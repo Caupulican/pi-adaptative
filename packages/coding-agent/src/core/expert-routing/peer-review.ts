@@ -27,7 +27,7 @@ export const peerReviewRequestSchema = Type.Object(
 			Type.String({
 				minLength: 1,
 				maxLength: 256,
-				description: "Exact provider/model reference from peer options. Omit when the owner selected an advisor.",
+				description: "Exact provider/model reference from peer options. Omit when the owner selected a peer.",
 			}),
 		),
 		thinkingLevel: Type.Optional(ORCHESTRATION_THINKING_LEVEL_SCHEMA),
@@ -295,7 +295,7 @@ export class PeerReviewController {
 			current.thinkingLevel !== expected.thinkingLevel ||
 			current.error !== expected.error
 		)
-			throw new Error("Advisor settings changed; review selection is stale.");
+			throw new Error("Peer settings changed; review selection is stale.");
 	}
 
 	/** Bind the operator's choice before replay, journaling, or any paid review. */
@@ -305,24 +305,24 @@ export class PeerReviewController {
 	):
 		| { ok: true; request: BoundPeerReviewRequest; lead: LeadSnapshot; model: Model<Api> }
 		| { ok: false; reason: string } {
-		if (settings.error) return { ok: false, reason: `Invalid advisor settings: ${settings.error}` };
-		if (!settings.enabled) return { ok: false, reason: "Advisor is disabled. Enable it in /settings > Advisor." };
+		if (settings.error) return { ok: false, reason: `Invalid peer settings: ${settings.error}` };
+		if (!settings.enabled) return { ok: false, reason: "Peer is disabled. Enable it in /settings > Peer." };
 		if (settings.model && request.peer && request.peer !== settings.model)
-			return { ok: false, reason: `Advisor is set to ${settings.model}; omit peer or use the configured model.` };
+			return { ok: false, reason: `Peer is set to ${settings.model}; omit peer or use the configured model.` };
 		if (settings.thinkingLevel && request.thinkingLevel && request.thinkingLevel !== settings.thinkingLevel)
 			return {
 				ok: false,
-				reason: `Advisor thinking is set to ${settings.thinkingLevel}; omit thinkingLevel or use that level.`,
+				reason: `Peer thinking is set to ${settings.thinkingLevel}; omit thinkingLevel or use that level.`,
 			};
 		const peer = settings.model ?? request.peer;
-		if (!peer) return { ok: false, reason: "Select an advisor in /settings, or use peer options to choose one." };
+		if (!peer) return { ok: false, reason: "Select a peer in /settings, or use peer options to choose one." };
 		const lead = this.deps.getLead();
 		if (!lead) return { ok: false, reason: "No foreground model is available for an independent review." };
 		const candidate = this.eligible(lead, settings.model).find(({ option }) => option.ref === peer);
 		if (!candidate)
 			return {
 				ok: false,
-				reason: `Advisor ${peer} is unavailable: it must be a distinct authenticated model allowed by the current model scope, policy and quota.`,
+				reason: `Peer ${peer} is unavailable: it must be a distinct authenticated model allowed by the current model scope, policy and quota.`,
 			};
 		const thinkingLevel =
 			settings.thinkingLevel ?? request.thinkingLevel ?? resolveModelThinkingLevel(candidate.model, undefined);
@@ -331,7 +331,7 @@ export class PeerReviewController {
 		if (!levels.includes(thinkingLevel))
 			return {
 				ok: false,
-				reason: `Advisor ${peer} does not support the requested ${thinkingLevel} effort for this selection.`,
+				reason: `Peer ${peer} does not support the requested ${thinkingLevel} effort for this selection.`,
 			};
 		return { ok: true, request: { ...request, peer, thinkingLevel }, lead, model: candidate.model };
 	}
@@ -347,7 +347,7 @@ export class PeerReviewController {
 		try {
 			this.assertAdvisorSettings(settings);
 		} catch (error) {
-			return error instanceof Error ? error.message : "Advisor settings changed.";
+			return error instanceof Error ? error.message : "Peer settings changed.";
 		}
 		const current = this.bindRequest(requested, settings);
 		if (!current.ok) return current.reason;
@@ -357,7 +357,7 @@ export class PeerReviewController {
 			JSON.stringify(current.lead) !== leadIdentity ||
 			JSON.stringify(current.model) !== modelIdentity
 		)
-			return "Advisor model, effort or foreground binding changed; review selection is stale.";
+			return "Peer model, effort or foreground binding changed; review selection is stale.";
 	}
 
 	options(): PeerReviewOptions {
@@ -385,12 +385,12 @@ export class PeerReviewController {
 			configuration,
 			peers,
 			...(configuration.error
-				? { reason: `Invalid advisor settings: ${configuration.error}` }
+				? { reason: `Invalid peer settings: ${configuration.error}` }
 				: !configuration.enabled
-					? { reason: "Advisor is disabled. Enable it in /settings > Advisor." }
+					? { reason: "Peer is disabled. Enable it in /settings > Peer." }
 					: configuration.model && peers.length === 0
 						? {
-								reason: `Configured advisor ${configuration.model} is not currently eligible; check scope, policy, quota, authentication, lead model and effort.`,
+								reason: `Configured peer ${configuration.model} is not currently eligible; check scope, policy, quota, authentication, lead model and effort.`,
 							}
 						: {}),
 		};
@@ -418,17 +418,17 @@ export class PeerReviewController {
 	/** Publish an already-paid retained review in its owning branch without another provider request. */
 	async recoverResult(reviewKey: string, reason: string, signal?: AbortSignal): Promise<PeerReviewResult> {
 		const runtime = this.deps.runtime;
-		if (!runtime?.isRoot()) return { status: "unavailable", reason: "Only the root may recover an advisor result." };
+		if (!runtime?.isRoot()) return { status: "unavailable", reason: "Only the root may recover a peer result." };
 		const held = this.retainedOnBranch(reviewKey, runtime);
 		if (!held)
 			return {
 				status: "unavailable",
-				reason: "No retained advisor result exists on this branch for that review key.",
+				reason: "No retained peer result exists on this branch for that review key.",
 			};
 		if (!reason.trim() || reason.length > 4000)
 			return { status: "unavailable", reason: "Recovery requires a bounded reason." };
 		if (this.runningOnBranch(reviewKey, runtime))
-			return { status: "unavailable", reason: "This advisor attempt is still active." };
+			return { status: "unavailable", reason: "This peer attempt is still active." };
 		const recovery = (async (): Promise<PeerReviewResult> => {
 			try {
 				const context = await runtime.captureContext(signal);
@@ -481,21 +481,21 @@ export class PeerReviewController {
 	/** Frees only a failed attempt's capacity; its outcome never becomes a completed review. */
 	async disposeAttempt(reviewKey: string, reason: string, signal?: AbortSignal) {
 		const runtime = this.deps.runtime;
-		if (!runtime?.isRoot()) throw new Error("Only the root may dispose an advisor attempt.");
+		if (!runtime?.isRoot()) throw new Error("Only the root may dispose a peer attempt.");
 		if (!reason.trim() || reason.length > 4000) throw new Error("Attempt disposition requires a bounded reason.");
 		const context = await runtime.captureContext(signal);
 		const record = runtime.journal.read().find((item) => item.key === reviewKey);
 		if (!record || record.outcome === "reviewed" || record.findings.length > 0 || record.limitations.length > 0)
 			throw new Error("Only pending or unavailable attempts without reviewed findings can be disposed.");
 		if (record.scope.sessionId !== context.scope.sessionId || record.scope.objectiveId !== context.scope.objectiveId)
-			throw new Error("Advisor attempt belongs to another root objective.");
+			throw new Error("Peer attempt belongs to another root objective.");
 		await context.assertCurrent();
 		if (this.retainedOnBranch(reviewKey, runtime))
 			throw new Error("This attempt has a retained review. Fix storage and recover it without another model call.");
-		if (this.runningOnBranch(reviewKey, runtime)) throw new Error("An active advisor attempt cannot be disposed.");
+		if (this.runningOnBranch(reviewKey, runtime)) throw new Error("An active peer attempt cannot be disposed.");
 		const current = runtime.journal.read().find((item) => item.key === reviewKey);
 		if (!current || peerReviewDigest(current) !== peerReviewDigest(record))
-			throw new Error("Advisor attempt changed during disposition.");
+			throw new Error("Peer attempt changed during disposition.");
 		this.recordReceipt(runtime, {
 			...record,
 			settled: true,
@@ -515,7 +515,7 @@ export class PeerReviewController {
 		evidence: string,
 	): Promise<{ status: "acknowledged"; validation: "root_decision_only" }> {
 		const runtime = this.deps.runtime;
-		if (!runtime?.isRoot()) throw new Error("Only the root may disposition advisor findings.");
+		if (!runtime?.isRoot()) throw new Error("Only the root may disposition peer findings.");
 		if (runtime.isSystemOneEnabled())
 			throw new Error("System One is enabled; resolve findings with canonical receiving-lane receipts.");
 		if (!evidence.trim() || evidence.length > 4000)
@@ -527,7 +527,7 @@ export class PeerReviewController {
 			record.scope.sessionId !== context.scope.sessionId ||
 			record.scope.objectiveId !== context.scope.objectiveId
 		)
-			throw new Error("Advisor review is absent, incomplete or belongs to another objective.");
+			throw new Error("Peer review is absent, incomplete or belongs to another objective.");
 		await context.assertCurrent();
 		this.recordReceipt(runtime, {
 			...record,
@@ -541,16 +541,16 @@ export class PeerReviewController {
 	async reviewCompletion(input: { objectiveId: string; sourceRevision: string }, signal?: AbortSignal) {
 		const runtime = this.deps.runtime;
 		const refused = (reason: string) => ({ passed: false, reviewerRef: "root-advisor", blockingIssues: [reason] });
-		if (!runtime?.isRoot()) return refused("Root advisor is unavailable; workers report to their parent.");
+		if (!runtime?.isRoot()) return refused("Root peer is unavailable; workers report to their parent.");
 		const settings = { ...this.deps.getAdvisorSettings() };
-		if (settings.error) return refused(`Invalid advisor settings: ${settings.error}`);
+		if (settings.error) return refused(`Invalid peer settings: ${settings.error}`);
 		if (!settings.enabled)
-			return refused("Advisor is disabled. Enable it in /settings or change the completion profile.");
+			return refused("Peer is disabled. Enable it in /settings or change the completion profile.");
 		const context = await runtime.captureContext(signal);
 		try {
 			this.assertAdvisorSettings(settings);
 		} catch {
-			return refused("Advisor settings changed; inspect the current selection and recheck completion.");
+			return refused("Peer settings changed; inspect the current selection and recheck completion.");
 		}
 		if (context.scope.objectiveId !== input.objectiveId || context.scope.sourceRevision !== input.sourceRevision)
 			return refused("Obtain a root peer delivery review of this exact objective and source revision.");
@@ -564,7 +564,7 @@ export class PeerReviewController {
 			(item) => peerReviewDigest(item.scope) === peerReviewDigest(context.scope),
 		);
 		if (objectiveReviews.some((review) => this.retainedOnBranch(review.key, runtime)))
-			return refused("Recover the retained advisor result before completing this objective.");
+			return refused("Recover the retained peer result before completing this objective.");
 		const record = [...current]
 			.reverse()
 			.find(
@@ -577,14 +577,14 @@ export class PeerReviewController {
 			);
 		if (record?.outcome !== "reviewed" || !record.verdict || record.verdict === "insufficient_evidence")
 			return refused(
-				"Use peer review with stage delivery, complete current evidence and the root's selected advisor; incomplete review remains owed.",
+				"Use peer review with stage delivery, complete current evidence and the root's selected peer; incomplete review remains owed.",
 			);
 		if (runtime.isSystemOneEnabled() && runtime.openVerificationCount() !== undefined) {
 			try {
 				this.reconcileVerification(runtime);
 			} catch (error) {
 				return refused(
-					`Advisor verification registration reconciliation failed: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
+					`Peer verification registration reconciliation failed: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
 				);
 			}
 			for (const review of objectiveReviews) {
@@ -593,7 +593,7 @@ export class PeerReviewController {
 						this.deps.releaseVerification(peerReportId(review.key));
 					} catch (error) {
 						return refused(
-							`Advisor verification registration cleanup failed: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
+							`Peer verification registration cleanup failed: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
 						);
 					}
 				}
@@ -610,7 +610,7 @@ export class PeerReviewController {
 					this.deps.releaseVerification(peerReportId(review.key));
 				} catch (error) {
 					return refused(
-						`Advisor findings remain recorded, but verification could not be registered: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
+						`Peer findings remain recorded, but verification could not be registered: ${error instanceof Error ? error.message : String(error)}. Resolve the cause and recheck completion.`,
 					);
 				}
 			}
@@ -627,21 +627,21 @@ export class PeerReviewController {
 					))
 		)
 			return refused(
-				"Resolve current advisor findings in the root: peer resolve with System One, or an evidenced peer acknowledge when System One is off.",
+				"Resolve current peer findings in the root: peer resolve with System One, or an evidenced peer acknowledge when System One is off.",
 			);
 		const journalIdentity = peerReviewDigest(runtime.journal.read());
 		await context.assertCurrent();
 		try {
 			this.assertAdvisorSettings(settings);
 		} catch {
-			return refused("Advisor settings changed; inspect the current selection and recheck completion.");
+			return refused("Peer settings changed; inspect the current selection and recheck completion.");
 		}
 		if (
 			peerReviewDigest(runtime.journal.read()) !== journalIdentity ||
 			(runtime.isSystemOneEnabled() && runtime.openVerificationCount() !== 0)
 		)
 			return refused(
-				"Advisor results or verification obligations changed during completion; inspect current reviews and recheck.",
+				"Peer results or verification obligations changed during completion; inspect current reviews and recheck.",
 			);
 		if (runtime.isSystemOneEnabled()) {
 			for (const review of runtime.journal.read()) {
@@ -659,7 +659,7 @@ export class PeerReviewController {
 	async review(request: PeerReviewRequest, signal?: AbortSignal): Promise<PeerReviewResult> {
 		const runtime = this.deps.runtime;
 		if (!runtime?.isRoot())
-			return { status: "unavailable", reason: "Advisor reviews are root-only; workers report to their parent." };
+			return { status: "unavailable", reason: "Peer reviews are root-only; workers report to their parent." };
 		if (!Value.Check(peerReviewRequestSchema, request))
 			return { status: "unavailable", reason: "Invalid or oversized peer review request" };
 		const requested = { ...request };
@@ -671,7 +671,7 @@ export class PeerReviewController {
 		try {
 			this.assertAdvisorSettings(settings);
 		} catch (error) {
-			return { status: "unavailable", reason: error instanceof Error ? error.message : "Advisor settings changed." };
+			return { status: "unavailable", reason: error instanceof Error ? error.message : "Peer settings changed." };
 		}
 		const currentAdmission = this.bindRequest(requested, settings);
 		if (!currentAdmission.ok) return { status: "unavailable", reason: currentAdmission.reason };
@@ -679,7 +679,7 @@ export class PeerReviewController {
 			currentAdmission.request.peer !== admission.request.peer ||
 			currentAdmission.request.thinkingLevel !== admission.request.thinkingLevel
 		)
-			return { status: "unavailable", reason: "Advisor model or effort changed while preparing the review." };
+			return { status: "unavailable", reason: "Peer model or effort changed while preparing the review." };
 		const bound = currentAdmission.request;
 		const leadIdentity = JSON.stringify(currentAdmission.lead);
 		const modelIdentity = JSON.stringify(currentAdmission.model);
@@ -714,7 +714,7 @@ export class PeerReviewController {
 						"A completed review is retained in memory because its receipt could not be saved. Fix storage and use peer recover_result without another model call.",
 					retainedReview: unpublished.result.review,
 				};
-			return this.recoverResult(key, "Recover the retained advisor result after fixing storage.", signal);
+			return this.recoverResult(key, "Recover the retained peer result after fixing storage.", signal);
 		}
 		if (prior && !(bound.recover && prior.outcome !== "reviewed")) {
 			await context.assertCurrent();
@@ -727,13 +727,13 @@ export class PeerReviewController {
 						status: "unavailable",
 						reviewKey: key,
 						replayed: true,
-						reason: `Advisor ${prior.outcome} receipt retained: ${prior.summary}. Inspect peer status. Recover only an unavailable review after addressing its cause; changed evidence needs a new review.`,
+						reason: `Peer ${prior.outcome} receipt retained: ${prior.summary}. Inspect peer status. Recover only an unavailable review after addressing its cause; changed evidence needs a new review.`,
 					};
 		}
 		if (this.unpublished.size + this.running.size >= 32)
 			return {
 				status: "unavailable",
-				reason: "Advisor capacity is occupied by active or unsaved reviews; recover them first.",
+				reason: "Peer capacity is occupied by active or unsaved reviews; recover them first.",
 			};
 		try {
 			// Reconcile before reserving a key, so an evicted report cannot be mistaken for this new attempt.
@@ -741,7 +741,7 @@ export class PeerReviewController {
 		} catch (error) {
 			return {
 				status: "unavailable",
-				reason: `Advisor verification registration reconciliation failed: ${error instanceof Error ? error.message : String(error)}.`,
+				reason: `Peer verification registration reconciliation failed: ${error instanceof Error ? error.message : String(error)}.`,
 			};
 		}
 		const pending = {
@@ -759,10 +759,9 @@ export class PeerReviewController {
 		const settingsAbort = new AbortController();
 		const unsubscribe = this.deps.subscribeAdvisorSettings(() => {
 			if (this.deps.getAdvisorSettings().revision !== settings.revision)
-				settingsAbort.abort("Advisor settings changed.");
+				settingsAbort.abort("Peer settings changed.");
 		});
-		if (this.deps.getAdvisorSettings().revision !== settings.revision)
-			settingsAbort.abort("Advisor settings changed.");
+		if (this.deps.getAdvisorSettings().revision !== settings.revision) settingsAbort.abort("Peer settings changed.");
 		const reviewSignal = signal ? AbortSignal.any([signal, settingsAbort.signal]) : settingsAbort.signal;
 		const reservation = Promise.withResolvers<PeerReviewResult>();
 		this.running.set(pendingEntryId, { key, promise: reservation.promise });
@@ -781,7 +780,7 @@ export class PeerReviewController {
 				return {
 					status: "unavailable",
 					reviewKey: key,
-					reason: error instanceof Error ? error.message.slice(0, 1000) : "Advisor result is stale",
+					reason: error instanceof Error ? error.message.slice(0, 1000) : "Peer result is stale",
 					...(result.usage ? { usage: result.usage } : {}),
 				};
 			}
@@ -882,7 +881,7 @@ export class PeerReviewController {
 				status: "unavailable",
 				reviewKey: key,
 				reason:
-					`Advisor receipt could not be saved: ${error instanceof Error ? error.message : String(error)}. ${recovery}`.slice(
+					`Peer receipt could not be saved: ${error instanceof Error ? error.message : String(error)}. ${recovery}`.slice(
 						0,
 						1000,
 					),

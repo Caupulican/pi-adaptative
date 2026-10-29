@@ -3736,16 +3736,16 @@ export class SettingsManager {
 		const configured = this.settings.advisor;
 		if (configured === undefined) return { enabled: true };
 		if (!configured || typeof configured !== "object" || Array.isArray(configured))
-			return { enabled: false, error: "Advisor settings must be an object." };
+			return { enabled: false, error: "Peer settings must be an object." };
 		if (configured.enabled !== undefined && typeof configured.enabled !== "boolean")
-			return { enabled: false, error: "Advisor enabled must be a boolean." };
+			return { enabled: false, error: "Peer enabled must be a boolean." };
 		if (
 			configured.model !== undefined &&
 			(typeof configured.model !== "string" || !configured.model.trim() || !configured.model.includes("/"))
 		)
-			return { enabled: false, error: "Advisor model must be an exact nonempty provider/model reference." };
+			return { enabled: false, error: "Peer model must be an exact nonempty provider/model reference." };
 		if (configured.thinkingLevel !== undefined && !isThinkingLevel(configured.thinkingLevel))
-			return { enabled: false, error: "Advisor thinkingLevel is unsupported." };
+			return { enabled: false, error: "Peer thinkingLevel is unsupported." };
 		return { enabled: configured.enabled ?? true, model: configured.model, thinkingLevel: configured.thinkingLevel };
 	}
 
@@ -3761,7 +3761,7 @@ export class SettingsManager {
 
 	setAdvisorSettings(settings: AdvisorSettings, scope: SettingsScope = "global"): void {
 		if (scope !== "global" && scope !== "project" && scope !== "directoryProfile")
-			throw new Error("Unknown advisor settings scope.");
+			throw new Error("Unknown peer settings scope.");
 		if (scope === "directoryProfile") {
 			this.persistDirectoryProfiles((current) => {
 				current.advisor = {

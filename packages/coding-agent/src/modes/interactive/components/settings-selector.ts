@@ -1246,15 +1246,14 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 				id: "advisor-scope",
 				label: "Save scope",
 				description:
-					"Each scope replaces the whole advisor configuration; directory profile overrides project, which overrides global.",
+					"Each scope replaces the whole peer configuration; directory profile overrides project, which overrides global.",
 				currentValue: saveScope,
 				values: ["global", "project", "directoryProfile"],
 			},
 			{
 				id: "advisor-enabled",
 				label: "Enabled",
-				description:
-					"Root-only independent advisor; works with System One off. Disabling preserves earlier findings.",
+				description: "Root-only independent peer; works with System One off. Disabling preserves earlier findings.",
 				currentValue: String(state.enabled ?? true),
 				values: ["true", "false"],
 			},
@@ -1262,7 +1261,7 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 				id: "advisor-model",
 				label: "Model",
 				description:
-					"Choose an advisor from configured accounts. Lead model, quota and explicit --models/SDK scope can make a choice unavailable.",
+					"Choose a peer from configured accounts. Lead model, quota and explicit --models/SDK scope can make a choice unavailable.",
 				currentValue: state.model ?? "Agent chooses",
 				submenu: (_value, done) =>
 					new ModelSelectionSubmenu(
@@ -1288,10 +1287,10 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Advisor Model",
+							title: "Peer Model",
 							description:
-								"Type to filter configured models. Selecting a model enables the root advisor; unsupported effort resets to Agent chooses.",
-							customTitle: "Advisor Model",
+								"Type to filter configured models. Selecting a model enables the root peer; unsupported effort resets to Agent chooses.",
+							customTitle: "Peer Model",
 							customDescription: "Enter an exact provider/model reference.",
 							customEmptyHint: "empty lets the agent choose",
 							customEmptyValue: "",
@@ -1306,7 +1305,7 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 				currentValue: state.thinkingLevel ?? "Agent chooses",
 				submenu: (_value, done) =>
 					new SelectSubmenu(
-						"Advisor Thinking",
+						"Peer Thinking",
 						"Choose an effort or let the agent choose; omitted effort uses the model default",
 						[
 							{ value: "", label: "Agent chooses" },
@@ -2659,7 +2658,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentAdvisor: AdvisorSettings & { error?: string } = { ...config.advisor };
 		const advisorDescription = () =>
 			currentAdvisor.error ??
-			`Root advisor independent of System One; active scope: ${config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global"}. Directory profile overrides project, which overrides global.`;
+			`Root peer independent of System One; active scope: ${config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global"}. Directory profile overrides project, which overrides global.`;
 		let currentModelCapability: ModelCapabilitySettings = { ...config.modelCapability };
 		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
@@ -2904,7 +2903,7 @@ export class SettingsSelectorComponent extends Container {
 				: []),
 			{
 				id: "advisor",
-				label: "Advisor",
+				label: "Peer",
 				description: advisorDescription(),
 				currentValue: currentAdvisor.enabled === false ? "Off" : (currentAdvisor.model ?? "Agent chooses"),
 				submenu: (_value, done) =>

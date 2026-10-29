@@ -90,7 +90,7 @@ export class PeerReviewJournal {
 			);
 			if (reusable < 0)
 				throw new Error(
-					"Advisor receipt capacity reached; resolve reviewed findings or use peer dispose_attempt for a non-running failed attempt before adding another.",
+					"Peer receipt capacity reached; resolve reviewed findings or use peer dispose_attempt for a non-running failed attempt before adding another.",
 				);
 			reviews.splice(reusable, 1);
 		}

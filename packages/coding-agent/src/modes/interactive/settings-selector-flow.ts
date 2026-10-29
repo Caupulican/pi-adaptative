@@ -499,7 +499,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					const activeScope = host.settingsManager.getAdvisorSettingsScope();
 					const effective = host.settingsManager.getAdvisorSettings();
 					if (effective.error) {
-						host.showWarning(`Advisor configuration error: ${effective.error}`);
+						host.showWarning(`Peer configuration error: ${effective.error}`);
 						return effective;
 					}
 					const selection =
@@ -507,22 +507,20 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 							? "disabled"
 							: `${effective.model ?? "agent chooses"} (${effective.thinkingLevel ?? "agent chooses effort"})`;
 					if (activeScope !== scope) {
-						host.showWarning(
-							`Advisor saved to ${scope}; active ${activeScope} configuration remains ${selection}.`,
-						);
+						host.showWarning(`Peer saved to ${scope}; active ${activeScope} configuration remains ${selection}.`);
 						return effective;
 					}
 					const options = host.session.getPeerReviewController()?.options();
 					if (effective.enabled && (!options || options.reason)) {
 						host.showWarning(
-							`Advisor settings saved to ${scope}: ${options?.reason ?? "the root peer tool is unavailable in this session"}`,
+							`Peer settings saved to ${scope}: ${options?.reason ?? "the root peer tool is unavailable in this session"}`,
 						);
 						return effective;
 					}
 					host.showStatus(
 						effective.enabled === false
-							? "Advisor disabled; existing findings remain available."
-							: `Advisor: ${selection}, saved to ${scope}. Applies to the next review; omitted effort uses the model default.`,
+							? "Peer disabled; existing findings remain available."
+							: `Peer: ${selection}, saved to ${scope}. Applies to the next review; omitted effort uses the model default.`,
 					);
 					return effective;
 				},

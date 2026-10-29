@@ -390,17 +390,17 @@ Disabling System One preserves existing verification obligations.
 
 ## Explicit peer review
 
-The root model uses the native `peer` advisor for plans with material uncertainty and delivery review.
+The root model uses the native `peer` peer for plans with material uncertainty and delivery review.
 It remains the executor; the peer receives only the supplied snapshot and has no tools or inherited
 foreground history. This review uses the host's configured provider connections and spends tokens on
 the chosen peer. Workers cannot launch a peer review: they send findings and questions to their parent.
-Advisor calls never spawn another advisor or a worker.
+Peer calls never spawn another peer or a worker.
 
-Choose the advisor in **`/settings` → Advisor**. The submenu provides Enabled, Model,
-Thinking and Save scope controls. Selecting a model enables the advisor. Save globally, for this
+Choose the peer in **`/settings` → Peer**. The submenu provides Enabled, Model,
+Thinking and Save scope controls. Selecting a model enables the peer. Save globally, for this
 project, or for the directory profile; the highest configured scope replaces the entire lower-scope
-advisor configuration. The selector shows the effective selection and warns when another scope masks
-a change. Selecting or enabling an advisor does not purchase a review: the root requests each review.
+peer configuration. The selector shows the effective selection and warns when another scope masks
+a change. Selecting or enabling a peer does not purchase a review: the root requests each review.
 Independent review works with System One off.
 
 An explicit model choice is honored even outside router favorites without changing those favorites.
@@ -413,7 +413,7 @@ request when possible and prevents its stale result from satisfying the new sele
 
 Call `peer` with `{"action":"options"}` to discover exact `provider/model` references and
 all supported `thinkingLevels`, plus the strictly higher `strongerThinkingLevels` for explicit
-stronger review. Options reflect the configured advisor choice and its supported effort. Without a
+stronger review. Options reflect the configured peer choice and its supported effort. Without a
 saved choice, they use the host routing pool. Authentication, quota and model scope apply in both
 cases. Options do not assert strength.
 Ordinary independent review works at equal effort, including when the root is at maximum effort.
@@ -423,7 +423,7 @@ Then call `peer` with `action: "review"` and a `review` object containing:
 
 | Field | Content |
 |---|---|
-| `peer` | Exact reference disclosed by `options`; omit when an advisor model is configured. A conflicting model is refused. |
+| `peer` | Exact reference disclosed by `options`; omit when a peer model is configured. A conflicting model is refused. |
 | `thinkingLevel` | Omit to use a configured fixed effort or the model default. Otherwise choose a disclosed supported level; stronger review needs higher effort. A conflicting fixed effort is refused. |
 | `selection` | Optional `independent` (default) or `stronger`. |
 | `recover` | Optional explicit recovery of a previously unavailable attempt after its cause was addressed. Completed reviews cannot be rerolled. |
@@ -443,13 +443,13 @@ full findings and limitations. Identical live requests coalesce; repeated reques
 without charging their usage again. A restarted session retains the attempt and requires explicit
 recovery instead of silently paying for it again. Review receipts bind the root objective, requirement
 definitions, candidate, mode and session branch. Pending or failed attempts never mean review passed.
-Disabling the advisor preserves `peer status`, earlier findings and their resolution paths. It only
+Disabling the peer preserves `peer status`, earlier findings and their resolution paths. It only
 prevents new paid reviews; it does not erase an outstanding obligation.
 
 If a completed paid review could not save its receipt, its bounded result remains available in the
 current process. Inspect `peer status` for its `reviewKey`, fix storage, then call `peer` with
 `action: "recover_result"` and `attempt: {reviewKey, reason}`. This republishes the retained result
-without another model call, including when the advisor is now disabled, exhausted or configured
+without another model call, including when the peer is now disabled, exhausted or configured
 differently. Recovery requires the original session and a branch that owns the same pending receipt:
 the original branch remains eligible after navigating away and back, and a descendant may recover a
 receipt it explicitly inherits. Unrelated branches cannot inspect or recover the retained report.
@@ -497,13 +497,13 @@ unavailable evaluator is not treated as off. A default, never-configured session
 uses deterministic operation without requiring a System One login.
 
 The `mechanical_plus_reviewer` completion profile consumes the root's current delivery-review receipt
-through the same advisor owner; it does not dispatch a paid review automatically. Missing, stale,
+through the same peer owner; it does not dispatch a paid review automatically. Missing, stale,
 incomplete or unresolved review evidence returns instructions to the root and keeps that requested
 stage open. Mechanical criteria and current obligations still apply, and the completion coordinator
-rechecks its candidate after consulting the advisor. Default deterministic completion does not require
+rechecks its candidate after consulting the peer. Default deterministic completion does not require
 this optional profile or turn System One on.
-With a configured advisor model or fixed effort, reviewer-required completion needs a current receipt
-matching that selection. Switching the advisor does not clear older unresolved findings.
+With a configured peer model or fixed effort, reviewer-required completion needs a current receipt
+matching that selection. Switching the peer does not clear older unresolved findings.
 
 Use `peer` with `{"action":"obligations"}` to inspect pending findings and host-recorded tool
 receipts. Resolve one with `action: "resolve"` and a `resolution` object:

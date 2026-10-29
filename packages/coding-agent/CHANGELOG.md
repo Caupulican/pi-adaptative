@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Renamed the root reviewer’s visible settings, prompts and messages from Advisor to Peer.
+
 ## [0.104.20] - 2026-10-29
 
 ### Added
