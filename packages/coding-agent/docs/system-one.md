@@ -25,6 +25,12 @@ Mandatory findings require receiving-lane reproduction, repair when confirmed, a
   telemetry only.
 - `legacy_goal` (default without System One): the legacy continuation alone.
 
+An explicit SDK `executionLoopMode` keeps its selected mode and required-binding checks when
+System One is disabled. In particular, `objective_primary` requires an explicitly supplied objective
+controller or construction fails; it never silently changes to `legacy_goal`. Supplied objective
+controllers and diagnostic readiness ports remain bound independently of System One. Disabling
+System One still prevents semantic controller/steering bindings and evaluator calls.
+
 ## Routes and executors
 
 | Route | Executor |

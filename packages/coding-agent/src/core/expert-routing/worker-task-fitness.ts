@@ -6,6 +6,15 @@ export class WorkerTaskFitness {
 	private judge: RouteChoiceJudge | undefined;
 	private readonly accepted = new Map<string, true>();
 
+	private inputKey(input: WorkerTaskFitInput): string {
+		return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+	}
+
+	/** A synchronous lookup only: dispatch may not yield after its final capacity check. */
+	hasAccepted(judge: RouteChoiceJudge | undefined, input: WorkerTaskFitInput): boolean {
+		return judge !== undefined && judge === this.judge && this.accepted.has(this.inputKey(input));
+	}
+
 	async check(
 		judge: RouteChoiceJudge | undefined,
 		input: WorkerTaskFitInput,
@@ -17,7 +26,7 @@ export class WorkerTaskFitness {
 		}
 		if (!judge?.evaluateWorkerTaskFit) return "worker_task_fitness_unavailable";
 		const snapshot = { ...input };
-		const key = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+		const key = this.inputKey(snapshot);
 		if (this.accepted.has(key)) return;
 		const answers = await judge.evaluateWorkerTaskFit(snapshot, signal);
 		signal?.throwIfAborted();

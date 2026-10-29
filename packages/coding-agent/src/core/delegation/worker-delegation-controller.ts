@@ -48,6 +48,7 @@ import {
 	chooseHostRouteProfile,
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	type RouteChoiceJudge,
+	type WorkerTaskFitInput,
 } from "../expert-routing/system-one-choice.ts";
 import type {
 	HmoeIndependence,
@@ -744,6 +745,7 @@ function boundedReleaseCause(cause: string): string {
 
 export class WorkerDelegationController {
 	private readonly taskFitness = new WorkerTaskFitness();
+	private readonly schedulerPreflight = Symbol("worker scheduler preflight");
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
 	/** Actual admitted continuations and execution promises, independent of durable lane status. */
@@ -844,10 +846,12 @@ export class WorkerDelegationController {
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed() || this.workerAbort.signal.aborted,
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
-			preflight: async (_request, record) => {
+			preflight: async (request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
-				return reasonCode ? { action: "cancel", reasonCode } : { action: "start" };
+				const failure = reasonCode ?? (await this.checkExistingWorkerTaskFitness(request, record));
+				return failure ? { action: "cancel", reasonCode: failure } : { action: "start" };
 			},
+			isPreflightCurrent: (request, record) => this.hasCurrentWorkerTaskFitness(request, record),
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
 			getDispatchToken: (laneId) => {
 				const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
@@ -855,7 +859,7 @@ export class WorkerDelegationController {
 					? attempt.attemptId
 					: undefined;
 			},
-			run: (request, record) => this.runOnce(request, undefined, record, true),
+			run: (request, record) => this.runOnce(request, undefined, record, this.schedulerPreflight),
 			cancel: (laneId, reasonCode, attemptId) => this.cancelScheduledWorker(laneId, reasonCode, attemptId),
 			warn: (message) => this.safeWarn(message),
 		});
@@ -4004,19 +4008,70 @@ export class WorkerDelegationController {
 		);
 	}
 
+	private workerTaskFitnessEnabled(): boolean {
+		return (
+			this.deps.getSettingsManager().getModelRouterSettings().enabled &&
+			(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager())) &&
+			this.deps.getRouteChoiceJudge?.()?.isRouteJudgmentEnabled?.() !== false
+		);
+	}
+
+	private workerTaskFitnessInput(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+	): WorkerTaskFitInput {
+		return {
+			instructions: request.instructions,
+			objective: this.goalForWorkerRequest(request)?.userGoal ?? "",
+			model: describeModelCard(
+				buildCapabilityCard(admission.shipment.model, { subscription: false, evidence: "unprobed" }),
+			),
+			thinkingLevel: admission.shipment.modelBinding.thinkingLevel,
+			role: admission.shipment.profile.role,
+		};
+	}
+
+	private existingWorkerFitnessAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerAdmission {
+		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
+		return attempt
+			? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract)
+			: { ok: false, skipReason: "worker_task_fitness_binding_unavailable" };
+	}
+
+	private async checkExistingWorkerTaskFitness(
+		request: WorkerDelegationRequest,
+		record: LaneRecord,
+	): Promise<string | undefined> {
+		const admission = this.existingWorkerFitnessAdmission(request, record);
+		return admission.ok ? this.checkWorkerTaskFitness(request, admission) : admission.skipReason;
+	}
+
+	/** Pure lookup while the scheduler still owns the queue, immediately before synchronous dispatch. */
+	private hasCurrentWorkerTaskFitness(request: WorkerDelegationRequest, record: LaneRecord): boolean {
+		if (!this.workerTaskFitnessEnabled()) return true;
+		try {
+			const admission = this.existingWorkerFitnessAdmission(request, record);
+			return (
+				admission.ok &&
+				this.taskFitness.hasAccepted(
+					this.deps.getRouteChoiceJudge?.(),
+					this.workerTaskFitnessInput(request, admission),
+				)
+			);
+		} catch {
+			// The owned preflight reports the actual failure through the existing cancellation path.
+			return false;
+		}
+	}
+
 	/** The same final task/model check covers explicit, inherited and fallback worker bindings. */
 	private async checkWorkerTaskFitness(
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
 		signal?: AbortSignal,
 	): Promise<string | undefined> {
-		if (
-			!this.deps.getSettingsManager().getModelRouterSettings().enabled ||
-			!(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager()))
-		)
-			return;
+		if (!this.workerTaskFitnessEnabled()) return;
 		const judge = this.deps.getRouteChoiceJudge?.();
-		if (judge?.isRouteJudgmentEnabled?.() === false) return;
 		const sessionId = this.deps.getSessionId();
 		const cwd = this.deps.getCwd();
 		const objective = this.goalForWorkerRequest(request)?.userGoal;
@@ -4026,24 +4081,13 @@ export class WorkerDelegationController {
 		try {
 			failure = await this.taskFitness.check(
 				judge,
-				{
-					instructions: request.instructions,
-					objective: objective ?? "",
-					model: describeModelCard(buildCapabilityCard(model, { subscription: false, evidence: "unprobed" })),
-					thinkingLevel: binding.thinkingLevel,
-					role: admission.shipment.profile.role,
-				},
+				this.workerTaskFitnessInput(request, admission),
 				signal ?? this.workerAbort.signal,
 			);
 		} catch (error) {
 			failure = `worker_task_fitness_unavailable:${error instanceof Error ? error.message : String(error)}`;
 		}
-		if (
-			!this.deps.getSettingsManager().getModelRouterSettings().enabled ||
-			!(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager())) ||
-			judge?.isRouteJudgmentEnabled?.() === false
-		)
-			return;
+		if (!this.workerTaskFitnessEnabled()) return;
 		const current = this.resolveWorkerAdmission(
 			{ ...request, profileId: admission.executionContract.worker.profile.profileId },
 			admission.executionContract,
@@ -4677,12 +4721,12 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
-		directoryValidated = false,
+		preflight?: symbol,
 	): Promise<WorkerDelegationRunOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
 		const capturedRequest = this.captureWorkerRequest(request, existingRecord !== undefined);
 		return this.runAdmittedWorker(
-			() => this.runWorkerOnce(capturedRequest, onStarted, existingRecord, directoryValidated),
+			() => this.runWorkerOnce(capturedRequest, onStarted, existingRecord, preflight),
 			() => ({ started: false, skipReason: "session_disposed" }),
 		);
 	}
@@ -4691,14 +4735,14 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
-		directoryValidated = false,
+		preflight?: symbol,
 	): Promise<WorkerDelegationRunOutcome> {
 		let admission: Extract<WorkerAdmission, { ok: true }> | undefined;
 		let releaseAllocation: (() => void) | undefined;
 		if (existingRecord) {
 			const startingAttempt = this.lifecycle.getActiveAttempt(existingRecord.laneId);
 			if (startingAttempt) this.foregroundHoldCleared.delete(startingAttempt.attemptId);
-			if (!directoryValidated) {
+			if (preflight !== this.schedulerPreflight) {
 				const deregister = registerInFlightWork(
 					this.deps.getAgentDir(),
 					"lane",
@@ -4725,12 +4769,9 @@ export class WorkerDelegationController {
 			releaseAllocation = selected.releaseAllocation;
 			admission = selected.admission;
 		}
-		if (existingRecord) {
+		if (existingRecord && preflight !== this.schedulerPreflight) {
 			const attempt = this.lifecycle.getActiveAttempt(existingRecord.laneId);
-			const current = attempt ? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract) : undefined;
-			const failure = current?.ok
-				? await this.checkWorkerTaskFitness(request, current)
-				: "worker_task_fitness_binding_unavailable";
+			const failure = await this.checkExistingWorkerTaskFitness(request, existingRecord);
 			if (failure) {
 				if (attempt && this.lifecycle.getActiveAttempt(existingRecord.laneId)?.attemptId === attempt.attemptId)
 					this.cancelAndPublish(this.lifecycle, existingRecord.laneId, failure);

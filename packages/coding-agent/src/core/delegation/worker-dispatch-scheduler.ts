@@ -74,6 +74,8 @@ export interface WorkerDispatchSchedulerOptions {
 		request: WorkerDelegationRequest,
 		record: LaneRecord,
 	): Promise<Exclude<WorkerDispatchAdmission, { action: "wait" }>>;
+	/** Synchronous freshness check; a false result retains the queue entry for another preflight. */
+	isPreflightCurrent?(request: WorkerDelegationRequest, record: LaneRecord): boolean;
 	getRecord(laneId: string): LaneRecord | undefined;
 	/** Exact durable attempt generation that this scheduler may dispatch; undefined means another owner. */
 	getDispatchToken?(laneId: string): string | undefined;
@@ -721,7 +723,11 @@ export class WorkerDispatchScheduler {
 					// lane skipped by the redrain that preflight's completion triggers (nothing signals the reservation
 					// available again), holding a reservation it never used.
 					this.reservationBlocked.delete(laneId);
-					if (this.options.preflight && !this.validated.has(laneId)) {
+					if (
+						this.options.preflight &&
+						(!this.validated.has(laneId) || this.options.isPreflightCurrent?.(request, record) === false)
+					) {
+						this.validated.delete(laneId);
 						// Admitted, and not waiting on anything: it is validating its start. Say so, so a status view never
 						// shows a queued lane with no reason.
 						this.waitStates.set(laneId, {

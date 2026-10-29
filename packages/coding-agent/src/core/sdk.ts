@@ -865,15 +865,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 
 			let steeringPlane = systemOneEnabled ? options.steeringPlane : undefined;
-			const adaptiveReadiness = systemOneEnabled ? options.adaptiveReadiness : undefined;
-			const objectiveExecutionController = systemOneEnabled ? options.objectiveExecutionController : undefined;
-			// System One decides the loop whenever it is bound; without a controller the legacy continuation
-			// stays the decider. An explicit option or setting always wins.
-			const executionLoopMode: ExecutionLoopMode = systemOneEnabled
-				? (options.executionLoopMode ??
-					systemOneSettings.loopMode ??
-					(systemOneController ? "objective_primary" : "legacy_goal"))
-				: "legacy_goal";
+			const adaptiveReadiness = options.adaptiveReadiness;
+			const objectiveExecutionController = options.objectiveExecutionController;
+			// Explicit SDK mode retains its required-binding checks. Otherwise semantic loop settings
+			// apply only while enabled, and an evaluator-free session defaults to legacy continuation.
+			const executionLoopMode: ExecutionLoopMode =
+				options.executionLoopMode ??
+				(systemOneEnabled
+					? (systemOneSettings.loopMode ?? (systemOneController ? "objective_primary" : "legacy_goal"))
+					: "legacy_goal");
 
 			// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
 			// The account catalog's refresh asks the providers while the session starts; the first turn waits for the answer
