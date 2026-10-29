@@ -4019,7 +4019,7 @@ export class WorkerDelegationController {
 		if (judge?.isRouteJudgmentEnabled?.() === false) return;
 		const sessionId = this.deps.getSessionId();
 		const cwd = this.deps.getCwd();
-		const objective = this.goalForWorkerRequest(request)?.userGoal ?? "";
+		const objective = this.goalForWorkerRequest(request)?.userGoal;
 		const binding = admission.shipment.modelBinding;
 		const model = structuredClone(admission.shipment.model);
 		let failure: string | undefined;
@@ -4028,7 +4028,7 @@ export class WorkerDelegationController {
 				judge,
 				{
 					instructions: request.instructions,
-					objective,
+					objective: objective ?? "",
 					model: describeModelCard(buildCapabilityCard(model, { subscription: false, evidence: "unprobed" })),
 					thinkingLevel: binding.thinkingLevel,
 					role: admission.shipment.profile.role,
@@ -4044,13 +4044,16 @@ export class WorkerDelegationController {
 			judge?.isRouteJudgmentEnabled?.() === false
 		)
 			return;
-		const current = this.resolveWorkerAdmission(request, admission.executionContract);
+		const current = this.resolveWorkerAdmission(
+			{ ...request, profileId: admission.executionContract.worker.profile.profileId },
+			admission.executionContract,
+		);
 		if (
 			this.deps.isDisposed() ||
 			this.deps.getSessionId() !== sessionId ||
 			this.deps.getCwd() !== cwd ||
 			this.deps.getRouteChoiceJudge?.() !== judge ||
-			this.goalForWorkerRequest(request)?.userGoal !== (objective || undefined) ||
+			this.goalForWorkerRequest(request)?.userGoal !== objective ||
 			!current.ok ||
 			!isDeepStrictEqual(current.shipment.modelBinding, binding) ||
 			!isDeepStrictEqual(current.shipment.model, model)
