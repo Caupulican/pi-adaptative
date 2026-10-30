@@ -241,6 +241,16 @@ export function selectRoutedWorkerModel(input: {
 	return collectRoutedWorkerModels(input, 1)[0];
 }
 
+export const STICKY_WORKHORSE_MODEL_REFS = [
+	"anthropic/claude-haiku-5-5",
+	"google-antigravity/gemini-3.8-flash-high",
+] as const;
+
+export function isStickyWorkhorseModel(provider: string, modelId: string): boolean {
+	const ref = `${provider}/${modelId}`;
+	return (STICKY_WORKHORSE_MODEL_REFS as readonly string[]).includes(ref);
+}
+
 function collectRoutedWorkerModels(
 	input: {
 		foregroundModel: Model<Api>;
@@ -260,9 +270,10 @@ function collectRoutedWorkerModels(
 	};
 	if (input.routing.account !== "other" || input.foregroundModel.provider === "faux") return found;
 	const { foregroundModel, modelRegistry } = input;
-	const ordered =
+	const configuredOrder =
 		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
 		input.routing.routeProviders;
+	const ordered = configuredOrder.length > 0 ? configuredOrder : [...STICKY_WORKHORSE_MODEL_REFS];
 	const available = modelRegistry.getAvailable();
 	// Automatic candidates are ACCOUNTS: providers with a stored credential (OAuth or API key). A
 	// provider that merely needs no auth (a local llama-cpp server, a models.json entry with a
@@ -270,7 +281,9 @@ function collectRoutedWorkerModels(
 	// pointed at it; the owner can still name such a provider explicitly in `routeProviders`.
 	const isAccount = (provider: string): boolean => modelRegistry.authStorage.hasAuth(provider);
 	const candidate = (provider: string, modelId?: string): Model<Api> | undefined => {
-		if (provider === foregroundModel.provider) return undefined;
+		if (provider === foregroundModel.provider && (modelId === undefined || modelId === foregroundModel.id)) {
+			return undefined;
+		}
 		const model = modelId
 			? modelRegistry.find(provider, modelId)
 			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
@@ -336,9 +349,11 @@ function selectModelBinding(
 				thinkingLevel:
 					explicitThinking !== undefined
 						? resolveModelThinkingLevel(model, explicitThinking)
-						: foregroundThinkingPolicy === "inherit"
-							? resolveModelThinkingLevel(model, inherited)
-							: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
+						: isStickyWorkhorseModel(model.provider, model.id)
+							? resolveModelThinkingLevel(model, "high")
+							: foregroundThinkingPolicy === "inherit"
+								? resolveModelThinkingLevel(model, inherited)
+								: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
 			});
 			const [first, ...rest] = routed.map(bind);
 			return { binding: first!, fallbacks: rest };
@@ -361,11 +376,13 @@ function selectModelBinding(
 		authority?.thinkingLevel ??
 		(sameAsBase
 			? base.modelBinding.thinkingLevel
-			: foregroundModel && provider === foregroundModel.provider && modelId === foregroundModel.id
-				? inheritedFromForeground()
-				: selectedModel
-					? resolveModelThinkingLevel(selectedModel, undefined)
-					: "off");
+			: isStickyWorkhorseModel(provider, modelId) && selectedModel
+				? resolveModelThinkingLevel(selectedModel, "high")
+				: foregroundModel && provider === foregroundModel.provider && modelId === foregroundModel.id
+					? inheritedFromForeground()
+					: selectedModel
+						? resolveModelThinkingLevel(selectedModel, undefined)
+						: "off");
 	return authored({ provider, modelId, thinkingLevel });
 }
 

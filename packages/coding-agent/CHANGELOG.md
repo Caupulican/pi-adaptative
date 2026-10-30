@@ -1,8 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Persistent bot and team routine scheduling (`/bot schedule`, `/team schedule`), detached background daemon execution across TUI restarts (`/bot daemon`), and unread inbox tracking (`/bot inbox`, `/bot ack`, `/team inbox`, `/team ack`) with live TUI roster and selector badges.
+
 ### Changed
 
 - Renamed the root reviewer’s visible settings, prompts and messages from Advisor to Peer.
+- Default worker routing prioritizes sticky workhorse models (`anthropic/claude-haiku-5-5` high and `google-antigravity/gemini-3.8-flash-high` high) and honors `fitnessGate` and explicit/pinned worker selections.
+
+### Fixed
+
+- Plan-stage peer reviews no longer deadlock pre-implementation edits or delegation, root `peer acknowledge` can supersede open peer verification obligations with recorded evidence, and long-horizon JEV completion projections and `completion_plausible` thresholds stay bounded and aligned.
 
 ## [0.104.20] - 2026-10-29
 

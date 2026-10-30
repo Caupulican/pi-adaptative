@@ -5877,27 +5877,15 @@ export class AgentSession {
 	}
 
 	// =========================================================================
-	// Utilities
-	// =========================================================================
-
 	getLastAssistantText(): string | undefined {
 		return this._analytics.getLastAssistantText();
 	}
-
-	// =========================================================================
-	// Extension System
-	// =========================================================================
 
 	public getAutonomyStatusSnapshot(): AutonomyStatusSnapshot {
 		return this._autonomyTelemetry.getStatusSnapshot();
 	}
 
-	/**
-	 * Aggregate an effectiveness/autonomy dashboard: what Pi has actually been doing (recent
-	 * route choices, latest gate outcome, cost, and any research/delegation/learning/goal
-	 * activity). Read-only — combines existing session-log getters, never mutates state or
-	 * recomputes a route/gate decision.
-	 */
+	/** Read-only effectiveness/autonomy diagnostic snapshot. */
 	public getAutonomyDiagnosticSnapshot(options?: { maxEntriesPerFamily?: number }): AutonomyDiagnosticSnapshot {
 		return this._autonomyTelemetry.getDiagnosticSnapshot(options);
 	}
@@ -5912,9 +5900,6 @@ export class AgentSession {
 		return context;
 	}
 
-	/**
-	 * Check if extensions have handlers for a specific event type.
-	 */
 	hasExtensionHandlers(eventType: string): boolean {
 		return this._extensionRunner.hasHandlers(eventType);
 	}
@@ -5923,10 +5908,6 @@ export class AgentSession {
 	get credentialManager(): CredentialManager {
 		return this._runtimeBuilder.credentialManager;
 	}
-
-	// =========================================================================
-	// Persistent Bots & Teams (BotTeamChatSessionPort)
-	// =========================================================================
 
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
@@ -5994,5 +5975,20 @@ export class AgentSession {
 	}
 	sendOperatorMessageToTeam(teamId: string, message: string) {
 		return this._backgroundLanes.sendOperatorMessageToTeam(teamId, message);
+	}
+	getBotTeamStore() {
+		return this._backgroundLanes.getBotTeamStore();
+	}
+	tickPersistentRoutines(routineId?: string) {
+		return this._backgroundLanes.tickPersistentRoutines(routineId);
+	}
+	getPersistentBotDaemonStatus() {
+		return this._backgroundLanes.getPersistentBotDaemonStatus();
+	}
+	startPersistentBotDaemon() {
+		return this._backgroundLanes.startPersistentBotDaemon();
+	}
+	stopPersistentBotDaemon() {
+		return this._backgroundLanes.stopPersistentBotDaemon();
 	}
 }

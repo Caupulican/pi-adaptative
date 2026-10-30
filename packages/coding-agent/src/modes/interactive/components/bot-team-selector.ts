@@ -108,15 +108,18 @@ export class BotTeamSelectorComponent extends Container {
 			},
 			...options.teams.map((team): SelectItem => {
 				const isCurrent = options.activeTarget.kind === "team" && options.activeTarget.teamId === team.teamId;
+				const unread = (team.unreadCount ?? 0) > 0 ? ` · ${team.unreadCount} unread` : "";
 				return {
 					value: `team:${team.teamId}`,
 					label: `${isCurrent ? "✓ " : "◆ "}Team: ${team.name || team.teamId}`,
-					description: `[${team.memberAgentIds.join(", ") || "no members"}]${team.description ? ` · ${team.description}` : ""}`,
+					description: `[${team.memberAgentIds.join(", ") || "no members"}]${unread}${team.description ? ` · ${team.description}` : ""}`,
 				};
 			}),
 			...options.bots.map((bot): SelectItem => {
 				const isCurrent = options.activeTarget.kind === "bot" && options.activeTarget.agentId === bot.agentId;
 				const glyph = botStatusGlyph(bot.state);
+				const unread = (bot.unreadCount ?? 0) > 0 ? ` · ${bot.unreadCount} unread` : "";
+				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
 				const summaryOrDesc = bot.currentSummary
 					? ` · ${bot.currentSummary}`
 					: bot.description
@@ -125,7 +128,7 @@ export class BotTeamSelectorComponent extends Container {
 				return {
 					value: `bot:${bot.agentId}`,
 					label: `${isCurrent ? "✓ " : `${glyph} `}Bot: ${bot.agentId}`,
-					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${bot.state}${bot.teamIds.length ? ` · teams: ${bot.teamIds.join(",")}` : ""}${summaryOrDesc}`,
+					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${bot.state}${unread}${schedules}${bot.teamIds.length ? ` · teams: ${bot.teamIds.join(",")}` : ""}${summaryOrDesc}`,
 				};
 			}),
 		];

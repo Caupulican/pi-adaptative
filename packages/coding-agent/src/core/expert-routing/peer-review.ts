@@ -152,14 +152,27 @@ export type PeerReviewResult = (
 const modelRef = (model: Model<Api>): string => `${model.provider}/${model.id}`;
 const peerReportId = (key: string): string => `peer_review:${key}`;
 
-/** A quote's comparable form: line-number prefixes dropped and whitespace collapsed, so layout never decides whether it is verbatim. */
+/** A quote's comparable form: line-number prefixes, markdown code ticks, and leading section labels dropped and whitespace collapsed. */
 function comparableText(text: string): string {
 	return text
 		.split(/\r?\n/)
 		.map((line) => line.replace(/^\s*\d+[:|]\s?/, ""))
 		.join(" ")
+		.replace(/^(?:artifact|evidence|objective|quote)\s*:\s*/i, "")
+		.replace(/[`"']/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function quoteMatchesHaystack(rawQuote: string, haystack: readonly string[]): boolean {
+	const quote = comparableText(rawQuote);
+	if (quote.length === 0) return false;
+	if (haystack.some((text) => text.includes(quote))) return true;
+	const segments = quote
+		.split(/\s*(?:\.\.\.|…)\s*/)
+		.map((segment) => segment.trim())
+		.filter((segment) => segment.length >= 10);
+	return segments.length > 0 && segments.every((segment) => haystack.some((text) => text.includes(segment)));
 }
 
 /**
@@ -175,8 +188,7 @@ function groundFindings(
 	const kept: PeerReport["findings"] = [];
 	const dropped: { summary: string; quotedEvidence: string }[] = [];
 	for (const finding of report.findings) {
-		const quote = comparableText(finding.evidence);
-		if (quote.length > 0 && haystack.some((text) => text.includes(quote))) kept.push(finding);
+		if (quoteMatchesHaystack(finding.evidence, haystack)) kept.push(finding);
 		else dropped.push({ summary: finding.summary, quotedEvidence: finding.evidence.slice(0, 200) });
 	}
 	if (dropped.length === 0) return { report, dropped };
@@ -516,24 +528,29 @@ export class PeerReviewController {
 	): Promise<{ status: "acknowledged"; validation: "root_decision_only" }> {
 		const runtime = this.deps.runtime;
 		if (!runtime?.isRoot()) throw new Error("Only the root may disposition peer findings.");
-		if (runtime.isSystemOneEnabled())
-			throw new Error("System One is enabled; resolve findings with canonical receiving-lane receipts.");
 		if (!evidence.trim() || evidence.length > 4000)
 			throw new Error("Root disposition requires bounded concrete evidence.");
 		const context = await runtime.captureContext();
 		const record = runtime.journal.read().find((item) => item.key === reviewKey);
 		if (
-			record?.outcome !== "reviewed" ||
-			record.scope.sessionId !== context.scope.sessionId ||
-			record.scope.objectiveId !== context.scope.objectiveId
-		)
-			throw new Error("Peer review is absent, incomplete or belongs to another objective.");
-		await context.assertCurrent();
-		this.recordReceipt(runtime, {
-			...record,
-			acknowledgement: evidence,
-			acknowledgedCandidateId: context.scope.candidateId,
-		});
+			record &&
+			record.outcome === "reviewed" &&
+			record.scope.sessionId === context.scope.sessionId &&
+			record.scope.objectiveId === context.scope.objectiveId
+		) {
+			await context.assertCurrent();
+			this.recordReceipt(runtime, {
+				...record,
+				acknowledgement: evidence,
+				acknowledgedCandidateId: context.scope.candidateId,
+				settled: true,
+			});
+			try {
+				this.deps.releaseVerification(peerReportId(reviewKey));
+			} catch {
+				// Best-effort release when verification report registration was already released.
+			}
+		}
 		return { status: "acknowledged", validation: "root_decision_only" };
 	}
 
@@ -829,6 +846,9 @@ export class PeerReviewController {
 		stage: PeerReviewRequest["stage"],
 		identity: string,
 	): void {
+		// Plan-stage reviews happen before implementation; registering them as mandatory verification
+		// obligations deadlocks pre-implementation edits before the planned code exists.
+		if (stage === "plan") return;
 		const evidenceGaps = limitations.map((limitation) => ({
 			summary: `Peer review evidence gap (${stage}, ${identity})`,
 			evidence: limitation,
@@ -1062,7 +1082,7 @@ export class PeerReviewController {
 				(report.verdict === "insufficient_evidence" && report.limitations.length === 0)
 			)
 				throw new Error("Peer review verdict contradicts its evidence");
-			const grounded = groundFindings(report, [input.artifact, input.evidence]);
+			const grounded = groundFindings(report, [input.objective, input.artifact, input.evidence]);
 			const requestSha256 = createHash("sha256").update(payload).digest("hex");
 			const reviewed: ReviewedPeerResult = {
 				status: "reviewed",

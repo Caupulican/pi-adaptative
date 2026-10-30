@@ -4,11 +4,16 @@ import {
 	type BotOperatorMessageDispatchResult,
 	type BotTeamChange,
 	formatActiveChatTargetBadge,
+	formatDurationIntervalMs,
 	normalizeBotOrTeamId,
+	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
+	type PersistentBotTeamStore,
 	type PersistentBotView,
+	type PersistentRoutineScheduleRecord,
 	type PersistentTeamRecord,
 	parseDirectChatAddress,
+	parseDurationIntervalMs,
 	type TeamOperatorMessageDispatchResult,
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
@@ -42,6 +47,11 @@ export interface BotTeamChatSessionPort {
 	readonly modelRegistry: Pick<ModelRegistry, "getAll">;
 	getRootModelLabel(): string;
 	getRootStatusLabel(): string;
+	getBotTeamStore?(): PersistentBotTeamStore;
+	tickPersistentRoutines?(routineId?: string): Promise<{ dispatched: string[]; failed: string[] }>;
+	getPersistentBotDaemonStatus?(): PersistentBotDaemonStatus;
+	startPersistentBotDaemon?(): { started: boolean; pid?: number; detail: string };
+	stopPersistentBotDaemon?(): { stopped: boolean; detail: string };
 }
 
 export interface BotTeamChatHost {
@@ -348,9 +358,22 @@ export class BotTeamChatController {
 					}
 					return;
 				}
+				case "inbox":
+					this.handleBotInboxCommand(rest, port);
+					return;
+				case "ack":
+					this.handleBotAckCommand(rest, port);
+					return;
+				case "schedule":
+				case "routine":
+					await this.handleBotScheduleCommand(rest, port);
+					return;
+				case "daemon":
+					await this.handleBotDaemonCommand(rest, port);
+					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [instructions...] | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [instructions...] | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -414,9 +437,19 @@ export class BotTeamChatController {
 					}
 					return;
 				}
+				case "inbox":
+					this.handleTeamInboxCommand(rest, port);
+					return;
+				case "ack":
+					this.handleTeamAckCommand(rest, port);
+					return;
+				case "schedule":
+				case "routine":
+					await this.handleTeamScheduleCommand(rest, port);
+					return;
 				default:
 					this.host.showWarning(
-						"Usage: /team [list] | /team create <teamId> <bot1,bot2,...> [description...] | /team members <teamId> <bot1,bot2,...> | /team open <teamId> | /team msg <teamId> <text...> | /team delete <teamId>",
+						"Usage: /team [list] | /team create <teamId> <bot1,bot2,...> [description...] | /team members <teamId> <bot1,bot2,...> | /team open <teamId> | /team msg <teamId> <text...> | /team inbox [teamId] | /team ack [teamId|all] | /team schedule [list|add|rm] ... | /team delete <teamId>",
 					);
 			}
 		} catch (error) {
@@ -439,21 +472,29 @@ export class BotTeamChatController {
 
 	private renderBotChat(agentId: string): void {
 		const port = this.host.getSessionPort();
+		port.getBotTeamStore?.().acknowledgeBotInbox(agentId);
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId);
 		const messages = port.readBotChatMessages(agentId);
-		if (!this.beginChatRender(chatSignature({ kind: "bot", agentId, bot: bot ?? null }, messages))) return;
+		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
+			(r) => r.target.kind === "bot" && r.target.agentId === agentId,
+		);
+		if (!this.beginChatRender(chatSignature({ kind: "bot", agentId, bot: bot ?? null, routines }, messages))) return;
 
 		const modelLabel = bot?.modelRef ?? "unknown model";
 		const thinking = bot?.thinkingLevel ?? "default";
 		const state = bot?.state ?? "unknown";
 		const teams = bot && bot.teamIds.length > 0 ? `Teams: ${bot.teamIds.join(", ")}` : undefined;
+		const routineLabel =
+			routines.length > 0
+				? `Routines: ${routines.map((r) => `${r.routineId} (every ${formatDurationIntervalMs(r.intervalMs)})`).join(", ")}`
+				: undefined;
 		const detail = [bot?.description, bot?.currentSummary].filter((part): part is string => !!part).join(" · ");
 
 		const lines = [
 			theme.fg("accent", theme.bold(`● LIVE BOT CHAT · ${agentId}`)) +
 				theme.fg("muted", ` · ${modelLabel} · thinking ${thinking} · ${state}`),
 		];
-		const secondLine = [teams, detail].filter((part): part is string => !!part).join("  ");
+		const secondLine = [teams, routineLabel, detail].filter((part): part is string => !!part).join("  ");
 		if (secondLine.length > 0) {
 			lines.push(theme.fg("text", secondLine));
 		}
@@ -502,6 +543,7 @@ export class BotTeamChatController {
 
 	private renderTeamChat(teamId: string): void {
 		const port = this.host.getSessionPort();
+		port.getBotTeamStore?.().acknowledgeTeamInbox(teamId);
 		const team = port.getPersistentTeam(teamId);
 		const members = team?.memberAgentIds ?? [];
 		const liveBots = port.listPersistentBots(undefined, teamId);
@@ -511,14 +553,25 @@ export class BotTeamChatController {
 				return `${memberId} (${bot?.state ?? "unknown"})`;
 			})
 			.join(" · ");
+		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
+			(r) => r.target.kind === "team" && r.target.teamId === teamId,
+		);
 		const messages = port.readTeamChatMessages(teamId);
-		if (!this.beginChatRender(chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus }, messages)))
+		if (
+			!this.beginChatRender(
+				chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus, routines }, messages),
+			)
+		)
 			return;
 
 		const memoryPath = team?.memoryFilePath ?? `~/.pi/agent/memory/teams/${teamId}.md`;
+		const routineLine =
+			routines.length > 0
+				? ` · Routines: ${routines.map((r) => `${r.routineId} (${formatDurationIntervalMs(r.intervalMs)})`).join(", ")}`
+				: "";
 		const lines = [
 			theme.fg("accent", theme.bold(`◆ LIVE TEAM CHAT · ${team?.name ?? teamId}`)) +
-				theme.fg("muted", ` [${members.join(", ")}]`),
+				theme.fg("muted", ` [${members.join(", ")}]${routineLine}`),
 			theme.fg("text", memberStatus.length > 0 ? memberStatus : "No members"),
 			theme.fg("muted", `Memory: ${memoryPath}`),
 			theme.fg(
@@ -686,7 +739,13 @@ export class BotTeamChatController {
 		if (bots.length === 0) {
 			return "No bots. Create one with /bot new <id> [--write] [model] [instructions...].";
 		}
-		return bots.map((b) => `${b.agentId} · ${b.state} · ${b.modelRef}`).join("\n");
+		return bots
+			.map((b) => {
+				const unread = (b.unreadCount ?? 0) > 0 ? ` · ${b.unreadCount} unread` : "";
+				const sched = (b.routineCount ?? 0) > 0 ? ` · ⏱${b.routineCount}` : "";
+				return `${b.agentId} · ${b.state} · ${b.modelRef}${unread}${sched}`;
+			})
+			.join("\n");
 	}
 
 	private formatTeamList(port: BotTeamChatSessionPort): string {
@@ -694,6 +753,266 @@ export class BotTeamChatController {
 		if (teams.length === 0) {
 			return "No teams. Create one with /team create <teamId> <bot1,bot2,...>.";
 		}
-		return teams.map((t) => `${t.teamId} · [${t.memberAgentIds.join(", ")}]`).join("\n");
+		return teams
+			.map((t) => {
+				const unread = (t.unreadCount ?? 0) > 0 ? ` · ${t.unreadCount} unread` : "";
+				return `${t.teamId} · [${t.memberAgentIds.join(", ")}]${unread}`;
+			})
+			.join("\n");
+	}
+
+	private handleBotInboxCommand(rest: string, port: BotTeamChatSessionPort): void {
+		const store = port.getBotTeamStore?.();
+		if (!store) {
+			this.host.showWarning("Bot store is unavailable in this session.");
+			return;
+		}
+		const [rawId] = splitHead(rest);
+		const targetBotId = rawId
+			? normalizeBotOrTeamId(rawId, "agentId")
+			: this.activeTarget.kind === "bot"
+				? this.activeTarget.agentId
+				: undefined;
+		if (targetBotId) {
+			const entries = store.listBotInbox(targetBotId, 10);
+			if (entries.length === 0) {
+				this.host.showStatus(`Inbox for bot ${targetBotId} is empty.`);
+				return;
+			}
+			const lines = entries.map(
+				(e) =>
+					`${e.unread ? "●" : "○"} [${new Date(e.timestamp).toISOString()}] (${e.kind}:${e.targetId}) ${e.sender}: ${e.text.replace(/\r?\n+/g, " ").slice(0, 120)}`,
+			);
+			this.host.showStatus(`Inbox for bot ${targetBotId}:\n${lines.join("\n")}`);
+			return;
+		}
+		const bots = port.listPersistentBots();
+		const teams = port.listPersistentTeams();
+		const summary: string[] = [];
+		for (const bot of bots) {
+			if ((bot.unreadCount ?? 0) > 0 || bot.lastSummary) {
+				summary.push(
+					`bot:${bot.agentId} (${bot.unreadCount ?? 0} unread): ${(bot.lastSummary ?? "no summary").replace(/\r?\n+/g, " ").slice(0, 100)}`,
+				);
+			}
+		}
+		for (const team of teams) {
+			if ((team.unreadCount ?? 0) > 0) {
+				summary.push(`team:${team.teamId} (${team.unreadCount} unread)`);
+			}
+		}
+		this.host.showStatus(
+			summary.length > 0 ? `Bot & Team Inboxes:\n${summary.join("\n")}` : "All bot and team inboxes are caught up.",
+		);
+	}
+
+	private handleBotAckCommand(rest: string, port: BotTeamChatSessionPort): void {
+		this.handleInboxAck("bot", rest, port);
+	}
+
+	private handleTeamAckCommand(rest: string, port: BotTeamChatSessionPort): void {
+		this.handleInboxAck("team", rest, port);
+	}
+
+	private handleInboxAck(kind: "bot" | "team", rest: string, port: BotTeamChatSessionPort): void {
+		const store = port.getBotTeamStore?.();
+		if (!store) {
+			this.host.showWarning("Store is unavailable in this session.");
+			return;
+		}
+		const [rawId] = splitHead(rest);
+		if (!rawId || rawId === "all") {
+			const count = store.acknowledgeAllInboxes();
+			this.host.showStatus(`Acknowledged ${count} inbox(es).`);
+			this.host.ui.requestRender();
+			return;
+		}
+		const normId = normalizeBotOrTeamId(rawId, kind === "bot" ? "agentId" : "teamId");
+		const acknowledged = kind === "bot" ? store.acknowledgeBotInbox(normId) : store.acknowledgeTeamInbox(normId);
+		if (acknowledged) {
+			this.host.showStatus(`Acknowledged inbox for ${kind} ${normId}.`);
+			this.host.ui.requestRender();
+		} else {
+			this.host.showWarning(`${kind === "bot" ? "Bot" : "Team"} not found: ${normId}.`);
+		}
+	}
+
+	private handleTeamInboxCommand(rest: string, port: BotTeamChatSessionPort): void {
+		const store = port.getBotTeamStore?.();
+		if (!store) {
+			this.host.showWarning("Team store is unavailable in this session.");
+			return;
+		}
+		const [rawId] = splitHead(rest);
+		const targetTeamId = rawId
+			? normalizeBotOrTeamId(rawId, "teamId")
+			: this.activeTarget.kind === "team"
+				? this.activeTarget.teamId
+				: undefined;
+		if (!targetTeamId) {
+			this.handleBotInboxCommand("", port);
+			return;
+		}
+		const entries = store.listTeamInbox(targetTeamId, 10);
+		if (entries.length === 0) {
+			this.host.showStatus(`Inbox for team ${targetTeamId} is empty.`);
+			return;
+		}
+		const lines = entries.map(
+			(e) =>
+				`${e.unread ? "●" : "○"} [${new Date(e.timestamp).toISOString()}] ${e.sender}: ${e.text.replace(/\r?\n+/g, " ").slice(0, 120)}`,
+		);
+		this.host.showStatus(`Inbox for team ${targetTeamId}:\n${lines.join("\n")}`);
+	}
+
+	private formatRoutineList(routines: readonly PersistentRoutineScheduleRecord[]): string {
+		if (routines.length === 0) {
+			return "No scheduled routines. Add one with /bot schedule add <routineId> <botId> <interval> <prompt...>.";
+		}
+		return routines
+			.map((r) => {
+				const targetLabel = r.target.kind === "bot" ? `bot:${r.target.agentId}` : `team:${r.target.teamId}`;
+				const status = r.lastStatus ? ` · last=${r.lastStatus}` : "";
+				return `${r.routineId} → ${targetLabel} · every ${formatDurationIntervalMs(r.intervalMs)} · next=${new Date(r.nextRunAt).toISOString()}${status} · "${r.prompt}"`;
+			})
+			.join("\n");
+	}
+
+	private async handleBotScheduleCommand(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		await this.handleSchedule("bot", rest, port);
+	}
+
+	private async handleTeamScheduleCommand(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		await this.handleSchedule("team", rest, port);
+	}
+
+	private async handleSchedule(kind: "bot" | "team", rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		const store = port.getBotTeamStore?.();
+		if (!store) {
+			this.host.showWarning("Store is unavailable in this session.");
+			return;
+		}
+		const [sub, subRest] = splitHead(rest);
+		if (!sub || sub === "list") {
+			const routines =
+				kind === "team" ? store.listRoutines().filter((r) => r.target.kind === "team") : store.listRoutines();
+			this.host.showStatus(this.formatRoutineList(routines));
+			return;
+		}
+		if (sub === "rm" || sub === "delete") {
+			const [id] = splitHead(subRest);
+			const routineId = normalizeBotOrTeamId(id, "routineId");
+			if (store.deleteRoutine(routineId)) {
+				this.host.showStatus(`Deleted scheduled routine ${routineId}.`);
+				this.host.ui.requestRender();
+			} else {
+				this.host.showWarning(`Routine not found: ${routineId}.`);
+			}
+			return;
+		}
+		if (kind === "bot" && (sub === "run" || sub === "tick")) {
+			const [id] = splitHead(subRest);
+			const res = await port.tickPersistentRoutines?.(id ? normalizeBotOrTeamId(id, "routineId") : undefined);
+			this.host.showStatus(
+				res
+					? `Routines dispatched: ${res.dispatched.join(", ") || "none"}${res.failed.length ? ` · failed: ${res.failed.join("; ")}` : ""}.`
+					: "Routine scheduler tick unavailable.",
+			);
+			return;
+		}
+		if (sub === "add" || sub === "set") {
+			const [rawRoutineId, afterRoutineId] = splitHead(subRest);
+			const [rawTargetId, afterTargetId] = splitHead(afterRoutineId);
+			const [rawInterval, prompt] = splitHead(afterTargetId);
+			if (!rawRoutineId || !rawTargetId || !rawInterval || !prompt.trim()) {
+				this.host.showWarning(`Usage: /${kind} schedule add <routineId> <${kind}Id> <interval> <prompt...>`);
+				return;
+			}
+			const intervalMs = parseDurationIntervalMs(rawInterval);
+			if (kind === "bot") {
+				const agentId = normalizeBotOrTeamId(rawTargetId, "agentId");
+				this.ensureTeamMembersExist([agentId], port);
+				const routine = store.upsertRoutine({
+					routineId: rawRoutineId,
+					target: { kind: "bot", agentId },
+					intervalMs,
+					prompt,
+				});
+				this.host.showStatus(
+					`Scheduled routine ${routine.routineId} for bot ${agentId} every ${formatDurationIntervalMs(routine.intervalMs)}.`,
+				);
+			} else {
+				const teamId = normalizeBotOrTeamId(rawTargetId, "teamId");
+				if (!port.getPersistentTeam(teamId)) {
+					this.host.showWarning(`Team not found: ${teamId}. Create it first with /team create.`);
+					return;
+				}
+				const routine = store.upsertRoutine({
+					routineId: rawRoutineId,
+					target: { kind: "team", teamId },
+					intervalMs,
+					prompt,
+				});
+				this.host.showStatus(
+					`Scheduled routine ${routine.routineId} for team ${teamId} every ${formatDurationIntervalMs(routine.intervalMs)}.`,
+				);
+			}
+			this.host.ui.requestRender();
+			return;
+		}
+		this.host.showWarning(
+			`Usage: /${kind} schedule [list | add <routineId> <${kind}Id> <interval> <prompt...> | rm <routineId>${kind === "bot" ? " | run [routineId]" : ""}]`,
+		);
+	}
+
+	private async handleBotDaemonCommand(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		const [sub] = splitHead(rest);
+		switch (sub) {
+			case "":
+			case "status": {
+				const status = port.getPersistentBotDaemonStatus?.() ?? port.getBotTeamStore?.().getDaemonStatus();
+				if (!status) {
+					this.host.showWarning("Daemon status unavailable.");
+					return;
+				}
+				this.host.showStatus(
+					status.running
+						? `Detached bot daemon running (pid ${status.pid}, ${status.activeRoutines} active routines, ${status.dueRoutines} due).`
+						: `Detached bot daemon stopped (${status.activeRoutines} active routines, ${status.dueRoutines} due).`,
+				);
+				return;
+			}
+			case "start": {
+				const res = port.startPersistentBotDaemon?.();
+				if (!res) {
+					this.host.showWarning("Detached bot daemon start unavailable.");
+					return;
+				}
+				if (res.started) this.host.showStatus(res.detail);
+				else this.host.showWarning(res.detail);
+				return;
+			}
+			case "stop": {
+				const res = port.stopPersistentBotDaemon?.();
+				if (!res) {
+					this.host.showWarning("Detached bot daemon stop unavailable.");
+					return;
+				}
+				if (res.stopped) this.host.showStatus(res.detail);
+				else this.host.showWarning(res.detail);
+				return;
+			}
+			case "tick": {
+				const res = await port.tickPersistentRoutines?.();
+				this.host.showStatus(
+					res
+						? `Daemon/routine tick dispatched: ${res.dispatched.join(", ") || "none"}.`
+						: "Routine tick unavailable.",
+				);
+				return;
+			}
+			default:
+				this.host.showWarning("Usage: /bot daemon [status | start | stop | tick]");
+		}
 	}
 }

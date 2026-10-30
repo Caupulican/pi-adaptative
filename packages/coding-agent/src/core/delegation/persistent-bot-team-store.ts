@@ -35,6 +35,7 @@ export interface PersistentBotRecord {
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
 	readonly lastMessageAt?: number;
+	readonly lastReadAt?: number;
 }
 
 export interface PersistentBotView {
@@ -57,6 +58,9 @@ export interface PersistentBotView {
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
 	readonly lastMessageAt?: number;
+	readonly lastReadAt?: number;
+	readonly unreadCount?: number;
+	readonly routineCount?: number;
 	readonly memoryFilePath?: string;
 }
 
@@ -69,6 +73,8 @@ export interface PersistentTeamRecord {
 	readonly createdAt: string;
 	readonly updatedAt: string;
 	readonly lastMessageAt?: number;
+	readonly lastReadAt?: number;
+	readonly unreadCount?: number;
 	readonly memoryFilePath?: string;
 }
 
@@ -107,6 +113,7 @@ export interface UpsertPersistentBotInput {
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
 	readonly lastMessageAt?: number;
+	readonly lastReadAt?: number;
 }
 
 export interface UpsertPersistentTeamInput {
@@ -114,6 +121,82 @@ export interface UpsertPersistentTeamInput {
 	readonly name?: string;
 	readonly description?: string;
 	readonly memberAgentIds: readonly string[];
+	readonly lastReadAt?: number;
+}
+
+export type PersistentRoutineTarget =
+	| { readonly kind: "bot"; readonly agentId: string }
+	| { readonly kind: "team"; readonly teamId: string };
+
+export interface PersistentRoutineScheduleRecord {
+	readonly routineId: string;
+	readonly target: PersistentRoutineTarget;
+	readonly prompt: string;
+	readonly intervalMs: number;
+	readonly enabled: boolean;
+	readonly nextRunAt: number;
+	readonly lastRunAt?: number;
+	readonly lastStatus?: "queued" | "running" | "succeeded" | "failed";
+	readonly lastSummary?: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
+export interface UpsertPersistentRoutineInput {
+	readonly routineId: string;
+	readonly target: PersistentRoutineTarget;
+	readonly prompt: string;
+	readonly intervalMs: number;
+	readonly enabled?: boolean;
+	readonly nextRunAt?: number;
+}
+
+export interface PersistentBotInboxEntry {
+	readonly id: string;
+	readonly kind: "bot" | "team";
+	readonly targetId: string;
+	readonly sender: string;
+	readonly text: string;
+	readonly timestamp: number;
+	readonly unread: boolean;
+}
+
+export interface PersistentBotDaemonStatus {
+	readonly running: boolean;
+	readonly pid?: number;
+	readonly startedAt?: string;
+	readonly lastHeartbeatAt?: number;
+	readonly lastTickAt?: number;
+	readonly activeRoutines: number;
+	readonly dueRoutines: number;
+}
+
+const MIN_ROUTINE_INTERVAL_MS = 10_000;
+const DAEMON_STALE_MS = 60_000;
+
+export function parseDurationIntervalMs(raw: string): number {
+	const trimmed = raw.trim().toLowerCase();
+	const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/u.exec(trimmed);
+	if (!match) {
+		throw new Error(`Invalid schedule interval "${raw}". Expected e.g. 30s, 5m, 1h, 1d.`);
+	}
+	const amount = Number.parseFloat(match[1]!);
+	const unit = match[2] ?? "s";
+	const multiplier =
+		unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+	const ms = Math.round(amount * multiplier);
+	if (!Number.isFinite(ms) || ms < MIN_ROUTINE_INTERVAL_MS) {
+		throw new Error(`Schedule interval must be at least ${MIN_ROUTINE_INTERVAL_MS / 1000}s.`);
+	}
+	return ms;
+}
+
+export function formatDurationIntervalMs(intervalMs: number): string {
+	if (intervalMs % 86_400_000 === 0) return `${intervalMs / 86_400_000}d`;
+	if (intervalMs % 3_600_000 === 0) return `${intervalMs / 3_600_000}h`;
+	if (intervalMs % 60_000 === 0) return `${intervalMs / 60_000}m`;
+	if (intervalMs % 1000 === 0) return `${intervalMs / 1000}s`;
+	return `${intervalMs}ms`;
 }
 
 export interface BotOperatorMessageDispatchResult {
@@ -322,6 +405,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		lastTranscriptRef,
 		lastSummary,
 		lastMessageAt,
+		lastReadAt,
 	} = value;
 
 	if (
@@ -352,6 +436,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		lastTranscriptRef: typeof lastTranscriptRef === "string" ? lastTranscriptRef : undefined,
 		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
 		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
+		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
 	};
 }
 
@@ -368,6 +453,7 @@ function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
 		createdAt,
 		updatedAt,
 		lastMessageAt,
+		lastReadAt,
 		memoryFilePath,
 	} = value;
 
@@ -399,7 +485,65 @@ function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
 		createdAt,
 		updatedAt,
 		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
+		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
 		memoryFilePath: typeof memoryFilePath === "string" ? memoryFilePath : undefined,
+	};
+}
+
+function parseRoutineRecord(value: unknown): PersistentRoutineScheduleRecord | undefined {
+	if (!isRecordObject(value)) return undefined;
+	const {
+		routineId,
+		target,
+		prompt,
+		intervalMs,
+		enabled,
+		nextRunAt,
+		lastRunAt,
+		lastStatus,
+		lastSummary,
+		createdAt,
+		updatedAt,
+	} = value;
+	if (
+		typeof routineId !== "string" ||
+		!BOT_OR_TEAM_ID_REGEX.test(routineId) ||
+		typeof prompt !== "string" ||
+		prompt.trim().length === 0 ||
+		typeof intervalMs !== "number" ||
+		!Number.isFinite(intervalMs) ||
+		intervalMs < MIN_ROUTINE_INTERVAL_MS ||
+		typeof nextRunAt !== "number" ||
+		!Number.isFinite(nextRunAt) ||
+		typeof createdAt !== "string" ||
+		typeof updatedAt !== "string" ||
+		!isRecordObject(target)
+	) {
+		return undefined;
+	}
+	let parsedTarget: PersistentRoutineTarget | undefined;
+	if (target.kind === "bot" && typeof target.agentId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.agentId)) {
+		parsedTarget = { kind: "bot", agentId: target.agentId };
+	} else if (target.kind === "team" && typeof target.teamId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.teamId)) {
+		parsedTarget = { kind: "team", teamId: target.teamId };
+	}
+	if (!parsedTarget) return undefined;
+	const validStatus =
+		lastStatus === "queued" || lastStatus === "running" || lastStatus === "succeeded" || lastStatus === "failed"
+			? lastStatus
+			: undefined;
+	return {
+		routineId,
+		target: parsedTarget,
+		prompt: prompt.trim(),
+		intervalMs: Math.round(intervalMs),
+		enabled: typeof enabled === "boolean" ? enabled : true,
+		nextRunAt,
+		lastRunAt: typeof lastRunAt === "number" && Number.isFinite(lastRunAt) ? lastRunAt : undefined,
+		lastStatus: validStatus,
+		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
+		createdAt,
+		updatedAt,
 	};
 }
 
@@ -498,6 +642,7 @@ export class PersistentBotTeamStore {
 	private readonly bots = new Map<string, PersistentBotRecord>();
 	private readonly teams = new Map<string, PersistentTeamRecord>();
 	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
+	private readonly routines = new Map<string, PersistentRoutineScheduleRecord>();
 	private readonly listeners = new Set<() => void>();
 	private mutationChanged = false;
 	private watcher: FSWatcher | undefined;
@@ -590,6 +735,7 @@ export class PersistentBotTeamStore {
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
 			teamMessages: Object.fromEntries(this.teamMessages),
+			...(this.routines.size > 0 ? { routines: Array.from(this.routines.values()) } : {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
@@ -658,6 +804,7 @@ export class PersistentBotTeamStore {
 		this.bots.clear();
 		this.teams.clear();
 		this.teamMessages.clear();
+		this.routines.clear();
 		this.loadedDigest = digest;
 		if (!isRecordObject(parsed)) return true;
 
@@ -692,6 +839,15 @@ export class PersistentBotTeamStore {
 					if (validMessages.length > 0) {
 						this.teamMessages.set(teamId, validMessages.slice(-MAX_TEAM_MESSAGES_PER_TEAM));
 					}
+				}
+			}
+		}
+
+		if (Array.isArray(parsed.routines)) {
+			for (const rawRoutine of parsed.routines) {
+				const routine = parseRoutineRecord(rawRoutine);
+				if (routine) {
+					this.routines.set(routine.routineId, routine);
 				}
 			}
 		}
@@ -766,6 +922,10 @@ export class PersistentBotTeamStore {
 				input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
 					? input.lastMessageAt
 					: existing?.lastMessageAt,
+			lastReadAt:
+				input.lastReadAt !== undefined && Number.isFinite(input.lastReadAt)
+					? input.lastReadAt
+					: existing?.lastReadAt,
 		};
 
 		this.bots.set(agentId, record);
@@ -816,9 +976,27 @@ export class PersistentBotTeamStore {
 				}
 			}
 
+			for (const [routineId, routine] of this.routines.entries()) {
+				if (routine.target.kind === "bot" && routine.target.agentId === normalizedId) {
+					this.routines.delete(routineId);
+				}
+			}
+
 			this.save();
 			return true;
 		});
+	}
+
+	private computeTeamUnreadCount(team: PersistentTeamRecord): number {
+		const readAt = team.lastReadAt ?? 0;
+		const msgs = this.teamMessages.get(team.teamId) ?? [];
+		const currentIncarnation = teamIncarnation(team);
+		return msgs.filter(
+			(m) =>
+				(!m.teamIncarnationId || m.teamIncarnationId === currentIncarnation) &&
+				m.timestamp > readAt &&
+				m.sender.kind !== "operator",
+		).length;
 	}
 
 	listTeams(): PersistentTeamRecord[] {
@@ -826,6 +1004,7 @@ export class PersistentBotTeamStore {
 			this._cachedTeamList = Array.from(this.teams.values()).map((team) => ({
 				...team,
 				memberAgentIds: [...team.memberAgentIds],
+				unreadCount: this.computeTeamUnreadCount(team),
 				memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
 			}));
 		}
@@ -841,6 +1020,7 @@ export class PersistentBotTeamStore {
 		return {
 			...team,
 			memberAgentIds: [...team.memberAgentIds],
+			unreadCount: this.computeTeamUnreadCount(team),
 			memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
 		};
 	}
@@ -870,12 +1050,20 @@ export class PersistentBotTeamStore {
 				createdAt: existing?.createdAt ?? now,
 				updatedAt: now,
 				lastMessageAt: existing?.lastMessageAt,
+				lastReadAt:
+					input.lastReadAt !== undefined && Number.isFinite(input.lastReadAt)
+						? input.lastReadAt
+						: existing?.lastReadAt,
 			};
 
 			this.teams.set(teamId, record);
 			this.ensureTeamMemoryFile(teamId);
 			this.save();
-			return { ...record, memoryFilePath: this.getTeamMemoryFilePath(teamId) };
+			return {
+				...record,
+				unreadCount: this.computeTeamUnreadCount(record),
+				memoryFilePath: this.getTeamMemoryFilePath(teamId),
+			};
 		});
 	}
 
@@ -918,9 +1106,307 @@ export class PersistentBotTeamStore {
 			}
 			this.teams.delete(normalizedId);
 			this.teamMessages.delete(normalizedId);
+			for (const [routineId, routine] of this.routines.entries()) {
+				if (routine.target.kind === "team" && routine.target.teamId === normalizedId) {
+					this.routines.delete(routineId);
+				}
+			}
 			this.save();
 			return true;
 		});
+	}
+
+	listRoutines(): PersistentRoutineScheduleRecord[] {
+		return Array.from(this.routines.values(), (r) => structuredClone(r)).sort((a, b) => a.nextRunAt - b.nextRunAt);
+	}
+
+	getRoutine(routineId: string): PersistentRoutineScheduleRecord | undefined {
+		const routine = this.routines.get(routineId.trim());
+		return routine ? structuredClone(routine) : undefined;
+	}
+
+	upsertRoutine(input: UpsertPersistentRoutineInput, nowMs = Date.now()): PersistentRoutineScheduleRecord {
+		return this.mutate(() => {
+			const routineId = normalizeBotOrTeamId(input.routineId, "routineId");
+			const prompt = input.prompt.trim();
+			if (!prompt) throw new Error("Routine prompt cannot be empty.");
+			const intervalMs = Math.max(MIN_ROUTINE_INTERVAL_MS, Math.round(input.intervalMs));
+			const target: PersistentRoutineTarget =
+				input.target.kind === "bot"
+					? { kind: "bot", agentId: normalizeBotOrTeamId(input.target.agentId, "agentId") }
+					: { kind: "team", teamId: normalizeBotOrTeamId(input.target.teamId, "teamId") };
+			const existing = this.routines.get(routineId);
+			const nowIso = new Date(nowMs).toISOString();
+			const record: PersistentRoutineScheduleRecord = {
+				routineId,
+				target,
+				prompt,
+				intervalMs,
+				enabled: input.enabled ?? existing?.enabled ?? true,
+				nextRunAt: input.nextRunAt ?? nowMs + intervalMs,
+				lastRunAt: existing?.lastRunAt,
+				lastStatus: existing?.lastStatus,
+				lastSummary: existing?.lastSummary,
+				createdAt: existing?.createdAt ?? nowIso,
+				updatedAt: nowIso,
+			};
+			this.routines.set(routineId, record);
+			this.save();
+			return structuredClone(record);
+		});
+	}
+
+	deleteRoutine(routineId: string): boolean {
+		return this.mutate(() => {
+			const normalizedId = normalizeBotOrTeamId(routineId, "routineId");
+			if (!this.routines.has(normalizedId)) return false;
+			this.routines.delete(normalizedId);
+			this.save();
+			return true;
+		});
+	}
+
+	claimDueRoutines(nowMs = Date.now(), routineIdFilter?: string): PersistentRoutineScheduleRecord[] {
+		return this.mutate(() => {
+			const claimed: PersistentRoutineScheduleRecord[] = [];
+			const nowIso = new Date(nowMs).toISOString();
+			for (const [id, routine] of this.routines.entries()) {
+				if (routineIdFilter && id !== routineIdFilter) continue;
+				if (!routineIdFilter && (!routine.enabled || routine.nextRunAt > nowMs)) continue;
+				const updated: PersistentRoutineScheduleRecord = {
+					...routine,
+					lastRunAt: nowMs,
+					nextRunAt: nowMs + routine.intervalMs,
+					lastStatus: "running",
+					updatedAt: nowIso,
+				};
+				this.routines.set(id, updated);
+				claimed.push(structuredClone(updated));
+			}
+			if (claimed.length > 0) this.save();
+			return claimed;
+		});
+	}
+
+	completeRoutineRun(
+		routineId: string,
+		status: "queued" | "succeeded" | "failed",
+		summary?: string,
+		nowMs = Date.now(),
+	): PersistentRoutineScheduleRecord | undefined {
+		return this.mutate(() => {
+			const existing = this.routines.get(routineId.trim());
+			if (!existing) return undefined;
+			const updated: PersistentRoutineScheduleRecord = {
+				...existing,
+				lastStatus: status,
+				lastSummary: summary?.trim().slice(0, 300) || existing.lastSummary,
+				updatedAt: new Date(nowMs).toISOString(),
+			};
+			this.routines.set(existing.routineId, updated);
+			this.save();
+			return structuredClone(updated);
+		});
+	}
+
+	acknowledgeBotInbox(agentId: string, readAt = Date.now()): PersistentBotRecord | undefined {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const current = this.bots.get(normId);
+		if (!current) return undefined;
+		if ((current.lastReadAt ?? 0) >= (current.lastMessageAt ?? 0)) return { ...current };
+		return this.mutate(() => {
+			const bot = this.bots.get(normId);
+			if (!bot) return undefined;
+			const updated: PersistentBotRecord = {
+				...bot,
+				lastReadAt: Math.max(readAt, bot.lastMessageAt ?? 0),
+			};
+			this.bots.set(normId, updated);
+			this.save();
+			return { ...updated };
+		});
+	}
+
+	acknowledgeTeamInbox(teamId: string, readAt = Date.now()): PersistentTeamRecord | undefined {
+		const normId = normalizeBotOrTeamId(teamId, "teamId");
+		const current = this.teams.get(normId);
+		if (!current) return undefined;
+		if (this.computeTeamUnreadCount(current) === 0) {
+			return {
+				...current,
+				memberAgentIds: [...current.memberAgentIds],
+				unreadCount: 0,
+				memoryFilePath: this.getTeamMemoryFilePath(normId),
+			};
+		}
+		return this.mutate(() => {
+			const team = this.teams.get(normId);
+			if (!team) return undefined;
+			const updated: PersistentTeamRecord = {
+				...team,
+				lastReadAt: Math.max(readAt, team.lastMessageAt ?? 0),
+			};
+			this.teams.set(normId, updated);
+			this.save();
+			return {
+				...updated,
+				memberAgentIds: [...updated.memberAgentIds],
+				unreadCount: 0,
+				memoryFilePath: this.getTeamMemoryFilePath(normId),
+			};
+		});
+	}
+
+	acknowledgeAllInboxes(readAt = Date.now()): number {
+		return this.mutate(() => {
+			let cleared = 0;
+			for (const [id, bot] of this.bots.entries()) {
+				if ((bot.lastMessageAt ?? 0) > (bot.lastReadAt ?? 0)) {
+					this.bots.set(id, { ...bot, lastReadAt: Math.max(readAt, bot.lastMessageAt ?? 0) });
+					cleared++;
+				}
+			}
+			for (const [id, team] of this.teams.entries()) {
+				if (this.computeTeamUnreadCount(team) > 0) {
+					this.teams.set(id, { ...team, lastReadAt: Math.max(readAt, team.lastMessageAt ?? 0) });
+					cleared++;
+				}
+			}
+			if (cleared > 0) this.save();
+			return cleared;
+		});
+	}
+
+	private collectTeamInboxEntries(team: PersistentTeamRecord, readAt: number): PersistentBotInboxEntry[] {
+		const currentIncarnation = teamIncarnation(team);
+		const entries: PersistentBotInboxEntry[] = [];
+		for (const msg of this.teamMessages.get(team.teamId) ?? []) {
+			if (msg.teamIncarnationId && msg.teamIncarnationId !== currentIncarnation) continue;
+			const sender = msg.sender.kind === "bot" ? msg.sender.agentId : msg.sender.kind;
+			entries.push({
+				id: msg.messageId,
+				kind: "team",
+				targetId: team.teamId,
+				sender,
+				text: msg.text,
+				timestamp: msg.timestamp,
+				unread: msg.sender.kind !== "operator" && msg.timestamp > readAt,
+			});
+		}
+		return entries;
+	}
+
+	listBotInbox(agentId: string, limit = 20): PersistentBotInboxEntry[] {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const bot = this.bots.get(normId);
+		const entries: PersistentBotInboxEntry[] = [];
+		const readAt = bot?.lastReadAt ?? 0;
+		if (bot?.lastSummary && bot.lastMessageAt) {
+			entries.push({
+				id: `bot:${normId}:${bot.lastMessageAt}`,
+				kind: "bot",
+				targetId: normId,
+				sender: normId,
+				text: bot.lastSummary,
+				timestamp: bot.lastMessageAt,
+				unread: bot.lastMessageAt > readAt,
+			});
+		}
+		for (const team of this.teams.values()) {
+			if (!team.memberAgentIds.includes(normId)) continue;
+			entries.push(...this.collectTeamInboxEntries(team, Math.max(readAt, team.lastReadAt ?? 0)));
+		}
+		entries.sort((a, b) => b.timestamp - a.timestamp);
+		return entries.slice(0, Math.max(1, limit));
+	}
+
+	listTeamInbox(teamId: string, limit = 20): PersistentBotInboxEntry[] {
+		const normId = normalizeBotOrTeamId(teamId, "teamId");
+		const team = this.teams.get(normId);
+		if (!team) return [];
+		const entries = this.collectTeamInboxEntries(team, team.lastReadAt ?? 0);
+		entries.sort((a, b) => b.timestamp - a.timestamp);
+		return entries.slice(0, Math.max(1, limit));
+	}
+
+	getStoreFilePath(): string {
+		return this.filePath;
+	}
+
+	private getDaemonLeasePath(): string {
+		return join(dirname(this.filePath), "bot-daemon-lease.json");
+	}
+
+	getDaemonStatus(nowMs = Date.now()): PersistentBotDaemonStatus {
+		const activeRoutines = Array.from(this.routines.values()).filter((r) => r.enabled).length;
+		const dueRoutines = Array.from(this.routines.values()).filter((r) => r.enabled && r.nextRunAt <= nowMs).length;
+		const leasePath = this.getDaemonLeasePath();
+		try {
+			const raw = readFileSync(leasePath, "utf8");
+			const parsed: unknown = JSON.parse(raw);
+			if (isRecordObject(parsed) && typeof parsed.pid === "number" && Number.isInteger(parsed.pid)) {
+				const lastHeartbeatAt =
+					typeof parsed.lastHeartbeatAt === "number" && Number.isFinite(parsed.lastHeartbeatAt)
+						? parsed.lastHeartbeatAt
+						: 0;
+				let alive = false;
+				try {
+					process.kill(parsed.pid, 0);
+					alive = nowMs - lastHeartbeatAt <= DAEMON_STALE_MS;
+				} catch {
+					alive = false;
+				}
+				return {
+					running: alive,
+					pid: alive ? parsed.pid : undefined,
+					startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
+					lastHeartbeatAt: lastHeartbeatAt || undefined,
+					lastTickAt:
+						typeof parsed.lastTickAt === "number" && Number.isFinite(parsed.lastTickAt)
+							? parsed.lastTickAt
+							: undefined,
+					activeRoutines,
+					dueRoutines,
+				};
+			}
+		} catch {
+			// Absent or unreadable lease file means no detached daemon is running.
+		}
+		return { running: false, activeRoutines, dueRoutines };
+	}
+
+	writeDaemonLease(
+		input: { pid: number; startedAt?: string; lastTickAt?: number },
+		nowMs = Date.now(),
+	): PersistentBotDaemonStatus {
+		const leasePath = this.getDaemonLeasePath();
+		mkdirSync(dirname(leasePath), { recursive: true });
+		const payload = {
+			pid: input.pid,
+			startedAt: input.startedAt ?? new Date(nowMs).toISOString(),
+			lastHeartbeatAt: nowMs,
+			...(input.lastTickAt !== undefined ? { lastTickAt: input.lastTickAt } : {}),
+		};
+		writeFileAtomicSync(leasePath, JSON.stringify(payload, null, 2));
+		return this.getDaemonStatus(nowMs);
+	}
+
+	releaseDaemonLease(pid?: number): boolean {
+		const leasePath = this.getDaemonLeasePath();
+		try {
+			if (!existsSync(leasePath)) return false;
+			if (pid !== undefined) {
+				const raw = readFileSync(leasePath, "utf8");
+				const parsed: unknown = JSON.parse(raw);
+				if (isRecordObject(parsed) && typeof parsed.pid === "number" && parsed.pid !== pid) {
+					return false;
+				}
+			}
+			writeFileAtomicSync(leasePath, JSON.stringify({ releasedAt: Date.now() }));
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	appendTeamMessage(message: PersistentTeamMessage): void {
@@ -1305,6 +1791,15 @@ export class PersistentBotTeamStore {
 				botRecord?.updatedAt ??
 				new Date().toISOString();
 
+			const unreadCount =
+				(botRecord?.lastMessageAt ?? 0) > (botRecord?.lastReadAt ?? 0) && Boolean(botRecord?.lastSummary) ? 1 : 0;
+			const routineCount = Array.from(this.routines.values()).filter(
+				(r) =>
+					r.enabled &&
+					((r.target.kind === "bot" && r.target.agentId === agentId) ||
+						(r.target.kind === "team" && teamIds.includes(r.target.teamId))),
+			).length;
+
 			views.push({
 				agentId,
 				displayName,
@@ -1325,6 +1820,9 @@ export class PersistentBotTeamStore {
 				lastTranscriptRef: botRecord?.lastTranscriptRef,
 				lastSummary: botRecord?.lastSummary,
 				lastMessageAt: botRecord?.lastMessageAt,
+				lastReadAt: botRecord?.lastReadAt,
+				unreadCount,
+				routineCount,
 				memoryFilePath: this.getBotMemoryFilePath(agentId),
 			});
 		}

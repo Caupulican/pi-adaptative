@@ -195,18 +195,20 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "score",
 					id: "semantic_progress",
-					instruction: "Semantic progress score (0=none, 3=significant)",
+					instruction:
+						"Semantic progress score toward the objective across current or sequential long-horizon tracks (0=none, 3=significant)",
 					levels: [
-						{ value: 0, description: "No progress" },
-						{ value: 1, description: "Minor progress" },
-						{ value: 2, description: "Good progress" },
-						{ value: 3, description: "Significant progress" },
+						{ value: 0, description: "No progress: blocked or repeating identical failed action" },
+						{ value: 1, description: "Minor progress: advancing survey, slice, or intermediate track" },
+						{ value: 2, description: "Good progress: completing or verifying a concrete requirement track" },
+						{ value: 3, description: "Significant progress: major requirement or full objective satisfied" },
 					],
 				},
 				{
 					kind: "boolean",
 					id: "strategy_repetition",
-					instruction: "Is the current failed strategy repeating without fresh evidence?",
+					instruction:
+						"Is the exact same failed action repeating without new evidence or multi-step track progression?",
 				},
 				{ kind: "boolean", id: "context_stale", instruction: "Has the working context drifted or become stale?" },
 				{

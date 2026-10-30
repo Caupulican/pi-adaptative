@@ -93,20 +93,55 @@ export function createPeerReviewToolDefinition(
 				};
 			}
 			if (input.action === "status" || input.action === "acknowledge") {
-				const result =
-					input.action === "status"
-						? controller.status()
-						: input.acknowledgement
-							? await controller.acknowledge(input.acknowledgement.reviewKey, input.acknowledgement.evidence)
-							: {
-									status: "unavailable",
-									reason: "acknowledgement with reviewKey and concrete evidence is required",
-								};
-				return {
-					content: [{ type: "text", text: JSON.stringify(result) }],
-					details: result,
-					isError: result.status === "unavailable",
-				};
+				if (input.action === "status") {
+					const result = controller.status();
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+						details: result,
+						isError: false,
+					};
+				}
+				if (!input.acknowledgement) {
+					const unavailable = {
+						status: "unavailable" as const,
+						reason: "acknowledgement with reviewKey and concrete evidence is required",
+					};
+					return {
+						content: [{ type: "text", text: JSON.stringify(unavailable) }],
+						details: unavailable,
+						isError: true,
+					};
+				}
+				try {
+					const ack = await controller.acknowledge(
+						input.acknowledgement.reviewKey,
+						input.acknowledgement.evidence,
+					);
+					const closed =
+						getVerification?.()?.acknowledgePeerFindings(
+							input.acknowledgement.reviewKey,
+							input.acknowledgement.evidence,
+						) ?? [];
+					const result = {
+						...ack,
+						closedObligationIds: closed.map((item) => item.id),
+					};
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+						details: result,
+						isError: false,
+					};
+				} catch (error) {
+					const unavailable = {
+						status: "unavailable" as const,
+						reason: error instanceof Error ? error.message : String(error),
+					};
+					return {
+						content: [{ type: "text", text: JSON.stringify(unavailable) }],
+						details: unavailable,
+						isError: true,
+					};
+				}
 			}
 			if (input.action === "obligations" || input.action === "resolve") {
 				const verification = getVerification?.();

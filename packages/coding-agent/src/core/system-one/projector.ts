@@ -432,7 +432,10 @@ export class StateProjector {
 				severity: r.severity,
 			}));
 
-		// Store each observation body once. Repeated citations retain their associations by canonical ID.
+		// Store each observation body once, bounded to prevent HTTP 400 max_tokens_exceeded on long-horizon goals.
+		const MAX_COMPLETION_PROJECTION_CHARS = 48_000;
+		const MAX_OBSERVATION_TEXT_CHARS = 1_200;
+		const MAX_OBSERVATIONS_COUNT = 24;
 		const outcomeEvidence = this.outcomeEvidence(state).map((row) => ({
 			...row,
 			checks: row.checks.map((check) => ({
@@ -442,18 +445,36 @@ export class StateProjector {
 			evidence: row.evidence.map(({ id }) => ({ id })),
 		}));
 
-		return {
+		const referencedObservationIds = new Set<string>();
+		for (const row of outcomeEvidence) {
+			for (const ev of row.evidence) referencedObservationIds.add(ev.id);
+			for (const check of row.checks) {
+				for (const obs of check.observed) referencedObservationIds.add(obs.id);
+			}
+		}
+		for (const claim of claimMatrix) {
+			for (const id of claim.evidence_ids) referencedObservationIds.add(id);
+		}
+		const orderedObservations = [
+			...state.observations.filter((obs) => referencedObservationIds.has(obs.id)),
+			...state.observations.filter((obs) => !referencedObservationIds.has(obs.id)),
+		].slice(0, MAX_OBSERVATIONS_COUNT);
+
+		const buildPayload = (patchLimit: number, obsTextLimit: number, maxClaims: number) => ({
 			objective: {
-				normalized_goal: this.redactText(state.objective.normalized_goal),
-				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
-				constraints: this.constraints(state),
+				normalized_goal: this.redactText(state.objective.normalized_goal).slice(0, 2_000),
+				non_goals: state.objective.non_goals.slice(0, 16).map((ng) => this.redactText(ng).slice(0, 500)),
+				constraints: this.constraints(state).slice(0, 24),
 			},
 			acceptance_matrix: acceptanceMatrix,
 			outcome_evidence: outcomeEvidence,
 			evidence_reference_contract:
 				"Resolve each outcome evidence or check observation reference by its id in the evidence table. An unresolved reference supplies no evidence. Constraint verified flags are recorded status, not independent proof.",
-			claim_matrix: claimMatrix,
-			verification_matrix: verificationMatrix,
+			claim_matrix: claimMatrix.slice(0, maxClaims).map((c) => ({
+				...c,
+				text: c.text.slice(0, 600),
+			})),
+			verification_matrix: verificationMatrix.slice(0, 32),
 			// The repository work only when the goal changed the repository; a machine, service or answer
 			// outcome has no diff to judge, and asking about one misjudges it.
 			...(hasRepositoryOutcome(work, state.changes.length)
@@ -461,7 +482,7 @@ export class StateProjector {
 						final_diff: work
 							? {
 									base_commit: this.redactText(work.base),
-									patch: this.redactText(work.patch.slice(0, WORK_DIFF_PATCH_LIMIT)),
+									patch: this.redactText(work.patch.slice(0, patchLimit)),
 									...(work.diagnostic ? { evidence_unavailable: this.redactText(work.diagnostic) } : {}),
 									...(work.repositories
 										? {
@@ -471,28 +492,39 @@ export class StateProjector {
 												})),
 											}
 										: {}),
-									...(work.omittedChars + Math.max(0, work.patch.length - WORK_DIFF_PATCH_LIMIT) > 0
+									...(work.omittedChars + Math.max(0, work.patch.length - patchLimit) > 0
 										? {
 												patch_truncated_chars:
-													work.omittedChars + Math.max(0, work.patch.length - WORK_DIFF_PATCH_LIMIT),
+													work.omittedChars + Math.max(0, work.patch.length - patchLimit),
 											}
 										: {}),
-									new_untracked_files: work.untracked.map((filePath) => this.redactText(filePath)),
-									recorded_changes: changesManifest,
+									new_untracked_files: work.untracked
+										.slice(0, 64)
+										.map((filePath) => this.redactText(filePath)),
+									recorded_changes: changesManifest.slice(0, 64),
 								}
-							: changesManifest,
+							: changesManifest.slice(0, 64),
 					}
 				: {}),
 			// What the acceptance matrix's evidence ids refer to.
-			evidence: state.observations.map((observation) => ({
+			evidence: orderedObservations.map((observation) => ({
 				id: observation.id,
-				text: this.redactText(observation.text),
+				text: this.redactText(observation.text).slice(0, obsTextLimit),
 				trust: observation.source.trust,
 				freshness: observation.freshness,
 			})),
-			hypotheses,
-			open_risks: openRisks,
-		};
+			hypotheses: hypotheses.slice(0, 16),
+			open_risks: openRisks.slice(0, 16),
+		});
+
+		let projected = buildPayload(WORK_DIFF_PATCH_LIMIT, MAX_OBSERVATION_TEXT_CHARS, 32);
+		if (JSON.stringify(projected).length > MAX_COMPLETION_PROJECTION_CHARS) {
+			projected = buildPayload(12_000, 600, 16);
+		}
+		if (JSON.stringify(projected).length > MAX_COMPLETION_PROJECTION_CHARS) {
+			projected = buildPayload(4_000, 300, 8);
+		}
+		return projected;
 	}
 
 	/**

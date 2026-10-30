@@ -14,6 +14,7 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
@@ -39,6 +40,7 @@ import {
 	botReplyText,
 	normalizeBotOrTeamId,
 	operatorTextOf,
+	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
 	PersistentBotTeamStore,
 	type PersistentBotView,
@@ -186,6 +188,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
+	private _routineSchedulerTimer: ReturnType<typeof setInterval> | undefined;
+	private _routineTickInFlight = false;
 	private readonly botBindings: BotRuntimeBindings;
 	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
 	private readonly botDispatches = new Map<string, Promise<void>>();
@@ -606,6 +610,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
+		this._runTeardownStep("stop bot routine scheduler", () => {
+			if (this._routineSchedulerTimer) {
+				clearInterval(this._routineSchedulerTimer);
+				this._routineSchedulerTimer = undefined;
+			}
+		});
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -1102,8 +1112,167 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._botTeamStore.subscribe(() => {
 				this._botViews = undefined;
 			});
+			this._ensureRoutineScheduler();
 		}
 		return this._botTeamStore;
+	}
+
+	private _ensureRoutineScheduler(): void {
+		if (this._routineSchedulerTimer || this.deps.isDisposed()) return;
+		this._routineSchedulerTimer = setInterval(() => {
+			if (this.deps.isDisposed()) {
+				if (this._routineSchedulerTimer) {
+					clearInterval(this._routineSchedulerTimer);
+					this._routineSchedulerTimer = undefined;
+				}
+				return;
+			}
+			void this.tickPersistentRoutines();
+		}, 15_000);
+		this._routineSchedulerTimer.unref?.();
+	}
+
+	async tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {
+		if (this._routineTickInFlight || this.deps.isDisposed()) {
+			return { dispatched: [], failed: [] };
+		}
+		this._routineTickInFlight = true;
+		const dispatched: string[] = [];
+		const failed: string[] = [];
+		try {
+			const store = this.getBotTeamStore();
+			store.reload();
+			const due = store.claimDueRoutines(Date.now(), routineIdFilter);
+			for (const routine of due) {
+				const routinePrompt = `[Scheduled routine ${routine.routineId}]: ${routine.prompt}`;
+				try {
+					if (routine.target.kind === "bot") {
+						const res = await this.sendOperatorMessageToBot(routine.target.agentId, routinePrompt);
+						store.completeRoutineRun(
+							routine.routineId,
+							res.mode === "queued" ? "queued" : "succeeded",
+							`Dispatched to bot ${routine.target.agentId} (${res.mode}).`,
+						);
+					} else {
+						const res = await this.sendOperatorMessageToTeam(routine.target.teamId, routinePrompt);
+						store.completeRoutineRun(
+							routine.routineId,
+							"succeeded",
+							`Dispatched to team ${routine.target.teamId} (${res.deliveries.length} deliveries).`,
+						);
+					}
+					dispatched.push(routine.routineId);
+				} catch (error) {
+					const errMsg = error instanceof Error ? error.message : String(error);
+					store.completeRoutineRun(routine.routineId, "failed", errMsg);
+					failed.push(`${routine.routineId}: ${errMsg}`);
+				}
+			}
+			return { dispatched, failed };
+		} finally {
+			this._routineTickInFlight = false;
+		}
+	}
+
+	getPersistentBotDaemonStatus(): PersistentBotDaemonStatus {
+		const store = this.getBotTeamStore();
+		store.reload();
+		return store.getDaemonStatus();
+	}
+
+	startPersistentBotDaemon(): { started: boolean; pid?: number; detail: string } {
+		const store = this.getBotTeamStore();
+		store.reload();
+		const current = store.getDaemonStatus();
+		if (current.running && current.pid) {
+			return {
+				started: false,
+				pid: current.pid,
+				detail: `Detached bot daemon is already running (pid ${current.pid}, ${current.activeRoutines} active routines).`,
+			};
+		}
+		const storeFile = store.getStoreFilePath();
+		const daemonScript = [
+			'const fs = require("node:fs");',
+			'const path = require("node:path");',
+			`const storeFile = ${JSON.stringify(storeFile)};`,
+			'const leaseFile = path.join(path.dirname(storeFile), "bot-daemon-lease.json");',
+			"const startedAt = new Date().toISOString();",
+			"function writeHeartbeat(lastTickAt) {",
+			"  try {",
+			"    fs.mkdirSync(path.dirname(leaseFile), { recursive: true });",
+			"    fs.writeFileSync(leaseFile, JSON.stringify({ pid: process.pid, startedAt, lastHeartbeatAt: Date.now(), ...(lastTickAt ? { lastTickAt } : {}) }, null, 2));",
+			"  } catch {}",
+			"}",
+			"function tickStore() {",
+			"  const now = Date.now();",
+			"  writeHeartbeat(now);",
+			"  try {",
+			"    if (!fs.existsSync(storeFile)) return;",
+			'    const data = JSON.parse(fs.readFileSync(storeFile, "utf8"));',
+			"    if (!data || !Array.isArray(data.routines)) return;",
+			"    let mutated = false;",
+			"    for (const r of data.routines) {",
+			"      if (!r || !r.enabled || typeof r.nextRunAt !== 'number' || r.nextRunAt > now) continue;",
+			"      r.lastRunAt = now;",
+			"      r.nextRunAt = now + Math.max(10000, Number(r.intervalMs) || 60000);",
+			"      r.lastStatus = 'queued';",
+			"      r.lastSummary = '[Daemon ' + new Date(now).toISOString() + '] Routine queued across TUI session: ' + String(r.prompt || '').slice(0, 160);",
+			"      r.updatedAt = new Date(now).toISOString();",
+			"      if (r.target && r.target.kind === 'bot' && Array.isArray(data.bots)) {",
+			"        const bot = data.bots.find((b) => b && b.agentId === r.target.agentId);",
+			"        if (bot) { bot.lastMessageAt = now; bot.lastSummary = r.lastSummary; bot.updatedAt = r.updatedAt; }",
+			"      } else if (r.target && r.target.kind === 'team' && data.teamMessages && typeof data.teamMessages === 'object') {",
+			"        const tid = r.target.teamId;",
+			"        const list = Array.isArray(data.teamMessages[tid]) ? data.teamMessages[tid] : (data.teamMessages[tid] = []);",
+			"        list.push({ messageId: 'daemon-' + r.routineId + '-' + now, teamId: tid, sender: { kind: 'brain' }, text: '[Scheduled routine ' + r.routineId + ']: ' + r.prompt, timestamp: now, targetAgentIds: [], deliveries: [] });",
+			"        if (Array.isArray(data.teams)) {",
+			"          const team = data.teams.find((t) => t && t.teamId === tid);",
+			"          if (team) { team.lastMessageAt = now; team.updatedAt = r.updatedAt; }",
+			"        }",
+			"      }",
+			"      mutated = true;",
+			"    }",
+			"    if (mutated) fs.writeFileSync(storeFile, JSON.stringify(data, null, 2));",
+			"  } catch {}",
+			"}",
+			"tickStore();",
+			"const timer = setInterval(tickStore, 10000);",
+			'process.on("SIGTERM", () => { clearInterval(timer); process.exit(0); });',
+		].join("\n");
+		const runtimeBin = process.execPath;
+		const child = spawn(runtimeBin, ["-e", daemonScript], {
+			detached: true,
+			stdio: "ignore",
+			env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+		});
+		child.unref();
+		const pid = child.pid;
+		if (!pid) {
+			return { started: false, detail: "Failed to spawn detached bot daemon process." };
+		}
+		store.writeDaemonLease({ pid, startedAt: new Date().toISOString(), lastTickAt: Date.now() });
+		return {
+			started: true,
+			pid,
+			detail: `Started detached bot daemon (pid ${pid}) watching ${storeFile} across TUI restarts.`,
+		};
+	}
+
+	stopPersistentBotDaemon(): { stopped: boolean; detail: string } {
+		const store = this.getBotTeamStore();
+		const status = store.getDaemonStatus();
+		if (status.running && status.pid) {
+			try {
+				process.kill(status.pid, "SIGTERM");
+			} catch {
+				// Process already exited.
+			}
+			store.releaseDaemonLease(status.pid);
+			return { stopped: true, detail: `Stopped detached bot daemon (pid ${status.pid}).` };
+		}
+		store.releaseDaemonLease();
+		return { stopped: false, detail: "Detached bot daemon is not running." };
 	}
 
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {

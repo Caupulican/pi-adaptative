@@ -481,7 +481,7 @@ function resolutionProofFingerprint(
 }
 
 function resolutionToken(branchKey: string, snapshot: SemanticVerificationSnapshot, proofFingerprint: string): string {
-	const fence = JSON.stringify({ branchKey, sequence: snapshot.sequence, proofFingerprint });
+	const fence = JSON.stringify({ branchKey, evidenceRevision: snapshot.evidenceRevision, proofFingerprint });
 	return createHash("sha256").update(fence).digest("hex");
 }
 

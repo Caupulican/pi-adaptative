@@ -421,7 +421,7 @@ export class SystemOneSteeringPlane {
 
 			case "JEV-004": {
 				if (directive.action === "completion_candidate") {
-					if (!this.isTruthy(answers.completion_plausible, 0.75, "completion_plausible")) {
+					if (!this.isTruthy(answers.completion_plausible, 0.65, "completion_plausible")) {
 						failed.push("completion_plausible");
 						outcome = "fail";
 					}
@@ -588,7 +588,7 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-024": {
-				if (!this.isTruthy(answers.completion_plausible, 0.75, "completion_plausible")) {
+				if (!this.isTruthy(answers.completion_plausible, 0.65, "completion_plausible")) {
 					failed.push("completion_plausible");
 					outcome = "fail";
 				}

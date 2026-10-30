@@ -1142,8 +1142,9 @@ export class WorkbenchComponent extends Container {
 			const isSelected = active.kind === "team" && active.teamId === team.teamId;
 			const target: ActiveChatTarget = { kind: "team", teamId: team.teamId };
 			const name = team.name || team.teamId;
+			const unreadBadge = (team.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${team.unreadCount}`)}` : "";
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${theme.fg("accent", "◆")} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", `[${team.memberAgentIds.length}]`)}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${theme.fg("accent", "◆")} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", `[${team.memberAgentIds.length}]`)}${unreadBadge}`,
 				target,
 			);
 			add(`    ${theme.fg("muted", team.description || team.memberAgentIds.join(", ") || "no members")}`, target);
@@ -1162,8 +1163,10 @@ export class WorkbenchComponent extends Container {
 						: bot.state === "failed"
 							? theme.fg("error", "✗")
 							: theme.fg("muted", "○");
+			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
+			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", bot.modelId || bot.modelRef)}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", bot.modelId || bot.modelRef)}${unreadBadge}${scheduleBadge}`,
 				target,
 			);
 			const detail = `${bot.state}${bot.teamIds.length > 0 ? ` · [${bot.teamIds.join(",")}]` : ""}${bot.currentSummary ? ` · ${bot.currentSummary}` : ""}`;

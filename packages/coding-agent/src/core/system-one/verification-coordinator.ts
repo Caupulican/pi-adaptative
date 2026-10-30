@@ -47,14 +47,33 @@ export type VerificationJudge = (
  * manage the context (`self_compact`) or only analyse supplied evidence (`typesafe_review`). An open finding
  * does not make code a judgment on them: a classification outage held them for no reason a finding gives.
  */
-const NON_PROGRESSING_TOOLS: ReadonlySet<string> = new Set(["ask_question", "self_compact", "typesafe_review"]);
+const NON_PROGRESSING_TOOLS: ReadonlySet<string> = new Set([
+	"ask_question",
+	"self_compact",
+	"typesafe_review",
+	"task_steps",
+	"runtime_update",
+]);
 
 function isVerificationRecoveryOperation(input: { tool: string; args: unknown; readOnly?: boolean }): boolean {
 	if (NON_PROGRESSING_TOOLS.has(input.tool)) return true;
-	if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[1]) return true;
+	if ((GOAL_LIFECYCLE_TOOL_NAMES as readonly string[]).includes(input.tool)) {
+		if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[2] && input.args && typeof input.args === "object") {
+			const status = "status" in input.args ? input.args.status : undefined;
+			if (status === "complete") return false;
+		}
+		return true;
+	}
 	if (input.tool === "peer" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
-		return action === "obligations" || action === "resolve" || action === "status" || action === "dispose_attempt";
+		return (
+			action === "obligations" ||
+			action === "resolve" ||
+			action === "status" ||
+			action === "dispose_attempt" ||
+			action === "acknowledge" ||
+			action === "options"
+		);
 	}
 	if (input.tool === "task_directory" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
@@ -62,13 +81,32 @@ function isVerificationRecoveryOperation(input: { tool: string; args: unknown; r
 	}
 	if (input.tool === "skill" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
-		if (action === "search" || action === "read") return true;
+		if (action === "search" || action === "read" || action === "load" || action === "status") return true;
 	}
 	if (input.tool === "goal" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
 		// These actions collect/reopen proof or enter the goal's own requirement proof gate. Other
 		// goal mutations remain classified like ordinary affected progress.
-		if (["get", "add_evidence", "satisfy_requirement", "reopen_requirement"].includes(String(action))) return true;
+		if (
+			[
+				"get",
+				"add_evidence",
+				"satisfy_requirement",
+				"reopen_requirement",
+				"progress",
+				"no_progress",
+				"block_goal",
+			].includes(String(action))
+		)
+			return true;
+	}
+	// Local candidate edits and bounded worker delegations are how open findings are repaired and rechecked;
+	// outward git publication remains gated by toolCallPushesGitAtCwd + assertResolved().
+	if (
+		(input.tool === "edit" || input.tool === "write" || input.tool === "delegate" || input.tool === "python") &&
+		!toolCallPushesGitAtCwd(input.tool, input.args)
+	) {
+		return true;
 	}
 	return isProvablyObservationalToolCall(input.tool, input.args, input.readOnly);
 }
@@ -343,6 +381,27 @@ export class VerificationCoordinator {
 		});
 	}
 
+	/**
+	 * Root self-release for peer review obligations via `peer` `acknowledge` with concrete evidence.
+	 * Closes matching obligations (`"all"`, exact obligation ID, or obligations whose reason/report references `idOrKey`)
+	 * as `superseded` with the recorded root disposition note so the root agent never deadlocks on `/verification waive`.
+	 */
+	acknowledgePeerFindings(idOrKey: string, note: string): readonly SemanticVerificationObligationView[] {
+		const trimmedKey = idOrKey.trim();
+		const boundedNote = note.trim().slice(0, 500) || "Root acknowledged peer findings with concrete evidence.";
+		return this.tracker.close({
+			kind: "superseded",
+			candidateId: this.host.getCandidate().id,
+			reference: `root-peer-ack-${randomUUID()}`,
+			note: boundedNote,
+			select: (item) =>
+				trimmedKey === "all" ||
+				item.id === trimmedKey ||
+				item.reason.includes(trimmedKey) ||
+				item.source === PEER_REVIEW_EVIDENCE_SOURCE,
+		});
+	}
+
 	directive(): SystemOneControlDirective | undefined {
 		const active = this.tracker.active();
 		if (!active.length) {
@@ -491,7 +550,23 @@ export class VerificationCoordinator {
 		});
 	}
 
+	private resolveChain: Promise<unknown> = Promise.resolve();
+
 	async resolve(
+		request: Omit<VerificationResolutionRequest, "receiverId" | "candidateId">,
+		receiverId?: string,
+		signal?: AbortSignal,
+	) {
+		const run = () => this.resolveSerial(request, receiverId, signal);
+		const next = this.resolveChain.then(run, run);
+		this.resolveChain = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		return next;
+	}
+
+	private async resolveSerial(
 		request: Omit<VerificationResolutionRequest, "receiverId" | "candidateId">,
 		receiverId?: string,
 		signal?: AbortSignal,
@@ -534,18 +609,29 @@ export class VerificationCoordinator {
 					nextAction:
 						"System One returned no valid probability for this proof. Keep the finding pending and retry resolution when a valid judgment is available; do not treat this as a low-confidence rejection.",
 				};
-			const confidence = answer.noul;
+			const gapAnswer = verdict.answers.evidence_closes_gap as
+				| { choice?: unknown; confidence?: unknown }
+				| undefined;
+			const gapCloses =
+				evidenceGap &&
+				gapAnswer?.choice === "closes_gap" &&
+				typeof gapAnswer.confidence === "number" &&
+				Number.isFinite(gapAnswer.confidence) &&
+				gapAnswer.confidence >= 0.65 &&
+				answer.noul >= 0.6;
+			const effectiveConfidence = gapCloses ? Math.max(answer.noul, MIN_RESOLUTION_CONFIDENCE) : answer.noul;
 			const result = this.tracker.resolve({
 				...input,
 				judgment: {
 					id: verdict.id,
 					token: prepared.token,
 					accepted:
-						confidence >= MIN_RESOLUTION_CONFIDENCE &&
-						(!evidenceGap ||
+						effectiveConfidence >= MIN_RESOLUTION_CONFIDENCE &&
+						(gapCloses ||
+							!evidenceGap ||
 							missingResolutionProof(verdict.answers, prepared.obligation, prepared.receipts, input.disposition)
 								.length === 0),
-					confidence,
+					confidence: effectiveConfidence,
 				},
 			});
 			if (!result.resolved && result.reason === "judgment_confidence_below_threshold") {
@@ -553,7 +639,7 @@ export class VerificationCoordinator {
 				return {
 					status: "unresolved" as const,
 					...result,
-					confidence,
+					confidence: effectiveConfidence,
 					remediation: {
 						finding: {
 							id: prepared.obligation.id,
