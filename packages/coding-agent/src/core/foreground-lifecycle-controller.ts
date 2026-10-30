@@ -11,6 +11,11 @@ import type {
 	ToolInvocationReceipt,
 } from "../kernel/index.ts";
 import { retainedToolFailureMemory, retainedToolInvocation, stampToolInvocation } from "../kernel/index.ts";
+import {
+	TOOL_NOT_STARTED,
+	type TOOL_OUTCOME_UNKNOWN,
+	UNKNOWN_RECOVERED_TOOL_RESULT_TEXT,
+} from "../kernel/session/lifecycle-ledger.ts";
 import type { SessionLifecycleInspection, SessionManager } from "../kernel/session/session-manager.ts";
 import { sessionLifecycleToolIdentityKey } from "../kernel/session/session-manager.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
@@ -608,7 +613,7 @@ export class ForegroundLifecycleController {
 	private appendRepairResult(
 		toolName: string,
 		callId: string,
-		code: string,
+		code: typeof TOOL_NOT_STARTED | typeof TOOL_OUTCOME_UNKNOWN,
 		rejection?: ToolPreflightRejectionRecord,
 	): string {
 		const message: ToolResultMessage = {
@@ -620,16 +625,16 @@ export class ForegroundLifecycleController {
 					type: "text",
 					text:
 						rejection?.message ??
-						(code === "TOOL_NOT_STARTED"
+						(code === TOOL_NOT_STARTED
 							? "The harness recorded that this tool call was never started. Treat it as not run and decide whether to retry."
-							: "The harness recorded that the tool outcome is unknown after interruption. Inspect the workspace before retrying or claiming completion."),
+							: UNKNOWN_RECOVERED_TOOL_RESULT_TEXT),
 				},
 			],
 			...(rejection
 				? {
 						details: stampToolInvocation({ piToolFailureMemory: rejection.failureMemory }, rejection.invocation),
 					}
-				: {}),
+				: { details: { piLifecycleRecovery: { version: 1, code } } }),
 			isError: true,
 			errorKind: "tool_failure",
 			timestamp: Date.now(),

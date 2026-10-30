@@ -67,7 +67,11 @@ export interface AccountOverview extends AuthenticatedAccount {
 export interface UsageOverview {
 	at: number;
 	session: {
+		modelUnknownTokens?: number;
+		modelUnknownOperations?: number;
+		apiEquivalentPartial?: boolean;
 		costUsd: number;
+		reportedCostUsd?: number;
 		costEstimate?: "base-rates";
 		rootCostUsd?: number;
 		/** Delegated workers and bots only; the ICM history summaries are `icmCostUsd`. */
@@ -78,7 +82,11 @@ export interface UsageOverview {
 		context: { tokens: number | null; window: number; percent: number | null; cachedTokens?: number | null } | null;
 	};
 	today: {
+		modelUnknownTokens?: number;
+		modelUnknownOperations?: number;
+		apiEquivalentPartial?: boolean;
 		costUsd: number;
+		reportedCostUsd?: number;
 		rootCostUsd?: number;
 		subagentCostUsd: number;
 		icmCostUsd: number;
@@ -521,7 +529,24 @@ export interface UsageOverviewInput {
 		| "todaySubagentCost"
 		| "todayHistorySummaryCost"
 	> &
-		Partial<Pick<SessionCostSummary, "ownCost" | "todayOwnCost" | "costEstimate" | "todayCostEstimate">>;
+		Partial<
+			Pick<
+				SessionCostSummary,
+				| "ownCost"
+				| "todayOwnCost"
+				| "costEstimate"
+				| "todayCostEstimate"
+				| "reportedCost"
+				| "todayReportedCost"
+				| "accountingStatus"
+				| "modelUnknownTokens"
+				| "modelUnknownOperations"
+				| "apiEquivalentPartial"
+				| "todayModelUnknownTokens"
+				| "todayModelUnknownOperations"
+				| "todayApiEquivalentPartial"
+			>
+		>;
 	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	context?: { tokens: number | null; contextWindow: number; percent: number | null; cachedTokens?: number | null };
 	subscription: boolean;
@@ -544,7 +569,11 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 	return {
 		at: input.now,
 		session: {
+			modelUnknownTokens: input.cost.modelUnknownTokens,
+			modelUnknownOperations: input.cost.modelUnknownOperations,
+			apiEquivalentPartial: input.cost.apiEquivalentPartial,
 			costUsd: input.cost.currentCost,
+			reportedCostUsd: input.cost.reportedCost ?? input.cost.currentCost,
 			...(input.cost.costEstimate ? { costEstimate: input.cost.costEstimate } : {}),
 			rootCostUsd,
 			subagentCostUsd: background.agentCost,
@@ -561,7 +590,11 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 				: null,
 		},
 		today: {
+			modelUnknownTokens: input.cost.todayModelUnknownTokens,
+			modelUnknownOperations: input.cost.todayModelUnknownOperations,
+			apiEquivalentPartial: input.cost.todayApiEquivalentPartial,
 			costUsd: input.cost.todayCost,
+			reportedCostUsd: input.cost.todayReportedCost ?? input.cost.todayCost,
 			...(input.cost.todayCostEstimate ? { costEstimate: input.cost.todayCostEstimate } : {}),
 			rootCostUsd: todayRootCostUsd,
 			...(input.cost.todayPending ? { pending: true } : {}),

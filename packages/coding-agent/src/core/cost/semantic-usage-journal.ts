@@ -4,7 +4,13 @@ import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isSessionIdentity } from "../../kernel/session/session-manager.ts";
 import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
-import { isReceiptCount, isReceiptText, parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
+import {
+	isReceiptCount,
+	isReceiptText,
+	MAX_RECEIPT_TEXT_CHARS,
+	MAX_TYPESAFE_USAGE_RECEIPT_BYTES,
+	parseTypeSafeUsageReceipt,
+} from "../review/typesafe-usage-receipt-codec.ts";
 import {
 	type AtomicFileLockOptions,
 	isMissingFileError,
@@ -21,14 +27,15 @@ import type { SemanticUsageLedgerIdentity } from "./session-ledger-port.ts";
  * responses (SYSTEM_ONE_RESPONSES_PER_EVALUATION) = 684, rounded up to 1024. A worker `maxConcurrent` above its default
  * has no source ceiling; once the owner's bound is reached, paid work is refused before payment instead of growing unbounded.
  *
- * On disk the journal holds at most 1024 records and about 2.1 MB: every write is checked under the lock against the
+ * On disk the journal holds at most 1024 records within the derived encoded-receipt bound: every write is checked under the lock against the
  * merged document, and a write past either bound is refused as capacity (the record stays held in memory). In memory the
  * bound is 2048: a recovery adopts up to 1024 journal records beside up to 1024 obligations admitted while the journal was
  * unreadable. Neither set is dropped.
  */
 export const SEMANTIC_USAGE_JOURNAL_MAX_RECORDS = 1024;
-/** Fits the largest receipt the codec accepts: five identity texts at MAX_RECEIPT_TEXT_CHARS plus record fields. */
-export const SEMANTIC_USAGE_JOURNAL_MAX_RECORD_BYTES = 2048;
+/** A codec-maximal receipt plus escaped reportId/createdAt and the journal record wrapper. */
+export const SEMANTIC_USAGE_JOURNAL_MAX_RECORD_BYTES =
+	MAX_TYPESAFE_USAGE_RECEIPT_BYTES + 2 * MAX_RECEIPT_TEXT_CHARS * 6 + 512;
 export const SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS = 8;
 const MAX_CORRUPT_EVIDENCE_SLOTS = 4;
 const MAX_SIDECAR_BYTES =

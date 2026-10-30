@@ -266,10 +266,31 @@ export function formatCostBreakdownLines(overview: UsageOverview, width: number)
 	const lines: string[] = [
 		`  ${theme.fg("accent", "◆")} ${theme.bold("COST BREAKDOWN")} ${theme.fg("dim", `session ${dollars(total)} · today ${dollars(overview.today.costUsd)} (root ${dollars(overview.today.rootCostUsd ?? 0)} · sub ${dollars(overview.today.subagentCostUsd)} · ICM ${dollars(overview.today.icmCostUsd)})`)}`,
 	];
+	if (session.reportedCostUsd !== undefined)
+		lines.push(
+			theme.fg(
+				"dim",
+				`    Recorded ${dollars(session.reportedCostUsd)} · catalog-equivalent ${session.costEstimate ? "~" : ""}${dollars(total)}`,
+			),
+		);
 	if (session.costEstimate || overview.today.costEstimate)
 		lines.push(theme.fg("dim", "    ~ Includes catalog API-equivalent estimates, not subscription charges."));
 	else if (session.subscription)
 		lines.push(theme.fg("dim", "    Subscription account; displayed usage is not a subscription invoice."));
+	if (session.apiEquivalentPartial)
+		lines.push(
+			theme.fg(
+				"warning",
+				`    Partial catalog-equivalent total: ${session.modelUnknownTokens ?? 0} tokens across ${session.modelUnknownOperations ?? 0} operations have no recorded model.`,
+			),
+		);
+	if (overview.today.apiEquivalentPartial)
+		lines.push(
+			theme.fg(
+				"warning",
+				`    Today includes ${overview.today.modelUnknownTokens ?? 0} tokens without recorded model pricing.`,
+			),
+		);
 	const buckets: Array<{ label: string; cost: number; detail?: string }> = [
 		{
 			label: "Root / Brain",
@@ -324,7 +345,7 @@ export function formatTaskMetricsLines(overview: UsageOverview, width: number): 
 		lines.push(
 			theme.fg("dim", `    Unassigned asynchronous receipts: ${dollars(tm.unassignedCostUsd)} (no task identity)`),
 		);
-	lines.push(theme.fg("dim", "    ~ Estimated activity; goal time uses recorded execution accounting."));
+	lines.push(theme.fg("dim", "    Active = recorded operation intervals; goal and worker clocks are separate."));
 	for (const task of recent) {
 		const glyph =
 			task.status === "completed"
@@ -344,6 +365,12 @@ export function formatTaskMetricsLines(overview: UsageOverview, width: number): 
 			truncateToWidth(`    ${glyph} ${theme.bold(task.title)} ${theme.fg("dim", `[${task.status}]`)}`, width, "…"),
 		);
 		lines.push(truncateToWidth(`      ${theme.fg("muted", statsLine)}`, width, "…"));
+		const clocks = [
+			task.goalActiveMs === undefined ? undefined : `goal accounted ${span(task.goalActiveMs)}`,
+			task.workerActiveMs === undefined ? undefined : `worker active ${span(task.workerActiveMs)}`,
+			task.unresolvedTimedOperations ? `${task.unresolvedTimedOperations} timing intervals unresolved` : undefined,
+		].filter(Boolean);
+		if (clocks.length) lines.push(truncateToWidth(`      ${theme.fg("dim", clocks.join(" · "))}`, width, "…"));
 	}
 	return lines;
 }

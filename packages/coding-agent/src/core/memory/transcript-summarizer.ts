@@ -11,7 +11,9 @@ import { randomUUID } from "node:crypto";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
+import type { HistoryUsageCall } from "../review/system-one-review-port.ts";
 import { hasReportableUsage } from "../spawned-usage.ts";
 import type { TranscriptSummarizerPort } from "./transcript-memory.ts";
 
@@ -27,7 +29,8 @@ export interface TranscriptSummarizerDeps {
 	 * record's own owner-facing message when it cannot be. Must not throw: it runs in the call's `finally`, where a throw
 	 * would replace the reply or the error already in flight.
 	 */
-	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
+	recordHistoryUsage(usage: Usage, call: HistoryUsageCall): void;
+	captureUsageOrigin?(): AccountingOrigin;
 }
 
 /**
@@ -35,13 +38,20 @@ export interface TranscriptSummarizerDeps {
  * every identity text it stores, so the session id is not part of it. A summarize call is one provider call: it has no retry
  * of its own, so its attempt is the first.
  */
-function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage, model: Model<Api>): void {
+function recordSummarySpend(
+	deps: TranscriptSummarizerDeps,
+	spent: Usage,
+	model: Model<Api>,
+	reportId: string,
+	origin: AccountingOrigin | undefined,
+): void {
 	if (!hasReportableUsage(spent)) return;
 	deps.recordHistoryUsage(spent, {
-		reportId: `${SUMMARY_USAGE_KIND}:${randomUUID()}`,
+		reportId,
 		provider: model.provider,
 		model: model.id,
 		attempt: 1,
+		...(origin ? { origin } : {}),
 	});
 }
 
@@ -73,6 +83,10 @@ export function resolveTranscriptSummarizer(
 			egress: isLocalExecutionModel(model) ? "local" : "external",
 			model: modelRef,
 			async summarize(input, signal) {
+				const reportId = `${SUMMARY_USAGE_KIND}:${randomUUID()}`;
+				const capturedOrigin = deps.captureUsageOrigin?.();
+				// Background history may span tasks; retain its call identity without borrowing the current goal.
+				const origin = capturedOrigin ? { sessionId: capturedOrigin.sessionId, operationId: reportId } : undefined;
 				const spent = createEmptyUsage();
 				try {
 					const completion = await deps.runIsolatedCompletion({
@@ -95,7 +109,7 @@ export function resolveTranscriptSummarizer(
 					return { text: completion.text, model: modelRef };
 				} finally {
 					// Charged whether or not the reply was accepted: the tokens were spent either way.
-					recordSummarySpend(deps, spent, model);
+					recordSummarySpend(deps, spent, model, reportId, origin);
 				}
 			},
 		},

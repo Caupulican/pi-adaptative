@@ -81,6 +81,7 @@ import type {
 	TranscriptMemoryDiagnostics,
 } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
+import { captureSessionAccountingOrigin } from "./cost/accounting-origin.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
@@ -1643,7 +1644,10 @@ export class RuntimeBuilder {
 					),
 					credentialBoundary: this._credentialExposureBoundary,
 					// Resolved per review: the session's usage delivery is bound after this builder is built.
-					usage: { begin: () => this.deps.getSemanticUsage().begin("system_one_tool") },
+					usage: {
+						captureOrigin: () => captureSessionAccountingOrigin(this.deps.getSessionManager()),
+						begin: (_route, origin) => this.deps.getSemanticUsage().begin("system_one_tool", origin),
+					},
 				});
 				this._baseToolDefinitions.set(
 					SYSTEM_ONE_TOOL_NAME,

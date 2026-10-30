@@ -3,6 +3,7 @@ import { type Static, Type } from "typebox";
 import { compactRetainedDetails } from "../../kernel/session/message-retention.ts";
 import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
 import {
+	SystemOneObserverError,
 	SystemOneReviewError,
 	type SystemOneReviewPort,
 	type SystemOneTransportAttempt,
@@ -162,6 +163,8 @@ export function createSystemOneToolDefinition(
 		// Independent System One calls in one turn run together: evidence saves are synchronous under the
 		// session bundle lock and the reviewer holds no per-call state.
 		async execute(toolCallId: string, input: Static<typeof schema>, signal?: AbortSignal) {
+			const capturedOrigin = reviewer.captureUsageOrigin?.();
+			const usageOrigin = capturedOrigin ? { ...capturedOrigin, toolCallId } : undefined;
 			let usageProjection: PricedTypeSafeUsage | undefined;
 			const onResponse = (
 				attempts: readonly SystemOneTransportAttempt[],
@@ -279,6 +282,7 @@ export function createSystemOneToolDefinition(
 						(manifest) => {
 							imageManifest = manifest;
 						},
+						usageOrigin,
 					);
 					record = {
 						...result,
@@ -304,8 +308,8 @@ export function createSystemOneToolDefinition(
 					sourceManifest = prepared.sourceManifest;
 					const result =
 						input.action === "evaluate"
-							? await reviewer.evaluate(prepared.request as EvaluationInput, signal, onResponse)
-							: await reviewer.review(prepared.request as ReviewInput, signal, onResponse);
+							? await reviewer.evaluate(prepared.request as EvaluationInput, signal, onResponse, usageOrigin)
+							: await reviewer.review(prepared.request as ReviewInput, signal, onResponse, usageOrigin);
 					record = {
 						...result,
 						...(sourceManifest ? { sourceManifest } : {}),
@@ -333,6 +337,9 @@ export function createSystemOneToolDefinition(
 				if (error instanceof SystemOneReviewError) errorKind = "operation_outcome";
 				transportAttempts = error instanceof SystemOneReviewError ? error.transportAttempts : [];
 				record = {
+					...(error instanceof SystemOneReviewError || error instanceof SystemOneObserverError
+						? { receipts: error.receipts }
+						: {}),
 					accepted: input.action === "vision" ? null : false,
 					...(input.action === "vision"
 						? { kind: "system_one_vision", advisoryOnly: true, experimental: true }

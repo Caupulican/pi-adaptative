@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import type { UsageComponent } from "../../kernel/usage-components.ts";
 import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -9,6 +10,7 @@ import { SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
 export { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 
 export interface SpawnedUsageReceiptOptions {
+	usageComponents?: readonly UsageComponent[];
 	parentSessionId: string;
 	reportId: string;
 	label?: string;
@@ -29,6 +31,7 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		(data.provider === undefined || data.provider === options.provider) &&
 		(data.model === undefined || data.model === options.model) &&
 		(data.goalId === undefined || data.goalId === options.goalId) &&
+		isDeepStrictEqual(data.usageComponents, options.usageComponents) &&
 		isDeepStrictEqual(data.usage, usage)
 	);
 }

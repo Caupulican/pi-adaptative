@@ -141,7 +141,13 @@ interface ReviewedPeerResult {
 	usage?: Usage;
 }
 export type PeerReviewResult = (
-	| { status: "unavailable"; reason: string; usage?: Usage; retainedReview?: PeerReport }
+	| {
+			status: "unavailable";
+			reason: string;
+			usage?: Usage;
+			peer?: ReviewedPeerResult["peer"];
+			retainedReview?: PeerReport;
+	  }
 	| (ReviewedPeerResult & { selection: "independent" })
 	| (ReviewedPeerResult & {
 			selection: "stronger";
@@ -151,6 +157,11 @@ export type PeerReviewResult = (
 
 const modelRef = (model: Model<Api>): string => `${model.provider}/${model.id}`;
 const peerReportId = (key: string): string => `peer_review:${key}`;
+
+/** Paid usage and the exact admitted peer remain paired even when parsing or publication fails. */
+function retainedPeerUsage(result: Pick<PeerReviewResult, "usage" | "peer">): Pick<PeerReviewResult, "usage" | "peer"> {
+	return result.usage ? { usage: result.usage, ...(result.peer ? { peer: result.peer } : {}) } : {};
+}
 
 /** A quote's comparable form: line-number prefixes, markdown code ticks, and leading section labels dropped and whitespace collapsed. */
 function comparableText(text: string): string {
@@ -798,7 +809,7 @@ export class PeerReviewController {
 					status: "unavailable",
 					reviewKey: key,
 					reason: error instanceof Error ? error.message.slice(0, 1000) : "Peer result is stale",
-					...(result.usage ? { usage: result.usage } : {}),
+					...retainedPeerUsage(result),
 				};
 			}
 			const failure = this.currentReviewFailure(requested, bound, settings, leadIdentity, modelIdentity);
@@ -816,14 +827,14 @@ export class PeerReviewController {
 								0,
 								1000,
 							),
-						...(result.usage ? { usage: result.usage } : {}),
+						...retainedPeerUsage(result),
 					};
 				}
 				return {
 					status: "unavailable",
 					reviewKey: key,
 					reason: failure,
-					...(result.usage ? { usage: result.usage } : {}),
+					...retainedPeerUsage(result),
 				};
 			}
 			return this.publishResult(key, pending, result, runtime, pendingEntryId);
@@ -906,7 +917,7 @@ export class PeerReviewController {
 						1000,
 					),
 				...(result.status === "reviewed" ? { retainedReview: result.review } : {}),
-				...(result.usage ? { usage: result.usage } : {}),
+				...retainedPeerUsage(result),
 			};
 		}
 		this.unpublished.delete(pendingEntryId);
@@ -940,7 +951,7 @@ export class PeerReviewController {
 								1000,
 							),
 						retainedReview: result.review,
-						...(result.usage ? { usage: result.usage } : {}),
+						...retainedPeerUsage(result),
 					}
 				: { ...result, reviewKey: key };
 		this.results.set(receiptEntryId, { key, result: { ...recorded, usage: undefined } });
@@ -956,6 +967,7 @@ export class PeerReviewController {
 		signal?: AbortSignal,
 	): Promise<PeerReviewResult> {
 		let usage: Usage | undefined;
+		let paidPeer: ReviewedPeerResult["peer"] | undefined;
 		try {
 			signal?.throwIfAborted();
 			this.assertAdvisorSettings(settings);
@@ -1049,6 +1061,7 @@ export class PeerReviewController {
 				artifact: input.artifact,
 				evidence: input.evidence,
 			});
+			paidPeer = { ref: modelRef(peer), thinkingLevel: input.thinkingLevel };
 			const completion = await this.deps.runCompletion({
 				model: peer,
 				thinkingLevel: input.thinkingLevel,
@@ -1109,7 +1122,7 @@ export class PeerReviewController {
 					: error instanceof Error
 						? error.message.slice(0, 1000)
 						: "Peer review failed",
-				...(usage ? { usage } : {}),
+				...retainedPeerUsage({ usage, peer: paidPeer }),
 			};
 		}
 	}

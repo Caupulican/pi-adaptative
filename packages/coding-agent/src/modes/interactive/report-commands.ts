@@ -72,6 +72,23 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 		`${theme.fg("dim", "ROOT (foreground & System One):")} $${costs.ownCost.toFixed(4)}`,
 		`${theme.fg("dim", "SUBAGENTS (workers & bots):")} $${agentCost.toFixed(4)} (${agentReports} reports)`,
 	];
+	if (costs.reportedCost !== undefined)
+		lines.push(`${theme.fg("dim", "RECORDED (unmodified usage totals):")} $${costs.reportedCost.toFixed(4)}`);
+	if (costs.accountingStatus) lines.push(`${theme.fg("warning", `Historical accounting ${costs.accountingStatus}`)}`);
+	if (costs.apiEquivalentPartial)
+		lines.push(
+			theme.fg(
+				"warning",
+				`Catalog-equivalent total is partial: ${costs.modelUnknownTokens ?? 0} tokens / ${costs.modelUnknownOperations ?? 0} operations have no recorded model.`,
+			),
+		);
+	if (costs.todayApiEquivalentPartial)
+		lines.push(
+			theme.fg(
+				"warning",
+				`Today's pricing is partial: ${costs.todayModelUnknownTokens ?? 0} tokens have no recorded model.`,
+			),
+		);
 	if (icmReports > 0 || icmCost > 0) {
 		lines.push(
 			`${theme.fg("dim", "ICM history summaries (included in CURRENT):")} $${icmCost.toFixed(4)} (${icmReports} calls)`,
@@ -176,6 +193,10 @@ export function handleUsageCommand(host: UsageReportHost): void {
 			info += `${theme.bold("Task & Goal Metrics")}\n`;
 			info += `${theme.fg("dim", "Current/Last task:")} ${ct.title} (${ct.status})\n`;
 			info += `${theme.fg("dim", "Duration & rounds:")} ${ct.timingEstimated ? "~" : ""}${formatCompactTaskDuration(ct.activeMs)} active (${formatCompactTaskDuration(ct.wallMs)} wall), ${ct.rounds} rounds, ${ct.toolCalls} tool calls${stepsPart}\n`;
+			if (ct.goalActiveMs !== undefined)
+				info += `${theme.fg("dim", "Recorded goal clock:")} ${formatCompactTaskDuration(ct.goalActiveMs)}\n`;
+			if (ct.workerActiveMs !== undefined)
+				info += `${theme.fg("dim", "Worker active time:")} ${formatCompactTaskDuration(ct.workerActiveMs)}\n`;
 			info += `${theme.fg("dim", "Task cost:")} $${ct.totalCostUsd.toFixed(4)} (root $${ct.rootCostUsd.toFixed(4)} · sub $${ct.subagentCostUsd.toFixed(4)}${ct.icmCostUsd > 0 ? ` · ICM $${ct.icmCostUsd.toFixed(4)}` : ""})\n\n`;
 		}
 		if (taskMetrics.models.length > 0) {

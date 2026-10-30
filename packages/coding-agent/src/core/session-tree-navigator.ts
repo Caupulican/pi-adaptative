@@ -11,12 +11,15 @@ import { randomUUID } from "node:crypto";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { collectEntriesForBranchSummary, generateBranchSummary } from "../kernel/compaction/index.ts";
+import { SessionAppendCommittedError, SessionAppendUncertainError } from "../kernel/session/session-append-receipt.ts";
 import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { combineUsage } from "../kernel/usage.ts";
+import type { UsageComponent } from "../kernel/usage-components.ts";
+import type { AccountingOrigin } from "./cost/accounting-evidence.ts";
 import type { ExtensionRunner, TreePreparation } from "./extensions/index.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import { reportSpawnedUsage, type SpawnedUsageReporter } from "./spawned-usage.ts";
+import { hasReportableUsage, reportSpawnedUsage, type SpawnedUsageReporter } from "./spawned-usage.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -25,6 +28,8 @@ export interface SessionTreeNavigatorSettingsSource {
 }
 
 export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
+	captureUsageOrigin?(): AccountingOrigin;
+	recordMaintenanceUsage?(component: UsageComponent, route: "branch_summary", origin?: AccountingOrigin): void;
 	/** Session log — leaf/branch reads and writes go through this. */
 	getSessionManager(): SessionManager;
 	/** Current model — required to run the default branch summarizer. */
@@ -84,6 +89,7 @@ export class SessionTreeNavigator {
 		const sessionManager = this.deps.getSessionManager();
 		const extensionRunner = this.deps.getExtensionRunner();
 		const oldLeafId = sessionManager.getLeafId();
+		const usageOrigin = this.deps.captureUsageOrigin?.();
 
 		// No-op if already at target
 		if (targetId === oldLeafId) {
@@ -134,7 +140,11 @@ export class SessionTreeNavigator {
 			identity: randomUUID(),
 		};
 		let summaryUsage: Usage | undefined;
+		let extensionUsage: Usage | undefined;
+		let summaryUsageComponents: readonly UsageComponent[] | undefined;
+		let summaryUsageReceiptOwned = false;
 		let summaryUsageCommitted = false;
+		let summaryUsageUncertain = false;
 		let navigationFailure: { error: unknown } | undefined;
 		let usageRecordingFailure: unknown | undefined;
 		let result:
@@ -166,6 +176,7 @@ export class SessionTreeNavigator {
 					signal: branchSummaryAbort.signal,
 				});
 				summaryUsage = reportedUsage;
+				extensionUsage = reportedUsage;
 
 				// Extensions may finish successfully after the caller cancels navigation.
 				if (branchSummaryAbort.signal.aborted) {
@@ -203,8 +214,16 @@ export class SessionTreeNavigator {
 					return { cancelled: true, aborted: true };
 				}
 				const branchSummarySettings = this.deps.getSettingsManager().getBranchSummarySettings();
-				const extensionUsage = summaryUsage;
+				const receiptOwned = this.deps.recordMaintenanceUsage;
+				summaryUsageReceiptOwned = Boolean(receiptOwned);
 				const result = await generateBranchSummary(entriesToSummarize, {
+					...(receiptOwned
+						? {
+								usageReceiptOwned: true as const,
+								onUsageComponent: (component: UsageComponent) =>
+									this.deps.recordMaintenanceUsage!(component, "branch_summary", usageOrigin),
+							}
+						: {}),
 					model: requestAuth.model ?? model,
 					apiKey: requestAuth.apiKey,
 					headers: requestAuth.headers,
@@ -223,10 +242,12 @@ export class SessionTreeNavigator {
 								? { providerAccountKey: requestAuth.providerAccountKey }
 								: {}),
 						}),
-					onUsage: (usage) => {
+					onUsage: (usage, components) => {
 						// The generator publishes cumulative snapshots before a later attempt can
 						// throw. Replace its previous contribution; retain extension charges once.
-						summaryUsage = combineUsage(extensionUsage, usage);
+						summaryUsage = receiptOwned ? usage : combineUsage(extensionUsage, usage);
+						summaryUsageComponents =
+							!receiptOwned && extensionUsage && hasReportableUsage(extensionUsage) ? undefined : components;
 					},
 					...(this.deps.summaryRetryTimers ? { timers: this.deps.summaryRetryTimers } : {}),
 				});
@@ -278,14 +299,17 @@ export class SessionTreeNavigator {
 			let summaryEntry: BranchSummaryEntry | undefined;
 			let labelTargetId = targetId;
 			if (summaryText) {
+				const separateExtension = summaryUsageReceiptOwned && extensionUsage && hasReportableUsage(extensionUsage);
 				// Create summary at target position (can be null for root)
 				const summaryId = sessionManager.branchWithSummary(
 					newLeafId,
 					summaryText,
 					summaryDetails,
 					fromExtension,
-					summaryUsage,
+					separateExtension ? extensionUsage : summaryUsage,
 					branchSummaryAbort.signal,
+					separateExtension ? undefined : summaryUsageComponents,
+					summaryUsageReceiptOwned && !separateExtension ? true : undefined,
 				);
 				summaryUsageCommitted = true;
 				summaryEntry = sessionManager.getEntry(summaryId) as BranchSummaryEntry;
@@ -330,18 +354,40 @@ export class SessionTreeNavigator {
 		try {
 			result = await executeNavigation();
 		} catch (error) {
+			if (
+				error instanceof SessionAppendCommittedError &&
+				error.receipt.entries.some((entry) => entry.type === "branch_summary")
+			)
+				summaryUsageCommitted = true;
+			if (
+				error instanceof SessionAppendUncertainError &&
+				error.identity.entries.some((entry) => entry.type === "branch_summary")
+			)
+				summaryUsageUncertain = true;
 			// Storage checks this same signal after serialization, before any physical write.
 			// Only its exact abort reason is cancellation; unrelated write errors still escape.
 			if (branchSummaryAbort.signal.aborted && error === branchSummaryAbort.signal.reason) {
 				result = { cancelled: true, aborted: true };
 			} else {
-				navigationFailure = { error };
+				navigationFailure = {
+					error: summaryUsageUncertain
+						? new AggregateError(
+								[error],
+								"Branch-summary inline usage has an unresolved canonical append; reconciliation is required before another accounting write.",
+							)
+						: error,
+				};
 			}
 		} finally {
 			try {
 				// A successful summary entry already owns its charge. Discarded results still
 				// carry received usage, recorded through the session's existing idempotent ledger.
-				if (summaryUsage && !summaryUsageCommitted) reportSpawnedUsage(this.deps, summaryUsage, usageIdentity);
+				const uncommittedUsage = summaryUsageReceiptOwned ? extensionUsage : summaryUsage;
+				if (uncommittedUsage && !summaryUsageCommitted && !summaryUsageUncertain)
+					reportSpawnedUsage(this.deps, uncommittedUsage, {
+						...usageIdentity,
+						usageComponents: summaryUsageReceiptOwned ? undefined : summaryUsageComponents,
+					});
 			} catch (error) {
 				usageRecordingFailure = error;
 			}

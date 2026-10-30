@@ -1,6 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai/types";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import type { SessionEntry } from "./session/session-entries.ts";
+import type { UsageComponent } from "./usage-components.ts";
 
 export { createEmptyUsage };
 
@@ -48,6 +49,91 @@ export function getSessionEntryUsage(entry: SessionEntry): Usage | undefined {
 		}
 		return undefined;
 	}
-	if (entry.type === "compaction" || entry.type === "branch_summary") return entry.usage;
+	if (entry.type === "compaction" || entry.type === "branch_summary")
+		return entry.usageReceiptOwned ? undefined : entry.usage;
 	return undefined;
+}
+
+export type SessionEntryUsageComponent = Omit<UsageComponent, "provider" | "model"> & {
+	readonly provider?: string;
+	readonly model?: string;
+};
+
+/** Expand only conserved direct responses; callers never price a multi-model aggregate as one model. */
+export function getSessionEntryUsageComponents(entry: SessionEntry): readonly SessionEntryUsageComponent[] {
+	const usage = getSessionEntryUsage(entry);
+	if (!usage) return [];
+	if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usageComponents !== undefined) {
+		return validateUsageComponents(usage, entry.usageComponents);
+	}
+	const message = entry.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
+	return [
+		{
+			sourceId: entry.id,
+			timestamp: entry.timestamp,
+			usage,
+			...(message ? { provider: message.provider, model: message.model } : {}),
+		},
+	];
+}
+
+export function validateUsageComponents(
+	usage: Usage,
+	components: readonly UsageComponent[],
+): readonly UsageComponent[] {
+	assertValidComponentUsage(usage);
+	if (!Array.isArray(components)) throw new Error("Invalid maintenance usage components.");
+	const total = createEmptyUsage();
+	const ids = new Set<string>();
+	for (const component of components) {
+		if (
+			!component ||
+			typeof component !== "object" ||
+			![component.sourceId, component.provider, component.model].every(
+				(value) =>
+					typeof value === "string" &&
+					value.length > 0 &&
+					value.length <= 4096 &&
+					value.trim() === value &&
+					!value.includes("\0"),
+			) ||
+			typeof component.timestamp !== "string" ||
+			!Number.isFinite(Date.parse(component.timestamp)) ||
+			ids.has(component.sourceId)
+		)
+			throw new Error("Invalid or repeated maintenance response identity.");
+		const value = component.usage;
+		assertValidComponentUsage(value);
+		ids.add(component.sourceId);
+		addUsage(total, value);
+	}
+	if (
+		total.input !== usage.input ||
+		total.output !== usage.output ||
+		total.cacheRead !== usage.cacheRead ||
+		total.cacheWrite !== usage.cacheWrite ||
+		total.totalTokens !== usage.totalTokens ||
+		Math.abs(total.cost.total - usage.cost.total) > Math.max(1e-9, Number.EPSILON * Math.abs(usage.cost.total))
+	)
+		throw new Error("Maintenance response components do not conserve recorded usage.");
+	return components;
+}
+
+function assertValidComponentUsage(value: Usage): void {
+	if (
+		!value?.cost ||
+		![
+			value.input,
+			value.output,
+			value.cacheRead,
+			value.cacheWrite,
+			value.totalTokens,
+			value.cost.input,
+			value.cost.output,
+			value.cost.cacheRead,
+			value.cost.cacheWrite,
+			value.cost.total,
+		].every((number) => typeof number === "number" && Number.isFinite(number) && number >= 0)
+	)
+		throw new Error("Invalid maintenance response usage.");
 }

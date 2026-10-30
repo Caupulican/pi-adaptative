@@ -27,7 +27,8 @@ import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provide
 import type { CompactionEntry, CompactionRetention, SessionEntry } from "../session/session-entries.ts";
 import { buildSessionContext, isWholePathCompaction, summarizedGapEntryIds } from "../session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
-import { addUsage, createEmptyUsage } from "../usage.ts";
+import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
+import { captureUsageComponent, type UsageComponent } from "../usage-components.ts";
 import {
 	ACTIVE_TASK_SOURCE_MAX_CHARS,
 	type CompactionFacts,
@@ -156,6 +157,8 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
+	usageComponents?: readonly UsageComponent[];
+	usageReceiptOwned?: true;
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
@@ -205,6 +208,8 @@ export interface StructuredCompactionRequest {
 }
 
 export interface CompactionExecutionOptions {
+	onUsage?: (component: UsageComponent) => void;
+	usageReceiptOwned?: true;
 	chunked?: boolean;
 	/**
 	 * Multiplier on the summary output budget, raised by the retry ladder after a length-stopped
@@ -1749,6 +1754,8 @@ export async function compact(
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
 	executionOptions?: CompactionExecutionOptions,
 ): Promise<CompactionResult> {
+	if (executionOptions?.usageReceiptOwned && !executionOptions.onUsage)
+		throw new Error("Receipt-owned compaction requires its usage recorder.");
 	const {
 		firstKeptEntryId,
 		messagesToSummarize,
@@ -1775,6 +1782,7 @@ export async function compact(
 		delegatedWorkerFacts: [],
 	};
 	const factsBlock = renderFactsBlock(facts);
+	const usageComponents: UsageComponent[] = [];
 	const verified = await generateVerifiedSummary({
 		messages: isSplitTurn && messagesToSummarize.length === 0 ? turnPrefixMessages : messagesToSummarize,
 		model,
@@ -1786,7 +1794,19 @@ export async function compact(
 		previousSummary,
 		thinkingLevel,
 		streamFn,
-		completion: executionOptions?.completion,
+		completion: async (selectedModel, context, options) => {
+			const response = await completeSummarization(
+				selectedModel,
+				context,
+				options,
+				streamFn,
+				executionOptions?.completion,
+			);
+			const component = captureUsageComponent(response);
+			usageComponents.push(component);
+			executionOptions?.onUsage?.(component);
+			return response;
+		},
 		structuredRequest: executionOptions?.structuredRequest,
 		preDigest,
 		facts,
@@ -1796,7 +1816,7 @@ export async function compact(
 	});
 
 	let summary = verified.summary;
-	const summaryUsage = verified.usage;
+	const summaryUsage = combineUsage(...usageComponents.map((component) => component.usage));
 	if (isSplitTurn) {
 		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${createTurnPrefixSummary(turnPrefixMessages)}`;
 	}
@@ -1816,6 +1836,8 @@ export async function compact(
 			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
 			...(gapEntryIds !== undefined ? { summarizedGapEntryIds: [...gapEntryIds] } : {}),
 			usage: summaryUsage,
+			usageComponents,
+			...(executionOptions?.usageReceiptOwned ? { usageReceiptOwned: true as const } : {}),
 			details: {
 				readFiles,
 				modifiedFiles,

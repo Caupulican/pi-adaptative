@@ -4,6 +4,7 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
 	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticAccountingReport,
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
@@ -76,7 +77,7 @@ export function aggregateCumulativeUsageFromSessionEntries(
 			}
 			addUsage(total, data.usage);
 		} else if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
-			const data = entry.data as SemanticUsageReport | undefined;
+			const data = entry.data as SemanticAccountingReport | undefined;
 			if (!data?.usage || !isUsage(data.usage) || !data.reportId || seenSemanticReportIds.has(data.reportId))
 				continue;
 			seenSemanticReportIds.add(data.reportId);

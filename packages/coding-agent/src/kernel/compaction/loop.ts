@@ -3,6 +3,7 @@ import type { ResolvedProviderRequestAuth } from "../loop-config.ts";
 import { classifyFailure } from "../reliability/classifier.ts";
 import type { SessionEntry } from "../session/session-entries.ts";
 import { isWholePathCompaction } from "../session/session-manager.ts";
+import { MaintenanceUsageRetentionError } from "../usage-components.ts";
 import { type CompactionResult, mergeCompactionVerificationReports } from "./compaction.ts";
 import { CompactionVerificationError, type VerificationReport } from "./verification.ts";
 
@@ -201,6 +202,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				modelInfo.requestGuard,
 			));
 		} catch (error) {
+			if (error instanceof MaintenanceUsageRetentionError)
+				return { kind: "failed", reason: error.message, cycles: cycle };
 			if (deps.signal?.aborted) {
 				return { kind: "failed", reason: "aborted", cycles: cycle };
 			}

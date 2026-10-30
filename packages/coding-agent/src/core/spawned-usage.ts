@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Usage } from "@caupulican/pi-ai";
+import type { UsageComponent } from "../kernel/usage-components.ts";
 
 export interface SpawnedUsageReporter {
 	addSpawnedUsage(
@@ -11,6 +12,7 @@ export interface SpawnedUsageReporter {
 			provider?: string;
 			model?: string;
 			goalId?: string;
+			usageComponents?: readonly UsageComponent[];
 		},
 	): string | undefined;
 }
@@ -18,6 +20,7 @@ export interface SpawnedUsageReporter {
 export type SpawnedUsageIdentity = string | readonly string[];
 
 export interface SpawnedUsageIdentityOptions {
+	usageComponents?: readonly UsageComponent[];
 	kind: string;
 	label?: string;
 	sessionId: string;
@@ -50,6 +53,7 @@ export function reportSpawnedUsage(
 ): string | undefined {
 	if (!hasReportableUsage(usage)) return undefined;
 	return reporter.addSpawnedUsage(usage, {
+		...(options.usageComponents ? { usageComponents: options.usageComponents } : {}),
 		...(options.label !== undefined ? { label: options.label } : {}),
 		reportId: deriveSpawnedUsageReportId(options.kind, options.sessionId, options.identity),
 	});

@@ -13,6 +13,8 @@ import { projectToolsForProvider } from "../../kernel/provider-tool-projection.t
 import { classifyFailure } from "../../kernel/reliability/classifier.ts";
 import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../kernel/reliability/retry.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
+import type { HistoryUsageCall } from "../review/system-one-review-port.ts";
 import { hasReportableUsage } from "../spawned-usage.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type {
@@ -99,7 +101,8 @@ export interface ContinuousChatCompactionAdapterDeps {
 	/** The configured summary model, checked now: setting, registry, egress and thinking level. */
 	summary(): ContinuousChatSummaryModelResolution;
 	/** Records one reply's paid spend in the history-usage owner. Must not throw. */
-	recordUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
+	recordUsage(usage: Usage, call: HistoryUsageCall): void;
+	captureUsageOrigin?(): AccountingOrigin;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
@@ -172,7 +175,12 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		target: ContinuousChatNodeCoordinate,
 	): ContinuousChatCompactionConversation {
 		const jobId = randomUUID();
+		const capturedOrigin = this.deps.captureUsageOrigin?.();
 		const node = `node-${target.level}-${target.ordinal}`;
+		// A background node can summarize several tasks. Its execution-time goal is not its billing owner.
+		const origin = capturedOrigin
+			? { sessionId: capturedOrigin.sessionId, operationId: `${jobId}:${node}` }
+			: undefined;
 		let replyIndex = 0;
 		const head = this.deps.prefixHead();
 		this.validate();
@@ -225,6 +233,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							provider: assistant?.provider ?? model.provider,
 							model: assistant?.model ?? model.id,
 							attempt: attemptNumber,
+							...(origin ? { origin } : {}),
 						});
 					}
 					return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };

@@ -1,9 +1,12 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type { TypeSafeUsageReceipt } from "./system-one-review-port.ts";
 
 /** Every identity string in a persisted receipt fits this many characters. */
 export const MAX_RECEIPT_TEXT_CHARS = 200;
+/** Five receipt/pricing identities, six origin identities and one response timestamp, each possibly JSON-escaped. */
+export const MAX_TYPESAFE_USAGE_RECEIPT_BYTES = 12 * MAX_RECEIPT_TEXT_CHARS * 6 + 512;
 
 const RECEIPT_PAYLOAD_KEYS = [
 	"receiptId",
@@ -14,6 +17,8 @@ const RECEIPT_PAYLOAD_KEYS = [
 	"costStatus",
 	"costProvenance",
 	"route",
+	"origin",
+	"responseTimestamp",
 ] as const;
 const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
 const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total", "estimate"] as const;
@@ -38,8 +43,23 @@ export function isReceiptText(value: unknown): value is string {
 export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECEIPT_PAYLOAD_KEYS)) return undefined;
 	const { receiptId, provider, model, attempt, usage, costStatus, costProvenance, route } = value;
+	const responseTimestamp = value.responseTimestamp;
+	if (
+		responseTimestamp !== undefined &&
+		(!isReceiptText(responseTimestamp) || !Number.isFinite(Date.parse(responseTimestamp)))
+	)
+		return undefined;
+	const origin = value.origin === undefined ? undefined : parseAccountingOrigin(value.origin);
+	if (value.origin !== undefined && !origin) return undefined;
 	if (!isReceiptText(receiptId) || !isReceiptCount(attempt)) return undefined;
-	if (route !== undefined && route !== "system_one_tool" && route !== "history_summary") return undefined;
+	if (
+		route !== undefined &&
+		route !== "system_one_tool" &&
+		route !== "history_summary" &&
+		route !== "compaction" &&
+		route !== "branch_summary"
+	)
+		return undefined;
 	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;
 	if (costStatus !== "catalog_priced" && costStatus !== "unpriced") return undefined;
 	let provenance: { provider: string; model: string } | undefined;
@@ -104,5 +124,27 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 		costStatus,
 		...(provenance ? { costProvenance: provenance } : {}),
 		...(route !== undefined ? { route } : {}),
+		...(origin ? { origin } : {}),
+		...(responseTimestamp !== undefined ? { responseTimestamp } : {}),
+	};
+}
+
+export function parseAccountingOrigin(value: unknown): AccountingOrigin | undefined {
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["sessionId", "entryId", "goalId", "taskId", "toolCallId", "operationId"])
+	)
+		return undefined;
+	if (!isReceiptText(value.sessionId)) return undefined;
+	for (const key of ["entryId", "goalId", "taskId", "toolCallId", "operationId"] as const) {
+		if (value[key] !== undefined && !isReceiptText(value[key])) return undefined;
+	}
+	return {
+		sessionId: value.sessionId,
+		...(value.entryId !== undefined ? { entryId: value.entryId as string } : {}),
+		...(value.goalId !== undefined ? { goalId: value.goalId as string } : {}),
+		...(value.taskId !== undefined ? { taskId: value.taskId as string } : {}),
+		...(value.toolCallId !== undefined ? { toolCallId: value.toolCallId as string } : {}),
+		...(value.operationId !== undefined ? { operationId: value.operationId as string } : {}),
 	};
 }

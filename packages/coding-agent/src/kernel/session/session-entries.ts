@@ -1,5 +1,6 @@
 import type { ImageContent, TextContent, Usage } from "@caupulican/pi-ai/types";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
+import type { UsageComponent } from "../usage-components.ts";
 
 export interface SessionEntryBase {
 	type: string;
@@ -46,6 +47,9 @@ export interface CompactionRetention {
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
+	/** The paid-usage journal owns these components; inline usage is retained evidence only. */
+	usageReceiptOwned?: true;
+	usageComponents?: readonly UsageComponent[];
 	type: "compaction";
 	summary: string;
 	firstKeptEntryId: string;
@@ -81,6 +85,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
+	usageReceiptOwned?: true;
+	usageComponents?: readonly UsageComponent[];
 	type: "branch_summary";
 	fromId: string;
 	summary: string;

@@ -54,6 +54,8 @@ import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync }
 import { sameFileVersion } from "../storage/bounded-file.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
+import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
+import type { UsageComponent } from "../usage-components.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { uuidv7 } from "../uuid.ts";
 import {
@@ -465,19 +467,37 @@ export function migrateSessionEntries(entries: FileEntry[]): void {
 	migrateToCurrentVersion(entries);
 }
 
-/** Exported for compaction.test.ts */
-export function parseSessionEntries(content: string): FileEntry[] {
+/** Decode captured session bytes without reopening the path. Recovery callers require every row. */
+export function parseSessionEntries(
+	content: string,
+	options?: { requireComplete?: boolean; allowFragment?: boolean },
+): FileEntry[] {
 	const entries: FileEntry[] = [];
+	if (options?.requireComplete && content.length > 0 && !content.endsWith("\n"))
+		throw new Error("Session history ends with an incomplete JSONL record.");
 	const lines = content.trim().split("\n");
 
 	for (const line of lines) {
 		if (!line.trim()) continue;
+		if (options?.requireComplete) {
+			if (line.length > MAX_SESSION_LINE_CHARS) throw new Error("Session record exceeds its size limit.");
+			const entry = parseSessionEntryLine(line, true);
+			if (entry) entries.push(entry);
+			continue;
+		}
 		try {
 			const entry = JSON.parse(line) as FileEntry;
 			entries.push(entry);
 		} catch {
 			// Skip malformed lines
 		}
+	}
+	if (options?.requireComplete) {
+		const header = entries[0];
+		if (header?.type !== "session") {
+			if (!options.allowFragment) throw new Error("Session snapshot has no valid header.");
+		} else assertValidSessionId(header.id);
+		validateLoadedLifecycleEntries(entries);
 	}
 
 	return entries;
@@ -2838,7 +2858,10 @@ export class SessionManager {
 		coveredThroughEntryId?: string,
 		summarizedGapEntryIds?: readonly string[],
 		scopeStartEntryId?: string,
+		usageComponents?: readonly UsageComponent[],
+		usageReceiptOwned?: true,
 	): string {
+		if (usageComponents) validateUsageComponents(usage ?? createEmptyUsage(), usageComponents);
 		const compactionParentId = this.leafId;
 		const leaf = compactionParentId ? this.byId.get(compactionParentId) : undefined;
 		for (const [field, id] of [
@@ -2856,6 +2879,7 @@ export class SessionManager {
 			if (!onBranch) throw new Error(`Compaction ${field} is not on the active branch: ${id}.`);
 		}
 		const entry: CompactionEntry<T> = {
+			...(usageReceiptOwned ? { usageReceiptOwned } : {}),
 			type: "compaction",
 			id: generateId(this.byId),
 			parentId: compactionParentId,
@@ -2869,6 +2893,7 @@ export class SessionManager {
 			...(scopeStartEntryId !== undefined ? { scopeStartEntryId } : {}),
 			details,
 			usage,
+			...(usageComponents ? { usageComponents: structuredClone(usageComponents) } : {}),
 			fromHook,
 		};
 		this._appendEntry(entry, () =>
@@ -3781,7 +3806,10 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 		signal?: AbortSignal,
+		usageComponents?: readonly UsageComponent[],
+		usageReceiptOwned?: true,
 	): string {
+		if (usageComponents) validateUsageComponents(usage ?? createEmptyUsage(), usageComponents);
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -3789,11 +3817,13 @@ export class SessionManager {
 		// The canonical append publishes the new leaf and advances/invalidates its caches
 		// after persistence. Moving the leaf first strands navigation on a failed write.
 		const entry: BranchSummaryEntry = {
+			...(usageReceiptOwned ? { usageReceiptOwned } : {}),
 			type: "branch_summary",
 			id: generateId(this.byId),
 			parentId: branchFromId,
 			timestamp: new Date().toISOString(),
 			fromId: branchFromId ?? "root",
+			...(usageComponents ? { usageComponents: structuredClone(usageComponents) } : {}),
 			summary,
 			details,
 			usage,

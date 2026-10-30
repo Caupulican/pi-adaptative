@@ -100,7 +100,7 @@ export function readFileDescriptorBoundedSync(fileDescriptor: number, maxBytes: 
 }
 
 /** Bounded, version-stable text read for small durable state files. */
-export function readBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string {
+export function readBoundedFileSync(filePath: string, maxBytes: number, label: string): Buffer {
 	validateByteLimit(maxBytes);
 	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
 		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
@@ -109,8 +109,12 @@ export function readBoundedTextFileSync(filePath: string, maxBytes: number, labe
 		if (content.byteLength !== before.size) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
-		return content.toString("utf-8");
+		return content;
 	});
+}
+
+export function readBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string {
+	return readBoundedFileSync(filePath, maxBytes, label).toString("utf-8");
 }
 
 /** Only absence at initial lookup is empty; unavailable paths and interrupted reads remain errors. */
@@ -195,7 +199,7 @@ export function readBoundedDirectoryNamesSync(directoryPath: string, maxEntries:
 }
 
 /** Async counterpart of {@link readBoundedTextFileSync}. */
-export async function readBoundedTextFile(filePath: string, maxBytes: number, label: string): Promise<string> {
+export async function readBoundedFile(filePath: string, maxBytes: number, label: string): Promise<Buffer> {
 	validateByteLimit(maxBytes);
 	const pathBefore = await lstatAsync(filePath);
 	assertRegularFile(pathBefore, label);
@@ -212,8 +216,12 @@ export async function readBoundedTextFile(filePath: string, maxBytes: number, la
 		if (content.byteLength !== before.size) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
-		return content.toString("utf-8");
+		return content;
 	} finally {
 		await fileHandle.close();
 	}
+}
+
+export async function readBoundedTextFile(filePath: string, maxBytes: number, label: string): Promise<string> {
+	return (await readBoundedFile(filePath, maxBytes, label)).toString("utf-8");
 }

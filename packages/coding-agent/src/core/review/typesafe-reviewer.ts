@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { redactCredentialContent } from "../secrets/credential-model-content.ts";
 import { type SystemOneAccessResolver, SystemOneDisabledError } from "../system-one/access.ts";
@@ -257,10 +258,15 @@ export class SystemOneReviewer {
 		};
 	}
 
+	captureUsageOrigin(): AccountingOrigin | undefined {
+		return this.deps.usage?.captureOrigin?.();
+	}
+
 	async review(
 		input: ReviewInput,
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
+		origin?: AccountingOrigin,
 	): Promise<SystemOneReviewRecord> {
 		signal?.throwIfAborted();
 		const snapshot: ReviewInput = JSON.parse(serializeEvaluation(input));
@@ -277,6 +283,7 @@ export class SystemOneReviewer {
 			},
 			signal,
 			onResponse,
+			origin,
 		);
 		const threshold = REVIEW_CONFIDENCE[snapshot.confidence ?? "high"];
 		const safeQuestionIds = Object.keys(result.request.questions);
@@ -303,7 +310,13 @@ export class SystemOneReviewer {
 		input: EvaluationInput,
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
+		origin?: AccountingOrigin,
 	): Promise<SystemOneEvaluationRecord> {
+		const evaluationId = randomUUID();
+		const initiatingOrigin = origin ?? this.captureUsageOrigin();
+		const capturedOrigin = initiatingOrigin
+			? Object.freeze({ ...initiatingOrigin, operationId: initiatingOrigin.operationId ?? evaluationId })
+			: undefined;
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
@@ -362,7 +375,6 @@ export class SystemOneReviewer {
 		const imageRequest = vision ? await encodeSystemOneImageRequest(safeRequest) : undefined;
 		signal?.throwIfAborted();
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
-		const evaluationId = randomUUID();
 		const receipts: SystemOneReceipt[] = [];
 		// A receipt the sink does not record stays unrecorded for its owner to retry; the answer it priced is still returned.
 		const recordReceipt = (lease: SystemOneUsageLease, payload: TypeSafeUsageReceipt): SystemOneReceipt => {
@@ -393,7 +405,7 @@ export class SystemOneReviewer {
 		let lease: SystemOneUsageLease | undefined;
 		try {
 			// Before any provider call: a refused lease is a typed evaluation failure with nothing paid.
-			lease = this.deps.usage?.begin();
+			lease = this.deps.usage?.begin(undefined, capturedOrigin);
 			raw = await retryProviderRequest(
 				async () => {
 					combined.signal?.throwIfAborted();
@@ -461,6 +473,7 @@ export class SystemOneReviewer {
 								provider: driver.id,
 								model: request.model,
 								attempt: attempts,
+								...(capturedOrigin ? { origin: capturedOrigin } : {}),
 							}),
 						);
 					}

@@ -2,21 +2,52 @@ import type { Usage } from "@caupulican/pi-ai";
 import { resolveCatalogPricing } from "@caupulican/pi-ai/models";
 import { calculateCost } from "@caupulican/pi-ai/usage";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import type { SystemOneUsageRoute } from "../review/system-one-review-port.ts";
+import { type SessionEntryUsageComponent, validateUsageComponents } from "../../kernel/usage.ts";
+import type { UsageComponent } from "../../kernel/usage-components.ts";
+import type { MaintenanceUsageRoute, SystemOneUsageRoute } from "../review/system-one-review-port.ts";
+import type { AccountingOrigin } from "./accounting-evidence.ts";
 
 export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
 
+export function isMaintenanceUsageRoute(route: SystemOneUsageRoute | undefined): route is MaintenanceUsageRoute {
+	return route === "compaction" || route === "branch_summary";
+}
+
+/** A recorded charge can be known while its model-specific API equivalent remains unattributable. */
+export function hasUnknownUsageModel(usage: Usage, provider?: string, model?: string): boolean {
+	return usage.totalTokens > 0 && (!provider || !model);
+}
+
 export interface SpawnedUsageReport {
 	/** Cumulative child usage, including that child's already-rolled-up descendants. */
 	usage: Usage;
+	usageComponents?: readonly UsageComponent[];
 	label?: string;
 	model?: string;
 	provider?: string;
 	goalId?: string;
+	origin?: AccountingOrigin;
+	costBasis?: "response";
 	sourceSessionId?: string;
 	/** Stable idempotency identity for retry-safe ingestion. */
 	reportId?: string;
+}
+
+export function getSpawnedUsageComponents(
+	report: SpawnedUsageReport,
+	timestamp: string,
+): readonly SessionEntryUsageComponent[] {
+	if (report.usageComponents !== undefined) return validateUsageComponents(report.usage, report.usageComponents);
+	return [
+		{
+			sourceId: report.reportId ?? timestamp,
+			timestamp,
+			usage: report.usage,
+			provider: report.provider,
+			model: report.model,
+		},
+	];
 }
 
 /**
@@ -26,8 +57,14 @@ export interface SpawnedUsageReport {
  */
 export function resolveEffectiveEntryCost(
 	usage: Usage | undefined,
-	options?: { model?: string; provider?: string; kind?: "own" | "spawned" | "semantic" },
-): { total: number; estimated: boolean } | undefined {
+	options?: {
+		model?: string;
+		provider?: string;
+		kind?: "own" | "spawned" | "semantic";
+		perResponse?: boolean;
+		costStatus?: "catalog_priced" | "unpriced";
+	},
+): { total: number; reportedTotal: number; estimated: boolean } | undefined {
 	const rawTotal = usage?.cost?.total;
 	if (typeof rawTotal !== "number" || !Number.isFinite(rawTotal) || rawTotal < 0 || !usage) return undefined;
 	if (
@@ -36,19 +73,43 @@ export function resolveEffectiveEntryCost(
 		)
 	)
 		return undefined;
-	if (rawTotal !== 0 || !usage || options?.provider !== "google-antigravity" || options.kind === "spawned")
+	const mayEstimate = options?.provider === "google-antigravity" || options?.costStatus === "unpriced";
+	if (rawTotal !== 0 || !usage || !mayEstimate || (options?.kind === "spawned" && !options.perResponse))
 		return {
 			total: rawTotal,
+			reportedTotal: rawTotal,
 			estimated: usage?.cost?.estimate === "base-rates" || options?.provider === "google-antigravity",
 		};
-	const model = options.model ? resolveCatalogPricing(options.provider, options.model) : undefined;
-	if (!model) return { total: rawTotal, estimated: usage.cost.estimate === "base-rates" };
+	const model =
+		options?.model && options.provider ? resolveCatalogPricing(options.provider, options.model) : undefined;
+	if (!model) return { total: rawTotal, reportedTotal: rawTotal, estimated: usage.cost.estimate === "base-rates" };
 	const priced = { ...usage, cost: { ...usage.cost } };
 	const total = calculateCost(model, priced).total;
-	return { total, estimated: total > 0 || usage.cost.estimate === "base-rates" };
+	return { total, reportedTotal: rawTotal, estimated: total > 0 || usage.cost.estimate === "base-rates" };
+}
+
+/** One shared pricing rule for cumulative receipts and their conserved per-response components. */
+export function resolveSpawnedUsageComponents(
+	report: SpawnedUsageReport,
+	timestamp: string,
+): {
+	part: SessionEntryUsageComponent;
+	cost: { total: number; reportedTotal: number; estimated: boolean };
+}[] {
+	return getSpawnedUsageComponents(report, timestamp).flatMap((part) => {
+		const cost = resolveEffectiveEntryCost(part.usage, {
+			model: part.model,
+			provider: part.provider,
+			kind: "spawned",
+			perResponse: report.costBasis === "response" || report.usageComponents !== undefined,
+		});
+		return cost ? [{ part, cost }] : [];
+	});
 }
 
 export interface SemanticUsageReport {
+	readonly responseTimestamp?: string;
+	readonly origin?: AccountingOrigin;
 	/** One provider response, including a retry response, priced against its exact catalog identity. */
 	usage: Usage;
 	provider: string;
@@ -61,20 +122,28 @@ export interface SemanticUsageReport {
 	route?: SystemOneUsageRoute;
 }
 
+/** Archived direct tool usage has no proven retry ordinal. */
+export type RecoveredDirectUsageReport = Omit<SemanticUsageReport, "attempt"> & {
+	readonly costBasis: "direct";
+	readonly modelProvenance?: "request-bound";
+};
+export type SemanticAccountingReport = SemanticUsageReport | RecoveredDirectUsageReport;
+
 /** One validated projection for every semantic-cost reader. */
 export function resolveSemanticUsageEntry(entry: SessionEntry):
 	| {
-			report: SemanticUsageReport;
-			cost: { total: number; estimated: boolean };
+			report: SemanticAccountingReport;
+			cost: { total: number; reportedTotal: number; estimated: boolean };
 	  }
 	| undefined {
 	if (entry.type !== "custom" || entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return undefined;
-	const report = entry.data as SemanticUsageReport | undefined;
+	const report = entry.data as SemanticAccountingReport | undefined;
 	if (!report?.reportId) return undefined;
 	const cost = resolveEffectiveEntryCost(report.usage, {
 		model: report.model,
 		provider: report.provider,
 		kind: "semantic",
+		costStatus: report.costStatus,
 	});
 	return cost ? { report, cost } : undefined;
 }
@@ -84,6 +153,8 @@ export function resolveSemanticUsageEntry(entry: SessionEntry):
  * the retry of an unrecorded receipt write the identical entry (aggregation dedupes by `reportId`).
  */
 export function semanticUsageReportOf(receipt: {
+	responseTimestamp?: string;
+	origin?: AccountingOrigin;
 	receiptId: string;
 	provider: string;
 	model: string;
@@ -93,6 +164,8 @@ export function semanticUsageReportOf(receipt: {
 	route?: SystemOneUsageRoute;
 }): SemanticUsageReport {
 	return {
+		...(receipt.responseTimestamp ? { responseTimestamp: receipt.responseTimestamp } : {}),
+		...(receipt.origin ? { origin: { ...receipt.origin } } : {}),
 		reportId: receipt.receiptId,
 		provider: receipt.provider,
 		model: receipt.model,

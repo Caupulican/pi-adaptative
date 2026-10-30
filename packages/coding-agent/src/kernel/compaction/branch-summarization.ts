@@ -26,6 +26,7 @@ import type { ReadonlySessionManager } from "../session/session-manager.ts";
 import type { TimerPort } from "../timer-port.ts";
 import type { AgentMessage } from "../types.ts";
 import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
+import { captureUsageComponent, type UsageComponent } from "../usage-components.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	addPersistedFileOperations,
@@ -43,6 +44,8 @@ import {
 // ============================================================================
 
 export interface BranchSummaryResult {
+	usageComponents?: readonly UsageComponent[];
+	usageReceiptOwned?: true;
 	summary?: string;
 	readFiles?: string[];
 	modifiedFiles?: string[];
@@ -77,6 +80,8 @@ export interface CollectEntriesResult {
 }
 
 export interface GenerateBranchSummaryOptions {
+	onUsageComponent?: (component: UsageComponent) => void;
+	usageReceiptOwned?: true;
 	/** Model to use for summarization */
 	model: Model<any>;
 	/** API key for the model */
@@ -94,7 +99,7 @@ export interface GenerateBranchSummaryOptions {
 	/** Optional wrapped stream function (watchdog/retry-capable host path). */
 	streamFn?: StreamFn;
 	/** Cumulative received usage snapshot, published before retry work can throw. */
-	onUsage?: (usage: Usage) => void;
+	onUsage?: (usage: Usage, components: readonly UsageComponent[]) => void;
 	/**
 	 * The timers the backoff between attempts waits on (a host passes its `branch-summary-retry` owner); defaults to
 	 * the system timers. An abort of `signal` still ends the backoff at once.
@@ -307,6 +312,8 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
+	if (options.usageReceiptOwned && !options.onUsageComponent)
+		throw new Error("Receipt-owned branch summary requires its usage recorder.");
 	const {
 		model,
 		apiKey,
@@ -358,6 +365,7 @@ export async function generateBranchSummary(
 	// use the same reliability doctrine as compaction instead of bypassing the host stream wrapper.
 	let response: AssistantMessage | undefined;
 	const usage = createEmptyUsage();
+	const usageComponents: UsageComponent[] = [];
 	for (let attempt = 1; attempt <= DEFAULT_RETRY_POLICY.maxAttempts; attempt++) {
 		response = await completeBranchSummary(
 			model,
@@ -366,7 +374,10 @@ export async function generateBranchSummary(
 			streamFn,
 		);
 		addUsage(usage, response.usage);
-		onUsage?.(combineUsage(usage));
+		const component = captureUsageComponent(response);
+		options.onUsageComponent?.(component);
+		usageComponents.push(component);
+		onUsage?.(combineUsage(usage), structuredClone(usageComponents));
 		if (response.stopReason !== "error") break;
 		const classified = classifyFailure({ message: response.errorMessage ?? "", provider: response.provider });
 		if (!classified.retryable || signal.aborted || attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
@@ -376,7 +387,7 @@ export async function generateBranchSummary(
 			});
 			await sleepAbortable(delayMs, signal, timers);
 		} catch (error) {
-			if (signal.aborted) return { aborted: true, usage };
+			if (signal.aborted) return { aborted: true, usage, usageComponents };
 			if (error instanceof RetryDelayExceededError) {
 				response.errorMessage = `${response.errorMessage || "Summarization failed"}\n${error.message}`;
 				break;
@@ -384,17 +395,17 @@ export async function generateBranchSummary(
 			throw error;
 		}
 	}
-	if (!response) return { error: "Summarization failed", usage };
+	if (!response) return { error: "Summarization failed", usage, usageComponents };
 
 	// Check if aborted, errored, or truncated
 	if (response.stopReason === "aborted") {
-		return { aborted: true, usage };
+		return { aborted: true, usage, usageComponents };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed", usage };
+		return { error: response.errorMessage || "Summarization failed", usage, usageComponents };
 	}
 	if (response.stopReason === "length") {
-		return { error: "branch summary hit its output cap before completing", usage };
+		return { error: "branch summary hit its output cap before completing", usage, usageComponents };
 	}
 
 	let summary = response.content
@@ -414,5 +425,7 @@ export async function generateBranchSummary(
 		readFiles,
 		modifiedFiles,
 		usage,
+		usageComponents,
+		...(options.usageReceiptOwned ? { usageReceiptOwned: true as const } : {}),
 	};
 }

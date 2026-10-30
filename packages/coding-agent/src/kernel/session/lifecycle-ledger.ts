@@ -24,6 +24,31 @@ export type ForegroundToolStartInput = Omit<ForegroundToolStartEntry, "type" | "
 
 export const TOOL_NOT_STARTED = "TOOL_NOT_STARTED";
 export const TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN";
+export const UNKNOWN_RECOVERED_TOOL_RESULT_TEXT =
+	"The harness recorded that the tool outcome is unknown after interruption. Inspect the workspace before retrying or claiming completion.";
+
+/** A recovery notice records uncertainty, not evidence of when a tool physically finished. */
+export function isUnknownRecoveredToolResult(message: AgentMessage): boolean {
+	if (message.role !== "toolResult" || !message.isError) return false;
+	const details = message.details;
+	if (details && typeof details === "object" && "piLifecycleRecovery" in details) {
+		const recovery = details.piLifecycleRecovery;
+		return Boolean(
+			recovery &&
+				typeof recovery === "object" &&
+				"version" in recovery &&
+				recovery.version === 1 &&
+				"code" in recovery &&
+				recovery.code === TOOL_OUTCOME_UNKNOWN,
+		);
+	}
+	// Older canonical recovery notices carried this exact one-block body without a marker.
+	return (
+		message.content.length === 1 &&
+		message.content[0]?.type === "text" &&
+		message.content[0].text === UNKNOWN_RECOVERED_TOOL_RESULT_TEXT
+	);
+}
 
 function lifecycleValidationError(path: string, detail: string): TypeError {
 	return new TypeError(`Invalid session lifecycle field ${path}: ${detail}`);
@@ -957,3 +982,5 @@ export function planSessionLifecycleRepair(
 		})),
 	};
 }
+
+import type { AgentMessage } from "../types.ts";

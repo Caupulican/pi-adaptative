@@ -1231,6 +1231,7 @@ export class AgentSession {
 			},
 			continuousChat: {
 				compaction: createContinuousChatCompactionAdapter({
+					captureUsageOrigin: () => this._semanticUsage.captureOrigin(),
 					timers: config.timers.port("continuous-chat"),
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
@@ -1264,6 +1265,7 @@ export class AgentSession {
 				// The configured summary model resolves through the one lane-model boundary: configured and
 				// authenticated models only, no second router and no credential client.
 				summarizer: {
+					captureUsageOrigin: () => this._semanticUsage.captureOrigin(),
 					resolveModel: (reference) => historyModels.resolveModel(reference),
 					runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 					recordHistoryUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
@@ -1353,6 +1355,9 @@ export class AgentSession {
 		const toolRepairSettings = this._toolProtocol.getRepairSettings();
 		this._failureCorpus = new FailureCorpusRecorder({ filePath: failureCorpusPath });
 		this._compaction = new CompactionController({
+			captureUsageOrigin: () => this._semanticUsage.captureOrigin(),
+			recordMaintenanceUsage: (component, route, origin) =>
+				this._semanticUsage.recordMaintenanceUsage(component, route, origin),
 			runtimeAdmission: runtimeGenerationAdmission(this._agentDir),
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1394,7 +1399,7 @@ export class AgentSession {
 			getFailureCorpus: () => this._failureCorpus,
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
-			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
+			compactWithRetry: (run, signal, provider) => this._compaction.compactWithRetry(run, signal, provider),
 			retryTimers: config.timers.port("compaction-retry"),
 			onCompactionSettled: () => {
 				this._foregroundRecovery?.wakeIdleWaiters();
@@ -2096,6 +2101,9 @@ export class AgentSession {
 			this._analytics.recordToolArgumentValidation(logRecord);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
+			captureUsageOrigin: () => this._semanticUsage.captureOrigin(),
+			recordMaintenanceUsage: (component, route, origin) =>
+				this._semanticUsage.recordMaintenanceUsage(component, route, origin),
 			getSessionManager: () => this.sessionManager,
 			addSpawnedUsage: (usage, options) => this.addSpawnedUsage(usage, options),
 			getModel: () => this.model,
@@ -5134,22 +5142,6 @@ export class AgentSession {
 	 */
 	private _runAutoCompaction(reason: AutoCompactionReason, willRetry: boolean): Promise<boolean> {
 		return this._compaction.runAuto(reason, willRetry);
-	}
-
-	/**
-	 * Run one compaction attempt, retrying retryable provider failures (stream stalls,
-	 * 429/5xx, network drops) with the session's retry policy. The reliability kernel
-	 * classifies a stall as retryable by design (see withStreamIdleWatchdog); without this
-	 * loop a single transient killed the whole compaction while ordinary turns survived the
-	 * same failure via auto-retry. Caller aborts are never retried; sleepAbortable rejects
-	 * with the abort reason if the signal fires mid-backoff.
-	 */
-	private _compactWithRetry(
-		run: () => Promise<CompactionResult>,
-		signal: AbortSignal,
-		provider?: string,
-	): Promise<CompactionResult> {
-		return this._compaction.compactWithRetry(run, signal, provider);
 	}
 
 	/**

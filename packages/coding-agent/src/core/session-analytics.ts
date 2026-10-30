@@ -22,6 +22,7 @@ import {
 } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, AgentState } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../kernel/usage.ts";
+import type { UsageComponent } from "../kernel/usage-components.ts";
 import { theme } from "../presentation/theme-model.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { CompactionGateCheckStats, SessionStats } from "./agent-session-contracts.ts";
@@ -47,6 +48,7 @@ import {
 	getLocalDayWindow,
 } from "./cost/daily-usage.ts";
 import type { SemanticUsageProjection } from "./cost/semantic-usage-delivery.ts";
+import { SessionAccountingHistory } from "./cost/session-accounting-history.ts";
 import { aggregateCumulativeUsageFromSessionEntries } from "./cost/session-usage.ts";
 import {
 	deliverSpawnedUsageReceipt,
@@ -54,8 +56,9 @@ import {
 	type SpawnedUsageReceiptOptions,
 } from "./cost/spawned-usage-receipt.ts";
 import {
+	isMaintenanceUsageRoute,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
-	type SemanticUsageReport,
+	type SemanticAccountingReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
 	type SpawnedUsageTotals,
@@ -163,6 +166,7 @@ export class SessionAnalytics {
 		computedAt: number;
 		summary: SessionTaskAndModelSummary;
 	};
+	private _rawSpawnedReports?: { entryCount: number; ids: Set<string> };
 	/** Cumulative stats initialized once from persisted telemetry, then updated without retaining record details. */
 	private _toolArgumentValidationStats: ToolArgumentValidationStats | undefined;
 	/** Incremental context-usage state keyed by the append-only branch leaf. */
@@ -173,9 +177,32 @@ export class SessionAnalytics {
 	};
 
 	private readonly deps: SessionAnalyticsDeps;
+	private readonly accountingHistory: SessionAccountingHistory;
 
 	constructor(deps: SessionAnalyticsDeps) {
 		this.deps = deps;
+		this.accountingHistory = new SessionAccountingHistory({
+			getSession: () => deps.getSessionManager(),
+			getAgentDir: () => deps.getAgentDir(),
+			isDisposed: () => deps.isDisposed?.() ?? false,
+			onUpdated: () => {
+				this._currentSessionCostCache = undefined;
+				this._costSummaryCache = undefined;
+				this._taskMetricsCache = undefined;
+				this._dailyUsageCache = undefined;
+				deps.onDailyUsageUpdated?.();
+			},
+			onError: (error) => {
+				this._costSummaryCache = undefined;
+				deps.onDailyUsageError?.(error);
+				deps.onDailyUsageUpdated?.();
+			},
+		});
+	}
+
+	private getAccountingEntries(): readonly SessionEntry[] {
+		this.getAccountingSession();
+		return this.accountingHistory.entries();
 	}
 
 	getSessionStats(): SessionStats {
@@ -185,15 +212,19 @@ export class SessionAnalytics {
 		let totalMessages = 0;
 		let toolCalls = 0;
 		const usage = createEmptyUsage();
-		// The root systemone tool's recorded reviews are the one System One route in these totals; each counts once by report id.
+		// Explicit root tool and maintenance charges replace their inline usage; each receipt counts once.
 		const toolReportIds = new Set<string>();
 
-		for (const entry of this.deps.getSessionManager().getEntries()) {
+		for (const entry of this.getAccountingEntries()) {
 			const entryUsage = getSessionEntryUsage(entry);
 			if (entryUsage) addUsage(usage, entryUsage);
 			if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
-				const report = entry.data as SemanticUsageReport | undefined;
-				if (report?.route === "system_one_tool" && !toolReportIds.has(report.reportId)) {
+				const report = entry.data as SemanticAccountingReport | undefined;
+				if (
+					report &&
+					(report.route === "system_one_tool" || isMaintenanceUsageRoute(report.route)) &&
+					!toolReportIds.has(report.reportId)
+				) {
 					toolReportIds.add(report.reportId);
 					addUsage(usage, report.usage);
 				}
@@ -353,7 +384,7 @@ export class SessionAnalytics {
 	getCumulativeUsage(): Usage {
 		const pending = this.deps.getPendingSemanticUsage();
 		return aggregateCumulativeUsageFromSessionEntries(
-			this.deps.getSessionManager().getEntries(),
+			this.getAccountingEntries(),
 			pending.reports,
 			pending.overflow?.usage,
 		);
@@ -380,14 +411,16 @@ export class SessionAnalytics {
 			provider?: string;
 			model?: string;
 			goalId?: string;
+			usageComponents?: readonly UsageComponent[];
 		},
 	): string | undefined {
 		const reportId = opts?.reportId;
-		if (reportId && this.getCurrentSessionCostTotals().seenSubagentReportIds.has(reportId)) {
+		if (reportId && this.getRawSpawnedReportIds().has(reportId)) {
 			return undefined;
 		}
 		const report: SpawnedUsageReport = {
 			usage,
+			usageComponents: opts?.usageComponents,
 			label: opts?.label,
 			sourceSessionId: opts?.sourceSessionId,
 			provider: opts?.provider,
@@ -396,7 +429,7 @@ export class SessionAnalytics {
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
-		if (reportId) this.getCurrentSessionCostTotals();
+		if (reportId) this.getRawSpawnedReportIds();
 		return entryId;
 	}
 
@@ -431,6 +464,8 @@ export class SessionAnalytics {
 			(!previous.lastEntry ||
 				(sessionManager.getEntry ? sessionManager.getEntry(previous.lastEntry.id) === previous.lastEntry : true));
 		if (!sameLineage) {
+			this.accountingHistory.reset();
+			this._rawSpawnedReports = undefined;
 			this._currentSessionCostCache = undefined;
 			this._dailyUsageCache = undefined;
 			this._costSummaryCache = undefined;
@@ -452,13 +487,33 @@ export class SessionAnalytics {
 		return sessionManager;
 	}
 
+	/** Physical append idempotency must not consult recovered or virtual accounting rows. */
+	private getRawSpawnedReportIds(): ReadonlySet<string> {
+		const session = this.getAccountingSession();
+		const count = session.getEntryCount();
+		const index = this._rawSpawnedReports ?? { entryCount: 0, ids: new Set<string>() };
+		for (const entry of session.getEntriesSince(index.entryCount)) {
+			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
+			const report = entry.data as SpawnedUsageReport | undefined;
+			if (report?.reportId) index.ids.add(report.reportId);
+		}
+		index.entryCount = count;
+		this._rawSpawnedReports = index;
+		return index.ids;
+	}
+
 	private getCurrentSessionCostTotals(): CurrentSessionCostAccumulator {
 		const sessionManager = this.getAccountingSession();
+		const entries = this.getAccountingEntries();
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		let cache = this._currentSessionCostCache;
 		const getEntriesSince = sessionManager.getEntriesSince?.bind(sessionManager);
-		if (!cache || entryCount < cache.entryCount || !getEntriesSince) {
-			const entries = sessionManager.getEntries();
+		if (
+			!cache ||
+			entryCount < cache.entryCount ||
+			!getEntriesSince ||
+			(entryCount !== cache.entryCount && this.accountingHistory.hasProjection())
+		) {
 			cache = {
 				entryCount,
 				accumulator: accumulateCurrentSessionCostsFromEntries(createCurrentSessionCostAccumulator(), entries),
@@ -489,9 +544,11 @@ export class SessionAnalytics {
 		const window = getLocalDayWindow(now);
 		const dailyTotals = this.getDailyUsageTotals(now);
 		const pending = this.deps.getPendingSemanticUsage();
+		const accountingStatus = this.accountingHistory.status();
 		const cached = this._costSummaryCache;
 		if (
 			cached?.entryCount === entryCount &&
+			cached.summary.accountingStatus === accountingStatus &&
 			cached.pendingRevision === pending.revision &&
 			cached.dailyTotals === dailyTotals &&
 			cached.summary.todayPending === dailyTotals.pending &&
@@ -509,6 +566,7 @@ export class SessionAnalytics {
 			dailyTotals,
 			todayWindow: window,
 		});
+		summary.accountingStatus = accountingStatus;
 		this._costSummaryCache = {
 			entryCount,
 			pendingRevision: pending.revision,
@@ -570,7 +628,7 @@ export class SessionAnalytics {
 			};
 		}
 		const summary = computeSessionTaskAndModelMetrics({
-			entries: sessionManager.getEntries(),
+			entries: this.getAccountingEntries(),
 			goalState: options.goalState,
 			taskState: options.taskState,
 			isStreaming: options.isStreaming,
@@ -610,7 +668,7 @@ export class SessionAnalytics {
 			return this._dailyUsageCache.totals;
 		const sessionFile = sessionManager.getSessionFile();
 		const sessionId = sessionManager.getSessionId();
-		const liveSession = sessionFile ? { filePath: sessionFile, entries: sessionManager.getEntries() } : undefined;
+		const liveSession = sessionFile ? { filePath: sessionFile, entries: this.getAccountingEntries() } : undefined;
 		const previous = this._dailyUsageCache;
 		const sameWindow =
 			previous?.sessionDir === scope &&

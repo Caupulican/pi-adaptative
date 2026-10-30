@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- `pi accounting-reconcile` rebuilds historical accounting from retained worker and System One evidence for the current project, an explicit session or all projects, without starting a model or altering transcripts.
+
+### Fixed
+
+- Historical worker receipts recover exact response models and originating tasks from retained attempt records and child transcripts, preserving recorded totals and deduplicating pending delivery. Valid headerless usage fragments retain their known charges without inventing session identity.
+- Task metrics retain the selected goal when it resumes, list identified worker tasks separately, preserve calls across partial lifecycle history, and exclude unknown recovered tool outcomes from active time.
+- Maintenance accounting preserves per-response model and time provenance across retries, distinguishes known compaction operations from unrecorded models, and marks incomplete API-equivalent estimates explicitly.
+
 ## [0.104.23] - 2026-10-30
 
 ### Added

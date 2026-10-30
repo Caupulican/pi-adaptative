@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import {
 	SystemOneReviewError,
 	type SystemOneReviewPort,
@@ -90,6 +91,7 @@ export async function evaluateSystemOneVision(
 	signal?: AbortSignal,
 	onResponse?: SystemOneReviewResponseObserver,
 	onPrepared?: (manifest: readonly SystemOneImageManifest[]) => void,
+	origin?: AccountingOrigin,
 ) {
 	// Freeze arguments before image decoding/provider awaits; no mutation can retarget a projection.
 	const snapshot: VisionInput = JSON.parse(serializeEvaluation(input));
@@ -172,7 +174,7 @@ export async function evaluateSystemOneVision(
 		});
 		onPrepared?.([...imageManifest]);
 	}
-	const result = await reviewer.evaluate({ state: snapshot.state, questions, assets }, signal, onResponse);
+	const result = await reviewer.evaluate({ state: snapshot.state, questions, assets }, signal, onResponse, origin);
 	if (signal?.aborted)
 		throw new SystemOneReviewError(
 			"System One vision cancelled after response",

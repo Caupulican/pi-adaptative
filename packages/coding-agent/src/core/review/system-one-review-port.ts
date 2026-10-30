@@ -37,17 +37,29 @@ export interface SystemOneStatus {
 
 /**
  * Where a paid response's usage is charged from. Absent is a System One review; `system_one_tool` is the root systemone tool's
- * review (counted in the session statistics); `history_summary` is a history summary model call's spend (counted in CURRENT and as background spend).
+ * review (counted in the session statistics); history and maintenance routes identify their actual summary responses.
  */
-export type SystemOneUsageRoute = "system_one_tool" | "history_summary";
+export type MaintenanceUsageRoute = "compaction" | "branch_summary";
+export type SystemOneUsageRoute = "system_one_tool" | "history_summary" | MaintenanceUsageRoute;
+
+export interface HistoryUsageCall {
+	readonly reportId: string;
+	readonly provider: string;
+	readonly model: string;
+	readonly attempt: number;
+	readonly origin?: AccountingOrigin;
+}
 
 /** The priced usage record handed to the usage sink. `receiptId` is the persistence identity of one response. */
 export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
+	/** Actual provider response time, preserved across deferred delivery. */
+	readonly responseTimestamp?: string;
 	readonly receiptId: string;
 	readonly provider: string;
 	readonly model: string;
 	readonly attempt: number;
 	readonly route?: SystemOneUsageRoute;
+	readonly origin?: AccountingOrigin;
 }
 
 /**
@@ -89,11 +101,13 @@ export interface SystemOneUsageLease {
 
 /** The session's usage sink: an evaluation begins a lease before any provider call is paid. */
 export interface SystemOneUsageSink {
+	/** Snapshot the initiating work before asynchronous preparation can change the live session. */
+	captureOrigin?(): AccountingOrigin;
 	/**
 	 * Throws {@link SystemOneUsageRefusal} when no slot can be reserved; nothing has been paid at that point. The route says
 	 * where the usage is charged from (see SystemOneUsageRoute); absent is a System One review.
 	 */
-	begin(route?: SystemOneUsageRoute): SystemOneUsageLease;
+	begin(route?: SystemOneUsageRoute, origin?: AccountingOrigin): SystemOneUsageLease;
 }
 
 /** The usage sink cannot admit a new paid evaluation, so none is made. */
@@ -182,15 +196,20 @@ export class SystemOneObserverError extends Error {
 
 /** The semantic-review capability the generic tool requires from any provider implementation. */
 export interface SystemOneReviewPort {
+	captureUsageOrigin?(): AccountingOrigin | undefined;
 	status(signal?: AbortSignal): Promise<SystemOneStatus>;
 	evaluate(
 		input: EvaluationInput,
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
+		origin?: AccountingOrigin,
 	): Promise<SystemOneEvaluationRecord>;
 	review(
 		input: ReviewInput,
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
+		origin?: AccountingOrigin,
 	): Promise<SystemOneReviewRecord>;
 }
+
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";

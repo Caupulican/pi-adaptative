@@ -5,10 +5,20 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
-import { getSessionEntryUsage } from "../../kernel/usage.ts";
+import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
+import { accountingProjectionPath } from "./accounting-evidence.ts";
+import { accountingFragmentPath } from "./accounting-fragments.ts";
 import {
+	readAccountingRevision,
+	readProjectedSessionEntries,
+	readProjectedSessionEntriesSync,
+} from "./accounting-history.ts";
+import {
+	getSpawnedUsageComponents,
+	hasUnknownUsageModel,
 	resolveEffectiveEntryCost,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticAccountingReport,
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
@@ -20,6 +30,9 @@ export type DailyUsageWindow = {
 };
 
 export type DailyUsageTotals = {
+	modelUnknownTokens?: number;
+	modelUnknownOperations?: number;
+	apiEquivalentPartial?: boolean;
 	/** Cross-session refresh is not settled; values are the last available projection. */
 	pending?: boolean;
 	costEstimate?: "base-rates";
@@ -29,18 +42,21 @@ export type DailyUsageTotals = {
 	/** The ICM history-summary share of `spawnedCost`. */
 	historySummaryCost: number;
 	totalCost: number;
+	reportedTotalCost?: number;
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
 	sessions: number;
+	fragments?: number;
 	reports: number;
 };
 
 function createZeroTotals(): DailyUsageTotals {
 	return {
 		ownCost: 0,
+		reportedTotalCost: 0,
 		spawnedCost: 0,
 		historySummaryCost: 0,
 		totalCost: 0,
@@ -79,9 +95,9 @@ function addDailyUsageFromEntries(
 ): boolean {
 	let hasUsage = false;
 	for (const entry of entries) {
-		const record = usageRecord(entry);
-		if (record && addDailyUsageRecord(totals, record, window, seenSpawnedReportIds, seenSemanticReportIds))
-			hasUsage = true;
+		for (const record of usageRecords(entry)) {
+			if (addDailyUsageRecord(totals, record, window, seenSpawnedReportIds, seenSemanticReportIds)) hasUsage = true;
+		}
 	}
 	return hasUsage;
 }
@@ -100,10 +116,18 @@ function addDailyUsageRecord(
 		model: record.model,
 		provider: record.provider,
 		kind: record.kind,
+		perResponse: record.perResponse,
+		costStatus: record.costStatus,
 	});
 	if (!resolved) return false;
 	if (record.reportId) seen?.add(record.reportId);
+	if (hasUnknownUsageModel(record.usage, record.provider, record.model)) {
+		totals.modelUnknownTokens = (totals.modelUnknownTokens ?? 0) + record.usage.totalTokens;
+		totals.modelUnknownOperations = (totals.modelUnknownOperations ?? 0) + 1;
+		totals.apiEquivalentPartial = true;
+	}
 	const costTotal = resolved.total;
+	totals.reportedTotalCost = (totals.reportedTotalCost ?? 0) + resolved.reportedTotal;
 	if (record.kind === "spawned" || record.historySummary) {
 		totals.spawnedCost += costTotal;
 		totals.reports++;
@@ -121,7 +145,18 @@ function finishTotals(totals: DailyUsageTotals): DailyUsageTotals {
 
 function shouldReadSessionFile(filePath: string, window: DailyUsageWindow): boolean {
 	try {
-		return statSync(filePath).mtimeMs >= window.startMs;
+		return (
+			Math.max(
+				...[filePath, accountingProjectionPath(filePath), accountingFragmentPath(filePath)].map((path) => {
+					try {
+						return statSync(path).mtimeMs;
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+						throw error;
+					}
+				}),
+			) >= window.startMs
+		);
 	} catch {
 		return false;
 	}
@@ -147,63 +182,84 @@ function getSessionEntries(
 	liveSession: LiveSessionDailyUsageSource | undefined,
 ): readonly SessionEntry[] {
 	if (liveSession && resolve(filePath) === resolve(liveSession.filePath)) return liveSession.entries;
-	return loadEntriesFromFile(filePath).filter((entry): entry is SessionEntry => entry.type !== "session");
+	return (
+		readProjectedSessionEntriesSync(filePath) ??
+		loadEntriesFromFile(filePath).filter((entry): entry is SessionEntry => entry.type !== "session")
+	);
 }
 
 interface DailyUsageRecord {
+	costStatus?: SemanticUsageReport["costStatus"];
 	timestamp: string;
 	usage: Usage;
 	kind: "own" | "spawned" | "semantic";
 	model?: string;
 	provider?: string;
+	perResponse?: boolean;
 	reportId?: string;
 	historySummary: boolean;
 }
 
-function usageRecord(entry: SessionEntry): DailyUsageRecord | undefined {
-	const own = getSessionEntryUsage(entry);
-	if (own) {
-		const model = entry.type === "message" && entry.message.role === "assistant" ? entry.message.model : undefined;
-		return {
-			timestamp: entry.timestamp,
-			usage: own,
+function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
+	const own = getSessionEntryUsageComponents(entry);
+	if (own.length > 0)
+		return own.map((part) => ({
+			timestamp: part.timestamp,
+			usage: part.usage,
 			kind: "own",
-			...(model
-				? {
-						model,
-						provider:
-							entry.type === "message" && entry.message.role === "assistant"
-								? entry.message.provider
-								: undefined,
-					}
-				: {}),
+			model: part.model,
+			provider: part.provider,
 			historySummary: false,
-		};
-	}
-	if (entry.type !== "custom") return;
-	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE && entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return;
-	const data = entry.data as SemanticUsageReport | SpawnedUsageReport | undefined;
-	if (!data?.usage) return;
+		}));
+	if (entry.type !== "custom") return [];
+	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE && entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return [];
+	const data = entry.data as SemanticAccountingReport | SpawnedUsageReport | undefined;
+	if (!data?.usage) return [];
 	const semantic = entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE;
-	if (semantic && !data.reportId) return;
-	return {
-		timestamp: entry.timestamp,
-		usage: data.usage,
-		kind: semantic ? "semantic" : "spawned",
-		...(typeof data.model === "string" ? { model: data.model } : {}),
-		...(typeof data.provider === "string" ? { provider: data.provider } : {}),
-		reportId: data.reportId,
-		historySummary: semantic && (data as SemanticUsageReport).route === "history_summary",
-	};
+	if (semantic && !data.reportId) return [];
+	if (!semantic && (data as SpawnedUsageReport).usageComponents !== undefined)
+		return getSpawnedUsageComponents(data as SpawnedUsageReport, entry.timestamp).map((part) => ({
+			timestamp: part.timestamp,
+			usage: part.usage,
+			kind: "spawned",
+			model: part.model,
+			provider: part.provider,
+			perResponse: true,
+			reportId: `${data.reportId ?? entry.id}:${part.sourceId}`,
+			historySummary: false,
+		}));
+	return [
+		{
+			timestamp: semantic
+				? ((data as SemanticAccountingReport).responseTimestamp ?? entry.timestamp)
+				: entry.timestamp,
+			usage: data.usage,
+			kind: semantic ? "semantic" : "spawned",
+			...(semantic ? { costStatus: (data as SemanticAccountingReport).costStatus } : {}),
+			...(typeof data.model === "string" ? { model: data.model } : {}),
+			...(typeof data.provider === "string" ? { provider: data.provider } : {}),
+			...(!semantic && (data as SpawnedUsageReport).costBasis === "response" ? { perResponse: true } : {}),
+			reportId: data.reportId,
+			historySummary: semantic && (data as SemanticAccountingReport).route === "history_summary",
+		},
+	];
 }
 
 const MAX_CACHED_USAGE_RECORDS = 50_000;
 const MAX_CACHED_USAGE_BYTES = 8 * 1024 * 1024;
-const fileUsageCache = new Map<string, { key: string; records: DailyUsageRecord[]; bytes: number }>();
+const fileUsageCache = new Map<
+	string,
+	{ key: string; records: DailyUsageRecord[]; bytes: number; projection?: string }
+>();
 let cachedUsageRecords = 0;
 let cachedUsageBytes = 0;
 
-async function retainUsageRecords(path: string, key: string, records: DailyUsageRecord[]): Promise<void> {
+async function retainUsageRecords(
+	path: string,
+	key: string,
+	records: DailyUsageRecord[],
+	projection?: string,
+): Promise<void> {
 	const remove = (target: string): void => {
 		const cached = fileUsageCache.get(target);
 		if (!cached) return;
@@ -236,7 +292,7 @@ async function retainUsageRecords(path: string, key: string, records: DailyUsage
 		if (oldest === undefined) return;
 		remove(oldest);
 	}
-	fileUsageCache.set(path, { key, records, bytes });
+	fileUsageCache.set(path, { key, records, bytes, projection });
 	cachedUsageRecords += records.length;
 	cachedUsageBytes += bytes;
 }
@@ -261,30 +317,49 @@ export async function aggregateDailyUsageAsync(
 			if (!name.endsWith(".jsonl")) continue;
 			const filePath = join(directory, name);
 			const revision = await stat(filePath);
-			if (revision.mtimeMs < window.startMs) continue;
-			const key = `${revision.dev}:${revision.ino}:${revision.size}:${revision.mtimeMs}:${revision.ctimeMs}`;
+			const projectionRevision = await stat(accountingProjectionPath(filePath)).catch((error: unknown) => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+				throw error;
+			});
+			const fragmentRevision = await stat(accountingFragmentPath(filePath)).catch((error: unknown) => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+				throw error;
+			});
+			if (
+				Math.max(revision.mtimeMs, projectionRevision?.mtimeMs ?? 0, fragmentRevision?.mtimeMs ?? 0) <
+				window.startMs
+			)
+				continue;
+			const key = `${revision.dev}:${revision.ino}:${revision.size}:${revision.mtimeMs}:${revision.ctimeMs}:${projectionRevision?.mtimeMs ?? 0}:${fragmentRevision?.mtimeMs ?? 0}`;
 			let records: DailyUsageRecord[];
 			if (liveSession && resolve(filePath) === resolve(liveSession.filePath)) {
 				records = [];
 				for (let index = 0; index < liveSession.entries.length; index++) {
 					if (index % 256 === 0) await yieldToEventLoop();
-					const record = usageRecord(liveSession.entries[index]!);
-					if (record) records.push(record);
+					records.push(...usageRecords(liveSession.entries[index]!));
 				}
 			} else {
+				const materialized = projectionRevision ? await readAccountingRevision(filePath) : undefined;
+				if (projectionRevision && !materialized) totals.pending = true;
 				const cached = fileUsageCache.get(filePath);
-				if (cached?.key === key) records = cached.records;
+				if (cached?.key === key && cached.projection === materialized) records = cached.records;
 				else {
 					records = [];
-					await visitSessionEntriesAsync(
-						filePath,
-						(line) => line.includes('"usage"'),
-						(entry) => {
-							const record = usageRecord(entry);
-							if (record) records.push(record);
-						},
-					);
-					await retainUsageRecords(filePath, key, records);
+					const projected =
+						projectionRevision || fragmentRevision ? await readProjectedSessionEntries(filePath) : undefined;
+					if (projected) {
+						for (const entry of projected) {
+							records.push(...usageRecords(entry));
+						}
+					} else
+						await visitSessionEntriesAsync(
+							filePath,
+							(line) => line.includes('"usage"'),
+							(entry) => {
+								records.push(...usageRecords(entry));
+							},
+						);
+					await retainUsageRecords(filePath, key, records, materialized);
 				}
 			}
 			let used = false;
@@ -293,10 +368,27 @@ export async function aggregateDailyUsageAsync(
 				const record = records[index]!;
 				if (addDailyUsageRecord(totals, record, window, spawned, semantic)) used = true;
 			}
-			if (used) totals.sessions++;
+			if (used) {
+				if (fragmentRevision) totals.fragments = (totals.fragments ?? 0) + 1;
+				else totals.sessions++;
+			}
 		}
 	}
 	return finishTotals(totals);
+}
+
+function addDailyUsageFile(
+	totals: DailyUsageTotals,
+	filePath: string,
+	window: DailyUsageWindow,
+	spawned: Set<string>,
+	semantic: Set<string>,
+	liveSession?: LiveSessionDailyUsageSource,
+): void {
+	if (!shouldReadSessionFile(filePath, window)) return;
+	if (!addDailyUsageFromEntries(totals, getSessionEntries(filePath, liveSession), window, spawned, semantic)) return;
+	if (existsSync(accountingFragmentPath(filePath))) totals.fragments = (totals.fragments ?? 0) + 1;
+	else totals.sessions++;
 }
 
 export function aggregateDailyUsageFromSessionFiles(
@@ -311,11 +403,7 @@ export function aggregateDailyUsageFromSessionFiles(
 	for (const name of readdirSync(sessionDir)) {
 		if (!name.endsWith(".jsonl")) continue;
 		const filePath = join(sessionDir, name);
-		if (!shouldReadSessionFile(filePath, window)) continue;
-		const entries = getSessionEntries(filePath, liveSession);
-		if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds, seenSemanticReportIds)) {
-			totals.sessions += 1;
-		}
+		addDailyUsageFile(totals, filePath, window, seenSpawnedReportIds, seenSemanticReportIds, liveSession);
 	}
 	return finishTotals(totals);
 }
@@ -335,11 +423,7 @@ export function aggregateDailyUsageFromSessionRoot(
 		for (const fileName of readdirSync(dir)) {
 			if (!fileName.endsWith(".jsonl")) continue;
 			const filePath = join(dir, fileName);
-			if (!shouldReadSessionFile(filePath, window)) continue;
-			const entries = getSessionEntries(filePath, liveSession);
-			if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds, seenSemanticReportIds)) {
-				totals.sessions += 1;
-			}
+			addDailyUsageFile(totals, filePath, window, seenSpawnedReportIds, seenSemanticReportIds, liveSession);
 		}
 	}
 	return finishTotals(totals);
@@ -350,6 +434,11 @@ export function formatDailyUsageBreakdown(
 	formatLabel: (label: string) => string = (label) => label,
 ): string {
 	return [
+		...(totals.apiEquivalentPartial
+			? [
+					`API equivalent partial: ${totals.modelUnknownTokens ?? 0} tokens across ${totals.modelUnknownOperations ?? 0} operations lack model attribution`,
+				]
+			: []),
 		`${formatLabel("Today:")} ${totals.costEstimate ? "~" : ""}$${totals.totalCost.toFixed(4)}${totals.costEstimate ? " (base-rate estimate)" : ""}${totals.pending ? " (partial; updating)" : ""}`,
 		`${formatLabel("Own/session messages:")} $${totals.ownCost.toFixed(4)}`,
 		`${formatLabel("Spawned/background reports:")} $${(totals.spawnedCost - totals.historySummaryCost).toFixed(4)}`,

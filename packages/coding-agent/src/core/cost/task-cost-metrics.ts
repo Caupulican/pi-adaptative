@@ -1,5 +1,7 @@
+import type { Usage } from "@caupulican/pi-ai";
+import { isUnknownRecoveredToolResult } from "../../kernel/session/lifecycle-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import { getSessionEntryUsage } from "../../kernel/usage.ts";
+import { getSessionEntryUsage, getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { type GoalStatus, isGoalExecutionActive, isGoalTerminalStatus } from "../goals/goal-state.ts";
 import {
 	decodeGoalJournalPayload,
@@ -7,9 +9,14 @@ import {
 	getLatestGoalStateSnapshot,
 } from "../goals/session-goal-state.ts";
 import { WORK_UNIT_CUSTOM_TYPE, type WorkUnitRecord } from "../work-units.ts";
+import type { AccountingOrigin } from "./accounting-evidence.ts";
+import { measureTaskExecutionTiming } from "./task-execution-timing.ts";
 import {
+	hasUnknownUsageModel,
+	isMaintenanceUsageRoute,
 	resolveEffectiveEntryCost,
 	resolveSemanticUsageEntry,
+	resolveSpawnedUsageComponents,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
 } from "./usage-records.ts";
@@ -20,15 +27,24 @@ export interface ModelCostBreakdownRow {
 	readonly calls: number;
 	readonly tokens: number;
 	readonly costUsd: number;
+	readonly reportedCostUsd: number;
 }
 
 export interface TaskExecutionMetrics {
+	readonly modelUnknownTokens?: number;
+	readonly modelUnknownOperations?: number;
+	readonly apiEquivalentPartial?: boolean;
 	readonly id: string;
-	readonly kind: "goal" | "task";
+	readonly kind: "goal" | "task" | "worker";
 	readonly title: string;
 	readonly status: "active" | "completed" | "blocked" | "paused" | "cancelled" | "inactive" | "unknown";
 	/** Older transcripts lack execution lease timing; their activity gaps are estimates. */
 	readonly timingEstimated: boolean;
+	readonly timingSource: "lifecycle" | "goal_ledger" | "worker_ledger" | "historical_estimate";
+	readonly unresolvedTimedOperations: number;
+	/** The goal lease accumulator is a distinct measure from provider/tool interval union. */
+	readonly goalActiveMs?: number;
+	readonly workerActiveMs?: number;
 	/** Cumulative active execution time; timingEstimated identifies inferred historical activity. */
 	readonly activeMs: number;
 	/** Total wall-clock elapsed time in ms from task start to completion (or `nowMs` while active). */
@@ -47,6 +63,9 @@ export interface TaskExecutionMetrics {
 }
 
 export interface SessionTaskAndModelSummary {
+	readonly modelUnknownTokens: number;
+	readonly modelUnknownOperations: number;
+	readonly apiEquivalentPartial: boolean;
 	readonly currentTask?: TaskExecutionMetrics;
 	readonly tasks: readonly TaskExecutionMetrics[];
 	readonly models: readonly ModelCostBreakdownRow[];
@@ -85,8 +104,10 @@ export interface TaskMetricsPlanInput {
 const MAX_ACTIVE_TURN_GAP_MS = 10 * 60_000;
 
 interface MutableTaskWindow {
+	modelUnknownTokens?: number;
+	modelUnknownOperations?: number;
 	id: string;
-	kind: "goal" | "task";
+	kind: TaskExecutionMetrics["kind"];
 	goalId?: string;
 	title: string;
 	status: TaskExecutionMetrics["status"];
@@ -94,8 +115,6 @@ interface MutableTaskWindow {
 	endMs: number;
 	activeMs: number;
 	lastActivityMs?: number;
-	rounds: number;
-	toolCalls: number;
 	tokens: number;
 	rootCostUsd: number;
 	subagentCostUsd: number;
@@ -103,6 +122,7 @@ interface MutableTaskWindow {
 	provisionalUserPrompt: boolean;
 	goalState?: TaskMetricsGoalInput;
 	goalWindowClosed?: boolean;
+	workerActiveMs?: number;
 }
 
 function extractUserText(content: unknown): string {
@@ -145,7 +165,7 @@ function mapGoalStatus(status: string | undefined): TaskExecutionMetrics["status
 
 function makeTaskWindow(
 	id: string,
-	kind: "goal" | "task",
+	kind: TaskExecutionMetrics["kind"],
 	title: string,
 	startMs: number,
 	provisionalUserPrompt: boolean,
@@ -161,8 +181,6 @@ function makeTaskWindow(
 		endMs: startMs,
 		activeMs: 0,
 		lastActivityMs: startMs,
-		rounds: 0,
-		toolCalls: 0,
 		tokens: 0,
 		rootCostUsd: 0,
 		subagentCostUsd: 0,
@@ -192,21 +210,43 @@ export function computeSessionTaskAndModelMetrics(options: {
 	const nowMs = options.nowMs ?? Date.now();
 	const modelMap = new Map<
 		string,
-		{ model: string; role: ModelCostBreakdownRow["role"]; calls: number; tokens: number; costUsd: number }
+		{
+			model: string;
+			role: ModelCostBreakdownRow["role"];
+			calls: number;
+			tokens: number;
+			costUsd: number;
+			reportedCostUsd: number;
+		}
 	>();
 	const seenSpawned = new Set<string>();
 	const seenSemantic = new Set<string>();
 	let systemOneCostUsd = 0;
 	let systemOneReports = 0;
-	let totalRounds = 0;
-	let totalToolCalls = 0;
 	let unassignedCostUsd = 0;
+	let modelUnknownTokens = 0;
+	let modelUnknownOperations = 0;
+	const recordUnknownModel = (
+		usage: Usage,
+		provider: string | undefined,
+		model: string | undefined,
+		owner?: MutableTaskWindow,
+	): void => {
+		if (!hasUnknownUsageModel(usage, provider, model)) return;
+		modelUnknownTokens += usage.totalTokens;
+		modelUnknownOperations++;
+		if (owner) {
+			owner.modelUnknownTokens = (owner.modelUnknownTokens ?? 0) + usage.totalTokens;
+			owner.modelUnknownOperations = (owner.modelUnknownOperations ?? 0) + 1;
+		}
+	};
 
 	const recordModelUsage = (
 		model: string,
 		role: ModelCostBreakdownRow["role"],
 		tokens: number,
 		costUsd: number,
+		reportedCostUsd = costUsd,
 	): void => {
 		const key = `${role}:${model}`;
 		const existing = modelMap.get(key);
@@ -214,12 +254,39 @@ export function computeSessionTaskAndModelMetrics(options: {
 			existing.calls += 1;
 			existing.tokens += tokens;
 			existing.costUsd += costUsd;
+			existing.reportedCostUsd += reportedCostUsd;
 		} else {
-			modelMap.set(key, { model, role, calls: 1, tokens, costUsd });
+			modelMap.set(key, { model, role, calls: 1, tokens, costUsd, reportedCostUsd });
 		}
 	};
 
 	const windows: MutableTaskWindow[] = [];
+	const workerWindows = new Map<string, MutableTaskWindow>();
+	const workerAttemptTimes = new Map<string, { owner: MutableTaskWindow; milliseconds: number }>();
+	const entryOwners = new Map<string, MutableTaskWindow>();
+	const receiptOwner = (
+		origin: AccountingOrigin | undefined,
+		goalId?: string,
+		at?: number,
+	): MutableTaskWindow | undefined => {
+		const goal = origin?.goalId ?? goalId;
+		const owner =
+			(goal ? windows.find((window) => window.goalId === goal) : undefined) ??
+			(origin?.entryId ? entryOwners.get(origin.entryId) : undefined);
+		if (owner || !origin?.taskId) return owner;
+		const id = JSON.stringify([origin.sessionId, origin.taskId]);
+		let worker = workerWindows.get(id);
+		if (!worker && at !== undefined && Number.isFinite(at)) {
+			worker = makeTaskWindow(`worker:${id}`, "worker", `Worker task ${origin.taskId}`, at, false);
+			worker.status = "unknown";
+			workerWindows.set(id, worker);
+			windows.push(worker);
+		} else if (worker && at !== undefined && Number.isFinite(at)) {
+			worker.startMs = Math.min(worker.startMs, at);
+			worker.endMs = Math.max(worker.endMs, at);
+		}
+		return worker;
+	};
 	let currentWindow: MutableTaskWindow | undefined;
 	let latestGoalEntry: Extract<SessionEntry, { type: "custom" }> | undefined;
 	const previousGoalEntries = new Map<string, Extract<SessionEntry, { type: "custom" }> | undefined>();
@@ -238,8 +305,16 @@ export function computeSessionTaskAndModelMetrics(options: {
 		}
 		win.lastActivityMs = entryMs;
 	};
-	const openGoalWindow = (goalId: string, title: string, startMs: number): MutableTaskWindow => {
+	const openGoalWindow = (goalId: string, title: string, startMs: number, resumedAt = startMs): MutableTaskWindow => {
 		if (currentWindow?.goalId === goalId) return currentWindow;
+		const existing = windows.find((window) => window.goalId === goalId);
+		if (existing) {
+			if (currentWindow && isTaskExecutionActive(currentWindow.status)) currentWindow.status = "inactive";
+			currentWindow = existing;
+			currentWindow.goalWindowClosed = false;
+			currentWindow.lastActivityMs = resumedAt;
+			return currentWindow;
+		}
 		if (currentWindow?.provisionalUserPrompt && !currentWindow.goalId) {
 			currentWindow.id = goalId;
 			currentWindow.kind = "goal";
@@ -257,6 +332,30 @@ export function computeSessionTaskAndModelMetrics(options: {
 
 	for (const entry of options.entries) {
 		const entryMs = Date.parse(entry.timestamp) || nowMs;
+		if (currentWindow) entryOwners.set(entry.id, currentWindow);
+		if (entry.type === "custom" && entry.customType === "accounting_worker_time") {
+			const data = entry.data as {
+				milliseconds: number;
+				taskId?: string;
+				goalId?: string;
+				origin?: AccountingOrigin;
+			};
+			const owner = receiptOwner(data.origin, data.goalId);
+			if (
+				owner &&
+				data.origin?.operationId &&
+				typeof data.taskId === "string" &&
+				data.origin.taskId === data.taskId &&
+				Number.isFinite(data.milliseconds) &&
+				data.milliseconds >= 0
+			) {
+				const key = JSON.stringify([data.origin.sessionId, data.taskId, data.origin.operationId]);
+				const prior = workerAttemptTimes.get(key);
+				if (prior) prior.milliseconds = Math.max(prior.milliseconds, data.milliseconds);
+				else workerAttemptTimes.set(key, { owner, milliseconds: data.milliseconds });
+			}
+			continue;
+		}
 		const predecessor = entry.parentId ? previousGoalEntries.get(entry.parentId) : undefined;
 		previousGoalEntries.set(entry.id, predecessor);
 		if (entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE) {
@@ -264,10 +363,10 @@ export function computeSessionTaskAndModelMetrics(options: {
 			previousGoalEntries.set(entry.id, latestGoalEntry);
 			const state = getLatestGoalStateSnapshot(goalSource);
 			const window = state
-				? (windows.find((candidate) => candidate.goalId === state.goalId) ??
-					openGoalWindow(state.goalId, state.userGoal, Date.parse(state.createdAt) || entryMs))
+				? openGoalWindow(state.goalId, state.userGoal, Date.parse(state.createdAt) || entryMs, entryMs)
 				: undefined;
 			if (state && window) {
+				entryOwners.set(entry.id, window);
 				window.goalState = state;
 				window.status = mapGoalStatus(state.status);
 				window.title = cleanTaskTitle(state.userGoal);
@@ -288,6 +387,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 				const openedAt =
 					typeof data.openedAt === "number" && Number.isFinite(data.openedAt) ? data.openedAt : entryMs;
 				openGoalWindow(data.goalId, data.reason ?? data.goalId, openedAt);
+				if (currentWindow) entryOwners.set(entry.id, currentWindow);
 				continue;
 			}
 		}
@@ -307,6 +407,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 				if (currentWindow && isTaskExecutionActive(currentWindow.status)) currentWindow.status = "inactive";
 				currentWindow = makeTaskWindow(`task-${windows.length + 1}`, "task", text, entryMs, true);
 				windows.push(currentWindow);
+				entryOwners.set(entry.id, currentWindow);
 			} else if (currentWindow) {
 				currentWindow.lastActivityMs = entryMs;
 				if (entryMs > currentWindow.endMs) currentWindow.endMs = entryMs;
@@ -316,30 +417,29 @@ export function computeSessionTaskAndModelMetrics(options: {
 
 		if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const report = entry.data as SpawnedUsageReport | undefined;
-			const resolved = resolveEffectiveEntryCost(report?.usage, {
-				model: report?.model,
-				provider: report?.provider,
-				kind: "spawned",
-			});
-			if (!resolved || !report) continue;
+			if (!report) continue;
 			if (report.reportId) {
 				if (seenSpawned.has(report.reportId)) continue;
 				seenSpawned.add(report.reportId);
 			}
-			const tok = report.usage.input + report.usage.output + report.usage.cacheRead + report.usage.cacheWrite;
-			const owner = report.goalId ? windows.find((window) => window.goalId === report.goalId) : undefined;
-			if (owner) {
-				owner.tokens += tok;
-				owner.subagentCostUsd += resolved.total;
-			} else unassignedCostUsd += resolved.total;
-			recordModelUsage(
-				report.model
-					? `${report.provider ?? "unknown"}/${report.model} subtree`
-					: (report.label ?? "subagent subtree"),
-				"subagent",
-				tok,
-				resolved.total,
-			);
+			const owner = receiptOwner(report.origin, report.goalId, Date.parse(entry.timestamp));
+			for (const { part, cost: resolved } of resolveSpawnedUsageComponents(report, entry.timestamp)) {
+				const tok = part.usage.input + part.usage.output + part.usage.cacheRead + part.usage.cacheWrite;
+				recordUnknownModel(part.usage, part.provider, part.model, owner);
+				if (owner) {
+					owner.tokens += tok;
+					owner.subagentCostUsd += resolved.total;
+				} else unassignedCostUsd += resolved.total;
+				recordModelUsage(
+					part.model
+						? `${part.provider ?? "unknown"}/${part.model}${report.costBasis === "response" || report.usageComponents !== undefined ? "" : " subtree"}`
+						: (report.label ?? "subagent subtree"),
+					"subagent",
+					tok,
+					resolved.total,
+					resolved.reportedTotal,
+				);
+			}
 			continue;
 		}
 
@@ -349,9 +449,22 @@ export function computeSessionTaskAndModelMetrics(options: {
 			if (seenSemantic.has(report.reportId)) continue;
 			seenSemantic.add(report.reportId);
 			const tok = report.usage.input + report.usage.output + report.usage.cacheRead + report.usage.cacheWrite;
-			const role = report.route === "history_summary" ? "icm" : "system_one";
-			recordModelUsage(`${report.provider}/${report.model || role}`, role, tok, resolved.total);
-			unassignedCostUsd += resolved.total;
+			const role =
+				report.route === "history_summary" ? "icm" : isMaintenanceUsageRoute(report.route) ? "root" : "system_one";
+			recordModelUsage(
+				`${report.provider}/${report.model || role}`,
+				role,
+				tok,
+				resolved.total,
+				resolved.reportedTotal,
+			);
+			const owner = receiptOwner(report.origin, undefined, Date.parse(report.responseTimestamp ?? entry.timestamp));
+			recordUnknownModel(report.usage, report.provider, report.model, owner);
+			if (owner) {
+				owner.tokens += tok;
+				if (role === "icm") owner.icmCostUsd += resolved.total;
+				else owner.rootCostUsd += resolved.total;
+			} else unassignedCostUsd += resolved.total;
 			if (role === "system_one") {
 				systemOneCostUsd += resolved.total;
 				systemOneReports += 1;
@@ -370,38 +483,39 @@ export function computeSessionTaskAndModelMetrics(options: {
 				options.goalState?.goalId,
 			);
 			windows.push(currentWindow);
+			entryOwners.set(entry.id, currentWindow);
 		}
 
 		const assistant = entry.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
 		if (assistant) {
-			totalRounds += 1;
-			currentWindow.rounds += 1;
 			advanceWindowClock(currentWindow, entryMs);
 		} else if (entry.type === "message" && entry.message.role === "toolResult") {
-			totalToolCalls += 1;
-			currentWindow.toolCalls += 1;
-			advanceWindowClock(currentWindow, entryMs);
+			if (!isUnknownRecoveredToolResult(entry.message)) advanceWindowClock(currentWindow, entryMs);
 		}
-		const usage = getSessionEntryUsage(entry);
-		if (!usage) continue;
-		const cost = resolveEffectiveEntryCost(usage, {
-			model: assistant?.model,
-			provider: assistant?.provider,
-			kind: "own",
-		});
-		if (!cost) continue;
-		const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-		currentWindow.tokens += tokens;
-		currentWindow.rootCostUsd += cost.total;
-		const model = assistant
-			? `${assistant.provider}/${assistant.model}`
-			: entry.type === "message"
-				? "tool usage (model unreported)"
-				: "compaction / branch summary";
-		recordModelUsage(model, "root", tokens, cost.total);
+		for (const part of getSessionEntryUsageComponents(entry)) {
+			const usage = part.usage;
+			const cost = resolveEffectiveEntryCost(usage, {
+				model: part.model,
+				provider: part.provider,
+				kind: "own",
+			});
+			if (!cost) continue;
+			const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			currentWindow.tokens += tokens;
+			currentWindow.rootCostUsd += cost.total;
+			recordUnknownModel(usage, part.provider, part.model, currentWindow);
+			const model = part.model
+				? `${part.provider ?? "unknown"}/${part.model}`
+				: entry.type === "message"
+					? "tool usage (model unreported)"
+					: `${entry.type === "compaction" ? "compaction" : "branch summary"} (model unrecorded)`;
+			recordModelUsage(model, "root", tokens, cost.total, cost.reportedTotal);
+		}
 	}
 
 	const goal = options.goalState;
+	for (const { owner, milliseconds } of workerAttemptTimes.values())
+		owner.workerActiveMs = (owner.workerActiveMs ?? 0) + milliseconds;
 	if (goal) {
 		let goalWin = windows.find((w) => w.goalId === goal.goalId);
 		if (!goalWin && windows.length > 0 && windows[windows.length - 1]!.provisionalUserPrompt) {
@@ -422,30 +536,38 @@ export function computeSessionTaskAndModelMetrics(options: {
 		if (createdMs > 0 && createdMs < goalWin.startMs) goalWin.startMs = createdMs;
 		if (updatedMs > goalWin.endMs) goalWin.endMs = updatedMs;
 		goalWin.goalState = goal;
+		currentWindow = goalWin;
 	}
 
 	const plan = options.taskState;
 	const planTotal = plan ? plan.steps.length + plan.archive.completed + plan.archive.cancelled : 0;
 	const planDone = plan ? plan.archive.completed + plan.steps.filter((s) => s.status === "completed").length : 0;
 
-	const tasks: TaskExecutionMetrics[] = windows.map((win, idx) => {
-		const isLast = idx === windows.length - 1;
+	const operationTimings = measureTaskExecutionTiming(options.entries, entryOwners);
+	const tasks: TaskExecutionMetrics[] = windows.map((win) => {
+		const isLast = win === currentWindow;
 		const isGoalMatch = goal !== undefined && win.goalId === goal.goalId;
 		const recordedGoal = win.goalState;
 		const isRunningNow =
 			!win.goalWindowClosed &&
 			isLast &&
 			(options.isStreaming === true || (isGoalMatch && isGoalExecutionActive(goal.status)));
-		const wallMs = Math.max(0, (isRunningNow ? Math.max(win.endMs, nowMs) : win.endMs) - win.startMs);
+		const timing = operationTimings.get(win);
+		const endedAt = Math.max(win.endMs, timing?.lastEndMs ?? win.endMs);
+		const wallMs = Math.max(0, (isRunningNow ? Math.max(endedAt, nowMs) : endedAt) - win.startMs);
 		const measuredActive = recordedGoal?.continuationWallClockMs;
-		const activeMs = Math.min(wallMs, measuredActive ?? win.activeMs);
+		const activeMs = timing?.hasLifecycle
+			? timing.activeMs
+			: win.kind === "worker"
+				? (win.workerActiveMs ?? 0)
+				: Math.min(wallMs, measuredActive ?? win.activeMs);
 		const status = win.goalWindowClosed
 			? win.status
 			: recordedGoal
 				? mapGoalStatus(recordedGoal.status)
 				: isRunningNow
 					? "active"
-					: win.kind === "goal"
+					: win.kind === "goal" || win.kind === "worker"
 						? win.status
 						: "inactive";
 		const stepsCompleted =
@@ -461,15 +583,28 @@ export function computeSessionTaskAndModelMetrics(options: {
 					? goal.requirements.length
 					: undefined;
 		return {
+			modelUnknownTokens: win.modelUnknownTokens,
+			modelUnknownOperations: win.modelUnknownOperations,
+			apiEquivalentPartial: (win.modelUnknownTokens ?? 0) > 0,
 			id: win.id,
 			kind: win.kind,
 			title: win.title,
 			status,
-			timingEstimated: measuredActive === undefined,
+			timingEstimated: !timing?.hasLifecycle && measuredActive === undefined && win.workerActiveMs === undefined,
+			timingSource: timing?.hasLifecycle
+				? "lifecycle"
+				: measuredActive !== undefined
+					? "goal_ledger"
+					: win.kind === "worker" && win.workerActiveMs !== undefined
+						? "worker_ledger"
+						: "historical_estimate",
+			unresolvedTimedOperations: timing?.unresolvedIntervals ?? 0,
+			...(measuredActive !== undefined ? { goalActiveMs: measuredActive } : {}),
+			...(win.workerActiveMs !== undefined ? { workerActiveMs: win.workerActiveMs } : {}),
 			activeMs,
 			wallMs: Math.max(activeMs, wallMs),
-			rounds: win.rounds,
-			toolCalls: win.toolCalls,
+			rounds: timing?.requests ?? 0,
+			toolCalls: timing?.toolCalls ?? 0,
 			...(stepsTotal !== undefined && stepsCompleted !== undefined ? { stepsCompleted, stepsTotal } : {}),
 			tokens: win.tokens,
 			rootCostUsd: win.rootCostUsd,
@@ -482,15 +617,18 @@ export function computeSessionTaskAndModelMetrics(options: {
 	const models = [...modelMap.values()].sort(
 		(a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens || a.model.localeCompare(b.model),
 	);
-	const currentTask = tasks.at(-1);
+	const currentTask = tasks.find((task) => task.id === currentWindow?.id);
 	return {
+		modelUnknownTokens,
+		modelUnknownOperations,
+		apiEquivalentPartial: modelUnknownTokens > 0,
 		...(currentTask ? { currentTask } : {}),
 		tasks,
 		models,
 		systemOneCostUsd,
 		systemOneReports,
-		totalRounds,
-		totalToolCalls,
+		totalRounds: tasks.reduce((sum, task) => sum + task.rounds, 0),
+		totalToolCalls: tasks.reduce((sum, task) => sum + task.toolCalls, 0),
 		unassignedCostUsd,
 	};
 }

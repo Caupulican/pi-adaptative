@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { lstat, rm, unlink } from "node:fs/promises";
 import { readSessionHeaderResult } from "../kernel/session/session-manager.ts";
 import { orchestrationSessionDir } from "./agent-paths.ts";
+import { accountingProjectionPath } from "./cost/accounting-evidence.ts";
+import { accountingFragmentPath } from "./cost/accounting-fragments.ts";
 import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { reserveSessionBundleDeletion, settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
@@ -83,6 +85,17 @@ async function removeJournalSidecars(
 	let paths: string[];
 	try {
 		paths = sessionJournalPaths(sessionPath);
+		for (const accounting of [accountingProjectionPath(sessionPath), accountingFragmentPath(sessionPath)])
+			if (
+				await lstat(accounting).then(
+					() => true,
+					(error: unknown) => {
+						if (isMissingFileError(error)) return false;
+						throw error;
+					},
+				)
+			)
+				paths.push(accounting);
 	} catch {
 		return { ok: false, method: "preserved" };
 	}

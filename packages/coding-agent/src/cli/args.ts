@@ -9,6 +9,7 @@ import type { ExtensionFlag } from "../core/extensions/types.ts";
 import { isTerminalSessionMode, type TerminalSessionMode } from "../core/session-role.ts";
 import { isValidThinkingLevel, VALID_THINKING_LEVELS } from "../core/thinking-level.ts";
 import type { ThinkingLevel } from "../kernel/index.ts";
+import { ACCOUNTING_RECONCILE_HELP } from "./reconcile-accounting.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -312,6 +313,7 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [@files...] [messages...]
 
 ${chalk.bold("Commands:")}
+  ${APP_NAME} ${ACCOUNTING_RECONCILE_HELP}
   ${APP_NAME} install <source> [-l] [--approve|--no-approve]
                                  Install extension source and add to settings
   ${APP_NAME} remove <source> [-l] [--approve|--no-approve]

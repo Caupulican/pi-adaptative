@@ -19,6 +19,7 @@ import { buildInitialMessage } from "./cli/initial-message.ts";
 import { applyLaunchEnvironment, isSupervisedInteractiveLaunch, isTruthyEnvFlag } from "./cli/launch.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
+import { runAccountingReconcileCommand } from "./cli/reconcile-accounting.ts";
 import { initializeRuntimeChildChannel } from "./cli/runtime-channel.ts";
 import { applyRuntimeRestartArgs, bindInteractiveRuntimeRestart } from "./cli/runtime-restart.ts";
 import { superviseInteractiveRuntime } from "./cli/runtime-supervision.ts";
@@ -649,6 +650,10 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (args[0] === "accounting-reconcile") {
+		await runAccountingReconcileCommand(args.slice(1));
+		return;
+	}
 	if (args[0] === "--collaboration-peer") {
 		console.log(JSON.stringify(await runCollaborationPeer(args.slice(1))));
 		return;

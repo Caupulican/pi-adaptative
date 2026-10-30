@@ -4,8 +4,11 @@ import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { addUsage } from "../../kernel/usage.ts";
+import { MaintenanceUsageRetentionError, type UsageComponent } from "../../kernel/usage-components.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import {
+	type HistoryUsageCall,
+	type MaintenanceUsageRoute,
 	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
 	type SystemOneUsageLease,
 	type SystemOneUsageOutcome,
@@ -16,6 +19,8 @@ import {
 } from "../review/system-one-review-port.ts";
 import { priceCompletedUsage } from "../review/typesafe-usage.ts";
 import { parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
+import type { AccountingOrigin } from "./accounting-evidence.ts";
+import { captureSessionAccountingOrigin } from "./accounting-origin.ts";
 import {
 	errorCodeOf,
 	foreignJournalPaths,
@@ -98,12 +103,15 @@ export interface SemanticUsageSnapshot {
 
 /** One session's usage owner: the reviewer's sink, admission's confirmation, and the session's pending journal. */
 export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
+	captureOrigin(): AccountingOrigin;
 	readonly disposed: boolean;
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	pendingProjection(): SemanticUsageProjection;
 	/** Records a history summary model call's paid spend through the same retention and canonical row as a System One review. */
-	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
+	recordHistoryUsage(usage: Usage, call: HistoryUsageCall): void;
+	/** Retains an actual maintenance response before validation; throws if its paid usage has no durable owner. */
+	recordMaintenanceUsage(component: UsageComponent, route: MaintenanceUsageRoute, origin?: AccountingOrigin): void;
 	snapshot(): SemanticUsageSnapshot;
 	/** Binds the host's warning sink; warnings raised before the binding are delivered on it. */
 	bindDiagnostics(warn: (message: string) => void): void;
@@ -153,6 +161,8 @@ const UNCERTAIN_LEDGER_CAUSE = "Session persistence state is uncertain after a f
 
 /** The noun a usage warning names: a System One review's receipt, or a history summary's spend report. */
 function usageSubject(route: SystemOneUsageRoute | undefined): string {
+	if (route === "compaction") return "A compaction usage report";
+	if (route === "branch_summary") return "A branch summary usage report";
 	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
 }
 
@@ -331,14 +341,22 @@ class SemanticUsageLease implements SystemOneUsageLease {
 	private readonly owner: LeaseOwner;
 	private readonly identity: SemanticUsageLedgerIdentity;
 	private readonly route: SystemOneUsageRoute | undefined;
+	private readonly origin: AccountingOrigin;
 	private unused: number;
 	private released = false;
 
-	constructor(owner: LeaseOwner, identity: SemanticUsageLedgerIdentity, slots: number, route?: SystemOneUsageRoute) {
+	constructor(
+		owner: LeaseOwner,
+		identity: SemanticUsageLedgerIdentity,
+		slots: number,
+		origin: AccountingOrigin,
+		route?: SystemOneUsageRoute,
+	) {
 		this.owner = owner;
 		this.identity = identity;
 		this.unused = slots;
 		this.route = route;
+		this.origin = Object.freeze({ ...origin });
 	}
 
 	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome {
@@ -349,10 +367,11 @@ class SemanticUsageLease implements SystemOneUsageLease {
 			this.unused -= 1;
 			this.owner.returnSlots(1);
 		}
-		return this.owner.recordLease(
-			this.identity,
-			this.route === undefined ? receipt : { ...receipt, route: this.route },
-		);
+		return this.owner.recordLease(this.identity, {
+			...receipt,
+			...(this.route === undefined ? {} : { route: this.route }),
+			origin: this.origin,
+		});
 	}
 
 	release(): void {
@@ -374,6 +393,7 @@ class SemanticUsageLease implements SystemOneUsageLease {
  * 2048: a recovery adopts up to 1024 journal records beside up to 1024 obligations admitted while the journal was unreadable.
  */
 class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner {
+	private readonly capture: () => AccountingOrigin;
 	private readonly ledger: SemanticUsageLedgerPort;
 	private readonly bound: SemanticUsageLedgerIdentity;
 	/** The bound identity's sidecar; undefined for an in-memory session or a persisted session whose id is not a safe name. */
@@ -408,9 +428,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private deferredHandoff: ((disposition: DiscardDisposition) => void) | undefined;
 	private overflow: { usage: Usage; reports: number } | undefined;
 
-	constructor(ledger: SemanticUsageLedgerPort) {
+	constructor(ledger: SemanticUsageLedgerPort, capture?: () => AccountingOrigin) {
 		this.ledger = ledger;
 		this.bound = ledger.identity();
+		this.capture = capture ?? (() => ({ sessionId: this.bound.sessionId }));
 		this.boundSlot = journalSlotOf(this.bound);
 		if (this.bound.persisted) this.unsubscribePersisted = ledger.onPersisted(() => this.scheduleReconcile());
 		if (this.boundSlot !== undefined) this.listUnmatched(this.boundSlot);
@@ -429,13 +450,20 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	 * when the session identity moved on. An unreadable or unwritable journal never refuses: its receipts are disclosed as
 	 * unretained, and the owner keeps retrying the journal.
 	 */
-	begin(route?: SystemOneUsageRoute): SystemOneUsageLease {
+	captureOrigin(): AccountingOrigin {
+		return Object.freeze({ ...this.capture() });
+	}
+
+	begin(route?: SystemOneUsageRoute, origin = this.captureOrigin()): SystemOneUsageLease {
 		if (this.isDisposed) {
 			throw new SystemOneUsageRefusal(
 				"System One usage cannot be recorded: the session has ended, so no evaluation starts",
 			);
 		}
 		const identity = this.ledger.identity();
+		if (origin.sessionId !== identity.sessionId) {
+			throw new SystemOneUsageRefusal("System One usage origin belongs to a different session");
+		}
 		if (!sameIdentity(identity, this.bound)) {
 			throw new SystemOneUsageRefusal("System One usage cannot be recorded: the session identity changed");
 		}
@@ -445,7 +473,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			);
 		}
 		this.reserved += SYSTEM_ONE_RESPONSES_PER_EVALUATION;
-		return new SemanticUsageLease(this, identity, SYSTEM_ONE_RESPONSES_PER_EVALUATION, route);
+		return new SemanticUsageLease(this, identity, SYSTEM_ONE_RESPONSES_PER_EVALUATION, origin, route);
 	}
 
 	returnSlots(count: number): void {
@@ -458,37 +486,47 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	 * bound, and history summary spend holds at most half of it, so System One always keeps the other half. Past either bound the
 	 * spend is kept in a bounded live aggregate: counted in this session's live total, warned once, not durable.
 	 */
-	recordHistoryUsage(
-		usage: Usage,
-		call: { reportId: string; provider: string; model: string; attempt: number },
-	): void {
+	recordHistoryUsage(usage: Usage, call: HistoryUsageCall): void {
+		const receipt = this.historyReceipt(usage, call);
 		if (this.isDisposed) {
-			this.retainAfterEnd(this.historyReceipt(usage, call));
+			this.retainAfterEnd(receipt);
 			return;
 		}
 		const historyHeld = [...this.held.values()].filter((entry) => entry.payload.route === "history_summary").length;
-		const priced = priceCompletedUsage(call.provider, call.model, usage);
 		if (
 			this.held.size + this.reserved + 1 > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS ||
 			historyHeld >= HISTORY_SUMMARY_SHARE_RECORDS
 		) {
-			this.keepOverflow(priced.usage);
+			this.keepOverflow(receipt.usage);
 			return;
 		}
-		this.recordLease(this.ledger.identity(), {
-			...priced,
-			receiptId: call.reportId,
-			provider: call.provider,
-			model: call.model,
-			attempt: call.attempt,
-			route: "history_summary",
-		});
+		this.recordLease(this.bound, receipt);
 	}
 
-	private historyReceipt(
-		usage: Usage,
-		call: { reportId: string; provider: string; model: string; attempt: number },
-	): TypeSafeUsageReceipt {
+	recordMaintenanceUsage(component: UsageComponent, route: MaintenanceUsageRoute, origin?: AccountingOrigin): void {
+		if (origin !== undefined && origin.sessionId !== this.bound.sessionId) {
+			throw new MaintenanceUsageRetentionError("Maintenance usage origin belongs to a different session");
+		}
+		if (!this.held.has(component.sourceId) && this.held.size + this.reserved >= SEMANTIC_USAGE_JOURNAL_MAX_RECORDS) {
+			throw new MaintenanceUsageRetentionError("Maintenance usage journal is full");
+		}
+		const receipt: TypeSafeUsageReceipt = {
+			...priceCompletedUsage(component.provider, component.model, component.usage),
+			responseTimestamp: component.timestamp,
+			receiptId: component.sourceId,
+			provider: component.provider,
+			model: component.model,
+			attempt: 1,
+			route,
+			origin: { sessionId: this.bound.sessionId, operationId: component.sourceId, ...origin },
+		};
+		const outcome = this.recordLease(this.bound, receipt);
+		if (outcome.kind === "unretained") {
+			throw new MaintenanceUsageRetentionError(`Maintenance usage could not be retained: ${outcome.cause}`);
+		}
+	}
+
+	private historyReceipt(usage: Usage, call: HistoryUsageCall): TypeSafeUsageReceipt {
 		return {
 			...priceCompletedUsage(call.provider, call.model, usage),
 			receiptId: call.reportId,
@@ -496,6 +534,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			model: call.model,
 			attempt: call.attempt,
 			route: "history_summary",
+			...(call.origin ? { origin: { ...call.origin } } : {}),
 		};
 	}
 
@@ -1367,7 +1406,9 @@ const deliveries = new WeakMap<SessionManager, SemanticUsageDelivery>();
 export function sessionSemanticUsageOf(manager: SessionManager): SessionSemanticUsageDelivery {
 	const existing = deliveries.get(manager);
 	if (existing && !existing.disposed) return existing;
-	const delivery = new SemanticUsageDelivery(createSessionManagerLedgerPort(manager));
+	const delivery = new SemanticUsageDelivery(createSessionManagerLedgerPort(manager), () =>
+		captureSessionAccountingOrigin(manager),
+	);
 	deliveries.set(manager, delivery);
 	return delivery;
 }

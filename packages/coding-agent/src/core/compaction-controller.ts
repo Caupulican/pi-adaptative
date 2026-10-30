@@ -27,6 +27,7 @@ import {
 	type RetryPolicy,
 	sleepAbortable,
 } from "../kernel/reliability/index.ts";
+import { SessionAppendCommittedError } from "../kernel/session/session-append-receipt.ts";
 import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import {
 	getLatestCompactionEntry,
@@ -35,6 +36,8 @@ import {
 	type SessionManager,
 } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
+import { combineUsage } from "../kernel/usage.ts";
+import { MaintenanceUsageRetentionError, type UsageComponent } from "../kernel/usage-components.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
 	type CompactionEconomicsInput,
@@ -63,6 +66,7 @@ import { type LastSentRequest, sameCacheLane, sessionLaneSummarizerRequest } fro
 import { IdlePreparationTimer } from "./context/idle-preparation-timer.ts";
 import { estimateRequestEnvelopeTokens } from "./context/prompt-headroom.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
+import type { AccountingOrigin } from "./cost/accounting-evidence.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { type ContinuousChatWire, resolveContinuousChatTurnStart } from "./memory/continuous-chat-projection.ts";
@@ -149,6 +153,7 @@ interface PendingRequestFrontier extends ThresholdFrontierSettings {
 }
 
 interface ActiveCompactionLifecycle {
+	usageComponents: UsageComponent[];
 	compactionId: string;
 	latestCompactionEntryId?: string;
 	/** How the committed compaction ends (a deterministic fallback keeps its outcome and cause), known once its entry is durable. */
@@ -211,6 +216,8 @@ type CompactionControllerEvent =
 	| { type: "warning"; message: string };
 
 export interface CompactionControllerDeps {
+	captureUsageOrigin?(): AccountingOrigin;
+	recordMaintenanceUsage?(component: UsageComponent, route: "compaction", origin?: AccountingOrigin): void;
 	agent: Agent;
 	runtimeAdmission: RuntimeGenerationAdmission;
 	sessionManager: SessionManager;
@@ -389,6 +396,7 @@ export async function runCompactionWithRetry<T>(options: {
 		try {
 			return await options.run();
 		} catch (error) {
+			if (error instanceof MaintenanceUsageRetentionError) throw error;
 			if (options.signal.aborted || attempt >= maxAttempts) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			const classified = classifyFailure({ message, provider: options.provider });
@@ -745,6 +753,7 @@ export class CompactionController {
 		sessionModel: Model<Api>,
 		chunked: boolean,
 		summaryBudgetScale = 1,
+		usageComponents = this.activeCompactionLifecycle?.usageComponents,
 	): CompactionExecutionOptions {
 		const structuredRequest = sessionLaneSummarizerRequest({
 			compactionModel,
@@ -757,7 +766,17 @@ export class CompactionController {
 			textToolCallProtocol: this.deps.agent.textToolCallProtocol,
 			sessionId: this.deps.sessionManager.getSessionId(),
 		});
-		return { chunked, summaryBudgetScale, ...(structuredRequest ? { structuredRequest } : {}) };
+		const origin = this.deps.captureUsageOrigin?.();
+		return {
+			chunked,
+			summaryBudgetScale,
+			...(structuredRequest ? { structuredRequest } : {}),
+			...(this.deps.recordMaintenanceUsage ? { usageReceiptOwned: true as const } : {}),
+			onUsage: (component: UsageComponent) => {
+				this.deps.recordMaintenanceUsage?.(component, "compaction", origin);
+				usageComponents?.push(component);
+			},
+		};
 	}
 
 	private streamWithFrozenAuth(
@@ -840,7 +859,7 @@ export class CompactionController {
 			preparation.tokensBefore,
 			preparation.summarizerInputTokens,
 		);
-		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
+		this.activeCompactionLifecycle = { compactionId, endAttempted: false, usageComponents: [] };
 	}
 
 	private recordAppliedCompaction(compactionEntryId: string): void {
@@ -2200,6 +2219,7 @@ export class CompactionController {
 		const auth = await this.deps.resolveModelAndAuth(summarizer, model);
 		if (auth.failure) throw new Error(auth.failure);
 		if (signal.aborted || this.closed) return undefined;
+		const usageComponents: UsageComponent[] = [];
 		const runIdleCompact = (budgetScale?: number) =>
 			this.deps.compactWithRetry(
 				() =>
@@ -2213,7 +2233,7 @@ export class CompactionController {
 						this.deps.resolveThinkingLevel(auth.model, model),
 						this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey, auth.requestGuard),
 						this.deps.buildPreDigest(),
-						this.buildExecutionOptions(preparation, auth.model, model, false, budgetScale),
+						this.buildExecutionOptions(preparation, auth.model, model, false, budgetScale, usageComponents),
 					),
 				signal,
 				auth.model.provider,
@@ -2226,6 +2246,11 @@ export class CompactionController {
 			if (!message.includes("summary-length-stop") || signal.aborted) throw error;
 			result = await runIdleCompact(2);
 		}
+		result = {
+			...result,
+			usageComponents,
+			usage: combineUsage(...usageComponents.map((component) => component.usage)),
+		};
 		// Record it only on the history it read: the same session, whose branch still leads from the entry
 		// the preparation read up to, with no new conversational entry, request, or compaction since.
 		if (signal.aborted || this.deps.sessionManager.getSessionId() !== sessionId || !this.leadsFrom(readLeafId)) {
@@ -2394,7 +2419,7 @@ export class CompactionController {
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
-		const lifecycle: ActiveCompactionLifecycle = { compactionId, endAttempted: false };
+		const lifecycle: ActiveCompactionLifecycle = { compactionId, endAttempted: false, usageComponents: [] };
 		this.activeCompactionLifecycle = lifecycle;
 		try {
 			const compactionEntryId = await this.applyResult(result, false);
@@ -2613,6 +2638,14 @@ export class CompactionController {
 			);
 		}
 		let applied: CompactionResult = { ...result };
+		const received = this.activeCompactionLifecycle?.usageComponents;
+		if (!fromExtension && received?.length)
+			applied = {
+				...applied,
+				usageComponents: [...received],
+				usage: combineUsage(...received.map((component) => component.usage)),
+				...(this.deps.recordMaintenanceUsage ? { usageReceiptOwned: true as const } : {}),
+			};
 		if (this.deps.decorateCompactionDetails) {
 			applied = { ...applied, details: this.deps.decorateCompactionDetails(applied.details) };
 		}
@@ -2623,18 +2656,31 @@ export class CompactionController {
 				applied = { ...applied, summary: `${applied.summary.trimEnd()}\n\n${transcriptPointer}` };
 			}
 		}
-		const compactionEntryId = this.deps.sessionManager.appendCompaction(
-			applied.summary,
-			applied.firstKeptEntryId,
-			applied.tokensBefore,
-			applied.details,
-			fromExtension,
-			applied.usage,
-			applied.retention,
-			applied.coveredThroughEntryId,
-			applied.summarizedGapEntryIds,
-			scopeStartEntryId,
-		);
+		let compactionEntryId: string;
+		try {
+			compactionEntryId = this.deps.sessionManager.appendCompaction(
+				applied.summary,
+				applied.firstKeptEntryId,
+				applied.tokensBefore,
+				applied.details,
+				fromExtension,
+				applied.usage,
+				applied.retention,
+				applied.coveredThroughEntryId,
+				applied.summarizedGapEntryIds,
+				scopeStartEntryId,
+				applied.usageComponents,
+				applied.usageReceiptOwned,
+			);
+		} catch (error) {
+			if (error instanceof SessionAppendCommittedError) {
+				const committed = error.receipt.entries.find((entry) => entry.type === "compaction");
+				if (committed) this.recordAppliedCompaction(committed.id);
+				if (received) received.length = 0;
+			}
+			throw error;
+		}
+		if (received) received.length = 0;
 		// The entry is durable from here: the lifecycle names it at once, so a close that lands while the extensions' `session_compact`
 		// handlers are still awaited records this compaction as committed, not as cancelled.
 		this.recordAppliedCompaction(compactionEntryId);
