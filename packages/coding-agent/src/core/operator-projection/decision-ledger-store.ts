@@ -236,6 +236,7 @@ export class DecisionLedgerStore {
 				...(options.busyTimeoutMs !== undefined ? { busyTimeoutMs: options.busyTimeoutMs } : {}),
 			},
 			(database) => {
+				database.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};`);
 				database.exec(`
 			PRAGMA journal_mode = WAL;
 			CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -280,6 +281,7 @@ export class DecisionLedgerStore {
 				disposition TEXT NOT NULL CHECK (disposition IN ('conservative_path', 'evidence_based_decision')),
 				reason TEXT NOT NULL,
 				evidence TEXT NOT NULL,
+				worker_task_fit TEXT CHECK (worker_task_fit IN ('adequate', 'inadequate')),
 				decided_at INTEGER NOT NULL,
 				PRIMARY KEY (session_id, evaluation_id, question)
 			);
@@ -396,40 +398,57 @@ export class DecisionLedgerStore {
 				PRIMARY KEY (session_id, fingerprint)
 			);
 		`);
-				// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
-				const columns = new Set(
+				database.exec("BEGIN IMMEDIATE");
+				try {
+					// Serialize the schema check and alteration across every process sharing this ledger.
+					// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
+					const columns = new Set(
+						database
+							.prepare("PRAGMA table_info(cache_observations)")
+							.all()
+							.map((column) => column.name),
+					);
+					for (const column of ["lineage", "holder"]) {
+						if (!columns.has(column)) database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
+					}
+					database.exec(
+						"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
+					);
+					const evaluationColumns = new Set(
+						database
+							.prepare("PRAGMA table_info(semantic_evaluations)")
+							.all()
+							.map((column) => column.name),
+					);
+					for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
+						if (!evaluationColumns.has(column))
+							database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
+					if (
+						!database
+							.prepare("PRAGMA table_info(semantic_doubt_decisions)")
+							.all()
+							.some((column) => column.name === "worker_task_fit")
+					)
+						database.exec(
+							"ALTER TABLE semantic_doubt_decisions ADD COLUMN worker_task_fit TEXT CHECK (worker_task_fit IN ('adequate', 'inadequate'))",
+						);
+					// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
+					const effectColumns = new Set(
+						database
+							.prepare("PRAGMA table_info(operation_effects)")
+							.all()
+							.map((column) => column.name),
+					);
+					if (!effectColumns.has("session_id"))
+						database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
 					database
-						.prepare("PRAGMA table_info(cache_observations)")
-						.all()
-						.map((column) => column.name),
-				);
-				for (const column of ["lineage", "holder"]) {
-					if (!columns.has(column)) database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
+						.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
+						.run(String(DECISION_LEDGER_SCHEMA_VERSION));
+					database.exec("COMMIT");
+				} catch (error) {
+					if (database.isTransaction) database.exec("ROLLBACK");
+					throw error;
 				}
-				database.exec(
-					"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
-				);
-				const evaluationColumns = new Set(
-					database
-						.prepare("PRAGMA table_info(semantic_evaluations)")
-						.all()
-						.map((column) => column.name),
-				);
-				for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
-					if (!evaluationColumns.has(column))
-						database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
-				// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
-				const effectColumns = new Set(
-					database
-						.prepare("PRAGMA table_info(operation_effects)")
-						.all()
-						.map((column) => column.name),
-				);
-				if (!effectColumns.has("session_id"))
-					database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
-				database
-					.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
-					.run(String(DECISION_LEDGER_SCHEMA_VERSION));
 				return database;
 			},
 		);
@@ -1158,8 +1177,8 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare(
 				`INSERT INTO semantic_doubt_decisions
-				 (session_id, evaluation_id, question, disposition, reason, evidence, decided_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)
+				 (session_id, evaluation_id, question, disposition, reason, evidence, decided_at, worker_task_fit)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT (session_id, evaluation_id, question) DO NOTHING`,
 			)
 			.run(
@@ -1170,10 +1189,11 @@ export class DecisionLedgerStore {
 				decision.reason,
 				decision.evidence,
 				decision.decidedAt,
+				decision.workerTaskFit ?? null,
 			);
 		const stored = this.database
 			.prepare(
-				`SELECT disposition, reason, evidence, decided_at FROM semantic_doubt_decisions
+				`SELECT disposition, reason, evidence, decided_at, worker_task_fit FROM semantic_doubt_decisions
 				 WHERE session_id = ? AND evaluation_id = ? AND question = ?`,
 			)
 			.get(sessionId, decision.evaluationId, decision.question);
@@ -1181,6 +1201,7 @@ export class DecisionLedgerStore {
 			stored?.disposition !== decision.disposition ||
 			stored.reason !== decision.reason ||
 			stored.evidence !== decision.evidence ||
+			stored.worker_task_fit !== (decision.workerTaskFit ?? null) ||
 			stored.decided_at !== decision.decidedAt
 		)
 			throw new Error(
@@ -1192,7 +1213,7 @@ export class DecisionLedgerStore {
 	semanticDoubtDecisions(sessionId: string): SemanticDoubtDecision[] {
 		const rows = this.database
 			.prepare(
-				`SELECT evaluation_id, question, disposition, reason, evidence, decided_at
+				`SELECT evaluation_id, question, disposition, reason, evidence, decided_at, worker_task_fit
 				 FROM semantic_doubt_decisions WHERE session_id = ? ORDER BY decided_at, rowid`,
 			)
 			.all(sessionId);
@@ -1204,6 +1225,7 @@ export class DecisionLedgerStore {
 			const reason = asText(row.reason);
 			const evidence = asText(row.evidence);
 			const decidedAt = asInteger(row.decided_at);
+			const workerTaskFit = asText(row.worker_task_fit);
 			if (
 				evaluationId === undefined ||
 				question === undefined ||
@@ -1213,7 +1235,15 @@ export class DecisionLedgerStore {
 				decidedAt === undefined
 			)
 				continue;
-			decisions.push({ evaluationId, question, disposition, reason, evidence, decidedAt });
+			decisions.push({
+				evaluationId,
+				question,
+				disposition,
+				reason,
+				evidence,
+				decidedAt,
+				...(workerTaskFit === "adequate" || workerTaskFit === "inadequate" ? { workerTaskFit } : {}),
+			});
 		}
 		return decisions;
 	}

@@ -239,10 +239,34 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		return this.doubts.snapshot();
 	}
 
+	getSessionIdentity(): string | undefined {
+		this.refreshSession();
+		return this.sessionId;
+	}
+
+	readOwnSessionDecision(evaluationId: string, question: string): SemanticDoubtDecision | undefined {
+		this.refreshSession();
+		try {
+			return this.durable?.()
+				?.readDoubtDecisions?.()
+				.find((decision) => decision.evaluationId === evaluationId && decision.question === question);
+		} catch (error) {
+			this.durableFailure = error instanceof Error ? error.message : String(error);
+			return undefined;
+		}
+	}
+
 	resolveOwnSession(input: ResolveSemanticDoubtInput): ResolveSemanticDoubtResult {
 		this.refreshSession();
 		if (
 			(input.disposition !== "conservative_path" && input.disposition !== "evidence_based_decision") ||
+			(input.question.startsWith("worker_task_fit:") &&
+				input.disposition === "evidence_based_decision" &&
+				input.workerTaskFit === undefined) ||
+			(input.workerTaskFit !== undefined &&
+				(input.disposition !== "evidence_based_decision" ||
+					!/^worker_task_fit:[a-f0-9]{64}$/.test(input.question) ||
+					(input.workerTaskFit !== "adequate" && input.workerTaskFit !== "inadequate"))) ||
 			typeof input.reason !== "string" ||
 			!input.reason.trim() ||
 			input.reason.length > 1000 ||

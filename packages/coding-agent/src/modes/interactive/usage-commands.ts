@@ -10,7 +10,7 @@ import type {
 import { consumeOpenAICodexRateLimitResetCredit, listOpenAICodexRateLimitResetCredits } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
-import type { SessionCostSummary } from "../../core/cost/cost-summary.ts";
+import type { SessionCostSummary, SessionTaskAndModelSummary } from "../../core/cost/cost-summary.ts";
 import { resolveProviderAccountKey } from "../../core/provider-admission/account-key.ts";
 import type { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
 import type { ProviderLoadView } from "../../core/provider-admission/load-view.ts";
@@ -58,6 +58,7 @@ export interface UsageCommandHost {
 		getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
 		getSelfCompactionView?(): { cachedTokens: number | null };
 		getProviderLoadView(): ProviderLoadView;
+		getTaskAndModelMetrics?(): SessionTaskAndModelSummary;
 	};
 	readonly usageMonitor: AccountUsageMonitor;
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
@@ -186,6 +187,7 @@ function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedA
 		tokens: session.getSessionStats().tokens,
 		...(context ? { context: { ...context, cachedTokens } } : {}),
 		subscription: model ? registry.isUsingSubscription(model) : false,
+		taskMetrics: session.getTaskAndModelMetrics?.(),
 		load: session.getProviderLoadView(),
 		accounts: [...accounts],
 		fetchState: (account) => host.usageMonitor.state(account, registry),

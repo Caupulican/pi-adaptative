@@ -3,7 +3,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ThinkingLevel } from "../../kernel/index.ts";
-import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { isRecordObject as isPlainRecord } from "../util/value-guards.ts";
@@ -163,7 +163,7 @@ export function deriveWorkerLaunchProfile(input: WorkerLaunchProfileInput): Work
 		const inheritedToolSet =
 			input.inheritedTools === undefined
 				? MANAGED_WORKER_TOOL_NAME_SET
-				: new Set(uniqueClassifiedTools(input.inheritedTools));
+				: new Set(uniqueClassifiedTools(lendableToolSurface(input.inheritedTools)));
 		const inheritedExtensionToolNames =
 			input.inheritedTools === undefined ? undefined : new Set(input.inheritedTools.map((tool) => tool.trim()));
 		const rejectedTools = new Set<string>();
@@ -194,7 +194,9 @@ export function deriveWorkerLaunchProfile(input: WorkerLaunchProfileInput): Work
 	if (extensionGrants.size > MAX_WORKER_EXTENSION_TOOL_GRANTS) {
 		throw new Error(`A worker profile may grant at most ${MAX_WORKER_EXTENSION_TOOL_GRANTS} extension tools.`);
 	}
-	const sourceTools = builtinRequests ?? input.inheritedTools ?? DEFAULT_MANAGED_WORKER_TOOLS;
+	const sourceTools =
+		builtinRequests ??
+		(input.inheritedTools ? lendableToolSurface(input.inheritedTools) : DEFAULT_MANAGED_WORKER_TOOLS);
 	const extensionToolGrants = [...extensionGrants.values()].map((entry) =>
 		Object.freeze({ tool: entry.name, extensionPath: entry.extensionPath }),
 	);

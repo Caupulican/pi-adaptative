@@ -9,7 +9,11 @@ import type {
 	XaiAccountUsage,
 } from "@caupulican/pi-ai";
 import type { AuthCredential } from "../auth-storage.ts";
-import { backgroundCostBreakdown, type SessionCostSummary } from "../cost/cost-summary.ts";
+import {
+	backgroundCostBreakdown,
+	type SessionCostSummary,
+	type SessionTaskAndModelSummary,
+} from "../cost/cost-summary.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, providerAccountKey } from "./account-key.ts";
 import { entryKey } from "./ledger.ts";
@@ -64,6 +68,8 @@ export interface UsageOverview {
 	at: number;
 	session: {
 		costUsd: number;
+		costEstimate?: "base-rates";
+		rootCostUsd?: number;
 		/** Delegated workers and bots only; the ICM history summaries are `icmCostUsd`. */
 		subagentCostUsd: number;
 		icmCostUsd: number;
@@ -71,7 +77,15 @@ export interface UsageOverview {
 		tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		context: { tokens: number | null; window: number; percent: number | null; cachedTokens?: number | null } | null;
 	};
-	today: { costUsd: number; subagentCostUsd: number; icmCostUsd: number; pending?: boolean };
+	today: {
+		costUsd: number;
+		rootCostUsd?: number;
+		subagentCostUsd: number;
+		icmCostUsd: number;
+		pending?: boolean;
+		costEstimate?: "base-rates";
+	};
+	taskMetrics?: SessionTaskAndModelSummary;
 	machine: {
 		inflight: number;
 		otherAccountsInflight: number;
@@ -506,10 +520,12 @@ export interface UsageOverviewInput {
 		| "todayPending"
 		| "todaySubagentCost"
 		| "todayHistorySummaryCost"
-	>;
+	> &
+		Partial<Pick<SessionCostSummary, "ownCost" | "todayOwnCost" | "costEstimate" | "todayCostEstimate">>;
 	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	context?: { tokens: number | null; contextWindow: number; percent: number | null; cachedTokens?: number | null };
 	subscription: boolean;
+	taskMetrics?: SessionTaskAndModelSummary;
 	load: ProviderLoadView;
 	accounts: AuthenticatedAccount[];
 	fetchState(account: AuthenticatedAccount): AccountUsageFetchState;
@@ -522,10 +538,15 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 	const current = new Set(input.accounts.map((account) => account.accountKey));
 	const otherInflight = input.load.inflight.filter((entry) => !current.has(entryKey(entry))).length;
 	const otherLimits = input.load.limits.filter((limit) => !current.has(limit.provider)).length;
+	const rootCostUsd =
+		input.cost.ownCost ?? Math.max(0, input.cost.currentCost - background.agentCost - background.icmCost);
+	const todayRootCostUsd = input.cost.todayOwnCost ?? Math.max(0, input.cost.todayCost - input.cost.todaySubagentCost);
 	return {
 		at: input.now,
 		session: {
 			costUsd: input.cost.currentCost,
+			...(input.cost.costEstimate ? { costEstimate: input.cost.costEstimate } : {}),
+			rootCostUsd,
 			subagentCostUsd: background.agentCost,
 			icmCostUsd: background.icmCost,
 			subscription: input.subscription,
@@ -541,10 +562,13 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 		},
 		today: {
 			costUsd: input.cost.todayCost,
+			...(input.cost.todayCostEstimate ? { costEstimate: input.cost.todayCostEstimate } : {}),
+			rootCostUsd: todayRootCostUsd,
 			...(input.cost.todayPending ? { pending: true } : {}),
 			subagentCostUsd: Math.max(0, input.cost.todaySubagentCost - input.cost.todayHistorySummaryCost),
 			icmCostUsd: input.cost.todayHistorySummaryCost,
 		},
+		...(input.taskMetrics ? { taskMetrics: input.taskMetrics } : {}),
 		machine: {
 			inflight: input.load.inflight.length,
 			otherAccountsInflight: otherInflight,

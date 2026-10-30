@@ -1,7 +1,12 @@
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { CiStatusView } from "../../../core/ci-status-view.ts";
 import type { SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
-import { backgroundCostShares, type SessionCostSummary } from "../../../core/cost/cost-summary.ts";
+import {
+	backgroundCostBreakdown,
+	formatCompactTaskDuration,
+	type SessionCostSummary,
+	type TaskExecutionMetrics,
+} from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
@@ -23,6 +28,7 @@ export interface OperatorPovSource {
 	getCostSummary(): Pick<
 		SessionCostSummary,
 		| "currentCost"
+		| "ownCost"
 		| "costEstimate"
 		| "subagentCost"
 		| "subagentReports"
@@ -31,6 +37,7 @@ export interface OperatorPovSource {
 	>;
 	/** True when the foreground model runs on a flat-rate subscription: the dollars shown are catalog estimates. */
 	isUsingSubscription(): boolean;
+	getTaskMetrics?(): TaskExecutionMetrics | undefined;
 	getSessionWorkState?(): SessionWorkState;
 	getSelfCompactionView?(): SelfCompactionView;
 	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
@@ -51,6 +58,7 @@ export type OperatorPovSegmentId =
 	| "system-one"
 	| "peer-findings"
 	| "tps"
+	| "task"
 	| "cache"
 	| "cost"
 	| "proof"
@@ -259,15 +267,39 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
-	const costParts = backgroundCostShares(cost, 3).map(
-		(share) => `${share.label === "AGENTS" ? "agents" : share.label} ${share.amount}`,
-	);
-	const subscription = source.isUsingSubscription();
+	const taskMetrics = source.getTaskMetrics?.();
+	if (taskMetrics && (taskMetrics.rounds > 0 || taskMetrics.activeMs > 0)) {
+		const duration = `${taskMetrics.timingEstimated ? "~" : ""}${formatCompactTaskDuration(taskMetrics.activeMs)}`;
+		const fullTask = `⏱ ${duration} · ${taskMetrics.rounds} ${taskMetrics.rounds === 1 ? "round" : "rounds"}`;
+		const compactTask = `⏱ ${duration}·${taskMetrics.rounds}r`;
+		segments.push({
+			id: "task",
+			label: "TASK",
+			value: fullTask,
+			compact: compactTask,
+			dropOrder: 35,
+			bare: true,
+			styled: theme.fg(taskMetrics.status === "active" ? "accent" : "muted", fullTask),
+		});
+	}
+
+	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(cost);
+	const prefix = cost.costEstimate ? "~" : "";
+	const fullBreakdown = [
+		`root ${formatCost(cost.ownCost)}`,
+		`sub ${formatCost(agentCost)}`,
+		...(icmCost > 0 || icmReports > 0 ? [`ICM ${formatCost(icmCost)}`] : []),
+	].join(" · ");
+	const compactBreakdown = [
+		`r:${formatCost(cost.ownCost)}`,
+		`s:${formatCost(agentCost)}`,
+		...(icmCost > 0 || icmReports > 0 ? [`i:${formatCost(icmCost)}`] : []),
+	].join(" ");
 	segments.push({
 		id: "cost",
 		label: "COST",
-		value: `${cost.costEstimate ? "~" : ""}${formatCost(cost.currentCost)}${subscription ? " (sub)" : ""}`,
-		...(costParts.length > 0 ? { extension: `(${costParts.join(" · ")})` } : {}),
+		value: `${prefix}${formatCost(cost.currentCost)} (${fullBreakdown})`,
+		compact: `${prefix}${formatCost(cost.currentCost)} (${compactBreakdown})`,
 		dropOrder: 0,
 		bare: true,
 	});

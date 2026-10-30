@@ -49,12 +49,15 @@ function percentTone(percent: number): (text: string) => string {
 	return (text) => theme.fg("accent", text);
 }
 
-function quotaBar(usedPercent: number, cells = 12): string {
+function filledBar(usedPercent: number, cells = 12): string {
 	const clamped = Math.max(0, Math.min(100, usedPercent));
 	const filled = Math.max(0, Math.min(cells, Math.round((clamped / 100) * cells)));
 	const free = cells - filled;
-	const bar = "█".repeat(filled) + "░".repeat(free);
-	return percentTone(usedPercent)(bar);
+	return "█".repeat(filled) + "░".repeat(free);
+}
+
+function quotaBar(usedPercent: number, cells = 12): string {
+	return percentTone(usedPercent)(filledBar(usedPercent, cells));
 }
 
 function accountSnapshot(account: AccountOverview): AccountUsageSnapshot | undefined {
@@ -82,13 +85,15 @@ function accountSortRank(account: AccountOverview): number {
 
 function formatKpiRows(overview: UsageOverview, width: number): [string, string] {
 	const session = overview.session;
-	const subText = session.subscription ? " (sub)" : "";
-	const backgroundParts = [
-		...(session.subagentCostUsd > 0 ? [`$${session.subagentCostUsd.toFixed(2)} agents`] : []),
-		...(session.icmCostUsd > 0 ? [`$${session.icmCostUsd.toFixed(2)} ICM`] : []),
+	const rootCostUsd =
+		session.rootCostUsd ?? Math.max(0, session.costUsd - session.subagentCostUsd - session.icmCostUsd);
+	const breakdownParts = [
+		`root ${dollars(rootCostUsd)}`,
+		`sub ${dollars(session.subagentCostUsd)}`,
+		...(session.icmCostUsd > 0 ? [`ICM ${dollars(session.icmCostUsd)}`] : []),
 	];
-	const subagentText = backgroundParts.length > 0 ? ` (${backgroundParts.join(" · ")})` : "";
-	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${dollars(session.costUsd)}${subText}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", `${dollars(overview.today.costUsd)}${overview.today.pending ? " (partial; updating)" : ""}`)}`;
+	const subagentText = ` (${breakdownParts.join(" · ")})`;
+	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${session.costEstimate ? "~" : ""}${dollars(session.costUsd)}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", `${overview.today.costEstimate ? "~" : ""}${dollars(overview.today.costUsd)}${overview.today.pending ? " (partial; updating)" : ""}`)}`;
 
 	const cacheTotal = session.tokens.input + session.tokens.cacheRead + session.tokens.cacheWrite;
 	const cacheSummary =
@@ -251,10 +256,110 @@ function formatProviderCardLines(overview: UsageOverview, width: number, now: nu
 	return result;
 }
 
+export function formatCostBreakdownLines(overview: UsageOverview, width: number): string[] {
+	const session = overview.session;
+	const total = Math.max(0, session.costUsd);
+	const rootCost = session.rootCostUsd ?? Math.max(0, session.costUsd - session.subagentCostUsd - session.icmCostUsd);
+	const s1Cost = overview.taskMetrics?.systemOneCostUsd ?? 0;
+	const brainDirectCost = Math.max(0, rootCost - s1Cost);
+	const sharePct = (val: number) => (total > 0 ? Math.round((val / total) * 100) : 0);
+	const lines: string[] = [
+		`  ${theme.fg("accent", "◆")} ${theme.bold("COST BREAKDOWN")} ${theme.fg("dim", `session ${dollars(total)} · today ${dollars(overview.today.costUsd)} (root ${dollars(overview.today.rootCostUsd ?? 0)} · sub ${dollars(overview.today.subagentCostUsd)} · ICM ${dollars(overview.today.icmCostUsd)})`)}`,
+	];
+	if (session.costEstimate || overview.today.costEstimate)
+		lines.push(theme.fg("dim", "    ~ Includes catalog API-equivalent estimates, not subscription charges."));
+	else if (session.subscription)
+		lines.push(theme.fg("dim", "    Subscription account; displayed usage is not a subscription invoice."));
+	const buckets: Array<{ label: string; cost: number; detail?: string }> = [
+		{
+			label: "Root / Brain",
+			cost: brainDirectCost,
+			...(overview.taskMetrics ? { detail: `${overview.taskMetrics.totalRounds} rounds` } : {}),
+		},
+		{ label: "Subagents / Workers", cost: session.subagentCostUsd },
+		...(session.icmCostUsd > 0 ? [{ label: "ICM Compaction", cost: session.icmCostUsd }] : []),
+		...(s1Cost > 0
+			? [
+					{
+						label: "System One / Review",
+						cost: s1Cost,
+						detail: `${overview.taskMetrics?.systemOneReports ?? 0} evals`,
+					},
+				]
+			: []),
+	];
+	const labelW = Math.max(20, ...buckets.map((b) => b.label.length));
+	for (const bucket of buckets) {
+		const pct = sharePct(bucket.cost);
+		const bar = theme.fg("muted", filledBar(pct, 12));
+		const pctStr = `${pct}%`.padStart(4);
+		const detail = bucket.detail ? theme.fg("dim", `  (${bucket.detail})`) : "";
+		lines.push(
+			`    ${theme.fg("text", bucket.label.padEnd(labelW))}  ${bar} ${theme.fg("muted", pctStr)}  ${theme.fg("text", dollars(bucket.cost))}${detail}`,
+		);
+	}
+	const models = overview.taskMetrics?.models ?? [];
+	if (models.length > 0) {
+		const modelParts = models
+			.slice(0, 5)
+			.map(
+				(m) =>
+					`${m.model} (${m.role}: ${dollars(m.costUsd)}, ${m.calls} ${m.role === "subagent" ? "reports" : "calls"}, ${tokens(m.tokens)})`,
+			);
+		lines.push(
+			truncateToWidth(`    ${theme.fg("dim", "Models:")} ${theme.fg("muted", modelParts.join(" · "))}`, width, "…"),
+		);
+	}
+	return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+}
+
+export function formatTaskMetricsLines(overview: UsageOverview, width: number): string[] {
+	const tm = overview.taskMetrics;
+	if (!tm || (tm.tasks.length === 0 && tm.unassignedCostUsd === 0)) return [];
+	const lines: string[] = [
+		`  ${theme.fg("accent", "◆")} ${theme.bold("TASK & GOAL METRICS")} ${theme.fg("dim", `${tm.tasks.length} ${tm.tasks.length === 1 ? "task" : "tasks"} · ${tm.totalRounds} total rounds · ${tm.totalToolCalls} tool calls`)}`,
+	];
+	const recent = [...tm.tasks].reverse().slice(0, 5);
+	if (tm.unassignedCostUsd > 0)
+		lines.push(
+			theme.fg("dim", `    Unassigned asynchronous receipts: ${dollars(tm.unassignedCostUsd)} (no task identity)`),
+		);
+	lines.push(theme.fg("dim", "    ~ Estimated activity; goal time uses recorded execution accounting."));
+	for (const task of recent) {
+		const glyph =
+			task.status === "completed"
+				? theme.fg("success", "✓")
+				: task.status === "active"
+					? theme.fg("accent", "●")
+					: task.status === "blocked"
+						? theme.fg("warning", "▲")
+						: theme.fg("dim", "○");
+		const stepsStr =
+			task.stepsTotal !== undefined && task.stepsCompleted !== undefined
+				? ` · ${task.stepsCompleted}/${task.stepsTotal} steps`
+				: "";
+		const costStr = `${dollars(task.totalCostUsd)} (root ${dollars(task.rootCostUsd)} · sub ${dollars(task.subagentCostUsd)}${task.icmCostUsd > 0 ? ` · ICM ${dollars(task.icmCostUsd)}` : ""})`;
+		const statsLine = `⏱ ${task.timingEstimated ? "~" : ""}${span(task.activeMs)} active (${span(task.wallMs)} wall) · ${task.rounds} ${task.rounds === 1 ? "round" : "rounds"} · ${task.toolCalls} tools${stepsStr} · ${tokens(task.tokens)} tok · ${costStr}`;
+		lines.push(
+			truncateToWidth(`    ${glyph} ${theme.bold(task.title)} ${theme.fg("dim", `[${task.status}]`)}`, width, "…"),
+		);
+		lines.push(truncateToWidth(`      ${theme.fg("muted", statsLine)}`, width, "…"));
+	}
+	return lines;
+}
+
 export function formatUsageOverviewLines(overview: UsageOverview, width: number, now = overview.at): string[] {
 	const [kpi1, kpi2] = formatKpiRows(overview, width);
+	const costLines = formatCostBreakdownLines(overview, width);
+	const taskLines = formatTaskMetricsLines(overview, width);
 	const providerLines = formatProviderCardLines(overview, width, now);
-	return [kpi1, kpi2, "", ...providerLines].map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+	const sections = [costLines, ...(taskLines.length > 0 ? [taskLines] : []), providerLines];
+	const body: string[] = [];
+	for (let i = 0; i < sections.length; i++) {
+		if (i > 0) body.push("");
+		body.push(...sections[i]!);
+	}
+	return [kpi1, kpi2, "", ...body].map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 }
 
 export const USAGE_OVERVIEW_HEADER_LINES = 3;
@@ -325,7 +430,7 @@ export class UsageDashboardComponent implements Component {
 		const total = this.maxRows();
 		const budget = Math.max(6, Math.min(26, Math.floor(total * 0.68), total - 8));
 
-		const titleText = " Usage & Quotas ";
+		const titleText = " Usage, Costs & Task Metrics ";
 		const title = surface(theme.bold(theme.fg("text", titleText)));
 		const titleWidth = visibleWidth(titleText);
 		const timeText = ` updated ${clock(now)} `;
@@ -352,7 +457,10 @@ export class UsageDashboardComponent implements Component {
 		const kpiRow2 = padRow(kpi2);
 		const divider = `${border(`├${"─".repeat(Math.max(0, width - 2))}┤`)}`;
 
-		const content = formatProviderCardLines(this.overview, inner, now);
+		const costLines = formatCostBreakdownLines(this.overview, inner);
+		const taskLines = formatTaskMetricsLines(this.overview, inner);
+		const providerLines = formatProviderCardLines(this.overview, inner, now);
+		const content = [...costLines, ...(taskLines.length > 0 ? ["", ...taskLines] : []), "", ...providerLines];
 		this.totalRows = content.length;
 		const bodyBudget = Math.max(1, budget - 5);
 		this.bodyRows = Math.max(1, Math.min(content.length, bodyBudget));

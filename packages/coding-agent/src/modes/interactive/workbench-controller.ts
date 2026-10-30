@@ -7,6 +7,7 @@ import {
 } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
+import type { TaskExecutionMetrics } from "../../core/cost/cost-summary.ts";
 import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
@@ -80,6 +81,8 @@ interface WorkbenchPorts {
 	clock?: (running: boolean) => void;
 	/** Who decides and who executes, read at render time so the Decider's clock and verdict stay live. */
 	team?: () => WorkbenchTeamFacts;
+	/** Current or last task execution metrics (duration, rounds, cost) so the Work plan header and summary keep them visible. */
+	taskMetrics?: () => TaskExecutionMetrics | undefined;
 	/** Who a foreground receipt belongs to at the moment it is created: the root on its active model. */
 	attribution?: () => PreviewAttribution;
 	/** The folder the session works in: output paths are shown relative to it. */
@@ -457,6 +460,7 @@ export class WorkbenchController {
 				this.ports.team,
 				() => this.view.graphShown,
 				this.ports.persistentTeams,
+				this.ports.taskMetrics,
 			),
 		);
 		this.workTitle = workTitle(snapshot.items);
@@ -665,6 +669,7 @@ export class WorkbenchController {
 					this.ports.team,
 					() => this.view.graphShown,
 					this.ports.persistentTeams,
+					this.ports.taskMetrics,
 				),
 			);
 		}
@@ -791,6 +796,7 @@ export function buildWorkbenchSections(
 		readonly name: string;
 		readonly memberAgentIds: readonly string[];
 	}[],
+	taskMetrics?: () => TaskExecutionMetrics | undefined,
 ): WorkbenchSection[] {
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
@@ -807,20 +813,34 @@ export function buildWorkbenchSections(
 			? task.archive.completed + task.steps.filter((step) => step.status === "completed").length
 			: 0;
 		const satisfied = goal?.requirements.filter((requirement) => requirement.status === "satisfied").length ?? 0;
-		const meta = task
+		const metrics = taskMetrics?.();
+		const metricsMeta =
+			metrics && (metrics.rounds > 0 || metrics.activeMs > 0)
+				? ` · ${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)} · ${metrics.rounds}r`
+				: "";
+		const baseMeta = task
 			? `${doneSteps} / ${totalSteps}`
 			: goal
 				? `${satisfied} / ${goal.requirements.length} requirements`
 				: "";
+		const meta = `${baseMeta}${metricsMeta}`;
 		const singleSection = new Set(shown.map((row) => row.section)).size <= 1;
+		const doneSummary = [
+			planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps",
+			metrics && metrics.activeMs > 0
+				? `${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)} active`
+				: undefined,
+			metrics && metrics.rounds > 0 ? `${metrics.rounds} ${metrics.rounds === 1 ? "round" : "rounds"}` : undefined,
+			metrics && metrics.totalCostUsd > 0 ? `$${metrics.totalCostUsd.toFixed(2)}` : undefined,
+		]
+			.filter(Boolean)
+			.join(" · ");
 		const body: Component | string[] = shown.length
 			? rowsComponent({
 					...plan,
 					rows: singleSection ? shown.map((row) => ({ ...row, section: undefined })) : shown,
 				})
-			: [
-					`  ${theme.fg("success", "✓")} ${theme.fg("text", planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps")}`,
-				];
+			: [`  ${theme.fg("success", "✓")} ${theme.fg("text", doneSummary)}`];
 		sections.push({ title: PLAN_SECTION, meta, body });
 	}
 	// Failed verifications are the operator's to see and to resolve; they never hide inside an error.

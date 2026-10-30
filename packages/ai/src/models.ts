@@ -24,6 +24,20 @@ export function getModels(provider: KnownProvider): Model<Api>[] {
 	return providerModels ? Object.values(providerModels) : [];
 }
 
+/** Resolve a catalog price without inventing rates for an unknown model or an aggregate report. */
+export function resolveCatalogPricing(provider: string, modelId: string): Model<Api> | undefined {
+	if (provider === "google-antigravity") {
+		const upstream = modelId.startsWith("gemini-")
+			? "google"
+			: modelId.startsWith("claude-")
+				? "anthropic"
+				: "openai";
+		return getModel(upstream, modelId) ?? getModel(upstream, modelId.replace(/-(?:low|medium|high)$/, ""));
+	}
+	if (!Object.hasOwn(MODELS, provider)) return undefined;
+	return getModel(provider as KnownProvider, modelId);
+}
+
 /**
  * Check if two models are equal by comparing both their id and provider.
  * Returns false if either model is null or undefined.

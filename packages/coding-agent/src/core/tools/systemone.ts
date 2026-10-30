@@ -78,6 +78,7 @@ const schema = Type.Object(
 					disposition: Type.Enum(["conservative_path", "evidence_based_decision"]),
 					reason: Type.String({ minLength: 1 }),
 					evidence: Type.String({ minLength: 1 }),
+					workerTaskFit: Type.Optional(Type.Enum(["adequate", "inadequate"])),
 				},
 				{ additionalProperties: false },
 			),
@@ -137,7 +138,7 @@ export function createSystemOneToolDefinition(
 	reviewerRecordsUsage = false,
 ) {
 	const uncertaintyPrompt = uncertainties
-		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a System One pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
+		? "At turn entry and before delivery, inspect active uncertainties. Take an extra reasoning round over the task and evidence before recording a decision. For worker_task_fit:<fingerprint> questions, record workerTaskFit as adequate or inadequate with an evidence_based_decision, concise evidence and reason. Only an explicit adequate outcome can settle that exact task/model fitness on retry; generic advice cannot. Other questions remain advisory. Keep mandatory same-lane verification and recheck requirements active. No disposition is a System One pass, verification proof, certificate proof, or execution grant. Reject stale questions and questions explicitly scoped to a foreign root session."
 		: "Worker lanes cannot disposition session-owner uncertainties. Recheck your own mandatory findings in this lane, report unresolved advisory questions and evidence to the parent, and continue independent work where appropriate.";
 	return {
 		name: SYSTEM_ONE_TOOL_NAME,
@@ -217,7 +218,9 @@ export function createSystemOneToolDefinition(
 							? { disposition: input.uncertainty.disposition, evaluationId: input.uncertainty.evaluationId }
 							: {}),
 						message: resolution.resolved
-							? "Recorded owner-model advisory disposition. This is not System One verification, certificate proof, or permission."
+							? input.uncertainty.workerTaskFit
+								? `Recorded exact worker task/model fitness decision: ${input.uncertainty.workerTaskFit}. Execution grants and verification remain independently required.`
+								: "Recorded owner-model advisory disposition. This is not System One verification, certificate proof, or permission."
 							: "No uncertainty was settled. Refresh the active questions; the evaluation or question may have changed or belong to another lane.",
 					};
 					return {

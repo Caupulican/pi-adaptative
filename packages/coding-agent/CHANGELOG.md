@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Task and goal metrics show cumulative active time, wall time, rounds, tool calls, token usage and cost by model and role in the workbench, session reports and `/usage`.
+
+### Fixed
+
+- Bot roster rendering no longer parses managed collaboration lane IDs as serialized bot bindings.
+- Fatal interactive shutdown reports the original crash before cleanup, keeps process error guards active, discloses failed host teardown and prevents repeated terminal teardown.
+- Session and daily cost views separate root, subagent and ICM usage, label API-equivalent estimates, and recover historically unpriced Antigravity response costs from exact catalog matches without repricing cumulative worker reports.
+- Uncertain worker task-fit checks now expose the exact evaluation for an additional reasoning round. Recorded `adequate` or `inadequate` decisions retain their evidence and session scope; generic advice cannot approve task fitness or satisfy verification.
+- Managed Pi worker profiles inherit the same bash-backed search and listing tools as native workers, and single-profile routing no longer sends an invalid one-option model choice.
+- Worker usage receipts retain their originating goal and model metadata instead of being attributed to whichever task is active when delivery completes.
+- Shared decision-ledger migrations serialize schema changes and preserve explicit task-fit outcomes across restarts.
+
 ## [0.104.22] - 2026-10-30
 
 ### Fixed

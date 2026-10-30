@@ -7,6 +7,7 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
+	resolveEffectiveEntryCost,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
@@ -95,12 +96,20 @@ function addDailyUsageRecord(
 	if (!isInsideWindow(Date.parse(record.timestamp), window)) return false;
 	const seen = record.kind === "spawned" ? spawned : record.kind === "semantic" ? semantic : undefined;
 	if (record.reportId && seen?.has(record.reportId)) return false;
+	const resolved = resolveEffectiveEntryCost(record.usage, {
+		model: record.model,
+		provider: record.provider,
+		kind: record.kind,
+	});
+	if (!resolved) return false;
 	if (record.reportId) seen?.add(record.reportId);
+	const costTotal = resolved.total;
 	if (record.kind === "spawned" || record.historySummary) {
-		totals.spawnedCost += record.usage.cost.total;
+		totals.spawnedCost += costTotal;
 		totals.reports++;
-	} else totals.ownCost += record.usage.cost.total;
-	if (record.historySummary) totals.historySummaryCost += record.usage.cost.total;
+	} else totals.ownCost += costTotal;
+	if (record.historySummary) totals.historySummaryCost += costTotal;
+	if (resolved?.estimated) totals.costEstimate = "base-rates";
 	addUsage(totals, record.usage);
 	return true;
 }
@@ -145,13 +154,32 @@ interface DailyUsageRecord {
 	timestamp: string;
 	usage: Usage;
 	kind: "own" | "spawned" | "semantic";
+	model?: string;
+	provider?: string;
 	reportId?: string;
 	historySummary: boolean;
 }
 
 function usageRecord(entry: SessionEntry): DailyUsageRecord | undefined {
 	const own = getSessionEntryUsage(entry);
-	if (own) return { timestamp: entry.timestamp, usage: own, kind: "own", historySummary: false };
+	if (own) {
+		const model = entry.type === "message" && entry.message.role === "assistant" ? entry.message.model : undefined;
+		return {
+			timestamp: entry.timestamp,
+			usage: own,
+			kind: "own",
+			...(model
+				? {
+						model,
+						provider:
+							entry.type === "message" && entry.message.role === "assistant"
+								? entry.message.provider
+								: undefined,
+					}
+				: {}),
+			historySummary: false,
+		};
+	}
 	if (entry.type !== "custom") return;
 	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE && entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return;
 	const data = entry.data as SemanticUsageReport | SpawnedUsageReport | undefined;
@@ -162,6 +190,8 @@ function usageRecord(entry: SessionEntry): DailyUsageRecord | undefined {
 		timestamp: entry.timestamp,
 		usage: data.usage,
 		kind: semantic ? "semantic" : "spawned",
+		...(typeof data.model === "string" ? { model: data.model } : {}),
+		...(typeof data.provider === "string" ? { provider: data.provider } : {}),
 		reportId: data.reportId,
 		historySummary: semantic && (data as SemanticUsageReport).route === "history_summary",
 	};

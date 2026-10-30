@@ -14,7 +14,11 @@ import type { Container, Keybinding, MarkdownTheme, TUI } from "@caupulican/pi-t
 import { Markdown, Spacer, Text, visibleWidth } from "@caupulican/pi-tui";
 import { getDebugLogPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import { backgroundCostBreakdown, type SessionCostSummary } from "../../core/cost/cost-summary.ts";
+import {
+	backgroundCostBreakdown,
+	formatCompactTaskDuration,
+	type SessionCostSummary,
+} from "../../core/cost/cost-summary.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -61,22 +65,20 @@ export interface DebugReportHost extends ReportRenderHost {
 }
 
 export function formatCostReport(costs: SessionCostSummary, usingSubscription = false): string {
-	const lines = [
-		`${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}${usingSubscription ? " (sub)" : ""}`,
-	];
 	const { agentCost, agentReports, icmCost, icmReports } = backgroundCostBreakdown(costs);
-	if (agentReports > 0 || agentCost > 0) {
-		lines.push(
-			`${theme.fg("dim", "AGENTS (included in CURRENT):")} $${agentCost.toFixed(4)} (${agentReports} reports)`,
-		);
-	}
+	const subNote = costs.costEstimate ? " (includes catalog estimates)" : usingSubscription ? " (subscription)" : "";
+	const lines = [
+		`${theme.fg("dim", "CURRENT (session total):")} $${costs.currentCost.toFixed(4)}${subNote}`,
+		`${theme.fg("dim", "ROOT (foreground & System One):")} $${costs.ownCost.toFixed(4)}`,
+		`${theme.fg("dim", "SUBAGENTS (workers & bots):")} $${agentCost.toFixed(4)} (${agentReports} reports)`,
+	];
 	if (icmReports > 0 || icmCost > 0) {
 		lines.push(
 			`${theme.fg("dim", "ICM history summaries (included in CURRENT):")} $${icmCost.toFixed(4)} (${icmReports} calls)`,
 		);
 	}
 	lines.push(
-		`${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}${costs.todayPending ? " (partial; updating)" : ""}`,
+		`${theme.fg("dim", "TODAY (host local day):")} ${costs.todayCostEstimate ? "~" : ""}$${costs.todayCost.toFixed(4)}${costs.todayCostEstimate ? " (includes catalog estimates)" : ""}${costs.todayPending ? " (partial; updating)" : ""}`,
 		`${theme.fg("dim", "Today rollover:")} local midnight`,
 	);
 	return lines.join("\n");
@@ -160,6 +162,30 @@ export function handleUsageCommand(host: UsageReportHost): void {
 
 	info += `${theme.bold("Cost")}\n`;
 	info += `${formatCostReport(costs, usingSubscription)}\n\n`;
+
+	const taskMetrics = host.session.getTaskAndModelMetrics();
+	if (taskMetrics && (taskMetrics.tasks.length > 0 || taskMetrics.models.length > 0)) {
+		if (taskMetrics.unassignedCostUsd > 0)
+			info += `${theme.fg("dim", "Unassigned asynchronous receipts:")} $${taskMetrics.unassignedCostUsd.toFixed(4)} (no task identity)\n`;
+		if (taskMetrics.currentTask) {
+			const ct = taskMetrics.currentTask;
+			const stepsPart =
+				ct.stepsTotal !== undefined && ct.stepsCompleted !== undefined
+					? `, ${ct.stepsCompleted}/${ct.stepsTotal} steps`
+					: "";
+			info += `${theme.bold("Task & Goal Metrics")}\n`;
+			info += `${theme.fg("dim", "Current/Last task:")} ${ct.title} (${ct.status})\n`;
+			info += `${theme.fg("dim", "Duration & rounds:")} ${ct.timingEstimated ? "~" : ""}${formatCompactTaskDuration(ct.activeMs)} active (${formatCompactTaskDuration(ct.wallMs)} wall), ${ct.rounds} rounds, ${ct.toolCalls} tool calls${stepsPart}\n`;
+			info += `${theme.fg("dim", "Task cost:")} $${ct.totalCostUsd.toFixed(4)} (root $${ct.rootCostUsd.toFixed(4)} · sub $${ct.subagentCostUsd.toFixed(4)}${ct.icmCostUsd > 0 ? ` · ICM $${ct.icmCostUsd.toFixed(4)}` : ""})\n\n`;
+		}
+		if (taskMetrics.models.length > 0) {
+			info += `${theme.bold("Model Cost Breakdown")}\n`;
+			for (const row of taskMetrics.models.slice(0, 8)) {
+				info += `${theme.fg("dim", `${row.model} (${row.role}):`)} $${row.costUsd.toFixed(4)} (${row.calls} ${row.role === "subagent" ? "reports" : "calls"}, ${row.tokens.toLocaleString()} tokens)\n`;
+			}
+			info += "\n";
+		}
+	}
 
 	const processMemory = getProcessMemoryMb();
 	info += `${theme.bold("Process")}\n`;

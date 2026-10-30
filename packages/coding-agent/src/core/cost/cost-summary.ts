@@ -3,7 +3,8 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { getSessionEntryUsage } from "../../kernel/usage.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 import {
-	SEMANTIC_USAGE_CUSTOM_TYPE,
+	resolveEffectiveEntryCost,
+	resolveSemanticUsageEntry,
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
@@ -67,41 +68,50 @@ export function accumulateCurrentSessionCostsFromEntries(
 	for (const entry of entries) {
 		const usage = getSessionEntryUsage(entry);
 		if (usage) {
-			const total = getUsageTotalCost(usage);
-			if (total !== undefined) {
-				accumulator.ownCost += total;
-				if (usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
+			const model = entry.type === "message" && entry.message.role === "assistant" ? entry.message.model : undefined;
+			const resolved = resolveEffectiveEntryCost(usage, {
+				model,
+				provider:
+					entry.type === "message" && entry.message.role === "assistant" ? entry.message.provider : undefined,
+				kind: "own",
+			});
+			if (resolved !== undefined) {
+				accumulator.ownCost += resolved.total;
+				if (resolved.estimated) accumulator.costEstimate = "base-rates";
 			}
 			continue;
 		}
 
-		if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
-			const report = entry.data as SemanticUsageReport | undefined;
-			const total = getUsageTotalCost(report?.usage);
-			if (total === undefined || !report?.reportId || accumulator.seenSemanticReportIds.has(report.reportId))
-				continue;
+		const semantic = resolveSemanticUsageEntry(entry);
+		if (semantic) {
+			const { report, cost: resolved } = semantic;
+			if (accumulator.seenSemanticReportIds.has(report.reportId)) continue;
 			accumulator.seenSemanticReportIds.add(report.reportId);
 			// History summary spend was a spawned (background) report before it moved onto this row; it stays background spend.
 			if (report.route === "history_summary") {
-				accumulator.subagentCost += total;
+				accumulator.subagentCost += resolved.total;
 				accumulator.subagentReports += 1;
-				accumulator.historySummaryCost += total;
+				accumulator.historySummaryCost += resolved.total;
 				accumulator.historySummaryReports += 1;
-			} else accumulator.ownCost += total;
-			if (report.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
+			} else accumulator.ownCost += resolved.total;
+			if (resolved.estimated) accumulator.costEstimate = "base-rates";
 			continue;
 		}
 
 		if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
 		const report = entry.data as SpawnedUsageReport | undefined;
-		const total = getUsageTotalCost(report?.usage);
-		if (total === undefined) continue;
+		const resolved = resolveEffectiveEntryCost(report?.usage, {
+			model: report?.model,
+			provider: report?.provider,
+			kind: "spawned",
+		});
+		if (resolved === undefined) continue;
 		if (report?.reportId) {
 			if (accumulator.seenSubagentReportIds.has(report.reportId)) continue;
 			accumulator.seenSubagentReportIds.add(report.reportId);
 		}
-		accumulator.subagentCost += total;
-		if (report?.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
+		accumulator.subagentCost += resolved.total;
+		if (resolved.estimated) accumulator.costEstimate = "base-rates";
 		accumulator.subagentReports += 1;
 	}
 	accumulator.currentCost = accumulator.ownCost + accumulator.subagentCost;
@@ -133,8 +143,13 @@ export function projectPendingSemanticCost(
 	let historySummaryReports = accumulator.historySummaryReports;
 	let costEstimate = accumulator.costEstimate;
 	for (const report of pending) {
-		const total = getUsageTotalCost(report.usage);
-		if (total === undefined || accumulator.seenSemanticReportIds.has(report.reportId)) continue;
+		const resolved = resolveEffectiveEntryCost(report.usage, {
+			model: report.model,
+			provider: report.provider,
+			kind: "semantic",
+		});
+		if (!resolved || accumulator.seenSemanticReportIds.has(report.reportId)) continue;
+		const total = resolved.total;
 		// History summary spend is background spend: the same classification as its recorded row.
 		if (report.route === "history_summary") {
 			subagentCost += total;
@@ -142,7 +157,7 @@ export function projectPendingSemanticCost(
 			historySummaryCost += total;
 			historySummaryReports += 1;
 		} else ownCost += total;
-		if (report.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
+		if (resolved.estimated) costEstimate = "base-rates";
 	}
 	// Paid history spend the bounded journal had no room for: live only, counted with the background spend it is.
 	const overflowCost = overflow === undefined ? undefined : getUsageTotalCost(overflow.usage);
@@ -250,27 +265,43 @@ export function formatFooterCostParts(
 	options: { subscription?: boolean } = {},
 ): string[] {
 	const parts: string[] = [];
+	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(summary);
 	if (summary.currentCost > 0 || hasSubagentCostSignal(summary) || options.subscription) {
-		parts.push(
-			`CURRENT:${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${options.subscription ? " (sub)" : ""}`,
-		);
+		parts.push(`CURRENT:${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}`);
+		parts.push(`ROOT:${summary.costEstimate ? "~" : ""}${formatCost(summary.ownCost, precision)}`);
+		parts.push(`SUB:${formatCost(agentCost, precision)}`);
+	}
+	if (icmReports > 0 || icmCost > 0) {
+		parts.push(`ICM:${formatCost(icmCost, precision)}`);
 	}
 	if (summary.todayCost > 0 || summary.todayPending) {
 		parts.push(
 			`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayPending ? " (partial; updating)" : ""}`,
 		);
 	}
-	for (const share of backgroundCostShares(summary, precision))
-		parts.push(`${share.label}:${share.amount} in CURRENT`);
 	return parts;
 }
 
 export function formatStatusCostSummary(summary: SessionCostSummary, precision = 4): string {
+	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(summary);
 	const parts = [
 		`CURRENT ${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${summary.costEstimate ? " (base-rate estimate)" : ""}`,
+		`ROOT ${summary.costEstimate ? "~" : ""}${formatCost(summary.ownCost, precision)}`,
+		`SUBAGENTS ${formatCost(agentCost, precision)} (included in CURRENT)`,
+		...(icmReports > 0 || icmCost > 0 ? [`ICM ${formatCost(icmCost, precision)} (included in CURRENT)`] : []),
 		`TODAY ${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayCostEstimate ? " (base-rate estimate)" : ""}${summary.todayPending ? " (partial; updating)" : ""}`,
 	];
-	for (const share of backgroundCostShares(summary, precision))
-		parts.push(`${share.label} ${share.amount} (included in CURRENT)`);
 	return parts.join(", ");
 }
+
+export {
+	computeSessionTaskAndModelMetrics,
+	formatCompactTaskDuration,
+	isTaskExecutionActive,
+	type ModelCostBreakdownRow,
+	type SessionTaskAndModelSummary,
+	type TaskExecutionMetrics,
+	type TaskMetricsGoalInput,
+	type TaskMetricsPlanInput,
+} from "./task-cost-metrics.ts";
+export { resolveEffectiveEntryCost } from "./usage-records.ts";

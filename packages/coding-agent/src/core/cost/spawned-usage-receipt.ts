@@ -13,6 +13,10 @@ export interface SpawnedUsageReceiptOptions {
 	reportId: string;
 	label?: string;
 	sourceSessionId?: string;
+	/** Originating worker binding; cumulative usage may also include other models. */
+	provider?: string;
+	model?: string;
+	goalId?: string;
 }
 
 export type SpawnedUsageReceiptDisposition = "persisted" | "pending" | "foreign_session";
@@ -22,6 +26,9 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		isPlainRecord(data) &&
 		data.reportId === options.reportId &&
 		data.sourceSessionId === options.sourceSessionId &&
+		(data.provider === undefined || data.provider === options.provider) &&
+		(data.model === undefined || data.model === options.model) &&
+		(data.goalId === undefined || data.goalId === options.goalId) &&
 		isDeepStrictEqual(data.usage, usage)
 	);
 }

@@ -57,7 +57,7 @@ function isNonNegativeInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | undefined {
+export function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | undefined {
 	if (!isPlainRecord(data) || data.version !== 2 || typeof data.kind !== "string") return undefined;
 	if (data.kind === "checkpoint") {
 		if (!isGoalState(data.state)) return undefined;

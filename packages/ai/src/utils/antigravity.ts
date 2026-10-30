@@ -1,3 +1,4 @@
+import { resolveCatalogPricing } from "../models.ts";
 import { requestBoundedAccountJson } from "../providers/account-request.ts";
 import { ANTIGRAVITY_CLIENT_CONFIG } from "../providers/antigravity-client-config.generated.ts";
 import { gemini4ArgonThinkingMetadata, isGemini4ArgonModel } from "../providers/google-model-family.ts";
@@ -172,6 +173,7 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 					: undefined;
 		// The catalog names the backend; only Gemini reads the JSON-schema tool field.
 		const backend = typeof info.apiProvider === "string" ? info.apiProvider : undefined;
+		const pricing = resolveCatalogPricing(ANTIGRAVITY_PROVIDER, id);
 		models.push({
 			id,
 			name: typeof info.displayName === "string" ? info.displayName.slice(0, 200) : id,
@@ -191,7 +193,8 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 			input: info.supportsImages === true ? ["text", "image"] : ["text"],
 			contextWindow,
 			maxTokens,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: pricing ? { ...pricing.cost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			...(pricing?.longContextPricing ? { longContextPricing: { ...pricing.longContextPricing } } : {}),
 			...(backend ? { upstream: antigravityUpstream(backend) } : {}),
 		});
 	}

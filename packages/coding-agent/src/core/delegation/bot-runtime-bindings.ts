@@ -44,7 +44,8 @@ export class BotRuntimeBindings {
 	private cachedEntry: object | undefined;
 	private cachedSession = "";
 	private current = new Map<string, string>();
-	private readonly generationAliases = new Map<string, string>();
+	// Unbound runtime IDs are opaque (managed lanes include ':'), not serialized bot binding keys.
+	private readonly generationContexts = new Map<string, BotRuntimeContext>();
 
 	constructor(manager: () => SessionManager) {
 		this.manager = manager;
@@ -59,7 +60,7 @@ export class BotRuntimeBindings {
 		this.current = bindings;
 		this.cachedEntry = entry;
 		this.cachedSession = session;
-		this.generationAliases.clear();
+		this.generationContexts.clear();
 		return bindings;
 	}
 
@@ -115,26 +116,28 @@ export class BotRuntimeBindings {
 	generationContext(runtime: string): BotRuntimeContext {
 		const bindings = this.read();
 		for (const [alias, current] of bindings) if (current === runtime) return decodeContext(alias);
-		const cached = this.generationAliases.get(runtime);
-		if (cached) return decodeContext(cached);
+		const cached = this.generationContexts.get(runtime);
+		if (cached) return { ...cached };
 		const branch = this.manager().getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index]!;
 			if (entry.type !== "custom" || entry.customType !== BINDING_TYPE) continue;
 			for (const [alias, previous] of this.decode(entry.data)) {
 				if (previous !== runtime) continue;
-				this.rememberGeneration(runtime, alias);
-				return decodeContext(alias);
+				const context = decodeContext(alias);
+				this.rememberGeneration(runtime, context);
+				return context;
 			}
 		}
-		this.rememberGeneration(runtime, runtime);
-		return { agentId: runtime };
+		const context = { agentId: runtime };
+		this.rememberGeneration(runtime, context);
+		return context;
 	}
 
-	private rememberGeneration(runtime: string, key: string): void {
-		if (this.generationAliases.size >= MAX_BINDINGS)
-			this.generationAliases.delete(this.generationAliases.keys().next().value!);
-		this.generationAliases.set(runtime, key);
+	private rememberGeneration(runtime: string, context: BotRuntimeContext): void {
+		if (this.generationContexts.size >= MAX_BINDINGS)
+			this.generationContexts.delete(this.generationContexts.keys().next().value!);
+		this.generationContexts.set(runtime, { ...context });
 	}
 
 	runtimes(alias: string): string[] {

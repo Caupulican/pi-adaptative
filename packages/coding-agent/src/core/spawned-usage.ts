@@ -4,7 +4,14 @@ import type { Usage } from "@caupulican/pi-ai";
 export interface SpawnedUsageReporter {
 	addSpawnedUsage(
 		usage: Usage,
-		options: { label?: string; sourceSessionId?: string; reportId: string },
+		options: {
+			label?: string;
+			sourceSessionId?: string;
+			reportId: string;
+			provider?: string;
+			model?: string;
+			goalId?: string;
+		},
 	): string | undefined;
 }
 

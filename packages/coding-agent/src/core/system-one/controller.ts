@@ -7,6 +7,7 @@ import {
 	supersededQuestionId,
 	type WorkerTaskFitInput,
 } from "../expert-routing/system-one-choice.ts";
+import { workerTaskFitKey, workerTaskFitStatus } from "../expert-routing/worker-task-fitness.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
 import { ObjectiveExecutionInterruptedError } from "../objective-execution/current-objective-execution.ts";
@@ -72,6 +73,7 @@ import {
 	noulFromAnswer,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
+import type { SemanticDoubtDecision, SemanticUncertaintyPort } from "./semantic-doubts.ts";
 import {
 	doubtReason,
 	type SemanticEvaluationObserver,
@@ -248,6 +250,7 @@ export class SystemOneController {
 	readonly config: SystemOneConfig;
 	readonly hookCoordinator?: IntegrityHookCoordinator;
 	private evaluationObserver?: SemanticEvaluationObserver;
+	private uncertaintyPort?: SemanticUncertaintyPort;
 	private truthSource?: () => CanonicalHydration | undefined;
 	private workDiffSource?: (signal?: AbortSignal) => Promise<WorkDiff | undefined> | WorkDiff | undefined;
 	private pendingDirective?: SystemOneControlDirective;
@@ -299,6 +302,18 @@ export class SystemOneController {
 	/** Binds the session's evaluation sink; late-bound because the controller is built before the session. */
 	setEvaluationObserver(observer: SemanticEvaluationObserver | undefined): void {
 		this.evaluationObserver = observer;
+	}
+
+	setSemanticUncertaintyPort(port: SemanticUncertaintyPort | undefined): void {
+		this.uncertaintyPort = port;
+	}
+
+	getWorkerTaskFitDecision(evaluationId: string, question: string): SemanticDoubtDecision | undefined {
+		return this.uncertaintyPort?.readOwnSessionDecision?.(evaluationId, question);
+	}
+
+	getWorkerTaskFitSessionIdentity(): string | undefined {
+		return this.uncertaintyPort?.getSessionIdentity?.();
 	}
 
 	/** The session's evaluation sink, for host programs that judge outside a catalog stage (file locate). */
@@ -1154,8 +1169,18 @@ export class SystemOneController {
 			batches[0]!.questions,
 			signal,
 		);
-		this.sealDecision(decision, "evaluated", evaluationId, ["worker task/model fitness"]);
-		return answers;
+		const answer = answers.worker_task_fit as { choice?: unknown; confidence?: unknown } | undefined;
+		const uncertain = workerTaskFitStatus(answer) === "uncertain";
+		const question = `worker_task_fit:${workerTaskFitKey(input)}`;
+		const text = `${question}: ${String(answer?.choice)} at confidence ${String(answer?.confidence)}`;
+		this.sealDecision(
+			decision,
+			"evaluated",
+			evaluationId,
+			[uncertain ? doubtReason(text) : text],
+			[{ question, uncertain, text }],
+		);
+		return { ...answers, ...(evaluationId ? { evaluationId, question } : {}) };
 	}
 
 	isRouteJudgmentEnabled(): boolean {

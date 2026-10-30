@@ -99,7 +99,7 @@ import { estimatePromptHeadroom } from "./context/prompt-headroom.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
-import type { SessionCostSummary } from "./cost/cost-summary.ts";
+import type { SessionCostSummary, SessionTaskAndModelSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
 import { CostGuardController } from "./cost-guard-controller.ts";
@@ -1591,7 +1591,7 @@ export class AgentSession {
 					this._selfCompaction.schedule();
 				}
 				this._toolProtocol.restoreWithheldTools();
-				this._flushPendingBashMessages();
+				this._bash.flushPendingBashMessages();
 				await this._drainQueuedExtensionCommands(beginRuntimeHandoff);
 			},
 		});
@@ -2052,6 +2052,9 @@ export class AgentSession {
 		this._semanticUsage = sessionSemanticUsageOf(this.sessionManager);
 		this._semanticUsage.bindDiagnostics((message) => this.emitHostWarning(message));
 		this._analytics = new SessionAnalytics({
+			getGoalState: () => this.getGoalStateSnapshot(),
+			getTaskState: () => this.getTaskStepsStateSnapshot(),
+			isStreaming: () => this.isStreaming,
 			onDailyUsageUpdated: () => this._emit({ type: "usage_updated" }),
 			isDisposed: () => this._disposed,
 			onDailyUsageError: (error) => this.emitHostWarning(`Daily usage refresh failed: ${String(error)}`),
@@ -2351,7 +2354,7 @@ export class AgentSession {
 			getPromptTemplates: () => this.promptTemplates,
 			isDisposed: () => this._disposed,
 			getAdaptiveReadiness: () => this._adaptiveReadiness,
-			flushPendingBashMessages: () => this._flushPendingBashMessages(),
+			flushPendingBashMessages: () => this._bash.flushPendingBashMessages(),
 			emit: (event) => this._emit(event),
 			leaveUnavailableSessionModel: () => this._leaveUnavailableSessionModel(),
 			getContextUsage: () => this.getContextUsage(),
@@ -5401,10 +5404,6 @@ export class AgentSession {
 		return this._bash.hasPendingBashMessages;
 	}
 
-	private _flushPendingBashMessages(): void {
-		this._bash.flushPendingBashMessages();
-	}
-
 	// =========================================================================
 	// Session Management
 	// =========================================================================
@@ -5467,6 +5466,10 @@ export class AgentSession {
 
 	getCostSummary(now = new Date()): SessionCostSummary {
 		return this._analytics.getCostSummary(now);
+	}
+
+	getTaskAndModelMetrics(nowMs = Date.now()): SessionTaskAndModelSummary {
+		return this._analytics.getTaskAndModelMetrics({ nowMs });
 	}
 
 	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {

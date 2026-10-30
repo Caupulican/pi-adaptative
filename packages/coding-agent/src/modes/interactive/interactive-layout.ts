@@ -398,6 +398,7 @@ export class InteractiveLayout {
 			getRouteSnapshot: () => port.getSession().getForegroundRouteSnapshot(),
 			getSemanticPlaneHealth: () => port.getSession().getSemanticPlaneHealth(),
 			getCostSummary: () => port.getSession().getCostSummary(),
+			getTaskMetrics: () => port.getSession().getTaskAndModelMetrics().currentTask,
 			isUsingSubscription: () => {
 				const session = port.getSession();
 				return session.model ? session.modelRegistry.isUsingSubscription(session.model) : false;
@@ -460,6 +461,7 @@ export class InteractiveLayout {
 			onSwitchChat: () => port.onSwitchChat?.(),
 			onSelectChatTarget: (target) => port.onSelectChatTarget?.(target),
 			persistentTeams: () => port.getSession().listPersistentTeams(),
+			taskMetrics: () => port.getSession().getTaskAndModelMetrics().currentTask,
 			semanticEvaluations: () => port.getSession().getSemanticEvaluations(),
 			activeForegroundCount: () => {
 				const handedOff = new Set(

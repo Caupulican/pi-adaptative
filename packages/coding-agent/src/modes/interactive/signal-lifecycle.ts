@@ -295,8 +295,8 @@ export class SignalLifecycle {
 	 * cursor, requiring `stty sane && reset` to recover.
 	 *
 	 * Unlike emergencyTerminalExit, the terminal is still alive here, so we
-	 * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
-	 * paste / Kitty / modifyOtherKeys sequences.
+	 * stop the host once to restore cooked mode, the cursor, and disable bracketed
+	 * paste / Kitty / modifyOtherKeys sequences while releasing held warnings.
 	 */
 	uncaughtCrash(thrown: unknown): void {
 		// Any value can reach uncaughtException (`throw "x"`, `throw null`), and the report reads a stack: a non-Error is wrapped first.
@@ -322,17 +322,25 @@ export class SignalLifecycle {
 		}
 		this.shuttingDown = true;
 		try {
-			this.unregisterSignalHandlers();
-		} catch {}
-		try {
-			killTrackedDetachedChildren();
-		} catch {}
-		try {
-			this.port.ui.stop();
-		} catch {}
-		console.error("pi exiting due to uncaughtException:");
-		console.error(error);
-		process.exit(1);
+			// Report before callback-bearing cleanup: a reentrant crash can exit immediately.
+			console.error("pi exiting due to uncaughtException:");
+			console.error(error);
+			try {
+				// Fatal cleanup can also reject pending work. Keep the process guards armed until exit,
+				// just as orderly shutdown does, so those failures retain their reporting owner.
+				this.unregisterTerminationSignals();
+			} catch {}
+			try {
+				killTrackedDetachedChildren();
+			} catch {}
+			try {
+				this.stopOnce();
+			} catch (stopError: unknown) {
+				this.io.stderr(`${neutralizeControls(`Stop failed during fatal shutdown: ${describeCause(stopError)}`)}\n`);
+			}
+		} finally {
+			this.io.exit(1);
+		}
 	}
 
 	/** Performs shutdown if the host has requested it. */

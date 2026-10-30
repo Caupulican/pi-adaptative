@@ -164,6 +164,12 @@ function projectTaskState(state: TaskStepsState | undefined): ActivityLaneProjec
 
 function projectGoalState(state: GoalState | undefined): ActivityLaneProjection {
 	if (!state) return { active: [], terminal: [] };
+	const rounds = state.continuationTurnsUsed ?? 0;
+	const activeMs = state.continuationWallClockMs ?? 0;
+	const metricsSuffix =
+		rounds > 0 || activeMs > 0
+			? ` (${[activeMs > 0 ? formatElapsed(activeMs) : undefined, rounds > 0 ? `${rounds}r` : undefined].filter(Boolean).join(" · ")})`
+			: "";
 	if (isGoalUnfinishedStatus(state.status)) {
 		const goalActive = isGoalExecutionActive(state.status);
 		return {
@@ -171,8 +177,9 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 				{
 					id: `goal:${state.goalId}`,
 					kind: "goal",
-					label: goalActive ? "active" : state.status.replaceAll("_", " "),
+					label: `${goalActive ? "active" : state.status.replaceAll("_", " ")}${metricsSuffix}`,
 					status: goalActive ? "active" : "waiting",
+					...(state.createdAt ? { originAt: state.createdAt } : {}),
 				},
 			],
 			terminal: [],
@@ -184,7 +191,7 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 			{
 				id: `terminal:goal:${state.goalId}:${state.status}:${state.updatedAt}`,
 				kind: "goal",
-				label: state.status === "completed" ? "Goal achieved" : "Goal closed",
+				label: `${state.status === "completed" ? "Goal achieved" : "Goal closed"}${metricsSuffix}`,
 				status: state.status === "completed" ? "success" : "neutral",
 			},
 		],

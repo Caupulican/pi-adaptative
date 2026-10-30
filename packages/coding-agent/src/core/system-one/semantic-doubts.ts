@@ -22,6 +22,8 @@ export interface ResolveSemanticDoubtInput {
 	readonly disposition: "conservative_path" | "evidence_based_decision";
 	readonly reason: string;
 	readonly evidence: string;
+	/** Explicit reasoning outcome for the exact worker_task_fit question; omitted for generic advice. */
+	readonly workerTaskFit?: "adequate" | "inadequate";
 }
 
 export interface SemanticDoubtDecision extends ResolveSemanticDoubtInput {
@@ -39,9 +41,12 @@ export type ResolveSemanticDoubtResult = {
  * same-lane verification obligations or execution grants.
  */
 export interface SemanticUncertaintyPort {
+	getSessionIdentity?(): string | undefined;
 	listOwnSession(): readonly SemanticDoubt[];
 	/** Records an advisory disposition in this session's journal; scope and verification remain intact. */
 	resolveOwnSession(input: ResolveSemanticDoubtInput): ResolveSemanticDoubtResult;
+	/** Reads an exact recorded reasoning decision in the current session; never a verification pass. */
+	readOwnSessionDecision?(evaluationId: string, question: string): SemanticDoubtDecision | undefined;
 }
 
 interface EvaluationGeneration {

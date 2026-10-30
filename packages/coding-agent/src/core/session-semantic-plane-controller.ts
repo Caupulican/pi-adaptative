@@ -57,6 +57,7 @@ export class SessionSemanticPlaneController {
 		this.configuredSteeringPlane = deps.steeringPlane;
 		this.bindSemanticObserver(this.configuredSteeringPlane);
 		this.configuredController?.setEvaluationObserver(this.health);
+		this.configuredController?.setSemanticUncertaintyPort(this.health);
 		this.configuredController?.setAccountPassStore(
 			accountPassBindings({
 				getLedger: () => this.getDecisionLedger(),

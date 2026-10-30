@@ -15,11 +15,14 @@
 import type { ModelThinkingLevel } from "@caupulican/pi-ai";
 import { settledAnswer } from "../decision/noul.ts";
 import { confidenceGate } from "../system-one/authority-line.ts";
+import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
 import type { ModelCapabilityCard } from "./capability-card.ts";
 
 export interface RouteChoiceJudge {
 	isRouteJudgmentEnabled?(): boolean;
 	evaluateWorkerTaskFit?(input: WorkerTaskFitInput, signal?: AbortSignal): Promise<Record<string, unknown>>;
+	getWorkerTaskFitDecision?(evaluationId: string, question: string): SemanticDoubtDecision | undefined;
+	getWorkerTaskFitSessionIdentity?(): string | undefined;
 	evaluateRouteChoice(
 		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
@@ -200,6 +203,8 @@ export async function chooseHostRouteProfile(
 	const ids = input.options.map((option) => option.id);
 	if (ids.length === 0 || new Set(ids).size !== ids.length || ids.some((id) => !id.trim()))
 		return { fallback: "no distinct host-approved profile" };
+	if (ids.length === 1)
+		return { choice: ids[0]!, confidence: 1, stage: "decided", reasons: ["only host-approved profile"] };
 	if (input.request.length > MAX_ROUTE_CHOICE_REQUEST_CHARACTERS)
 		return { fallback: "request exceeds the host route-choice budget" };
 	const result = await decideChoice(

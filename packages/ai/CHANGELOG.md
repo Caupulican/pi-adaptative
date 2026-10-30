@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity account models use matching upstream catalog prices and long-context tiers for API-equivalent usage estimates instead of defaulting every discovered model to zero cost. Unknown models remain unpriced.
+
 ## [0.104.22] - 2026-10-30
 
 ## [0.104.21] - 2026-10-30

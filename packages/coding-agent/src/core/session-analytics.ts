@@ -29,10 +29,15 @@ import { latestAssistantText } from "./context/message-text.ts";
 import {
 	accumulateCurrentSessionCostsFromEntries,
 	type CurrentSessionCostAccumulator,
+	computeSessionTaskAndModelMetrics,
 	createCurrentSessionCostAccumulator,
 	createSessionCostSummary,
+	isTaskExecutionActive,
 	projectPendingSemanticCost,
 	type SessionCostSummary,
+	type SessionTaskAndModelSummary,
+	type TaskMetricsGoalInput,
+	type TaskMetricsPlanInput,
 } from "./cost/cost-summary.ts";
 import {
 	aggregateDailyUsageAsync,
@@ -78,6 +83,9 @@ export interface SessionAnalyticsSettingsSource {
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
 
 export interface SessionAnalyticsDeps {
+	getGoalState?(): TaskMetricsGoalInput | undefined;
+	getTaskState?(): TaskMetricsPlanInput | undefined;
+	isStreaming?(): boolean;
 	/** Live agent state — assistant-message usage and message counts are read from here. */
 	getState(): AgentState;
 	/** All messages (agent state view) — used for context-window estimation and last-assistant text. */
@@ -146,6 +154,14 @@ export class SessionAnalytics {
 		windowStartMs: number;
 		windowEndMs: number;
 		summary: SessionCostSummary;
+	};
+	private _taskMetricsCache?: {
+		entryCount: number;
+		goalKey: string;
+		taskKey: string;
+		streaming: boolean;
+		computedAt: number;
+		summary: SessionTaskAndModelSummary;
 	};
 	/** Cumulative stats initialized once from persisted telemetry, then updated without retaining record details. */
 	private _toolArgumentValidationStats: ToolArgumentValidationStats | undefined;
@@ -357,7 +373,14 @@ export class SessionAnalytics {
 	 */
 	addSpawnedUsage(
 		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+		opts?: {
+			label?: string;
+			sourceSessionId?: string;
+			reportId?: string;
+			provider?: string;
+			model?: string;
+			goalId?: string;
+		},
 	): string | undefined {
 		const reportId = opts?.reportId;
 		if (reportId && this.getCurrentSessionCostTotals().seenSubagentReportIds.has(reportId)) {
@@ -367,6 +390,9 @@ export class SessionAnalytics {
 			usage,
 			label: opts?.label,
 			sourceSessionId: opts?.sourceSessionId,
+			provider: opts?.provider,
+			model: opts?.model,
+			goalId: opts?.goalId,
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
@@ -408,6 +434,7 @@ export class SessionAnalytics {
 			this._currentSessionCostCache = undefined;
 			this._dailyUsageCache = undefined;
 			this._costSummaryCache = undefined;
+			this._taskMetricsCache = undefined;
 		}
 		if (!sameLineage || entryCount !== previous?.entryCount) {
 			const tail =
@@ -488,6 +515,73 @@ export class SessionAnalytics {
 			dailyTotals,
 			windowStartMs: window.startMs,
 			windowEndMs: window.endMs,
+			summary,
+		};
+		return summary;
+	}
+
+	getTaskAndModelMetrics(
+		options: {
+			goalState?: TaskMetricsGoalInput;
+			taskState?: TaskMetricsPlanInput;
+			isStreaming?: boolean;
+			nowMs?: number;
+		} = {},
+	): SessionTaskAndModelSummary {
+		options = {
+			goalState: this.deps.getGoalState?.(),
+			taskState: this.deps.getTaskState?.(),
+			isStreaming: this.deps.isStreaming?.(),
+			...options,
+		};
+		const sessionManager = this.getAccountingSession();
+		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
+		const nowMs = options.nowMs ?? Date.now();
+		const goal = options.goalState;
+		const goalKey = goal
+			? `${goal.goalId}:${goal.revision ?? 0}:${goal.status}:${goal.updatedAt}:${goal.continuationWallClockMs ?? 0}:${goal.continuationTurnsUsed ?? 0}`
+			: "none";
+		const plan = options.taskState;
+		const doneSteps = plan ? plan.steps.filter((s) => s.status === "completed").length : 0;
+		const taskKey = plan
+			? `${plan.steps.length}:${doneSteps}:${plan.archive.completed}:${plan.archive.cancelled}`
+			: "none";
+		const streaming = options.isStreaming === true;
+		const cached = this._taskMetricsCache;
+		if (
+			cached &&
+			cached.entryCount === entryCount &&
+			cached.goalKey === goalKey &&
+			cached.taskKey === taskKey &&
+			cached.streaming === streaming
+		) {
+			const current = cached.summary.currentTask;
+			if (!current || !isTaskExecutionActive(current.status)) return cached.summary;
+			const elapsed = Math.max(0, nowMs - cached.computedAt);
+			const projected = {
+				...current,
+				wallMs: current.wallMs + elapsed,
+				activeMs: current.activeMs + (current.timingEstimated && streaming ? elapsed : 0),
+			};
+			return {
+				...cached.summary,
+				currentTask: projected,
+				tasks: cached.summary.tasks.map((task) => (task === current ? projected : task)),
+			};
+		}
+		const summary = computeSessionTaskAndModelMetrics({
+			entries: sessionManager.getEntries(),
+			goalState: options.goalState,
+			taskState: options.taskState,
+			isStreaming: options.isStreaming,
+			nowMs,
+		});
+		this._taskMetricsCache = {
+			entryCount,
+			goalKey,
+			taskKey,
+			streaming,
+			computedAt: nowMs,
 			summary,
 		};
 		return summary;

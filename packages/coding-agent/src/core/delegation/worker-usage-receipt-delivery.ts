@@ -45,6 +45,7 @@ export class WorkerUsageReceiptDelivery {
 		// The microtask boundary above prevents acknowledgement from reentering that commit.
 		const snapshot = this.deps.runtime.getSnapshot();
 		for (const attempt of Object.values(snapshot.attempts)) {
+			const objectiveId = snapshot.tasks[attempt.taskId]?.task.objectiveId;
 			const receipts = Object.values(attempt.usageReceipts ?? {}).sort(
 				(left, right) => Number(left.kind !== "baseline") - Number(right.kind !== "baseline"),
 			);
@@ -59,6 +60,13 @@ export class WorkerUsageReceiptDelivery {
 						parentSessionId: this.deps.parentSessionId,
 						reportId,
 						label: "worker-delegation",
+						...(objectiveId?.startsWith("goal:") ? { goalId: objectiveId.slice("goal:".length) } : {}),
+						...(receipt.kind !== "baseline" && attempt.dispatch.executionContract
+							? {
+									provider: attempt.dispatch.executionContract.worker.modelBinding.provider,
+									model: attempt.dispatch.executionContract.worker.modelBinding.modelId,
+								}
+							: {}),
 					});
 					if (disposition === "foreign_session") return;
 					// Never pass an unconfirmed baseline: its legacy report could already cover later usage.
