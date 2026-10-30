@@ -11,6 +11,7 @@ import { addUsage, createEmptyUsage, getSessionEntryUsageComponents } from "../.
 import { scanWorkerSessionFile } from "../delegation/worker-conversation-revision.ts";
 import { providerUsageFromAttemptUsage, validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import { isMissingFileError } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
 	AccountingEvidenceGroup,
@@ -59,7 +60,14 @@ async function captureSource(path: string): Promise<Source> {
 			throw new FileSnapshotChangedError(`Accounting source changed while reading: ${path}`);
 		return {
 			evidence: { path, sha256: hash.digest("hex"), size: offset },
-			unchanged: async () => same(await stat(path, { bigint: true })),
+			unchanged: async () => {
+				try {
+					return same(await stat(path, { bigint: true }));
+				} catch (error) {
+					if (isMissingFileError(error)) return false;
+					throw error;
+				}
+			},
 		};
 	} finally {
 		await file.close();
@@ -120,7 +128,14 @@ async function readTranscript(
 	cwd: string,
 ): Promise<{ byAttempt: Map<string, AccountingUsageComponent[]>; source: Source }> {
 	const source = await captureSource(path);
-	const head = scanWorkerSessionFile(path, sessionId, cwd);
+	let head: ReturnType<typeof scanWorkerSessionFile>;
+	try {
+		head = scanWorkerSessionFile(path, sessionId, cwd);
+	} catch (error) {
+		if (!(await source.unchanged()))
+			throw new FileSnapshotChangedError("Worker accounting source changed during verification.");
+		throw error;
+	}
 	const byAttempt = new Map<string, AccountingUsageComponent[]>();
 	let attemptId = "";
 	let visited = 0;
@@ -259,8 +274,18 @@ async function collectSessionWorkerEvidence(
 	const store = new OrchestrationEventStore({ agentDir, sessionId });
 	const paths = await eventSourcePaths(store);
 	const sources: Source[] = [];
-	for (const path of paths) sources.push(await captureSource(path));
-	const state = readHistoricalWorkerAccountingState(store);
+	let state: HistoricalWorkerAccountingState;
+	try {
+		for (const path of paths) sources.push(await captureSource(path));
+		state = readHistoricalWorkerAccountingState(store);
+	} catch (error) {
+		if (
+			JSON.stringify(paths) !== JSON.stringify(await eventSourcePaths(store)) ||
+			!(await Promise.all(sources.map((source) => source.unchanged()))).every(Boolean)
+		)
+			throw new FileSnapshotChangedError("Worker accounting source inventory changed while reading its state.");
+		throw error;
+	}
 	const pending = new Map<string, { reportId: string; usage: Usage; timestamp: string }>();
 	for (const attempt of state.attempts.values()) {
 		if (!includePending) break;

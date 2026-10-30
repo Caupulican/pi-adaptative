@@ -51,7 +51,7 @@ import {
 } from "../messages.ts";
 import { ownerInputIdOf } from "../owner-input-stamp.ts";
 import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
-import { sameFileVersion } from "../storage/bounded-file.ts";
+import { FileSnapshotChangedError, sameFileVersion } from "../storage/bounded-file.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
@@ -1073,7 +1073,8 @@ function loadEntriesFromFileInternal(
 	let lineLength = 0;
 	let unterminatedTail = false;
 	try {
-		if (!sameFileVersion(revision, fstatSync(fd))) throw new Error("Session file changed while opening it.");
+		if (!sameFileVersion(revision, fstatSync(fd)))
+			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		// The preliminary path check can observe a different file. Validate the first
 		// physical record on this descriptor before the permissive row parser runs.
 		if (revision.size > 0 && !readSessionHeaderFromDescriptor(fd, MAX_SESSION_HEADER_BYTES).ok) {
@@ -1127,7 +1128,7 @@ function loadEntriesFromFileInternal(
 		const finalLine = lines.finish();
 		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
 		if (!sameFileVersion(revision, fstatSync(fd)) || !sameFileVersion(revision, statSync(resolvedFilePath)))
-			throw new Error("Session file changed while reading it; reopen it before retrying.");
+			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
 		if (options?.requireComplete && unterminatedTail)
 			throw new Error("Session history ends with an incomplete JSONL record; its write remains unresolved.");
 	} finally {
@@ -1160,8 +1161,9 @@ export async function visitSessionEntriesAsync(
 	const file = await open(filePath, "r");
 	try {
 		const before = await file.stat();
-		if (!before.isFile() || !sameFileVersion(before, await stat(filePath)))
-			throw new Error("Session file changed while opening it.");
+		if (!before.isFile()) throw new Error("Session history is not a regular file.");
+		if (!sameFileVersion(before, await stat(filePath)))
+			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		if (!readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES).ok)
 			throw new Error("Session file header is invalid.");
 		const decoder = new StringDecoder("utf8");
@@ -1183,7 +1185,7 @@ export async function visitSessionEntriesAsync(
 		const tail = lines.finish();
 		if (tail !== undefined) consume(tail);
 		if (!sameFileVersion(before, await file.stat()) || !sameFileVersion(before, await stat(filePath)))
-			throw new Error("Session file changed while reading it; reopen it before retrying.");
+			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
 	} finally {
 		await file.close();
 	}
