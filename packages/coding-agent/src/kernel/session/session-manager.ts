@@ -2050,6 +2050,11 @@ export class SessionManager {
 		return this.persist;
 	}
 
+	/** A configured path alone does not mean the first buffered entries have reached disk. */
+	hasDurableSessionFile(): boolean {
+		return this.persist && this.flushed && this.sessionFile !== undefined;
+	}
+
 	/** Whether the entry is already written to the session file. Entries buffered before the first flush are not. */
 	isEntryPersisted(entryId: string): boolean {
 		return this.persist && this._getEntryFileLocation(entryId) !== undefined;

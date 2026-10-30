@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import { withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
-import { readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
+import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type AccountingEvidenceGroup,
@@ -127,7 +127,8 @@ async function loadProjection(sessionFile: string): Promise<
 			const allowAbsent = path !== sessionFile && path !== accountingProjectionPath(sessionFile);
 			versions.push({ path, allowAbsent, signature: await sourceVersion(path, allowAbsent) });
 		}
-		if (versions[0]?.signature !== markerVersion) throw new Error("Accounting projection changed while loading.");
+		if (versions[0]?.signature !== markerVersion)
+			throw new FileSnapshotChangedError("Accounting projection changed while loading.");
 		const raw = await readBoundedFile(sessionFile, MAX_ACCOUNTING_SOURCE_BYTES, "Accounting session source");
 		const entries = capturedEntries(projection, raw, sessionFile);
 		if (!entries) return undefined;
@@ -150,7 +151,8 @@ async function loadProjection(sessionFile: string): Promise<
 			}
 		}
 		projection = annotateEvidence(projection, evidenceStates);
-		if (!(await versionsMatch(versions))) throw new Error("Accounting sources changed while loading.");
+		if (!(await versionsMatch(versions)))
+			throw new FileSnapshotChangedError("Accounting sources changed while loading.");
 		if (cached) {
 			verifiedProjections.delete(sessionFile);
 			verifiedBytes -= cached.bytes;
@@ -202,7 +204,7 @@ export async function readAccountedSession(
 			sessionFile,
 		);
 	if (!entries || !(await versionsMatch(loaded.versions)))
-		throw new Error("Accounting source changed before projection.");
+		throw new FileSnapshotChangedError("Accounting source changed before projection.");
 	return { projection: loaded.projection, entries: projectHistoricalAccounting(entries, loaded.projection) };
 }
 
@@ -259,7 +261,7 @@ export async function reconcileSessionAccounting(
 	const header = loaded[0];
 	if (header?.type !== "session") throw new Error("Historical accounting requires an existing session header.");
 	if (previous && (previous.sessionId !== header.id || !matchesBytes(previous.source, raw, true)))
-		throw new Error("Parent accounting source changed before reconciliation.");
+		throw new FileSnapshotChangedError("Parent accounting source changed before reconciliation.");
 	const entries = loaded.filter((entry): entry is SessionEntry => entry.type !== "session");
 	const reports = entries.flatMap((entry) =>
 		entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE
@@ -329,12 +331,12 @@ export async function reconcileSessionAccounting(
 			current.mtimeNs !== before.mtimeNs ||
 			current.ctimeNs !== before.ctimeNs
 		)
-			throw new Error("Session changed before historical accounting publication.");
+			throw new FileSnapshotChangedError("Session changed before historical accounting publication.");
 		for (const source of publicationSources) {
 			if (
 				!matchesBytes(source, readBoundedFileSync(source.path, MAX_ACCOUNTING_SOURCE_BYTES, "Accounting evidence"))
 			)
-				throw new Error("Accounting evidence changed before publication.");
+				throw new FileSnapshotChangedError("Accounting evidence changed before publication.");
 		}
 		writeFileAtomicSync(accountingProjectionPath(sessionFile), serialized);
 	});

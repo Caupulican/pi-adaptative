@@ -4,6 +4,14 @@ import { isMissingFileError } from "./atomic-file.ts";
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
+/** The source changed during an optimistic read; retry against a later settled revision. */
+export class FileSnapshotChangedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "FileSnapshotChangedError";
+	}
+}
+
 function validateByteLimit(maxBytes: number): void {
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
 		throw new TypeError("Bounded file reads require a non-negative safe-integer byte limit.");
@@ -30,7 +38,7 @@ function assertRegularFile(version: Stats, label: string): void {
 function assertOpenedPathVersion(pathVersion: Stats, openedVersion: Stats, label: string): void {
 	assertRegularFile(openedVersion, label);
 	if (!sameFileVersion(pathVersion, openedVersion)) {
-		throw new Error(`${label} changed while it was being opened.`);
+		throw new FileSnapshotChangedError(`${label} changed while it was being opened.`);
 	}
 }
 
@@ -42,7 +50,7 @@ function assertStableReadVersion(
 	label: string,
 ): void {
 	if (!sameFileVersion(openedBefore, openedAfter) || !sameFileVersion(pathBefore, pathAfter)) {
-		throw new Error(`${label} changed while it was being read.`);
+		throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 	}
 }
 
@@ -107,7 +115,7 @@ export function readBoundedFileSync(filePath: string, maxBytes: number, label: s
 		const content = readFileDescriptorBoundedSync(fileDescriptor, maxBytes);
 		if (!content) throw new Error(`${label} exceeds its byte limit.`);
 		if (content.byteLength !== before.size) {
-			throw new Error(`${label} changed while it was being read.`);
+			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 		}
 		return content;
 	});
@@ -147,7 +155,7 @@ export function readFilePrefixSync(filePath: string, maxBytes: number, label: st
 			totalBytes += bytesRead;
 		}
 		if (totalBytes !== expectedBytes) {
-			throw new Error(`${label} changed while it was being read.`);
+			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 		}
 		return { content, truncated: before.size > maxBytes };
 	});
@@ -171,7 +179,7 @@ export function countFileLinesSync(filePath: string, label: string): number {
 			}
 		}
 		if (bytesReadTotal !== before.size) {
-			throw new Error(`${label} changed while it was being read.`);
+			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 		}
 		return lineCount;
 	});
@@ -214,7 +222,7 @@ export async function readBoundedFile(filePath: string, maxBytes: number, label:
 		const pathAfter = await lstatAsync(filePath);
 		assertStableReadVersion(pathBefore, before, after, pathAfter, label);
 		if (content.byteLength !== before.size) {
-			throw new Error(`${label} changed while it was being read.`);
+			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 		}
 		return content;
 	} finally {

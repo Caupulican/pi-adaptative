@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Live accounting refresh waits for persisted session history and defers changed snapshots while preserving known totals; malformed history still reports an error.
+
 ## [0.104.24] - 2026-10-30
 
 ### Added

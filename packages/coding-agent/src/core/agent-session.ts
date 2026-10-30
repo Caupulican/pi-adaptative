@@ -3919,6 +3919,7 @@ export class AgentSession {
 		this._disposeCompletion = completion.then(() => this._runtimeAdmission.releaseBundle());
 		void this._disposeCompletion.catch(() => undefined);
 		this._disposed = true;
+		this._analytics.dispose();
 		const humanInputPreparation = this._humanInput.invalidate("session dispose");
 		this._runtimeBuilder.closeMutationAdmission();
 		this._runtimeAdmission.close();

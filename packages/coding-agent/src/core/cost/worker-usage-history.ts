@@ -6,6 +6,7 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { assertWorkerConversationFile } from "../../kernel/session/worker-storage-identity.ts";
+import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { scanWorkerSessionFile } from "../delegation/worker-conversation-revision.ts";
 import { providerUsageFromAttemptUsage, validateProviderUsage } from "../orchestration/attempt-usage.ts";
@@ -55,7 +56,7 @@ async function captureSource(path: string): Promise<Source> {
 			offset += bytesRead;
 		}
 		if (!same(await file.stat({ bigint: true })) || !same(await stat(path, { bigint: true })))
-			throw new Error(`Accounting source changed while reading: ${path}`);
+			throw new FileSnapshotChangedError(`Accounting source changed while reading: ${path}`);
 		return {
 			evidence: { path, sha256: hash.digest("hex"), size: offset },
 			unchanged: async () => same(await stat(path, { bigint: true })),
@@ -187,8 +188,9 @@ async function readTranscript(
 			byAttempt.set(attemptId, components);
 		},
 	);
-	if (visited !== head.entryCount || !(await source.unchanged()))
-		throw new Error("Worker accounting transcript changed or contains unreadable entries.");
+	if (!(await source.unchanged()))
+		throw new FileSnapshotChangedError("Worker accounting transcript changed while reading.");
+	if (visited !== head.entryCount) throw new Error("Worker accounting transcript contains unreadable entries.");
 	return { byAttempt, source };
 }
 
@@ -354,6 +356,8 @@ async function collectSessionWorkerEvidence(
 			)
 		).every(Boolean)
 	)
-		throw new Error("Historical worker accounting sources changed; retry the read-only projection.");
+		throw new FileSnapshotChangedError(
+			"Historical worker accounting sources changed; retry the read-only projection.",
+		);
 	return groups;
 }

@@ -1,5 +1,6 @@
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { readAccountingProjection, reconcileSessionAccounting } from "./accounting-history.ts";
 import { type HistoricalAccountingProjection, projectHistoricalAccounting } from "./accounting-projection.ts";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
@@ -11,12 +12,18 @@ interface HistoryState {
 	projection?: HistoricalAccountingProjection;
 	entries: readonly SessionEntry[];
 	count: number;
+	revision: number;
+	retriesLeft: number;
 	loading: boolean;
 	loaded: boolean;
-	retryAfterCount?: number;
+	scheduled: boolean;
+	needsRefresh: boolean;
+	deferred: boolean;
+	failed: boolean;
+	unsubscribe?: () => void;
 }
 
-/** Async disk evidence has one owner; no filesystem read or hash occurs during a redraw. */
+/** Durable append events own refresh admission; redraws only read the cached projection. */
 export class SessionAccountingHistory {
 	private state: HistoryState | undefined;
 	private readonly deps: {
@@ -32,6 +39,7 @@ export class SessionAccountingHistory {
 	}
 
 	reset(): void {
+		this.state?.unsubscribe?.();
 		this.state = undefined;
 	}
 
@@ -40,7 +48,7 @@ export class SessionAccountingHistory {
 	}
 
 	status(): "pending" | "unavailable" | undefined {
-		return this.state?.loading ? "pending" : this.state?.retryAfterCount !== undefined ? "unavailable" : undefined;
+		return this.state?.loading || this.state?.deferred ? "pending" : this.state?.failed ? "unavailable" : undefined;
 	}
 
 	entries(): readonly SessionEntry[] {
@@ -49,53 +57,118 @@ export class SessionAccountingHistory {
 		const sessionId = session.getSessionId();
 		let state = this.state;
 		if (!state || state.session !== session || state.file !== file || state.sessionId !== sessionId) {
-			state = { session, file, sessionId, entries: session.getEntries(), count: -1, loading: false, loaded: false };
+			this.reset();
+			state = {
+				session,
+				file,
+				sessionId,
+				entries: session.getEntries(),
+				count: -1,
+				revision: 0,
+				retriesLeft: 1,
+				loading: false,
+				loaded: false,
+				scheduled: false,
+				needsRefresh: false,
+				deferred: false,
+				failed: false,
+			};
 			this.state = state;
+			const observed = state;
+			state.unsubscribe = session.onEntriesPersisted((event) => {
+				if (
+					!this.isCurrent(observed) ||
+					event.sessionId !== observed.sessionId ||
+					event.sessionFile !== observed.file
+				)
+					return;
+				observed.revision++;
+				const workerChanged = event.entryIds.some((id) => {
+					const entry = session.getEntry(id);
+					return entry?.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE;
+				});
+				if (!observed.loaded || observed.deferred || observed.failed || workerChanged || event.rewritten) {
+					observed.needsRefresh = true;
+					observed.retriesLeft = 1;
+					this.schedule(observed);
+				}
+			});
 		}
 		const count = session.getEntryCount();
 		if (state.count !== count) {
-			const raw = session.getEntries();
-			const hasNewWorkerReceipt = raw
-				.slice(Math.max(0, state.count))
-				.some((entry) => entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE);
-			state.entries = projectHistoricalAccounting(raw, state.projection);
+			state.entries = projectHistoricalAccounting(session.getEntries(), state.projection);
 			state.count = count;
-			if (hasNewWorkerReceipt && state.loaded && !state.loading) this.hydrate(state, true);
-			else if (state.retryAfterCount !== undefined && count > state.retryAfterCount && !state.loading)
-				this.hydrate(state, true);
 		}
-		if (!state.loaded && !state.loading && file) this.hydrate(state, false);
+		if (!state.loaded) this.schedule(state);
 		return state.entries;
 	}
 
-	private hydrate(state: HistoryState, refresh: boolean): void {
-		if (!state.file) return;
+	private isCurrent(state: HistoryState): boolean {
+		return (
+			this.state === state &&
+			!this.deps.isDisposed() &&
+			this.deps.getSession() === state.session &&
+			state.session.getSessionId() === state.sessionId &&
+			state.session.getSessionFile() === state.file
+		);
+	}
+
+	private schedule(state: HistoryState): void {
+		if (
+			!this.isCurrent(state) ||
+			state.loading ||
+			state.scheduled ||
+			!state.file ||
+			!state.session.hasDurableSessionFile()
+		)
+			return;
+		state.scheduled = true;
+		queueMicrotask(() => {
+			state.scheduled = false;
+			if (this.isCurrent(state) && state.session.hasDurableSessionFile()) this.hydrate(state);
+		});
+	}
+
+	private hydrate(state: HistoryState): void {
+		if (!state.file || state.loading) return;
 		state.loading = true;
+		state.needsRefresh = false;
 		const file = state.file;
+		const revision = state.revision;
+		let updated = false;
 		void (async () => {
 			const projection =
-				(!refresh ? await readAccountingProjection(file) : undefined) ??
+				(!state.loaded ? await readAccountingProjection(file) : undefined) ??
 				(await reconcileSessionAccounting(this.deps.getAgentDir(), file));
 			if (projection.sessionId !== state.sessionId)
 				throw new Error("Accounting projection session identity changed.");
-			if (this.state !== state || this.deps.isDisposed()) return;
+			if (!this.isCurrent(state)) return;
 			state.projection = projection;
 			state.entries = projectHistoricalAccounting(state.session.getEntries(), projection);
 			state.count = state.session.getEntryCount();
 			state.loaded = true;
-			state.retryAfterCount = undefined;
-			state.loading = false;
-			this.deps.onUpdated();
+			state.deferred = false;
+			state.failed = false;
+			updated = true;
 		})()
 			.catch((error: unknown) => {
-				if (this.state === state && !this.deps.isDisposed()) {
-					state.loaded = true;
-					state.retryAfterCount = state.session.getEntryCount();
-					this.deps.onError(error);
-				}
+				if (!this.isCurrent(state)) return;
+				state.loaded = true;
+				state.deferred = error instanceof FileSnapshotChangedError;
+				state.failed = !state.deferred;
+				if (state.deferred) {
+					if (state.revision !== revision) state.needsRefresh = true;
+					else if (state.retriesLeft > 0) {
+						state.retriesLeft--;
+						state.needsRefresh = true;
+					}
+					updated = true;
+				} else this.deps.onError(error);
 			})
 			.finally(() => {
 				state.loading = false;
+				if (this.isCurrent(state) && state.needsRefresh) this.schedule(state);
+				if (this.isCurrent(state) && updated) this.deps.onUpdated();
 			});
 	}
 }

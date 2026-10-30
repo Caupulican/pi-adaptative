@@ -20,6 +20,7 @@ import {
 	type SessionHeader,
 	type SessionManager,
 } from "../kernel/session/session-manager.ts";
+import { FileSnapshotChangedError } from "../kernel/storage/bounded-file.ts";
 import type { AgentMessage, AgentState } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../kernel/usage.ts";
 import type { UsageComponent } from "../kernel/usage-components.ts";
@@ -203,6 +204,10 @@ export class SessionAnalytics {
 	private getAccountingEntries(): readonly SessionEntry[] {
 		this.getAccountingSession();
 		return this.accountingHistory.entries();
+	}
+
+	dispose(): void {
+		this.accountingHistory.reset();
 	}
 
 	getSessionStats(): SessionStats {
@@ -714,7 +719,7 @@ export class SessionAnalytics {
 				.catch((error: unknown) => {
 					if (!refreshIsCurrent()) return;
 					this.dailyRetryAfter = Date.now() + 10_000;
-					this.deps.onDailyUsageError?.(error);
+					if (!(error instanceof FileSnapshotChangedError)) this.deps.onDailyUsageError?.(error);
 				})
 				.finally(() => {
 					this.dailyRefresh = undefined;
