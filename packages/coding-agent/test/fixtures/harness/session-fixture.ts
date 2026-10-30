@@ -1387,7 +1387,8 @@ export class VirtualGit {
 			return { code: 0, stdout: paths.map((path) => `${path}\n`).join(""), stderr: "" };
 		}
 		const dashes = args.indexOf("--");
-		const operands = args.slice(0, dashes < 0 ? args.length : dashes).filter((arg) => !arg.startsWith("-"));
+		const options = args.slice(0, dashes < 0 ? args.length : dashes);
+		const operands = options.filter((arg) => !arg.startsWith("-"));
 		const pathspecs = dashes < 0 ? [] : args.slice(dashes + 1).map((spec) => spec.replace(":(literal)", ""));
 		const range = operands.find((arg) => arg.includes(".."));
 		const ambiguous = (ref: string): GitOutcome => ({
@@ -1434,11 +1435,13 @@ export class VirtualGit {
 			const terminator = args.includes("-z") ? "\0" : "\n";
 			return { code: 0, stdout: changed.map(({ path }) => `${path}${terminator}`).join(""), stderr: "" };
 		}
+		const sourcePrefix = options.findLast((arg) => arg.startsWith("--src-prefix="))?.slice(13) ?? "a/";
+		const destinationPrefix = options.findLast((arg) => arg.startsWith("--dst-prefix="))?.slice(13) ?? "b/";
 		const patch = changed.map(({ path, old, next }) => {
 			const lines = [
-				`diff --git a/${path} b/${path}`,
-				old === undefined ? "--- /dev/null" : `--- a/${path}`,
-				next === undefined ? "+++ /dev/null" : `+++ b/${path}`,
+				`diff --git ${sourcePrefix}${path} ${destinationPrefix}${path}`,
+				old === undefined ? "--- /dev/null" : `--- ${sourcePrefix}${path}`,
+				next === undefined ? "+++ /dev/null" : `+++ ${destinationPrefix}${path}`,
 			];
 			if (old !== undefined) lines.push(...old.split("\n").map((line) => `-${line}`));
 			if (next !== undefined) lines.push(...next.split("\n").map((line) => `+${line}`));
