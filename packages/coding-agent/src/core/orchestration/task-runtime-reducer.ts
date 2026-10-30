@@ -39,6 +39,7 @@ import {
 	approvalFromPayload,
 	approvalResolutionFromPayload,
 	assertReferencedAcceptanceCriteriaRetained,
+	cancellationDetail,
 	checkpointFromPayload,
 	dispatchFromValue,
 	dispatchIdentifier,
@@ -1670,6 +1671,9 @@ export function reduceOrchestrationEvent(
 				...attempt,
 				status: "cancelled",
 				reasonCode: string(event.payload.reasonCode, "attempt.cancelled.reasonCode"),
+				...(event.payload.reasonDetail === undefined
+					? {}
+					: { reasonDetail: cancellationDetail(event.payload.reasonDetail, "attempt.cancelled.reasonDetail") }),
 				updatedAt: event.occurredAt,
 			});
 			const task = tasks[attempt.taskId];

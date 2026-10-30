@@ -24,6 +24,7 @@ import {
 	MAX_EVIDENCE_SOURCE_ID_CHARS,
 	MAX_EVIDENCE_TEXT_CHARS,
 } from "../research/evidence-bundle.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { boundedUtf8Text } from "../util/bounded-line.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestration-panel.ts";
@@ -84,6 +85,7 @@ export interface DelegateStatusLaneView {
 	/** Binding status of the lane's logical agent when known; "retired" takes no follow_up, resume, or wait. */
 	agentStatus?: NonNullable<LaneRecord["agentStatus"]>;
 	reasonCode?: string;
+	reasonDetail?: string;
 	/** The host's judgment of the lane's claim against its receipts; absent on a legacy claim. */
 	hostVerdict?: WorkerHostVerdictView;
 	/** Host advice on the worker's lifecycle once its task ended; the root decides. */
@@ -282,6 +284,10 @@ function formatRecord(
 	const builder = new RecordTextBudgetBuilder(maxRecordBytes);
 	const boundedLaneId = record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS);
 	const headerLines: string[] = [`${boundedLaneId}: ${formattedRecordStatus(record)}`];
+	if (record.reasonDetail)
+		headerLines.push(
+			`diagnostic (untrusted):\n${wrapUntrustedText(record.reasonDetail, `worker-diagnostic:${boundedLaneId}`)}`,
+		);
 	if (record.agentStatus === "retired") {
 		headerLines.push(
 			"agent retired: no follow_up, resume, or wait; delegate transcript still reads its conversation.",
@@ -468,6 +474,7 @@ function laneView(
 		status: record.status,
 		...(record.agentStatus ? { agentStatus: record.agentStatus } : {}),
 		...(record.reasonCode ? { reasonCode: record.reasonCode.slice(0, 256) } : {}),
+		...(record.reasonDetail ? { reasonDetail: record.reasonDetail } : {}),
 		...(claim?.hostVerdict ? { hostVerdict: workerHostVerdictView(claim.hostVerdict) } : {}),
 		...(disposition ? { recommendedDisposition: disposition } : {}),
 		...(record.status === "queued" && record.waitReason ? { waitReason: record.waitReason.slice(0, 512) } : {}),

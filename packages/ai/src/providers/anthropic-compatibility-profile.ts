@@ -80,6 +80,11 @@ export const REVIEWED_CLAUDE_INSTALLATIONS = Object.freeze([
 		sha256: "4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d",
 		oauth: ANTHROPIC_OAUTH_PROTOCOL,
 	}),
+	Object.freeze({
+		version: "2.1.314",
+		sha256: "4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594",
+		oauth: ANTHROPIC_OAUTH_PROTOCOL,
+	}),
 ]);
 
 export const PACKAGED_ANTHROPIC_IDENTITY: AnthropicClientIdentity = Object.freeze({ ...ANTHROPIC_CLIENT_CONFIG });

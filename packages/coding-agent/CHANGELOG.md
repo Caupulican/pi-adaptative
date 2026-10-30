@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Runtime updates pause and drain continuous-chat work before reload while preserving runtime admission checks.
+- Completion accounts can group explicit paths with a shared reason while preserving separate file review and repository identity; ambiguous path suffixes no longer cover multiple changed files.
+- Worker follow-ups preserve task-fitness failure codes and recovery diagnostics in status and continuous-chat history, and avoid rechecking launch control frames or hashing mailbox metadata as parent instructions.
+- Identical worker task-fitness requests share their active evaluation without letting one caller cancel another caller's wait.
+
 ## [0.104.24] - 2026-10-30
 
 ### Added

@@ -119,6 +119,7 @@ import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-m
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
@@ -2132,7 +2133,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	persistWorkerTerminalReport(
 		name: string,
-		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
+		terminal: {
+			laneId: string;
+			attemptId?: string;
+			status: string;
+			completedAt?: string;
+			reasonCode?: string;
+			reasonDetail?: string;
+		},
 	): void {
 		const entries = this.deps.getSessionManager().getEntries();
 		const claim =
@@ -2151,12 +2159,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			return;
 		}
 		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
+		const detail = terminal.reasonDetail ? boundedRedactedDiagnosticText(terminal.reasonDetail) : undefined;
 		const transcriptReference = this.workerTranscriptReference(terminal);
 		const report: ContinuousChatWorkReportEntry = {
 			version: 1,
 			name,
 			claimId,
-			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
+			text: claim
+				? workerReportClaimText(claim)
+				: `Terminal status ${terminal.status}${reason}.${detail ? ` Diagnostic: ${detail}` : ""}`,
 			timestamp: Date.now(),
 			...(transcriptReference ? { transcriptReference } : {}),
 		};

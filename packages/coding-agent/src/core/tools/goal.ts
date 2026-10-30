@@ -37,7 +37,11 @@ import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON
 import { awaitPreflight } from "../preflight.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
-import { completionAccountInputSchema, parseCompletionAccount } from "../system-one/completion-account.ts";
+import {
+	COMPLETION_ACCOUNT_GUIDANCE,
+	completionAccountInputSchema,
+	parseCompletionAccount,
+} from "../system-one/completion-account.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
@@ -858,7 +862,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
 			"amend_goal extends this objective only: quote the owner's full message, keep the current objective text in userGoal, then append its change and requirements. For unrelated work, leave this goal and its workers unchanged.",
 			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
-			"complete for work that changed the repository needs `account`: { changes: [{ path, reason, serves: [requirement ids or the changed file it supports], evidenceIds? }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }] (empty when none), cause: { claim, evidenceIds } for a bug fix }. Cite ids from get. System One decides each claim against the diff or the evidence you cite; it does not guess what the diff means.",
+			COMPLETION_ACCOUNT_GUIDANCE,
 			"Before complete, rank every defect, risk or misleading result you noticed by relevance to this goal: a relevant one is part of the goal and must be fixed and proven first; list the rest in your closing answer. complete with a relevant noticed item unresolved is refused work.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],

@@ -57,7 +57,11 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
-import { WorkerTaskFitness } from "../expert-routing/worker-task-fitness.ts";
+import {
+	formatWorkerTaskFitnessFailure,
+	WorkerTaskFitness,
+	type WorkerTaskFitnessFailure,
+} from "../expert-routing/worker-task-fitness.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import {
@@ -80,6 +84,7 @@ import {
 	type AttemptUsageSnapshot,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
@@ -120,6 +125,7 @@ import type { ResourceLoader } from "../resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type {
 	ModelCapabilitySettings,
@@ -230,6 +236,7 @@ import {
 	raceLosersToCancel,
 	raceLostReasonCode,
 } from "./worker-fanout.ts";
+import { workerFitnessInstructions } from "./worker-fanout-header.ts";
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
@@ -848,8 +855,9 @@ export class WorkerDelegationController {
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
 			preflight: async (request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
-				const failure = reasonCode ?? (await this.checkExistingWorkerTaskFitness(request, record));
-				return failure ? { action: "cancel", reasonCode: failure } : { action: "start" };
+				if (reasonCode) return { action: "cancel", reasonCode };
+				const failure = await this.checkExistingWorkerTaskFitness(request, record);
+				return failure ? { action: "cancel", ...failure } : { action: "start" };
 			},
 			isPreflightCurrent: (request, record) => this.hasCurrentWorkerTaskFitness(request, record),
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
@@ -860,7 +868,8 @@ export class WorkerDelegationController {
 					: undefined;
 			},
 			run: (request, record) => this.runOnce(request, undefined, record, this.schedulerPreflight),
-			cancel: (laneId, reasonCode, attemptId) => this.cancelScheduledWorker(laneId, reasonCode, attemptId),
+			cancel: (laneId, reasonCode, attemptId, detail) =>
+				this.cancelScheduledWorker(laneId, reasonCode, attemptId, detail),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
@@ -1108,9 +1117,10 @@ export class WorkerDelegationController {
 		laneId: string,
 		reasonCode: string,
 		expectedAttemptId?: string,
+		detail?: string,
 	): { cancelled: boolean; record: LaneRecord | undefined } {
 		if (!this.ownsProjectLane(laneId)) return { cancelled: false, record: lifecycle.getRecord(laneId) };
-		const outcome = lifecycle.cancelUnleased(laneId, reasonCode, expectedAttemptId);
+		const outcome = lifecycle.cancelUnleased(laneId, reasonCode, expectedAttemptId, detail);
 		if (outcome.cancelled && outcome.record) {
 			try {
 				this.publishTerminalRecord(outcome.record);
@@ -1126,7 +1136,12 @@ export class WorkerDelegationController {
 		return outcome;
 	}
 
-	private cancelScheduledWorker(laneId: string, reasonCode: string, expectedAttemptId?: string): boolean {
+	private cancelScheduledWorker(
+		laneId: string,
+		reasonCode: string,
+		expectedAttemptId?: string,
+		detail?: string,
+	): boolean {
 		if (!this.ownsProjectLane(laneId)) return false;
 		try {
 			// Direct runs may never be scheduler-tracked, and a failed disposal keeps its physical hold.
@@ -1141,7 +1156,7 @@ export class WorkerDelegationController {
 			throw error;
 		}
 		try {
-			return this.cancelUnleasedAndPublish(this.getWorkerLifecycle(), laneId, reasonCode, expectedAttemptId)
+			return this.cancelUnleasedAndPublish(this.getWorkerLifecycle(), laneId, reasonCode, expectedAttemptId, detail)
 				.cancelled;
 		} catch (error) {
 			this.safeWarn(
@@ -2571,9 +2586,14 @@ export class WorkerDelegationController {
 	 * future recovery read to receive the handoff. Repeated late cancellation paths are inert via
 	 * the attempt-id publication fence above.
 	 */
-	private cancelAndPublish(lifecycle: WorkerLifecycle, laneId: string, reasonCode: string): LaneRecord | undefined {
+	private cancelAndPublish(
+		lifecycle: WorkerLifecycle,
+		laneId: string,
+		reasonCode: string,
+		detail?: string,
+	): LaneRecord | undefined {
 		if (!this.ownsProjectLane(laneId)) return undefined;
-		const record = lifecycle.cancel(laneId, reasonCode);
+		const record = lifecycle.cancel(laneId, reasonCode, detail);
 		if (record) this.publishTerminalRecord(record);
 		if (record && !this.deps.isDisposed()) this.scheduler.drain();
 		return record;
@@ -4026,7 +4046,7 @@ export class WorkerDelegationController {
 		admission: Extract<WorkerAdmission, { ok: true }>,
 	): WorkerTaskFitInput {
 		return {
-			instructions: request.instructions,
+			instructions: workerFitnessInstructions(request.instructions),
 			objective: this.goalForWorkerRequest(request)?.userGoal ?? "",
 			model: describeModelCard(
 				buildCapabilityCard(admission.shipment.model, { subscription: false, evidence: "unprobed" }),
@@ -4046,9 +4066,23 @@ export class WorkerDelegationController {
 	private async checkExistingWorkerTaskFitness(
 		request: WorkerDelegationRequest,
 		record: LaneRecord,
-	): Promise<string | undefined> {
+	): Promise<WorkerTaskFitnessFailure | undefined> {
 		const admission = this.existingWorkerFitnessAdmission(request, record);
-		return admission.ok ? this.checkWorkerTaskFitness(request, admission) : admission.skipReason;
+		if (admission.ok) return this.checkWorkerTaskFitness(request, admission);
+		// Non-fitness admission owners already return a reason followed by an optional diagnostic.
+		const separator = admission.skipReason.indexOf(":");
+		const code = separator < 0 ? admission.skipReason : admission.skipReason.slice(0, separator);
+		const validCode = code.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH && /^[A-Za-z0-9._-]+$/.test(code);
+		const diagnostic = validCode
+			? separator < 0
+				? undefined
+				: admission.skipReason.slice(separator + 1)
+			: admission.skipReason;
+		const detail = diagnostic ? boundedRedactedDiagnosticText(diagnostic) : undefined;
+		return {
+			reasonCode: validCode ? code : "worker_task_fitness_binding_unavailable",
+			...(detail ? { detail } : {}),
+		};
 	}
 
 	/** Pure lookup while the scheduler still owns the queue, immediately before synchronous dispatch. */
@@ -4074,7 +4108,7 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
 		signal?: AbortSignal,
-	): Promise<string | undefined> {
+	): Promise<WorkerTaskFitnessFailure | undefined> {
 		if (!this.workerTaskFitnessEnabled()) return;
 		const judge = this.deps.getRouteChoiceJudge?.();
 		const sessionId = this.deps.getSessionId();
@@ -4082,7 +4116,7 @@ export class WorkerDelegationController {
 		const objective = this.goalForWorkerRequest(request)?.userGoal;
 		const binding = admission.shipment.modelBinding;
 		const model = structuredClone(admission.shipment.model);
-		let failure: string | undefined;
+		let failure: WorkerTaskFitnessFailure | undefined;
 		try {
 			failure = await this.taskFitness.check(
 				judge,
@@ -4090,7 +4124,10 @@ export class WorkerDelegationController {
 				signal ?? this.workerAbort.signal,
 			);
 		} catch (error) {
-			failure = `worker_task_fitness_unavailable:${error instanceof Error ? error.message : String(error)}`;
+			failure = {
+				reasonCode: "worker_task_fitness_unavailable",
+				detail: error instanceof Error ? error.message : String(error),
+			};
 		}
 		if (
 			failure !== undefined &&
@@ -4114,8 +4151,10 @@ export class WorkerDelegationController {
 			!isDeepStrictEqual(current.shipment.modelBinding, binding) ||
 			!isDeepStrictEqual(current.shipment.model, model)
 		)
-			return "worker_task_fitness_stale";
-		return failure;
+			return { reasonCode: "worker_task_fitness_stale" };
+		if (!failure?.detail) return failure;
+		const detail = boundedRedactedDiagnosticText(failure.detail);
+		return { reasonCode: failure.reasonCode, ...(detail ? { detail } : {}) };
 	}
 
 	private async selectFreshWorkerRoute(
@@ -4412,7 +4451,7 @@ export class WorkerDelegationController {
 		const fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
 		if (fitnessFailure) {
 			if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
-			return { kind: "refused", skipReason: fitnessFailure };
+			return { kind: "refused", skipReason: formatWorkerTaskFitnessFailure(fitnessFailure) };
 		}
 		if (reuse.outcome === "reuse") {
 			const current = this.resolveWorkerAdmission(
@@ -4717,7 +4756,7 @@ export class WorkerDelegationController {
 			case "ran":
 				return settled.outcome;
 			case "cancelled":
-				return { started: false, skipReason: settled.reasonCode };
+				return { started: false, skipReason: formatWorkerTaskFitnessFailure(settled) };
 			case "failed":
 				throw settled.error;
 			default: {
@@ -4786,8 +4825,8 @@ export class WorkerDelegationController {
 			const failure = await this.checkExistingWorkerTaskFitness(request, existingRecord);
 			if (failure) {
 				if (attempt && this.lifecycle.getActiveAttempt(existingRecord.laneId)?.attemptId === attempt.attemptId)
-					this.cancelAndPublish(this.lifecycle, existingRecord.laneId, failure);
-				return { started: false, skipReason: failure };
+					this.cancelAndPublish(this.lifecycle, existingRecord.laneId, failure.reasonCode, failure.detail);
+				return { started: false, skipReason: formatWorkerTaskFitnessFailure(failure) };
 			}
 		}
 		let outcome: PreparedWorkerRun;
@@ -5382,12 +5421,20 @@ export class WorkerDelegationController {
 		);
 		const buildExecutor = () =>
 			createWorkerAttemptExecutor({
+				...(prepared.attempt!.dispatch.controlMessageId
+					? { controlMessageId: prepared.attempt!.dispatch.controlMessageId }
+					: {}),
 				requirementIds: prepared.attempt!.dispatch.requirementIds ?? [],
 				reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
 				request: workerRequest,
 				assertTaskFitness: async (instructions, signal) => {
 					const failure = await this.checkWorkerTaskFitness({ ...request, instructions }, admission, signal);
-					if (failure) throw new BoundedCompletionFailureError("failed", "worker_task_model_inadequate", failure);
+					if (failure)
+						throw new BoundedCompletionFailureError(
+							"failed",
+							failure.reasonCode,
+							formatWorkerTaskFitnessFailure(failure),
+						);
 				},
 				grant,
 				executionPlan,

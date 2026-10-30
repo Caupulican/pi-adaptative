@@ -45,6 +45,7 @@ import {
 	accountOutcome,
 	type CompletionAccount,
 	checkCompletionAccount,
+	completionChangedPaths,
 	judgeAccountClaims,
 } from "./completion-account.ts";
 import { concretizeOutcomeFinding } from "./completion-evidence-gaps.ts";
@@ -1642,13 +1643,10 @@ export class SystemOneController {
 					id: criterion.id,
 					text: criterion.text,
 				})),
-				changedPaths: [
-					...new Set([
-						...(work?.files ?? []),
-						...(work?.untracked ?? []),
-						...snapshot.changes.map((change) => change.path),
-					]),
-				],
+				changedPaths: completionChangedPaths(
+					[...(work?.files ?? []), ...(work?.untracked ?? [])],
+					snapshot.changes.map((change) => change.path),
+				),
 				patch: work?.patch ?? "",
 				patchOmittedChars: work?.omittedChars ?? 0,
 				...(work?.suppressions ? { suppressions: work.suppressions } : {}),

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
-import type { AgentHaltRequest, AgentMessage } from "../../kernel/index.ts";
+import type { AgentHaltRequest } from "../../kernel/index.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -20,6 +20,7 @@ import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
@@ -192,7 +193,7 @@ export function boundWorkerWaitTimeoutMs(timeoutMs: number): number {
 
 export function buildWorkerTerminalHandoffContent(args: {
 	childAgentId: string;
-	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
+	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode" | "reasonDetail">;
 	outputArtifact?: ArtifactContract;
 	claim?: {
 		summary?: string;
@@ -223,6 +224,9 @@ export function buildWorkerTerminalHandoffContent(args: {
 		`laneId=${args.record.laneId}`,
 		`status=${args.record.status}`,
 		...(args.record.reasonCode ? [`reasonCode=${handoffReasonCode(args.record.reasonCode)}`] : []),
+		...(args.record.reasonDetail
+			? [`diagnostic (untrusted):\n${wrapUntrustedText(args.record.reasonDetail, source, { nonce })}`]
+			: []),
 		...(args.outputArtifact
 			? [
 					`fullOutput=${args.outputArtifact.uri}${args.outputArtifact.sizeBytes === undefined ? "" : ` (${args.outputArtifact.sizeBytes} bytes)`}`,
@@ -286,6 +290,13 @@ type MandatoryTranscriptControlInput = {
 	replyToMessageId?: string;
 	task: WorkerAgentTaskMetadata;
 };
+
+/** Mailbox identity and user content are kept separate from their transcript presentation. */
+export interface WorkerMailboxConversationMessage {
+	messageId: string;
+	instructions: string;
+	message: UserMessage;
+}
 
 /**
  * Sole owner of model-facing logical-agent controls and their durable inboxes.
@@ -1939,7 +1950,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agentId: string,
 		conversation: WorkerConversation,
 		includeFollowUp: boolean,
-	): AgentMessage[] {
+	): WorkerMailboxConversationMessage[] {
 		const mailbox = this.getMailbox(agentId);
 		const pending = mailbox.pending();
 		if (pending.length === 0) return [];
@@ -1956,7 +1967,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return mailbox
 			.pending()
 			.filter((message) => message.kind === "steer" || includeFollowUp)
-			.map((message) => this.mailboxMessage(message));
+			.map((message) => ({
+				messageId: message.messageId,
+				instructions: message.content,
+				message: this.mailboxMessage(message),
+			}));
 	}
 
 	/** Acknowledge only after the exact child transcript message has been durably appended. */

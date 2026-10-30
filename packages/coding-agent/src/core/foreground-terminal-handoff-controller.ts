@@ -209,6 +209,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		laneId: string;
 		status: LaneTerminalStatus;
 		reasonCode?: string;
+		reasonDetail?: string;
 		outputArtifact?: ArtifactContract;
 		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
 		fanout?: string;
@@ -240,6 +241,10 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			// line cannot carry free text a worker chose.
 			const reason = record.reasonCode ? ` reason=${handoffReasonCode(record.reasonCode)}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
+			if (record.reasonDetail)
+				lines.push(
+					`  Diagnostic (untrusted):\n${wrapUntrustedText(record.reasonDetail, `worker-diagnostic:${record.laneId}`)}`,
+				);
 			if (record.fanout) lines.push(`  Fan-out: ${record.fanout.replace(/[\r\n]+/g, " ").slice(0, 600)}`);
 			if (record.outputArtifact) {
 				lines.push(
@@ -527,6 +532,7 @@ export class ForegroundTerminalHandoffController {
 				...(record.attemptId ? { attemptId: record.attemptId } : {}),
 				status: record.status,
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+				...(record.reasonDetail ? { reasonDetail: record.reasonDetail } : {}),
 				...(outputArtifact ? { outputArtifact } : {}),
 				...(fanout ? { fanout } : {}),
 				...(claim?.hostVerdict ? { hostVerdict: claim.hostVerdict } : {}),

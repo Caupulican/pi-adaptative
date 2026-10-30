@@ -59,8 +59,8 @@ export interface RuntimeUpdateControllerDeps {
 	reload(extensionPath?: string, ownerHandoff?: RuntimeMutationHandoff): Promise<void>;
 	appendNotice(content: string): Promise<void>;
 	isRoot(): boolean;
-	/** Pause background producers and drain paid work; release resumes them if restart cannot proceed. */
-	acquireRestartQuiescence?(signal: AbortSignal): Promise<(() => void) | undefined>;
+	/** Pause background producers and drain paid work; release resumes them after an update. */
+	acquireUpdateQuiescence?(signal: AbortSignal): Promise<(() => void) | undefined>;
 	onStopped?(): void;
 	resume?(prepare: () => Promise<void>): Promise<void>;
 }
@@ -299,18 +299,24 @@ export class RuntimeUpdateController {
 					if (!sessionFile || !this.restart)
 						throw new Error("Core restart adapter or persisted session unavailable.");
 					this.save({ ...this.state, status: "restarting" });
-					const resume = await this.deps.acquireRestartQuiescence?.(updateSignal);
+					const resume = await this.deps.acquireUpdateQuiescence?.(updateSignal);
 					try {
 						await this.restart({ id: this.state.id, sessionId: this.state.sessionId, sessionFile }, updateSignal);
 					} finally {
 						resume?.();
 					}
 				} else {
-					const handoff = beginRuntimeHandoff?.();
+					const resume = await this.deps.acquireUpdateQuiescence?.(updateSignal);
 					try {
-						await this.deps.reload(this.state.extensionPath, handoff);
+						updateSignal.throwIfAborted();
+						const handoff = beginRuntimeHandoff?.();
+						try {
+							await this.deps.reload(this.state.extensionPath, handoff);
+						} finally {
+							handoff?.release();
+						}
 					} finally {
-						handoff?.release();
+						resume?.();
 					}
 				}
 				if (updateSignal.aborted)

@@ -27,11 +27,11 @@ export interface WorkDiff {
 	readonly base: string;
 	/** Complete Git tree diff from the admitted working bytes, within the capture byte bound. */
 	readonly patch: string;
-	/** Every tracked path the diff changes. */
+	/** Every path in the diff, including additions. */
 	readonly files: readonly string[];
 	/** Characters of the patch left out to keep the check bounded; 0 when complete. */
 	readonly omittedChars: number;
-	/** New files git does not track yet, which `git diff` does not show. */
+	/** Added paths that remain untracked in the checkout; these also appear in `files`. */
 	readonly untracked: readonly string[];
 	/**
 	 * Lint and type-check suppressions the work adds, scanned over the whole diff: the content of new files and
@@ -73,6 +73,11 @@ export interface WorkEvidenceOperationOptions {
 	readonly signal?: AbortSignal;
 	/** Absolute monotonic wall-clock deadline shared by every operation in one observation. */
 	readonly deadline?: number;
+}
+
+export interface WorkDiffReadOptions extends WorkEvidenceOperationOptions {
+	/** Qualify diff and untracked paths with the repository root for cross-repository evidence. */
+	readonly qualifyRepositoryPaths?: boolean;
 }
 
 type WorkEvidenceFailureKind = "aborted" | "timeout" | "command" | "filesystem" | "unstable" | "invalid";
@@ -482,16 +487,32 @@ export async function readWorkDiff(
 	cwd: string,
 	baseline: WorkBaseline,
 	paths?: readonly string[],
-	options: WorkEvidenceOperationOptions = {},
+	options: WorkDiffReadOptions = {},
 ): Promise<WorkDiff> {
 	try {
 		const current = await captureWorkBaseline(cwd, options);
 		if (current.root !== baseline.root) throw new Error("Repository baseline unavailable or scope changed");
 		const selected = paths?.length ? paths.map((path) => `:(literal)${path}`) : [];
+		const repositoryPrefix = options.qualifyRepositoryPaths
+			? `${current.root.replaceAll("\\", "/").replace(/\/+$/, "")}/`
+			: "";
 		const full = await git(
 			"diff",
 			current.root,
-			["diff", "--no-color", "--no-ext-diff", "--no-textconv", baseline.tree, current.tree, "--", ...selected],
+			[
+				...(options.qualifyRepositoryPaths ? ["-c", "core.quotePath=false"] : []),
+				"diff",
+				"--no-color",
+				"--no-ext-diff",
+				"--no-textconv",
+				...(options.qualifyRepositoryPaths
+					? [`--src-prefix=a/${repositoryPrefix}`, `--dst-prefix=b/${repositoryPrefix}`]
+					: []),
+				baseline.tree,
+				current.tree,
+				"--",
+				...selected,
+			],
 			undefined,
 			undefined,
 			options,
@@ -527,7 +548,8 @@ export async function readWorkDiff(
 			)
 		)
 			.split("\0")
-			.filter((path) => added.has(path));
+			.filter((path) => added.has(path))
+			.map((path) => `${repositoryPrefix}${path}`);
 		const files = patchPaths(full);
 		const suppressions = addedSuppressions(full);
 		if (
@@ -539,6 +561,17 @@ export async function readWorkDiff(
 				"diff",
 				"invalid",
 				"repository evidence exceeds the file or suppression count bound; partition the work without discarding evidence",
+			);
+		if (
+			options.qualifyRepositoryPaths &&
+			(files.length !== (full.match(/^diff --git /gm)?.length ?? 0) ||
+				files.some((path) => !path.startsWith(repositoryPrefix)) ||
+				untracked.some((path) => !files.includes(path)))
+		)
+			throw new WorkEvidenceError(
+				"diff",
+				"invalid",
+				"Qualified diff contains quoted, ambiguous or unsupported file headers; complete path evidence is unavailable",
 			);
 		return {
 			base: baseline.revision,

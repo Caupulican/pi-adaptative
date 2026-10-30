@@ -55,6 +55,8 @@ export interface AttemptRuntimeState {
 	dispatch: OrchestrationDispatchRequest;
 	status: AttemptStatus;
 	reasonCode?: string;
+	/** Bounded, redacted diagnostic for a canceled attempt, separate from its stable reason code. */
+	reasonDetail?: string;
 	grantId?: string;
 	/** Full compiled authority for new attempts; grantId alone is retained only when replaying legacy events. */
 	grant?: ExecutionGrant;

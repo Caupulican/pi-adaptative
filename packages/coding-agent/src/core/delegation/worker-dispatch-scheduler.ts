@@ -18,7 +18,7 @@ export type WorkerDispatchWaitReason =
 export type WorkerDispatchAdmission =
 	| { action: "start" }
 	| { action: "wait"; reason?: WorkerDispatchWaitReason; detail?: string }
-	| { action: "cancel"; reasonCode: string };
+	| { action: "cancel"; reasonCode: string; detail?: string };
 
 /** Process-local explanation of why a queued lane has not been dispatched yet. */
 export interface WorkerDispatchWaitState {
@@ -34,7 +34,7 @@ export interface WorkerDispatchWaitState {
  */
 export type WorkerLaneOutcome =
 	| { state: "ran"; outcome: WorkerDelegationRunOutcome }
-	| { state: "cancelled"; reasonCode: string }
+	| { state: "cancelled"; reasonCode: string; detail?: string }
 	| { state: "failed"; error: unknown }
 	| { state: "unowned" };
 
@@ -81,13 +81,14 @@ export interface WorkerDispatchSchedulerOptions {
 	getDispatchToken?(laneId: string): string | undefined;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
 	/** Literal false means the exact attempt changed before conditional cancellation could commit. */
-	cancel(laneId: string, reasonCode: string, dispatchToken?: string): unknown;
+	cancel(laneId: string, reasonCode: string, dispatchToken?: string, detail?: string): unknown;
 	warn(message: string): void;
 }
 
 interface PendingCancellation {
 	reasonCode: string;
 	dispatchToken?: string;
+	detail?: string;
 	deregister?: () => void;
 }
 
@@ -383,9 +384,14 @@ export class WorkerDispatchScheduler {
 		);
 	}
 
-	private retainPendingCancellation(laneId: string, reasonCode: string, dispatchToken?: string): void {
+	private retainPendingCancellation(
+		laneId: string,
+		reasonCode: string,
+		dispatchToken?: string,
+		detail?: string,
+	): void {
 		if (this.pendingCancellations.has(laneId)) return;
-		const pending: PendingCancellation = { reasonCode, dispatchToken };
+		const pending: PendingCancellation = { reasonCode, dispatchToken, ...(detail ? { detail } : {}) };
 		this.pendingCancellations.set(laneId, pending);
 		this.registerPendingCancellation(laneId, pending);
 	}
@@ -408,7 +414,7 @@ export class WorkerDispatchScheduler {
 	private retryPendingCancellations(): void {
 		for (const [laneId, pending] of [...this.pendingCancellations]) {
 			this.registerPendingCancellation(laneId, pending);
-			const cancellation = this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken);
+			const cancellation = this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken, pending.detail);
 			if (cancellation.state === "failed") continue;
 			// A durable cancellation terminals the lane rather than freeing its deferred resume for
 			// promotion. Delete that ownership before removeQueued releases capacity to other lanes.
@@ -417,7 +423,11 @@ export class WorkerDispatchScheduler {
 			this.removeQueued(laneId);
 			const outcome: WorkerLaneOutcome =
 				cancellation.state === "cancelled"
-					? { state: "cancelled", reasonCode: pending.reasonCode }
+					? {
+							state: "cancelled",
+							reasonCode: pending.reasonCode,
+							...(pending.detail ? { detail: pending.detail } : {}),
+						}
 					: { state: "unowned" };
 			this.settleLaneObservers(laneId, outcome);
 			if (hadDeferred) {
@@ -450,10 +460,12 @@ export class WorkerDispatchScheduler {
 		dispatchToken = this.queuedDispatchTokens.get(laneId) ??
 			this.runningDispatchTokens.get(laneId) ??
 			this.pendingCancellations.get(laneId)?.dispatchToken,
+		detail?: string,
 	): CancellationOutcome {
 		try {
-			const cancelled =
-				dispatchToken === undefined
+			const cancelled = detail
+				? this.options.cancel(laneId, reasonCode, dispatchToken, detail)
+				: dispatchToken === undefined
 					? this.options.cancel(laneId, reasonCode)
 					: this.options.cancel(laneId, reasonCode, dispatchToken);
 			return cancelled === false ? { state: "unowned" } : { state: "cancelled" };
@@ -610,10 +622,14 @@ export class WorkerDispatchScheduler {
 			}
 			if (result.action === "cancel") {
 				const dispatchToken = this.queuedDispatchTokens.get(laneId);
-				const cancellation = this.cancelWithOutcome(laneId, result.reasonCode, dispatchToken);
+				const cancellation = this.cancelWithOutcome(laneId, result.reasonCode, dispatchToken, result.detail);
 				if (cancellation.state === "cancelled") {
 					this.removeQueued(laneId);
-					this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: result.reasonCode });
+					this.settleLaneObservers(laneId, {
+						state: "cancelled",
+						reasonCode: result.reasonCode,
+						...(result.detail ? { detail: result.detail } : {}),
+					});
 					return;
 				}
 				if (cancellation.state === "unowned") {
@@ -623,7 +639,7 @@ export class WorkerDispatchScheduler {
 				// The durable cancellation failed: this lane is still owned and still executable, so no
 				// observer may be told it was cancelled. Retain it for the next scheduler signal, which
 				// retries the same reason through `retryPendingCancellations`.
-				this.retainPendingCancellation(laneId, result.reasonCode, dispatchToken);
+				this.retainPendingCancellation(laneId, result.reasonCode, dispatchToken, result.detail);
 				return;
 			}
 			this.validated.add(laneId);
@@ -702,9 +718,14 @@ export class WorkerDispatchScheduler {
 						// Durable cancellation owns this transition. Retain the scheduler entry when
 						// that write fails so a later explicit drain can retry it without a busy loop.
 						const dispatchToken = this.queuedDispatchTokens.get(laneId);
-						const cancellation = this.cancelWithOutcome(laneId, admission.reasonCode, dispatchToken);
+						const cancellation = this.cancelWithOutcome(
+							laneId,
+							admission.reasonCode,
+							dispatchToken,
+							admission.detail,
+						);
 						if (cancellation.state === "failed") {
-							this.retainPendingCancellation(laneId, admission.reasonCode, dispatchToken);
+							this.retainPendingCancellation(laneId, admission.reasonCode, dispatchToken, admission.detail);
 							continue;
 						}
 						if (cancellation.state === "unowned") {
@@ -712,7 +733,11 @@ export class WorkerDispatchScheduler {
 							continue;
 						}
 						this.removeQueued(laneId);
-						this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: admission.reasonCode });
+						this.settleLaneObservers(laneId, {
+							state: "cancelled",
+							reasonCode: admission.reasonCode,
+							...(admission.detail ? { detail: admission.detail } : {}),
+						});
 						// Cancellation can synchronously block another queued task that appeared earlier.
 						// Re-evaluate the bounded queue until that dependency cascade reaches a fixed point.
 						this.redrainRequested = true;
@@ -799,7 +824,7 @@ export class WorkerDispatchScheduler {
 			);
 		}
 		for (const [laneId, pending] of [...this.pendingCancellations]) {
-			this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken);
+			this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken, pending.detail);
 			// Disposal hands any remaining durable recovery to the next controller generation. Release
 			// this generation's process-local reload blocker even when its last cancellation attempt fails.
 			this.removePendingCancellation(laneId);

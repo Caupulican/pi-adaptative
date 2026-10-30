@@ -41,6 +41,8 @@ export interface LaneRecord {
 	/** Effective thinking level admitted with modelRef. */
 	thinkingLevel?: OrchestrationThinkingLevel;
 	reasonCode?: string;
+	/** Bounded host diagnostic accompanying a cancellation reason. */
+	reasonDetail?: string;
 	queuedAt?: string;
 	startedAt?: string;
 	completedAt?: string;
@@ -122,6 +124,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 		return false;
 	}
 	if (!isOptionalString(record.reasonCode)) return false;
+	if (!isOptionalString(record.reasonDetail)) return false;
 	if (!isOptionalString(record.queuedAt)) return false;
 	if (!isOptionalString(record.startedAt)) return false;
 	if (!isOptionalString(record.completedAt)) return false;

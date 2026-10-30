@@ -24,6 +24,7 @@ import { unsettledQuestionId, verdictAt } from "./unsettled-ladder.ts";
 
 export const COMPLETION_ACCOUNT_LIMITS = {
 	changes: 50,
+	pathsPerChange: 50,
 	claims: 20,
 	/** Targets of one change that System One reads it against. */
 	servesJudged: 4,
@@ -40,12 +41,27 @@ const evidenceIds = Type.Array(Type.String({ minLength: 1, maxLength: 200 }), {
 	description: "Ids of the goal evidence (or harness verification runs) the claim stands on, from `get`.",
 });
 
+const changePath = Type.String({ minLength: 1, maxLength: COMPLETION_ACCOUNT_LIMITS.pathChars });
+
 export const completionAccountSchema = Type.Object(
 	{
 		changes: Type.Array(
 			Type.Object(
 				{
-					path: Type.String({ minLength: 1, maxLength: COMPLETION_ACCOUNT_LIMITS.pathChars }),
+					path: Type.Union(
+						[
+							changePath,
+							Type.Array(changePath, {
+								minItems: 1,
+								maxItems: COMPLETION_ACCOUNT_LIMITS.pathsPerChange,
+								uniqueItems: true,
+							}),
+						],
+						{
+							description:
+								"One changed file, or explicit changed paths sharing the same reason, requirements, and evidence. Every file is reviewed separately; no directories or globs.",
+						},
+					),
 					reason: Type.String({
 						minLength: 1,
 						maxLength: COMPLETION_ACCOUNT_LIMITS.textChars,
@@ -69,7 +85,8 @@ export const completionAccountSchema = Type.Object(
 			),
 			{
 				maxItems: COMPLETION_ACCOUNT_LIMITS.changes,
-				description: "Every file the goal changed: what the change does and which requirement it serves.",
+				description:
+					"Every file the goal changed: what the change does and which requirement it serves. Group explicit paths with identical reasons to account for larger changes.",
 			},
 		),
 		assumptions: Type.Array(
@@ -125,7 +142,9 @@ export const completionAccountSchema = Type.Object(
 	},
 );
 
-export type CompletionAccount = Static<typeof completionAccountSchema>;
+type CompletionAccountInput = Static<typeof completionAccountSchema>;
+type CompletionAccountChange = Omit<CompletionAccountInput["changes"][number], "path"> & { path: string };
+export type CompletionAccount = Omit<CompletionAccountInput, "changes"> & { changes: CompletionAccountChange[] };
 
 /**
  * What the goal tools advertise: a short shape only, because every request carries the tool schemas and the full
@@ -142,7 +161,15 @@ export const completionAccountInputSchema = Type.Object(
 export function parseCompletionAccount(
 	value: unknown,
 ): { readonly account: CompletionAccount } | { readonly error: string } {
-	if (Value.Check(completionAccountSchema, value)) return { account: value };
+	if (Value.Check(completionAccountSchema, value))
+		return {
+			account: {
+				...value,
+				changes: value.changes.flatMap((entry) =>
+					(typeof entry.path === "string" ? [entry.path] : entry.path).map((path) => ({ ...entry, path })),
+				),
+			},
+		};
 	const first = Value.Errors(completionAccountSchema, value)[0];
 	return {
 		error: first ? `${first.instancePath || "account"}: ${first.message}` : "account does not match its shape",
@@ -184,13 +211,25 @@ function normalizePath(path: string): string {
 	return path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
-function samePath(left: string, right: string): boolean {
-	const a = normalizePath(left);
-	const b = normalizePath(right);
-	return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+/** Resolve one file identity; a shared suffix must never stand for several files. */
+function resolvePath(path: string, candidates: readonly string[]): string | undefined {
+	const normalized = normalizePath(path);
+	const exact = candidates.filter((candidate) => normalizePath(candidate) === normalized);
+	if (exact.length > 0) return exact.length === 1 ? exact[0] : undefined;
+	const suffix = candidates.filter((candidate) => {
+		const other = normalizePath(candidate);
+		return normalized.endsWith(`/${other}`) || other.endsWith(`/${normalized}`);
+	});
+	return suffix.length === 1 ? suffix[0] : undefined;
 }
 
-/** The repository-relative paths a patch changes, from its `diff --git` headers. */
+/** Keep observed repository identities; normalize an older recorded alias only when it is unique. */
+export function completionChangedPaths(observed: readonly string[], recorded: readonly string[]): string[] {
+	const paths = [...new Set(observed)];
+	return [...new Set([...paths, ...recorded.map((path) => resolvePath(path, paths) ?? path)])];
+}
+
+/** The paths named by a patch's `diff --git` headers, preserving any repository qualification. */
 export function patchPaths(patch: string): string[] {
 	const paths: string[] = [];
 	for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) paths.push(match[2] ?? match[1] ?? "");
@@ -200,10 +239,13 @@ export function patchPaths(patch: string): string[] {
 /** One changed file's complete part of the captured patch. */
 export function diffForPath(patch: string, path: string, omittedChars = 0): string | undefined {
 	const sections = patch.split(/^(?=diff --git )/m);
-	const section = sections.find((candidate) => {
+	const paths = sections.flatMap((candidate) => {
 		const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(candidate);
-		return header !== null && samePath(header[2] ?? "", path);
+		return header ? [header[2] ?? ""] : [];
 	});
+	const resolved = resolvePath(path, paths);
+	if (resolved === undefined) return undefined;
+	const section = sections.find((candidate) => /^diff --git a\/(.+?) b\/(.+)$/m.exec(candidate)?.[2] === resolved);
 	if (section === undefined) return undefined;
 	return omittedChars > 0 && section === sections.at(-1) ? undefined : section;
 }
@@ -282,8 +324,7 @@ function claimNamesPath(claim: string, path: string): boolean {
 	return claim.replaceAll("\\", "/").includes(name);
 }
 
-const ACCOUNT_SHAPE =
-	"Call goal complete again with `account`: { changes: [{ path, reason, serves: [requirement id or the file it supports] }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }], cause: { claim, evidenceIds, paths? } for a bug fix }. Cite evidence ids from `get`. cause.paths selects complete changed-file diffs for the causal claim; every other file still receives scope review. Never shrink production code to fit review limits.";
+export const COMPLETION_ACCOUNT_GUIDANCE = `Complete repository work with \`account\`: { changes: [{ path, reason, serves: [requirement id or the file it supports], evidenceIds? }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }], cause: { claim, evidenceIds, paths? } for a bug fix. path may be a string or a list of up to ${COMPLETION_ACCOUNT_LIMITS.pathsPerChange} explicit paths sharing the same reason, serves, and evidenceIds; every file still receives its own scope review. Paths must identify one changed file each; no directories, globs, or ambiguous suffixes. Cite evidence ids from \`get\`. cause.paths selects complete changed-file diffs for the causal claim. Never shrink production code to fit review limits.`;
 
 function fingerprintOf(statement: string, evidence: string): string {
 	return createHash("sha256").update(statement).update("\u0000").update(evidence).digest("hex").slice(0, 16);
@@ -321,7 +362,7 @@ export function checkCompletionAccount(
 						"The repository changed and completion has no account of it: why each change is needed, what it assumed, what it could break" +
 						(options.isBugFix ? ", and the defect's cause" : "") +
 						".",
-					required_next_proof: `${ACCOUNT_SHAPE}${known.length ? ` Evidence ids you can cite: ${known.join(", ")}.` : " Record evidence first (add_evidence)."}`,
+					required_next_proof: `${COMPLETION_ACCOUNT_GUIDANCE}${known.length ? ` Evidence ids you can cite: ${known.join(", ")}.` : " Record evidence first (add_evidence)."}`,
 				},
 			],
 			claims: [],
@@ -331,9 +372,19 @@ export function checkCompletionAccount(
 	const failures: CompletionRejectionDetail[] = [];
 	const claims: AccountClaim[] = [];
 	const known = citedEvidenceIds(context.state);
+	const changes = account.changes.flatMap((entry) => {
+		const path = resolvePath(entry.path, context.changedPaths);
+		if (path !== undefined) return [{ ...entry, path }];
+		failures.push({
+			id: `account_change_unknown:${normalizePath(entry.path)}`,
+			reason: `\`${entry.path}\` does not identify one changed file.`,
+			required_next_proof: "Name an exact changed path, or a suffix unique among the changed files.",
+		});
+		return [];
+	});
 
 	for (const changed of context.changedPaths) {
-		if (!account.changes.some((entry) => samePath(entry.path, changed)))
+		if (!changes.some((entry) => entry.path === changed))
 			failures.push({
 				id: `account_change_unexplained:${normalizePath(changed)}`,
 				reason: `\`${changed}\` changed and the account does not say why.`,
@@ -344,14 +395,13 @@ export function checkCompletionAccount(
 	const patchHeader = (path: string) =>
 		diffForPath(context.patch, path, context.patchOmittedChars) ??
 		"(this file is not in the captured patch, so its content was not captured)";
-	for (const entry of account.changes) {
-		if (!context.changedPaths.some((changed) => samePath(entry.path, changed))) continue;
+	for (const entry of changes) {
 		// Which requirement a change serves is the model's call; that the requirement exists is code's.
-		const unknown = entry.serves.filter(
-			(target) =>
-				!context.acceptance.some((criterion) => criterion.id === target) &&
-				!context.changedPaths.some((changed) => samePath(changed, target) && !samePath(changed, entry.path)),
-		);
+		const unknown = entry.serves.filter((target) => {
+			if (context.acceptance.some((criterion) => criterion.id === target)) return false;
+			const targetPath = resolvePath(target, context.changedPaths);
+			return targetPath === undefined || targetPath === entry.path;
+		});
 		if (unknown.length > 0)
 			failures.push({
 				id: `account_serves_unknown:${normalizePath(entry.path)}`,
@@ -385,13 +435,14 @@ export function checkCompletionAccount(
 			// Whether the change serves its named requirement or another changed file uses the same evidence.
 			for (const target of entry.serves.slice(0, COMPLETION_ACCOUNT_LIMITS.servesJudged)) {
 				const criterion = context.acceptance.find((candidate) => candidate.id === target);
+				const targetPath = resolvePath(target, context.changedPaths);
 				const targetSlice = chunkFileDiffForBudget(patchHeader(target))[0] ?? "";
 				const supported = criterion
 					? {
 							statement: `This change helps achieve: ${criterion.text}.`,
 							evidence: changeEvidence,
 						}
-					: context.changedPaths.some((changed) => samePath(changed, target))
+					: targetPath !== undefined
 						? {
 								statement: `This change is a dependency of the change to ${target}.`,
 								evidence: `${evidence}\nChange to ${target}:\n${targetSlice}`,
@@ -488,13 +539,11 @@ export function checkCompletionAccount(
 			});
 		else {
 			const causePaths = account.cause.paths ?? context.changedPaths;
-			const unknownPaths = causePaths.filter(
-				(path) => !context.changedPaths.some((changed) => samePath(path, changed)),
-			);
+			const unknownPaths = causePaths.filter((path) => resolvePath(path, context.changedPaths) === undefined);
 			if (unknownPaths.length > 0) {
 				failures.push({
 					id: "account_cause_unknown_paths",
-					reason: `Cause evidence names unchanged paths: ${unknownPaths.join(", ")}.`,
+					reason: `Cause evidence names unchanged or ambiguous paths: ${unknownPaths.join(", ")}.`,
 					required_next_proof:
 						"Select changed paths that establish the mechanism, and cite verified evidence for surrounding unchanged code.",
 				});

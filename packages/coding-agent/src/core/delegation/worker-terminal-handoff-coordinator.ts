@@ -6,6 +6,7 @@ import {
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 } from "../orchestration/contracts.ts";
+import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
 import { MAX_WORKER_TASK_LABEL_LENGTH } from "./worker-task-label.ts";
 
 export interface WorkerTerminalHandoff {
@@ -38,6 +39,7 @@ const LANE_RECORD_FIELD_MAX_CHARS: Readonly<Record<Exclude<keyof LaneRecord, "wa
 		modelRef: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH + 1 + MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 		thinkingLevel: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 		reasonCode: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+		reasonDetail: MAX_RETAINED_DIAGNOSTIC_CHARS,
 		queuedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 		startedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 		completedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
@@ -153,7 +155,11 @@ function sameTerminalEdge(left: WorkerTerminalHandoff, right: WorkerTerminalHand
  * the attempt's idempotency key, a payload that changes them can no longer replace it.
  */
 function sameDeliveredContent(left: WorkerTerminalHandoff, right: WorkerTerminalHandoff): boolean {
-	return left.record.status === right.record.status && left.record.reasonCode === right.record.reasonCode;
+	return (
+		left.record.status === right.record.status &&
+		left.record.reasonCode === right.record.reasonCode &&
+		left.record.reasonDetail === right.record.reasonDetail
+	);
 }
 
 /**

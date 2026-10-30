@@ -33,6 +33,7 @@ import {
 	verificationSubjectAttempt,
 } from "../orchestration/verification-identity.ts";
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
 	attemptAwaitsVerification,
@@ -507,10 +508,10 @@ export class WorkerLifecycle {
 		return subject;
 	}
 
-	cancel(laneId: string, reasonCode: string): LaneRecord | undefined {
+	cancel(laneId: string, reasonCode: string, reasonDetail?: string): LaneRecord | undefined {
 		const attempt = this.getActiveAttempt(laneId);
 		if (!attempt) return this.getRecord(laneId);
-		this.ledger.cancel(attempt.attemptId, reasonCode);
+		this.ledger.cancel(attempt.attemptId, reasonCode, reasonDetail);
 		const record = this.getRecord(laneId);
 		if (record) this.enqueueTerminalNotification(record);
 		return record;
@@ -525,12 +526,19 @@ export class WorkerLifecycle {
 		laneId: string,
 		reasonCode: string,
 		expectedAttemptId?: string,
+		reasonDetail?: string,
 	): { cancelled: boolean; record: LaneRecord | undefined } {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const attempt = selectedWorkerAttempt(snapshot, laneId);
 		const record = projectWorkerLaneRecord(snapshot, laneId);
 		const expectedAttempt = expectedAttemptId === undefined || attempt?.attemptId === expectedAttemptId;
-		if (attempt?.status === "cancelled" && expectedAttempt && attempt.reasonCode === reasonCode.trim()) {
+		const detail = reasonDetail ? boundedRedactedDiagnosticText(reasonDetail) : undefined;
+		if (
+			attempt?.status === "cancelled" &&
+			expectedAttempt &&
+			attempt.reasonCode === reasonCode.trim() &&
+			attempt.reasonDetail === detail
+		) {
 			if (record) this.enqueueTerminalNotification(record);
 			return { cancelled: true, record };
 		}
@@ -543,10 +551,12 @@ export class WorkerLifecycle {
 			return { cancelled: false, record };
 		}
 		try {
-			this.ledger.runtime.cancelAttempt(attempt.attemptId, reasonCode, {
-				expectedLastOrdinal: snapshot.lastOrdinal,
-				unleasedOnly: true,
-			});
+			this.ledger.runtime.cancelAttempt(
+				attempt.attemptId,
+				reasonCode,
+				{ expectedLastOrdinal: snapshot.lastOrdinal, unleasedOnly: true },
+				detail,
+			);
 		} catch (error) {
 			let currentSnapshot: TaskRuntimeProjection;
 			try {

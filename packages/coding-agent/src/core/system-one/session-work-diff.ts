@@ -342,7 +342,7 @@ export async function readGoalWorkDiff(
 			scope.repositoryRoot,
 			scope.baseline,
 			scope.pathScope === "repository" ? undefined : scope.changedPaths,
-			options,
+			{ ...options, qualifyRepositoryPaths: true },
 		);
 		if (work.diagnostic) diagnostics.push(`${scope.repositoryRoot}: ${work.diagnostic}`);
 		const section = work.patch.length ? `Repository ${JSON.stringify(scope.repositoryRoot)}\n${work.patch}` : "";
@@ -361,7 +361,7 @@ export async function readGoalWorkDiff(
 			suppressions.push(hit);
 		}
 		for (const path of work.untracked) {
-			untracked.push(`${scope.repositoryRoot}:${path}`);
+			untracked.push(path);
 		}
 	}
 	if (

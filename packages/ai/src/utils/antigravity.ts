@@ -27,6 +27,10 @@ export const REVIEWED_ANTIGRAVITY_INSTALLATIONS = Object.freeze([
 		version: "1.4.9",
 		sha256: "1c9102d0a36194d57f6b4a66249217ece0bf563e108bcdd1046b81c5b6d6004c",
 	}),
+	Object.freeze({
+		version: "1.4.11",
+		sha256: "4341b80b43fc3b4437ff65041673f0f71c950e49d69a6256e3b6f212c4694ed4",
+	}),
 ]);
 
 export function antigravityObject(value: unknown): Record<string, unknown> {

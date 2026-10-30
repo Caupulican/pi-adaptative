@@ -1508,7 +1508,7 @@ export class AgentSession {
 		});
 		this.runtimeUpdates = new RuntimeUpdateController({
 			sessionManager: this.sessionManager,
-			acquireRestartQuiescence: async (signal) => this._memory.continuousChatHost()?.runtime.pauseAndDrain(signal),
+			acquireUpdateQuiescence: async (signal) => this._memory.continuousChatHost()?.runtime.pauseAndDrain(signal),
 			getMessages: () => this.agent.state.messages,
 			isRoot: () => !this._isChildSession,
 			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),
@@ -5574,6 +5574,7 @@ export class AgentSession {
 			status: handoff.record.status,
 			...(handoff.record.completedAt ? { completedAt: handoff.record.completedAt } : {}),
 			...(handoff.record.reasonCode ? { reasonCode: handoff.record.reasonCode } : {}),
+			...(handoff.record.reasonDetail ? { reasonDetail: handoff.record.reasonDetail } : {}),
 		});
 	}
 
@@ -5590,7 +5591,14 @@ export class AgentSession {
 	 */
 	private persistWorkerTerminalReport(
 		name: string,
-		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
+		terminal: {
+			laneId: string;
+			attemptId?: string;
+			status: string;
+			completedAt?: string;
+			reasonCode?: string;
+			reasonDetail?: string;
+		},
 	): void {
 		this._backgroundLanes.persistWorkerTerminalReport(name, terminal);
 	}

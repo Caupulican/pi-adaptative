@@ -61,6 +61,14 @@ export function parseFanoutHeader(instructions: string): { membership: FanoutMem
 	return { membership: { groupId, kind, memberId, declared }, body: instructions.slice(header.length) };
 }
 
+/** Group identity is host correlation, not a change in the member's assigned work. */
+export function workerFitnessInstructions(instructions: string): string {
+	const parsed = parseFanoutHeader(instructions);
+	return parsed
+		? `${formatFanoutHeader({ ...parsed.membership, groupId: "fo-00000000" })}${parsed.body}`
+		: instructions;
+}
+
 /** Compact label prefix that keeps the group and member visible in status and Team views. */
 export function fanoutLabelTag(membership: Pick<FanoutMembership, "groupId" | "memberId">): string {
 	return `[${membership.groupId}/${membership.memberId}]`;

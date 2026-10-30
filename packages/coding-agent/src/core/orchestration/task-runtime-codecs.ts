@@ -1,4 +1,5 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
 import { addAttemptUsage, EMPTY_ATTEMPT_USAGE, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
@@ -183,6 +184,13 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 export function string(value: unknown, label: string): string {
 	if (typeof value !== "string" || value.length === 0) throw new DurableTaskRuntimeError(`${label} is required.`);
 	return value;
+}
+
+export function cancellationDetail(value: unknown, label: string): string {
+	const detail = string(value, label);
+	if (boundedRedactedDiagnosticText(detail) !== detail)
+		throw new DurableTaskRuntimeError(`${label} must be bounded, redacted diagnostic text.`);
+	return detail;
 }
 
 export function number(value: unknown, label: string): number {
@@ -842,6 +850,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"dispatch",
 		"status",
 		"reasonCode",
+		"reasonDetail",
 		"grantId",
 		"grant",
 		"agentId",
@@ -897,6 +906,9 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		...(attempt.reasonCode === undefined
 			? {}
 			: { reasonCode: dispatchIdentifier(attempt.reasonCode, `${label}.reasonCode`) }),
+		...(attempt.reasonDetail === undefined
+			? {}
+			: { reasonDetail: cancellationDetail(attempt.reasonDetail, `${label}.reasonDetail`) }),
 		...(attempt.grantId === undefined ? {} : { grantId: dispatchIdentifier(attempt.grantId, `${label}.grantId`) }),
 		...(grant ? { grant } : {}),
 		...(attempt.agentId === undefined ? {} : { agentId: dispatchIdentifier(attempt.agentId, `${label}.agentId`) }),

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
@@ -901,6 +902,7 @@ export class DurableTaskRuntime {
 		attemptId: string,
 		reasonCode: string,
 		guard?: { expectedLastOrdinal: number; unleasedOnly: true },
+		reasonDetail?: string,
 	): AttemptRuntimeState {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
@@ -910,12 +912,17 @@ export class DurableTaskRuntime {
 			throw new DurableTaskRuntimeError("Unleased cancellation evidence changed.");
 		if (terminalAttemptStatus(attempt.status)) return structuredClone(attempt);
 		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Cancellation reason is required.");
+		const detail = reasonDetail ? boundedRedactedDiagnosticText(reasonDetail) : undefined;
 		this.commit({
 			type: "attempt.cancelled",
 			aggregateId: attemptId,
 			actor: "runtime",
 			idempotencyKey: `attempt-cancelled:${attemptId}`,
-			payload: toJsonObject({ attemptId, reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode") }),
+			payload: toJsonObject({
+				attemptId,
+				reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode"),
+				...(detail ? { reasonDetail: detail } : {}),
+			}),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}

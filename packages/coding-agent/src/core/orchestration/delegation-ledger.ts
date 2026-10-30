@@ -594,8 +594,8 @@ export class DelegationOrchestrationLedger {
 		};
 	}
 
-	cancel(attemptId: string, reasonCode: string): void {
-		this.runtime.cancelAttempt(attemptId, reasonCode);
+	cancel(attemptId: string, reasonCode: string, reasonDetail?: string): void {
+		this.runtime.cancelAttempt(attemptId, reasonCode, undefined, reasonDetail);
 	}
 
 	/** Durable accounting total, or the latest checkpoint for an attempt predating accounting. */

@@ -28,6 +28,7 @@ export interface WorkerTerminalHandoffRecord {
 	status: LaneTerminalStatus;
 	completedAt?: string;
 	reasonCode?: string;
+	reasonDetail?: string;
 	/** Goal ownership retained until delivery so a stopped goal cannot be resurrected by a late terminal. */
 	goalId?: string;
 	/** Runtime-only receipt. Observation consumes delivery, never mutation review. */
@@ -191,6 +192,7 @@ export class WorkerNotificationCoordinator {
 				status: record.status,
 				...(record.completedAt ? { completedAt: record.completedAt } : {}),
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+				...(record.reasonDetail ? { reasonDetail: record.reasonDetail } : {}),
 				...(record.goalId ? { goalId: record.goalId } : {}),
 				...(observedAt ? { observedAt } : {}),
 				...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
