@@ -2476,6 +2476,10 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			shows_false_25: { kind: "noul", probability: 0.02 },
 			shows_true_26: { kind: "noul", probability: 0.97 },
 			shows_false_26: { kind: "noul", probability: 0.02 },
+			shows_true_27: { kind: "noul", probability: 0.97 },
+			shows_false_27: { kind: "noul", probability: 0.02 },
+			shows_true_28: { kind: "noul", probability: 0.97 },
+			shows_false_28: { kind: "noul", probability: 0.02 },
 			outcomes_achieved: { kind: "noul", probability: 0.97 },
 			required_behavior_unverified: { kind: "noul", probability: 0.02 },
 			material_claim_unsupported: { kind: "noul", probability: 0.02 },
@@ -2488,12 +2492,12 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 					"Change the stage one line of the notes file.",
 					"Re-read the notes file.",
 				)(request);
-				if ("shows_true_26" in request.questions) {
+				if ("shows_true_28" in request.questions) {
 					if (!isRecordObject(request.state)) throw new Error("the change account has no decoded state");
 					expect(
 						Object.keys(request.state).filter((key) => /^s\d+$/.test(key)),
-						"all twelve change accounts plus the assumption and regressions reach review",
-					).toHaveLength(27);
+						"all thirteen changed files plus the assumption and regressions reach review",
+					).toHaveLength(29);
 					expect(request.state, "landed files survive later shared-checkout path observations").toMatchObject({
 						s2: "Exports the LATE flag from the late module.",
 						e2: expect.stringContaining("src/late.ts"),
@@ -2626,7 +2630,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 						account: {
 							changes: [
 								{
-									path: "src/limits.ts",
+									path: projectPath("src", "limits.ts"),
 									reason: "Raises MAX_RETRIES to 5 for the retries lane.",
 									evidenceIds: [integrationEvidence.id],
 									serves: [requirement],
@@ -2638,18 +2642,18 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 									serves: [requirement],
 								},
 								{
-									path: `${HARNESS_PROJECT_CWD}:e10/shared/a.txt`,
-									reason: "Writes the shared file A: the held writer of the overlap proof.",
+									path: `${legendPath(request, "p/rootwork")}/src/limits.ts`,
+									reason: "Resolves the rootwork retry conflict to MAX_RETRIES = 5 before landing.",
 									serves: [requirement],
 								},
 								{
-									path: `${HARNESS_PROJECT_CWD}:e10/shared/nested/b.txt`,
-									reason: "Writes the nested file B: the queued writer admitted after A's release.",
+									path: `${legendPath(request, "p/e12")}/src/e12.ts`,
+									reason: "Adds the E12 module in the checkout that executes its landing gate.",
 									serves: [requirement],
 								},
 								{
-									path: `${HARNESS_PROJECT_CWD}:e10/other/c/c.txt`,
-									reason: "Writes the disjoint file C: the writer that completed beside the held scope.",
+									path: `${legendPath(request, "p/e12")}/src/e12-persist.ts`,
+									reason: "Adds the persistence module in the checkout retained for epoch recovery.",
 									serves: [requirement],
 								},
 								{
@@ -2668,7 +2672,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 									serves: [requirement],
 								},
 								{
-									path: "src/e12.ts",
+									path: projectPath("src", "e12.ts"),
 									reason: "Adds the E12 module, landed through the executed gate at its tested tip.",
 									serves: [requirement],
 								},
@@ -2679,13 +2683,16 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 									serves: [requirement],
 								},
 								{
-									path: "src/e12-persist.ts",
+									path: projectPath("src", "e12-persist.ts"),
 									reason:
 										"Adds the persistence module: its landing's epoch record failed and reconcile rolled it forward once.",
 									serves: [requirement],
 								},
 								{
-									path: "src/e12-ambig.ts",
+									path: [
+										projectPath("src", "e12-ambig.ts"),
+										`${legendPath(request, "p/e12")}/src/e12-ambig.ts`,
+									],
 									reason:
 										"Adds the ambiguity module: its landing was reconciled only after main was repaired to the tested tip.",
 									serves: [requirement],
@@ -2721,7 +2728,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	if (world.systemOne.enabled) {
 		expect(
 			world.systemOne.decoded.filter(
-				(request) => request.phase === "complete" && "shows_true_26" in request.questions,
+				(request) => request.phase === "complete" && "shows_true_28" in request.questions,
 			),
 			"the complete change account reaches the transport exactly once",
 		).toHaveLength(1);
