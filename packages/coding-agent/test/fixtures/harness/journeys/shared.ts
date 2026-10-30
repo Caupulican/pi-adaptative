@@ -715,7 +715,10 @@ export function durableGoalEvidenceIds(sessionManager: SessionManager): string[]
  * evidence key, so the payload carries that evidence once; the first such item's key holds it.
  */
 export function evidenceKeyOf(request: SystemOneDecodedRequest, index: string): string | undefined {
-	const instructions = request.questions[`shows_true_${index}`]?.instructions ?? "";
+	const instructions =
+		request.questions[`shows_true_${index}`]?.instructions ??
+		request.questions[`shows_false_${index}`]?.instructions ??
+		"";
 	return /`(e\d+)`/.exec(instructions)?.[1];
 }
 
