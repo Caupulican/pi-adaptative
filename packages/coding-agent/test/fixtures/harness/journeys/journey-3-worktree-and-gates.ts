@@ -2492,21 +2492,22 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 					"Change the stage one line of the notes file.",
 					"Re-read the notes file.",
 				)(request);
-				if ("shows_true_28" in request.questions) {
+				if ("shows_true_2" in request.questions || "shows_false_2" in request.questions) {
 					if (!isRecordObject(request.state)) throw new Error("the change account has no decoded state");
-					expect(
-						Object.keys(request.state).filter((key) => /^s\d+$/.test(key)),
-						"all thirteen changed files plus the assumption and regressions reach review",
-					).toHaveLength(29);
 					expect(request.state, "landed files survive later shared-checkout path observations").toMatchObject({
 						s2: "Exports the LATE flag from the late module.",
 						e2: expect.stringContaining("src/late.ts"),
-						s18: "Adds the module an external writer committed while the gate ran; the moved tip was refused, and this file landed with the unchanged tip.",
-						e18: expect.stringContaining("src/e12-late.ts"),
 					});
 					expect(request.state.e2, "the late account receives the actual landed patch").toContain(
 						"+export const LATE = true;",
 					);
+				}
+				if ("shows_true_18" in request.questions || "shows_false_18" in request.questions) {
+					if (!isRecordObject(request.state)) throw new Error("the change account has no decoded state");
+					expect(request.state, "the external commit receives its own account").toMatchObject({
+						s18: "Adds the module an external writer committed while the gate ran; the moved tip was refused, and this file landed with the unchanged tip.",
+						e18: expect.stringContaining("src/e12-late.ts"),
+					});
 					expect(request.state.e18, "the external commit account receives its landed patch").toContain(
 						"+export const E12_LATE = 1;",
 					);
@@ -2726,6 +2727,15 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	);
 	trace.mark("root", "goal.completed");
 	if (world.systemOne.enabled) {
+		const accountQuestions = world.systemOne.decoded
+			.filter((request) => request.phase === "complete")
+			.flatMap((request) => Object.keys(request.questions));
+		for (const direction of ["true", "false"]) {
+			expect(
+				accountQuestions.filter((key) => key.startsWith(`shows_${direction}_`)).sort(),
+				`all thirteen changed files plus the assumption and regressions reach review once (${direction})`,
+			).toEqual(Array.from({ length: 29 }, (_, index) => `shows_${direction}_${index}`).sort());
+		}
 		expect(
 			world.systemOne.decoded.filter(
 				(request) => request.phase === "complete" && "shows_true_28" in request.questions,
