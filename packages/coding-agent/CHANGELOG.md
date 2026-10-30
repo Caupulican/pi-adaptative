@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Extracted persistent bot and team routine/inbox/daemon helpers into `bot-team-routine-helpers.ts`, added hunk-boundary diff chunking in `completion-account.ts` so large single-file diffs stay within the 24 KiB System One request budget, and preserved `worker_task_fit` judgment consumption before sticky workhorse fallback admission.
+
 ## [0.104.21] - 2026-10-30
 
 ### Added

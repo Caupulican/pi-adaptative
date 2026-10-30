@@ -6,7 +6,34 @@ import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
+import {
+	buildUpsertedRoutineRecord,
+	claimDueRoutinesInMap,
+	collectBotInboxEntries,
+	collectTeamInboxEntries,
+	formatDurationIntervalMs,
+	type PersistentBotDaemonStatus,
+	type PersistentBotInboxEntry,
+	type PersistentRoutineScheduleRecord,
+	type PersistentRoutineTarget,
+	parseDurationIntervalMs,
+	parseRoutineRecord,
+	readDaemonLeaseStatus,
+	releaseDaemonLeaseFile,
+	type UpsertPersistentRoutineInput,
+	writeDaemonLeaseFile,
+} from "./bot-team-routine-helpers.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
+
+export {
+	formatDurationIntervalMs,
+	type PersistentBotDaemonStatus,
+	type PersistentBotInboxEntry,
+	type PersistentRoutineScheduleRecord,
+	type PersistentRoutineTarget,
+	parseDurationIntervalMs,
+	type UpsertPersistentRoutineInput,
+};
 
 export type ActiveChatTarget =
 	| { readonly kind: "root" }
@@ -122,81 +149,6 @@ export interface UpsertPersistentTeamInput {
 	readonly description?: string;
 	readonly memberAgentIds: readonly string[];
 	readonly lastReadAt?: number;
-}
-
-export type PersistentRoutineTarget =
-	| { readonly kind: "bot"; readonly agentId: string }
-	| { readonly kind: "team"; readonly teamId: string };
-
-export interface PersistentRoutineScheduleRecord {
-	readonly routineId: string;
-	readonly target: PersistentRoutineTarget;
-	readonly prompt: string;
-	readonly intervalMs: number;
-	readonly enabled: boolean;
-	readonly nextRunAt: number;
-	readonly lastRunAt?: number;
-	readonly lastStatus?: "queued" | "running" | "succeeded" | "failed";
-	readonly lastSummary?: string;
-	readonly createdAt: string;
-	readonly updatedAt: string;
-}
-
-export interface UpsertPersistentRoutineInput {
-	readonly routineId: string;
-	readonly target: PersistentRoutineTarget;
-	readonly prompt: string;
-	readonly intervalMs: number;
-	readonly enabled?: boolean;
-	readonly nextRunAt?: number;
-}
-
-export interface PersistentBotInboxEntry {
-	readonly id: string;
-	readonly kind: "bot" | "team";
-	readonly targetId: string;
-	readonly sender: string;
-	readonly text: string;
-	readonly timestamp: number;
-	readonly unread: boolean;
-}
-
-export interface PersistentBotDaemonStatus {
-	readonly running: boolean;
-	readonly pid?: number;
-	readonly startedAt?: string;
-	readonly lastHeartbeatAt?: number;
-	readonly lastTickAt?: number;
-	readonly activeRoutines: number;
-	readonly dueRoutines: number;
-}
-
-const MIN_ROUTINE_INTERVAL_MS = 10_000;
-const DAEMON_STALE_MS = 60_000;
-
-export function parseDurationIntervalMs(raw: string): number {
-	const trimmed = raw.trim().toLowerCase();
-	const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/u.exec(trimmed);
-	if (!match) {
-		throw new Error(`Invalid schedule interval "${raw}". Expected e.g. 30s, 5m, 1h, 1d.`);
-	}
-	const amount = Number.parseFloat(match[1]!);
-	const unit = match[2] ?? "s";
-	const multiplier =
-		unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-	const ms = Math.round(amount * multiplier);
-	if (!Number.isFinite(ms) || ms < MIN_ROUTINE_INTERVAL_MS) {
-		throw new Error(`Schedule interval must be at least ${MIN_ROUTINE_INTERVAL_MS / 1000}s.`);
-	}
-	return ms;
-}
-
-export function formatDurationIntervalMs(intervalMs: number): string {
-	if (intervalMs % 86_400_000 === 0) return `${intervalMs / 86_400_000}d`;
-	if (intervalMs % 3_600_000 === 0) return `${intervalMs / 3_600_000}h`;
-	if (intervalMs % 60_000 === 0) return `${intervalMs / 60_000}m`;
-	if (intervalMs % 1000 === 0) return `${intervalMs / 1000}s`;
-	return `${intervalMs}ms`;
 }
 
 export interface BotOperatorMessageDispatchResult {
@@ -487,63 +439,6 @@ function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
 		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
 		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
 		memoryFilePath: typeof memoryFilePath === "string" ? memoryFilePath : undefined,
-	};
-}
-
-function parseRoutineRecord(value: unknown): PersistentRoutineScheduleRecord | undefined {
-	if (!isRecordObject(value)) return undefined;
-	const {
-		routineId,
-		target,
-		prompt,
-		intervalMs,
-		enabled,
-		nextRunAt,
-		lastRunAt,
-		lastStatus,
-		lastSummary,
-		createdAt,
-		updatedAt,
-	} = value;
-	if (
-		typeof routineId !== "string" ||
-		!BOT_OR_TEAM_ID_REGEX.test(routineId) ||
-		typeof prompt !== "string" ||
-		prompt.trim().length === 0 ||
-		typeof intervalMs !== "number" ||
-		!Number.isFinite(intervalMs) ||
-		intervalMs < MIN_ROUTINE_INTERVAL_MS ||
-		typeof nextRunAt !== "number" ||
-		!Number.isFinite(nextRunAt) ||
-		typeof createdAt !== "string" ||
-		typeof updatedAt !== "string" ||
-		!isRecordObject(target)
-	) {
-		return undefined;
-	}
-	let parsedTarget: PersistentRoutineTarget | undefined;
-	if (target.kind === "bot" && typeof target.agentId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.agentId)) {
-		parsedTarget = { kind: "bot", agentId: target.agentId };
-	} else if (target.kind === "team" && typeof target.teamId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.teamId)) {
-		parsedTarget = { kind: "team", teamId: target.teamId };
-	}
-	if (!parsedTarget) return undefined;
-	const validStatus =
-		lastStatus === "queued" || lastStatus === "running" || lastStatus === "succeeded" || lastStatus === "failed"
-			? lastStatus
-			: undefined;
-	return {
-		routineId,
-		target: parsedTarget,
-		prompt: prompt.trim(),
-		intervalMs: Math.round(intervalMs),
-		enabled: typeof enabled === "boolean" ? enabled : true,
-		nextRunAt,
-		lastRunAt: typeof lastRunAt === "number" && Number.isFinite(lastRunAt) ? lastRunAt : undefined,
-		lastStatus: validStatus,
-		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
-		createdAt,
-		updatedAt,
 	};
 }
 
@@ -1127,30 +1022,8 @@ export class PersistentBotTeamStore {
 
 	upsertRoutine(input: UpsertPersistentRoutineInput, nowMs = Date.now()): PersistentRoutineScheduleRecord {
 		return this.mutate(() => {
-			const routineId = normalizeBotOrTeamId(input.routineId, "routineId");
-			const prompt = input.prompt.trim();
-			if (!prompt) throw new Error("Routine prompt cannot be empty.");
-			const intervalMs = Math.max(MIN_ROUTINE_INTERVAL_MS, Math.round(input.intervalMs));
-			const target: PersistentRoutineTarget =
-				input.target.kind === "bot"
-					? { kind: "bot", agentId: normalizeBotOrTeamId(input.target.agentId, "agentId") }
-					: { kind: "team", teamId: normalizeBotOrTeamId(input.target.teamId, "teamId") };
-			const existing = this.routines.get(routineId);
-			const nowIso = new Date(nowMs).toISOString();
-			const record: PersistentRoutineScheduleRecord = {
-				routineId,
-				target,
-				prompt,
-				intervalMs,
-				enabled: input.enabled ?? existing?.enabled ?? true,
-				nextRunAt: input.nextRunAt ?? nowMs + intervalMs,
-				lastRunAt: existing?.lastRunAt,
-				lastStatus: existing?.lastStatus,
-				lastSummary: existing?.lastSummary,
-				createdAt: existing?.createdAt ?? nowIso,
-				updatedAt: nowIso,
-			};
-			this.routines.set(routineId, record);
+			const record = buildUpsertedRoutineRecord(this.routines, input, nowMs);
+			this.routines.set(record.routineId, record);
 			this.save();
 			return structuredClone(record);
 		});
@@ -1168,21 +1041,7 @@ export class PersistentBotTeamStore {
 
 	claimDueRoutines(nowMs = Date.now(), routineIdFilter?: string): PersistentRoutineScheduleRecord[] {
 		return this.mutate(() => {
-			const claimed: PersistentRoutineScheduleRecord[] = [];
-			const nowIso = new Date(nowMs).toISOString();
-			for (const [id, routine] of this.routines.entries()) {
-				if (routineIdFilter && id !== routineIdFilter) continue;
-				if (!routineIdFilter && (!routine.enabled || routine.nextRunAt > nowMs)) continue;
-				const updated: PersistentRoutineScheduleRecord = {
-					...routine,
-					lastRunAt: nowMs,
-					nextRunAt: nowMs + routine.intervalMs,
-					lastStatus: "running",
-					updatedAt: nowIso,
-				};
-				this.routines.set(id, updated);
-				claimed.push(structuredClone(updated));
-			}
+			const claimed = claimDueRoutinesInMap(this.routines, nowMs, routineIdFilter);
 			if (claimed.length > 0) this.save();
 			return claimed;
 		});
@@ -1277,54 +1136,16 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	private collectTeamInboxEntries(team: PersistentTeamRecord, readAt: number): PersistentBotInboxEntry[] {
-		const currentIncarnation = teamIncarnation(team);
-		const entries: PersistentBotInboxEntry[] = [];
-		for (const msg of this.teamMessages.get(team.teamId) ?? []) {
-			if (msg.teamIncarnationId && msg.teamIncarnationId !== currentIncarnation) continue;
-			const sender = msg.sender.kind === "bot" ? msg.sender.agentId : msg.sender.kind;
-			entries.push({
-				id: msg.messageId,
-				kind: "team",
-				targetId: team.teamId,
-				sender,
-				text: msg.text,
-				timestamp: msg.timestamp,
-				unread: msg.sender.kind !== "operator" && msg.timestamp > readAt,
-			});
-		}
-		return entries;
-	}
-
 	listBotInbox(agentId: string, limit = 20): PersistentBotInboxEntry[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		const bot = this.bots.get(normId);
-		const entries: PersistentBotInboxEntry[] = [];
-		const readAt = bot?.lastReadAt ?? 0;
-		if (bot?.lastSummary && bot.lastMessageAt) {
-			entries.push({
-				id: `bot:${normId}:${bot.lastMessageAt}`,
-				kind: "bot",
-				targetId: normId,
-				sender: normId,
-				text: bot.lastSummary,
-				timestamp: bot.lastMessageAt,
-				unread: bot.lastMessageAt > readAt,
-			});
-		}
-		for (const team of this.teams.values()) {
-			if (!team.memberAgentIds.includes(normId)) continue;
-			entries.push(...this.collectTeamInboxEntries(team, Math.max(readAt, team.lastReadAt ?? 0)));
-		}
-		entries.sort((a, b) => b.timestamp - a.timestamp);
-		return entries.slice(0, Math.max(1, limit));
+		return collectBotInboxEntries(normId, this.bots.get(normId), this.teams.values(), this.teamMessages, limit);
 	}
 
 	listTeamInbox(teamId: string, limit = 20): PersistentBotInboxEntry[] {
 		const normId = normalizeBotOrTeamId(teamId, "teamId");
 		const team = this.teams.get(normId);
 		if (!team) return [];
-		const entries = this.collectTeamInboxEntries(team, team.lastReadAt ?? 0);
+		const entries = collectTeamInboxEntries(team, this.teamMessages.get(normId) ?? [], team.lastReadAt ?? 0);
 		entries.sort((a, b) => b.timestamp - a.timestamp);
 		return entries.slice(0, Math.max(1, limit));
 	}
@@ -1333,80 +1154,19 @@ export class PersistentBotTeamStore {
 		return this.filePath;
 	}
 
-	private getDaemonLeasePath(): string {
-		return join(dirname(this.filePath), "bot-daemon-lease.json");
-	}
-
 	getDaemonStatus(nowMs = Date.now()): PersistentBotDaemonStatus {
-		const activeRoutines = Array.from(this.routines.values()).filter((r) => r.enabled).length;
-		const dueRoutines = Array.from(this.routines.values()).filter((r) => r.enabled && r.nextRunAt <= nowMs).length;
-		const leasePath = this.getDaemonLeasePath();
-		try {
-			const raw = readFileSync(leasePath, "utf8");
-			const parsed: unknown = JSON.parse(raw);
-			if (isRecordObject(parsed) && typeof parsed.pid === "number" && Number.isInteger(parsed.pid)) {
-				const lastHeartbeatAt =
-					typeof parsed.lastHeartbeatAt === "number" && Number.isFinite(parsed.lastHeartbeatAt)
-						? parsed.lastHeartbeatAt
-						: 0;
-				let alive = false;
-				try {
-					process.kill(parsed.pid, 0);
-					alive = nowMs - lastHeartbeatAt <= DAEMON_STALE_MS;
-				} catch {
-					alive = false;
-				}
-				return {
-					running: alive,
-					pid: alive ? parsed.pid : undefined,
-					startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
-					lastHeartbeatAt: lastHeartbeatAt || undefined,
-					lastTickAt:
-						typeof parsed.lastTickAt === "number" && Number.isFinite(parsed.lastTickAt)
-							? parsed.lastTickAt
-							: undefined,
-					activeRoutines,
-					dueRoutines,
-				};
-			}
-		} catch {
-			// Absent or unreadable lease file means no detached daemon is running.
-		}
-		return { running: false, activeRoutines, dueRoutines };
+		return readDaemonLeaseStatus(this.filePath, this.routines.values(), nowMs);
 	}
 
 	writeDaemonLease(
 		input: { pid: number; startedAt?: string; lastTickAt?: number },
 		nowMs = Date.now(),
 	): PersistentBotDaemonStatus {
-		const leasePath = this.getDaemonLeasePath();
-		mkdirSync(dirname(leasePath), { recursive: true });
-		const payload = {
-			pid: input.pid,
-			startedAt: input.startedAt ?? new Date(nowMs).toISOString(),
-			lastHeartbeatAt: nowMs,
-			...(input.lastTickAt !== undefined ? { lastTickAt: input.lastTickAt } : {}),
-		};
-		writeFileAtomicSync(leasePath, JSON.stringify(payload, null, 2));
-		return this.getDaemonStatus(nowMs);
+		return writeDaemonLeaseFile(this.filePath, this.routines.values(), input, nowMs);
 	}
 
 	releaseDaemonLease(pid?: number): boolean {
-		const leasePath = this.getDaemonLeasePath();
-		try {
-			if (!existsSync(leasePath)) return false;
-			if (pid !== undefined) {
-				const raw = readFileSync(leasePath, "utf8");
-				const parsed: unknown = JSON.parse(raw);
-				if (isRecordObject(parsed) && typeof parsed.pid === "number" && parsed.pid !== pid) {
-					return false;
-				}
-			}
-			writeFileAtomicSync(leasePath, JSON.stringify({ releasedAt: Date.now() }));
-			return true;
-		} catch {
-			return false;
-		}
+		return releaseDaemonLeaseFile(this.filePath, pid);
 	}
 
 	appendTeamMessage(message: PersistentTeamMessage): void {

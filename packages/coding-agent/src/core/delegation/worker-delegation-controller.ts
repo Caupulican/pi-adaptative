@@ -4009,21 +4009,14 @@ export class WorkerDelegationController {
 	}
 
 	private workerTaskFitnessEnabled(): boolean {
-		const routerSettings = this.deps.getSettingsManager().getModelRouterSettings();
 		return (
-			routerSettings.enabled &&
-			routerSettings.fitnessGate === true &&
+			this.deps.getSettingsManager().getModelRouterSettings().enabled &&
 			(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager())) &&
 			this.deps.getRouteChoiceJudge?.()?.isRouteJudgmentEnabled?.() !== false
 		);
 	}
 
-	private isPinnedOrStickyWorkhorseAdmission(
-		request: WorkerDelegationRequest,
-		admission: Extract<WorkerAdmission, { ok: true }>,
-	): boolean {
-		if (request.authority?.model !== undefined) return true;
-		if (admission.shipment.profile.modelPolicy.mode === "fixed") return true;
+	private isStickyWorkhorseAdmission(admission: Extract<WorkerAdmission, { ok: true }>): boolean {
 		const ref = `${admission.shipment.model.provider}/${admission.shipment.model.id}`;
 		return ref === "anthropic/claude-haiku-5-5" || ref === "google-antigravity/gemini-3.8-flash-high";
 	}
@@ -4032,10 +4025,9 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
 	): WorkerTaskFitInput {
-		const scopedInstructions = request.instructions.trim();
 		return {
 			instructions: request.instructions,
-			objective: scopedInstructions || (this.goalForWorkerRequest(request)?.userGoal ?? ""),
+			objective: this.goalForWorkerRequest(request)?.userGoal ?? "",
 			model: describeModelCard(
 				buildCapabilityCard(admission.shipment.model, { subscription: false, evidence: "unprobed" }),
 			),
@@ -4084,7 +4076,6 @@ export class WorkerDelegationController {
 		signal?: AbortSignal,
 	): Promise<string | undefined> {
 		if (!this.workerTaskFitnessEnabled()) return;
-		if (this.isPinnedOrStickyWorkhorseAdmission(request, admission)) return;
 		const judge = this.deps.getRouteChoiceJudge?.();
 		const sessionId = this.deps.getSessionId();
 		const cwd = this.deps.getCwd();
@@ -4100,6 +4091,13 @@ export class WorkerDelegationController {
 			);
 		} catch (error) {
 			failure = `worker_task_fitness_unavailable:${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (
+			failure !== undefined &&
+			this.isStickyWorkhorseAdmission(admission) &&
+			this.deps.getSettingsManager().getModelRouterSettings().fitnessGate !== true
+		) {
+			failure = undefined;
 		}
 		if (!this.workerTaskFitnessEnabled()) return;
 		const current = this.resolveWorkerAdmission(

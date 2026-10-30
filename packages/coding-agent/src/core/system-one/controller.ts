@@ -1124,11 +1124,10 @@ export class SystemOneController {
 
 	/** Worker admission judges complete task evidence; it never inherits the 4k route preview cutoff. */
 	async evaluateWorkerTaskFit(input: WorkerTaskFitInput, signal?: AbortSignal): Promise<Record<string, unknown>> {
-		const scopedInstructions = this.projector.redactText(input.instructions);
 		const state = {
 			...input,
-			instructions: scopedInstructions,
-			objective: scopedInstructions || this.projector.redactText(input.objective),
+			instructions: this.projector.redactText(input.instructions),
+			objective: this.projector.redactText(input.objective),
 		};
 		const batches = planEvaluationBatches({
 			count: 1,

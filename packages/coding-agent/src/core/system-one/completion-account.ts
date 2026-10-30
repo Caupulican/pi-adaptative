@@ -208,6 +208,41 @@ export function diffForPath(patch: string, path: string, omittedChars = 0): stri
 	return omittedChars > 0 && section === sections.at(-1) ? undefined : section;
 }
 
+const MAX_CLAIM_PATCH_SLICE_CHARS = 16_000;
+
+/**
+ * Splits a single file's diff along hunk/line boundaries only when its serialized size would exceed
+ * a single evaluation batch request, preserving every character of the diff across source-backed claims.
+ */
+function chunkFileDiffForBudget(fileDiff: string, maxChars = MAX_CLAIM_PATCH_SLICE_CHARS): readonly string[] {
+	if (fileDiff.length <= maxChars) return [fileDiff];
+	const lines = fileDiff.split("\n");
+	const headerLines: string[] = [];
+	let index = 0;
+	while (index < lines.length && !lines[index]!.startsWith("@@ ")) {
+		headerLines.push(lines[index]!);
+		index++;
+	}
+	const header = headerLines.join("\n");
+	const bodyLines = lines.slice(index);
+	const chunks: string[] = [];
+	let current: string[] = [];
+	let currentLen = header.length;
+	for (const line of bodyLines) {
+		if (current.length > 0 && currentLen + line.length + 1 > maxChars) {
+			chunks.push(header ? `${header}\n${current.join("\n")}` : current.join("\n"));
+			current = [];
+			currentLen = header.length;
+		}
+		current.push(line);
+		currentLen += line.length + 1;
+	}
+	if (current.length > 0) {
+		chunks.push(header ? `${header}\n${current.join("\n")}` : current.join("\n"));
+	}
+	return chunks.length > 0 ? chunks : [fileDiff];
+}
+
 interface ResolvedEvidence {
 	readonly id: string;
 	readonly text: string;
@@ -335,36 +370,41 @@ export function checkCompletionAccount(
 		const citedText = cited
 			.flatMap((item) => (item.found?.verified ? [`${item.id}: ${item.found.text}`] : []))
 			.join("\n");
-		const changeEvidence = [patchHeader(entry.path), citedText].filter(Boolean).join("\n");
-		const evidence = `Change to ${entry.path}:\n${changeEvidence}`;
-		claims.push({
-			topic: "scope",
-			label: `change to ${entry.path}`,
-			statement: entry.reason,
-			evidence,
-			fingerprint: fingerprintOf(entry.reason, evidence),
-		});
-		// Whether the change serves its named requirement or another changed file uses the same evidence.
-		for (const target of entry.serves.slice(0, COMPLETION_ACCOUNT_LIMITS.servesJudged)) {
-			const criterion = context.acceptance.find((candidate) => candidate.id === target);
-			const supported = criterion
-				? {
-						statement: `This change helps achieve: ${criterion.text}.`,
-						evidence: changeEvidence,
-					}
-				: context.changedPaths.some((changed) => samePath(changed, target))
+		const slices = chunkFileDiffForBudget(patchHeader(entry.path));
+		for (let sliceIdx = 0; sliceIdx < slices.length; sliceIdx++) {
+			const partSuffix = slices.length > 1 ? ` (part ${sliceIdx + 1}/${slices.length})` : "";
+			const changeEvidence = [slices[sliceIdx], citedText].filter(Boolean).join("\n");
+			const evidence = `Change to ${entry.path}${partSuffix}:\n${changeEvidence}`;
+			claims.push({
+				topic: "scope",
+				label: `change to ${entry.path}${partSuffix}`,
+				statement: entry.reason,
+				evidence,
+				fingerprint: fingerprintOf(entry.reason, evidence),
+			});
+			// Whether the change serves its named requirement or another changed file uses the same evidence.
+			for (const target of entry.serves.slice(0, COMPLETION_ACCOUNT_LIMITS.servesJudged)) {
+				const criterion = context.acceptance.find((candidate) => candidate.id === target);
+				const targetSlice = chunkFileDiffForBudget(patchHeader(target))[0] ?? "";
+				const supported = criterion
 					? {
-							statement: `This change is a dependency of the change to ${target}.`,
-							evidence: `${evidence}\nChange to ${target}:\n${patchHeader(target)}`,
+							statement: `This change helps achieve: ${criterion.text}.`,
+							evidence: changeEvidence,
 						}
-					: undefined;
-			if (supported)
-				claims.push({
-					topic: "scope",
-					label: `link of ${entry.path} to ${target}`,
-					...supported,
-					fingerprint: fingerprintOf(supported.statement, supported.evidence),
-				});
+					: context.changedPaths.some((changed) => samePath(changed, target))
+						? {
+								statement: `This change is a dependency of the change to ${target}.`,
+								evidence: `${evidence}\nChange to ${target}:\n${targetSlice}`,
+							}
+						: undefined;
+				if (supported)
+					claims.push({
+						topic: "scope",
+						label: `link of ${entry.path}${partSuffix} to ${target}`,
+						...supported,
+						fingerprint: fingerprintOf(supported.statement, supported.evidence),
+					});
+			}
 		}
 	}
 
