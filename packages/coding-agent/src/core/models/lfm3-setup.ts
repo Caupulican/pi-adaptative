@@ -13,7 +13,7 @@ import { resolveRouterCandidatePool } from "../model-router/candidate-pool.ts";
 import { evaluateSurfaceFitness } from "../model-router/fitness-gate.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import { type Lfm3FitnessModality, runLfm3ModalityFitness } from "../research/lfm3-modality-fitness.ts";
-import { isProbeAllFailed } from "../research/model-fitness.ts";
+import { isProbeAllFailed, projectModelFitnessReport } from "../research/model-fitness.ts";
 import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
 import { createAgentSession } from "../sdk.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "../secrets/credential-manager.ts";
@@ -23,6 +23,7 @@ import { SystemOneJevAdapter } from "../system-one/adapter.ts";
 import { createSystemOneConfig } from "../system-one/config.ts";
 import type { ToolProbeResult } from "../tool-protocol-controller.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { toolExecutionFailure } from "./fitness-tool-gate.ts";
 import { Lfm3MediaClient } from "./lfm3-media.ts";
 import { LFM3_MINIMUM_OLLAMA_VERSION, LFM3_MODELS } from "./lfm3-models.ts";
@@ -41,7 +42,23 @@ export interface Lfm3SetupOptions {
 
 export function lfm3Status(agentDir: string): string {
 	try {
-		return readFileSync(stateFile(agentDir, "lfm3-setup.json"), "utf8");
+		const saved: unknown = JSON.parse(readFileSync(stateFile(agentDir, "lfm3-setup.json"), "utf8"));
+		const projectAttempt = (attempt: unknown): unknown => {
+			if (!isPlainRecord(attempt) || !Array.isArray(attempt.stages)) return attempt;
+			return {
+				...attempt,
+				stages: attempt.stages.map((stage) => {
+					if (!isPlainRecord(stage) || stage.stage !== "fitness") return stage;
+					return { ...stage, report: projectModelFitnessReport(stage.report) };
+				}),
+			};
+		};
+		const projected = isPlainRecord(saved)
+			? Array.isArray(saved.attempts)
+				? { ...saved, attempts: saved.attempts.map(projectAttempt) }
+				: projectAttempt(saved)
+			: saved;
+		return `${JSON.stringify(projected, null, 2)}\n`;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "No LFM3 setup evidence yet.";
 		throw error;

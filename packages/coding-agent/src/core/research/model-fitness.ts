@@ -9,6 +9,7 @@ import {
 	TOOL_CALL_PROBE_SYSTEM_PROMPT,
 } from "../provider-prompt-contracts.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { MAX_FITNESS_DIAGNOSTIC_CHARS, MAX_FITNESS_DIAGNOSTICS } from "./fitness-diagnostic-contract.ts";
 import { runResearch } from "./research-runner.ts";
 
@@ -45,7 +46,7 @@ export type FitnessComplete = (args: {
 
 export interface CapacityProbeOptions {
 	registeredContextWindow: number;
-	/** Smallest candidate window to try before declaring the capacity unknown. Default 1024. */
+	/** Smallest nominal target to try before leaving the observation unknown. Default 1024. */
 	minContextWindow?: number;
 }
 
@@ -84,7 +85,8 @@ export interface LaneFitnessScore {
 
 export interface CapacityFitnessScore {
 	registeredContextWindow: number;
-	servedContextWindow: number;
+	/** Largest nominal character-estimated target whose sentinels were recalled; absent means unknown. */
+	servedContextWindow?: number;
 	outcomes: string[];
 	meanMs: number;
 }
@@ -101,9 +103,54 @@ export interface ModelFitnessReport {
 	toolCall: LaneFitnessScore;
 	/** Curator surface: can the model digest a context chunk to strict JSON WITHOUT losing key facts? */
 	digest: LaneFitnessScore;
-	/** Local-model capacity lane: measured context window the server actually serves. */
+	/** Local-model capacity lane: largest recalled nominal probe target, if any. */
 	capacity?: CapacityFitnessScore;
 	totalCostUsd: number;
+}
+
+function largestRecalledCapacityTarget(registered: number, outcomes: readonly unknown[]): number | undefined {
+	let largest: number | undefined;
+	for (const outcome of outcomes) {
+		if (typeof outcome !== "string") continue;
+		const match = /^(\d+):ok$/.exec(outcome);
+		if (!match) continue;
+		const target = Number(match[1]);
+		if (Number.isSafeInteger(target) && target > 0 && target <= registered && target > (largest ?? 0)) {
+			largest = target;
+		}
+	}
+	return largest;
+}
+
+/**
+ * Project the capacity observation only from a successful, bounded nominal target. This is a
+ * character-based probe estimate, not an exact provider-token count. Old reports may carry a
+ * fabricated minimum value, so their numeric field is deliberately ignored without an `:ok`
+ * outcome witness.
+ */
+export function projectCapacityFitnessScore(score: CapacityFitnessScore): CapacityFitnessScore;
+export function projectCapacityFitnessScore(score: unknown): unknown;
+export function projectCapacityFitnessScore(score: unknown): unknown {
+	if (!isPlainRecord(score)) return score;
+	const registered = score.registeredContextWindow;
+	const outcomes = score.outcomes;
+	const { servedContextWindow: _unverified, ...capacity } = score;
+	const largestRecalledTarget =
+		typeof registered === "number" && Number.isSafeInteger(registered) && registered > 0 && Array.isArray(outcomes)
+			? largestRecalledCapacityTarget(registered, outcomes)
+			: undefined;
+	return {
+		...capacity,
+		...(largestRecalledTarget !== undefined ? { servedContextWindow: largestRecalledTarget } : {}),
+	};
+}
+
+/** Canonical projection for fresh and persisted reports, including legacy reports with no success witness. */
+export function projectModelFitnessReport(report: ModelFitnessReport): ModelFitnessReport;
+export function projectModelFitnessReport(report: unknown): unknown;
+export function projectModelFitnessReport(report: unknown): unknown {
+	if (!isPlainRecord(report) || !isPlainRecord(report.capacity)) return report;
+	return { ...report, capacity: projectCapacityFitnessScore(report.capacity) };
 }
 
 /** Static prompts for the heavy-lifter surfaces (stable for provider prompt caching). */
@@ -226,7 +273,6 @@ async function measureServedContextWindow(args: {
 	const endNeedle = `NEEDLE_END_${nonce}`;
 	const score: CapacityFitnessScore = {
 		registeredContextWindow: registered,
-		servedContextWindow: 0,
 		outcomes: [],
 		meanMs: 0,
 	};
@@ -252,14 +298,12 @@ async function measureServedContextWindow(args: {
 		const recalled = !bounded.failure && output.includes(startNeedle) && output.includes(endNeedle);
 		score.outcomes.push(`${candidate}:${recalled ? "ok" : (bounded.failure?.status ?? "miss")}`);
 		if (recalled) {
-			score.servedContextWindow = candidate;
 			break;
 		}
 		candidate = Math.floor(candidate / 2);
 	}
-	if (score.servedContextWindow === 0) score.servedContextWindow = minWindow;
 	score.meanMs = calls > 0 ? Math.round(score.meanMs / calls) : 0;
-	return { score, costUsd };
+	return { score: projectCapacityFitnessScore(score), costUsd };
 }
 
 export async function runModelFitnessProbe(options: ModelFitnessOptions): Promise<ModelFitnessReport> {
@@ -420,7 +464,17 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	const tokensPerSecond =
 		overallSpeed.evalMs > 0 ? Math.round((overallSpeed.tokens / overallSpeed.evalMs) * 1000) : undefined;
 
-	return { trials, tokensPerSecond, research, worker, search, toolCall, digest, capacity, totalCostUsd };
+	return projectModelFitnessReport({
+		trials,
+		tokensPerSecond,
+		research,
+		worker,
+		search,
+		toolCall,
+		digest,
+		capacity,
+		totalCostUsd,
+	});
 }
 
 /**
@@ -441,6 +495,7 @@ export function isProbeAllFailed(report: ModelFitnessReport): boolean {
 
 /** Compact human-readable report for tool output / interactive display. Bounded, no raw dumps. */
 export function formatModelFitnessReport(model: string, report: ModelFitnessReport): string {
+	report = projectModelFitnessReport(report);
 	const speed = (tokensPerSecond: number | undefined) =>
 		tokensPerSecond !== undefined ? `, ~${tokensPerSecond} tok/s` : "";
 	const lines = [
@@ -452,7 +507,9 @@ export function formatModelFitnessReport(model: string, report: ModelFitnessRepo
 		`- digests:       ${report.digest.succeeded}/${report.digest.total} faithful, mean ${report.digest.meanMs}ms${speed(report.digest.tokensPerSecond)}`,
 		...(report.capacity
 			? [
-					`- capacity:      served window ${report.capacity.servedContextWindow}/${report.capacity.registeredContextWindow} tokens, mean ${report.capacity.meanMs}ms`,
+					report.capacity.servedContextWindow === undefined
+						? `- capacity:      unknown; no nominal probe target was recalled (character-based estimate)`
+						: `- capacity:      largest recalled nominal target ${report.capacity.servedContextWindow}/${report.capacity.registeredContextWindow} tokens (character-based estimate), mean ${report.capacity.meanMs}ms`,
 				]
 			: []),
 	];

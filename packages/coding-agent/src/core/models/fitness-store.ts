@@ -1,6 +1,6 @@
 import { stateFile } from "../agent-paths.ts";
 import { MAX_FITNESS_DIAGNOSTIC_CHARS, MAX_FITNESS_DIAGNOSTICS } from "../research/fitness-diagnostic-contract.ts";
-import type { ModelFitnessReport } from "../research/model-fitness.ts";
+import { type ModelFitnessReport, projectModelFitnessReport } from "../research/model-fitness.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type HostFingerprint, HostStateStore, isHostFingerprint } from "./host-state-store.ts";
@@ -69,7 +69,6 @@ function isFitnessReport(value: unknown): value is ModelFitnessReport {
 		(value.capacity === undefined ||
 			(isPlainRecord(value.capacity) &&
 				isFiniteNumber(value.capacity.registeredContextWindow) &&
-				isFiniteNumber(value.capacity.servedContextWindow) &&
 				Array.isArray(value.capacity.outcomes) &&
 				value.capacity.outcomes.every((outcome) => typeof outcome === "string") &&
 				isFiniteNumber(value.capacity.meanMs))) &&
@@ -92,7 +91,7 @@ function parseFitnessHost(value: unknown, hostId: string): Record<string, Stored
 			continue;
 		reports[model] = {
 			model,
-			report: candidate.report,
+			report: projectModelFitnessReport(candidate.report),
 			at: candidate.at,
 			host: candidate.host,
 		};
@@ -125,7 +124,12 @@ export class FitnessStore {
 		return this.storage.mutateCurrentHost(
 			() => ({}),
 			(reports, host) => {
-				const entry: StoredFitnessReport = { model, report, at: at ?? new Date().toISOString(), host };
+				const entry: StoredFitnessReport = {
+					model,
+					report: projectModelFitnessReport(report),
+					at: at ?? new Date().toISOString(),
+					host,
+				};
 				reports[model] = entry;
 				return { result: entry, changed: true };
 			},

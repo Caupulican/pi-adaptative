@@ -19,7 +19,7 @@ interface ModelsJsonModel {
 	api?: string;
 	baseUrl?: string;
 	contextWindow?: number;
-	/** Measured by the local capacity probe; compaction uses min(contextWindow, servedContextWindow). */
+	/** Optional runtime-configured context ceiling recorded with this local model definition. */
 	servedContextWindow?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
