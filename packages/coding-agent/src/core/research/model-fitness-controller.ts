@@ -2,9 +2,11 @@ import type { Usage } from "@caupulican/pi-ai";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import { runIsolatedTextCompletion } from "../isolated-text-completion.ts";
+import type { ModelRegistry } from "../model-registry.ts";
 import { FitnessStore, type StoredFitnessReport } from "../models/fitness-store.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import { redactCredentialValues } from "../secrets/credential-manager.ts";
 import { reportSpawnedUsage } from "../spawned-usage.ts";
 import type { LaneModelResolver } from "./lane-model-resolver.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./model-fitness.ts";
@@ -13,6 +15,7 @@ export interface ModelFitnessControllerDeps {
 	isDisposed(): boolean;
 	getSessionId(): string;
 	getAgentDir(): string;
+	getModelRegistry(): ModelRegistry;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
@@ -61,6 +64,8 @@ export class ModelFitnessController {
 				const spent = createEmptyUsage();
 				const report = await runModelFitnessProbe({
 					trials: args.trials,
+					redactDiagnostic: (text) =>
+						redactCredentialValues(text, this.deps.getModelRegistry().getKnownCredentialValues()),
 					signal: this.abortController.signal,
 					capacityProbe:
 						resolved.provider === "ollama" && resolved.contextWindow > 0

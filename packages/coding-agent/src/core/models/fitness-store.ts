@@ -1,4 +1,5 @@
 import { stateFile } from "../agent-paths.ts";
+import { MAX_FITNESS_DIAGNOSTIC_CHARS, MAX_FITNESS_DIAGNOSTICS } from "../research/fitness-diagnostic-contract.ts";
 import type { ModelFitnessReport } from "../research/model-fitness.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -30,6 +31,21 @@ function isLaneScore(value: unknown): boolean {
 		isFiniteNumber(value.total) &&
 		Array.isArray(value.outcomes) &&
 		value.outcomes.every((outcome) => typeof outcome === "string") &&
+		(value.diagnostics === undefined ||
+			(Array.isArray(value.diagnostics) &&
+				value.diagnostics.length <= MAX_FITNESS_DIAGNOSTICS &&
+				value.diagnostics.every(
+					(diagnostic) =>
+						isPlainRecord(diagnostic) &&
+						Number.isSafeInteger(diagnostic.trial) &&
+						Number(diagnostic.trial) > 0 &&
+						typeof diagnostic.outcome === "string" &&
+						diagnostic.outcome.length <= MAX_FITNESS_DIAGNOSTIC_CHARS &&
+						[diagnostic.stopReason, diagnostic.excerpt, diagnostic.detail].every(
+							(item) =>
+								item === undefined || (typeof item === "string" && item.length <= MAX_FITNESS_DIAGNOSTIC_CHARS),
+						),
+				))) &&
 		isFiniteNumber(value.meanMs) &&
 		(value.tokensPerSecond === undefined || isFiniteNumber(value.tokensPerSecond))
 	);

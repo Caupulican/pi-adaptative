@@ -35,7 +35,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
@@ -3960,6 +3960,37 @@ export class SessionManager {
 	static create(cwd: string, agentDir: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
 		return new SessionManager(cwd, dir, undefined, true, agentDir, options);
+	}
+
+	/** Materialize only a known never-persisted empty session; callers must validate its independent identity evidence. */
+	static materializeMissingEmptySession(args: {
+		cwd: string;
+		agentDir: string;
+		sessionFile: string;
+		id: string;
+		timestamp: string;
+		version: number;
+	}): SessionManager {
+		assertValidSessionId(args.id);
+		if (
+			args.version !== CURRENT_SESSION_VERSION ||
+			!Number.isFinite(Date.parse(args.timestamp)) ||
+			new Date(args.timestamp).toISOString() !== args.timestamp
+		)
+			throw new Error("Invalid original empty-session header");
+		const sessionFile = resolvePath(args.sessionFile);
+		const expectedName = `${args.timestamp.replace(/[:.]/g, "-")}_${args.id}.jsonl`;
+		if (basename(sessionFile) !== expectedName || existsSync(sessionFile))
+			throw new Error("Original session path is invalid or already exists");
+		const manager = new SessionManager(args.cwd, dirname(sessionFile), undefined, true, args.agentDir, {
+			id: args.id,
+		});
+		manager.sessionFile = sessionFile;
+		manager.fileEntries = [
+			{ type: "session", version: args.version, id: args.id, timestamp: args.timestamp, cwd: manager.cwd },
+		];
+		manager.flushBufferedEntries();
+		return manager;
 	}
 
 	/**

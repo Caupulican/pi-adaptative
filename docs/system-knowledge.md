@@ -64,6 +64,8 @@ anything fully encoded in code, tests, or docs does not belong here.
 
 ## Local Models and Reliability
 
+- Pi-managed Ollama registrations set `supportsDeveloperRole: false` and `maxTokensField: "max_tokens"`: Ollama’s OpenAI adapter forwards role names to the renderer and reads `max_tokens` for generation limits. Re-registration retains other per-model compatibility settings.
+
 - Native tool-calling is serving-stack-scoped, not a property of the weights: identical GGUF can have a working tool channel under one runtime and none under another. Probe verdicts are keyed by provider/model ref; the runtime is part of model identity.
 - Local-class (loopback) providers emit nothing — headers included — until the first generated token, so prefill lands in the connect phase. The adaptive resolver treats local connect as the quiet bound and raises profiled `connectMs` from measured prefill throughput; remote providers keep the stock bound. A `text-protocol` demotion probed under starved transport (stock bounds, CPU serving) is invalid evidence — re-probe with adequate bounds.
 - Ollama startup readiness is proven from the exact spawned child's post-bind `Listening on <ln.Addr()>` log, not by adopting any reachable server. The reader drains bounded stdout/stderr and unreferences the pipes; after the bind proof, `/api/tags` verifies the configured model and startup fails closed when it is absent. `OllamaRuntime` canonicalizes HTTP(S) `localhost` to `127.0.0.1` once in its constructor and reuses that URL for `OLLAMA_HOST`, readiness, health and API calls; readiness then requires the exact numeric host and port logged by the child.

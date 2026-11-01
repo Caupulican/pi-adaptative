@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { OpenAICompletionsCompat } from "@caupulican/pi-ai";
 import { configFile } from "../agent-paths.ts";
 
 /**
@@ -26,7 +27,7 @@ interface ModelsJsonModel {
 	textToolCallProtocol?: boolean;
 	input?: string[];
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
-	compat?: Record<string, unknown>;
+	compat?: OpenAICompletionsCompat & Record<string, unknown>;
 }
 
 interface ModelsJsonProvider {
@@ -82,6 +83,7 @@ function localModelEntry(
 		reasoning: reasoning ?? false,
 		thinkingLevelMap: reasoning ? { off: "none" } : undefined,
 		input: input ?? ["text"],
+		compat: { supportsDeveloperRole: false, maxTokensField: "max_tokens" },
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
 }
@@ -166,8 +168,14 @@ function registerModel(args: {
 	}
 	provider.models ??= [];
 	const existing = provider.models.findIndex((model) => model.id === args.modelId);
-	if (existing >= 0) provider.models[existing] = { ...provider.models[existing], ...args.entry };
-	else provider.models.push(args.entry);
+	if (existing >= 0) {
+		const previous = provider.models[existing]!;
+		provider.models[existing] = {
+			...previous,
+			...args.entry,
+			...(args.entry.compat ? { compat: { ...previous.compat, ...args.entry.compat } } : {}),
+		};
+	} else provider.models.push(args.entry);
 
 	writeModelsJson(modelsJsonPath, json);
 	return { ok: true, modelsJsonPath };

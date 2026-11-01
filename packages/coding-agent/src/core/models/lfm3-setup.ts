@@ -130,6 +130,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 	const failures: unknown[] = [];
 	try {
 		checkAbort();
+		manager.flushBufferedEntries();
 		const readiness = await adapter.evaluate(
 			{
 				state: { value: "ready" },

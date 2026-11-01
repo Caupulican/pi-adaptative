@@ -8,6 +8,8 @@ import {
 	SEARCH_PROBE_SYSTEM_PROMPT,
 	TOOL_CALL_PROBE_SYSTEM_PROMPT,
 } from "../provider-prompt-contracts.ts";
+import { redactKnownSecrets } from "../security/secret-text.ts";
+import { MAX_FITNESS_DIAGNOSTIC_CHARS, MAX_FITNESS_DIAGNOSTICS } from "./fitness-diagnostic-contract.ts";
 import { runResearch } from "./research-runner.ts";
 
 export {
@@ -56,14 +58,25 @@ export interface ModelFitnessOptions {
 	/** Optional local-model capacity lane: measures the actually served context window. */
 	capacityProbe?: CapacityProbeOptions;
 	signal?: AbortSignal;
+	/** Redacts host-known credential values before excerpts are retained. */
+	redactDiagnostic?: (text: string) => string;
 	/** Injected clock for latency measurement (test seam). Defaults to Date.now. */
 	now?: () => number;
+}
+
+export interface FitnessFailureDiagnostic {
+	trial: number;
+	outcome: string;
+	stopReason?: string;
+	excerpt?: string;
+	detail?: string;
 }
 
 export interface LaneFitnessScore {
 	succeeded: number;
 	total: number;
 	outcomes: string[];
+	diagnostics?: FitnessFailureDiagnostic[];
 	meanMs: number;
 	/** Mean output tokens/second across the surface's calls; undefined when not reported. */
 	tokensPerSecond?: number;
@@ -253,6 +266,8 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	const trials = Math.max(1, Math.min(options.trials ?? 3, 20));
 	const maxWallClockMs = options.maxWallClockMs ?? 120_000;
 	const now = options.now ?? Date.now;
+	const diagnosticText = (text: string): string =>
+		redactKnownSecrets(options.redactDiagnostic?.(text) ?? text).slice(0, MAX_FITNESS_DIAGNOSTIC_CHARS);
 	let totalCostUsd = 0;
 
 	// Token-speed instrumentation: the lane runners' own contracts carry text/cost only, so the
@@ -346,12 +361,31 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 				execute: (signal) => complete({ systemPrompt, userPrompt: task, signal }),
 			});
 			if (bounded.completion) totalCostUsd += bounded.completion.costUsd;
+			let diagnostic: FitnessFailureDiagnostic | undefined;
 			if (bounded.failure || !bounded.completion) {
-				score.outcomes.push(bounded.failure ? bounded.failure.status : "completion_error");
+				const outcome = bounded.failure ? bounded.failure.status : "completion_error";
+				score.outcomes.push(outcome);
+				diagnostic = {
+					trial: taskIndex + 1,
+					outcome,
+					...(bounded.failure?.detail ? { detail: diagnosticText(bounded.failure.detail) } : {}),
+					...(bounded.completion ? { stopReason: diagnosticText(bounded.completion.stopReason) } : {}),
+				};
 			} else {
 				const ok = accepts(bounded.completion.text, taskIndex);
 				if (ok) score.succeeded++;
 				score.outcomes.push(ok ? "ok" : "unparseable_output");
+				if (!ok)
+					diagnostic = {
+						trial: taskIndex + 1,
+						outcome: "unparseable_output",
+						stopReason: diagnosticText(bounded.completion.stopReason),
+						excerpt: diagnosticText(bounded.completion.text),
+					};
+			}
+			if (diagnostic && (score.diagnostics?.length ?? 0) < MAX_FITNESS_DIAGNOSTICS) {
+				score.diagnostics ??= [];
+				score.diagnostics.push(diagnostic);
 			}
 			score.meanMs += now() - started;
 		}
