@@ -64,15 +64,20 @@ Ollama server is already running, the command refuses to use or stop it because 
 ownership. Stop the Pi-managed server from its owning Pi session with `/models stop`, then retry.
 The media command starts and stops its own Pi-managed server for the request.
 
-Setup fitness uses native Ollama image/audio requests and Pi-provided generic held-out images. The
-vision check uses a red image; Omni combines a separate blue image with audio. Audio speech and
-transcription checks share a generated reference utterance; if speech generation fails,
-transcription is blocked. These checks do not independently establish transcription accuracy on
+Setup media checks use native Ollama image/audio requests and Pi-provided generic held-out images.
+The vision check uses a red image; Omni combines a separate blue image with audio. Audio speech and
+transcription checks share a generated reference utterance; failed synthesis blocks dependent audio
+checks. A successful round trip does not independently establish transcription accuracy on
 held-out recorded audio.
 
 ## Evaluation and activation
 
-Setup evaluates candidates on the current host. Request additional trials with `--trials N`:
+Setup evaluates candidates on the current host. Every selected model must pass all its advertised
+modality checks for setup to complete. Existing model fitness and tool-calling gates are recorded
+separately: a model can be media-ready and usable through its native media command even if it is
+not qualified for the general coding-agent pool. Trials use a temporary local-only candidate scope
+so newly installed models can be evaluated without changing saved model favorites or the enabled
+pool. Request additional trials with `--trials N`:
 
 ```bash
 pi lfm3 setup --trials 3
@@ -84,27 +89,35 @@ Inspect installed models and their recorded setup state with:
 pi lfm3 status
 ```
 
-Activation is opt-in and requires every selected model to pass the router/executor fitness lanes,
-task-scale tool calling, and the selected model's modality trials. Modality trial results are judged
-by System One. For example, selecting all models means all four must pass before activation can
-apply:
+Activation is opt-in. Every selected model must be media-ready, and at least one selected model
+must also pass all router and executor fitness lanes plus task-scale tool calling. Activation uses
+only that general-agent-ready subset; a text, vision, or audio specialist that fails the general
+agent gates remains installed and registered for its native media command. The primary model must
+also pass compaction/digest fitness and support the effective ICM history-summary reasoning level
+(default `low`); it is moved to the front of the enabled pool. Modality trial results are judged by
+System One. For example:
 
 ```bash
 pi lfm3 setup --activate
 ```
 
-Activation enables the local runtime, sets the first selected model as the Ollama default, disables
-thinking, and enables the manual fitness-gated router with its tiers and executor set to that model.
-It applies only after all selected models pass; there is no partial activation by passing subset.
-The validated model pool and routing policy are committed together in one global settings write.
-`status` retains bounded setup attempts with errors and fitness evidence to diagnose the result.
+Activation adds the qualified subset to model favorites and the enabled model pool. It sets the
+primary as the Ollama default, compaction model, and history-summary model; sets foreground and
+router-lane thinking to off; enables System One; and enables automatic fitness-gated routing with
+the cheap, medium, and expensive pins cleared. The executor and learning model are pinned to the
+qualified primary. External summary-model egress is disabled; System One's separate remote judgment
+and admission path remains enabled. Fresh workers inherit the qualified foreground model; existing
+provider-order preferences are retained. The pool and policies are committed together in one global
+settings write; conflicting active profile settings refuse activation. Without `--activate`, setup
+does not change the interactive model pool. `status` retains bounded attempts with media, fitness,
+tool, and failure evidence.
 
 Setup requires an available configured System One provider for readiness and modality judgments.
 Ollama inference is local, but the evaluation and coordination path remains remote.
 
-Activation does not establish that tool use, audio, or vision is fit for every host workload. Use
-Pi's existing `/fitness` and task tools to inspect capabilities before assigning a model to a role or
-router lane.
+Activation establishes general-agent eligibility for the tested surfaces, not that a model is fit
+for every host workload. Use Pi's existing `/fitness` and task tools to inspect capabilities before
+assigning a model to a role or router lane.
 
 ## Runtime and coordination
 

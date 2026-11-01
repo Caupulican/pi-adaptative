@@ -75,7 +75,7 @@ export async function runLfm3MediaCli(command: MediaCommand, args: string[]): Pr
 			);
 		if (status.binarySource !== "pi-owned")
 			throw new Error("Pi-managed Ollama is not installed; run pi lfm3 setup first.");
-		const started = await runtime.start();
+		const started = await runtime.start({ retainForOperation: true });
 		controller.signal.throwIfAborted();
 		if (!started.started) throw new Error(`Ollama start: ${started.reason}`);
 		const installed = await runtime.list();

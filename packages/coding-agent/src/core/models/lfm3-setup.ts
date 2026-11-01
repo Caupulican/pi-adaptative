@@ -1,11 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getProfilesDir } from "../../config.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { stateFile } from "../agent-paths.ts";
+import type { AgentSession } from "../agent-session.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "../memory/continuous-chat-settings.ts";
 import { ModelRegistry } from "../model-registry.ts";
-import { resolveProfileModelSettings } from "../model-resolver.ts";
+import { resolveCliModel, resolveProfileModelSettings } from "../model-resolver.ts";
+import { resolveRouterCandidatePool } from "../model-router/candidate-pool.ts";
 import { evaluateSurfaceFitness } from "../model-router/fitness-gate.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import { type Lfm3FitnessModality, runLfm3ModalityFitness } from "../research/lfm3-modality-fitness.ts";
@@ -13,10 +17,11 @@ import { isProbeAllFailed } from "../research/model-fitness.ts";
 import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
 import { createAgentSession } from "../sdk.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "../secrets/credential-manager.ts";
-import { SettingsManager } from "../settings-manager.ts";
+import { InMemorySettingsStorage, SettingsManager } from "../settings-manager.ts";
 import { systemOneAccessFromSession } from "../system-one/access.ts";
 import { SystemOneJevAdapter } from "../system-one/adapter.ts";
 import { createSystemOneConfig } from "../system-one/config.ts";
+import type { ToolProbeResult } from "../tool-protocol-controller.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { toolExecutionFailure } from "./fitness-tool-gate.ts";
 import { Lfm3MediaClient } from "./lfm3-media.ts";
@@ -43,6 +48,30 @@ export function lfm3Status(agentDir: string): string {
 	}
 }
 
+/** Session-only scope for measuring these exact models without changing the user's persisted selection. */
+function createFitnessSettings(
+	settings: SettingsManager,
+	refs: readonly string[],
+	agentDir: string,
+	cwd: string,
+): SettingsManager {
+	const projected = structuredClone(settings.settings);
+	projected.modelFavorites = settings.getModelFavoritesIncluding(refs);
+	projected.enabledModels = [...refs];
+	projected.localRuntimes = {
+		...projected.localRuntimes,
+		ollama: { ...projected.localRuntimes?.ollama, enabled: true },
+	};
+	projected.systemOne = { ...projected.systemOne, enabled: true };
+	const memory = new InMemorySettingsStorage();
+	memory.withLock("global", () => JSON.stringify(projected));
+	return SettingsManager.fromStorage({
+		withLock: (scope, fn) => memory.withLock(scope, fn),
+		getProfilesDir: () => getProfilesDir(agentDir),
+		getProfileResolutionBaseDir: () => cwd,
+	});
+}
+
 /** A single staged owner; each failure remains visible and activation requires all gates. */
 export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 	const selected = options.model ? LFM3_MODELS.filter((item) => item.id === options.model) : [...LFM3_MODELS];
@@ -51,7 +80,10 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 	const settings = SettingsManager.create(options.cwd, options.agentDir);
 	const auth = AuthStorage.create(join(options.agentDir, "auth.json"));
 	const registry = ModelRegistry.create(auth, join(options.agentDir, "models.json"));
-	const access = systemOneAccessFromSession(settings, auth);
+	const access = systemOneAccessFromSession(
+		{ getSystemOneSettings: () => ({ ...settings.getSystemOneSettings(), enabled: true }) },
+		auth,
+	);
 	const manager = SessionManager.create(options.cwd, options.agentDir);
 	options.log(`Fitness session ${manager.getSessionId()} in ${options.cwd}`);
 	const reviewer = new SystemOneReviewer({
@@ -90,7 +122,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 	const checkAbort = () => options.signal?.throwIfAborted();
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	const abortSession = () => {
-		runtime.retainForShutdown();
+		runtime.retainForOperation();
 		session?.dispose();
 	};
 	options.signal?.addEventListener("abort", abortSession, { once: true });
@@ -133,7 +165,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 		if (status.serverUp && !status.managedByPi)
 			throw new Error("An existing Ollama server is not owned by this setup; stop it before setup.");
 		if (!status.serverUp) {
-			const started = await runtime.start();
+			const started = await runtime.start({ retainForOperation: true });
 			if (!started.started) throw new Error(`Runtime start: ${started.reason}`);
 		}
 		status = await runtime.detect();
@@ -159,7 +191,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			const upgrade = await runtime.installManaged(options.log, options.signal);
 			if (!upgrade.ok) throw new Error(`Ollama upgrade: ${upgrade.error ?? "failed"}`);
 			checkAbort();
-			const restarted = await runtime.start();
+			const restarted = await runtime.start({ retainForOperation: true });
 			if (!restarted.started) throw new Error(`Ollama restart: ${restarted.reason}`);
 			status = await runtime.detect();
 			if (!status.managedByPi || status.activeStore?.kind !== "pi-owned")
@@ -186,9 +218,9 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			if (!result.ok) throw new Error(`${model.id}: ${result.stage}: ${result.reason}`);
 			refs.push(result.modelRef);
 		}
-		const resolveLocalModels = () => {
+		const resolveLocalModels = (requested: readonly string[] = refs) => {
 			registry.refresh();
-			return refs.map((ref) => {
+			return requested.map((ref) => {
 				const model = registry.find("ollama", ref.slice("ollama/".length));
 				if (!model) throw new Error(`Installed model ${ref} could not be resolved in the registry`);
 				if (model.api !== "openai-completions" || model.baseUrl !== `${runtime.baseUrl}/v1`)
@@ -198,12 +230,13 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 		};
 		const models = resolveLocalModels();
 		const scoped = models.map((model) => ({ model: model! }));
+		const fitnessSettings = createFitnessSettings(settings, refs, options.agentDir, options.cwd);
 		const made = await createAgentSession({
 			cwd: options.cwd,
 			agentDir: options.agentDir,
 			authStorage: auth,
 			modelRegistry: registry,
-			settingsManager: settings,
+			settingsManager: fitnessSettings,
 			sessionManager: manager,
 			model: scoped[0]!.model,
 			isExplicitModel: true,
@@ -212,22 +245,42 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			systemOneEnabled: true,
 		});
 		session = made.session;
+		const trialPool = session.getRouterCandidatePool();
+		if (
+			trialPool.models.length !== refs.length ||
+			trialPool.models.some((model) => !refs.includes(`${model.provider}/${model.id}`))
+		) {
+			throw new Error("Fitness session did not admit the exact local trial pool");
+		}
 		const media = new Lfm3MediaClient({ baseUrl: runtime.baseUrl });
 		const successful: string[] = [];
+		const summaryQualified: string[] = [];
+		let allMediaReady = true;
 		for (let i = 0; i < selected.length; i++) {
 			checkAbort();
 			const model = selected[i]!;
 			const ref = refs[i]!;
 			options.log(`Measuring ${ref}`);
-			const outcome = await session.runModelFitness({ model: ref, trials: options.trials });
-			if (!outcome.started || outcome.model !== ref)
-				throw new Error(
-					`Fitness did not run for ${ref}: ${outcome.started ? `resolved ${outcome.model}` : outcome.skipReason}`,
-				);
+			let outcome: Awaited<ReturnType<AgentSession["runModelFitness"]>> | undefined;
+			let fitnessError: string | undefined;
+			try {
+				outcome = await session.runModelFitness({ model: ref, trials: options.trials });
+				if (!outcome.started || outcome.model !== ref)
+					fitnessError = outcome.started ? `resolved ${outcome.model}` : outcome.skipReason;
+			} catch (error) {
+				fitnessError = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+			}
 			checkAbort();
-			const tools = await session.probeToolCalling(ref);
+			let tool: ToolProbeResult | undefined;
+			let toolError: string | undefined;
+			try {
+				const tools = await session.probeToolCalling(ref);
+				tool = tools.results.find((item) => item.model === ref);
+				if (!tool) toolError = "Probe returned no result for the requested model";
+			} catch (error) {
+				toolError = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+			}
 			checkAbort();
-			const tool = tools.results.find((item) => item.model === ref);
 			const modalities: Lfm3FitnessModality[] = ["text"];
 			if (model.modalities.includes("image")) modalities.push("vision");
 			if (model.modalities.includes("audio")) modalities.push("transcription", "audio-understanding");
@@ -271,35 +324,104 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 					};
 				},
 			});
+			const report = outcome?.started && outcome.model === ref ? outcome.report : undefined;
 			const fitnessOk =
-				!isProbeAllFailed(outcome.report) &&
+				!!report &&
+				!fitnessError &&
+				!isProbeAllFailed(report) &&
 				(["router_cheap", "router_medium", "router_expensive", "executor"] as const).every(
-					(surface) => evaluateSurfaceFitness(surface, outcome.report).fit,
+					(surface) => evaluateSurfaceFitness(surface, report).fit,
 				);
-			const toolsOk = toolExecutionFailure(tool) === undefined;
-			const mediaOk = mediaReport.results
-				.filter((result) => modalities.includes(result.modality))
-				.every((result) => result.status === "pass");
+			const toolsOk = !toolError && toolExecutionFailure(tool) === undefined;
+			const mediaOk = modalities.every((modality) =>
+				mediaReport.results.some((result) => result.modality === modality && result.status === "pass"),
+			);
 			evidence.stages.push({
 				stage: "fitness",
 				id: model.id,
 				ref,
-				report: outcome.report,
+				report,
+				fitnessError,
 				tool,
+				toolError,
 				media: mediaReport,
 				fitnessOk,
 				toolsOk,
 				mediaOk,
 			});
 			persist();
-			if (fitnessOk && toolsOk && mediaOk) successful.push(ref);
+			if (!mediaOk) allMediaReady = false;
+			if (fitnessOk && toolsOk && mediaOk) {
+				successful.push(ref);
+				if (evaluateSurfaceFitness("compaction", report).fit) summaryQualified.push(ref);
+			}
 		}
 		checkAbort();
+		if (!allMediaReady)
+			throw new Error(
+				"Setup incomplete: one or more advertised media modalities did not pass; see status for evidence.",
+			);
 		if (options.activate) {
-			if (successful.length !== selected.length)
-				throw new Error("Activation blocked: one or more models did not pass every required gate.");
-			await settings.activateLocalModelPool(successful, options.signal, (settings) => {
-				resolveLocalModels();
+			if (successful.length === 0)
+				throw new Error("Activation blocked: no model passed every general-agent fitness and tool gate.");
+			if (summaryQualified.length === 0)
+				throw new Error("Activation blocked: no general-agent model passed the compaction fitness gate.");
+			const summarySettings = readContinuousChatSettings(settings);
+			const resolveSummary = (ref: string) => {
+				const model = resolveCliModel({ cliModel: ref, modelRegistry: registry }).model;
+				return model && registry.hasConfiguredAuth(model) ? model : undefined;
+			};
+			const primary = summaryQualified.find(
+				(ref) =>
+					validateContinuousChatSummaryModel(
+						{
+							summaryModel: ref,
+							thinkingLevel: summarySettings.thinkingLevel,
+							allowExternalSummaryEgress: false,
+						},
+						{ resolveModel: resolveSummary },
+					).ok,
+			);
+			if (!primary)
+				throw new Error(
+					`Activation blocked: no compaction-fit model supports the configured history summary thinking level ${summarySettings.thinkingLevel}.`,
+				);
+			successful.splice(successful.indexOf(primary), 1);
+			successful.unshift(primary);
+			await settings.activateLocalModelPool(successful, options.signal, (settings, candidate, projected) => {
+				const scopedModels = resolveLocalModels(successful);
+				const pool = resolveRouterCandidatePool({ source: "enabled_models", models: scopedModels }, registry, {
+					favorites: candidate.modelFavorites ?? [],
+				});
+				if (
+					pool.models.length !== successful.length ||
+					pool.models.some((model) => !successful.includes(`${model.provider}/${model.id}`))
+				)
+					throw new Error("Verified local models are not all eligible in the router candidate pool");
+				const requireQualifiedSummary = (setting: string, value: string): void => {
+					const resolved = resolveCliModel({ cliModel: value, modelRegistry: registry }).model;
+					if (
+						!resolved ||
+						!summaryQualified.includes(`${resolved.provider}/${resolved.id}`) ||
+						resolved.api !== "openai-completions" ||
+						resolved.baseUrl !== `${runtime.baseUrl}/v1`
+					) {
+						throw new Error(`${setting} resolves outside the qualified local agent pool: ${value}`);
+					}
+				};
+				const effective = SettingsManager.inMemory(projected);
+				const compaction = effective.getCompactionModel().trim();
+				if (compaction && compaction !== "auto") requireQualifiedSummary("compaction.model", compaction);
+				const history = effective.getMemoryHistorySettings();
+				if (history.summaryModel) {
+					requireQualifiedSummary("contextPolicy.memory.history.summaryModel", history.summaryModel);
+				}
+				const continuousChat = readContinuousChatSettings(effective);
+				const validatedSummary = validateContinuousChatSummaryModel(continuousChat, {
+					resolveModel: resolveSummary,
+				});
+				if (!validatedSummary.ok)
+					throw new Error(`History summary model is not usable: ${validatedSummary.reason}`);
 				const names = settings.getActiveResourceProfileNames();
 				const profile = resolveProfileModelSettings({
 					activeProfileNames: names,
@@ -316,8 +438,29 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 						`Active resource profile overrides the local model or thinking policy: ${profile.error ?? "conflicting model or thinking"}`,
 					);
 				}
-				const orchestrationId = settings.getActiveOrchestrationProfile();
-				if (orchestrationId) {
+				const pinPolicy = settings.getWorkerModelPinPolicy();
+				if (pinPolicy.status === "invalid")
+					throw new Error(`Invalid worker model pin policy: ${pinPolicy.diagnostics.join("; ")}`);
+				if (
+					pinPolicy.status === "active" &&
+					Object.values(pinPolicy.byRole).some(
+						(pin) =>
+							pin &&
+							(!successful.includes(`${pin.binding.provider}/${pin.binding.modelId}`) ||
+								pin.binding.thinkingLevel !== "off"),
+					)
+				) {
+					throw new Error(
+						"Worker model pin policy selects a model outside the qualified local pool or non-off thinking",
+					);
+				}
+				const orchestrationIds = new Set(
+					[
+						settings.getActiveOrchestrationProfile(),
+						settings.getWorkerDelegationSettings().orchestrationProfile,
+					].filter((id): id is string => !!id),
+				);
+				for (const orchestrationId of orchestrationIds) {
 					const loaded = new OrchestrationProfileStore({
 						agentDir: options.agentDir,
 						cwd: options.cwd,
@@ -346,7 +489,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 						if (
 							router &&
 							((router.enabled !== undefined && !router.enabled) ||
-								(router.selectionMode !== undefined && router.selectionMode !== "manual") ||
+								(router.selectionMode !== undefined && router.selectionMode !== "auto") ||
 								(router.fitnessGate !== undefined && !router.fitnessGate) ||
 								[
 									router.cheapThinking,
@@ -354,13 +497,12 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 									router.expensiveThinking,
 									router.executorThinking,
 								].some((level) => level !== undefined && level !== "off") ||
-								[
-									router.cheapModel,
-									router.mediumModel,
-									router.expensiveModel,
-									router.executorModel,
-									router.learningModel,
-								].some((ref) => ref !== undefined && ref !== successful[0]))
+								[router.cheapModel, router.mediumModel, router.expensiveModel].some(
+									(ref) => ref !== undefined && ref.trim() !== "",
+								) ||
+								[router.executorModel, router.learningModel].some(
+									(ref) => ref !== undefined && ref !== successful[0],
+								))
 						) {
 							throw new Error(
 								`Active orchestration resource profile ${name} overrides the verified router configuration`,
@@ -372,8 +514,9 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			evidence.activated = true;
 			persist();
 		}
-		if (successful.length !== selected.length)
-			throw new Error("Setup completed with failed fitness gates; see status for evidence.");
+		options.log(
+			`${selected.length} model(s) media-ready; ${successful.length} qualified for the general-agent pool.`,
+		);
 	} catch (error) {
 		failures.push(error);
 		evidence.stages.push({ stage: "failure", error: error instanceof Error ? error.message : String(error) });
@@ -383,7 +526,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			failures.push(persistError);
 		}
 	} finally {
-		runtime.retainForShutdown();
+		runtime.retainForOperation();
 		options.signal?.removeEventListener("abort", abortSession);
 		for (const close of [() => session?.disposeAndWait(), () => runtime.stopAndWait()]) {
 			try {

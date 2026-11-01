@@ -199,7 +199,7 @@ import type {
 	WorkerThinkingPolicy,
 } from "./settings/settings-schema.ts";
 import { validateSkillName } from "./skills.ts";
-import type { SystemOneProviderChoice } from "./system-one/access.ts";
+import { isSystemOneEnabled, type SystemOneProviderChoice } from "./system-one/access.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
@@ -1833,7 +1833,7 @@ export class SettingsManager {
 	async activateLocalModelPool(
 		refs: readonly string[],
 		signal?: AbortSignal,
-		validate?: (current: SettingsManager) => void,
+		validate?: (current: SettingsManager, candidate: Settings, projected: Settings) => void,
 	): Promise<void> {
 		await this.flush();
 		signal?.throwIfAborted();
@@ -1862,9 +1862,10 @@ export class SettingsManager {
 				current.directoryProfileSettingsLoadError
 			)
 				throw new Error("Settings could not be loaded; activation refused");
-			validate?.(current);
-			validated = current;
 			committed = current.prepareLocalModelPool(refs, signal);
+			validate?.(current, committed, current.mergeEffectiveSettings(committed));
+			signal?.throwIfAborted();
+			validated = current;
 			return JSON.stringify(committed, null, 2);
 		});
 		if (!committed || !validated) throw new Error("Settings activation was not committed");
@@ -1882,19 +1883,34 @@ export class SettingsManager {
 		if (this.globalSettingsLoadError) throw new Error("Global settings could not be loaded; activation refused");
 		const primary = refs[0]!;
 		const next = structuredClone(this.globalSettings);
+		next.modelFavorites = this.getModelFavoritesIncluding(refs);
 		next.enabledModels = [...refs];
 		next.defaultProvider = "ollama";
 		next.defaultModel = primary.slice("ollama/".length);
 		next.defaultThinkingLevel = "off";
+		next.systemOne = { ...next.systemOne, enabled: true };
+		next.compaction = { ...next.compaction, model: primary };
+		next.contextPolicy = {
+			...next.contextPolicy,
+			memory: {
+				...next.contextPolicy?.memory,
+				history: {
+					...next.contextPolicy?.memory?.history,
+					summaryModel: primary,
+					allowExternalSummaryEgress: false,
+				},
+			},
+		};
+		next.workerDelegation = { ...next.workerDelegation, account: "same" };
 		next.localRuntimes = { ...next.localRuntimes, ollama: { ...next.localRuntimes?.ollama, enabled: true } };
 		next.modelRouter = {
 			...next.modelRouter,
 			enabled: true,
-			selectionMode: "manual",
+			selectionMode: "auto",
 			fitnessGate: true,
-			cheapModel: primary,
-			mediumModel: primary,
-			expensiveModel: primary,
+			cheapModel: undefined,
+			mediumModel: undefined,
+			expensiveModel: undefined,
 			executorModel: primary,
 			learningModel: primary,
 			cheapThinking: "off",
@@ -1912,22 +1928,24 @@ export class SettingsManager {
 			projected.defaultModel !== next.defaultModel ||
 			projected.defaultThinkingLevel !== "off" ||
 			projected.localRuntimes?.ollama?.enabled === false ||
+			projected.systemOne?.enabled !== true ||
+			projected.workerDelegation?.account !== "same" ||
+			projected.contextPolicy?.memory?.history?.allowExternalSummaryEgress !== false ||
+			!isSystemOneEnabled({ getSystemOneSettings: () => projected.systemOne ?? {} }) ||
 			!enabled ||
 			enabled.length !== refs.length ||
 			enabled.some((ref, i) => ref !== refs[i]) ||
 			router.enabled !== true ||
-			router.selectionMode !== "manual" ||
+			router.selectionMode !== "auto" ||
 			router.fitnessGate !== true ||
 			[router.cheapThinking, router.mediumThinking, router.expensiveThinking, router.executorThinking].some(
 				(level) => level !== "off",
 			) ||
-			[
-				router.cheapModel,
-				router.mediumModel,
-				router.expensiveModel,
-				router.executorModel,
-				router.learningModel,
-			].some((ref) => ref !== primary)
+			[router.cheapModel, router.mediumModel, router.expensiveModel].some(
+				(ref) => ref !== undefined && ref.trim() !== "",
+			) ||
+			router.executorModel !== primary ||
+			router.learningModel !== primary
 		) {
 			throw new Error(
 				"Project, directory or active profile settings override the requested local model configuration",
@@ -3222,6 +3240,24 @@ export class SettingsManager {
 			result.push({ provider, modelId });
 		}
 		return result;
+	}
+
+	/** Return the current canonical favorites unioned with provider/model references, without persisting. */
+	getModelFavoritesIncluding(refs: readonly string[]): ModelFavorite[] {
+		const favorites = this.getModelFavorites();
+		const seen = new Set(favorites.map((entry) => `${entry.provider}\u0000${entry.modelId}`));
+		for (const ref of refs) {
+			const slash = ref.indexOf("/");
+			const provider = ref.slice(0, slash).trim();
+			const modelId = ref.slice(slash + 1).trim();
+			if (slash <= 0 || !provider || !modelId) throw new Error(`Invalid model favorite reference: ${ref}`);
+			const key = `${provider}\u0000${modelId}`;
+			if (!seen.has(key)) {
+				favorites.push({ provider, modelId });
+				seen.add(key);
+			}
+		}
+		return favorites;
 	}
 
 	isModelFavorite(provider: string, modelId: string): boolean {

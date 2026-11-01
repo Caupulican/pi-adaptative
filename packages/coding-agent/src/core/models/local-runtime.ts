@@ -14,6 +14,7 @@ import {
 	waitForChildProcessWithTermination,
 } from "../../utils/child-process.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
+import { redactKnownSecrets } from "../security/secret-text.ts";
 import {
 	deriveHostLocalInferenceProfile,
 	type LocalInferenceProfile,
@@ -715,6 +716,7 @@ export class OllamaRuntime {
 		binary: { path: string },
 		extraEnv: NodeJS.ProcessEnv,
 		isCurrent: () => boolean,
+		retainForOperation: boolean,
 	): Promise<{ started: boolean; reason: string }> {
 		if (!isCurrent()) return cancelledRuntimeStart();
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
@@ -730,7 +732,7 @@ export class OllamaRuntime {
 		child.on("exit", () => {
 			if (this._child === child) this._ownsListener = false;
 		});
-		child.unref?.();
+		if (!retainForOperation) child.unref();
 		try {
 			await waitForOllamaListener(child, this._baseUrl, START_POLL_ATTEMPTS * START_POLL_INTERVAL_MS);
 		} catch (error) {
@@ -755,15 +757,16 @@ export class OllamaRuntime {
 		return result.started ? cancelledRuntimeStart() : result;
 	}
 
-	private _startServer(modelsDir?: string): Promise<RuntimeStartResult> {
-		return this._starts.run(JSON.stringify(modelsDir ?? null), (isCurrent) =>
-			this._startServerOnce(modelsDir, isCurrent),
+	private _startServer(modelsDir?: string, retainForOperation = false): Promise<RuntimeStartResult> {
+		return this._starts.run(JSON.stringify({ modelsDir: modelsDir ?? null, retainForOperation }), (isCurrent) =>
+			this._startServerOnce(modelsDir, isCurrent, retainForOperation),
 		);
 	}
 
 	private async _startServerOnce(
 		modelsDir: string | undefined,
 		isCurrent: () => boolean,
+		retainForOperation: boolean,
 	): Promise<RuntimeStartResult> {
 		if (!isCurrent()) return cancelledRuntimeStart();
 		const serverUp = await this._serverUp();
@@ -785,6 +788,7 @@ export class OllamaRuntime {
 				...ollamaEnvironmentForLocalInferenceProfile(this._profile),
 			},
 			isCurrent,
+			retainForOperation,
 		);
 	}
 
@@ -793,8 +797,8 @@ export class OllamaRuntime {
 	 * hardware. No-op (reported) when a server already responds — pi never double-serves. Used by
 	 * `/models add` et al, where isolated per-model-pull storage is the point.
 	 */
-	async start(): Promise<{ started: boolean; reason: string }> {
-		return this._startServer(this.ownedModelsDir());
+	async start(options?: { retainForOperation?: boolean }): Promise<{ started: boolean; reason: string }> {
+		return this._startServer(this.ownedModelsDir(), options?.retainForOperation ?? false);
 	}
 
 	/** Start against one caller-selected store; acceptance harnesses use this on an isolated port. */
@@ -824,8 +828,8 @@ export class OllamaRuntime {
 		return { stopped: true };
 	}
 
-	/** Keep the owning process alive while it drains session work and shuts this child down. */
-	retainForShutdown(): void {
+	/** Retain the owning process while an operation or its shutdown is pending. */
+	retainForOperation(): void {
 		this._child?.ref();
 	}
 
@@ -915,10 +919,13 @@ export class OllamaRuntime {
 				signal: AbortSignal.timeout(60_000),
 			});
 			if (!response.ok)
-				return { ok: false, error: `HTTP ${response.status}: ${await response.text().catch(() => "")}` };
+				return {
+					ok: false,
+					error: redactKnownSecrets(`HTTP ${response.status}: ${await response.text().catch(() => "")}`),
+				};
 			return { ok: true };
 		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			return { ok: false, error: redactKnownSecrets(error instanceof Error ? error.message : String(error)) };
 		}
 	}
 
@@ -936,7 +943,9 @@ export class OllamaRuntime {
 			if (!response.ok) {
 				return {
 					ok: false,
-					error: `show failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					error: redactKnownSecrets(
+						`show failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					),
 				};
 			}
 			const data = (await response.json()) as { model_info?: Record<string, unknown>; capabilities?: unknown };
@@ -945,7 +954,7 @@ export class OllamaRuntime {
 				: [];
 			return { ok: true, info: { modelInfo: data.model_info ?? {}, capabilities } };
 		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			return { ok: false, error: redactKnownSecrets(error instanceof Error ? error.message : String(error)) };
 		}
 	}
 
@@ -959,12 +968,14 @@ export class OllamaRuntime {
 			if (!response.ok) {
 				return {
 					ok: false,
-					error: `${operation} failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					error: redactKnownSecrets(
+						`${operation} failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					),
 				};
 			}
 			return { ok: true };
 		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			return { ok: false, error: redactKnownSecrets(error instanceof Error ? error.message : String(error)) };
 		}
 	}
 
@@ -1001,7 +1012,9 @@ export class OllamaRuntime {
 			if (!response.ok || !response.body) {
 				return {
 					ok: false,
-					error: `pull failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					error: redactKnownSecrets(
+						`pull failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					),
 				};
 			}
 			const reader = response.body.getReader();
@@ -1013,10 +1026,10 @@ export class OllamaRuntime {
 				if (!line.trim()) return;
 				try {
 					const event = JSON.parse(line) as { status?: string; error?: string };
-					if (event.error) errorMessage = event.error;
-					if (event.status && event.status !== lastStatus) {
+					if (typeof event.error === "string" && event.error) errorMessage = redactKnownSecrets(event.error);
+					if (typeof event.status === "string" && event.status && event.status !== lastStatus) {
 						lastStatus = event.status;
-						onProgress?.(event.status);
+						onProgress?.(redactKnownSecrets(event.status));
 					}
 				} catch {
 					// partial line noise
@@ -1034,9 +1047,9 @@ export class OllamaRuntime {
 			if (errorMessage) return { ok: false, error: errorMessage };
 			return lastStatus === "success"
 				? { ok: true }
-				: { ok: false, error: `pull ended with: ${lastStatus || "unknown"}` };
+				: { ok: false, error: redactKnownSecrets(`pull ended with: ${lastStatus || "unknown"}`) };
 		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			return { ok: false, error: redactKnownSecrets(error instanceof Error ? error.message : String(error)) };
 		}
 	}
 
