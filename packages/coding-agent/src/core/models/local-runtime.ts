@@ -205,6 +205,19 @@ const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.16.1", "huggingface-hub==
 const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
 const TORCH_PINNED_VERSION = "2.14.0";
 
+function normalizeOllamaBaseUrl(baseUrl: string): string {
+	const normalized = baseUrl.replace(/\/$/, "");
+	try {
+		const url = new URL(normalized);
+		if ((url.protocol !== "http:" && url.protocol !== "https:") || url.hostname.toLowerCase() !== "localhost")
+			return normalized;
+		url.hostname = "127.0.0.1";
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return normalized;
+	}
+}
+
 interface RuntimeStartResult {
 	started: boolean;
 	reason: string;
@@ -310,7 +323,7 @@ export class OllamaRuntime {
 		deps?: LocalRuntimeDeps;
 	}) {
 		this._agentDir = args.agentDir;
-		this._baseUrl = (args.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+		this._baseUrl = normalizeOllamaBaseUrl(args.baseUrl ?? DEFAULT_BASE_URL);
 		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
 		this._linkFile = args.deps?.linkFile ?? linkSync;
 		this._copyFile = args.deps?.copyFile ?? copyFileSync;

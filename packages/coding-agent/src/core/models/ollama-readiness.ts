@@ -1,18 +1,5 @@
 import type { Socket } from "node:net";
-import { isLoopbackModelEndpoint } from "./model-endpoint.ts";
 import type { ManagedRuntimeChild } from "./runtime-process.ts";
-
-function normalizedHostname(hostname: string): string {
-	return hostname.toLowerCase().replace(/^\[|\]$/g, "");
-}
-
-function matchesListenerAddress(expected: URL, actual: URL): boolean {
-	if (actual.port !== expected.port) return false;
-	const expectedHost = normalizedHostname(expected.hostname);
-	const actualHost = normalizedHostname(actual.hostname);
-	if (expectedHost === actualHost) return true;
-	return expectedHost === "localhost" && isLoopbackModelEndpoint(actual.origin);
-}
 
 /** Ollama emits this only after net.Listen succeeds (server/routes.go in the pinned release). */
 export function waitForOllamaListener(child: ManagedRuntimeChild, baseUrl: string, timeoutMs: number): Promise<void> {
@@ -42,7 +29,7 @@ export function waitForOllamaListener(child: ManagedRuntimeChild, baseUrl: strin
 					if (!match) continue;
 					try {
 						const actual = new URL(`http://${match[1]}`);
-						if (matchesListenerAddress(expected, actual)) finish();
+						if (actual.hostname === expected.hostname && actual.port === expected.port) finish();
 						else finish(new Error(`Ollama announced an unexpected listener ${match[1]}`));
 					} catch {
 						finish(new Error("Ollama listener announcement was malformed"));
