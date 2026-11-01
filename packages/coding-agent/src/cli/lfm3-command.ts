@@ -1,9 +1,14 @@
 import { getAgentDir } from "../config.ts";
 import { lfm3Status, setupLfm3 } from "../core/models/lfm3-setup.ts";
+import { runLfm3BlobImport } from "./lfm3-blob-command.ts";
 import { runLfm3MediaCli } from "./lfm3-media-command.ts";
 
 export async function runLfm3Cli(args: string[]): Promise<void> {
 	const [command, ...rest] = args;
+	if (command === "import-blob") {
+		await runLfm3BlobImport(rest);
+		return;
+	}
 	if (command === "describe" || command === "transcribe" || command === "speak" || command === "ask") {
 		await runLfm3MediaCli(command, rest);
 		return;
@@ -14,7 +19,7 @@ export async function runLfm3Cli(args: string[]): Promise<void> {
 	}
 	if (command !== "setup")
 		throw new Error(
-			"Usage: pi lfm3 setup [--trials N] [--model text|vision|audio|omni] [--activate] | status | describe | transcribe | speak | ask",
+			"Usage: pi lfm3 setup [--trials N] [--model text|vision|audio|omni] [--activate] | status | describe | transcribe | speak | ask | import-blob",
 		);
 	let trials = 3;
 	let model: string | undefined;

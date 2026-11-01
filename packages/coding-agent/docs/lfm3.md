@@ -64,6 +64,26 @@ Ollama server is already running, the command refuses to use or stop it because 
 ownership. Stop the Pi-managed server from its owning Pi session with `/models stop`, then retry.
 The media command starts and stops its own Pi-managed server for the request.
 
+## Importing a verified Ollama blob
+
+`import-blob` can seed one Ollama content-addressed weight blob from a file already available on
+the host. The Pi-managed Ollama runtime must be installed. Pi starts its own server, verifies the
+source is a regular file with the supplied exact size and SHA-256, stages a private copy, uploads it
+through Ollama's blob API, and then verifies the bytes in Ollama's actual cache. It stops its server
+when the operation ends. A running server is refused because Pi cannot establish its ownership.
+
+```bash
+pi lfm3 import-blob --file /path/to/lfm3-audio.blob \
+  --sha256 9a773289bd321ed879cd3a76545f6aca506e403851a45fb315420aee45625be2 \
+  --size 1099626016
+```
+
+The supplied digest proves the imported bytes match the expected digest; it does not establish who
+published them. Verify the blob's official repository and revision through a trusted source before
+importing it. Blob import alone does not install a model or run fitness. `pi lfm3 setup` still
+fetches the official registry manifest and any remaining layers, then installs and evaluates the
+model.
+
 Setup media checks use native Ollama image/audio requests and Pi-provided generic held-out images.
 The vision check uses a red image; Omni combines a separate blue image with audio. Audio speech and
 transcription checks share a generated reference utterance; failed synthesis blocks dependent audio
@@ -122,9 +142,10 @@ assigning a model to a role or router lane.
 ## Runtime and coordination
 
 Model inference runs locally through Ollama after the runtime and weights are installed. Initial
-runtime/model installation needs network access unless the matching runtime and tag are already
-cached. Local inference does not make Pi's coordination offline: remote System One judgments still
-use their configured provider and require its network/authentication path.
+runtime installation and initial setup or refresh require network access; setup fetches registry
+metadata even when weight blobs are already cached. After setup completes, normal inference and
+native media commands can use cached weights offline. Pi's coordination still requires its
+configured remote System One provider and its network/authentication path.
 
 The supported minimum Ollama version is 0.40.13, which includes the required Linux and Windows
 support. Pi manages its runtime separately from a system-wide Ollama installation.

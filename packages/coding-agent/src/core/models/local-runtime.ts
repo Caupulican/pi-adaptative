@@ -1,5 +1,15 @@
 import type { ChildProcess } from "node:child_process";
-import { copyFileSync, type Dirent, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+	copyFileSync,
+	createReadStream,
+	type Dirent,
+	linkSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
 import type { Readable } from "node:stream";
@@ -21,6 +31,7 @@ import {
 	type LocalInferenceProfileMode,
 	ollamaEnvironmentForLocalInferenceProfile,
 } from "./local-inference-profile.ts";
+import { importOllamaBlob, verifyOllamaBlobFile } from "./ollama-blob-import.ts";
 import { waitForOllamaListener } from "./ollama-readiness.ts";
 import { SerializedOperationCoordinator } from "./runtime-operation-coordinator.ts";
 import {
@@ -355,6 +366,48 @@ export class OllamaRuntime {
 
 	ownedModelsDir(): string {
 		return agentModelsDir("ollama", this._agentDir);
+	}
+
+	async importVerifiedBlob(args: { file: string; sha256: string; size: number; signal: AbortSignal }): Promise<void> {
+		const assertOwned = () => {
+			args.signal.throwIfAborted();
+			if (!this._hasOwnedListener() || this._childModelsDir !== this.ownedModelsDir())
+				throw new Error("Blob import requires this runtime's owned Ollama listener and Pi-owned store");
+		};
+		assertOwned();
+		await importOllamaBlob({
+			...args,
+			port: {
+				upload: async (path, digest, signal) => {
+					assertOwned();
+					const stream = createReadStream(path);
+					try {
+						const response = await this._fetch(`${this._baseUrl}/api/blobs/sha256:${digest}`, {
+							method: "POST",
+							body: stream as unknown as BodyInit,
+							duplex: "half",
+							redirect: "error",
+							signal,
+						} as RequestInit & { duplex: "half" });
+						if (!response.ok) throw new Error(`Ollama blob upload failed with HTTP ${response.status}`);
+						await response.body?.cancel();
+					} finally {
+						stream.destroy();
+					}
+					assertOwned();
+				},
+				verifyCache: async (digest, size, signal) => {
+					assertOwned();
+					await verifyOllamaBlobFile(
+						join(this.ownedModelsDir(), "blobs", `sha256-${digest}`),
+						size,
+						digest,
+						signal,
+					);
+					assertOwned();
+				},
+			},
+		});
 	}
 
 	userModelsDir(): string {
