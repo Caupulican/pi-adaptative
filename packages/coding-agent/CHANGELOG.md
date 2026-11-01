@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added opt-in managed LFM3 setup, local media commands, and verified Ollama blob import. Activation requires host-local fitness qualification.
+
+### Fixed
+
+- Bound managed Ollama requests to the owned loopback runtime and coordinated concurrent setup and cancellation.
+- Corrected Ollama fitness request handling and kept failed capacity observations unknown.
+
 ## [0.104.25] - 2026-10-30
 
 ### Fixed

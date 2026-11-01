@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated reviewed Claude and Antigravity subscription client identities and compatibility profiles to Claude Code `2.1.316` and AGY `1.4.12`.
+
 ## [0.104.25] - 2026-10-30
 
 ### Changed
