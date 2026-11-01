@@ -2,15 +2,15 @@ import type { FitnessRole } from "./fitness-role.ts";
 import { ORNITH_9B_OLLAMA_REF } from "./managed-ollama-model.ts";
 
 /**
- * Curated local-model suggestions: a starting roster validated during pi-adaptative's own
- * small-model research so a user does not have to know WHICH model fits WHICH role. Each entry is
- * an install ref (accepted by /models add) plus the role it was validated for and whether it can use
- * tools. Native tool-calling remains preferred when it works; text-protocol models are listed only
- * when their runtime is pi-managed and the fitness/probe path can calibrate that fallback.
+ * Curated local-model suggestions: a starting roster from pi-adaptative's small-model research and
+ * current external candidates. Each entry is an install ref (accepted by /models add) plus a
+ * validated role or a candidate role to evaluate, and whether tool use is established. Native
+ * tool-calling remains preferred when it works; text-protocol models are listed only when their
+ * runtime is pi-managed and the fitness/probe path can calibrate that fallback.
  *
  * Honesty: these are SUGGESTIONS, not guarantees. Fitness is a property of the model AND the host
  * hardware, so no per-model score is baked in here — `/models add` auto-probes on the actual
- * machine, and the roster only encodes what role each model was SHAPED for. `assignRole` is the
+ * machine, and the roster only encodes each model's validated role or candidate use. `assignRole` is the
  * /fitness role the suggestion maps to (undefined = no single-setting slot yet; use it as a
  * research/worker lane model).
  */
@@ -20,13 +20,13 @@ export interface ModelSuggestion {
 	name: string;
 	/** Ref accepted by /models add and the source normalizer. */
 	pullRef: string;
-	/** Role this model was validated/shaped for. */
+	/** Validated role or candidate role to evaluate. */
 	role: string;
-	/** True if the model can use tools after host-local probing/calibration (required for executor). */
-	toolCalling: boolean;
+	/** Established capability, known absence, or a candidate whose tool use is not yet verified. */
+	toolCalling: boolean | "unverified";
 	/** The /fitness assignment target this suggestion maps to, when there is a single-setting slot. */
 	assignRole?: FitnessRole;
-	/** One-line rationale from the validation work; never a fabricated numeric score. */
+	/** One-line validation rationale or candidate description; never a fabricated numeric score. */
 	rationale: string;
 	/** Optional caveat (quant selection, RAM needs). */
 	note?: string;
@@ -92,6 +92,42 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		note: "Q4_K_M ≈ 5.2 GB, 8.3B total / 1.5B active parameters, with a 128K-class model context. On a 10 GB host run it as the only large local resident; Pi still applies its bounded host profile and context budget.",
 	},
 	{
+		name: "LFM3-1.7B",
+		pullRef: "lfm3:1.7b-q4_K_M",
+		role: "Local text and tool-use candidate",
+		toolCalling: "unverified",
+		rationale:
+			"Liquid AI's current 1.7B text model is trained for local agent workflows. Native tool-calling and task fitness still need to be established on this host before assigning an executor or router role.",
+		note: "Ollama advertises a 256K context window for this tag. Pi's host profile and actual runtime response determine the usable budget.",
+	},
+	{
+		name: "LFM3-VL-2B",
+		pullRef: "lfm3-vl:2b-q4_K_M",
+		role: "Local image understanding candidate",
+		toolCalling: "unverified",
+		rationale:
+			"Liquid AI describes text, image, and video inputs upstream; Pi's media path currently exposes image input only. Treat it as a modality-specific candidate; /fitness on this host must establish its supported tasks before use in a lane.",
+		note: "Ollama advertises a 125K context window for this tag; actual runtime capacity can be lower.",
+	},
+	{
+		name: "LFM3-Audio-2B",
+		pullRef: "lfm3-audio:2b-q4_K_M",
+		role: "Local audio understanding and speech candidate",
+		toolCalling: "unverified",
+		rationale:
+			"Liquid AI's audio model accepts text or audio and can return text, speech, or both. Audio input/output fitness remains to be established on this host.",
+		note: "Ollama advertises a 125K context window for this tag; the model card separately describes a 32K native context. Treat advertised runtime capacity as metadata, not a guaranteed budget.",
+	},
+	{
+		name: "LFM3-Omni-2B",
+		pullRef: "lfm3-omni:2b-q4_K_M",
+		role: "Local image, audio, and speech candidate",
+		toolCalling: "unverified",
+		rationale:
+			"Liquid AI describes text, image, video, and audio inputs upstream and text or speech outputs. Pi's media path currently exposes image and audio only; combined modality fitness and tool use remain to be established on this host.",
+		note: "Ollama advertises a 125K context window for this tag; actual runtime capacity can be lower.",
+	},
+	{
 		name: "Bonsai-4B (GGUF Q1_0)",
 		pullRef: "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0",
 		role: "Context curator / reflex brain / lighter lane analyst",
@@ -143,12 +179,10 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 
 /** Bounded plain-text roster for `/models suggest` and the empty-store hint. */
 export function formatModelSuggestions(suggestions: readonly ModelSuggestion[] = DEFAULT_MODEL_SUGGESTIONS): string[] {
-	const lines = [
-		"Suggested local models (validated roles from pi's own small-model research; probe on YOUR hardware with /fitness):",
-	];
+	const lines = ["Suggested local models and candidates (probe on YOUR hardware with /fitness):"];
 	for (const suggestion of suggestions) {
 		lines.push(
-			`  - ${suggestion.name} → ${suggestion.role}${suggestion.toolCalling ? "" : " [no tool-calling]"}`,
+			`  - ${suggestion.name} → ${suggestion.role}${suggestion.toolCalling === false ? " [no tool-calling]" : suggestion.toolCalling === "unverified" ? " [tool-calling unverified]" : ""}`,
 			`      /models add ${suggestion.pullRef}`,
 			`      ${suggestion.rationale}`,
 		);

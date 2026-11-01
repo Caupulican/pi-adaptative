@@ -9,9 +9,9 @@ const MODEL_SUGGESTION_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 /**
- * Picker over the validated local-model roster: the user chooses a suggestion instead of retyping
- * a ref, and the caller then installs it, probes it on THIS host, and lands its shaped role
- * pre-selected. Non-tool-callers are marked so the executor role reads as the footgun it is.
+ * Picker over the local-model suggestions: the user chooses a suggestion instead of retyping a
+ * ref, and the caller then installs it, probes it on THIS host, and lands its candidate role
+ * pre-selected. Known non-tool-callers and unverified candidates have distinct labels.
  */
 export class ModelSuggestionSelectorComponent extends Container {
 	private selectList: SelectList;
@@ -25,14 +25,14 @@ export class ModelSuggestionSelectorComponent extends Container {
 
 		const items: SelectItem[] = suggestions.map((suggestion, index) => ({
 			value: String(index),
-			label: `${suggestion.name}${suggestion.toolCalling ? "" : "  [no tool-calling]"}`,
+			label: `${suggestion.name}${suggestion.toolCalling === false ? "  [no tool-calling]" : suggestion.toolCalling === "unverified" ? "  [tool-calling unverified]" : ""}`,
 			// Surface the note (quant/RAM caveats) here so a caveat is seen BEFORE the pull, not as a
 			// confusing failure after picking.
 			description: `${suggestion.role} — ${suggestion.rationale}${suggestion.note ? `  (note: ${suggestion.note})` : ""}`,
 		}));
 
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text("Pick a validated local model to install and set up (probed on your hardware):", 1, 0));
+		this.addChild(new Text("Pick a local model suggestion to install and evaluate on your hardware:", 1, 0));
 		this.selectList = new SelectList(items, 8, getSelectListTheme(), MODEL_SUGGESTION_SELECT_LIST_LAYOUT);
 		this.selectList.onSelect = (item) => {
 			const suggestion = suggestions[Number(item.value)];

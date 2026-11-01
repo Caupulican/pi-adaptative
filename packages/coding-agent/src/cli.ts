@@ -15,7 +15,7 @@ process.emitWarning = (() => {}) as typeof process.emitWarning;
 
 const cliArgs = process.argv.slice(2);
 const [firstArg] = cliArgs;
-const packageCommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth"]);
+const packageCommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth", "lfm3"]);
 
 // Fast path: version needs nothing beyond config.ts (already loaded). Mirrors main.ts's
 // `parsed.version` output exactly; skipping main's import graph turns ~1s into ~150ms.

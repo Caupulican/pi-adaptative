@@ -22,6 +22,7 @@ interface ModelsJsonModel {
 	servedContextWindow?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
+	thinkingLevelMap?: { off: "none" };
 	textToolCallProtocol?: boolean;
 	input?: string[];
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -65,15 +66,22 @@ export const HF_TRANSFORMERS_PROVIDER = "pi-hf-transformers";
  */
 export const PRISM_LLAMACPP_PROVIDER = "llama-cpp";
 
-function localModelEntry(ref: string, contextWindow: number, servedContextWindow?: number): ModelsJsonModel {
+function localModelEntry(
+	ref: string,
+	contextWindow: number,
+	servedContextWindow?: number,
+	input?: ("text" | "image")[],
+	reasoning?: boolean,
+): ModelsJsonModel {
 	return {
 		id: ref,
 		name: ref,
 		contextWindow,
 		...(servedContextWindow !== undefined ? { servedContextWindow } : {}),
 		maxTokens: 2048,
-		reasoning: false,
-		input: ["text"],
+		reasoning: reasoning ?? false,
+		thinkingLevelMap: reasoning ? { off: "none" } : undefined,
+		input: input ?? ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
 }
@@ -106,8 +114,7 @@ function prismLlamaCppModelEntry(args: {
 		servedContextWindow: args.servedContextWindow,
 		maxTokens: 2048,
 		reasoning: false,
-		// Vision rides along via the served mmproj file — unlike localModelEntry's Ollama entries,
-		// which are text-only until per-model vision plumbing exists there too.
+		// Vision rides along via the served mmproj file.
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
@@ -191,13 +198,19 @@ export function registerLocalModel(args: {
 	baseUrl: string;
 	contextWindow?: number;
 	servedContextWindow?: number;
+	input?: ("text" | "image")[];
+	reasoning?: boolean;
 }): LocalRegistrationResult {
 	const contextWindow = args.contextWindow ?? 8192;
-	const entry = localModelEntry(args.ref, contextWindow, args.servedContextWindow);
 	const providerBase = {
 		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
 		api: "openai-completions",
 		apiKey: "ollama",
+	};
+	const entry = {
+		...localModelEntry(args.ref, contextWindow, args.servedContextWindow, args.input, args.reasoning),
+		baseUrl: providerBase.baseUrl,
+		api: providerBase.api,
 	};
 	return registerModel({
 		agentDir: args.agentDir,

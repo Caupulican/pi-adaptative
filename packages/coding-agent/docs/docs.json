@@ -85,6 +85,10 @@
           "path": "models.md"
         },
         {
+          "title": "LFM3 Local Models",
+          "path": "lfm3.md"
+        },
+        {
           "title": "Custom Providers",
           "path": "custom-provider.md"
         }

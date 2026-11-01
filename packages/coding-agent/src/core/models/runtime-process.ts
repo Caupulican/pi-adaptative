@@ -113,10 +113,14 @@ export function runtimeSleep(ms: number): Promise<void> {
 }
 
 /** Terminal-state fields ride along so the owned handle can authorize its own tree kill. */
-export type ManagedRuntimeChild = Pick<ChildProcess, "pid" | "kill" | "unref" | "on" | "exitCode" | "signalCode">;
+export type ManagedRuntimeChild = Pick<
+	ChildProcess,
+	"pid" | "kill" | "ref" | "unref" | "on" | "exitCode" | "signalCode"
+> &
+	Partial<Pick<ChildProcess, "stdout" | "stderr">>;
 export interface ManagedRuntimeSpawnOptions {
 	detached?: boolean;
-	stdio?: "ignore";
+	stdio?: "ignore" | "pipe";
 	env: NodeJS.ProcessEnv;
 }
 export type ManagedRuntimeSpawn = (
@@ -130,7 +134,7 @@ export function spawnManagedRuntime(
 	args: string[],
 	options: ManagedRuntimeSpawnOptions,
 ): ManagedRuntimeChild {
-	return spawn(command, args, { ...options, stdio: "ignore" });
+	return spawn(command, args, { ...options, stdio: options.stdio === "pipe" ? ["ignore", "pipe", "pipe"] : "ignore" });
 }
 
 export interface RuntimeLifecycleDependencyOverrides {
@@ -189,9 +193,10 @@ export async function installRuntimeArchive<TInput extends NodeJS.ReadableStream
 	asset: { name: string; kind: TKind },
 	extractArchive: (input: TInput, destDir: string, kind: TKind) => Promise<{ ok: boolean; error?: string }>,
 	onProgress?: (status: string) => void,
+	signal?: AbortSignal,
 ): Promise<{ ok: boolean; error?: string }> {
 	onProgress?.(`Downloading ${asset.name}…`);
-	const download = await fetchRuntimeDownload(fetchFn, downloadUrl);
+	const download = await fetchRuntimeDownload(fetchFn, downloadUrl, { signal });
 	if (!download.ok) return download;
 	mkdirSync(destDir, { recursive: true });
 	onProgress?.(`Extracting ${asset.name}…`);

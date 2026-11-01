@@ -17,6 +17,7 @@ import { runCollaborationWorker } from "./cli/collaboration-worker.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { applyLaunchEnvironment, isSupervisedInteractiveLaunch, isTruthyEnvFlag } from "./cli/launch.ts";
+import { runLfm3Cli } from "./cli/lfm3-command.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
 import { runAccountingReconcileCommand } from "./cli/reconcile-accounting.ts";
@@ -650,6 +651,10 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (args[0] === "lfm3") {
+		await runLfm3Cli(args.slice(1));
+		return;
+	}
 	if (args[0] === "accounting-reconcile") {
 		await runAccountingReconcileCommand(args.slice(1));
 		return;

@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import { getBundledResourcesDir } from "../../config.ts";
+import { isProcessAlive } from "../../kernel/reliability/process-tree.ts";
 import {
 	type ChildProcessTerminationResult,
 	spawnProcess,
@@ -19,11 +20,13 @@ import {
 	type LocalInferenceProfileMode,
 	ollamaEnvironmentForLocalInferenceProfile,
 } from "./local-inference-profile.ts";
+import { waitForOllamaListener } from "./ollama-readiness.ts";
 import { SerializedOperationCoordinator } from "./runtime-operation-coordinator.ts";
 import {
 	createRuntimeCommandRunner,
 	extractZipArchive,
 	installRuntimeArchive,
+	type ManagedRuntimeChild,
 	type ManagedRuntimeSpawn,
 	type RuntimeCommandResult,
 	type RuntimeCommandRunner,
@@ -76,6 +79,7 @@ export interface LocalRuntimeStatus {
 export interface InstalledLocalModel {
 	name: string;
 	sizeBytes: number;
+	digest?: string;
 }
 
 interface OllamaPsModel {
@@ -98,6 +102,7 @@ export interface OllamaImportResult {
 
 export interface OllamaModelInfo {
 	modelInfo: Record<string, unknown>;
+	capabilities: string[];
 }
 
 export type OllamaModelParameter = string | number | boolean;
@@ -114,7 +119,7 @@ export interface OllamaCreateModelInput {
 }
 
 /** Pinned ollama release for the managed installer below. Bump here when needed — one constant. */
-export const OLLAMA_PINNED_VERSION = "0.33.3";
+export const OLLAMA_PINNED_VERSION = "0.40.13";
 
 export type OllamaAssetKind = "tar-zst" | "tar-gz" | "zip";
 
@@ -294,8 +299,9 @@ export class OllamaRuntime {
 	private readonly _extractArchiveFn: NonNullable<LocalRuntimeDeps["extractArchive"]>;
 	private readonly _profile: LocalInferenceProfile;
 	private readonly _starts = new SerializedOperationCoordinator<RuntimeStartResult>();
-	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
+	private _child: ManagedRuntimeChild | undefined;
 	private _childModelsDir: string | undefined;
+	private _ownsListener = false;
 
 	constructor(args: {
 		agentDir: string;
@@ -404,12 +410,21 @@ export class OllamaRuntime {
 		}
 	}
 
+	private _hasOwnedListener(): boolean {
+		return (
+			this._ownsListener &&
+			this._child !== undefined &&
+			this._child.exitCode === null &&
+			this._child.signalCode === null
+		);
+	}
+
 	private _activeStoreSummary(
 		serverModelCount: number,
 		ownedStore: OllamaStoreSummary,
 		userStore: OllamaStoreSummary,
 	): OllamaStoreSummary {
-		if (this._childModelsDir) {
+		if (this._hasOwnedListener() && this._childModelsDir) {
 			return {
 				kind: this._childModelsDir === this.ownedModelsDir() ? "pi-owned" : "user",
 				path: this._childModelsDir,
@@ -446,7 +461,7 @@ export class OllamaRuntime {
 			binarySource: binary?.source,
 			serverUp: serverModels.up,
 			serverUrl: this._baseUrl,
-			managedByPi: this._child !== undefined && serverModels.up,
+			managedByPi: this._hasOwnedListener() && serverModels.up,
 			ownedModelsDir: this.ownedModelsDir(),
 			userModelsDir: this.userModelsDir(),
 			ownedStore,
@@ -544,12 +559,15 @@ export class OllamaRuntime {
 	 * consent/UI; this method only does the mechanical download+extract+verify and reports the
 	 * outcome honestly. `onProgress` is best-effort UI feedback, not a completion signal.
 	 */
-	async installManaged(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+	async installManaged(
+		onProgress?: (status: string) => void,
+		signal?: AbortSignal,
+	): Promise<{ ok: boolean; error?: string }> {
 		const asset = resolveOllamaAsset(this._platform(), this._arch());
 		if (!asset) return { ok: false, error: "unsupported-platform" };
 
 		const downloadUrl = `https://github.com/ollama/ollama/releases/download/v${OLLAMA_PINNED_VERSION}/${asset.name}`;
-		const extracted = await this._installArchive(downloadUrl, asset, onProgress);
+		const extracted = await this._installArchive(downloadUrl, asset, onProgress, signal);
 		if (!extracted.ok) return extracted;
 
 		const destDir = agentRuntimesDir("ollama", this._agentDir);
@@ -566,6 +584,7 @@ export class OllamaRuntime {
 		downloadUrl: string,
 		asset: OllamaReleaseAsset,
 		onProgress?: (status: string) => void,
+		signal?: AbortSignal,
 	): Promise<{ ok: boolean; error?: string }> {
 		return installRuntimeArchive(
 			this._fetch,
@@ -574,6 +593,7 @@ export class OllamaRuntime {
 			asset,
 			this._extractArchiveFn,
 			onProgress,
+			signal,
 		);
 	}
 
@@ -686,20 +706,40 @@ export class OllamaRuntime {
 		if (!isCurrent()) return cancelledRuntimeStart();
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
 		const env: NodeJS.ProcessEnv = { ...process.env, OLLAMA_HOST: host, ...extraEnv };
+		this._ownsListener = false;
 		this._childModelsDir = env.OLLAMA_MODELS ?? this.userModelsDir();
 		this._child = this._spawn(binary.path, ["serve"], {
 			detached: process.platform !== "win32",
 			env,
-			stdio: "ignore",
+			stdio: "pipe",
 		});
-		this._child.unref?.();
-		return awaitRuntimeStart({
+		const child = this._child;
+		child.on("exit", () => {
+			if (this._child === child) this._ownsListener = false;
+		});
+		child.unref?.();
+		try {
+			await waitForOllamaListener(child, this._baseUrl, START_POLL_ATTEMPTS * START_POLL_INTERVAL_MS);
+		} catch (error) {
+			await this.stopAndWait();
+			return { started: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		const stillOwned = () =>
+			isCurrent() && this._child === child && child.exitCode === null && child.signalCode === null;
+		if (!stillOwned()) return cancelledRuntimeStart();
+		const result = await awaitRuntimeStart({
 			attempts: START_POLL_ATTEMPTS,
 			serverUp: () => this._serverUp(),
 			sleep: this._sleep,
-			isCurrent,
-			onTimeout: () => this.stop(),
+			isCurrent: stillOwned,
+			onTimeout: () => {},
 		});
+		if (result.started && stillOwned()) {
+			this._ownsListener = true;
+			return result;
+		}
+		if (this._child === child) await this.stopAndWait();
+		return result.started ? cancelledRuntimeStart() : result;
 	}
 
 	private _startServer(modelsDir?: string): Promise<RuntimeStartResult> {
@@ -716,7 +756,10 @@ export class OllamaRuntime {
 		const serverUp = await this._serverUp();
 		if (!isCurrent()) return cancelledRuntimeStart();
 		if (serverUp) {
-			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
+			return {
+				started: false,
+				reason: this._hasOwnedListener() ? "already_running_managed" : "already_running_system",
+			};
 		}
 		const binary = this._findBinary();
 		if (!binary) return { started: false, reason: "binary_missing" };
@@ -763,17 +806,68 @@ export class OllamaRuntime {
 		if (!child) return { stopped: false };
 		this._child = undefined;
 		this._childModelsDir = undefined;
+		this._ownsListener = false;
 		terminateManagedRuntimeProcess(child as ChildProcess);
 		return { stopped: true };
 	}
 
-	async list(): Promise<InstalledLocalModel[]> {
-		const response = await this._fetch(`${this._baseUrl}/api/tags`, { signal: AbortSignal.timeout(10_000) });
+	/** Keep the owning process alive while it drains session work and shuts this child down. */
+	retainForShutdown(): void {
+		this._child?.ref();
+	}
+
+	/** Stop a child owned by this instance and wait for its terminal event before replacement. */
+	async stopAndWait(): Promise<boolean> {
+		const child = this._child;
+		if (!child) return false;
+		this._starts.retire();
+		this._child = undefined;
+		this._childModelsDir = undefined;
+		this._ownsListener = false;
+		child.ref();
+		const diagnostics: string[] = [];
+		const controller = new AbortController();
+		controller.abort();
+		const terminal = await waitForChildProcessWithTermination(child as ChildProcess, {
+			signal: controller.signal,
+			timeoutMs: 10_000,
+			killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+			onDiagnostic: (message) => diagnostics.push(message),
+		});
+		if (diagnostics.length) throw new Error(`Ollama shutdown failed: ${diagnostics.join("; ")}`);
+		if (
+			terminal.reason === "timeout" ||
+			(child.exitCode == null && child.signalCode == null && child.pid !== undefined && isProcessAlive(child.pid))
+		)
+			throw new Error("Ollama process remained alive after shutdown");
+		return true;
+	}
+
+	/** The version served by the active endpoint, not a guessed local binary version. */
+	async version(signal?: AbortSignal): Promise<string> {
+		const response = await this._fetch(`${this._baseUrl}/api/version`, {
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+		});
+		if (!response.ok) throw new Error(`Ollama version request failed: HTTP ${response.status}`);
+		const data: unknown = await response.json();
+		if (!data || typeof data !== "object" || !("version" in data) || typeof data.version !== "string")
+			throw new Error("Ollama version response is invalid");
+		return data.version;
+	}
+
+	async list(signal?: AbortSignal): Promise<InstalledLocalModel[]> {
+		const response = await this._fetch(`${this._baseUrl}/api/tags`, {
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+		});
 		if (!response.ok) throw new Error(`ollama list failed: HTTP ${response.status}`);
-		const data = (await response.json()) as { models?: Array<{ name?: string; size?: number }> };
+		const data = (await response.json()) as { models?: Array<{ name?: string; size?: number; digest?: string }> };
 		return (data.models ?? [])
-			.filter((model): model is { name: string; size?: number } => typeof model.name === "string")
-			.map((model) => ({ name: model.name, sizeBytes: model.size ?? 0 }));
+			.filter((model): model is { name: string; size?: number; digest?: string } => typeof model.name === "string")
+			.map((model) => ({
+				name: model.name,
+				sizeBytes: model.size ?? 0,
+				...(typeof model.digest === "string" ? { digest: model.digest } : {}),
+			}));
 	}
 
 	async listResidentModels(): Promise<InstalledLocalModel[]> {
@@ -815,13 +909,16 @@ export class OllamaRuntime {
 		}
 	}
 
-	async show(ref: string): Promise<{ ok: true; info: OllamaModelInfo } | { ok: false; error: string }> {
+	async show(
+		ref: string,
+		signal?: AbortSignal,
+	): Promise<{ ok: true; info: OllamaModelInfo } | { ok: false; error: string }> {
 		try {
 			const response = await this._fetch(`${this._baseUrl}/api/show`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ model: ref }),
-				signal: AbortSignal.timeout(10_000),
+				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
 			});
 			if (!response.ok) {
 				return {
@@ -829,8 +926,11 @@ export class OllamaRuntime {
 					error: `show failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
 				};
 			}
-			const data = (await response.json()) as { model_info?: Record<string, unknown> };
-			return { ok: true, info: { modelInfo: data.model_info ?? {} } };
+			const data = (await response.json()) as { model_info?: Record<string, unknown>; capabilities?: unknown };
+			const capabilities = Array.isArray(data.capabilities)
+				? data.capabilities.filter((item): item is string => typeof item === "string")
+				: [];
+			return { ok: true, info: { modelInfo: data.model_info ?? {}, capabilities } };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
@@ -855,7 +955,10 @@ export class OllamaRuntime {
 		}
 	}
 
-	async createModel(args: OllamaCreateModelInput): Promise<{ ok: true } | { ok: false; error: string }> {
+	async createModel(
+		args: OllamaCreateModelInput,
+		signal?: AbortSignal,
+	): Promise<{ ok: true } | { ok: false; error: string }> {
 		const { name, ...definition } = args;
 		return this._requestModelMutation(
 			"/api/create",
@@ -863,19 +966,24 @@ export class OllamaRuntime {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ model: name, ...definition, stream: false }),
-				signal: AbortSignal.timeout(60_000),
+				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
 			},
 			"create",
 		);
 	}
 
 	/** Pull a model through the server API (weights land in the SERVER's models dir). */
-	async pull(ref: string, onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+	async pull(
+		ref: string,
+		onProgress?: (status: string) => void,
+		signal?: AbortSignal,
+	): Promise<{ ok: boolean; error?: string }> {
 		try {
 			const response = await this._fetch(`${this._baseUrl}/api/pull`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ model: ref, stream: true }),
+				signal,
 			});
 			if (!response.ok || !response.body) {
 				return {

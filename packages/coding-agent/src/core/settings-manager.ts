@@ -209,7 +209,15 @@ export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
 }
 
+export interface SettingsSnapshot {
+	global?: string;
+	project?: string;
+	directoryProfile?: string;
+}
+
 export interface SettingsStorage {
+	/** Hold all settings scopes while validating and replacing the global generation. */
+	updateGlobalSnapshot?(fn: (snapshot: SettingsSnapshot) => string): void;
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 	getProfilesDir?(): string;
 	/** Base directory used to resolve explicit ./ or ../ profile references. */
@@ -328,6 +336,29 @@ export class FileSettingsStorage implements SettingsStorage {
 			if (migratedLegacy) this.removeMigratedDirectoryProfile();
 		}
 	}
+	updateGlobalSnapshot(fn: (snapshot: SettingsSnapshot) => string): void {
+		const releases: Array<() => void> = [];
+		try {
+			for (const path of [
+				this.globalSettingsPath,
+				this.projectSettingsPath,
+				this.legacyDirectoryProfilePath,
+				this.directoryProfileInfo.path,
+			]) {
+				releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
+			}
+			const read = (path: string) => (existsSync(path) ? readFileSync(path, "utf-8") : undefined);
+			const snapshot = {
+				global: read(this.globalSettingsPath),
+				project: read(this.projectSettingsPath),
+				directoryProfile: read(this.directoryProfileInfo.path) ?? read(this.legacyDirectoryProfilePath),
+			};
+			const next = fn(snapshot);
+			withHostFileWrite(this.globalSettingsPath, next, () => writeFileAtomicSync(this.globalSettingsPath, next));
+		} finally {
+			for (const release of releases.reverse()) release();
+		}
+	}
 }
 
 export class InMemorySettingsStorage implements SettingsStorage {
@@ -350,6 +381,9 @@ export class InMemorySettingsStorage implements SettingsStorage {
 			return;
 		}
 		this.directoryProfile = next;
+	}
+	updateGlobalSnapshot(fn: (snapshot: SettingsSnapshot) => string): void {
+		this.global = fn({ global: this.global, project: this.project, directoryProfile: this.directoryProfile });
 	}
 }
 
@@ -536,18 +570,18 @@ export class SettingsManager {
 			: registry.getProfile(profileRef);
 	}
 
-	private mergeEffectiveSettings(): Settings {
-		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
+	private mergeEffectiveSettings(globalSettings: Settings = this.globalSettings): Settings {
+		let merged = deepMergeSettings(globalSettings, this.projectSettings);
 		merged = deepMergeSettings(merged, this.directoryProfileSettings);
-		for (const layer of [this.globalSettings, this.projectSettings, this.directoryProfileSettings]) {
+		for (const layer of [globalSettings, this.projectSettings, this.directoryProfileSettings]) {
 			if (Object.hasOwn(layer, "advisor")) merged.advisor = structuredClone(layer.advisor);
 		}
 		// Favorites are deliberately global user preferences; project and directory overlays must
 		// never shadow the canonical list or make a pin disappear when changing repositories.
-		if (this.globalSettings.modelFavorites !== undefined) merged.modelFavorites = this.globalSettings.modelFavorites;
+		if (globalSettings.modelFavorites !== undefined) merged.modelFavorites = globalSettings.modelFavorites;
 		else delete merged.modelFavorites;
 		const workerDelegation = mergeWorkerDelegationLayers(
-			this.globalSettings.workerDelegation,
+			globalSettings.workerDelegation,
 			this.projectSettings.workerDelegation,
 			this.directoryProfileSettings.workerDelegation,
 		);
@@ -1795,6 +1829,114 @@ export class SettingsManager {
 		this.saveProjectSettings(projectSettings);
 	}
 
+	/** Validate and publish against the locked, current settings generation. */
+	async activateLocalModelPool(
+		refs: readonly string[],
+		signal?: AbortSignal,
+		validate?: (current: SettingsManager) => void,
+	): Promise<void> {
+		await this.flush();
+		signal?.throwIfAborted();
+		if (!this.storage.updateGlobalSnapshot) throw new Error("Settings storage cannot atomically validate activation");
+		let committed: Settings | undefined;
+		let validated: SettingsManager | undefined;
+		this.storage.updateGlobalSnapshot((snapshot) => {
+			const parent = this.storage;
+			const snapshotStorage: SettingsStorage = {
+				withLock: (scope, fn) => {
+					fn(
+						scope === "global"
+							? snapshot.global
+							: scope === "project"
+								? snapshot.project
+								: snapshot.directoryProfile,
+					);
+				},
+				getProfilesDir: () => parent.getProfilesDir?.() ?? "",
+				getProfileResolutionBaseDir: () => parent.getProfileResolutionBaseDir?.() ?? process.cwd(),
+			};
+			const current = SettingsManager.fromStorage(snapshotStorage, { projectTrusted: this.projectTrusted });
+			if (
+				current.globalSettingsLoadError ||
+				current.projectSettingsLoadError ||
+				current.directoryProfileSettingsLoadError
+			)
+				throw new Error("Settings could not be loaded; activation refused");
+			validate?.(current);
+			validated = current;
+			committed = current.prepareLocalModelPool(refs, signal);
+			return JSON.stringify(committed, null, 2);
+		});
+		if (!committed || !validated) throw new Error("Settings activation was not committed");
+		this.globalSettings = committed;
+		this.projectSettings = validated.projectSettings;
+		this.directoryProfileSettings = validated.directoryProfileSettings;
+		this.recomputeSettings();
+	}
+
+	private prepareLocalModelPool(refs: readonly string[], signal?: AbortSignal): Settings {
+		if (refs.length === 0 || refs.some((ref) => !ref.startsWith("ollama/") || ref.length <= "ollama/".length)) {
+			throw new Error("A nonempty Ollama model pool is required");
+		}
+		if (isWorkerSession()) throw new Error("Workers cannot activate a model pool");
+		if (this.globalSettingsLoadError) throw new Error("Global settings could not be loaded; activation refused");
+		const primary = refs[0]!;
+		const next = structuredClone(this.globalSettings);
+		next.enabledModels = [...refs];
+		next.defaultProvider = "ollama";
+		next.defaultModel = primary.slice("ollama/".length);
+		next.defaultThinkingLevel = "off";
+		next.localRuntimes = { ...next.localRuntimes, ollama: { ...next.localRuntimes?.ollama, enabled: true } };
+		next.modelRouter = {
+			...next.modelRouter,
+			enabled: true,
+			selectionMode: "manual",
+			fitnessGate: true,
+			cheapModel: primary,
+			mediumModel: primary,
+			expensiveModel: primary,
+			executorModel: primary,
+			learningModel: primary,
+			cheapThinking: "off",
+			mediumThinking: "off",
+			expensiveThinking: "off",
+			executorThinking: "off",
+		};
+		// Build the effective candidate without publishing a transient settings change.
+		const projected = this.mergeEffectiveSettings(next);
+		const profileRouter = this.getProfileModelRouterSettings();
+		const router = { ...projected.modelRouter, ...profileRouter };
+		const enabled = projected.enabledModels;
+		if (
+			projected.defaultProvider !== "ollama" ||
+			projected.defaultModel !== next.defaultModel ||
+			projected.defaultThinkingLevel !== "off" ||
+			projected.localRuntimes?.ollama?.enabled === false ||
+			!enabled ||
+			enabled.length !== refs.length ||
+			enabled.some((ref, i) => ref !== refs[i]) ||
+			router.enabled !== true ||
+			router.selectionMode !== "manual" ||
+			router.fitnessGate !== true ||
+			[router.cheapThinking, router.mediumThinking, router.expensiveThinking, router.executorThinking].some(
+				(level) => level !== "off",
+			) ||
+			[
+				router.cheapModel,
+				router.mediumModel,
+				router.expensiveModel,
+				router.executorModel,
+				router.learningModel,
+			].some((ref) => ref !== primary)
+		) {
+			throw new Error(
+				"Project, directory or active profile settings override the requested local model configuration",
+			);
+		}
+
+		signal?.throwIfAborted();
+		return next;
+	}
 	async flush(): Promise<void> {
 		await this.writeQueue;
 	}

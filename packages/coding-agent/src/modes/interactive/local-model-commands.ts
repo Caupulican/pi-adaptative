@@ -36,15 +36,14 @@ import type {
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
-import { deriveLocalContextSizing } from "../../core/models/context-sizing.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import type { FitnessRole } from "../../core/models/fitness-role.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
+import { toolExecutionFailure } from "../../core/models/fitness-tool-gate.ts";
 import { PrismLlamaCppRuntime, type PrismModelDescriptor } from "../../core/models/llamacpp-runtime.ts";
 import {
 	HF_TRANSFORMERS_PROVIDER,
 	PRISM_LLAMACPP_PROVIDER,
-	registerLocalModel,
 	registerPrismLlamaCppModel,
 	registerTransformersModel,
 	unregisterLocalModel,
@@ -52,9 +51,9 @@ import {
 	unregisterTransformersModel,
 } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
-import { planManagedOllamaModel } from "../../core/models/managed-ollama-model.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { NeedleRuntime } from "../../core/models/needle-runtime.ts";
+import { installOllamaModel } from "../../core/models/ollama-model-installation.ts";
 import {
 	derivePrismLlamaCppNumCtx,
 	ensurePrismModelFilesThenServe,
@@ -472,11 +471,10 @@ function formatOllamaStore(store: { kind: string; path: string; modelCount: numb
 export async function ensureLocalServer(host: LocalModelHost): Promise<boolean> {
 	const status = await host.localRuntime.detect();
 	if (status.serverUp) {
-		if (status.activeStore?.kind === "pi-owned") return true;
+		if (status.managedByPi && status.activeStore?.kind === "pi-owned") return true;
 		host.showStatus(
-			`Ollama is already running on ${status.serverUrl} with store ${formatOllamaStore(status.activeStore)}; ` +
-				`pi's canonical store is ${status.ownedModelsDir} (${status.ownedStore.modelCount} model(s)). ` +
-				"Stop the other serve or run /models import before adding models.",
+			`Ollama is already running on ${status.serverUrl}; this session cannot verify its ownership or store. ` +
+				"Stop the other server before adding models.",
 		);
 		return false;
 	}
@@ -554,62 +552,25 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 	if (!(await ensureLocalServer(host))) return;
 	host.showStatus(`Pulling ${pullRef}… (weights land in pi's owned Ollama store)`);
 	let lastShown = 0;
-	const pulled = await host.localRuntime.pull(pullRef, (progress) => {
-		const now = Date.now();
-		if (now - lastShown > 2000) {
-			lastShown = now;
-			host.showStatus(`  ${pullRef}: ${progress}`);
-		}
-	});
-	if (!pulled.ok) {
-		host.showStatus(`Pull failed: ${pulled.error}`);
-		return;
-	}
-	const installed = await host.localRuntime.list().catch(() => []);
-	const installedEntry = installed.find((entry) => matchesInstalledLocalModel(pullRef, entry.name));
-	const shown = await host.localRuntime.show(pullRef);
-	const sizing =
-		installedEntry && shown.ok
-			? deriveLocalContextSizing({
-					host: { totalMemBytes: totalmem() },
-					model: { modelInfo: shown.info.modelInfo, weightsBytes: installedEntry.sizeBytes },
-					runtime: { supportsKvQuantization: true },
-				})
-			: undefined;
-	const managedPlan = planManagedOllamaModel({
-		sourceRef: pullRef,
-		modelInfo: shown.ok ? shown.info.modelInfo : {},
-		numCtx: sizing?.numCtx,
-	});
-	let registeredRef = pullRef;
-	if (managedPlan) {
-		const created = await host.localRuntime.createModel({
-			name: managedPlan.name,
-			...managedPlan.create,
-		});
-		if (!created.ok) {
-			host.showStatus(`Pulled, but could not create the managed model profile: ${created.error}`);
-			return;
-		}
-		registeredRef = managedPlan.name;
-	}
-	const registration = registerLocalModel({
+	const result = await installOllamaModel({
+		runtime: host.localRuntime,
 		agentDir: getAgentDir(),
-		ref: registeredRef,
-		baseUrl: host.localRuntime.baseUrl,
-		contextWindow: sizing?.numCtx,
-		servedContextWindow: sizing?.numCtx,
+		sourceRef: pullRef,
+		onProgress: (progress) => {
+			const now = Date.now();
+			if (now - lastShown > 2000) {
+				lastShown = now;
+				host.showStatus(`  ${pullRef}: ${progress}`);
+			}
+		},
 	});
-	if (!registration.ok) {
-		host.showStatus(`Pulled, but not auto-registered: ${registration.reason}`);
-		if (registration.manualSnippet) {
-			host.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
-		}
+	if (!result.ok) {
+		host.showStatus(`Installation failed at ${result.stage}: ${result.reason}`);
 		return;
 	}
 	host.modelRegistry.refresh();
-	host.showStatus(`${pullRef} installed and registered as ollama/${registeredRef}. Probing fitness…`);
-	await runFitnessAndAssign(host, `ollama/${registeredRef}`, preselectRole);
+	host.showStatus(`${pullRef} installed and registered as ${result.modelRef}. Probing fitness…`);
+	await runFitnessAndAssign(host, result.modelRef, preselectRole);
 }
 
 export async function addTransformersModel(
@@ -1341,11 +1302,7 @@ function roleRequiresToolExecution(role: FitnessRole): boolean {
 
 function toolRoleFailure(role: FitnessRole, probe: ToolProbeResult | undefined): string | undefined {
 	if (!roleRequiresToolExecution(role)) return undefined;
-	if (!probe) return "was not proven; run /toolprobe and retry /fitness";
-	if (probe.verdict === "text-protocol") return undefined;
-	if (probe.verdict === "native" && probe.nativeGrade === "task") return undefined;
-	if (probe.verdict === "native") return `reported native ${probe.nativeGrade ?? "ungraded"}, not task-scale calls`;
-	return `probe reported ${probe.verdict}${probe.diagnostic ? ` (${probe.diagnostic})` : ""}`;
+	return toolExecutionFailure(probe);
 }
 
 /** Persist a role assignment from the post-probe selector into the matching settings. */
