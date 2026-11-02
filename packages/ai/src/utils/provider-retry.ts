@@ -193,7 +193,8 @@ export function appendProviderRetryDirective(message: string, error: unknown): s
 }
 
 /** Mirrors the pinned OpenAI and Anthropic SDK retry policy. */
-function isRetryableProviderError(error: ProviderError): boolean {
+export function isRetryableProviderError(error: unknown): boolean {
+	if (!isProviderError(error)) return false;
 	const shouldRetry = combineShouldRetry(getExplicitShouldRetry(error.headers), getStructuredShouldRetry(error));
 	if (shouldRetry !== undefined) return shouldRetry;
 	if (error.status === undefined) return true;
@@ -229,7 +230,7 @@ function createRetryDelayExceededError(error: ProviderError, delayMs: number, ma
 	return boundedError;
 }
 
-function validateServerRetryDelayMs(
+export function validateServerRetryDelayMs(
 	delayMs: number,
 	maxRetryDelayMs: number | undefined,
 	error: ProviderError,

@@ -8,4 +8,6 @@ Existing Antigravity credentials refresh their discovered catalog when the packa
 
 The reviewed AGY 1.3.5 presets have a 1,048,576-token context window and a 65,536-token output cap. Thinking counts toward that output cap. Pi uses the account's advertised limits when discovering models. Google’s larger background long-decode API is a separate transport and is not provided by this Antigravity integration.
 
+Pi follows the service's continuation checkpoints within one response, retaining the requested output limit and allowing at most 32 continuation attempts. A dropped connection can resume only when a checkpoint covers all delivered content. Cancellation, quota exhaustion and failures after uncheckpointed output remain visible; Pi does not replay that output.
+
 Argon is also present in the refreshed Google and OpenRouter catalogs. Those routes use their own API credentials and provider limits; they do not use Antigravity subscription credentials. See Google's [Argon API documentation](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon).

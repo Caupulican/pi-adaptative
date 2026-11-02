@@ -91,6 +91,8 @@ function parseWindow(name: string, value: unknown): AnthropicUsageWindow | undef
 	if (value === undefined || value === null) return undefined;
 	if (!isRecord(value)) throw new AnthropicAccountError(`Anthropic usage response has an invalid ${name} window`);
 	const usedPercent = value.utilization;
+	// Native usage windows may report an unknown utilization; it is not zero usage.
+	if (usedPercent === null) return undefined;
 	if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent) || usedPercent < 0) {
 		throw new AnthropicAccountError(`Anthropic usage response has an invalid ${name} utilization`);
 	}

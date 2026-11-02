@@ -42,6 +42,8 @@ import { buildBaseOptions } from "./simple-options.ts";
 // The stream consumes wire fields, not SDK response getters or client implementation details.
 export type GoogleGenAiResponse = Pick<GenerateContentResponse, "candidates" | "responseId"> & {
 	usageMetadata?: GoogleUsageMetadata;
+	/** A transport that already assembled a complete snapshot can retire omitted prior annotations. */
+	usageMetadataMode?: "replace";
 	usageCredits?: Pick<UsageDetails, "consumedCredits" | "remainingCredits">;
 };
 
@@ -97,7 +99,11 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 			let usageMetadata: GoogleUsageMetadata | undefined;
 			let usageCredits: GoogleGenAiResponse["usageCredits"];
 			for await (const chunk of googleStream) {
-				if (chunk.usageMetadata !== undefined) usageMetadata = mergeGoogleUsage(usageMetadata, chunk.usageMetadata);
+				if (chunk.usageMetadata !== undefined)
+					usageMetadata = mergeGoogleUsage(
+						chunk.usageMetadataMode === "replace" ? undefined : usageMetadata,
+						chunk.usageMetadata,
+					);
 				if (chunk.usageCredits) usageCredits = { ...usageCredits, ...chunk.usageCredits };
 				output.responseId ||= chunk.responseId;
 				const candidate = chunk.candidates?.[0];
