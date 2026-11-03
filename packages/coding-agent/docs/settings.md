@@ -177,7 +177,7 @@ Start a new session or run `/reload` after changing `edge.mode` so the tool regi
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `modelRouter.enabled` | boolean | on with System One, off otherwise | Enable cheap/medium/expensive model routing. Unset, it is on when the session has System One (a TypeSafe or OpenRouter key) and off otherwise; an explicit value wins |
-| `modelRouter.fitnessGate` | boolean | `false` | Opt-in subtractive gate: when a tier model has a host-local failed probe for its router lanes, skip or fall back instead of routing to it; unprobed tier models still route |
+| `modelRouter.fitnessGate` | boolean | `false` | Opt in to model fitness checks. Failed host-local probes exclude tier models from their router lanes; unprobed tier models still route. Worker task-fitness judgments also require this setting, the router, and System One to be enabled |
 | `modelRouter.cheapModel` | string | - | Model pattern for read-only, research, explanation, and question turns |
 | `modelRouter.mediumModel` | string | - | Model pattern for scoped implementation/planning turns |
 | `modelRouter.expensiveModel` | string | - | Model pattern for high-impact, modify, implementation, and escalated tool-heavy turns |
@@ -192,6 +192,7 @@ Fitness applicability is intentionally split by autonomy level:
 - Class B routed turns are subtractive and opt-in via `modelRouter.fitnessGate`: cheap uses `research` + `toolCall`; medium/expensive use `worker` + `toolCall`. Unprobed tier models pass. Routing itself is judged by System One, not a fitness-gated lane.
 - Compaction summarizer auto-selection is always-on subtractive composition: when `compaction.model` is `auto`, a router cheap model with a probed failed `digest` lane falls back to the session model; unprobed cheap models still pass, and exhausted explicit/cheap summarizers fall back visibly.
 - Class C explicit user choices are sovereign: explicit `/model` and explicit `scout.model` patterns are not router-gated, except for the existing all-lanes-failed adoption backstop and runtime output checks.
+- Worker task-fitness judgments require `modelRouter.fitnessGate: true`, the router, and System One. Ordinary bot creation by the owner or root does not opt in. With the gate off, startup, queued dispatch, and execution do not require a task-fitness judgment. Authentication, model availability, permissions, capacity, and lifecycle checks still apply. With the gate on, all worker models require accepted task fitness; there are no model-specific waivers.
 
 ```json
 {

@@ -3,6 +3,12 @@
 Bots have persistent identities and model settings. Teams are group chats: each bot has a separate
 conversation and memory in each group. Direct bot chats remain separate from group chats.
 
+Bot creation by the owner or root uses the selected, configured, or default model. It does not opt in
+to model task-fitness judgments. These judgments require `modelRouter.fitnessGate: true`, the router,
+and System One. With that gate off, no task-fitness judgment is required at startup, queued dispatch,
+or execution. Authentication, model availability, permissions, capacity, and lifecycle checks remain
+in force. See [Model Router settings](settings.md#model-router).
+
 ## Create and use a group
 
 Use existing bot names in the member list:
