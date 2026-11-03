@@ -14,11 +14,11 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../kernel/types.ts";
+import { spawnProcess } from "../utils/child-process.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
 	GoalContinuationLoopOptions,
@@ -30,6 +30,7 @@ import type {
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
+import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
@@ -115,6 +116,7 @@ import type {
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
+import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -1181,99 +1183,72 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return store.getDaemonStatus();
 	}
 
+	/**
+	 * Starts the detached bot daemon as pi's own `--bot-daemon` command through the stable self-launch target (it
+	 * outlives this session and its runtime generation). The lease is claimed with a fresh token before the spawn and
+	 * the token travels in argv, so the daemon's identity is the lease it renews, never a pid read back from disk.
+	 */
 	startPersistentBotDaemon(): { started: boolean; pid?: number; detail: string } {
 		const store = this.getBotTeamStore();
 		store.reload();
-		const current = store.getDaemonStatus();
-		if (current.running && current.pid) {
+		const target = getStableSelfLaunchTarget();
+		if (!target) {
 			return {
 				started: false,
-				pid: current.pid,
-				detail: `Detached bot daemon is already running (pid ${current.pid}, ${current.activeRoutines} active routines).`,
+				detail: "Detached bot daemon unavailable: this host has no stable pi launch target.",
 			};
 		}
-		const storeFile = store.getStoreFilePath();
-		const daemonScript = [
-			'const fs = require("node:fs");',
-			'const path = require("node:path");',
-			`const storeFile = ${JSON.stringify(storeFile)};`,
-			'const leaseFile = path.join(path.dirname(storeFile), "bot-daemon-lease.json");',
-			"const startedAt = new Date().toISOString();",
-			"function writeHeartbeat(lastTickAt) {",
-			"  try {",
-			"    fs.mkdirSync(path.dirname(leaseFile), { recursive: true });",
-			"    fs.writeFileSync(leaseFile, JSON.stringify({ pid: process.pid, startedAt, lastHeartbeatAt: Date.now(), ...(lastTickAt ? { lastTickAt } : {}) }, null, 2));",
-			"  } catch {}",
-			"}",
-			"function tickStore() {",
-			"  const now = Date.now();",
-			"  writeHeartbeat(now);",
-			"  try {",
-			"    if (!fs.existsSync(storeFile)) return;",
-			'    const data = JSON.parse(fs.readFileSync(storeFile, "utf8"));',
-			"    if (!data || !Array.isArray(data.routines)) return;",
-			"    let mutated = false;",
-			"    for (const r of data.routines) {",
-			"      if (!r || !r.enabled || typeof r.nextRunAt !== 'number' || r.nextRunAt > now) continue;",
-			"      r.lastRunAt = now;",
-			"      r.nextRunAt = now + Math.max(10000, Number(r.intervalMs) || 60000);",
-			"      r.lastStatus = 'queued';",
-			"      r.lastSummary = '[Daemon ' + new Date(now).toISOString() + '] Routine queued across TUI session: ' + String(r.prompt || '').slice(0, 160);",
-			"      r.updatedAt = new Date(now).toISOString();",
-			"      if (r.target && r.target.kind === 'bot' && Array.isArray(data.bots)) {",
-			"        const bot = data.bots.find((b) => b && b.agentId === r.target.agentId);",
-			"        if (bot) { bot.lastMessageAt = now; bot.lastSummary = r.lastSummary; bot.updatedAt = r.updatedAt; }",
-			"      } else if (r.target && r.target.kind === 'team' && data.teamMessages && typeof data.teamMessages === 'object') {",
-			"        const tid = r.target.teamId;",
-			"        const list = Array.isArray(data.teamMessages[tid]) ? data.teamMessages[tid] : (data.teamMessages[tid] = []);",
-			"        list.push({ messageId: 'daemon-' + r.routineId + '-' + now, teamId: tid, sender: { kind: 'brain' }, text: '[Scheduled routine ' + r.routineId + ']: ' + r.prompt, timestamp: now, targetAgentIds: [], deliveries: [] });",
-			"        if (Array.isArray(data.teams)) {",
-			"          const team = data.teams.find((t) => t && t.teamId === tid);",
-			"          if (team) { team.lastMessageAt = now; team.updatedAt = r.updatedAt; }",
-			"        }",
-			"      }",
-			"      mutated = true;",
-			"    }",
-			"    if (mutated) fs.writeFileSync(storeFile, JSON.stringify(data, null, 2));",
-			"  } catch {}",
-			"}",
-			"tickStore();",
-			"const timer = setInterval(tickStore, 10000);",
-			'process.on("SIGTERM", () => { clearInterval(timer); process.exit(0); });',
-		].join("\n");
-		const runtimeBin = process.execPath;
-		const child = spawn(runtimeBin, ["-e", daemonScript], {
+		const token = randomUUID();
+		if (!store.claimDaemonLease(token)) {
+			const current = store.getDaemonStatus();
+			return {
+				started: false,
+				...(current.pid ? { pid: current.pid } : {}),
+				detail: current.pid
+					? `Detached bot daemon is already running (pid ${current.pid}, ${current.activeRoutines} active routines).`
+					: "Detached bot daemon is already starting.",
+			};
+		}
+		const args = [...target.argsPrefix, ...botDaemonCommandArgs(this.deps.getAgentDir(), token)];
+		const child = spawnProcess(target.executable, args, {
 			detached: true,
 			stdio: "ignore",
-			env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+			windowsHide: true,
+			env: target.environment ? { ...process.env, ...target.environment } : process.env,
 		});
+		child.once("error", (error) => this._safeWarn(`Detached bot daemon failed to start: ${error.message}`));
 		child.unref();
 		const pid = child.pid;
-		if (!pid) {
+		if (pid === undefined) {
+			store.releaseDaemonLease(token);
 			return { started: false, detail: "Failed to spawn detached bot daemon process." };
 		}
-		store.writeDaemonLease({ pid, startedAt: new Date().toISOString(), lastTickAt: Date.now() });
+		store.recordDaemonLeasePid(token, pid);
 		return {
 			started: true,
 			pid,
-			detail: `Started detached bot daemon (pid ${pid}) watching ${storeFile} across TUI restarts.`,
+			detail: `Started detached bot daemon (pid ${pid}) watching ${store.getStoreFilePath()} across TUI restarts.`,
 		};
 	}
 
+	/**
+	 * Stops the detached daemon by releasing its lease; the daemon exits when it observes the release. No signal is
+	 * sent: a pid in the lease may belong to an unrelated process by now, while the lease token is the daemon's own.
+	 */
 	stopPersistentBotDaemon(): { stopped: boolean; detail: string } {
-		const store = this.getBotTeamStore();
-		const status = store.getDaemonStatus();
-		if (status.running && status.pid) {
-			try {
-				process.kill(status.pid, "SIGTERM");
-			} catch {
-				// Process already exited.
-			}
-			store.releaseDaemonLease(status.pid);
-			return { stopped: true, detail: `Stopped detached bot daemon (pid ${status.pid}).` };
+		const released = this.getBotTeamStore().releaseDaemonLease();
+		if (released.released && released.held) {
+			return {
+				stopped: true,
+				detail: `Released the detached bot daemon's lease${released.pid ? ` (pid ${released.pid})` : ""}; it exits as soon as it observes the release.`,
+			};
 		}
-		store.releaseDaemonLease();
-		return { stopped: false, detail: "Detached bot daemon is not running." };
+		return {
+			stopped: false,
+			detail: released.released
+				? "Detached bot daemon is not running; its stale lease was released."
+				: "Detached bot daemon is not running.",
+		};
 	}
 
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {

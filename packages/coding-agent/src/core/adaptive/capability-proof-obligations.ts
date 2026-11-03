@@ -6,11 +6,13 @@
  * an identifier like `test_cap_x_isolated` can only ever be asserted, which is what
  * EXECUTION_FAIL_CLOSED.md forbids.
  *
- * The script body is carried as base64 so one command string parses identically under `/bin/sh`
- * and `cmd.exe`: the base64 alphabet contains no character either shell treats specially.
+ * The script body is carried as base64 so it needs no quoting under `/bin/sh` or `cmd.exe`: the
+ * base64 alphabet contains no character either shell treats specially. The runtime prefix (executable
+ * and any environment it needs) is rendered for the shell the proof runner uses on this host.
  */
 
 import { join } from "node:path";
+import { getJavaScriptRuntime } from "../process-matrix/javascript-runtime.ts";
 import type { CapabilityKind, CapabilitySpecProof } from "./types.ts";
 
 /**
@@ -26,10 +28,18 @@ export function capabilityArtifactPath(artifactRoot: string, capabilityId: strin
 	return join(artifactRoot, `${capabilityId}.mjs`);
 }
 
-/** One portable `node -e` invocation carrying `source` verbatim. */
+/**
+ * One JavaScript-runtime `-e` invocation carrying `source` verbatim, for the host shell the proof
+ * runner spawns (`cmd.exe /d /s /c` on Windows, `/bin/sh -c` elsewhere). Proofs run within the
+ * synthesis that compiled them, so the running generation's runtime is the right one.
+ */
 export function compileNodeProofCommand(source: string): string {
 	const encoded = Buffer.from(source, "utf-8").toString("base64");
-	return `"${process.execPath}" -e "eval(Buffer.from('${encoded}','base64').toString('utf8'))"`;
+	const runtime = getJavaScriptRuntime();
+	const environment = Object.entries(runtime.environment)
+		.map(([name, value]) => (process.platform === "win32" ? `set "${name}=${value}" && ` : `${name}=${value} `))
+		.join("");
+	return `${environment}"${runtime.executable}" -e "eval(Buffer.from('${encoded}','base64').toString('utf8'))"`;
 }
 
 function artifactBytesProofSource(artifactPath: string): string {

@@ -15,6 +15,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getJavaScriptRuntime } from "./process-matrix/javascript-runtime.ts";
 
 export type CiVerdictState = "running" | "green" | "red" | "unknown";
 
@@ -157,7 +158,10 @@ function reconcileStaleRecord(commonDir: string, path: string, branch: string): 
 	reconcileAttempts.set(path, now);
 	const script = join(resolve(commonDir, ".."), "scripts", "ci-status.mjs");
 	if (!existsSync(script)) return;
-	execFile(process.execPath, [script, "reconcile", branch], { timeout: 60_000 }, (error) => {
+	// The script is the repository's JavaScript, not a pi command: run it on a JavaScript runtime.
+	const runtime = getJavaScriptRuntime();
+	const env = { ...process.env, ...runtime.environment };
+	execFile(runtime.executable, [script, "reconcile", branch], { timeout: 60_000, env }, (error) => {
 		if (error) return;
 		recordCache.delete(path);
 		recentViews.clear();

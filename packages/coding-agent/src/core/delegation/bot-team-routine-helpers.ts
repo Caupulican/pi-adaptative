@@ -1,6 +1,12 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import {
+	isMissingFileError,
+	LOW_LATENCY_FILE_LOCK_OPTIONS,
+	withFileLockSync,
+	writeFileAtomicSync,
+} from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
 	normalizeBotOrTeamId,
@@ -249,6 +255,89 @@ export function collectBotInboxEntries(
 	return entries.slice(0, Math.max(1, limit));
 }
 
+/**
+ * The detached bot daemon's lease. Its identity is the random token the starting session wrote under the lease lock
+ * before spawning the daemon and handed to it in argv; a recorded pid is display data and a fast negative only (a dead
+ * pid means the daemon is gone), never authority to signal, because a pid can be reused once its process exits.
+ * The daemon renews the lease under the same lock while the token is still its own and exits once it is not, so
+ * stopping the daemon is releasing its lease: nothing is ever sent to a pid read from disk.
+ */
+interface DaemonLeaseRecord {
+	readonly token: string;
+	readonly startedAt: string;
+	readonly pid?: number;
+	readonly lastHeartbeatAt?: number;
+	readonly lastTickAt?: number;
+}
+
+const DAEMON_LEASE_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether `value` is a daemon lease token (`crypto.randomUUID()` spelling). */
+export function isDaemonLeaseToken(value: string): boolean {
+	return DAEMON_LEASE_TOKEN_REGEX.test(value);
+}
+
+export function daemonLeasePath(storeFilePath: string): string {
+	return join(dirname(storeFilePath), "bot-daemon-lease.json");
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** The current lease, or undefined when there is none: no file, a released lease, or a record without a token. */
+function readDaemonLease(leasePath: string): DaemonLeaseRecord | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(leasePath, "utf8");
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (
+		!isRecordObject(parsed) ||
+		typeof parsed.token !== "string" ||
+		!isDaemonLeaseToken(parsed.token) ||
+		typeof parsed.startedAt !== "string"
+	)
+		return undefined;
+	const pid = isPositiveSafePid(parsed.pid) ? parsed.pid : undefined;
+	const lastHeartbeatAt = finiteNumber(parsed.lastHeartbeatAt);
+	const lastTickAt = finiteNumber(parsed.lastTickAt);
+	return {
+		token: parsed.token,
+		startedAt: parsed.startedAt,
+		...(pid !== undefined ? { pid } : {}),
+		...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
+		...(lastTickAt !== undefined ? { lastTickAt } : {}),
+	};
+}
+
+/**
+ * A lease is held while its holder renewed it (or, before the first renewal, claimed it) within the stale window and
+ * its recorded pid is not proven gone. Only the token holder renews, so a reused pid cannot keep a lease held.
+ */
+function isDaemonLeaseHeld(lease: DaemonLeaseRecord, nowMs: number): boolean {
+	const renewedAt = lease.lastHeartbeatAt ?? Date.parse(lease.startedAt);
+	if (!Number.isFinite(renewedAt) || nowMs - renewedAt > DAEMON_STALE_MS) return false;
+	return lease.pid === undefined || probeProcessLiveness(lease.pid) !== "dead";
+}
+
+function withDaemonLease<T>(storeFilePath: string, action: (leasePath: string) => T): T {
+	const leasePath = daemonLeasePath(storeFilePath);
+	return withFileLockSync(leasePath, () => action(leasePath), LOW_LATENCY_FILE_LOCK_OPTIONS);
+}
+
+function writeDaemonLease(leasePath: string, lease: DaemonLeaseRecord): void {
+	writeFileAtomicSync(leasePath, JSON.stringify(lease, null, 2));
+}
+
 export function readDaemonLeaseStatus(
 	storeFilePath: string,
 	routines: Iterable<PersistentRoutineScheduleRecord>,
@@ -261,73 +350,66 @@ export function readDaemonLeaseStatus(
 		activeRoutines++;
 		if (r.nextRunAt <= nowMs) dueRoutines++;
 	}
-	const leasePath = join(dirname(storeFilePath), "bot-daemon-lease.json");
-	try {
-		const raw = readFileSync(leasePath, "utf8");
-		const parsed: unknown = JSON.parse(raw);
-		if (isRecordObject(parsed) && typeof parsed.pid === "number" && Number.isInteger(parsed.pid)) {
-			const lastHeartbeatAt =
-				typeof parsed.lastHeartbeatAt === "number" && Number.isFinite(parsed.lastHeartbeatAt)
-					? parsed.lastHeartbeatAt
-					: 0;
-			let alive = false;
-			try {
-				process.kill(parsed.pid, 0);
-				alive = nowMs - lastHeartbeatAt <= DAEMON_STALE_MS;
-			} catch {
-				alive = false;
-			}
-			return {
-				running: alive,
-				pid: alive ? parsed.pid : undefined,
-				startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
-				lastHeartbeatAt: lastHeartbeatAt || undefined,
-				lastTickAt:
-					typeof parsed.lastTickAt === "number" && Number.isFinite(parsed.lastTickAt)
-						? parsed.lastTickAt
-						: undefined,
-				activeRoutines,
-				dueRoutines,
-			};
-		}
-	} catch {
-		// Absent or unreadable lease file means no detached daemon is running.
-	}
-	return { running: false, activeRoutines, dueRoutines };
-}
-
-export function writeDaemonLeaseFile(
-	storeFilePath: string,
-	routines: Iterable<PersistentRoutineScheduleRecord>,
-	input: { pid: number; startedAt?: string; lastTickAt?: number },
-	nowMs = Date.now(),
-): PersistentBotDaemonStatus {
-	const leasePath = join(dirname(storeFilePath), "bot-daemon-lease.json");
-	mkdirSync(dirname(leasePath), { recursive: true });
-	const payload = {
-		pid: input.pid,
-		startedAt: input.startedAt ?? new Date(nowMs).toISOString(),
-		lastHeartbeatAt: nowMs,
-		...(input.lastTickAt !== undefined ? { lastTickAt: input.lastTickAt } : {}),
+	const lease = readDaemonLease(daemonLeasePath(storeFilePath));
+	if (!lease) return { running: false, activeRoutines, dueRoutines };
+	const running = isDaemonLeaseHeld(lease, nowMs);
+	return {
+		running,
+		pid: running ? lease.pid : undefined,
+		startedAt: lease.startedAt,
+		lastHeartbeatAt: lease.lastHeartbeatAt,
+		lastTickAt: lease.lastTickAt,
+		activeRoutines,
+		dueRoutines,
 	};
-	writeFileAtomicSync(leasePath, JSON.stringify(payload, null, 2));
-	return readDaemonLeaseStatus(storeFilePath, routines, nowMs);
 }
 
-export function releaseDaemonLeaseFile(storeFilePath: string, pid?: number): boolean {
-	const leasePath = join(dirname(storeFilePath), "bot-daemon-lease.json");
-	try {
-		if (!existsSync(leasePath)) return false;
-		if (pid !== undefined) {
-			const raw = readFileSync(leasePath, "utf8");
-			const parsed: unknown = JSON.parse(raw);
-			if (isRecordObject(parsed) && typeof parsed.pid === "number" && parsed.pid !== pid) {
-				return false;
-			}
-		}
-		writeFileAtomicSync(leasePath, JSON.stringify({ releasedAt: Date.now() }));
+/** Takes the lease for a daemon about to be started with `token`; false while another holder keeps it. */
+export function claimDaemonLeaseFile(storeFilePath: string, token: string, nowMs = Date.now()): boolean {
+	return withDaemonLease(storeFilePath, (leasePath) => {
+		const current = readDaemonLease(leasePath);
+		if (current && isDaemonLeaseHeld(current, nowMs)) return false;
+		writeDaemonLease(leasePath, { token, startedAt: new Date(nowMs).toISOString() });
 		return true;
-	} catch {
-		return false;
-	}
+	});
+}
+
+/** Records the spawned daemon's pid while the lease is still the one claimed for it and not yet renewed. */
+export function recordDaemonLeasePidFile(storeFilePath: string, token: string, pid: number): void {
+	withDaemonLease(storeFilePath, (leasePath) => {
+		const current = readDaemonLease(leasePath);
+		if (current?.token === token && current.pid === undefined) writeDaemonLease(leasePath, { ...current, pid });
+	});
+}
+
+/** The daemon's renewal: true while the lease is still `token`'s, false once released or claimed by another start. */
+export function renewDaemonLeaseFile(storeFilePath: string, token: string, pid: number, nowMs = Date.now()): boolean {
+	return withDaemonLease(storeFilePath, (leasePath) => {
+		const current = readDaemonLease(leasePath);
+		if (current?.token !== token) return false;
+		writeDaemonLease(leasePath, { ...current, pid, lastHeartbeatAt: nowMs, lastTickAt: nowMs });
+		return true;
+	});
+}
+
+/** Whether the lease currently names `token`; read without the lock, which atomic replacement makes consistent. */
+export function daemonLeaseBelongsTo(storeFilePath: string, token: string): boolean {
+	return readDaemonLease(daemonLeasePath(storeFilePath))?.token === token;
+}
+
+export type DaemonLeaseRelease =
+	| { readonly released: false }
+	| { readonly released: true; readonly held: boolean; readonly pid?: number };
+
+/**
+ * Releases the lease (only when it is `token`'s, if one is given). `held` says whether a live holder had it, which
+ * is the daemon that now exits on observing the release; a lease that was not held was stale and is simply cleared.
+ */
+export function releaseDaemonLeaseFile(storeFilePath: string, token?: string, nowMs = Date.now()): DaemonLeaseRelease {
+	return withDaemonLease(storeFilePath, (leasePath) => {
+		const current = readDaemonLease(leasePath);
+		if (!current || (token !== undefined && current.token !== token)) return { released: false };
+		writeFileAtomicSync(leasePath, JSON.stringify({ releasedAt: nowMs }));
+		return { released: true, held: isDaemonLeaseHeld(current, nowMs), ...(current.pid ? { pid: current.pid } : {}) };
+	});
 }

@@ -8,10 +8,14 @@ import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
 	buildUpsertedRoutineRecord,
+	claimDaemonLeaseFile,
 	claimDueRoutinesInMap,
 	collectBotInboxEntries,
 	collectTeamInboxEntries,
+	type DaemonLeaseRelease,
+	daemonLeaseBelongsTo,
 	formatDurationIntervalMs,
+	MIN_ROUTINE_INTERVAL_MS,
 	type PersistentBotDaemonStatus,
 	type PersistentBotInboxEntry,
 	type PersistentRoutineScheduleRecord,
@@ -19,9 +23,10 @@ import {
 	parseDurationIntervalMs,
 	parseRoutineRecord,
 	readDaemonLeaseStatus,
+	recordDaemonLeasePidFile,
 	releaseDaemonLeaseFile,
+	renewDaemonLeaseFile,
 	type UpsertPersistentRoutineInput,
-	writeDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
@@ -1158,15 +1163,68 @@ export class PersistentBotTeamStore {
 		return readDaemonLeaseStatus(this.filePath, this.routines.values(), nowMs);
 	}
 
-	writeDaemonLease(
-		input: { pid: number; startedAt?: string; lastTickAt?: number },
-		nowMs = Date.now(),
-	): PersistentBotDaemonStatus {
-		return writeDaemonLeaseFile(this.filePath, this.routines.values(), input, nowMs);
+	/** Takes the detached daemon's lease for a daemon about to start with `token`; false while another holds it. */
+	claimDaemonLease(token: string, nowMs = Date.now()): boolean {
+		return claimDaemonLeaseFile(this.filePath, token, nowMs);
 	}
 
-	releaseDaemonLease(pid?: number): boolean {
-		return releaseDaemonLeaseFile(this.filePath, pid);
+	recordDaemonLeasePid(token: string, pid: number): void {
+		recordDaemonLeasePidFile(this.filePath, token, pid);
+	}
+
+	/** The daemon's renewal; false once its lease was released or taken by another start. */
+	renewDaemonLease(token: string, pid: number, nowMs = Date.now()): boolean {
+		return renewDaemonLeaseFile(this.filePath, token, pid, nowMs);
+	}
+
+	daemonLeaseBelongsTo(token: string): boolean {
+		return daemonLeaseBelongsTo(this.filePath, token);
+	}
+
+	/** Releases the daemon's lease (only `token`'s, when given); its daemon exits on observing the release. */
+	releaseDaemonLease(token?: string, nowMs = Date.now()): DaemonLeaseRelease {
+		return releaseDaemonLeaseFile(this.filePath, token, nowMs);
+	}
+
+	/**
+	 * The detached daemon's tick: every enabled due routine is advanced and marked queued, its bot's summary updated
+	 * or its team handed the routine prompt as a brain message, all in one locked transaction over the shared store.
+	 */
+	queueDueRoutinesForDaemon(nowMs = Date.now()): number {
+		return this.mutate(() => {
+			const nowIso = new Date(nowMs).toISOString();
+			let queued = 0;
+			for (const routine of [...this.routines.values()]) {
+				if (!routine.enabled || routine.nextRunAt > nowMs) continue;
+				const summary = `[Daemon ${nowIso}] Routine queued across TUI session: ${routine.prompt.slice(0, 160)}`;
+				this.routines.set(routine.routineId, {
+					...routine,
+					lastRunAt: nowMs,
+					nextRunAt: nowMs + Math.max(MIN_ROUTINE_INTERVAL_MS, routine.intervalMs),
+					lastStatus: "queued",
+					lastSummary: summary,
+					updatedAt: nowIso,
+				});
+				queued++;
+				if (routine.target.kind === "bot") {
+					const bot = this.bots.get(routine.target.agentId);
+					if (bot)
+						this.bots.set(bot.agentId, { ...bot, lastMessageAt: nowMs, lastSummary: summary, updatedAt: nowIso });
+				} else {
+					this.recordTeamMessage({
+						messageId: `daemon-${routine.routineId}-${nowMs}`,
+						teamId: routine.target.teamId,
+						sender: { kind: "brain" },
+						text: `[Scheduled routine ${routine.routineId}]: ${routine.prompt}`,
+						timestamp: nowMs,
+						targetAgentIds: [],
+						deliveries: [],
+					});
+				}
+			}
+			if (queued > 0) this.save();
+			return queued;
+		});
 	}
 
 	appendTeamMessage(message: PersistentTeamMessage): void {

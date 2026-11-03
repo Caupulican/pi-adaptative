@@ -7,6 +7,7 @@
  */
 import type { Args } from "./cli/args.ts";
 import { APP_NAME, VERSION } from "./config.ts";
+import { BOT_DAEMON_COMMAND } from "./core/delegation/bot-daemon-command.ts";
 
 process.title = APP_NAME;
 process.env.PI_CODING_AGENT = "true";
@@ -23,6 +24,13 @@ const packageCommands = new Set(["install", "remove", "uninstall", "update", "li
 if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
 	console.log(VERSION);
 	process.exit(0);
+}
+
+// The detached bot daemon is pi's own routine process, started by a session through the stable self-launch target.
+// It never parses as a session launch and never binds a supervisor channel it may have inherited.
+if (firstArg === BOT_DAEMON_COMMAND) {
+	const { runBotDaemonCommand } = await import("./core/delegation/bot-daemon.ts");
+	process.exit(await runBotDaemonCommand(cliArgs.slice(1)));
 }
 
 // An interactive launch owns the terminal from here: keys typed while the program loads stay raw
