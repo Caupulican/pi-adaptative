@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- Collaboration agents whose helper process died are settled instead of staying `running`, and acquisitions abandoned by a dead controller are reconciled on the next session recovery.
+- Worktree-sync lane and lock owners and process-matrix entries are judged by identity-aware liveness: foreign-host and inconclusive owners are never reclaimed, reused pids are detected, and unknown matrix entries age out by heartbeat.
+- The flow trace and System One evidence reset on objective change or goal completion even while the Decision graph is hidden.
+
 - The persistent bot daemon, capability proofs and CI status reconcile no longer start a second pi session when run from the compiled binary; the bot daemon is a `pi --bot-daemon` command with a token-keyed lease, and stopping it no longer signals a pid read from a file.
 - Process-group kills require proof that the group was created by this process, and reissued pids are detected by start time; dead work-run lease markers are reclaimed on the next acquisition.
 - The left pane's visibility is saved separately (`workbench.leftPane`) from the Decision graph's (`workbench.graph`): hiding the graph no longer hides the Chats list, `alt+g` hides or shows the whole pane, and graph mode below 110 columns falls back to the Chats list. Persistent bots are listed in the Team section.

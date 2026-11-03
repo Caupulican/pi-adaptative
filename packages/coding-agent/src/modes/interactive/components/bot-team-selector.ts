@@ -5,6 +5,7 @@ import type {
 	PersistentTeamRecord,
 } from "../../../core/delegation/persistent-bot-team-store.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
+import { botStateMark } from "./bot-state-mark.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const BOT_TEAM_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -47,25 +48,6 @@ function formatActiveTargetValue(target: ActiveChatTarget): string {
 			return `team:${target.teamId}`;
 		default: {
 			const _exhaustive: never = target;
-			return _exhaustive;
-		}
-	}
-}
-
-function botStatusGlyph(state: PersistentBotView["state"]): string {
-	switch (state) {
-		case "running":
-		case "queued":
-			return "●";
-		case "awaiting_parent":
-			return "◐";
-		case "failed":
-			return "✗";
-		case "idle":
-		case "retired":
-			return "○";
-		default: {
-			const _exhaustive: never = state;
 			return _exhaustive;
 		}
 	}
@@ -117,7 +99,8 @@ export class BotTeamSelectorComponent extends Container {
 			}),
 			...options.bots.map((bot): SelectItem => {
 				const isCurrent = options.activeTarget.kind === "bot" && options.activeTarget.agentId === bot.agentId;
-				const glyph = botStatusGlyph(bot.state);
+				// Plain: the list colours a selected row whole, and a toned glyph would cut that colour.
+				const glyph = botStateMark(bot.state).glyph;
 				const unread = (bot.unreadCount ?? 0) > 0 ? ` · ${bot.unreadCount} unread` : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
 				const summaryOrDesc = bot.currentSummary

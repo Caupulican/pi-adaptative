@@ -16,6 +16,7 @@ import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
+import { botStateMark } from "./bot-state-mark.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
@@ -165,13 +166,8 @@ export interface WorkbenchGeometry {
 
 /** A bot's live state as one toned glyph; the Chats list and the Team section draw the same one. */
 export function botStateGlyph(state: PersistentBotView["state"]): string {
-	return state === "running" || state === "queued"
-		? theme.fg("accent", "●")
-		: state === "awaiting_parent"
-			? theme.fg("warning", "◐")
-			: state === "failed"
-				? theme.fg("error", "✗")
-				: theme.fg("muted", "○");
+	const { glyph, tone } = botStateMark(state);
+	return theme.fg(tone, glyph);
 }
 
 /** The zone width a left-pane mode needs: its own minimum, the rule and a readable chat beside it. */

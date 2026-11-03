@@ -4,12 +4,14 @@ import { type AssistantMessage, resolveCacheRetention } from "@caupulican/pi-ai"
 import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { CacheClock } from "../../core/cache-clock.ts";
 import { onCiStatusChange, readCiStatusView } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
 import { GenerationRate } from "../../core/generation-rate.ts";
+import type { GoalState } from "../../core/goals/goal-state.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { FlowTrace } from "../../core/operator-projection/flow-trace.ts";
@@ -126,9 +128,9 @@ export class InteractiveLayout {
 	/** When the provider's prompt cache for the last request expires; the POV bar counts it down. */
 	private readonly cacheClock = new CacheClock(() => resolveCacheRetention());
 	private cacheTicker: ReturnType<typeof setInterval> | undefined;
-	/** The objective the graph last composed for; a change clears the flow trace and System One evidence. */
+	/** The objective the session listeners last saw; a change clears the flow trace and System One evidence. */
 	private lastObjectiveId: string | undefined;
-	/** The completed goal whose graph was already cleared, so the clear runs once per goal. */
+	/** The completed goal whose flow trace and evidence were already cleared, so the clear runs once per goal. */
 	private clearedCompletedGoalId: string | undefined;
 
 	constructor(port: InteractiveLayoutPort) {
@@ -157,16 +159,10 @@ export class InteractiveLayout {
 				: { asked: 0, answered: 0 };
 		const task = session.getTaskStepsStateSnapshot();
 		const goal = session.getGoalStateSnapshot();
-		if (this.lastObjectiveId !== undefined && this.lastObjectiveId !== projection.objective_id) {
-			this.flowTrace.reset();
-			this.workbenchController?.resetSystemOneEvidence();
-		}
-		this.lastObjectiveId = projection.objective_id;
+		// The session listeners already cleared what an earlier objective or a completed goal left behind
+		// (`observeObjective`, `settleCompletedGoal`); a frame composes from that state and changes none of it.
 		const allLanes = session.getLaneRecords();
-		const hasActiveLanes = allLanes.some((lane) => lane.status === "running" || lane.status === "queued");
-		// The projection carries no execution record; an open flow event is the one in-progress fact.
-		const flowOpen = this.flowTrace.snapshot().some((event) => event.endedAt === undefined);
-		const goalDoneAndIdle = goal?.status === "completed" && !session.isStreaming && !flowOpen && !hasActiveLanes;
+		const goalDoneAndIdle = this.goalDoneAndIdle(session, goal, allLanes);
 		const plan: DecisionGraphInput["plan"] = task
 			? task.steps.map((step) => ({ title: step.content, status: PLAN_STEP_STATUS[step.status] }))
 			: (goal?.requirements ?? []).map((requirement) => ({
@@ -200,11 +196,6 @@ export class InteractiveLayout {
 		const route = session.getForegroundRouteSnapshot();
 		if (goalDoneAndIdle) {
 			// A settled, completed goal cleans the graph up: nothing of its work is drawn once it is done.
-			if (goal && this.clearedCompletedGoalId !== goal.goalId) {
-				this.clearedCompletedGoalId = goal.goalId;
-				this.flowTrace.reset();
-				this.workbenchController?.resetSystemOneEvidence();
-			}
 			return buildDecisionGraphModel({
 				projection,
 				stageLog: { loop: 1, stages: [], entries: [] },
@@ -266,12 +257,60 @@ export class InteractiveLayout {
 		});
 	}
 
+	/** A completed goal with nothing left in progress: no streaming run, no open flow event, no live lane. */
+	private goalDoneAndIdle(session: AgentSession, goal: GoalState | undefined, lanes: readonly LaneRecord[]): boolean {
+		// The projection carries no execution record; an open flow event is the one in-progress fact.
+		return (
+			goal?.status === "completed" &&
+			!session.isStreaming &&
+			!this.flowTrace.snapshot().some((event) => event.endedAt === undefined) &&
+			!lanes.some((lane) => lane.status === "running" || lane.status === "queued")
+		);
+	}
+
+	/**
+	 * An objective change clears the flow trace and System One evidence the earlier objective left. Runs on
+	 * every projection publish, whether or not the Decision graph is drawn; the first objective seen clears nothing.
+	 */
+	private observeObjective(objectiveId: string | undefined): void {
+		if (this.lastObjectiveId !== undefined && this.lastObjectiveId !== objectiveId) {
+			this.flowTrace.reset();
+			this.workbenchController?.resetSystemOneEvidence();
+		}
+		this.lastObjectiveId = objectiveId;
+	}
+
+	/**
+	 * A settled, completed goal clears the flow trace and System One evidence once per goal. Runs from every
+	 * listener whose update can settle it (projection, session events, lanes, questions, foreground activity),
+	 * whether or not the Decision graph is drawn.
+	 */
+	private settleCompletedGoal(): void {
+		// Not before the workbench mounts: its first restore settles, so a listener replaying state during `mount`
+		// cannot spend the once-per-goal clear before the restored evaluations are in the flow trace.
+		if (!this.workbenchController) return;
+		const session = this.port.getSession();
+		// A streaming run is never settled; checked first, as session events arrive per streamed token.
+		if (session.isStreaming) return;
+		const goal = session.getGoalStateSnapshot();
+		if (!goal || this.clearedCompletedGoalId === goal.goalId) return;
+		if (!this.goalDoneAndIdle(session, goal, session.getLaneRecords())) return;
+		this.clearedCompletedGoalId = goal.goalId;
+		this.flowTrace.reset();
+		this.workbenchController?.resetSystemOneEvidence();
+	}
+
+	/** Records the session's System One evaluations into the views, then settles them against the objective and goal. */
 	private restoreSemanticViews(): void {
 		if (!this.workbenchController) return;
-		for (const record of this.port.getSession().getSemanticEvaluations()) {
+		const session = this.port.getSession();
+		for (const record of session.getSemanticEvaluations()) {
 			this.workbenchController.recordSystemOneEvaluation(record);
 			this.flowTrace.observeEvaluation(record);
 		}
+		// Settled here rather than on a frame's first compose, so it holds before any frame and with the graph hidden.
+		this.observeObjective(session.operatorProjection.getProjection().objective_id);
+		this.settleCompletedGoal();
 	}
 
 	/**
@@ -284,7 +323,12 @@ export class InteractiveLayout {
 		this.disposeOperatorProjection?.();
 		const port = this.port;
 		const session = port.getSession();
-		const unsubscribeOperatorProjection = session.operatorProjection.subscribe(() => port.ui.requestRender());
+		// Every publish carries the objective; the objective-change and completed-goal clears run here, not in a frame.
+		const unsubscribeOperatorProjection = session.operatorProjection.subscribe((projection) => {
+			this.observeObjective(projection.objective_id);
+			this.settleCompletedGoal();
+			port.ui.requestRender();
+		});
 		// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
 		const unsubscribeStageChange = session.operatorProjection.onStageChange(() => port.ui.requestRender());
 		// The flow trace belongs to the session it records: a swapped session starts its own.
@@ -297,12 +341,16 @@ export class InteractiveLayout {
 			rate.observe(event);
 			this.cacheClock.observe(event);
 			this.syncCacheTicker();
+			this.settleCompletedGoal();
 		});
+		// A run turns idle only after its `agent_end` listeners settle; the submission's release follows that.
+		const unsubscribeForegroundActivity = session.subscribeForegroundActivity(() => this.settleCompletedGoal());
 		flow.observeLanes(session.getLaneRecords());
 		const unsubscribePullRequest = onPullRequestChange(() => port.ui.requestRender());
 		const unsubscribeCiStatus = onCiStatusChange(() => port.ui.requestRender());
 		const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
 			flow.observeLanes(records);
+			this.settleCompletedGoal();
 			port.ui.requestRender();
 		});
 		// Every settled System One evaluation is Execution evidence and changes the Decider row and the graph.
@@ -332,6 +380,7 @@ export class InteractiveLayout {
 				humanInput.question = undefined;
 				humanInput.askedAt = undefined;
 			}
+			this.settleCompletedGoal();
 			port.ui.requestRender();
 		});
 		this.disposeOperatorProjection = () => {
@@ -340,6 +389,7 @@ export class InteractiveLayout {
 			unsubscribeSemantic();
 			unsubscribeHumanInput();
 			unsubscribeFlow();
+			unsubscribeForegroundActivity();
 			unsubscribeLanes();
 			unsubscribePullRequest();
 			unsubscribeCiStatus();
