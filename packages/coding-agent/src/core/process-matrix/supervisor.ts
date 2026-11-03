@@ -6,6 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
+import { type HostIdentity, isRecordedOnHost } from "../../kernel/reliability/host-identity.ts";
 import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
@@ -22,8 +23,23 @@ import { buildEntryId } from "./store.ts";
 export interface BuildMasterEntryFacts {
 	agent: AgentIdentityContract;
 	pid: number;
-	hostname: string;
+	/** The registering host: both its hostname and (when readable) its machine id are recorded. */
+	host: HostIdentity;
+	/** {@link pid}'s own Linux start time, when readable. */
+	processStartTime?: string;
 	now: string;
+}
+
+/** Host and process identity of a newly registered entry. Absent values are omitted, never written as undefined. */
+function processIdentityFields(
+	host: HostIdentity,
+	processStartTime: string | undefined,
+): Pick<ProcessMatrixEntry, "hostname" | "machineId" | "processStartTime"> {
+	return {
+		hostname: host.hostname,
+		...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
+		...(processStartTime !== undefined ? { processStartTime } : {}),
+	};
 }
 
 export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEntry {
@@ -32,7 +48,7 @@ export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEnt
 		role: "master",
 		agent: structuredClone(facts.agent),
 		pid: facts.pid,
-		hostname: facts.hostname,
+		...processIdentityFields(facts.host, facts.processStartTime),
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
 		status: "running",
@@ -42,7 +58,10 @@ export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEnt
 export interface BuildWorkerEntryFacts {
 	agent: AgentIdentityContract;
 	pid: number;
-	hostname: string;
+	/** The registering host: both its hostname and (when readable) its machine id are recorded. */
+	host: HostIdentity;
+	/** {@link pid}'s own Linux start time, when readable. */
+	processStartTime?: string;
 	now: string;
 	parentPid: number;
 	parentSessionId?: string;
@@ -58,7 +77,7 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 		role: "worker",
 		agent: structuredClone(facts.agent),
 		pid: facts.pid,
-		hostname: facts.hostname,
+		...processIdentityFields(facts.host, facts.processStartTime),
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
 		status: "running",
@@ -76,11 +95,17 @@ export function applyHeartbeat(entry: ProcessMatrixEntry, now: string): ProcessM
 	return { ...entry, heartbeatAt: now };
 }
 
+/**
+ * Local observation of a recorded process: `startTime` is the start time recorded with `pid`, or undefined when
+ * none was. A pid that now names a process with another start time must read `dead`.
+ */
+export type RecordedProcessObserver = (pid: number, startTime: string | undefined) => ProcessObservation;
+
 export interface DetectOrphanedWorkersDeps {
-	/** Local pid observation. Only consulted for entries recorded on {@link hostname}. */
-	observeProcess: (pid: number) => ProcessObservation;
-	/** This host's name: an entry recorded on another host is never judged by a local pid probe. */
-	hostname: string;
+	/** Local pid observation. Only consulted for entries recorded on {@link host}. */
+	observeProcess: RecordedProcessObserver;
+	/** This host: an entry recorded on another host ({@link isRecordedOnHost}) is never judged by a local pid probe. */
+	host: HostIdentity;
 	/** This session's own sessionId -- never treat yourself as an orphan you found. */
 	ownSessionId?: string;
 }
@@ -97,10 +122,10 @@ export function detectOrphanedWorkers(
 	return entries.filter((entry) => {
 		if (entry.role !== "worker") return false;
 		if (entry.status === "closed") return false;
-		if (entry.hostname !== deps.hostname) return false;
+		if (!isRecordedOnHost(entry, deps.host)) return false;
 		if (deps.ownSessionId !== undefined && entry.agent.resumeContext.sessionId === deps.ownSessionId) return false;
 		if (entry.parentPid === undefined) return false;
-		return deps.observeProcess(entry.parentPid) === "dead";
+		return deps.observeProcess(entry.parentPid, undefined) === "dead";
 	});
 }
 
@@ -210,10 +235,10 @@ export function pollWorkerDirective(
 }
 
 export interface ReconcileMatrixDeps {
-	/** Local pid observation. Only consulted for entries recorded on {@link hostname}. */
-	observeProcess: (pid: number) => ProcessObservation;
-	/** This host's name: an entry recorded on another host is never judged by a local pid probe. */
-	hostname: string;
+	/** Local observation of an entry's pid and recorded start time. Only consulted for entries recorded on {@link host}. */
+	observeProcess: RecordedProcessObserver;
+	/** This host: an entry recorded on another host ({@link isRecordedOnHost}) is never judged by a local pid probe. */
+	host: HostIdentity;
 	/** Epoch ms "now", compared against an entry's `heartbeatAt` (or terminal `observedAt`). */
 	now: number;
 	resumableTtlMs: number;
@@ -230,7 +255,8 @@ function isExpired(at: string, now: number, ttlMs: number): boolean {
  * before persisting its own resumable transition is repaired from its already-durable logical-agent
  * identity. `resumable`/`adopted` entries are kept until they age past `resumableTtlMs`.
  *
- * Only a same-host `dead` observation proves a `running`/`winding_down` process gone. An entry from
+ * Only a same-host `dead` observation proves a `running`/`winding_down` process gone: ESRCH, or a pid that now
+ * names a process whose start time differs from the entry's `processStartTime` (a reissued pid). An entry from
  * another host is never observed here, and a same-host `unknown` observation proves nothing either
  * way: both are kept while their own heartbeat (every live runtime refreshes it) is within
  * `resumableTtlMs`, then pruned. Neither is ever recovered to `resumable`: that would let this host
@@ -249,7 +275,9 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 			continue;
 		}
 		if (entry.status === "running" || entry.status === "winding_down") {
-			const observation = entry.hostname === deps.hostname ? deps.observeProcess(entry.pid) : "unknown";
+			const observation = isRecordedOnHost(entry, deps.host)
+				? deps.observeProcess(entry.pid, entry.processStartTime)
+				: "unknown";
 			if (observation === "unknown") {
 				if (isExpired(entry.heartbeatAt, deps.now, deps.resumableTtlMs)) prunedEntryIds.push(entry.entryId);
 				else kept.push(entry);

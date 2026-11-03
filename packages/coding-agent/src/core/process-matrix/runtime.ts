@@ -26,9 +26,13 @@
  * perform generation-fenced lifecycle/TTL maintenance, and nothing here ever kills a process directly.
  */
 
-import { hostname as osHostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
+import { readHostIdentity, warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import {
+	type ProcessObservation,
+	probeProcessIdentityLiveness,
+	readOwnProcessStartTime,
+} from "../../kernel/reliability/process-tree.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
@@ -66,6 +70,7 @@ import {
 	markTerminal,
 	markTerminalNotificationDelivered,
 	pollWorkerDirective,
+	type RecordedProcessObserver,
 	reconcileMatrix,
 } from "./supervisor.ts";
 
@@ -215,6 +220,30 @@ function nowIso(now: () => number): string {
 	return new Date(now()).toISOString();
 }
 
+/**
+ * How every recorded entry pid is judged: `config.observeProcess` answers for the pid (this process is alive by
+ * construction), and a recorded `processStartTime` that the pid no longer has proves the pid was reissued.
+ */
+function recordedProcessObserver(config: ProcessMatrixRuntimeConfig): RecordedProcessObserver {
+	const observePid = (pid: number): ProcessObservation => (pid === process.pid ? "alive" : config.observeProcess(pid));
+	return (pid, startTime) => probeProcessIdentityLiveness(pid, startTime, observePid);
+}
+
+/**
+ * `entry` re-pointed at another OS process on this host (a resumed replacement). The recorded start time described
+ * the previous process: keeping it beside the new pid would judge the live replacement a reissued pid.
+ */
+function rebindEntryProcess(entry: ProcessMatrixEntry, pid: number): ProcessMatrixEntry {
+	const { processStartTime: _previous, machineId: _machineId, ...rest } = entry;
+	const host = readHostIdentity();
+	return {
+		...rest,
+		pid,
+		hostname: host.hostname,
+		...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
+	};
+}
+
 /** Session custom-entry type for a wall-clock discontinuity. Read by the latency census. */
 export const CLOCK_JUMP_CUSTOM_TYPE = "clock_jump";
 
@@ -270,6 +299,8 @@ export async function startProcessMatrixRuntime(
 	const now = (): number => timers.now();
 	const parentPid = getParentPid();
 
+	// macOS/Windows read the machine id by spawning a process: start it now, never wait for it.
+	void warmHostIdentity();
 	try {
 		if (!isAgentIdentity(config.agent)) throw new TypeError("Process-matrix agent identity is invalid.");
 		if (parentPid !== undefined) {
@@ -294,7 +325,8 @@ async function startMasterBranch(
 	let entry = buildMasterEntry({
 		agent: config.agent,
 		pid: process.pid,
-		hostname: osHostname(),
+		host: readHostIdentity(),
+		processStartTime: readOwnProcessStartTime(),
 		now: nowIso(now),
 	});
 	try {
@@ -429,8 +461,8 @@ async function reconcileAndRunOrphanScan(
 	}
 	if (signal.aborted) return [];
 	const reconciled = reconcileMatrix(entries, {
-		observeProcess: (pid) => (pid === process.pid ? "alive" : config.observeProcess(pid)),
-		hostname: osHostname(),
+		observeProcess: recordedProcessObserver(config),
+		host: readHostIdentity(),
 		now: now(),
 		resumableTtlMs: PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	});
@@ -522,9 +554,10 @@ async function runOrphanScan(
 	entries: ProcessMatrixEntry[],
 	signal: AbortSignal,
 ): Promise<ProcessMatrixEntry[]> {
+	const observeRecorded = recordedProcessObserver(config);
 	const orphans = detectOrphanedWorkers(entries, {
-		observeProcess: config.observeProcess,
-		hostname: osHostname(),
+		observeProcess: observeRecorded,
+		host: readHostIdentity(),
 		ownSessionId: config.agent.resumeContext.sessionId,
 	});
 	const awaitingOwner: ProcessMatrixEntry[] = [];
@@ -542,14 +575,14 @@ async function runOrphanScan(
 			// bounded reconciliation (see reconcileAndRunOrphanScan) already ages it out over
 			// PROCESS_MATRIX_RESUMABLE_RETENTION_MS without help from this diagnostic, so
 			// repeating the warning on every startup until that TTL elapses is pure noise.
-			const observation = config.observeProcess(orphan.pid);
+			const observation = observeRecorded(orphan.pid, orphan.processStartTime);
 			if (observation === "alive") {
 				reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
 				awaitingOwner.push(orphan);
 			}
 			continue;
 		}
-		const observation = config.observeProcess(orphan.pid);
+		const observation = observeRecorded(orphan.pid, orphan.processStartTime);
 		if (observation === "dead") {
 			await resumeDeadOrphan(config, orphan, signal);
 			continue;
@@ -654,8 +687,9 @@ async function requestWorkerCleanup(
 	try {
 		// The worker may legitimately advance its own lifecycle (running -> winding_down -> resumable)
 		// while the owner reads the question; the fence is the process generation the owner was shown.
+		const observeRecorded = recordedProcessObserver(config);
 		for (let attempt = 0; attempt < 3; attempt++) {
-			if (config.observeProcess(expected.pid) !== "alive") {
+			if (observeRecorded(expected.pid, expected.processStartTime) !== "alive") {
 				config.onDiagnostic?.(
 					`process-matrix: orphan ${shown.entryId} exited before cleanup was requested; nothing written`,
 				);
@@ -750,7 +784,7 @@ async function resumeDeadOrphan(
 		config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${describeError(error)}`);
 		return;
 	}
-	const launchedEntry = { ...claimed, pid: launched.pid };
+	const launchedEntry = rebindEntryProcess(claimed, launched.pid);
 	if (!signal.aborted) {
 		try {
 			// Bridge the interval before the replacement can self-register. Without its real PID here, a
@@ -812,7 +846,7 @@ async function persistResumedWorkerTerminal(
 		// If recording the spawned PID failed (or shutdown won the race immediately after spawn), the
 		// untouched pre-launch claim proves no newer process has taken this logical entry. Upgrade it
 		// to the actual exited process before persisting its terminal handoff.
-		const fallbackTerminal = markTerminal({ ...preLaunchClaim, pid: claimed.pid }, result, observedAt);
+		const fallbackTerminal = markTerminal(rebindEntryProcess(preLaunchClaim, claimed.pid), result, observedAt);
 		if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, preLaunchClaim, fallbackTerminal)) {
 			if (lifetime.aborted) return;
 			await notifyResumedWorkerTerminal(config, fallbackTerminal, lifetime);
@@ -878,7 +912,8 @@ async function startWorkerBranch(
 	let entry = buildWorkerEntry({
 		agent: config.agent,
 		pid: process.pid,
-		hostname: osHostname(),
+		host: readHostIdentity(),
+		processStartTime: readOwnProcessStartTime(),
 		now: nowIso(now),
 		parentPid: initialParentPid,
 		...(parentSessionId !== undefined ? { parentSessionId } : {}),

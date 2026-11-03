@@ -83,8 +83,13 @@ export interface LaneRegistration {
 	/** Host `LaneRecord.laneId` after dispatch correlation (tmux/in-process worker binding). */
 	boundLaneId?: string;
 	ownerPid?: number;
-	/** Host the owner pid belongs to. Absent on records written before it was recorded: those are this host's. */
+	/**
+	 * `os.hostname()` of the owner's host. Decides locality only when {@link ownerMachineId} is absent; a record with
+	 * neither predates both and was written on this host.
+	 */
 	ownerHostname?: string;
+	/** The owner host's stable machine id (`kernel/reliability/host-identity.ts`); when present it alone decides locality. */
+	ownerMachineId?: string;
 	/** The owner's Linux start time, so a reissued pid is not mistaken for the owner. Absent on older records. */
 	ownerStartTime?: string;
 	ownerSessionId?: string;
@@ -126,7 +131,10 @@ export interface LaneFacts {
 
 export interface IntegrationLockOwner {
 	pid: number;
+	/** `os.hostname()` of the holder's host. Decides locality only when {@link machineId} is absent. */
 	hostname: string;
+	/** The holder host's stable machine id; when present it alone decides locality. Absent on older manifests. */
+	machineId?: string;
 	/** Random acquisition identity; PID/session are diagnostic only and never authorize release. */
 	token: string;
 	sessionId?: string;

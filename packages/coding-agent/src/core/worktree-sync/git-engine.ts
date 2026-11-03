@@ -14,8 +14,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
+import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { withFileLock } from "../util/atomic-file.ts";
@@ -347,11 +347,17 @@ export async function deriveLaneFacts(
 
 /**
  * The process recorded as owning `lane`, or undefined when the record names no valid pid. A record without
- * `ownerHostname` predates it and was written on this host; one without `ownerStartTime` is judged by pid alone.
+ * `ownerMachineId` is located by `ownerHostname`; one with neither predates both and was written on this host; one
+ * without `ownerStartTime` is judged by pid alone.
  */
 function laneOwner(lane: LaneRegistration): RecordedProcessOwner | undefined {
 	if (!isPositiveSafePid(lane.ownerPid)) return undefined;
-	return { pid: lane.ownerPid, hostname: lane.ownerHostname, startTime: lane.ownerStartTime };
+	return {
+		pid: lane.ownerPid,
+		hostname: lane.ownerHostname,
+		machineId: lane.ownerMachineId,
+		startTime: lane.ownerStartTime,
+	};
 }
 
 function sanitizeScope(scope: string): string {
@@ -423,6 +429,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 		const at = nowIso(deps);
 		const ownerPid = deps.pid ?? process.pid;
 		const ownerStartTime = ownerStartTimeFor(ownerPid);
+		const host = readHostIdentity();
 		const lane: LaneRegistration = {
 			laneKey,
 			branch,
@@ -433,7 +440,8 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			...(args.goalId !== undefined ? { goalId: args.goalId } : {}),
 			...(args.requirementId !== undefined ? { requirementId: args.requirementId } : {}),
 			ownerPid,
-			ownerHostname: osHostname(),
+			ownerHostname: host.hostname,
+			...(host.machineId !== undefined ? { ownerMachineId: host.machineId } : {}),
 			...(ownerStartTime !== undefined ? { ownerStartTime } : {}),
 			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
 		};
@@ -665,7 +673,7 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	if (landingTransaction) {
 		const recoveryLock = await acquireIntegrationLock(
 			ctx.paths,
-			{ pid: deps.pid ?? process.pid, hostname: osHostname(), sessionId: deps.sessionId, laneKey: "reconcile" },
+			{ pid: deps.pid ?? process.pid, sessionId: deps.sessionId, laneKey: "reconcile" },
 			{ now: deps.now, isPidAlive: deps.isPidAlive },
 		);
 		if (!recoveryLock.acquired) {
@@ -732,6 +740,7 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 			const {
 				ownerPid: _pid,
 				ownerHostname: _hostname,
+				ownerMachineId: _machineId,
 				ownerStartTime: _startTime,
 				ownerSessionId: _session,
 				...rest
@@ -1248,7 +1257,6 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 			ctx.paths,
 			{
 				pid: deps.pid ?? process.pid,
-				hostname: osHostname(),
 				...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
 				laneKey: lane.laneKey,
 			},

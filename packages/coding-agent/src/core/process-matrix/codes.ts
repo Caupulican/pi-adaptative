@@ -51,7 +51,18 @@ export interface ProcessMatrixEntry {
 	role: ProcessRole;
 	agent: AgentIdentityContract;
 	pid: number;
+	/** `os.hostname()` when the entry was written. Decides locality only for an entry without {@link machineId}. */
 	hostname: string;
+	/**
+	 * The writer's stable machine id (`kernel/reliability/host-identity.ts`). When present it alone decides whether
+	 * the entry's pid belongs to this host. Absent on entries written before it was recorded, or by a host without one.
+	 */
+	machineId?: string;
+	/**
+	 * Linux start time of {@link pid} (`readOwnProcessStartTime`), so a reissued pid is judged dead rather than alive.
+	 * Absent on older entries, off Linux, and on an entry whose pid was rewritten to a process it cannot read.
+	 */
+	processStartTime?: string;
 	startedAt: string;
 	heartbeatAt: string;
 	status: ProcessStatus;

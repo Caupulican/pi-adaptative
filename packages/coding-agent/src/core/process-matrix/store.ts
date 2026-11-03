@@ -112,6 +112,9 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 		isPositiveSafePid(value.pid) &&
 		typeof value.hostname === "string" &&
 		value.hostname.length <= 255 &&
+		isOptionalString(value.machineId, 255) &&
+		(value.processStartTime === undefined ||
+			(typeof value.processStartTime === "string" && /^\d{1,32}$/.test(value.processStartTime))) &&
 		isTimestamp(value.startedAt) &&
 		isTimestamp(value.heartbeatAt) &&
 		isProcessStatus(value.status) &&

@@ -65,23 +65,33 @@ export function readOwnProcessStartTime(): string | undefined {
 
 /**
  * {@link probeProcessLiveness} for a recorded owner identity (pid plus {@link readOwnProcessStartTime}).
- * A pid that answers alive while its Linux start time differs from the recorded one was reissued, so
- * the recorded owner is dead. Without a recorded start time, or when procfs cannot answer, the plain
- * pid probe stands: an unreadable identity never proves death.
+ * Only two answers prove the recorded owner dead: the pid probe's ESRCH, or a pid that answers while its
+ * Linux start time differs from the recorded one (a reissued pid). Without a recorded start time (or off
+ * Linux) the plain pid probe stands.
+ *
+ * When a start time is recorded and the pid answers but its identity cannot be read, the answer is
+ * `unknown`: the pid is occupied, by whom is unproven. A missing `/proc/<pid>/stat` is not death by
+ * itself -- under a `hidepid` procfs mount another user's live process has no visible entry while
+ * `kill(pid, 0)` answers EPERM -- so the pid is probed again after the failed read, and only that
+ * probe's ESRCH (the owner exited between the two reads) proves death.
+ *
+ * `observe` is the pid probe both observations use (the caller's injected observer; default the OS probe).
  */
-export function probeProcessIdentityLiveness(pid: number, startTime: string | undefined): ProcessLivenessProbe {
-	const liveness = probeProcessLiveness(pid);
+export function probeProcessIdentityLiveness(
+	pid: number,
+	startTime: string | undefined,
+	observe: (pid: number) => ProcessLivenessProbe = probeProcessLiveness,
+): ProcessLivenessProbe {
+	const liveness = observe(pid);
 	if (liveness !== "alive" || startTime === undefined || process.platform !== "linux") return liveness;
-	let text: string;
+	let observed: string | undefined;
 	try {
-		text = readFileSync(`/proc/${pid}/stat`, "utf8");
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		return code === "ENOENT" || code === "ESRCH" ? "dead" : liveness;
+		observed = parseLinuxProcessStat(pid, readFileSync(`/proc/${pid}/stat`, "utf8"))?.startTime;
+	} catch {
+		return observe(pid) === "dead" ? "dead" : "unknown";
 	}
-	const observed = parseLinuxProcessStat(pid, text)?.startTime;
-	if (observed !== undefined && observed !== startTime) return "dead";
-	return liveness;
+	if (observed === undefined) return "unknown";
+	return observed === startTime ? "alive" : "dead";
 }
 
 /**

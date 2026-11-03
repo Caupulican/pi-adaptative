@@ -399,7 +399,13 @@ A worker session's `worktree_sync` calls are narrowed at the tool layer (indepen
 `land` and `release_lane` refuse `lane_owner_conflict` when the target lane is owned (its
 registration's `ownerSessionId`) by a **different, still-alive** session -- identity-aware owner
 liveness (a foreign-host or inconclusive owner counts as alive; a reused pid is detected by start time),
-the same pattern the integration lock and `reconcile` already use. A lane with no recorded owner,
+the same pattern the integration lock and `reconcile` already use. Lane and lock owners record the
+owner's hostname and, when the OS exposes one, its stable machine id (Linux `machine-id`, macOS
+`IOPlatformUUID`, Windows `MachineGuid`, stored as a digest). A record carrying a machine id is local
+only when that id matches, so a renamed host still recognizes and reclaims its own dead owners and a
+different machine with the same hostname never looks local; a record without one is located by its
+hostname. A record written before the machine id was recorded under a hostname this host no longer
+has stays foreign: it is never cleared or taken over automatically. A lane with no recorded owner,
 owned by the calling session itself, or whose recorded owner is dead never conflicts. This check is
 deliberately engine-level and applies to `land`/`release_lane` ONLY -- `sync`/`continue`/
 `abort_sync` are never owner-gated at the engine; a worker's cross-lane containment for those comes

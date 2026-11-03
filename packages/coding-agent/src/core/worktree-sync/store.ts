@@ -18,8 +18,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsPromises, realpathSync } from "node:fs";
-import { hostname as osHostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { isRecordedOnHost, readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import {
 	isPositiveSafePid,
 	probeProcessIdentityLiveness,
@@ -224,10 +224,14 @@ export async function appendAuditEvent(
  */
 export type OwnerPidProbe = (pid: number, startTime: string | undefined) => boolean;
 
-/** A recorded process owner. `hostname` is absent only on legacy lane records, all written by this host. */
+/**
+ * A recorded process owner. Its host is `machineId` when recorded, else `hostname` (`isRecordedOnHost`); a lane
+ * record carrying neither predates host recording and was written by this host.
+ */
 export interface RecordedProcessOwner {
 	pid: number;
 	hostname?: string;
+	machineId?: string;
 	/** Linux start time recorded with the pid ({@link ownerStartTimeFor}); absent on older records and off Linux. */
 	startTime?: string;
 }
@@ -239,14 +243,16 @@ export function ownerStartTimeFor(pid: number): string | undefined {
 
 /**
  * Whether a recorded owner is NOT proven dead. A foreign-host owner is never judged by a local pid probe and is
- * therefore always alive here -- never taken over, never cleared. `probe` is the same-host pid probe (injectable for
- * deterministic hosts); it defaults to the shared identity-aware OS probe.
+ * therefore always alive here -- never taken over, never cleared. Locality is the stable machine id when the record
+ * carries one (a renamed host still recognizes its own owners), else the recorded hostname. `probe` is the
+ * same-host pid probe (injectable for deterministic hosts); it defaults to the shared identity-aware OS probe.
  */
 export function isRecordedOwnerAlive(
 	owner: RecordedProcessOwner,
 	probe: OwnerPidProbe = (pid, startTime) => probeProcessIdentityLiveness(pid, startTime) !== "dead",
 ): boolean {
-	if (owner.hostname !== undefined && owner.hostname !== osHostname()) return true;
+	const predatesHostRecording = owner.hostname === undefined && owner.machineId === undefined;
+	if (!predatesHostRecording && !isRecordedOnHost(owner, readHostIdentity())) return true;
 	return probe(owner.pid, owner.startTime);
 }
 
@@ -262,6 +268,7 @@ function isIntegrationLockOwner(value: unknown): value is IntegrationLockOwner {
 		isPlainRecord(value) &&
 		isPositiveSafePid(value.pid) &&
 		typeof value.hostname === "string" &&
+		(value.machineId === undefined || (typeof value.machineId === "string" && value.machineId.length <= 255)) &&
 		typeof value.token === "string" &&
 		typeof value.acquiredAt === "string" &&
 		(value.startTime === undefined || typeof value.startTime === "string")
@@ -302,11 +309,12 @@ async function tryMkdirLock(paths: SyncStorePaths): Promise<boolean> {
  * retry on their own cadence rather than spinning here. Takeover happens ONLY when the recorded
  * owner is provably dead on this host -- its pid answers ESRCH or was reissued to a process with another
  * start time -- (or the lock dir is ownerless and older than {@link OWNERLESS_LOCK_STALE_MS}); every
- * takeover is audited. The manifest records the owner's start time when the owner is this process.
+ * takeover is audited. The manifest records this host (hostname, and machine id when readable) and the owner's
+ * start time when the owner is this process.
  */
 export async function acquireIntegrationLock(
 	paths: SyncStorePaths,
-	owner: Omit<IntegrationLockOwner, "acquiredAt" | "token" | "startTime">,
+	owner: Omit<IntegrationLockOwner, "acquiredAt" | "token" | "startTime" | "hostname" | "machineId">,
 	deps: IntegrationLockDeps = {},
 ): Promise<IntegrationLockAcquisition> {
 	return withFileLock(paths.lockGuardFile, async () => {
@@ -317,8 +325,11 @@ export async function acquireIntegrationLock(
 			if (await tryMkdirLock(paths)) {
 				const token = randomUUID();
 				const startTime = ownerStartTimeFor(owner.pid);
+				const host = readHostIdentity();
 				const manifest: IntegrationLockOwner = {
 					...owner,
+					hostname: host.hostname,
+					...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
 					...(startTime !== undefined ? { startTime } : {}),
 					token,
 					acquiredAt: now(),
