@@ -322,10 +322,8 @@ export class SignalLifecycle {
 				killTrackedDetachedChildren();
 			} catch {}
 			const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-			const recordPath = this.io.writeCrashRecord("uncaughtException during shutdown; exit 1", detail);
-			this.io.stderr(
-				`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}\n(record: ${recordPath})`)}\n`,
-			);
+			this.io.writeCrashRecord("uncaughtException during shutdown; exit 1", detail);
+			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
 			this.io.exit(1);
 			// An injected exit returns: the crash must not fall through to the non-shutdown path below.
 			return;

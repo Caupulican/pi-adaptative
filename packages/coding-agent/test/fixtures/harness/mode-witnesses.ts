@@ -282,6 +282,7 @@ function createGuardHost(options: GuardHostOptions): GuardHost {
 				stderr.push(text);
 			},
 			stdout: () => {},
+			writeCrashRecord: () => "",
 			prependListener: install,
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
 		},
@@ -562,6 +563,7 @@ async function createInteractiveHarness(
 			stdout: (text) => {
 				stdout.push(text);
 			},
+			writeCrashRecord: () => "",
 			prependListener: install,
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
 		},
