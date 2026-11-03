@@ -4,7 +4,7 @@
  * onto a cell canvas with box-drawing glyphs. Edges are routed from the placed rectangles, clicks are
  * answered from the canvas's hit map (per node, not per row), and the only motion is a pair of springs
  * that carry a focus bar from the node the loop left to the node it entered. Every frame is a pure
- * function of (model, width, the spring table the pane owns).
+ * function of (model, width, the spring table the pane owns and the monotonic clock it is stepped on).
  */
 
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
@@ -250,6 +250,11 @@ function cardSpec(card: Card, alone: boolean, avail: number): BoxSpec {
 export interface DecisionSceneOptions {
 	/** False under reduced motion: springs jump to their target instead of travelling. */
 	readonly motion: boolean;
+	/**
+	 * The monotonic clock (milliseconds) the focus bar's springs step on. Never the model's wall clock: the spring table
+	 * requires a clock that does not go backwards, and the wall clock steps backwards when the host adjusts the time.
+	 */
+	readonly motionClockMs: number;
 }
 
 /** Siblings that do not fit side by side stack as a level each, so labels stay readable and no edge breaks. */
@@ -415,7 +420,7 @@ export function renderDecisionScene(
 		springs.delete("focusTop");
 		springs.delete("focusBottom");
 	}
-	springs.step(model.nowMs);
+	springs.step(options.motionClockMs);
 	const top = springs.value("focusTop");
 	const bottom = springs.value("focusBottom");
 	if (top !== undefined && bottom !== undefined) {

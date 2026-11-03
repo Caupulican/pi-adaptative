@@ -105,7 +105,10 @@ export class SpringTable {
 		this.entries.set(id, { state: { ...existing.state, target }, config });
 	}
 
-	/** Advances every spring by the time since the previous call; the first call only records the clock. */
+	/**
+	 * Advances every spring by the time since the previous call; the first call only records the clock. `nowMs` is a
+	 * monotonic clock (`performance.now()`), never the wall clock, which steps backwards when the host adjusts the time.
+	 */
 	step(nowMs: number): void {
 		assertFinite("clock", nowMs);
 		const last = this.lastStepMs;

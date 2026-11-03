@@ -110,7 +110,7 @@ export class DecisionGraphPane extends WorkbenchPane {
 				? renderDecisionList(model, inner, this.selectedStage)
 				: view === "lanes"
 					? renderFlowLanes(model.flow, inner, model.nowMs, motion)
-					: renderDecisionScene(model, inner, this.springs, { motion });
+					: renderDecisionScene(model, inner, this.springs, { motion, motionClockMs: performance.now() });
 		this.stageAt = composed.stageAt;
 		this.stageAtCell = composed.stageAtCell;
 		this.motion = composed.motionUntil;

@@ -6380,6 +6380,7 @@ export async function runSignalShutdown(script: {
 			stdout: (text) => {
 				stdout.push(text);
 			},
+			writeCrashRecord: () => "",
 		},
 	);
 	await lifecycle.shutdown({ fromSignal: script.fromSignal });

@@ -300,16 +300,18 @@ export class InteractiveLayout {
 		this.workbenchController?.resetSystemOneEvidence();
 	}
 
-	/** Records the session's System One evaluations into the views, then settles them against the objective and goal. */
+	/** Settles the views against the session's objective, records its System One evaluations into them, then settles the goal. */
 	private restoreSemanticViews(): void {
 		if (!this.workbenchController) return;
 		const session = this.port.getSession();
+		// Settled here rather than on a frame's first compose, so it holds before any frame and with the graph hidden. The objective
+		// goes first: a rebind to a session with another objective clears the views, and that clear must not wipe what is restored below.
+		this.observeObjective(session.operatorProjection.getProjection().objective_id);
 		for (const record of session.getSemanticEvaluations()) {
 			this.workbenchController.recordSystemOneEvaluation(record);
 			this.flowTrace.observeEvaluation(record);
 		}
-		// Settled here rather than on a frame's first compose, so it holds before any frame and with the graph hidden.
-		this.observeObjective(session.operatorProjection.getProjection().objective_id);
+		// After the restore: a completed goal's once-per-goal clear must land after its restored evaluations, not before them.
 		this.settleCompletedGoal();
 	}
 
