@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added Antigravity stream continuation with bounded checkpoint recovery and cumulative token usage across resumed requests.
+
+### Fixed
+
+- Antigravity recovery honors caller retry limits, preserves initial authentication recovery, and refuses to replay output beyond the latest checkpoint.
+- Anthropic account usage omits quota windows with explicitly unknown utilization while retaining valid numeric windows.
+
 ## [0.104.26] - 2026-11-01
 
 ### Changed

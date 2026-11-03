@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Antigravity responses follow service continuation checkpoints, retaining cumulative token usage and caller retry controls.
+
+### Fixed
+
+- Claude usage remains available when an account quota window reports unknown utilization.
+
 ## [0.104.26] - 2026-11-01
 
 ### Added
