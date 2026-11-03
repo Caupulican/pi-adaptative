@@ -3299,6 +3299,8 @@ export class SettingsManager {
 				0.7,
 			),
 			previews: sanitizeIntegerSetting(stored.previews, DEFAULT_WORKBENCH_SETTINGS.previews, 4, 200),
+			// The left pane has its own flag: a stored `graph: "hidden"` hides only the graph, never the Chats list.
+			leftPane: stored.leftPane === "hidden" ? "hidden" : DEFAULT_WORKBENCH_SETTINGS.leftPane,
 			graph: stored.graph === "hidden" ? "hidden" : DEFAULT_WORKBENCH_SETTINGS.graph,
 			graphFraction: sanitizeNumberSetting(
 				stored.graphFraction,

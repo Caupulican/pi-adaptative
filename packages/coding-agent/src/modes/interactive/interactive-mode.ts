@@ -663,6 +663,7 @@ export class InteractiveMode {
 					teams: this.session.listPersistentTeams(),
 				};
 			},
+			getPersistentBots: () => this.chatBots(),
 			onSelectChatTarget: (target) => {
 				void this.botTeamChat.switchTarget(target);
 			},

@@ -196,7 +196,7 @@ export const KEYBINDINGS = {
 	},
 	"app.graph.toggle": {
 		defaultKeys: "alt+g",
-		description: "Hide or show the Decision graph beside the conversation",
+		description: "Hide or show the left pane (Decision graph or Chats list) beside the conversation",
 	},
 	"app.graph.view": {
 		defaultKeys: "alt+l",

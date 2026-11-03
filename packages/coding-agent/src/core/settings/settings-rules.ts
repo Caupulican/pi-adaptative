@@ -391,6 +391,7 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	layout: "stacked",
 	conversationFraction: 0.5,
 	previews: 24,
+	leftPane: "shown",
 	graph: "shown",
 	graphFraction: DEFAULT_GRAPH_FRACTION,
 	graphView: "diagram",

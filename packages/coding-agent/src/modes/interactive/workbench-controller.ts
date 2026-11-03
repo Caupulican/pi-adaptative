@@ -8,7 +8,7 @@ import {
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
 import type { TaskExecutionMetrics } from "../../core/cost/cost-summary.ts";
-import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
+import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
@@ -37,6 +37,7 @@ import { type DecisionGraphModel, workerRouteText } from "./components/decision-
 import { SYSTEM_ONE_TONE } from "./components/decision-graph-render.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
+	botStateGlyph,
 	CHECKS_SECTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
@@ -92,11 +93,27 @@ interface WorkbenchPorts {
 	/** Resumes the chat the operator clicked on the Chats & Teams roster (the left pane). */
 	onSelectChatTarget?: (target: ActiveChatTarget) => void;
 	/** Persistent teams listed under the inspector's Teams group. */
-	persistentTeams?: () => readonly {
-		readonly teamId: string;
-		readonly name: string;
-		readonly memberAgentIds: readonly string[];
-	}[];
+	persistentTeams?: () => readonly WorkbenchPersistentTeam[];
+	/** Persistent bots listed under the inspector's Bots group: the same list the Chats roster draws. */
+	persistentBots?: () => readonly PersistentBotView[];
+}
+
+/** What the Team section lists of a persistent team. */
+export interface WorkbenchPersistentTeam {
+	readonly teamId: string;
+	readonly name: string;
+	readonly memberAgentIds: readonly string[];
+}
+
+/** The live sources behind the inspector's sections, each read at render time. */
+export interface WorkbenchSectionSources {
+	/** Who decides and who executes; absent, the Team lists its members without the hierarchy. */
+	team?: () => WorkbenchTeamFacts;
+	/** Whether the Decision graph is drawn: it carries the Decider and Brain, so the Team then lists members only. */
+	graphShown?: () => boolean;
+	persistentTeams?: () => readonly WorkbenchPersistentTeam[];
+	persistentBots?: () => readonly PersistentBotView[];
+	taskMetrics?: () => TaskExecutionMetrics | undefined;
 }
 
 /** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
@@ -453,18 +470,22 @@ export class WorkbenchController {
 
 	refresh(snapshot: AgentsOverlaySnapshot): void {
 		this.snapshot = snapshot;
-		this.view.setInspector(
-			buildWorkbenchSections(
-				snapshot,
-				Date.now(),
-				this.ports.team,
-				() => this.view.graphShown,
-				this.ports.persistentTeams,
-				this.ports.taskMetrics,
-			),
-		);
+		this.publishSections(snapshot);
 		this.workTitle = workTitle(snapshot.items);
 		this.publishHeadline();
+	}
+
+	/** The inspector's sections from one snapshot and the live sources; every writer goes through here. */
+	private publishSections(snapshot: AgentsOverlaySnapshot): void {
+		this.view.setInspector(
+			buildWorkbenchSections(snapshot, Date.now(), {
+				team: this.ports.team,
+				graphShown: () => this.view.graphShown,
+				persistentTeams: this.ports.persistentTeams,
+				persistentBots: this.ports.persistentBots,
+				taskMetrics: this.ports.taskMetrics,
+			}),
+		);
 	}
 
 	invalidate(): void {
@@ -504,7 +525,7 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.execution.pageDown")) this.view.pageExecution(1);
 		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
 		else if (keys.matches(data, "app.workbench.layout")) this.changeGeometry(() => this.view.toggleLayout());
-		else if (keys.matches(data, "app.graph.toggle")) this.changeGeometry(() => this.view.toggleGraph());
+		else if (keys.matches(data, "app.graph.toggle")) this.changeGeometry(() => this.view.toggleLeftPane());
 		else if (keys.matches(data, "app.graph.view")) this.changeGeometry(() => this.view.cycleGraphView());
 		else if (keys.matches(data, "app.graph.follow")) this.changeGeometry(() => this.view.followCurrentGraph());
 		else if (keys.matches(data, "app.execution.maximize"))
@@ -560,7 +581,7 @@ export class WorkbenchController {
 				const headerAction = this.view.headerAction(column);
 				if (headerAction === "latest") conversation.latest();
 				else if (headerAction === "layout") this.changeGeometry(() => this.view.toggleLayout());
-				else if (headerAction === "showGraph") this.changeGeometry(() => this.view.toggleGraph());
+				else if (headerAction === "showLeftPane") this.changeGeometry(() => this.view.showLeftPane());
 				else if (headerAction === "switchChat") this.ports.onSwitchChat?.();
 			} else if (action === "down" && button === "left" && hit === "divider") {
 				this.geometryDrag = {
@@ -598,7 +619,8 @@ export class WorkbenchController {
 				const titleAction = this.view.paneTitleAction(column, row);
 				if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
 				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
-				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
+				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.hideGraph());
+				else if (titleAction === "hideLeftPane") this.changeGeometry(() => this.view.hideLeftPane());
 				else if (titleAction === "toggleLeftPaneMode") this.changeGeometry(() => this.view.toggleLeftPaneMode());
 				else if (titleAction === "switchChat") this.ports.onSwitchChat?.();
 			} else if (action === "down" && button === "left" && hit === "graph") {
@@ -661,18 +683,7 @@ export class WorkbenchController {
 	/** Every operator change to the work area is applied to the view and persisted in one step. */
 	private changeGeometry(mutate: () => void): void {
 		mutate();
-		if (this.snapshot) {
-			this.view.setInspector(
-				buildWorkbenchSections(
-					this.snapshot,
-					Date.now(),
-					this.ports.team,
-					() => this.view.graphShown,
-					this.ports.persistentTeams,
-					this.ports.taskMetrics,
-				),
-			);
-		}
+		if (this.snapshot) this.publishSections(this.snapshot);
 		this.ports.geometry?.save(this.view.geometry());
 	}
 
@@ -789,15 +800,9 @@ export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 export function buildWorkbenchSections(
 	snapshot: AgentsOverlaySnapshot,
 	nowMs: number,
-	team?: () => WorkbenchTeamFacts,
-	graphShown?: () => boolean,
-	persistentTeams?: () => readonly {
-		readonly teamId: string;
-		readonly name: string;
-		readonly memberAgentIds: readonly string[];
-	}[],
-	taskMetrics?: () => TaskExecutionMetrics | undefined,
+	sources: WorkbenchSectionSources = {},
 ): WorkbenchSection[] {
+	const { team, graphShown, persistentTeams, persistentBots, taskMetrics } = sources;
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
 	const planRows = rows.filter((row) => !TEAM_SECTIONS.has(row.section ?? ""));
@@ -867,36 +872,33 @@ export function buildWorkbenchSections(
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
-	// Persistent teams are standing members of the Team: they keep it listed whichever pane the left side shows.
-	const persistent = persistentTeams?.() ?? [];
-	if (teamRows.length || specialists.length || team || persistent.length > 0) {
+	// Persistent teams and bots are standing members of the Team: they keep it listed whichever pane the left side shows.
+	const persistentTeamCount = persistentTeams?.().length ?? 0;
+	const persistentBotCount = persistentBots?.().length ?? 0;
+	const standing = persistentTeamCount + persistentBotCount > 0;
+	if (teamRows.length || specialists.length || team || standing) {
 		const panel = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter(isActiveWorkerLane).length;
-		const executors = `${
-			active ? `${active} active` : `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`
-		}${persistent.length ? ` · ${persistent.length} ${persistent.length === 1 ? "team" : "teams"}` : ""}`;
+		const executors = [
+			active ? `${active} active` : `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`,
+			...(persistentTeamCount ? [`${persistentTeamCount} ${persistentTeamCount === 1 ? "team" : "teams"}`] : []),
+			...(persistentBotCount ? [`${persistentBotCount} ${persistentBotCount === 1 ? "bot" : "bots"}`] : []),
+		].join(" · ");
 		const idle = [
 			`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
 		];
 		const lanePanel = { ...panel, rows: shown.map((row) => ({ ...row, section: undefined })) };
-		if (!team) {
-			sections.push({
-				title: TEAM_SECTION,
-				meta: executors,
-				body: shown.length ? rowsComponent(lanePanel) : idle,
-				quiet: !shown.length && !specialists.length,
-			});
-			return sections;
-		}
 		const executorRows = (width: number): string[] =>
 			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
 		const hasSpecialists = shown.length > 0 || specialists.length > 0;
 		const group = (label: string) => `  ${theme.fg("dim", label)}`;
-		// The standing members: persistent teams (read at render time so a new team shows at once), then the subagents.
+		// The standing members, read at render time so a new team or bot shows at once: persistent teams, the
+		// bots (the same list the Chats roster draws), then the subagents.
 		const memberRows = (width: number): string[] => {
 			const teams = persistentTeams?.() ?? [];
+			const bots = persistentBots?.() ?? [];
 			return [
 				...(teams.length
 					? [
@@ -907,24 +909,34 @@ export function buildWorkbenchSections(
 							),
 						]
 					: []),
+				...(bots.length
+					? [
+							group("Bots"),
+							...bots.map(
+								(bot) =>
+									`  ${botStateGlyph(bot.state)} ${theme.fg("text", bot.displayName || bot.agentId)} ${theme.fg("muted", `${bot.modelId || bot.modelRef} · ${bot.state}`)}`,
+							),
+						]
+					: []),
 				...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
 			];
 		};
-		if (graphShown?.() === true) {
-			if (hasSpecialists || persistent.length > 0) {
-				sections.push({
-					title: TEAM_SECTION,
-					meta: executors,
-					body: {
-						render: (width) => memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
-						invalidate() {},
-					},
-					quiet: !hasSpecialists,
-					standing: persistent.length > 0,
-				});
-			}
+		const membersBody: Component = {
+			render: (width) => memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
+			invalidate() {},
+		};
+		if (!team) {
+			sections.push({
+				title: TEAM_SECTION,
+				meta: executors,
+				body: standing ? membersBody : shown.length ? rowsComponent(lanePanel) : idle,
+				quiet: !shown.length && !specialists.length,
+				standing,
+			});
 			return sections;
 		}
+		// The body asks at render time whether the graph is drawn, so a pane hidden or shown since this build
+		// draws the right rows (members alone beside the graph, the full hierarchy without it).
 		const body: Component = {
 			render: (width) => {
 				if (graphShown?.() === true) {
@@ -943,12 +955,18 @@ export function buildWorkbenchSections(
 			},
 			invalidate() {},
 		};
+		if (graphShown?.() === true) {
+			if (hasSpecialists || standing) {
+				sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists, standing });
+			}
+			return sections;
+		}
 		sections.push({
 			title: TEAM_SECTION,
 			meta: `decider + ${executors}`,
 			body,
 			quiet: !hasSpecialists,
-			standing: persistent.length > 0,
+			standing,
 		});
 	}
 	return sections;

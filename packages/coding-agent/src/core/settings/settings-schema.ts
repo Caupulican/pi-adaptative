@@ -571,7 +571,9 @@ export interface WorkbenchSettings {
 	conversationFraction?: number;
 	/** Previews Execution retains per cycle (4..200); the transcript keeps the complete record. */
 	previews?: number;
-	/** The Decision graph pane beside the conversation: shown, or hidden by the operator. */
+	/** The pane left of the conversation as a whole (the Decision graph or the Chats list): shown, or hidden by the operator. */
+	leftPane?: "shown" | "hidden";
+	/** The Decision graph inside the left pane: shown, or hidden by the operator so the Chats list keeps the pane. */
 	graph?: "shown" | "hidden";
 	/** The graph's share of the conversation zone (0.25..0.5). */
 	graphFraction?: number;

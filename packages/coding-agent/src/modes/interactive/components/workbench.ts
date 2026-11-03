@@ -44,7 +44,7 @@ export interface WorkbenchSection {
 	standing?: boolean;
 }
 
-export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showGraph" | "switchChat";
+export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showLeftPane" | "switchChat";
 
 /** What the left pane shows: the Decision graph, or the Chats & Teams roster. */
 export type WorkbenchLeftPaneMode = "chats" | "graph";
@@ -157,9 +157,26 @@ export interface WorkbenchGeometry {
 	inspectorFraction?: number;
 	layout?: WorkbenchLayout;
 	conversationFraction?: number;
+	leftPane?: "shown" | "hidden";
 	graph?: "shown" | "hidden";
 	graphFraction?: number;
 	graphView?: WorkbenchGraphView;
+}
+
+/** A bot's live state as one toned glyph; the Chats list and the Team section draw the same one. */
+export function botStateGlyph(state: PersistentBotView["state"]): string {
+	return state === "running" || state === "queued"
+		? theme.fg("accent", "●")
+		: state === "awaiting_parent"
+			? theme.fg("warning", "◐")
+			: state === "failed"
+				? theme.fg("error", "✗")
+				: theme.fg("muted", "○");
+}
+
+/** The zone width a left-pane mode needs: its own minimum, the rule and a readable chat beside it. */
+function leftPaneZoneMinimum(mode: WorkbenchLeftPaneMode): number {
+	return (mode === "chats" ? MIN_CHAT_ROSTER_WIDTH : MIN_GRAPH_WIDTH) + 2 + MIN_CHAT_WIDTH;
 }
 
 /** One-cell left gutter; rows that already fit skip the grapheme scan (the width lookup is cached per string). */
@@ -234,8 +251,9 @@ export class WorkbenchComponent extends Container {
 	private graphSource?: () => DecisionGraphModel | undefined;
 	/** This frame's graph model: composed once, and only when the graph is wanted and has something to show. */
 	private frameGraphModel?: DecisionGraphModel;
-	/** This frame's chat roster: composed once per frame when the left pane is shown. */
+	/** This frame's chat roster: composed at most once per frame, and only when the left pane asks for it. */
 	private frameChatRoster?: WorkbenchChatRosterSnapshot;
+	private frameChatRosterComposed = false;
 	/** Told after every frame whether the drawn graph carries a running clock (the lane's ticker). */
 	private graphClock?: (running: boolean) => void;
 	/** The one timer that moves the flow views' carriers; present while the graph has a render trigger. */
@@ -245,6 +263,9 @@ export class WorkbenchComponent extends Container {
 	private zoneWidth = 0;
 	private inspectorFraction = DEFAULT_INSPECTOR_FRACTION;
 	private conversationFraction = DEFAULT_CONVERSATION_FRACTION;
+	/** The operator hid the whole left pane (alt+g, the Chats list's chevron): neither mode draws. */
+	private leftPaneHidden = false;
+	/** The operator hid the Decision graph (its chevron): the Chats list keeps the left pane. */
 	private graphHidden = false;
 	private graphFraction = DEFAULT_GRAPH_FRACTION;
 	private graphView: WorkbenchGraphView = "diagram";
@@ -385,11 +406,7 @@ export class WorkbenchComponent extends Container {
 	get graphShown(): boolean {
 		if (this.graphRuleColumn >= 0) return this.leftPaneKind === "graph";
 		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
-		return (
-			this.frameGraphModel !== undefined &&
-			this.effectiveLeftPaneMode() === "graph" &&
-			this.resolvedGraphWidth(zoneWidth) > 0
-		);
+		return this.effectiveLeftPaneMode(zoneWidth) === "graph";
 	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
 		return this.graphPane.scrollAt(column, row, delta) || this.chatRosterPane.scrollAt(column, row, delta);
@@ -398,9 +415,9 @@ export class WorkbenchComponent extends Container {
 	graphStageAt(column: number, row: number): DecisionStage | undefined {
 		return this.graphPane.stageAtPoint(column, row);
 	}
-	/** The chat target under a pointer on the Chats & Teams roster; undefined while the roster is not the left pane. */
+	/** The chat target under a pointer on the Chats & Teams roster; undefined while the last frame drew no roster. */
 	chatTargetAt(column: number, row: number): ActiveChatTarget | undefined {
-		if (this.effectiveLeftPaneMode() !== "chats") return undefined;
+		if (this.leftPaneKind !== "chats") return undefined;
 		const index = this.chatRosterPane.rowAt(column, row);
 		return index !== undefined ? this.chatTargetsByRow[index] : undefined;
 	}
@@ -451,6 +468,7 @@ export class WorkbenchComponent extends Container {
 			inspectorFraction: this.inspectorFraction,
 			layout: this.columns ? "columns" : "stacked",
 			conversationFraction: this.conversationFraction,
+			leftPane: this.leftPaneHidden ? "hidden" : "shown",
 			graph: this.graphHidden ? "hidden" : "shown",
 			graphFraction: this.graphFraction,
 			graphView: this.graphView,
@@ -464,13 +482,32 @@ export class WorkbenchComponent extends Container {
 		if (geometry.inspectorFraction !== undefined) this.resizeInspector(geometry.inspectorFraction);
 		if (geometry.layout !== undefined) this.columns = geometry.layout === "columns";
 		if (geometry.conversationFraction !== undefined) this.resizeConversation(geometry.conversationFraction);
+		if (geometry.leftPane !== undefined) this.leftPaneHidden = geometry.leftPane === "hidden";
 		if (geometry.graph !== undefined) this.graphHidden = geometry.graph === "hidden";
 		if (geometry.graphFraction !== undefined) this.resizeGraph(geometry.graphFraction);
 		if (geometry.graphView !== undefined) this.graphView = geometry.graphView;
 	}
-	/** Hide or show the Decision graph beside the conversation. */
-	toggleGraph(): void {
-		this.graphHidden = !this.graphHidden;
+	/** Hide the whole left pane, or show it again (alt+g). */
+	toggleLeftPane(): void {
+		if (this.leftPaneHidden) this.showLeftPane();
+		else this.leftPaneHidden = true;
+	}
+	/** Hide the whole left pane: the Chats list's chevron. */
+	hideLeftPane(): void {
+		this.leftPaneHidden = true;
+	}
+	/**
+	 * Show the left pane with what it would draw at the current width; a graph the operator hid returns only when
+	 * nothing else can take the pane, so the way back always opens something.
+	 */
+	showLeftPane(): void {
+		const opens = this.leftPaneToOpen(this.zoneWidth);
+		this.leftPaneHidden = false;
+		if (opens === "graph") this.graphHidden = false;
+	}
+	/** Hide the Decision graph only: the graph's chevron. The Chats list takes the pane where the host offers one. */
+	hideGraph(): void {
+		this.graphHidden = true;
 	}
 	cycleGraphView(): void {
 		// The view list's order, wrapping: List → Diagram → Lanes → List.
@@ -678,16 +715,16 @@ export class WorkbenchComponent extends Container {
 		const convTitle = this.options.conversationTitle?.() || "Conversation";
 		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
 		const headingWidth = visibleWidth(convTitle) + stateText.length;
-		// The chip names the pane a click opens and is offered only where that pane fits beside a readable chat.
-		const opensChats = Boolean(this.options.chatRoster) && (this.leftPaneMode === "chats" || !this.graphSource);
-		const leftPaneMinimum = (opensChats ? MIN_CHAT_ROSTER_WIDTH : MIN_GRAPH_WIDTH) + 2 + MIN_CHAT_WIDTH;
-		const canShowLeftPane =
-			this.graphHidden && (opensChats || Boolean(this.graphSource)) && this.zoneWidth >= leftPaneMinimum;
+		// The way back to a pane the operator hid, offered while the left pane draws nothing; it names what a click opens at this width.
+		const opens =
+			(this.leftPaneHidden || this.graphHidden) && !this.effectiveLeftPaneMode(this.zoneWidth)
+				? this.leftPaneToOpen(this.zoneWidth)
+				: undefined;
 		const switchChatLabel = this.options.switchChatChip?.();
 		// Chips drop from the end on a narrow header; the only way back to a hidden left pane comes first.
 		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
-			...(canShowLeftPane
-				? [{ action: "showGraph" as const, label: opensChats ? "Show chats" : "Show graph" }]
+			...(opens
+				? [{ action: "showLeftPane" as const, label: opens === "chats" ? "Show chats" : "Show graph" }]
 				: []),
 			...(switchChatLabel ? [{ action: "switchChat" as const, label: switchChatLabel }] : []),
 			...(this.columns ? [{ action: "layout" as const, label: "Stacked" }] : []),
@@ -1006,27 +1043,60 @@ export class WorkbenchComponent extends Container {
 	 * A fold never writes the setting; the operator's fraction returns with the width.
 	 */
 	resolvedGraphWidth(zoneWidth: number): number {
-		const mode = this.effectiveLeftPaneMode();
+		const mode = this.effectiveLeftPaneMode(zoneWidth);
 		if (!mode) return 0;
 		const minWidth = mode === "chats" ? MIN_CHAT_ROSTER_WIDTH : MIN_GRAPH_WIDTH;
-		if (zoneWidth < minWidth + 2 + MIN_CHAT_WIDTH) return 0;
 		return Math.max(minWidth, Math.min(zoneWidth - 2 - MIN_CHAT_WIDTH, Math.round(zoneWidth * this.graphFraction)));
 	}
 
-	/**
-	 * What the left pane shows now: the Decision graph or the Chats & Teams roster, or nothing while folded.
-	 * The graph is preferred only when the operator chose it; a missing side falls back to the other.
-	 */
-	private effectiveLeftPaneMode(): WorkbenchLeftPaneMode | undefined {
-		if (this.graphHidden) return undefined;
-		const hasGraph = this.frameGraphModel !== undefined;
-		if (this.leftPaneMode === "graph" && hasGraph) return "graph";
-		const hasChats = (this.frameChatRoster ?? this.options.chatRoster?.()) !== undefined;
-		if (this.leftPaneMode === "graph") {
-			return hasChats ? "chats" : undefined;
+	/** This frame's roster, composed on first use so a frame that draws no roster never asks the host for one. */
+	private chatRosterForFrame(): WorkbenchChatRosterSnapshot | undefined {
+		if (!this.frameChatRosterComposed) {
+			this.frameChatRosterComposed = true;
+			this.frameChatRoster = this.options.chatRoster?.();
 		}
-		if (hasChats) return "chats";
-		return hasGraph ? "graph" : undefined;
+		return this.frameChatRoster;
+	}
+
+	/**
+	 * The one fit rule of the left pane: the operator's mode first, then the other, each only when it has
+	 * something to draw and fits beside a readable chat at `zoneWidth`. A mode that cannot fit falls back to
+	 * the one that can, so a shown pane never draws empty while the other side would fit.
+	 */
+	private resolveLeftPaneMode(
+		zoneWidth: number,
+		hasGraph: () => boolean,
+		hasChats: () => boolean,
+	): WorkbenchLeftPaneMode | undefined {
+		const order: readonly WorkbenchLeftPaneMode[] =
+			this.leftPaneMode === "graph" ? ["graph", "chats"] : ["chats", "graph"];
+		return order.find(
+			(mode) => zoneWidth >= leftPaneZoneMinimum(mode) && (mode === "graph" ? hasGraph() : hasChats()),
+		);
+	}
+
+	/** What the left pane draws now at `zoneWidth`: the Decision graph or the Chats & Teams roster, or nothing. */
+	private effectiveLeftPaneMode(zoneWidth: number): WorkbenchLeftPaneMode | undefined {
+		if (this.leftPaneHidden) return undefined;
+		return this.resolveLeftPaneMode(
+			zoneWidth,
+			() => !this.graphHidden && this.frameGraphModel !== undefined,
+			() => this.chatRosterForFrame() !== undefined,
+		);
+	}
+
+	/**
+	 * What showing the left pane would draw at `zoneWidth`, whatever hides it now. A hidden pane composes no
+	 * graph, so the graph counts when the host has a source; a graph the operator hid counts only when
+	 * nothing else would fit.
+	 */
+	private leftPaneToOpen(zoneWidth: number): WorkbenchLeftPaneMode | undefined {
+		const hasGraph = () => this.graphSource !== undefined;
+		const hasChats = () => this.options.chatRoster !== undefined;
+		return (
+			this.resolveLeftPaneMode(zoneWidth, () => !this.graphHidden && hasGraph(), hasChats) ??
+			this.resolveLeftPaneMode(zoneWidth, hasGraph, () => false)
+		);
 	}
 
 	/** The left pane's mode: the Decision graph or the Chats & Teams roster. */
@@ -1034,10 +1104,12 @@ export class WorkbenchComponent extends Container {
 		return this.leftPaneMode;
 	}
 
-	/** Flip the left pane between Chats and Graph; a folded pane opens, since neither mode draws while folded. */
+	/** Switch the left pane to the side it is not drawing; choosing the graph shows it again if the operator hid it. */
 	toggleLeftPaneMode(): void {
-		this.leftPaneMode = this.leftPaneMode === "chats" ? "graph" : "chats";
-		this.graphHidden = false;
+		const next = (this.leftPaneKind ?? this.leftPaneMode) === "chats" ? "graph" : "chats";
+		this.leftPaneMode = next;
+		if (next === "graph") this.graphHidden = false;
+		this.leftPaneHidden = false;
 		this.invalidate();
 	}
 
@@ -1052,8 +1124,8 @@ export class WorkbenchComponent extends Container {
 		this.zoneWidth = zoneWidth;
 		this.conversationTop = top + 1;
 		this.conversationHeight = height;
+		const mode = this.effectiveLeftPaneMode(zoneWidth);
 		const graphWidth = this.resolvedGraphWidth(zoneWidth);
-		const mode = graphWidth > 0 ? this.effectiveLeftPaneMode() : undefined;
 		const model = mode === "graph" ? this.frameGraphModel : undefined;
 		this.graphClock?.(model?.hasRunningClock === true);
 		if (!mode) {
@@ -1098,7 +1170,7 @@ export class WorkbenchComponent extends Container {
 		} else {
 			this.graphAnimator?.settled();
 			this.graphPane.hide();
-			const roster = this.frameChatRoster ?? this.options.chatRoster?.();
+			const roster = this.chatRosterForFrame();
 			if (roster) {
 				left = this.drawChatRosterPane(roster, originX, top, graphWidth, height + 1);
 			} else {
@@ -1160,14 +1232,7 @@ export class WorkbenchComponent extends Container {
 			const isSelected = active.kind === "bot" && active.agentId === bot.agentId;
 			const target: ActiveChatTarget = { kind: "bot", agentId: bot.agentId };
 			const name = bot.displayName || bot.agentId;
-			const glyph =
-				bot.state === "running" || bot.state === "queued"
-					? theme.fg("accent", "●")
-					: bot.state === "awaiting_parent"
-						? theme.fg("warning", "◐")
-						: bot.state === "failed"
-							? theme.fg("error", "✗")
-							: theme.fg("muted", "○");
+			const glyph = botStateGlyph(bot.state);
 			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
 			add(
@@ -1182,9 +1247,14 @@ export class WorkbenchComponent extends Container {
 		const teams = roster.teams.length;
 		const bots = roster.bots.length;
 		const meta = `${bots} bot${bots === 1 ? "" : "s"}${teams > 0 ? ` · ${teams} team${teams === 1 ? "" : "s"}` : ""}`;
+		// The way to the graph is offered only where the graph fits; a graph the operator hid composes no model this
+		// frame, so its source stands in, and the chip shows it again.
+		const graphReachable =
+			this.zoneWidth >= leftPaneZoneMinimum("graph") &&
+			(this.frameGraphModel !== undefined || (this.graphHidden && this.graphSource !== undefined));
 		const actions: WorkbenchPaneTitleButton[] = [
-			{ action: "hideGraph", label: "▾", leading: true },
-			...(this.frameGraphModel !== undefined
+			{ action: "hideLeftPane", label: "▾", leading: true },
+			...(graphReachable
 				? [
 						{
 							action: "toggleLeftPaneMode" as const,
@@ -1253,6 +1323,7 @@ export class WorkbenchComponent extends Container {
 		this.leftPaneKind = undefined;
 		this.frameGraphModel = undefined;
 		this.frameChatRoster = undefined;
+		this.frameChatRosterComposed = false;
 		this.frameExecutionLines.clear();
 		this.headerButtons = [];
 		const columns = Math.max(1, width);
@@ -1272,19 +1343,12 @@ export class WorkbenchComponent extends Container {
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		// The graph is earned like the work area: wanted (not hidden, wide enough for two panes) and with
-		// something to draw. It is composed once per frame; the inspector and the zone both read it.
-		if (!this.graphHidden && this.graphSource && columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
+		// The graph is earned like the work area: wanted (neither it nor the left pane hidden, wide enough for
+		// two panes) and with something to draw. It is composed once per frame; the inspector and the zone both
+		// read it. The roster is composed on first use by the left pane's fit rule.
+		if (!this.leftPaneHidden && !this.graphHidden && this.graphSource && columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
 			const model = this.graphSource();
 			if (model && graphHasContent(model)) this.frameGraphModel = model;
-		}
-		if (
-			!this.graphHidden &&
-			columns >= SIDE_BY_SIDE_MIN_COLUMNS &&
-			this.options.chatRoster &&
-			(this.leftPaneMode === "chats" || this.frameGraphModel === undefined)
-		) {
-			this.frameChatRoster = this.options.chatRoster();
 		}
 		// Title strip, divider, conversation header, three conversation rows, the live row and the POV
 		// row stay; the editor's rendering already carries its own two rules.

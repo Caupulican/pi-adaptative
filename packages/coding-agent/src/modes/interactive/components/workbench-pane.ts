@@ -54,6 +54,7 @@ export type WorkbenchPaneTitleAction =
 	| "layout"
 	| "graphCycle"
 	| "hideGraph"
+	| "hideLeftPane"
 	| "followCurrent"
 	| "toggleLeftPaneMode"
 	| "switchChat";

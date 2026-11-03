@@ -7,7 +7,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { CacheClock } from "../../core/cache-clock.ts";
 import { onCiStatusChange, readCiStatusView } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
-import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
+import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
 import { GenerationRate } from "../../core/generation-rate.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
@@ -73,6 +73,8 @@ export interface InteractiveLayoutPort {
 	onSwitchChat?: () => void;
 	/** The Chats & Teams roster for the left pane; absent, the pane offers only the Graph. */
 	getChatRoster?: () => WorkbenchChatRosterSnapshot | undefined;
+	/** The persistent bots the roster lists, for the Team section; the roster and the Team read this one list. */
+	getPersistentBots?: () => readonly PersistentBotView[];
 	/** Resumes the chat the operator clicked on the Chats & Teams roster. */
 	onSelectChatTarget?: (target: ActiveChatTarget) => void;
 }
@@ -461,6 +463,7 @@ export class InteractiveLayout {
 			onSwitchChat: () => port.onSwitchChat?.(),
 			onSelectChatTarget: (target) => port.onSelectChatTarget?.(target),
 			persistentTeams: () => port.getSession().listPersistentTeams(),
+			persistentBots: () => port.getPersistentBots?.() ?? [],
 			taskMetrics: () => port.getSession().getTaskAndModelMetrics().currentTask,
 			semanticEvaluations: () => port.getSession().getSemanticEvaluations(),
 			activeForegroundCount: () => {
