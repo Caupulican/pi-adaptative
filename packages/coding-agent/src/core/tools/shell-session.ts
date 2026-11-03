@@ -47,7 +47,11 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STDERR_BARRIER_LABEL,
 } from "../../utils/powershell-session-protocol.ts";
-import { awaitOwnedProcessDescendants, reapOwnedProcessGroup } from "../../utils/process-group-wait.ts";
+import {
+	awaitOwnedProcessDescendants,
+	claimOwnedProcessGroup,
+	reapOwnedProcessGroup,
+} from "../../utils/process-group-wait.ts";
 import {
 	getPowerShellCandidateConfigs,
 	getShellConfig,
@@ -788,7 +792,7 @@ export class PersistentShellSession {
 						if (settled) return;
 						void (async () => {
 							try {
-								if (this.kind !== "powershell") await reapOwnedProcessGroup(child.pid, cwd);
+								if (this.kind !== "powershell") await reapOwnedProcessGroup(child, cwd);
 							} catch (error) {
 								if (!settled) settle(() => reject(error instanceof Error ? error : new Error(String(error))));
 								return;
@@ -1038,14 +1042,17 @@ export class PersistentShellSession {
 		});
 	}
 
+	/** The shell leads the process group it creates; the group is claimed in the spawn's own turn. */
 	private spawnOwnedShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): ChildProcess {
-		return this.spawnProcess(shell, args, {
+		const child = this.spawnProcess(shell, args, {
 			cwd,
 			env,
 			detached: process.platform !== "win32",
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 		});
+		claimOwnedProcessGroup(child);
+		return child;
 	}
 
 	private attachReadyChild(child: ChildProcess): void {

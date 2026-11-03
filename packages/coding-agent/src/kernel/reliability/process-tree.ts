@@ -9,8 +9,9 @@
  * detached: true). Both functions fall back to single-pid signaling otherwise.
  */
 import { type ChildProcess, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readProcessTerminationProtection } from "./process-termination-protection.ts";
+import { parseLinuxProcessStat, readProcessTerminationProtection } from "./process-termination-protection.ts";
 
 const KILL_ACKNOWLEDGEMENT_MS = 1000;
 
@@ -50,6 +51,40 @@ export function probeProcessLiveness(
 }
 
 /**
+ * This process's start time from Linux `/proc/self/stat`, recorded beside its pid so a later reader can
+ * tell the owner from a process that reused the pid. Undefined off Linux or when procfs cannot answer.
+ */
+export function readOwnProcessStartTime(): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		return parseLinuxProcessStat(process.pid, readFileSync("/proc/self/stat", "utf8"))?.startTime;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * {@link probeProcessLiveness} for a recorded owner identity (pid plus {@link readOwnProcessStartTime}).
+ * A pid that answers alive while its Linux start time differs from the recorded one was reissued, so
+ * the recorded owner is dead. Without a recorded start time, or when procfs cannot answer, the plain
+ * pid probe stands: an unreadable identity never proves death.
+ */
+export function probeProcessIdentityLiveness(pid: number, startTime: string | undefined): ProcessLivenessProbe {
+	const liveness = probeProcessLiveness(pid);
+	if (liveness !== "alive" || startTime === undefined || process.platform !== "linux") return liveness;
+	let text: string;
+	try {
+		text = readFileSync(`/proc/${pid}/stat`, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code === "ENOENT" || code === "ESRCH" ? "dead" : liveness;
+	}
+	const observed = parseLinuxProcessStat(pid, text)?.startTime;
+	if (observed !== undefined && observed !== startTime) return "dead";
+	return liveness;
+}
+
+/**
  * Conservative boolean view of {@link probeProcessLiveness}.
  *
  * BOUND: `false` means ESRCH — proven absence. `true` means "not proven absent", which covers both a
@@ -81,7 +116,7 @@ function classifySignalError(error: unknown): "gone" | "failed" {
 export type OwnedProcessHandle = Pick<ChildProcess, "pid" | "exitCode" | "signalCode">;
 
 /** Never turn a malformed PID into POSIX group/broadcast semantics or kill our own host. */
-function isInvalidTerminationPid(pid: number, onDiagnostic?: (message: string) => void): boolean {
+export function isInvalidTerminationPid(pid: number, onDiagnostic?: (message: string) => void): boolean {
 	if (!isPositiveSafePid(pid) || pid > 2_147_483_647) {
 		onDiagnostic?.(`Process target ${pid} is not a valid termination PID`);
 		return true;

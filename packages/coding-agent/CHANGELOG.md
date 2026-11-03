@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- The persistent bot daemon, capability proofs and CI status reconcile no longer start a second pi session when run from the compiled binary; the bot daemon is a `pi --bot-daemon` command with a token-keyed lease, and stopping it no longer signals a pid read from a file.
+- Process-group kills require proof that the group was created by this process, and reissued pids are detected by start time; dead work-run lease markers are reclaimed on the next acquisition.
+- The left pane's visibility is saved separately (`workbench.leftPane`) from the Decision graph's (`workbench.graph`): hiding the graph no longer hides the Chats list, `alt+g` hides or shows the whole pane, and graph mode below 110 columns falls back to the Chats list. Persistent bots are listed in the Team section.
 - A crash or fatal runtime error is recorded under `state/crashes` and printed after the terminal is restored, instead of being erased with the alternate screen; the runtime supervisor reports a signal-killed or non-zero runtime exit instead of exiting silently.
 - The Chats list can be reopened from the graph pane, persistent teams show beside the graph, and the show-chats control is no longer dropped from narrow headers.
 

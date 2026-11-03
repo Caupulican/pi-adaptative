@@ -71,17 +71,41 @@ export function collectProtectedProcessIds(
 	return refuseProtection(`Process ancestry exceeded ${MAX_ANCESTORS} generations`, onDiagnostic);
 }
 
-/** comm may contain spaces and closing parentheses; numeric stat fields begin after the last ')'. */
-function readLinuxParent(pid: number): ProcessParentRecord | undefined {
-	const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+/** The identity-bearing fields of one Linux `/proc/<pid>/stat` record. */
+export interface LinuxProcessStat {
+	pid: number;
+	parentPid: number;
+	groupId: number;
+	sessionId: number;
+	/** Clock ticks since boot at which the process started. With the pid it identifies one process. */
+	startTime: string;
+}
+
+/**
+ * The single `/proc/<pid>/stat` parser. comm may contain spaces and closing parentheses; numeric stat
+ * fields begin after the last ')'. A record that is not this pid's, or is malformed, is undefined.
+ */
+export function parseLinuxProcessStat(pid: number, stat: string): LinuxProcessStat | undefined {
 	if (stat.length > 16384 || !stat.startsWith(`${pid} (`)) return undefined;
 	const fields = stat
 		.slice(stat.lastIndexOf(")") + 1)
 		.trim()
 		.split(/\s+/);
-	if (!/^[A-Za-z]$/.test(fields[0] ?? "") || !/^\d+$/.test(fields[1] ?? "") || !/^\d+$/.test(fields[2] ?? ""))
-		return undefined;
-	return { pid, parentPid: Number(fields[1]), groupId: Number(fields[2]) };
+	if (!/^[A-Za-z]$/.test(fields[0] ?? "")) return undefined;
+	const [parentPid, groupId, sessionId, startTime] = [fields[1], fields[2], fields[3], fields[19]];
+	if (![parentPid, groupId, sessionId, startTime].every((value) => /^\d+$/.test(value ?? ""))) return undefined;
+	return {
+		pid,
+		parentPid: Number(parentPid),
+		groupId: Number(groupId),
+		sessionId: Number(sessionId),
+		startTime: startTime as string,
+	};
+}
+
+function readLinuxParent(pid: number): ProcessParentRecord | undefined {
+	const stat = parseLinuxProcessStat(pid, readFileSync(`/proc/${pid}/stat`, "utf8"));
+	return stat && { pid, parentPid: stat.parentPid, groupId: stat.groupId };
 }
 
 function readProcessTable(

@@ -18,7 +18,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomicSync } from "../core/util/atomic-file.ts";
-import { probeProcessLiveness } from "../kernel/reliability/process-tree.ts";
+import { probeProcessIdentityLiveness, readOwnProcessStartTime } from "../kernel/reliability/process-tree.ts";
 
 export const PI_WORK_ROOT_ENV = "PI_WORK_ROOT";
 export const WORK_RUN_MANIFEST_FILE = ".pi-work-run.json";
@@ -57,6 +57,8 @@ interface WorkMarker {
 	version: 1;
 	hostname: string;
 	pid: number;
+	/** The owner's process start time (Linux), so a process that reused the pid is not mistaken for it. */
+	startTime?: string;
 	createdAt: number;
 }
 
@@ -309,6 +311,7 @@ function isMarker(value: unknown): value is WorkMarker {
 		typeof marker.pid === "number" &&
 		Number.isSafeInteger(marker.pid) &&
 		marker.pid > 0 &&
+		(marker.startTime === undefined || (typeof marker.startTime === "string" && /^\d+$/.test(marker.startTime))) &&
 		typeof marker.createdAt === "number" &&
 		Number.isFinite(marker.createdAt)
 	);
@@ -319,12 +322,18 @@ function markerState(path: string): "active" | "stale" | "unknown" {
 		const value = readSmallJson(path);
 		if (!isMarker(value)) return "unknown";
 		if (value.hostname !== hostname()) return "active";
-		// The canonical liveness owner: only a proven absence (ESRCH) is stale; a probe that could not tell stays unknown and fail-closed.
-		const liveness = probeProcessLiveness(value.pid);
+		// The canonical liveness owner: only a proven absence (ESRCH, or the pid now names a process with another start time) is
+		// stale; a probe that could not tell stays unknown and fail-closed.
+		const liveness = probeProcessIdentityLiveness(value.pid, value.startTime);
 		return liveness === "alive" ? "active" : liveness === "dead" ? "stale" : "unknown";
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
 	}
+}
+
+function ownMarker(now: number): WorkMarker {
+	const startTime = readOwnProcessStartTime();
+	return { version: 1, hostname: hostname(), pid: process.pid, ...(startTime ? { startTime } : {}), createdAt: now };
 }
 
 function removeFile(path: string): void {
@@ -371,6 +380,29 @@ function hasActiveLease(runDir: string): boolean {
 		rmdirSync(leasesDir);
 	} catch {}
 	return false;
+}
+
+/**
+ * A crashed owner never releases its marker. A run with a fixed id stays in use, so retention never selects it and
+ * {@link hasActiveLease} never inspects it; each acquisition therefore reclaims the run's proven-dead markers itself. One
+ * acquisition inspects at most {@link MAX_LEASE_MARKERS} entries, so a backlog drains over successive acquisitions. Live,
+ * foreign-host and unreadable markers stay. The handle is closed before any removal.
+ */
+function reclaimDeadLeaseMarkers(leasesDir: string, ownMarkerName: string): void {
+	const stale: string[] = [];
+	const handle = opendirSync(leasesDir);
+	try {
+		for (let scanned = 0; scanned < MAX_LEASE_MARKERS; scanned++) {
+			const entry = handle.readSync();
+			if (!entry) break;
+			if (entry.name === ownMarkerName || !entry.isFile()) continue;
+			const markerPath = join(leasesDir, entry.name);
+			if (markerState(markerPath) === "stale") stale.push(markerPath);
+		}
+	} finally {
+		handle.closeSync();
+	}
+	for (const markerPath of stale) removeFile(markerPath);
 }
 
 /**
@@ -442,7 +474,7 @@ function inspectRun(
 
 function createCleanupMarker(runDir: string, now: number): string | undefined {
 	const path = join(runDir, CLEANUP_MARKER_FILE);
-	const marker: WorkMarker = { version: 1, hostname: hostname(), pid: process.pid, createdAt: now };
+	const marker = ownMarker(now);
 	try {
 		writeFileSync(path, JSON.stringify(marker), { encoding: "utf8", flag: "wx" });
 		return path;
@@ -760,8 +792,7 @@ function leaseWorkRun(options: AcquireWorkRunOptions, existingOnly: boolean): Wo
 	const leasesDir = join(runDir, LEASES_DIRECTORY);
 	ensureDirectory(leasesDir);
 	const markerPath = join(leasesDir, `active-${process.pid}-${randomUUID()}.json`);
-	const marker: WorkMarker = { version: 1, hostname: hostname(), pid: process.pid, createdAt: now };
-	const markerText = JSON.stringify(marker);
+	const markerText = JSON.stringify(ownMarker(now));
 	writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx" });
 	try {
 		if (cleanupMarkerBlocksAcquisition(runDir)) {
@@ -777,6 +808,7 @@ function leaseWorkRun(options: AcquireWorkRunOptions, existingOnly: boolean): Wo
 		if (readSmallMetadata(markerPath) !== markerText) {
 			throw new Error(`Work run lease changed while it was being acquired: ${runDir}`);
 		}
+		reclaimDeadLeaseMarkers(leasesDir, basename(markerPath));
 		try {
 			utimesSync(runDir, new Date(now), new Date(now));
 		} catch {}
