@@ -66,18 +66,16 @@ export function projectWorkerAttemptLaneRecord(
 	if (!task || !attempt) return undefined;
 	const taskId = attempt.taskId;
 	const managed = isManagedWorkerAttempt(attempt);
+	// Queued turns already carry their logical agent identity before acquiring a lease.
+	const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
 	// Retire keeps the binding, the transcript, and this record. The binding status lets the Team
 	// blocks tell a retained session from a retired one without dropping the lane for status, review,
 	// worker evidence, or recovery, which all resolve lanes through this projection.
 	// An in-process worker's lifetime is its durable agent binding. A managed lane has no such
 	// binding -- the host never launches or resumes that process -- so its lifetime is the one the
 	// lane's owner observed and recorded on this exact dispatch generation.
-	const agentStatus =
-		attempt.managedLifetime === "retired"
-			? "retired"
-			: attempt.agentId
-				? snapshot.agents[attempt.agentId]?.status
-				: undefined;
+	const agent = !managed && agentId ? snapshot.agents[agentId] : undefined;
+	const agentStatus = attempt.managedLifetime === "retired" ? "retired" : agent?.status;
 	const objective = snapshot.objectives[task.task.objectiveId];
 	const verification = attemptVerification(snapshot, attempt);
 	const awaitingVerification = attemptAwaitsVerification(snapshot, attempt);
@@ -107,10 +105,6 @@ export function projectWorkerAttemptLaneRecord(
 	const goalId = objective?.objective.objectiveId.startsWith("goal:")
 		? objective.objective.objectiveId.slice("goal:".length)
 		: undefined;
-	// The durable identity that owns this lane: bound by the lease while an attempt runs, and carried
-	// on the dispatch for a queued turn that no process has taken yet. Without it every consumer
-	// counts tasks where it means specialists.
-	const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
 	// A terminal result seals execution, not subsequent received billing. Legacy managed results
 	// have no generation accounting and retain their reported cost.
 	const costUsd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd;

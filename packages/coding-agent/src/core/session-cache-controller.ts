@@ -493,8 +493,8 @@ export class SessionCacheController {
 				instructions: minionInstructions(question),
 				authority: { readOnly: true },
 				forkTurns: "none",
-				// Each question is its own brief: minions never share one specialist's context.
-				parallelWork: { independentOf: [], justification: "one atomic gathering question per read-only minion" },
+				// Ordinary admission reuses a compatible idle specialist; each question is a new task,
+				// not authorization to allocate an independent copy of its retained session.
 			});
 			if (!run.started || !run.outcome)
 				return { question, accepted: false, reason: run.skipReason ?? "not started" };

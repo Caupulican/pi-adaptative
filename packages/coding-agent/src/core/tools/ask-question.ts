@@ -111,8 +111,6 @@ const askQuestionSchema = Type.Object(
 
 const ANSWER_PREVIEW_CHARS = 240;
 const ANSWER_EDITOR_VIEWPORT_LINES = 8;
-/** Up to this many options render as one chip row when the width holds it; more become a numbered list. */
-const MAX_CHIP_OPTIONS = 3;
 
 export type AskQuestionToolInput = Static<typeof askQuestionSchema>;
 export type AskQuestion = HumanInputQuestion;
@@ -598,9 +596,10 @@ export class AskQuestionDialog implements Component {
 	}
 
 	private addWrapped(lines: string[], text: string, width: number, indent = ""): void {
-		const contentWidth = Math.max(1, width - visibleWidth(indent));
+		const safeIndent = truncateToWidth(indent, Math.max(0, width - 1), "");
+		const contentWidth = Math.max(1, width - visibleWidth(safeIndent));
 		for (const line of wrapTextWithAnsi(text, contentWidth)) {
-			lines.push(truncateToWidth(`${indent}${line}`, width, ""));
+			lines.push(truncateToWidth(`${safeIndent}${line}`, width, ""));
 		}
 	}
 
@@ -651,28 +650,16 @@ export class AskQuestionDialog implements Component {
 			{ text: otherText, active: otherActive, tone: "muted" as const, description: "" },
 			{ text: skipText, active: skipActive, tone: "dim" as const, description: "" },
 		];
-		// Few options ride one chip row, the active option's description beneath it; more, or a row the
-		// width cannot hold, become a numbered list so every option stays readable.
-		const chipRow = choices.map((choice) => chip(choice.text, choice.active, choice.tone));
-		const chipWidth =
-			choices.reduce((sum, choice) => sum + visibleWidth(choice.text) + 2, 0) + (choices.length - 1) * 2;
-		if (question.options.length <= MAX_CHIP_OPTIONS && chipWidth <= width) {
-			this.activeLine = lines.length;
-			lines.push(chipRow.join("  "));
-			const active = choices.find((choice) => choice.active);
-			if (active?.description) this.addWrapped(lines, this.theme.fg("muted", active.description), width, "    ");
-		} else {
-			choices.forEach((choice, index) => {
-				const numbered =
-					index < question.options.length
-						? choice.text.replace(/^(. .) /, `$1 ${String(index + 1).padStart(2)}. `)
-						: choice.text.replace(/^(. .) /, "$1     ");
-				if (choice.active) this.activeLine = lines.length;
-				lines.push(truncateToWidth(chip(numbered, choice.active, choice.tone), width, ""));
-				if (choice.description)
-					this.addWrapped(lines, this.theme.fg("muted", choice.description), width, "        ");
-			});
-		}
+		// Every option keeps its own row and description, even when all labels would fit inline.
+		choices.forEach((choice, index) => {
+			const numbered =
+				index < question.options.length
+					? choice.text.replace(/^(. .) /, `$1 ${String(index + 1).padStart(2)}. `)
+					: choice.text.replace(/^(. .) /, "$1     ");
+			if (choice.active) this.activeLine = lines.length;
+			this.addWrapped(lines, chip(numbered, choice.active, choice.tone), width);
+			if (choice.description) this.addWrapped(lines, this.theme.fg("muted", choice.description), width, "        ");
+		});
 
 		if (this.input) {
 			lines.push("");

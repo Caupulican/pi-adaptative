@@ -51,6 +51,16 @@ Workers send findings and questions to their parent; the independent advisor ser
 
 ## History and lifecycle
 
+A new task does not require a new worker session. Automatic evidence gathering runs one question
+at a time through ordinary worker admission, which reuses a compatible idle specialist. It does
+not request an independent parallel copy. Busy, unreadable, or ambiguous contexts remain subject
+to admission checks; the gatherer does not bypass them by creating another session.
+
+The Workplan pane groups worker tasks by their agent identity. A terminal native task that never
+acquired an agent binding is not a retained session. Retiring a worker removes it from retained
+session counts but preserves its task records and transcript. A bot's later messages reuse its
+existing direct or group runtime; different groups remain separate conversations.
+
 Group replies and automatic memory updates belong only to their originating group. Group prompts
 exclude direct-chat summaries, the shared bot blackboard and other groups' history. Older unscoped
 history remains available for root inspection and is not automatically imported into new group

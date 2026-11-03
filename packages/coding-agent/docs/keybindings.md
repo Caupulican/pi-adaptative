@@ -93,7 +93,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 
 ### Native Questions
 
-These actions apply while the built-in `ask_question` interaction has focus. The dialog also uses the configurable `tui.select.*` and `tui.input.*` actions above, plus `app.clipboard.pasteImage` while entering a custom **Other** answer.
+These actions apply while the built-in `ask_question` interaction has focus. Each option appears as a separate numbered item with its description below it. Long labels and descriptions wrap to the available width. The dialog also uses the configurable `tui.select.*` and `tui.input.*` actions above, plus `app.clipboard.pasteImage` while entering a custom **Other** answer.
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|

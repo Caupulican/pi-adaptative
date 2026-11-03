@@ -41,12 +41,14 @@ export interface MinionReport {
 	readonly reason?: string;
 }
 
-/** Run one minion per question, all at once; the worker admission bounds how many run concurrently. */
+/** Run one brief at a time so ordinary admission can reuse the same compatible idle specialist. */
 export async function gatherWithMinions(
 	questions: readonly string[],
 	run: (question: string) => Promise<MinionReport>,
 ): Promise<MinionReport[]> {
-	return Promise.all(questions.map((question) => run(question)));
+	const reports: MinionReport[] = [];
+	for (const question of questions) reports.push(await run(question));
+	return reports;
 }
 
 /**

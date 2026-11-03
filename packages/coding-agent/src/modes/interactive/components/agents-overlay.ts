@@ -120,9 +120,11 @@ export function isActiveWorkerLane(record: LaneRecord): boolean {
 }
 const ACTIVE_BACKGROUND_TOOL_STATUSES = new Set<ActivityLaneItem["status"]>(["active", "waiting"]);
 
-/** A worker lane whose logical agent still holds a session; `delegate retire` ends the session but keeps the record. */
+/** Keep active admissions and retained sessions, not terminal native lanes that never acquired a binding. */
 export function isRetainedWorkerLane(record: LaneRecord): boolean {
-	return (record.type === "worker" || record.type === "tmux-worker") && record.agentStatus !== "retired";
+	if (record.agentStatus === "retired") return false;
+	if (record.type === "tmux-worker") return true;
+	return record.type === "worker" && (isActiveWorkerLane(record) || record.agentStatus !== undefined);
 }
 
 /** One retained specialist and the single lane it is working on right now, if any. */
