@@ -430,6 +430,7 @@ async function reconcileAndRunOrphanScan(
 	if (signal.aborted) return [];
 	const reconciled = reconcileMatrix(entries, {
 		observeProcess: (pid) => (pid === process.pid ? "alive" : config.observeProcess(pid)),
+		hostname: osHostname(),
 		now: now(),
 		resumableTtlMs: PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	});
@@ -523,6 +524,7 @@ async function runOrphanScan(
 ): Promise<ProcessMatrixEntry[]> {
 	const orphans = detectOrphanedWorkers(entries, {
 		observeProcess: config.observeProcess,
+		hostname: osHostname(),
 		ownSessionId: config.agent.resumeContext.sessionId,
 	});
 	const awaitingOwner: ProcessMatrixEntry[] = [];
@@ -1278,6 +1280,12 @@ async function startWorkerBranch(
 			return;
 		}
 		attachPresence();
+		// Reconciliation ages out an entry whose pid it cannot judge (another host, an inconclusive probe)
+		// by this timestamp, so a supervised worker keeps it fresh on the master's heartbeat cadence. The
+		// write goes through the same generation-fenced gate as every other transition of this entry.
+		if (owned && now() - Date.parse(owned.heartbeatAt) >= config.settings.heartbeatMs) {
+			await persist(owned, applyHeartbeat(owned, nowIso(now)), "failed to write worker heartbeat");
+		}
 	};
 
 	const enterWindDown = async (cause: ParentLossCode): Promise<void> => {

@@ -12,15 +12,22 @@
  * Writes are tmp+rename atomic (`util/atomic-file.ts`); the audit log uses the shared bounded JSONL
  * sink, which serializes concurrent writers and atomically rotates to its newest low-water tail.
  * The integration lock is a mkdir-atomic directory with an owner manifest: mkdir either succeeds
- * (lock acquired) or fails EEXIST (held), with takeover ONLY for a provably-dead same-host owner.
+ * (lock acquired) or fails EEXIST (held), with takeover ONLY for a provably-dead same-host owner
+ * ({@link isRecordedOwnerAlive}: ESRCH or a reissued pid, never an unclassified probe failure).
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsPromises, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import {
+	isPositiveSafePid,
+	probeProcessIdentityLiveness,
+	readOwnProcessStartTime,
+} from "../../kernel/reliability/process-tree.ts";
 import { type AtomicFileWriteOptions, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { appendBoundedJsonLine, type BoundedJsonlLimits } from "../util/bounded-jsonl.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import type {
 	IntegrationLockAcquisition,
 	IntegrationLockOwner,
@@ -210,27 +217,64 @@ export async function appendAuditEvent(
 	await appendBoundedJsonLine(paths.eventsFile, { at, ...event }, WORKTREE_AUDIT_EVENT_LIMITS);
 }
 
+/**
+ * Same-host liveness of a recorded owner pid. `false` means PROVEN gone and nothing else: the pid answers ESRCH, or it
+ * now names a process whose Linux start time differs from the recorded one (a reissued pid). Every probe failure the
+ * OS does not classify, and every identity procfs cannot read, answers `true`, so it never authorizes a takeover.
+ */
+export type OwnerPidProbe = (pid: number, startTime: string | undefined) => boolean;
+
+/** A recorded process owner. `hostname` is absent only on legacy lane records, all written by this host. */
+export interface RecordedProcessOwner {
+	pid: number;
+	hostname?: string;
+	/** Linux start time recorded with the pid ({@link ownerStartTimeFor}); absent on older records and off Linux. */
+	startTime?: string;
+}
+
+/** The start time to record beside `pid`. Only this process can read its own; any other pid records none. */
+export function ownerStartTimeFor(pid: number): string | undefined {
+	return pid === process.pid ? readOwnProcessStartTime() : undefined;
+}
+
+/**
+ * Whether a recorded owner is NOT proven dead. A foreign-host owner is never judged by a local pid probe and is
+ * therefore always alive here -- never taken over, never cleared. `probe` is the same-host pid probe (injectable for
+ * deterministic hosts); it defaults to the shared identity-aware OS probe.
+ */
+export function isRecordedOwnerAlive(
+	owner: RecordedProcessOwner,
+	probe: OwnerPidProbe = (pid, startTime) => probeProcessIdentityLiveness(pid, startTime) !== "dead",
+): boolean {
+	if (owner.hostname !== undefined && owner.hostname !== osHostname()) return true;
+	return probe(owner.pid, owner.startTime);
+}
+
 export interface IntegrationLockDeps {
-	/** Injectable liveness probe (deterministic tests). Default: same-host `process.kill(pid, 0)`. */
-	isPidAlive?: (owner: IntegrationLockOwner) => boolean;
+	/** Injectable same-host pid probe (deterministic hosts). Default: the identity-aware OS probe. */
+	isPidAlive?: OwnerPidProbe;
 	now?: () => string;
 	nowMs?: () => number;
 }
 
-/** Same-host pid liveness. A foreign-host owner is ALWAYS treated as alive -- never taken over. */
-export function defaultIsPidAlive(owner: IntegrationLockOwner): boolean {
-	if (owner.hostname !== osHostname()) return true;
-	try {
-		process.kill(owner.pid, 0);
-		return true;
-	} catch (err) {
-		// EPERM means the pid exists but belongs to another user -- alive. Only ESRCH is dead.
-		return (err as NodeJS.ErrnoException).code === "EPERM";
-	}
+function isIntegrationLockOwner(value: unknown): value is IntegrationLockOwner {
+	return (
+		isPlainRecord(value) &&
+		isPositiveSafePid(value.pid) &&
+		typeof value.hostname === "string" &&
+		typeof value.token === "string" &&
+		typeof value.acquiredAt === "string" &&
+		(value.startTime === undefined || typeof value.startTime === "string")
+	);
 }
 
+/**
+ * The lock manifest, or undefined when it is absent, corrupt, or malformed. A malformed manifest names no process, so
+ * it is treated like an ownerless lock dir (stale only after {@link OWNERLESS_LOCK_STALE_MS}) rather than probed.
+ */
 async function readLockOwner(paths: SyncStorePaths): Promise<IntegrationLockOwner | undefined> {
-	return readJsonFile<IntegrationLockOwner>(paths.lockOwnerFile);
+	const value = await readJsonFile<unknown>(paths.lockOwnerFile);
+	return isIntegrationLockOwner(value) ? value : undefined;
 }
 
 async function tryMkdirLock(paths: SyncStorePaths): Promise<boolean> {
@@ -256,22 +300,29 @@ async function tryMkdirLock(paths: SyncStorePaths): Promise<boolean> {
  * Acquire the single integration lock (G1: landing is serialized). Non-blocking: a held lock
  * returns `{acquired:false, holder, holderAlive}` immediately -- callers surface `lock_busy` and
  * retry on their own cadence rather than spinning here. Takeover happens ONLY when the recorded
- * owner is provably dead on this host (or the lock dir is ownerless and older than
- * {@link OWNERLESS_LOCK_STALE_MS}); every takeover is audited.
+ * owner is provably dead on this host -- its pid answers ESRCH or was reissued to a process with another
+ * start time -- (or the lock dir is ownerless and older than {@link OWNERLESS_LOCK_STALE_MS}); every
+ * takeover is audited. The manifest records the owner's start time when the owner is this process.
  */
 export async function acquireIntegrationLock(
 	paths: SyncStorePaths,
-	owner: Omit<IntegrationLockOwner, "acquiredAt" | "token">,
+	owner: Omit<IntegrationLockOwner, "acquiredAt" | "token" | "startTime">,
 	deps: IntegrationLockDeps = {},
 ): Promise<IntegrationLockAcquisition> {
 	return withFileLock(paths.lockGuardFile, async () => {
 		const now = deps.now ?? (() => new Date().toISOString());
 		const nowMs = deps.nowMs ?? (() => Date.now());
-		const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+		const isAlive = (holder: IntegrationLockOwner): boolean => isRecordedOwnerAlive(holder, deps.isPidAlive);
 		for (let attempt = 0; attempt < 2; attempt++) {
 			if (await tryMkdirLock(paths)) {
 				const token = randomUUID();
-				const manifest: IntegrationLockOwner = { ...owner, token, acquiredAt: now() };
+				const startTime = ownerStartTimeFor(owner.pid);
+				const manifest: IntegrationLockOwner = {
+					...owner,
+					...(startTime !== undefined ? { startTime } : {}),
+					token,
+					acquiredAt: now(),
+				};
 				await fsPromises.writeFile(paths.lockOwnerFile, `${JSON.stringify(manifest)}\n`, "utf-8");
 				await appendAuditEvent(
 					paths,
@@ -283,7 +334,7 @@ export async function acquireIntegrationLock(
 
 			const holder = await readLockOwner(paths);
 			if (holder) {
-				if (isPidAlive(holder)) return { acquired: false, holder, holderAlive: true };
+				if (isAlive(holder)) return { acquired: false, holder, holderAlive: true };
 			} else {
 				// Ownerless dir: a crash between mkdir and the owner write. Only stale ones are dead.
 				let dirMtimeMs: number | undefined;
@@ -308,7 +359,7 @@ export async function acquireIntegrationLock(
 			);
 		}
 		const holder = await readLockOwner(paths);
-		return { acquired: false, holder, holderAlive: holder ? isPidAlive(holder) : true };
+		return { acquired: false, holder, holderAlive: holder ? isAlive(holder) : true };
 	});
 }
 

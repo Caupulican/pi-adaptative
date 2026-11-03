@@ -83,6 +83,10 @@ export interface LaneRegistration {
 	/** Host `LaneRecord.laneId` after dispatch correlation (tmux/in-process worker binding). */
 	boundLaneId?: string;
 	ownerPid?: number;
+	/** Host the owner pid belongs to. Absent on records written before it was recorded: those are this host's. */
+	ownerHostname?: string;
+	/** The owner's Linux start time, so a reissued pid is not mistaken for the owner. Absent on older records. */
+	ownerStartTime?: string;
 	ownerSessionId?: string;
 }
 
@@ -115,7 +119,8 @@ export interface LaneFacts {
 	aheadOfMain: number;
 	behindMain: number;
 	worktreePresent: boolean;
-	/** Undefined when the lane has no recorded owner pid. */
+	/** Undefined when the lane has no recorded owner pid. `false` only when the owner is proven dead on this host;
+	 * a foreign-host owner or an inconclusive probe reads `true`. */
 	ownerAlive?: boolean;
 }
 
@@ -127,6 +132,8 @@ export interface IntegrationLockOwner {
 	sessionId?: string;
 	laneKey?: string;
 	acquiredAt: string;
+	/** The holder's Linux start time, so a reissued pid is not mistaken for the holder. Absent on older manifests. */
+	startTime?: string;
 }
 
 export type IntegrationLockAcquisition =

@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { withFileLock } from "../util/atomic-file.ts";
 import {
@@ -44,8 +45,11 @@ import {
 	acquireIntegrationLock,
 	appendAuditEvent,
 	clearLandingTransaction,
-	defaultIsPidAlive,
+	isRecordedOwnerAlive,
 	listLanes,
+	type OwnerPidProbe,
+	ownerStartTimeFor,
+	type RecordedProcessOwner,
 	readEpoch,
 	readLandingTransaction,
 	readLane,
@@ -89,8 +93,11 @@ export interface WorktreeSyncEngineDeps {
 	/** Injectable file reader (conflict-marker scan, rebase progress). Default: `readFileSync`,
 	 * returning undefined on any read error. */
 	readFile?: (path: string) => string | undefined;
-	/** Injectable same-host pid liveness for deterministic tests. */
-	isPidAlive?: (pid: number) => boolean;
+	/**
+	 * Injectable same-host pid probe for deterministic hosts; `false` must mean proven dead. Foreign-host owners never
+	 * reach it. Default: the identity-aware OS probe ({@link isRecordedOwnerAlive}).
+	 */
+	isPidAlive?: OwnerPidProbe;
 	/** Clock and transient classifier of the store's record replacements. Default: system time, win32-only retry. */
 	atomicWrite?: SyncStoreWriteOptions;
 }
@@ -320,9 +327,7 @@ export async function deriveLaneFacts(
 		}
 	}
 
-	const isAlive =
-		deps.isPidAlive ??
-		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
+	const owner = laneOwner(lane);
 
 	return {
 		laneKey: lane.laneKey,
@@ -336,8 +341,17 @@ export async function deriveLaneFacts(
 		aheadOfMain,
 		behindMain,
 		worktreePresent,
-		...(lane.ownerPid !== undefined ? { ownerAlive: isAlive(lane.ownerPid) } : {}),
+		...(owner !== undefined ? { ownerAlive: isRecordedOwnerAlive(owner, deps.isPidAlive) } : {}),
 	};
+}
+
+/**
+ * The process recorded as owning `lane`, or undefined when the record names no valid pid. A record without
+ * `ownerHostname` predates it and was written on this host; one without `ownerStartTime` is judged by pid alone.
+ */
+function laneOwner(lane: LaneRegistration): RecordedProcessOwner | undefined {
+	if (!isPositiveSafePid(lane.ownerPid)) return undefined;
+	return { pid: lane.ownerPid, hostname: lane.ownerHostname, startTime: lane.ownerStartTime };
 }
 
 function sanitizeScope(scope: string): string {
@@ -407,6 +421,8 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 		if (add.code !== 0) return gitError(`git worktree add failed for lane '${laneKey}'`, add);
 
 		const at = nowIso(deps);
+		const ownerPid = deps.pid ?? process.pid;
+		const ownerStartTime = ownerStartTimeFor(ownerPid);
 		const lane: LaneRegistration = {
 			laneKey,
 			branch,
@@ -416,7 +432,9 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			updatedAt: at,
 			...(args.goalId !== undefined ? { goalId: args.goalId } : {}),
 			...(args.requirementId !== undefined ? { requirementId: args.requirementId } : {}),
-			ownerPid: deps.pid ?? process.pid,
+			ownerPid,
+			ownerHostname: osHostname(),
+			...(ownerStartTime !== undefined ? { ownerStartTime } : {}),
 			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
 		};
 		await writeLane(ctx.paths, lane, ctx.write);
@@ -426,20 +444,17 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 }
 
 /**
- * Does `lane` have a DIFFERENT, still-alive session owning it? Same same-host `isAlive` pattern
- * used elsewhere (`deps.isPidAlive`, else {@link defaultIsPidAlive} against this host). A lane
- * with no recorded owner, owned by THIS session, or whose owner is dead never conflicts --
+ * Does `lane` have a DIFFERENT, still-alive session owning it? Same {@link isRecordedOwnerAlive} rule
+ * used elsewhere: a foreign-host owner, or one whose probe is inconclusive, is alive. A lane with no
+ * recorded owner, owned by THIS session, or whose owner is proven dead never conflicts --
  * `reconcile` already clears dead owners, but a race can still observe one here, and a dead owner
  * must never block land/release (D6, per R1: land/release ONLY -- sync/continue/abort_sync stay
  * ungated at the engine; worker cross-lane containment for those lives at the tool layer, D3).
  */
 function ownerConflicts(deps: WorktreeSyncEngineDeps, lane: LaneRegistration): boolean {
 	if (lane.ownerSessionId == null || lane.ownerSessionId === deps.sessionId) return false;
-	if (lane.ownerPid === undefined) return false;
-	const isAlive =
-		deps.isPidAlive ??
-		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
-	return isAlive(lane.ownerPid);
+	const owner = laneOwner(lane);
+	return owner !== undefined && isRecordedOwnerAlive(owner, deps.isPidAlive);
 }
 
 export interface BindLaneWorkerArgs {
@@ -651,7 +666,7 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		const recoveryLock = await acquireIntegrationLock(
 			ctx.paths,
 			{ pid: deps.pid ?? process.pid, hostname: osHostname(), sessionId: deps.sessionId, laneKey: "reconcile" },
-			{ now: deps.now },
+			{ now: deps.now, isPidAlive: deps.isPidAlive },
 		);
 		if (!recoveryLock.acquired) {
 			return { code: "git_error", message: "landing transaction recovery is blocked by an active integration lock" };
@@ -688,9 +703,6 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		};
 	}
 
-	const isAlive =
-		deps.isPidAlive ??
-		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 	const at = nowIso(deps);
 
 	const orphanedLaneKeys: string[] = [];
@@ -714,8 +726,16 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 			await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey: lane.laneKey }, at);
 		}
 
-		if (next.ownerPid !== undefined && !isAlive(next.ownerPid)) {
-			const { ownerPid: _pid, ownerSessionId: _session, ...rest } = next;
+		// Only a proven-dead same-host owner is cleared; a record whose ownerPid names no valid pid owns nothing.
+		const owner = laneOwner(next);
+		if (next.ownerPid !== undefined && (owner === undefined || !isRecordedOwnerAlive(owner, deps.isPidAlive))) {
+			const {
+				ownerPid: _pid,
+				ownerHostname: _hostname,
+				ownerStartTime: _startTime,
+				ownerSessionId: _session,
+				...rest
+			} = next;
 			next = { ...rest, updatedAt: at };
 			ownerClearedLaneKeys.push(lane.laneKey);
 		}
@@ -741,10 +761,10 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey }, at);
 	}
 
-	// Provably-stale integration lock: dead same-host owner (never a foreign or live one).
+	// Provably-stale integration lock: proven-dead same-host owner (never a foreign, live, or unprovable one).
 	let staleLockReleased = false;
 	const holder = await readLockHolder(ctx.paths);
-	if (holder && holder.hostname === osHostname() && !isAlive(holder.pid) && holder.token) {
+	if (holder && !isRecordedOwnerAlive(holder, deps.isPidAlive)) {
 		staleLockReleased = await releaseIntegrationLock(ctx.paths, holder.token, { now: deps.now });
 	}
 
@@ -1232,12 +1252,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
 				laneKey: lane.laneKey,
 			},
-			{
-				now: deps.now,
-				...(deps.isPidAlive
-					? { isPidAlive: (owner) => (deps.isPidAlive as (pid: number) => boolean)(owner.pid) }
-					: {}),
-			},
+			{ now: deps.now, isPidAlive: deps.isPidAlive },
 		);
 		if (!acquisition.acquired) {
 			return {
@@ -1445,9 +1460,6 @@ export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncSt
 	const changedTruncated = epochRecord?.changedPathsTruncated === true;
 
 	const holder = await readLockHolder(ctx.paths);
-	const isAlive =
-		deps.isPidAlive ??
-		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 
 	let hub: { path: string; clean: boolean } | undefined;
 	if (ctx.hubPath) {
@@ -1509,7 +1521,7 @@ export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncSt
 		...(hub ? { hub } : {}),
 		lock: {
 			held: holder !== undefined,
-			...(holder ? { holder, holderAlive: isAlive(holder.pid) } : {}),
+			...(holder ? { holder, holderAlive: isRecordedOwnerAlive(holder, deps.isPidAlive) } : {}),
 		},
 		lanes,
 		...(advice ? { advice } : {}),

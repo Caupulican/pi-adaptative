@@ -397,7 +397,8 @@ A worker session's `worktree_sync` calls are narrowed at the tool layer (indepen
 ### Land/release ownership
 
 `land` and `release_lane` refuse `lane_owner_conflict` when the target lane is owned (its
-registration's `ownerSessionId`) by a **different, still-alive** session -- same-host pid liveness,
+registration's `ownerSessionId`) by a **different, still-alive** session -- identity-aware owner
+liveness (a foreign-host or inconclusive owner counts as alive; a reused pid is detected by start time),
 the same pattern the integration lock and `reconcile` already use. A lane with no recorded owner,
 owned by the calling session itself, or whose recorded owner is dead never conflicts. This check is
 deliberately engine-level and applies to `land`/`release_lane` ONLY -- `sync`/`continue`/

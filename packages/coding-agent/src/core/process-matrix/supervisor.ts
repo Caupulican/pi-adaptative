@@ -77,14 +77,18 @@ export function applyHeartbeat(entry: ProcessMatrixEntry, now: string): ProcessM
 }
 
 export interface DetectOrphanedWorkersDeps {
+	/** Local pid observation. Only consulted for entries recorded on {@link hostname}. */
 	observeProcess: (pid: number) => ProcessObservation;
+	/** This host's name: an entry recorded on another host is never judged by a local pid probe. */
+	hostname: string;
 	/** This session's own sessionId -- never treat yourself as an orphan you found. */
 	ownSessionId?: string;
 }
 
 /**
- * Worker entries whose `parentPid` is dead, excluding this session's own entry and anything
- * already `closed` (a closed worker isn't "orphaned", it's already done).
+ * Worker entries on this host whose `parentPid` is dead, excluding this session's own entry and
+ * anything already `closed` (a closed worker isn't "orphaned", it's already done). A worker
+ * recorded on another host is skipped: its parent pid names a process on that host.
  */
 export function detectOrphanedWorkers(
 	entries: ProcessMatrixEntry[],
@@ -93,6 +97,7 @@ export function detectOrphanedWorkers(
 	return entries.filter((entry) => {
 		if (entry.role !== "worker") return false;
 		if (entry.status === "closed") return false;
+		if (entry.hostname !== deps.hostname) return false;
 		if (deps.ownSessionId !== undefined && entry.agent.resumeContext.sessionId === deps.ownSessionId) return false;
 		if (entry.parentPid === undefined) return false;
 		return deps.observeProcess(entry.parentPid) === "dead";
@@ -205,16 +210,31 @@ export function pollWorkerDirective(
 }
 
 export interface ReconcileMatrixDeps {
+	/** Local pid observation. Only consulted for entries recorded on {@link hostname}. */
 	observeProcess: (pid: number) => ProcessObservation;
-	/** Epoch ms "now", compared against a resumable/adopted entry's `heartbeatAt`. */
+	/** This host's name: an entry recorded on another host is never judged by a local pid probe. */
+	hostname: string;
+	/** Epoch ms "now", compared against an entry's `heartbeatAt` (or terminal `observedAt`). */
 	now: number;
 	resumableTtlMs: number;
+}
+
+/** True once `at` (an ISO timestamp) is unparseable or older than `ttlMs` before `now`. */
+function isExpired(at: string, now: number, ttlMs: number): boolean {
+	const atMs = Date.parse(at);
+	return !Number.isFinite(atMs) || now - atMs > ttlMs;
 }
 
 /**
  * Prune `closed` entries and unrecoverable dead processes. A dead Pi worker that was interrupted
  * before persisting its own resumable transition is repaired from its already-durable logical-agent
  * identity. `resumable`/`adopted` entries are kept until they age past `resumableTtlMs`.
+ *
+ * Only a same-host `dead` observation proves a `running`/`winding_down` process gone. An entry from
+ * another host is never observed here, and a same-host `unknown` observation proves nothing either
+ * way: both are kept while their own heartbeat (every live runtime refreshes it) is within
+ * `resumableTtlMs`, then pruned. Neither is ever recovered to `resumable`: that would let this host
+ * relaunch a worker that may still be running.
  */
 export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMatrixDeps): ReconcileMatrixResult {
 	const kept: ProcessMatrixEntry[] = [];
@@ -222,16 +242,17 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 	const recoveredEntryIds: string[] = [];
 	for (const entry of entries) {
 		if (entry.status === "closed") {
-			const terminalAt = Date.parse(entry.terminal?.observedAt ?? entry.heartbeatAt);
-			const terminalExpired = !Number.isFinite(terminalAt) || deps.now - terminalAt > deps.resumableTtlMs;
+			const terminalAt = entry.terminal?.observedAt ?? entry.heartbeatAt;
+			const terminalExpired = isExpired(terminalAt, deps.now, deps.resumableTtlMs);
 			if (entry.terminal && !entry.terminal.notificationDeliveredAt && !terminalExpired) kept.push(entry);
 			else prunedEntryIds.push(entry.entryId);
 			continue;
 		}
 		if (entry.status === "running" || entry.status === "winding_down") {
-			const observation = deps.observeProcess(entry.pid);
+			const observation = entry.hostname === deps.hostname ? deps.observeProcess(entry.pid) : "unknown";
 			if (observation === "unknown") {
-				kept.push(entry);
+				if (isExpired(entry.heartbeatAt, deps.now, deps.resumableTtlMs)) prunedEntryIds.push(entry.entryId);
+				else kept.push(entry);
 				continue;
 			}
 			if (observation === "dead") {
@@ -253,12 +274,8 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 			continue;
 		}
 		// resumable / adopted: TTL-gated on the entry's own last heartbeat.
-		const heartbeatMs = Date.parse(entry.heartbeatAt);
-		if (!Number.isFinite(heartbeatMs) || deps.now - heartbeatMs > deps.resumableTtlMs) {
-			prunedEntryIds.push(entry.entryId);
-			continue;
-		}
-		kept.push(entry);
+		if (isExpired(entry.heartbeatAt, deps.now, deps.resumableTtlMs)) prunedEntryIds.push(entry.entryId);
+		else kept.push(entry);
 	}
 	return { code: "reconciled", kept, prunedEntryIds, recoveredEntryIds };
 }

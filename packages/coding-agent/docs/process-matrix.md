@@ -1,7 +1,7 @@
 # process-matrix
 
-`core/process-matrix` is a durable, restart-surviving record of every `pi` process on this
-machine and how they're related: a **master** (an interactive/direct session, or the root of a
+`core/process-matrix` is a durable, restart-surviving record of every `pi` process
+this machine started and how they're related: a **master** (an interactive/direct session, or the root of a
 launch chain) and its **workers** (sessions launched with a known parent, including persistent collaboration
 agents). It answers one question reliably even across a crash: *if my parent is gone, what do I
 do?* -- and a companion question on resume: *did I leave orphaned children behind, and what should
@@ -27,8 +27,8 @@ entry.
   whose recorded parent pid is dead. `/new`, `/resume`, and `/fork` replace this session-owned
   runtime, so its identity, notifications, and scan always follow the active session.
 - **Worker** (launched with `PI_PARENT_PID` / `--parent-pid` set): self-registers its own entry
-  (the only writer of that entry during normal operation) and watches its parent's liveness on a
-  poll interval.
+  (the only writer of that entry during normal operation), heartbeats it at most once per
+  `heartbeatMs` after a parent-alive verdict, and watches its parent's liveness on a poll interval.
 
 ### Resume: a master never auto-kills what it finds
 
@@ -166,7 +166,7 @@ same way lane-first dispatch threads `--worktree-lane` -- see `launch-profile.ts
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch. Explicit `false` is the hard off-switch: no entry is ever written, no scan runs, no watcher runs -- zero behavior change once set. |
-| `heartbeatMs` | `30000` | Master heartbeat interval (bounds: 1000-600000). |
+| `heartbeatMs` | `30000` | Heartbeat interval of masters and workers (bounds: 1000-600000). |
 | `adoptionGraceMs` | `300000` | How long an orphaned worker waits for an adopt/cleanup directive before self-exiting (bounds: 5000-3600000). |
 | `watcherPollMs` | `25000` | Poll cadence for parent-liveness and directive checks (bounds: 1000-600000). |
 
@@ -208,4 +208,6 @@ rejected rather than represented as enforced across a boundary the host cannot s
   the pure reconciliation pass once: a Pi worker interrupted before its own resumable write is
   repaired from its durable logical-agent identity, closed and unrecoverable records are removed,
   undelivered terminal handoffs are retained, and resumable/adopted/pending-terminal records remain
-  recoverable for at most 30 days before expiry.
+  recoverable for at most 30 days before expiry. An entry recorded by another hostname is never judged
+  by a local pid probe, and a foreign or `unknown` running entry is kept while its `heartbeatAt` is
+  within that 30 days, then removed; neither is ever marked resumable by this host.
