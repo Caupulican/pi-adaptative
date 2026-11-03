@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.104.28] - 2026-11-03
+
 ### Added
 
 - The model selector groups models under one expanding and retracting header per provider (subscription or OAuth account, API credential, local), with `subscriptions` and `api` tabs and search by account or credential type.
