@@ -1149,7 +1149,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					compileExecutionCharter({
 						objectiveId: `obj-${sessionManager.getSessionId()}`,
 						prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
-						admission: observeDeliveryAdmission(cwd),
+						admission: observeDeliveryAdmission(cwd, settingsManager.getNpmCommand()),
 					});
 
 				// The objective loop routes over the goal the owner started: reconcile it into the durable

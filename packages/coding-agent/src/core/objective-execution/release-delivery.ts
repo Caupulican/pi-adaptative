@@ -1,8 +1,9 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { createRollingOutputBuffer } from "../exec.ts";
 import type { PreparedPackageArtifact } from "./delivery-coordinator.ts";
 import type { PackagePublishIntent } from "./delivery-intent.ts";
 import type { DeployProofObservation, PublishProofObservation } from "./delivery-proof.ts";
@@ -54,6 +55,7 @@ export interface RepoReleaseDelivery {
 
 const RELEASE_TIMEOUT_MS = 120_000;
 const RELEASE_OUTPUT_MAX_BYTES = 1_048_576;
+const RELEASE_KILL_GRACE_MS = 5_000;
 
 function readManifest(repoRoot: string): PackageManifest | undefined {
 	try {
@@ -72,31 +74,37 @@ function publishableIdentity(manifest: PackageManifest | undefined): { name: str
 	return { name: manifest.name, version: manifest.version };
 }
 
-function run(command: string, args: readonly string[], cwd: string, signal?: AbortSignal): Promise<string> {
-	return new Promise((resolve, reject) => {
-		execFile(
-			command,
-			[...args],
-			{
-				cwd,
-				encoding: "utf8",
-				maxBuffer: RELEASE_OUTPUT_MAX_BYTES,
-				timeout: RELEASE_TIMEOUT_MS,
-				signal,
-				env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
-			},
-			(error, stdout, stderr) => {
-				if (error) {
-					const detail = String(stderr || error.message)
-						.trim()
-						.slice(0, 500);
-					reject(new Error(detail || error.message));
-					return;
-				}
-				resolve(String(stdout).trim());
-			},
-		);
+/** Runs through `spawnProcess` so a Windows `npm.cmd` shim is launched (cross-spawn), never via `process.execPath`. */
+async function run(command: string, args: readonly string[], cwd: string, signal?: AbortSignal): Promise<string> {
+	const child = spawnProcess(command, [...args], {
+		cwd,
+		detached: process.platform !== "win32",
+		stdio: ["ignore", "pipe", "pipe"],
+		env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
 	});
+	const stdout = createRollingOutputBuffer(RELEASE_OUTPUT_MAX_BYTES);
+	const stderr = createRollingOutputBuffer(RELEASE_OUTPUT_MAX_BYTES);
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	child.stdout.on("data", (data: string) => stdout.push(data));
+	child.stderr.on("data", (data: string) => stderr.push(data));
+	const terminal = await waitForChildProcessWithTermination(child, {
+		signal,
+		timeoutMs: RELEASE_TIMEOUT_MS,
+		killGraceMs: RELEASE_KILL_GRACE_MS,
+	});
+	const commandLine = `${command} ${args.join(" ")}`;
+	if (terminal.reason === "timeout") throw new Error(`${commandLine} timed out after ${RELEASE_TIMEOUT_MS}ms`);
+	if (terminal.reason === "aborted") throw new Error(`${commandLine} was aborted`);
+	if (terminal.code !== 0) {
+		const exitStatus = terminal.code === null ? `signal ${child.signalCode ?? "unknown"}` : `code ${terminal.code}`;
+		const detail = stderr.text().trim().slice(0, 500);
+		throw new Error(detail || `${commandLine} failed with ${exitStatus}`);
+	}
+	// Callers parse stdout (`pack --json`, `view --json`): a truncated tail would corrupt the result.
+	if (stdout.truncated())
+		throw new Error(`${commandLine} produced more than ${RELEASE_OUTPUT_MAX_BYTES} bytes of output`);
+	return stdout.text().trim();
 }
 
 function registryArgs(registry: string | undefined): string[] {

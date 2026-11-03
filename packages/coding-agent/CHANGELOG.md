@@ -6,6 +6,12 @@
 
 ### Fixed
 
+- The Decision graph steps its springs on a monotonic clock, so a backwards system-clock step no longer crashes the session.
+- Every way the interactive runtime can end (signals, `process.exit`, shutdown failure, stdout failure, unhandled rejections) leaves a record under `state/crashes`, which keeps the last 100.
+- Release delivery and its registry admission run npm through the configured command or `npm` on PATH instead of deriving it from `process.execPath`, which is pi itself in the compiled binary.
+- Process-matrix entries, worktree-sync owners and lock manifests identify the machine by its OS machine id instead of the hostname, record process start times so reused pids are detected, and treat an unreadable `/proc` entry as unknown rather than dead.
+- A collaboration pane that herdr reports as not found counts as gone, controller identity includes its start time, and `pi_collaboration` gains `release_acquisition` to clear an acquisition abandoned by a dead controller.
+
 - Collaboration agents whose helper process died are settled instead of staying `running`, and acquisitions abandoned by a dead controller are reconciled on the next session recovery.
 - Worktree-sync lane and lock owners and process-matrix entries are judged by identity-aware liveness: foreign-host and inconclusive owners are never reclaimed, reused pids are detected, and unknown matrix entries age out by heartbeat.
 - The flow trace and System One evidence reset on objective change or goal completion even while the Decision graph is hidden.

@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnProcessSync } from "../../utils/child-process.ts";
 import { withoutInheritedGitLocation } from "../exec.ts";
 import { npmExec } from "./npm-exec.ts";
 
@@ -72,6 +73,8 @@ export interface DeliveryAdmission {
 	readonly registry?: string;
 	/** Present when this admission was read from a real checkout. Registry is read from here once. */
 	readonly repoRoot?: string;
+	/** The configured `npmCommand`, so the registry read uses the npm that will publish. */
+	readonly npmCommand?: readonly string[];
 }
 
 export interface DeliveryInitialGitGrant {
@@ -111,7 +114,7 @@ export function emptyDeliveryIntent(): DeliveryIntent {
 }
 
 /** One admission observation. A failed read is dirty and detached so delivery cannot assume a clean tree. */
-export function observeDeliveryAdmission(repoRoot: string): DeliveryAdmission {
+export function observeDeliveryAdmission(repoRoot: string, npmCommand?: readonly string[]): DeliveryAdmission {
 	const failed: DeliveryAdmission = { upstream: null, baselineDirty: true, detached: true };
 	try {
 		const branch = gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -136,6 +139,7 @@ export function observeDeliveryAdmission(repoRoot: string): DeliveryAdmission {
 			packageVersion: manifest?.version,
 			packagePrivate: manifest?.privatePackage,
 			repoRoot,
+			...(npmCommand ? { npmCommand } : {}),
 		};
 	} catch {
 		return failed;
@@ -198,7 +202,7 @@ export function compileDeliveryIntent(input: {
 			const registry =
 				input.release?.package_registry ??
 				admission?.registry ??
-				(admission?.repoRoot ? readDefaultNpmRegistry(admission.repoRoot) : undefined);
+				(admission?.repoRoot ? readDefaultNpmRegistry(admission.repoRoot, admission.npmCommand) : undefined);
 			if (admission?.repoRoot && !registry) {
 				unresolved.push({ action: "package_publish", error: "package_registry_unavailable" });
 			} else packagePublish = { packageName, version, ...(registry ? { registry } : {}) };
@@ -235,16 +239,19 @@ export function unresolvedError(intent: DeliveryIntent, action: DeliveryUnresolv
 }
 
 /** One registry read at admission, from the checkout npm would publish. Publish does not read this again. */
-function readDefaultNpmRegistry(repoRoot: string): string | undefined {
+function readDefaultNpmRegistry(repoRoot: string, npmCommand?: readonly string[]): string | undefined {
 	try {
-		const npm = npmExec();
-		const value = execFileSync(npm.command, [...npm.args, "config", "get", "registry", "--workspaces=false"], {
+		const npm = npmExec(npmCommand);
+		const result = spawnProcessSync(npm.command, [...npm.args, "config", "get", "registry", "--workspaces=false"], {
 			cwd: repoRoot,
 			encoding: "utf8",
 			timeout: 15_000,
 			maxBuffer: 1_048_576,
+			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
-		}).trim();
+		});
+		if (result.error || result.status !== 0) return undefined;
+		const value = result.stdout.trim();
 		if (!value || value === "undefined" || value === "null") return undefined;
 		return value;
 	} catch {
