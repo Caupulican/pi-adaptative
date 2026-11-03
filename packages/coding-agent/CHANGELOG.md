@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- The model selector groups models under one expanding and retracting header per provider (subscription or OAuth account, API credential, local), with `subscriptions` and `api` tabs and search by account or credential type.
+
+### Fixed
+
+- A crash or fatal runtime error is recorded under `state/crashes` and printed after the terminal is restored, instead of being erased with the alternate screen; the runtime supervisor reports a signal-killed or non-zero runtime exit instead of exiting silently.
+- The Chats list can be reopened from the graph pane, persistent teams show beside the graph, and the show-chats control is no longer dropped from narrow headers.
+
 ## [0.104.27] - 2026-11-03
 
 ### Added

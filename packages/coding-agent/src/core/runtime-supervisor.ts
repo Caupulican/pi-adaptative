@@ -14,9 +14,16 @@ export type RuntimeSupervisorReply =
 	| { type: "prepared" | "committed"; id: string }
 	| { type: "rejected"; id?: string; error: string };
 
+/** How a runtime child ended: the exit status the supervisor acts on, and the signal that ended it when it did not exit by itself. */
+export interface RuntimeChildExit {
+	/** The child's exit code; a signal-terminated child carries 128 plus the signal number. */
+	code: number;
+	signal?: NodeJS.Signals;
+}
+
 export interface RuntimeChild {
 	/** Exactly one process terminal event, never inferred from output. */
-	terminal: Promise<number>;
+	terminal: Promise<RuntimeChildExit>;
 	onMessage(listener: (message: RuntimeSupervisorMessage) => void): () => void;
 	send(message: RuntimeSupervisorReply): void;
 	stop(): void;
@@ -36,6 +43,8 @@ interface RuntimeSupervisorPorts {
 	/** Atomic, bounded handoff persistence. Failure prevents an acknowledged transition. */
 	record(record: RuntimeSupervisorRecord): void;
 	watch(milliseconds: number, expired: () => void): () => void;
+	/** Tells the operator a runtime child ended abnormally with no session left to say so (a signal, or a non-zero exit nobody asked for). */
+	report(message: string): void;
 }
 
 interface Generation {
@@ -47,6 +56,13 @@ interface Generation {
 	unwatch(): void;
 	error?: string;
 	committedId?: string;
+}
+
+/** The one-line statement of an abnormal child end; the signal is named because a signal-terminated child writes nothing itself. */
+export function describeAbnormalExit(exit: RuntimeChildExit): string {
+	return exit.signal
+		? `the runtime process was terminated by ${exit.signal} (exit status ${exit.code}) and left no message.`
+		: `the runtime process exited with code ${exit.code}.`;
 }
 
 /** One process writer at a time; candidate exit restores the retained code artifact automatically. */
@@ -131,7 +147,7 @@ export class RuntimeSupervisor {
 			generation.error = "Runtime generation did not become ready before its startup deadline.";
 			child.stop();
 		});
-		void child.terminal.then((code) => this.enqueue(() => this.terminal(generation, code)));
+		void child.terminal.then((exit) => this.enqueue(() => this.terminal(generation, exit)));
 	}
 
 	private async receive(generation: Generation, message: RuntimeSupervisorMessage): Promise<void> {
@@ -204,7 +220,8 @@ export class RuntimeSupervisor {
 		this.prepared.armed = true;
 	}
 
-	private async terminal(generation: Generation, code: number): Promise<void> {
+	private async terminal(generation: Generation, exit: RuntimeChildExit): Promise<void> {
+		const { code } = exit;
 		if (this.active !== generation) return;
 		generation.detach();
 		generation.unwatch();
@@ -225,7 +242,7 @@ export class RuntimeSupervisor {
 			phase: "terminal",
 			artifact: generation.artifact,
 			request: generation.handoff ?? prepared?.request,
-			error: generation.error ?? (code === 0 ? undefined : `Runtime exited with code ${code}.`),
+			error: generation.error ?? (code === 0 ? undefined : describeAbnormalExit(exit)),
 		});
 		if (this.closing) {
 			this.finish?.(code || 1);
@@ -239,6 +256,10 @@ export class RuntimeSupervisor {
 		const request =
 			prepared?.request ?? (generation.handoff?.disposition === "candidate" ? generation.handoff : undefined);
 		if (!request) {
+			// The child ended the session on its own. A clean exit is silent; anything else may have left nothing on the terminal
+			// (a kill, a crash of the runtime itself, an exit that wrote no message), and the handoff record that holds it is
+			// removed by the next launch, so the operator is told here.
+			if (code !== 0) this.ports.report(`pi: ${describeAbnormalExit(exit)}`);
 			this.finish?.(code);
 			return;
 		}

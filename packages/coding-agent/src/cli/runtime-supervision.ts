@@ -85,6 +85,7 @@ export async function superviseInteractiveRuntime(args: readonly string[]): Prom
 				const timer = setTimeout(expired, milliseconds);
 				return () => clearTimeout(timer);
 			},
+			report: (message) => process.stderr.write(`${message}\n`),
 			launch: (artifact, handoff): RuntimeChild => {
 				const launch = store.target(artifact);
 				const env: NodeJS.ProcessEnv = {

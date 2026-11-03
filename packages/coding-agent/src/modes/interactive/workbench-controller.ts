@@ -867,14 +867,16 @@ export function buildWorkbenchSections(
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
-	if (teamRows.length || specialists.length || team || (persistentTeams?.().length ?? 0) > 0) {
+	// Persistent teams are standing members of the Team: they keep it listed whichever pane the left side shows.
+	const persistent = persistentTeams?.() ?? [];
+	if (teamRows.length || specialists.length || team || persistent.length > 0) {
 		const panel = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter(isActiveWorkerLane).length;
-		const executors = active
-			? `${active} active`
-			: `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`;
+		const executors = `${
+			active ? `${active} active` : `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`
+		}${persistent.length ? ` · ${persistent.length} ${persistent.length === 1 ? "team" : "teams"}` : ""}`;
 		const idle = [
 			`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
 		];
@@ -891,51 +893,63 @@ export function buildWorkbenchSections(
 		const executorRows = (width: number): string[] =>
 			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
 		const hasSpecialists = shown.length > 0 || specialists.length > 0;
+		const group = (label: string) => `  ${theme.fg("dim", label)}`;
+		// The standing members: persistent teams (read at render time so a new team shows at once), then the subagents.
+		const memberRows = (width: number): string[] => {
+			const teams = persistentTeams?.() ?? [];
+			return [
+				...(teams.length
+					? [
+							group("Teams"),
+							...teams.map(
+								(t) =>
+									`  ${theme.fg("accent", "◆")} ${theme.fg("text", t.name || t.teamId)} ${theme.fg("muted", `[${t.memberAgentIds.join(", ") || "empty"}]`)}`,
+							),
+						]
+					: []),
+				...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
+			];
+		};
 		if (graphShown?.() === true) {
-			if (hasSpecialists) {
+			if (hasSpecialists || persistent.length > 0) {
 				sections.push({
 					title: TEAM_SECTION,
 					meta: executors,
 					body: {
-						render: (width) => executorRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
+						render: (width) => memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
 						invalidate() {},
 					},
+					quiet: !hasSpecialists,
+					standing: persistent.length > 0,
 				});
 			}
 			return sections;
 		}
-		const group = (label: string) => `  ${theme.fg("dim", label)}`;
 		const body: Component = {
 			render: (width) => {
 				if (graphShown?.() === true) {
-					return (hasSpecialists ? executorRows(width) : []).map((line) =>
-						truncateToWidth(line, Math.max(1, width), ""),
-					);
+					return memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), ""));
 				}
 				const facts = team();
 				const routing = renderRoutingRows(facts);
-				const teams = persistentTeams?.() ?? [];
 				return [
 					group("Decider"),
 					...renderDeciderRows(facts, Date.now()),
 					group("Brain"),
 					renderRootRow(facts),
-					...(teams.length
-						? [
-								group("Teams"),
-								...teams.map(
-									(t) =>
-										`  ${theme.fg("accent", "◆")} ${theme.fg("text", t.name || t.teamId)} ${theme.fg("muted", `[${t.memberAgentIds.join(", ") || "empty"}]`)}`,
-								),
-							]
-						: []),
-					...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
+					...memberRows(width),
 					...(routing.length ? [group("Routing"), ...routing] : []),
 				].map((line) => truncateToWidth(line, Math.max(1, width), ""));
 			},
 			invalidate() {},
 		};
-		sections.push({ title: TEAM_SECTION, meta: `decider + ${executors}`, body, quiet: !hasSpecialists });
+		sections.push({
+			title: TEAM_SECTION,
+			meta: `decider + ${executors}`,
+			body,
+			quiet: !hasSpecialists,
+			standing: persistent.length > 0,
+		});
 	}
 	return sections;
 }

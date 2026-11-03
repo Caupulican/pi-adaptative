@@ -40,6 +40,8 @@ export interface WorkbenchSection {
 	body: Component | string[];
 	/** Standing facts with no work in them (an idle team): listed beside real work, never a reason to open the panel. */
 	quiet?: boolean;
+	/** Standing members worth keeping on screen (persistent teams): they hold the panel open, but never re-open one the operator hid. */
+	standing?: boolean;
 }
 
 export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showGraph" | "switchChat";
@@ -570,7 +572,9 @@ export class WorkbenchComponent extends Container {
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
 			buttons.push({ action: "followCurrent", label: "Follow current" });
 		}
-		if (this.frameChatRoster !== undefined) {
+		// The way back to the roster depends on the host offering one, not on this frame having composed it:
+		// a frame on the graph skips composing the roster, and the chip must still be there to return to it.
+		if (this.options.chatRoster !== undefined) {
 			buttons.push({ action: "toggleLeftPaneMode", label: "Chats", raised: true });
 		}
 		buttons.push({ action: "graphCycle", label, raised: true });
@@ -674,22 +678,19 @@ export class WorkbenchComponent extends Container {
 		const convTitle = this.options.conversationTitle?.() || "Conversation";
 		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
 		const headingWidth = visibleWidth(convTitle) + stateText.length;
+		// The chip names the pane a click opens and is offered only where that pane fits beside a readable chat.
+		const opensChats = Boolean(this.options.chatRoster) && (this.leftPaneMode === "chats" || !this.graphSource);
+		const leftPaneMinimum = (opensChats ? MIN_CHAT_ROSTER_WIDTH : MIN_GRAPH_WIDTH) + 2 + MIN_CHAT_WIDTH;
 		const canShowLeftPane =
-			this.graphHidden &&
-			this.zoneWidth >= SIDE_BY_SIDE_MIN_COLUMNS &&
-			(Boolean(this.graphSource) || Boolean(this.options.chatRoster));
+			this.graphHidden && (opensChats || Boolean(this.graphSource)) && this.zoneWidth >= leftPaneMinimum;
 		const switchChatLabel = this.options.switchChatChip?.();
+		// Chips drop from the end on a narrow header; the only way back to a hidden left pane comes first.
 		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
+			...(canShowLeftPane
+				? [{ action: "showGraph" as const, label: opensChats ? "Show chats" : "Show graph" }]
+				: []),
 			...(switchChatLabel ? [{ action: "switchChat" as const, label: switchChatLabel }] : []),
 			...(this.columns ? [{ action: "layout" as const, label: "Stacked" }] : []),
-			...(canShowLeftPane
-				? [
-						{
-							action: "showGraph" as const,
-							label: this.leftPaneMode === "chats" ? "Show chats" : "Show graph",
-						},
-					]
-				: []),
 			...(following ? [] : [{ action: "latest" as const, label: "Latest ↓" }]),
 		];
 		const chipTone = this.mouseMode ? "accent" : "muted";
@@ -827,9 +828,13 @@ export class WorkbenchComponent extends Container {
 		return { title: PLAN_SECTION, meta: plan?.meta ?? "", lines };
 	}
 
-	/** The plan and team beside the evidence: shown when there is work to list, unless the operator hid them for this work or Execution is maximized. */
+	/** The plan and team beside the evidence: shown when there is work or standing members to list, unless the operator hid them or Execution is maximized. */
 	private showsInspector(): boolean {
-		return !this.inspectorHidden && !this.executionMaximized && this.sections.some((section) => !section.quiet);
+		return (
+			!this.inspectorHidden &&
+			!this.executionMaximized &&
+			this.sections.some((section) => !section.quiet || section.standing)
+		);
 	}
 
 	private renderSourceLines(source: Component | undefined, kind: "shell" | "exec", width: number): string[] {

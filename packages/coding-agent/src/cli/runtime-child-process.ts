@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import type { PiSelfLaunchTarget } from "../core/process-matrix/resume-launcher.ts";
-import type { RuntimeChild } from "../core/runtime-supervisor.ts";
+import type { RuntimeChild, RuntimeChildExit } from "../core/runtime-supervisor.ts";
 import { parseRuntimeSupervisorMessage } from "./runtime-channel.ts";
 
 /** Native process adapter. Output is never used as lifecycle evidence. */
@@ -38,25 +39,30 @@ export function launchRuntimeChild(
 			// The bounded fallback retains termination ownership after a failed first signal.
 		}
 	};
-	const terminal = new Promise<number>((resolve) => {
-		const settleTerminal = (code: number): void => {
+	const terminal = new Promise<RuntimeChildExit>((resolve) => {
+		const settleTerminal = (exit: RuntimeChildExit): void => {
 			if (terminalSettled) return;
 			terminalSettled = true;
 			clearTimeout(killTimer);
 			child.off("spawn", onSpawn);
-			resolve(code);
+			resolve(exit);
 		};
 		const onSpawn = (): void => {
 			if (terminalSettled) return;
 			spawned = true;
 			if (stopRequested) requestTermination();
 		};
-		child.once("exit", (code) => settleTerminal(code ?? 1));
+		child.once("exit", (code, signal) => {
+			if (code !== null) return settleTerminal({ code });
+			// Node reports a signal-terminated child with a null code. The signal is the evidence, so it is kept, and the status follows
+			// the shell convention (128 + signal number) instead of a bare 1 that reads as an ordinary failure.
+			settleTerminal(signal ? { code: 128 + (constants.signals[signal] ?? 0), signal } : { code: 1 });
+		});
 		child.once("spawn", onSpawn);
 		// A failed spawn has no writer. Errors on an existing process (e.g. kill denied) do not
 		// prove it stopped; only its terminal event may release the single-writer fence.
 		child.on("error", () => {
-			if (!spawned) settleTerminal(1);
+			if (!spawned) settleTerminal({ code: 1 });
 		});
 	});
 	return {

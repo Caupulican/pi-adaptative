@@ -14,6 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { writeCrashRecord } from "../../core/crash-record.ts";
 import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
@@ -66,6 +67,8 @@ export interface SignalLifecycleIo {
 	exit(code: number): void;
 	stderr(text: string): void;
 	stdout(text: string): void;
+	/** Persists why the process is ending and returns the record's path (or the failure text), before any cleanup touches the terminal. */
+	writeCrashRecord(kind: string, detail: string): string;
 	/** Adds a process listener at the front of its queue and returns the function that removes it. */
 	prependListener(
 		event: NodeJS.Signals | "uncaughtException" | "unhandledRejection",
@@ -79,6 +82,7 @@ const PROCESS_IO: SignalLifecycleIo = {
 	exit: (code) => process.exit(code),
 	stderr: (text) => process.stderr.write(text),
 	stdout: (text) => process.stdout.write(text),
+	writeCrashRecord,
 	prependListener: (event, handler) => {
 		const events: Pick<NodeJS.EventEmitter, "off" | "prependListener"> = process;
 		events.prependListener(event, handler);
@@ -115,6 +119,7 @@ export class SignalLifecycle {
 			exit: io.exit ?? PROCESS_IO.exit,
 			stderr: io.stderr ?? PROCESS_IO.stderr,
 			stdout: io.stdout ?? PROCESS_IO.stdout,
+			writeCrashRecord: io.writeCrashRecord ?? PROCESS_IO.writeCrashRecord,
 			prependListener: io.prependListener ?? PROCESS_IO.prependListener,
 			onStreamError: io.onStreamError ?? PROCESS_IO.onStreamError,
 		};
@@ -255,6 +260,8 @@ export class SignalLifecycle {
 
 	emergencyTerminalExit(): never {
 		this.shuttingDown = true;
+		// Nothing can be shown on a dead terminal, so the record is the only trace of this exit.
+		this.io.writeCrashRecord("dead terminal (EIO/EPIPE/ENOTCONN on stdout or stderr); exit 129", "");
 		this.unregisterSignalHandlers();
 		killTrackedDetachedChildren();
 		// The terminal is gone. Do not run normal shutdown because TUI and
@@ -315,16 +322,20 @@ export class SignalLifecycle {
 				killTrackedDetachedChildren();
 			} catch {}
 			const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
+			const recordPath = this.io.writeCrashRecord("uncaughtException during shutdown; exit 1", detail);
+			this.io.stderr(
+				`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}\n(record: ${recordPath})`)}\n`,
+			);
 			this.io.exit(1);
 			// An injected exit returns: the crash must not fall through to the non-shutdown path below.
 			return;
 		}
 		this.shuttingDown = true;
+		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
+		// The record goes first and synchronously, so a reentrant crash or an exit cannot lose it. The screen report goes AFTER the
+		// terminal is restored: the interactive UI draws on the alternate screen, and leaving it erases what was printed there.
+		const recordPath = this.io.writeCrashRecord("uncaughtException; exit 1", detail);
 		try {
-			// Report before callback-bearing cleanup: a reentrant crash can exit immediately.
-			console.error("pi exiting due to uncaughtException:");
-			console.error(error);
 			try {
 				// Fatal cleanup can also reject pending work. Keep the process guards armed until exit,
 				// just as orderly shutdown does, so those failures retain their reporting owner.
@@ -339,6 +350,9 @@ export class SignalLifecycle {
 				this.io.stderr(`${neutralizeControls(`Stop failed during fatal shutdown: ${describeCause(stopError)}`)}\n`);
 			}
 		} finally {
+			this.io.stderr(
+				`${neutralizeControls(`pi exiting due to uncaughtException: ${detail}\n(record: ${recordPath})`)}\n`,
+			);
 			this.io.exit(1);
 		}
 	}

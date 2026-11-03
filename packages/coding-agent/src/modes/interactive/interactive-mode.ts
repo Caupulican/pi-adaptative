@@ -38,6 +38,7 @@ import {
 	observeCacheStateFromMessages,
 } from "../../core/cache-miss-notice.ts";
 import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
+import { writeCrashRecord } from "../../core/crash-record.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
@@ -1344,9 +1345,15 @@ export class InteractiveMode {
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
 		const message = error instanceof Error ? error.message : String(error);
-		this.showError(`${prefix}: ${message}`);
+		const text = `${prefix}: ${message}`;
+		// The UI draws on the alternate screen, so a message shown in it is erased by the stop below: record it, stop, then print it.
+		const recordPath = writeCrashRecord(
+			"fatal runtime error; exit 1",
+			error instanceof Error ? (error.stack ?? text) : text,
+		);
 		stopThemeWatcher();
 		this.stop();
+		process.stderr.write(`${text}\n(record: ${recordPath})\n`);
 		process.exit(1);
 	}
 
