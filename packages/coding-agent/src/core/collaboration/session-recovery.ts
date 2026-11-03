@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import type { CollaborationBackend, CollaborationAgent as NativeAgent } from "./backend.ts";
 import type { CollaborationAgent, CollaborationJob } from "./job-record.ts";
-import type { CollaborationJobStore } from "./job-store.ts";
+import { type CollaborationJobStore, collaborationController } from "./job-store.ts";
 
 /** Opens (or, for an already-admitted new job, creates) the native backend that hosts a job. */
 export type CollaborationBackendFactory = (job: CollaborationJob, create?: boolean) => Promise<CollaborationBackend>;
@@ -89,13 +90,50 @@ export async function classifyPaneOwnership(
 	}
 }
 
+const ACTIVE_STATUSES: readonly string[] = ["idle", "reserved", "running"];
+
+/**
+ * Only the process recorded as the job's controller ever begins a backend acquisition, so once that
+ * process is proven gone (and is not this one) nobody remains to record the acquisition's outcome.
+ * Without a recorded controller pid, or when the probe cannot tell, the acquisition stays live.
+ */
+function acquisitionsAbandoned(job: CollaborationJob): boolean {
+	const parentPid = collaborationController(job).parentPid;
+	return parentPid !== undefined && parentPid !== process.pid && probeProcessLiveness(parentPid) === "dead";
+}
+
+/**
+ * Settles the turn of each member whose acquisition its dead controller abandoned. One without a
+ * recorded pane has nothing to verify or close: the request may still have created a pane or
+ * workspace, so its turn ends failed while `acquiring` stays set and no closure is ever claimed.
+ * One with a recorded pane is left `stopping` for the verified close in `resolveStrandedMember`.
+ * Needs no backend, so an unreachable backend cannot keep the turn running.
+ */
+function settleAbandonedAcquisitions(store: CollaborationJobStore, job: CollaborationJob): void {
+	for (const initial of job.agents) {
+		const current = store.load(job.id).agents.find((candidate) => candidate.id === initial.id);
+		// Already settled once: a terminal status with the acquisition still unresolved.
+		if (!current?.acquiring || current.closed || (!current.stopping && !ACTIVE_STATUSES.includes(current.status)))
+			continue;
+		const stopping = current.stopping ? current : store.beginStop(job.id, current.id, current.turnId);
+		if (!stopping || stopping.paneId) continue;
+		store.finishStop(
+			job.id,
+			stopping.id,
+			stopping.turnId,
+			"failed",
+			`Resource acquisition abandoned by an exited controller; any pane it created${job.workspaceId ? ` in workspace ${job.workspaceId}` : ""} is untracked and needs manual inspection.`,
+		);
+	}
+}
+
 /**
  * Resolves one member left mid-stop by a process that died before finishing it — D8's recycle
  * exhaustion, the team-wide launch rollback, or `stopCollaborationAgent`'s own paneId branch
- * throwing. Never runs against a live in-progress stop: reconcile only executes at a fresh session
- * start, so any `stopping` found here is necessarily left over from an earlier, now-dead process. A
- * member still `acquiring` is left untouched — job-store.ts's own doctrine: an absent pane is not
- * evidence that none exists, and this function never infers otherwise.
+ * throwing. Reconcile runs at session start and on an explicit `job_status`, so a `stopping` found
+ * here is normally left over from an earlier process. A member still `acquiring` is left untouched
+ * unless its controller is proven gone (`abandoned`) — job-store.ts's own doctrine: an absent pane
+ * is not evidence that none exists — and even then only a recorded pane is verified and closed.
  */
 async function resolveStrandedMember(
 	store: CollaborationJobStore,
@@ -103,8 +141,9 @@ async function resolveStrandedMember(
 	jobId: string,
 	agent: CollaborationAgent,
 	native: readonly NativeAgent[],
+	abandoned: boolean,
 ): Promise<void> {
-	if (agent.acquiring) return;
+	if (agent.acquiring && (!abandoned || !agent.paneId)) return;
 	let resolved = !agent.paneId; // the acquisition already positively resolved with no resource
 	if (agent.paneId) {
 		const registered = agent.backendName
@@ -158,6 +197,8 @@ export async function reconcileCollaborationSessions(
 			let identity = recoveryIdentity(job);
 			let failure: string | undefined;
 			try {
+				const abandoned = acquisitionsAbandoned(job);
+				if (abandoned) settleAbandonedAcquisitions(store, job);
 				const client = await backend(job, false);
 				const native = await client.listAgents();
 				// Resolve any member stranded mid-stop before checking reattachment: a member this
@@ -165,7 +206,7 @@ export async function reconcileCollaborationSessions(
 				for (const initial of job.agents) {
 					const current = store.load(job.id).agents.find((candidate) => candidate.id === initial.id);
 					if (!current || current.closed || !current.stopping) continue;
-					await resolveStrandedMember(store, client, job.id, current, native);
+					await resolveStrandedMember(store, client, job.id, current, native, abandoned);
 				}
 				const settled = store.load(job.id);
 				identity = recoveryIdentity(settled);

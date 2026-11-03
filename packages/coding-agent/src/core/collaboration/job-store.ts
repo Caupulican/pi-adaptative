@@ -152,6 +152,7 @@ function skipReason(error: unknown): string {
 
 function releaseTurnProcess(agent: CollaborationAgent): void {
 	delete agent.helperPid;
+	delete agent.helperStartTime;
 	delete agent.deadlineAt;
 }
 
@@ -599,6 +600,7 @@ export class CollaborationJobStore {
 		delete agent.pendingQuestion;
 		agent.deadlineAt = Date.now() + current.deadlineSeconds * 1000;
 		delete agent.helperPid;
+		delete agent.helperStartTime;
 		return agent;
 	}
 	reserveTurn(
@@ -823,7 +825,8 @@ export class CollaborationJobStore {
 			return result;
 		});
 	}
-	claimTurn(id: string, agentId: string, turnId: string, helperPid: number): boolean {
+	/** `helperStartTime` is the claiming helper's own `readOwnProcessStartTime()`, recorded beside its pid. */
+	claimTurn(id: string, agentId: string, turnId: string, helperPid: number, helperStartTime?: string): boolean {
 		return this.updateAgent(id, agentId, (agent, job) => {
 			if (
 				!agent ||
@@ -838,6 +841,8 @@ export class CollaborationJobStore {
 				return false;
 			agent.status = "running";
 			agent.helperPid = helperPid;
+			if (helperStartTime === undefined) delete agent.helperStartTime;
+			else agent.helperStartTime = helperStartTime;
 			return true;
 		});
 	}
@@ -993,6 +998,22 @@ export class CollaborationJobStore {
 		// A closed member can no longer authenticate, so its credential goes once the close is durable.
 		if (closed) removePeerCredentialFile(this.directory, id, agentId);
 		return finished;
+	}
+	/**
+	 * The turn's helper is proven gone but its pane's closure is not observed: the turn settles as failed
+	 * and the helper identity is released, while `stopping` stays as the fence and `closed` stays unset,
+	 * so no cleanup proof is claimed and reconciliation retries the verified close.
+	 */
+	settleUncertainStop(id: string, agentId: string, turnId: string, evidence: string): boolean {
+		return this.updateAgent(id, agentId, (agent) => {
+			if (!agent || agent.turnId !== turnId || !agent.stopping || agent.closed) return false;
+			releaseTurnProcess(agent);
+			if (["idle", "reserved", "running"].includes(agent.status)) {
+				agent.status = "failed";
+				agent.evidence = boundCollaborationEvidence(evidence);
+			}
+			return true;
+		});
 	}
 	archive(id: string): string {
 		return withFileLockSync(join(this.directory, "admission"), () =>

@@ -273,8 +273,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				deadlines.reconcile(
 					store.list().flatMap((job) =>
 						job.agents
+							// An unfinished stop keeps its cleanup ladder after its turn settled without a closure proof.
 							.filter(
-								(agent) => !agent.closed && !job.dismissed && ["running", "reserved"].includes(agent.status),
+								(agent) =>
+									!agent.closed &&
+									!job.dismissed &&
+									(agent.stopping || ["running", "reserved"].includes(agent.status)),
 							)
 							.map((agent) => ({
 								jobId: job.id,

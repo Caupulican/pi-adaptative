@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { probeProcessIdentityLiveness } from "../../kernel/reliability/process-tree.ts";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/managed-lane-records.ts";
 import { WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
@@ -61,15 +62,30 @@ export async function stopCollaborationAgent(
 		// exists. The launch's own catch owns the rollback once the acquisition resolves.
 		return false;
 	}
+	// Read from the stop snapshot: every settlement below releases the recorded helper identity.
+	const helperDead =
+		agent.helperPid !== undefined && probeProcessIdentityLiveness(agent.helperPid, agent.helperStartTime) === "dead";
 	if (agent.paneId) {
-		if (!agent.backendName || !agent.terminalId)
-			throw new Error("Cannot verify collaboration agent identity before stopping.");
-		const backend = await backendFactory(job, false);
-		const current = await backend.getAgent(agent.backendName);
-		if (current.paneId !== agent.paneId || current.terminalId !== agent.terminalId)
-			throw new Error("Collaboration pane occupant identity changed; refusing to stop it.");
-		await backend.closePane(agent.paneId);
-	} else if (agent.helperPid || agent.status === "running") {
+		let unproven: string | undefined;
+		try {
+			if (!(await verifiedClosePane(await backendFactory(job, false), agent)))
+				unproven = "its pane identity could not be re-proven";
+		} catch (error) {
+			unproven = `its backend is unavailable (${String(error).slice(0, 500)})`;
+		}
+		if (unproven) {
+			// A dead helper ends the turn but proves nothing about the native CLI in the pane, so the
+			// turn settles without a cleanup proof and the stop stays fenced for a later verified close.
+			if (helperDead)
+				store.settleUncertainStop(
+					jobId,
+					agent.id,
+					agent.turnId,
+					`${failure ?? "Owned collaboration agent stop requested."} Turn helper exited; pane closure was not proven when the stop ran because ${unproven}.`,
+				);
+			throw new Error(`Cannot prove collaboration pane closed: ${unproven}.`);
+		}
+	} else if (agent.helperPid !== undefined ? !helperDead : agent.status === "running") {
 		throw new Error("Cannot prove collaboration worker stopped without a pane identity.");
 	}
 	return store.finishStop(
@@ -79,6 +95,38 @@ export async function stopCollaborationAgent(
 		failure ? "failed" : "stopped",
 		failure ?? "Owned collaboration agent stopped.",
 	);
+}
+
+/**
+ * Verified pane close: only closes when the backend proves the pane still holds this exact agent
+ * identity, mirroring session reconciliation's own verification (`classifyPaneOwnership`, shared
+ * so the two can never drift apart — never closes on the record's word alone). Returns whether the
+ * close is now provably clean: a confirmed different occupant needs no close but is just as
+ * conclusive as one, so it counts as clean too.
+ */
+async function verifiedClosePane(
+	backend: CollaborationBackend,
+	agent: { paneId?: string; terminalId?: string; backendName?: string },
+): Promise<boolean> {
+	if (!agent.paneId) return true;
+	const paneId = agent.paneId;
+	let registered: { paneId: string; terminalId: string } | undefined;
+	if (agent.backendName) {
+		try {
+			const current = await backend.getAgent(agent.backendName);
+			registered = { paneId: current.paneId, terminalId: current.terminalId };
+		} catch {
+			// Agent name not registered in backend (e.g. failed during startAgent)
+		}
+	}
+	try {
+		const status = await classifyPaneOwnership(backend, { paneId, terminalId: agent.terminalId }, registered);
+		if (status === "unverifiable") return false;
+		if (status === "ours") await backend.closePane(paneId);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 interface CollaborationPlacementStrategy {
@@ -386,37 +434,6 @@ export class CollaborationCoordinator {
 		return updated;
 	}
 	/**
-	 * Verified pane close: only closes when the backend proves the pane still holds this exact agent
-	 * identity, mirroring session reconciliation's own verification (`classifyPaneOwnership`, shared
-	 * so the two can never drift apart — never closes on the record's word alone). Returns whether the
-	 * close is now provably clean: a confirmed different occupant needs no close but is just as
-	 * conclusive as one, so it counts as clean too.
-	 */
-	private async verifiedClosePane(
-		backend: CollaborationBackend,
-		agent: { paneId?: string; terminalId?: string; backendName?: string },
-	): Promise<boolean> {
-		if (!agent.paneId) return true;
-		const paneId = agent.paneId;
-		let registered: { paneId: string; terminalId: string } | undefined;
-		if (agent.backendName) {
-			try {
-				const current = await backend.getAgent(agent.backendName);
-				registered = { paneId: current.paneId, terminalId: current.terminalId };
-			} catch {
-				// Agent name not registered in backend (e.g. failed during startAgent)
-			}
-		}
-		try {
-			const status = await classifyPaneOwnership(backend, { paneId, terminalId: agent.terminalId }, registered);
-			if (status === "unverifiable") return false;
-			if (status === "ours") await backend.closePane(paneId);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-	/**
 	 * Durable resolution once a member's stop intent (`beginStop`) is settled: a verified-clean close
 	 * resolves the acquisition and finishes the stop as failed; an unresolved one is left uncertain,
 	 * durably marked without ever claiming closure. Shared by the team-wide launch rollback and the
@@ -462,7 +479,7 @@ export class CollaborationCoordinator {
 		const agent = store.beginStop(job.id, agentId, before?.turnId);
 		if (!agent) return;
 		const cleaned = agent.paneId
-			? await this.verifiedClosePane(backend, agent)
+			? await verifiedClosePane(backend, agent)
 			: !(agent.acquiring && acquisitionOutcomeUnknown);
 		this.resolveStoppedAgent(store, job.id, agent, cleaned, detail);
 	}
@@ -628,7 +645,7 @@ export class CollaborationCoordinator {
 				if (backend) {
 					for (const agent of loaded.agents) {
 						if (agent.paneId && agent.paneId !== job.callerPaneId) {
-							if (await this.verifiedClosePane(backend, agent)) cleanedAgentIds.add(agent.id);
+							if (await verifiedClosePane(backend, agent)) cleanedAgentIds.add(agent.id);
 						} else if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) {
 							cleanedAgentIds.add(agent.id);
 						}

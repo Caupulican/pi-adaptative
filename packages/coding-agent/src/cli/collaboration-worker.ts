@@ -10,6 +10,7 @@ import { CollaborationJobStore } from "../core/collaboration/job-store.ts";
 import { memberPeerInvocation } from "../core/collaboration/peer-credential-store.ts";
 import { COLLABORATION_WORK_RUN } from "../core/collaboration/state-directory.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
+import { readOwnProcessStartTime } from "../kernel/reliability/process-tree.ts";
 import { canonicalizeWatchDir } from "../utils/fs-watch.ts";
 import { acquireWorkRun } from "../utils/work-directory.ts";
 
@@ -68,7 +69,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 	let backend: CollaborationBackend | undefined;
 	try {
 		store = new CollaborationJobStore(directory, parent);
-		claimed = store.claimTurn(jobId, agentId, turnId, process.pid);
+		claimed = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
 		if (!claimed) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
 		notifyParent({ type: "ready", turnId });
 		const job = store.load(jobId);

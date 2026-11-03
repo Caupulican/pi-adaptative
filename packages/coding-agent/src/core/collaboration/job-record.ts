@@ -109,6 +109,9 @@ const agentSchema = Type.Object(
 			}),
 		),
 		helperPid: Type.Optional(Type.Integer({ minimum: 1 })),
+		/** The helper's Linux start time beside `helperPid`, so a reissued pid never reads as the live helper.
+		 * Absent off Linux, when procfs cannot answer, and in records written before it existed. */
+		helperStartTime: Type.Optional(Type.String({ pattern: "^[0-9]{1,32}$" })),
 		deadlineAt: Type.Optional(Type.Number()),
 		notifiedTurn: Type.Integer({ minimum: 0, maximum: 128 }),
 		/** Present only when this coordinator owns dispatch publication. Zero records unacknowledged
