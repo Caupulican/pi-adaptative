@@ -82,6 +82,7 @@ const parameters = Type.Object({
 			"show_template",
 			"stop_job",
 			"stop_session",
+			"release_acquisition",
 		]),
 	),
 	placement: Type.Optional(Type.Union([Type.Literal("current-pane"), Type.Literal("managed-workspace")])),
@@ -524,7 +525,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		label: "Persistent collaboration",
 		parameters,
 		description:
-			"Persistent native-CLI subagents in Herdr: discover/authenticate, start teams, ask/answer questions, follow up, inspect results, and stop. Model CLIs remain interactive; only stopped-work or question handoffs reach the parent.",
+			"Persistent native-CLI subagents in Herdr: discover/authenticate, start teams, ask/answer questions, follow up, inspect results, stop, and release acquisitions abandoned by an exited controller. Model CLIs remain interactive; only stopped-work or question handoffs reach the parent.",
 		promptSnippet: "Persistent multi-provider subagents with terminal/question-only handoffs.",
 		promptGuidelines: [
 			"Use delegate for in-process workers; use pi_collaboration for persistent native CLI environments.",
@@ -535,6 +536,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			"External CLIs specify reasoning effort via args (e.g. agy with model: gemini-3.8-flash-high and args: ['--effort', 'high']); thinkingLevel is Pi-only.",
 			"Answer a stopped agent's question with answer_question on the same jobId/agentId. New tasks use send_followup. Review evidence before treating reported success as verified.",
 			"Every task, answer, environment, and result may persist; never include secrets. Stop actions terminate exact owned agent panes; pass dryRun: true to preview without mutating.",
+			"release_acquisition (jobId + agentId) settles a member whose exited controller abandoned a pane request before any pane was recorded; it closes nothing and is refused while the controller is alive. Close any untracked pane its evidence names by hand.",
 		],
 		async execute(_id, input, signal, _update, ctx) {
 			const params = input as Params;
@@ -677,6 +679,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 						await coordinator.stop(job.id, action === "dismiss");
 						details = store.load(job.id);
 					}
+				} else if (action === "release_acquisition") {
+					if (!params.jobId || !params.agentId)
+						throw new Error("release_acquisition requires an exact jobId and agentId.");
+					details = store.releaseAbandonedAcquisition(job.id, params.agentId);
 				} else if (action === "notify") {
 					await (await backend(job)).notify(
 						params.title ?? "Pi collaboration",

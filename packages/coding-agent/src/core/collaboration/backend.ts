@@ -107,6 +107,12 @@ export interface CollaborationBackend {
 	sendKeys?(target: string, keys: readonly string[]): Promise<void>;
 }
 
+/**
+ * `getPane` rejects with this code only when the reachable backend server answered that no pane has the
+ * requested id: proof of absence. Connection, timeout, spawn and malformed-reply failures never carry it.
+ */
+export const COLLABORATION_PANE_NOT_FOUND = "pane_not_found";
+
 export class CollaborationBackendError extends Error {
 	readonly code: string;
 	readonly delivery: "not-submitted" | "unknown";

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, opendirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { Value } from "typebox/value";
+import { probeProcessIdentityLiveness, readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
 import type { ProcessParentOwnership } from "../process-matrix/runtime.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -57,9 +58,35 @@ import {
 export function collaborationController(job: CollaborationJob): {
 	parentSessionId: string;
 	parentPid?: number;
+	parentStartTime?: string;
 	generation: number;
 } {
 	return job.controller ?? { parentSessionId: job.parentSessionId, generation: 1 };
+}
+
+/**
+ * The recorded controller process is proven gone: its pid answers dead, or answers for a process whose
+ * Linux start time differs from the recorded one. This process, as the recorded controller, reads alive.
+ * Without a recorded pid, or when the probe cannot tell, nothing is proven. Records written before the
+ * start time existed fall back to the plain pid probe.
+ */
+export function collaborationControllerExited(job: CollaborationJob): boolean {
+	const { parentPid, parentStartTime } = collaborationController(job);
+	return parentPid !== undefined && probeProcessIdentityLiveness(parentPid, parentStartTime) === "dead";
+}
+
+/** This process as a job controller: its pid and, where procfs answers, its start time. */
+function ownControllerIdentity(
+	parentSessionId: string,
+	generation: number,
+): NonNullable<CollaborationJob["controller"]> {
+	const parentStartTime = readOwnProcessStartTime();
+	return {
+		parentSessionId,
+		parentPid: process.pid,
+		...(parentStartTime === undefined ? {} : { parentStartTime }),
+		generation,
+	};
 }
 
 /** The persisted evidence and parent handoff share one UTF-8 byte ceiling. */
@@ -397,14 +424,15 @@ export class CollaborationJobStore {
 						throw new Error("Collaboration start receipt limit reached.");
 					const owner = collaborationController(current);
 					if (owner.parentSessionId === this.parentSessionId) this.assertController(current);
-					if (owner.parentSessionId !== this.parentSessionId || owner.parentPid !== process.pid) {
+					// The full process identity: a reissued pid with a stale start time is a different controller.
+					if (
+						owner.parentSessionId !== this.parentSessionId ||
+						owner.parentPid !== process.pid ||
+						owner.parentStartTime !== readOwnProcessStartTime()
+					) {
 						if (owner.generation === Number.MAX_SAFE_INTEGER)
 							throw new Error("Collaboration controller generation exhausted.");
-						current.controller = {
-							parentSessionId: this.parentSessionId,
-							parentPid: process.pid,
-							generation: owner.generation + 1,
-						};
+						current.controller = ownControllerIdentity(this.parentSessionId, owner.generation + 1);
 					}
 					if (task)
 						for (const agent of input.agents)
@@ -438,7 +466,7 @@ export class CollaborationJobStore {
 		const job: CollaborationJob = {
 			...input,
 			version: 1,
-			controller: { parentSessionId: this.parentSessionId, parentPid: process.pid, generation: 1 },
+			controller: ownControllerIdentity(this.parentSessionId, 1),
 			variables: {},
 			metadata: {},
 			mailbox: { messages: [], receipts: [] },
@@ -627,8 +655,9 @@ export class CollaborationJobStore {
 		const job = this.read(id);
 		this.assertPeerParent(job);
 		this.authenticatePeer(job, senderId, token);
-		const owner = collaborationController(job);
-		return owner.parentPid === undefined ? undefined : { ...owner, parentPid: owner.parentPid };
+		const { parentSessionId, parentPid, generation } = collaborationController(job);
+		// Exactly the supervision contract's fields; the controller's start time stays a store-internal fact.
+		return parentPid === undefined ? undefined : { parentSessionId, parentPid, generation };
 	}
 	/** Answers mint a fresh dispatch identity; workers discover it without exposing credentials. */
 	currentPeerTurn(id: string, senderId: string, token: string): { turnId: string } {
@@ -1013,6 +1042,43 @@ export class CollaborationJobStore {
 				agent.evidence = boundCollaborationEvidence(evidence);
 			}
 			return true;
+		});
+	}
+	/**
+	 * Explicit operator release of an acquisition that an exited controller abandoned before any pane was
+	 * recorded. No recorded fact identifies a pane the lost request may have created (the backend name is
+	 * minted after the reply and non-Pi members carry no job environment), so nothing is verified or closed
+	 * and the release itself records no closure: it leaves `closed` unset, settles an active turn failed, and
+	 * the evidence names where an untracked pane must be inspected and closed by hand. A later explicit stop
+	 * of the released member is the operator's own decision and records closure through `finishStop`. The
+	 * controller's exit is proven
+	 * again under the job lock, so a live controller's in-flight acquisition is never released.
+	 */
+	releaseAbandonedAcquisition(id: string, agentId: string): CollaborationAgent {
+		return this.updateAgent(id, agentId, (agent, job) => {
+			if (!agent || agent.closed) throw new Error("Unknown or closed collaboration agent.");
+			if (!agent.acquiring) throw new Error("Collaboration agent has no unresolved resource acquisition.");
+			if (agent.paneId)
+				throw new Error(
+					"Collaboration agent has a recorded pane; run job_status so reconciliation verifies and closes it.",
+				);
+			if (!collaborationControllerExited(job))
+				throw new Error(
+					"Collaboration controller is not proven exited; its acquisition may still resolve. Nothing was released.",
+				);
+			const location =
+				job.placement === "current-pane"
+					? `Herdr tab ${job.callerTabId ?? "(unrecorded)"} beside caller pane ${job.callerPaneId ?? "(unrecorded)"}`
+					: job.workspaceId
+						? `Herdr workspace ${job.workspaceId}`
+						: `an unrecorded Herdr workspace labelled "${job.title}" in session ${job.sessionName}`;
+			const note = `Acquisition released by operator after controller pid ${collaborationController(job).parentPid} exited; no pane was observed or closed. Any untracked pane in ${location} must be inspected and closed manually.`;
+			delete agent.acquiring;
+			delete agent.stopping;
+			releaseTurnProcess(agent);
+			if (["idle", "reserved", "running"].includes(agent.status)) agent.status = "failed";
+			agent.evidence = boundCollaborationEvidence(agent.evidence ? `${agent.evidence} ${note}` : note);
+			return agent;
 		});
 	}
 	archive(id: string): string {

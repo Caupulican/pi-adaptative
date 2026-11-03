@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { Value } from "typebox/value";
 import {
+	COLLABORATION_PANE_NOT_FOUND,
 	type CollaborationAgent,
 	type CollaborationAgentStatus,
 	type CollaborationBackend,
@@ -510,7 +511,18 @@ export class HerdrBackend implements CollaborationBackend {
 	}
 
 	async getPane(paneId: string): Promise<CollaborationPane> {
-		return pane((await this.request(["pane", "get", target(paneId)], "pane_info")).pane);
+		try {
+			return pane((await this.request(["pane", "get", target(paneId)], "pane_info")).pane);
+		} catch (error) {
+			// Herdr's `pane get` exits nonzero with `{"error":{"code":"pane_not_found"}}` only when its server
+			// answered; an unreachable server reports `server_not_running` and stays an ordinary failure.
+			if (error instanceof CollaborationBackendError && error.code === "pane_not_found")
+				throw new CollaborationBackendError(
+					COLLABORATION_PANE_NOT_FOUND,
+					`Herdr reports that pane ${paneId} does not exist.`,
+				);
+			throw error;
+		}
 	}
 
 	async closePane(paneId: string): Promise<void> {

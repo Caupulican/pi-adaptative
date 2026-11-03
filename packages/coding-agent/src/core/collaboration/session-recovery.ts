@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
-import type { CollaborationBackend, CollaborationAgent as NativeAgent } from "./backend.ts";
+import {
+	COLLABORATION_PANE_NOT_FOUND,
+	type CollaborationBackend,
+	CollaborationBackendError,
+	type CollaborationAgent as NativeAgent,
+} from "./backend.ts";
 import type { CollaborationAgent, CollaborationJob } from "./job-record.ts";
-import { type CollaborationJobStore, collaborationController } from "./job-store.ts";
+import { type CollaborationJobStore, collaborationControllerExited } from "./job-store.ts";
 
 /** Opens (or, for an already-admitted new job, creates) the native backend that hosts a job. */
 export type CollaborationBackendFactory = (job: CollaborationJob, create?: boolean) => Promise<CollaborationBackend>;
@@ -58,14 +62,15 @@ export type PaneOwnership = "ours" | "gone" | "unverifiable";
  *
  * "ours": the registration confirms the exact paneId (and, whenever a terminalId was recorded, the
  * exact terminalId too) — still live and safe to close. "gone": a direct lookup on our own paneId
- * proves a DIFFERENT terminal now occupies it — our claim on it is settled, nothing of ours remains.
+ * proves a DIFFERENT terminal now occupies it, or the reachable backend answers that no pane has that
+ * id (`COLLABORATION_PANE_NOT_FOUND`) — our claim on it is settled, nothing of ours remains.
  * A registration under our name pointing elsewhere is never itself proof of "gone": pane ids and
  * process names both get reused after the owning process exits, so only a lookup on our OWN paneId
  * can settle it — a name mismatch falls through to that lookup exactly like a name that was never
- * registered at all. Anything the backend cannot answer for certain — no terminalId was ever
- * recorded to check a raw pane lookup against (a paneId alone is never proof by itself; ids get
- * reused), or a `getPane` exception — is "unverifiable": never a claim, the caller's own notice
- * stays up.
+ * registered at all. Anything the backend cannot answer for certain — an existing pane with no
+ * recorded terminalId to check it against (a paneId alone is never proof by itself; ids get reused),
+ * or any other `getPane` failure (unreachable server, timeout, malformed reply) — is "unverifiable":
+ * never a claim, the caller's own notice stays up.
  */
 export async function classifyPaneOwnership(
 	backend: CollaborationBackend,
@@ -79,28 +84,20 @@ export async function classifyPaneOwnership(
 	) {
 		return "ours";
 	}
-	if (!agent.terminalId) return "unverifiable";
+	let currentPane: { terminalId: string };
 	try {
-		const currentPane = await backend.getPane(agent.paneId);
-		return currentPane.terminalId === agent.terminalId ? "ours" : "gone";
-	} catch {
-		// A getPane exception cannot distinguish "genuinely gone" from "backend cannot answer" — treated
-		// the same way: unverifiable, never a claim.
-		return "unverifiable";
+		currentPane = await backend.getPane(agent.paneId);
+	} catch (error) {
+		// Only the server's own "no such pane" answer proves absence; a failure to ask proves nothing.
+		return error instanceof CollaborationBackendError && error.code === COLLABORATION_PANE_NOT_FOUND
+			? "gone"
+			: "unverifiable";
 	}
+	if (!agent.terminalId) return "unverifiable";
+	return currentPane.terminalId === agent.terminalId ? "ours" : "gone";
 }
 
 const ACTIVE_STATUSES: readonly string[] = ["idle", "reserved", "running"];
-
-/**
- * Only the process recorded as the job's controller ever begins a backend acquisition, so once that
- * process is proven gone (and is not this one) nobody remains to record the acquisition's outcome.
- * Without a recorded controller pid, or when the probe cannot tell, the acquisition stays live.
- */
-function acquisitionsAbandoned(job: CollaborationJob): boolean {
-	const parentPid = collaborationController(job).parentPid;
-	return parentPid !== undefined && parentPid !== process.pid && probeProcessLiveness(parentPid) === "dead";
-}
 
 /**
  * Settles the turn of each member whose acquisition its dead controller abandoned. One without a
@@ -197,7 +194,9 @@ export async function reconcileCollaborationSessions(
 			let identity = recoveryIdentity(job);
 			let failure: string | undefined;
 			try {
-				const abandoned = acquisitionsAbandoned(job);
+				// Only the recorded controller ever begins a backend acquisition, so once that process is proven
+				// gone by its full identity nobody remains to record the acquisition's outcome.
+				const abandoned = collaborationControllerExited(job);
 				if (abandoned) settleAbandonedAcquisitions(store, job);
 				const client = await backend(job, false);
 				const native = await client.listAgents();
@@ -212,6 +211,10 @@ export async function reconcileCollaborationSessions(
 				identity = recoveryIdentity(settled);
 				for (const expected of settled.agents) {
 					if (expected.closed) continue;
+					// A settled member that never recorded a pane and holds no outstanding acquisition has no
+					// native identity to reattach (a released acquisition, for one); asserting one would only
+					// raise a false "identity changed" notice until the job is archived.
+					if (!expected.paneId && !expected.acquiring && !ACTIVE_STATUSES.includes(expected.status)) continue;
 					const actual = native.find((agent) => agent.name === expected.backendName);
 					assertCollaborationNativeIdentity(expected, actual);
 					if (expected.steering) {

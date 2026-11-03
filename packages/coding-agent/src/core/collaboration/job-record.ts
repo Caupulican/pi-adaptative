@@ -138,6 +138,9 @@ export const jobSchema = Type.Object(
 				{
 					parentSessionId: shortText,
 					parentPid: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+					/** The controller's Linux start time beside `parentPid`, so a reissued pid never reads as the live
+					 * controller. Absent off Linux, when procfs cannot answer, and in records written before it existed. */
+					parentStartTime: Type.Optional(Type.String({ pattern: "^[0-9]{1,32}$" })),
 					generation: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 				},
 				{ additionalProperties: false },

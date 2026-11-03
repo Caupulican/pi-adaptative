@@ -18,7 +18,9 @@ Pi dialog questions retain bounded authenticated question/choice context separat
 
 `job_status`, `list_jobs`, `set_variable`, and `list_variables` expose bounded state. `notify`, `set_status`, and `clear_status` affect display metadata, not task completion. `list_templates` and `show_template` load the single JSON template source.
 
-`stop_job`/`stop_session` terminate exact owned agent panes directly; pass `dryRun: true` to preview termination targets without closing panes. `dismiss` ends tracking without terminating an idle native CLI; active work must first stop. Closing a controller alone is not proof that its worker stopped.
+`stop_job`/`stop_session` terminate exact owned agent panes directly; pass `dryRun: true` to preview termination targets without closing panes. `dismiss` ends tracking without terminating an idle native CLI; active work must first stop. Closing a controller alone is not proof that its worker stopped. A pane missing from a reachable Herdr server counts as closed.
+
+`release_acquisition` with an exact `jobId` and `agentId` settles a member whose controller exited while its pane request was outstanding and before any pane was recorded. Such a member cannot be stopped, dismissed or archived otherwise, because no recorded fact identifies a pane the lost request may have created. The release is refused while the controller process is alive. It closes nothing and the release itself records no closure: the turn ends failed and its evidence names the tab or workspace where an untracked pane must be inspected and closed by hand.
 
 Team launches require distinct per-agent `task` responsibilities. Native workers receive a portable, authenticated peer mailbox command; queued messages reuse the same turn owner once a recipient is idle. Herdr client detach (`Ctrl+B`, then `q`) and reattach (`herdr --session <sessionName>`) preserve live agents. Server termination is a separate failure boundary; an uncertain task is never blindly resubmitted. See the packaged `docs/pi-collaboration.md` for recovery and retention limits.
 
