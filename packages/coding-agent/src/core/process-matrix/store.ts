@@ -12,6 +12,7 @@
 import { promises as fsPromises, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isOwnerStartTimeField } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
@@ -79,6 +80,24 @@ function parseJson(raw: string): unknown {
 	}
 }
 
+/**
+ * The one reader of a persisted entry: every read path (lists, reads and the compare-and-swap writers' own re-reads)
+ * goes through it, so the value a caller holds and the value a fenced write compares against have the same shape.
+ * An entry written before the shared owner shape stored its start time as `processStartTime`; it is read into
+ * `startTime` (an entry carrying both keeps `startTime`) and the legacy key is dropped, so the next write of the entry
+ * carries only the current shape.
+ */
+function parseProcessMatrixEntry(value: unknown): ProcessMatrixEntry | undefined {
+	if (!isPlainRecord(value) || !("processStartTime" in value)) return isProcessMatrixEntry(value) ? value : undefined;
+	const { processStartTime, ...current } = value;
+	if (!isOwnerStartTimeField(processStartTime)) return undefined;
+	const entry =
+		current.startTime === undefined && processStartTime !== undefined
+			? { ...current, startTime: processStartTime }
+			: current;
+	return isProcessMatrixEntry(entry) ? entry : undefined;
+}
+
 function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 	if (!isPlainRecord(value) || !isAgentIdentity(value.agent) || (value.role !== "master" && value.role !== "worker"))
 		return false;
@@ -113,8 +132,7 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 		typeof value.hostname === "string" &&
 		value.hostname.length <= 255 &&
 		isOptionalString(value.machineId, 255) &&
-		(value.processStartTime === undefined ||
-			(typeof value.processStartTime === "string" && /^\d{1,32}$/.test(value.processStartTime))) &&
+		isOwnerStartTimeField(value.startTime) &&
 		isTimestamp(value.startedAt) &&
 		isTimestamp(value.heartbeatAt) &&
 		isProcessStatus(value.status) &&
@@ -128,8 +146,7 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 }
 
 export async function readEntry(agentDir: string, entryId: string): Promise<ProcessMatrixEntry | undefined> {
-	const value = await readJsonFile(entryPath(agentDir, entryId));
-	return isProcessMatrixEntry(value) ? value : undefined;
+	return parseProcessMatrixEntry(await readJsonFile(entryPath(agentDir, entryId)));
 }
 
 export async function listEntries(agentDir: string): Promise<ProcessMatrixEntry[]> {
@@ -142,8 +159,8 @@ export async function listEntries(agentDir: string): Promise<ProcessMatrixEntry[
 	const entries: ProcessMatrixEntry[] = [];
 	for (const name of names.sort()) {
 		if (!name.endsWith(".json")) continue;
-		const entry = await readJsonFile(join(processMatrixDir(agentDir), name));
-		if (isProcessMatrixEntry(entry)) entries.push(entry);
+		const entry = parseProcessMatrixEntry(await readJsonFile(join(processMatrixDir(agentDir), name)));
+		if (entry) entries.push(entry);
 	}
 	return entries;
 }
@@ -174,7 +191,7 @@ export async function writeEntryIfUnchanged(
 	}
 	return withEntryLock(agentDir, entryId, async () => {
 		const value = await readJsonFile(entryPath(agentDir, entryId));
-		const current = isProcessMatrixEntry(value) ? value : undefined;
+		const current = parseProcessMatrixEntry(value);
 		if (!isDeepStrictEqual(current, expected)) return false;
 		await writeFileAtomic(entryPath(agentDir, entryId), serialize(next));
 		return true;
@@ -194,7 +211,7 @@ export function writeEntryIfUnchangedSync(
 		entryPath(agentDir, expected.entryId),
 		() => {
 			const value = readJsonFileSync(entryPath(agentDir, expected.entryId));
-			const current = isProcessMatrixEntry(value) ? value : undefined;
+			const current = parseProcessMatrixEntry(value);
 			if (!isDeepStrictEqual(current, expected)) return false;
 			writeFileAtomicSync(entryPath(agentDir, expected.entryId), serialize(next));
 			return true;
@@ -216,7 +233,7 @@ export async function removeEntry(agentDir: string, entryId: string): Promise<vo
 export async function removeEntryIfUnchanged(agentDir: string, expected: ProcessMatrixEntry): Promise<boolean> {
 	return withEntryLock(agentDir, expected.entryId, async () => {
 		const value = await readJsonFile(entryPath(agentDir, expected.entryId));
-		const current = isProcessMatrixEntry(value) ? value : undefined;
+		const current = parseProcessMatrixEntry(value);
 		if (!isDeepStrictEqual(current, expected)) return false;
 		await fsPromises.rm(entryPath(agentDir, expected.entryId), { force: true });
 		return true;

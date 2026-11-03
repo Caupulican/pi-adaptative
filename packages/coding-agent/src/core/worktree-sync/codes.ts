@@ -6,6 +6,8 @@
  * carried alongside as evidence for humans, not as a branch condition.
  */
 
+import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+
 /** Cap on `WorktreeSyncEpoch.changedPaths`; beyond it the list is truncated and overlap checks
  * treat the land as conservatively overlapping EVERYTHING (deterministic, never optimistic). */
 export const EPOCH_CHANGED_PATHS_CAP = 500;
@@ -82,16 +84,12 @@ export interface LaneRegistration {
 	requirementId?: string;
 	/** Host `LaneRecord.laneId` after dispatch correlation (tmux/in-process worker binding). */
 	boundLaneId?: string;
-	ownerPid?: number;
 	/**
-	 * `os.hostname()` of the owner's host. Decides locality only when {@link ownerMachineId} is absent; a record with
-	 * neither predates both and was written on this host.
+	 * The process that owns the lane (`ownProcessOwner`), judged by `judgeOwner`. Records written before it was nested
+	 * carried flat `ownerPid`/`ownerHostname`/`ownerMachineId`/`ownerStartTime`; the store reads those into this field.
+	 * An owner naming no host predates host recording and was written on this host.
 	 */
-	ownerHostname?: string;
-	/** The owner host's stable machine id (`kernel/reliability/host-identity.ts`); when present it alone decides locality. */
-	ownerMachineId?: string;
-	/** The owner's Linux start time, so a reissued pid is not mistaken for the owner. Absent on older records. */
-	ownerStartTime?: string;
+	owner?: ProcessOwner;
 	ownerSessionId?: string;
 }
 
@@ -129,19 +127,16 @@ export interface LaneFacts {
 	ownerAlive?: boolean;
 }
 
-export interface IntegrationLockOwner {
-	pid: number;
-	/** `os.hostname()` of the holder's host. Decides locality only when {@link machineId} is absent. */
-	hostname: string;
-	/** The holder host's stable machine id; when present it alone decides locality. Absent on older manifests. */
-	machineId?: string;
+/**
+ * The integration-lock manifest: the holder process (`ownProcessOwner`, judged by `judgeOwner`) plus the acquisition.
+ * Every manifest names its host by hostname; `machineId` and `startTime` are absent on older manifests.
+ */
+export interface IntegrationLockOwner extends ProcessOwner {
 	/** Random acquisition identity; PID/session are diagnostic only and never authorize release. */
 	token: string;
 	sessionId?: string;
 	laneKey?: string;
 	acquiredAt: string;
-	/** The holder's Linux start time, so a reissued pid is not mistaken for the holder. Absent on older manifests. */
-	startTime?: string;
 }
 
 export type IntegrationLockAcquisition =

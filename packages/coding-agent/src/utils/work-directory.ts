@@ -15,10 +15,9 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomicSync } from "../core/util/atomic-file.ts";
-import { probeProcessIdentityLiveness, readOwnProcessStartTime } from "../kernel/reliability/process-tree.ts";
+import { judgeOwner, ownProcessOwner, type ProcessOwner } from "../kernel/reliability/owner-identity.ts";
 
 export const PI_WORK_ROOT_ENV = "PI_WORK_ROOT";
 export const WORK_RUN_MANIFEST_FILE = ".pi-work-run.json";
@@ -53,12 +52,12 @@ interface WorkRunManifest {
 	createdAt: number;
 }
 
-interface WorkMarker {
+/**
+ * A lease or cleanup marker: its owner process ({@link ownProcessOwner}, judged by {@link judgeOwner}) and when it was
+ * written. Every marker names its host by hostname; `startTime` and `machineId` are absent on older markers.
+ */
+interface WorkMarker extends ProcessOwner {
 	version: 1;
-	hostname: string;
-	pid: number;
-	/** The owner's process start time (Linux), so a process that reused the pid is not mistaken for it. */
-	startTime?: string;
 	createdAt: number;
 }
 
@@ -308,6 +307,7 @@ function isMarker(value: unknown): value is WorkMarker {
 	return (
 		marker.version === 1 &&
 		typeof marker.hostname === "string" &&
+		(marker.machineId === undefined || (typeof marker.machineId === "string" && marker.machineId.length <= 255)) &&
 		typeof marker.pid === "number" &&
 		Number.isSafeInteger(marker.pid) &&
 		marker.pid > 0 &&
@@ -317,23 +317,24 @@ function isMarker(value: unknown): value is WorkMarker {
 	);
 }
 
+/**
+ * Only an owner {@link judgeOwner} finds `dead` (same host, and ESRCH or a pid now naming a process with another start
+ * time) makes a marker stale. A marker from another host stays active: its pid means nothing here, so it is never
+ * reclaimed. A probe that could not tell stays unknown; both are fail-closed.
+ */
 function markerState(path: string): "active" | "stale" | "unknown" {
 	try {
 		const value = readSmallJson(path);
 		if (!isMarker(value)) return "unknown";
-		if (value.hostname !== hostname()) return "active";
-		// The canonical liveness owner: only a proven absence (ESRCH, or the pid now names a process with another start time) is
-		// stale; a probe that could not tell stays unknown and fail-closed.
-		const liveness = probeProcessIdentityLiveness(value.pid, value.startTime);
-		return liveness === "alive" ? "active" : liveness === "dead" ? "stale" : "unknown";
+		const standing = judgeOwner(value);
+		return standing === "dead" ? "stale" : standing === "unknown" ? "unknown" : "active";
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
 	}
 }
 
 function ownMarker(now: number): WorkMarker {
-	const startTime = readOwnProcessStartTime();
-	return { version: 1, hostname: hostname(), pid: process.pid, ...(startTime ? { startTime } : {}), createdAt: now };
+	return { version: 1, ...ownProcessOwner(), createdAt: now };
 }
 
 function removeFile(path: string): void {
@@ -406,8 +407,8 @@ function reclaimDeadLeaseMarkers(leasesDir: string, ownMarkerName: string): void
 }
 
 /**
- * Report whether a managed run is leased or being cleaned. Stale local markers are removed as part
- * of the check; malformed or foreign-host markers remain fail-closed and count as active.
+ * Report whether a managed run is leased or being cleaned. Markers whose owner is proven dead are removed as part
+ * of the check; malformed, unjudgeable or foreign-host markers remain fail-closed and count as active.
  */
 export function hasActiveWorkRunLease(runDir: string): boolean {
 	return cleanupMarkerBlocksAcquisition(runDir) || hasDurableHold(runDir) || hasActiveLease(runDir);

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir, getBundledResourcesDir } from "../../config.ts";
+import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import {
@@ -83,6 +84,7 @@ const parameters = Type.Object({
 			"stop_job",
 			"stop_session",
 			"release_acquisition",
+			"adopt_job",
 		]),
 	),
 	placement: Type.Optional(Type.Union([Type.Literal("current-pane"), Type.Literal("managed-workspace")])),
@@ -175,7 +177,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				controls: CollaborationControlHandoffs;
 				readyJobs: Set<string>;
 				cancelRuntimeRetry(): void;
-				recover(): Promise<void>;
+				recover(fresh?: boolean): Promise<void>;
 		  }
 		| undefined;
 	const backend =
@@ -209,9 +211,14 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 	const bind = (ctx: ExtensionContext) => {
 		if (binding?.store.parentSessionId === ctx.sessionManager.getSessionId()) return binding;
 		close();
+		// The lease registry lives in the same agent directory as the default job root; a store bound to another
+		// directory has no registry to judge other sessions by, so it never adopts and shows them as unproven.
 		const store = new CollaborationJobStore(
 			options.stateDirectory ?? join(getCollaborationDataRoot(), "jobs"),
 			ctx.sessionManager.getSessionId(),
+			options.stateDirectory === undefined
+				? { sessionServers: (sessionId) => readSessionLeaseHolders(getAgentDir(), sessionId) }
+				: {},
 		);
 		const controls = new CollaborationControlHandoffs(store, (notice) =>
 			pi.sendMessage(
@@ -239,7 +246,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				(options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer),
 		});
 		const deadlines = new CollaborationDeadlines(
-			(jobId, agentId, turnId) => coordinator.stopAgent(jobId, agentId, turnId),
+			(jobId, agentId, turnId) => coordinator.stopAgent(jobId, agentId, turnId, { kind: "deadline" }),
 			(turn, error) => {
 				try {
 					controls.record(turn.jobId, turn.agentId, turn.turnId, String(error));
@@ -263,6 +270,9 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		};
 		const refresh = () => {
 			try {
+				// A job of this session whose controller is gone is taken back first, so publication, peer delivery
+				// and deadlines below run on it.
+				store.reclaimSessionJobs();
 				coordinator.refresh();
 				controls.flush();
 				if (recovered)
@@ -309,7 +319,14 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			: watch(watchDirectory, { persistent: false }, (_event, file) => changed(file));
 		watcher.on("error", (error) => ctx.ui.notify(`Collaboration signal failed: ${error.message}`, "error"));
 		let reattaching: Promise<void> | undefined;
-		const recover = (): Promise<void> => {
+		/** `fresh`: wait out a reconciliation already in flight (it listed jobs before the caller's change), then run. */
+		const recover = async (fresh = false): Promise<void> => {
+			if (fresh && reattaching)
+				await reattaching.then(
+					() => undefined,
+					// The in-flight run's own caller reports its failure; this one only waits for it to end.
+					() => undefined,
+				);
 			if (!reattaching) recovered = false;
 			reattaching ??= reconcileCollaborationSessions(
 				store,
@@ -525,7 +542,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		label: "Persistent collaboration",
 		parameters,
 		description:
-			"Persistent native-CLI subagents in Herdr: discover/authenticate, start teams, ask/answer questions, follow up, inspect results, stop, and release acquisitions abandoned by an exited controller. Model CLIs remain interactive; only stopped-work or question handoffs reach the parent.",
+			"Persistent native-CLI subagents in Herdr: discover/authenticate, start teams, ask/answer questions, follow up, inspect results, stop, release acquisitions abandoned by an exited process, and adopt another session's orphaned job. Model CLIs remain interactive; only stopped-work or question handoffs reach the parent.",
 		promptSnippet: "Persistent multi-provider subagents with terminal/question-only handoffs.",
 		promptGuidelines: [
 			"Use delegate for in-process workers; use pi_collaboration for persistent native CLI environments.",
@@ -536,33 +553,60 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			"External CLIs specify reasoning effort via args (e.g. agy with model: gemini-3.8-flash-high and args: ['--effort', 'high']); thinkingLevel is Pi-only.",
 			"Answer a stopped agent's question with answer_question on the same jobId/agentId. New tasks use send_followup. Review evidence before treating reported success as verified.",
 			"Every task, answer, environment, and result may persist; never include secrets. Stop actions terminate exact owned agent panes; pass dryRun: true to preview without mutating.",
-			"release_acquisition (jobId + agentId) settles a member whose exited controller abandoned a pane request before any pane was recorded; it closes nothing and is refused while the controller is alive. Close any untracked pane its evidence names by hand.",
+			"release_acquisition (jobId + agentId) settles a member whose exited issuing process abandoned a pane request before any pane was recorded; it closes nothing and is refused while that process is alive. Close any untracked pane its evidence names by hand.",
+			"status and list_jobs also list other sessions' jobs read-only with a control standing: owned_by_live_session (a live process serves it; never mutable from here), awaiting_session (its own session is open elsewhere and takes it back), orphaned (its controller exited and no live process holds its session), or unproven. A job of this session whose controller exited is taken back automatically.",
+			"adopt_job (exact jobId) takes over an orphaned job: the conditions are re-verified under the job lock, the controller is rebound to this process with a new generation, and its handoffs then publish here. The job keeps its own session; that session, once resumed, takes it back only after this process is gone. dryRun: true shows the standing without changing anything.",
 		],
 		async execute(_id, input, signal, _update, ctx) {
 			const params = input as Params;
 			const action = params.action ?? "status";
 			const { store, coordinator, readyJobs, recover } = bind(ctx);
+			// A job of this session whose controller exited since the last refresh (no file changed) is taken back first.
+			store.reclaimSessionJobs();
 			let details: unknown;
-			if (action === "status" || action === "setup_help")
+			if (action === "status" || action === "setup_help") {
+				const overview = store.overview();
 				details = {
 					backend: "herdr",
 					providers: await providers.list(),
-					jobs: store.list(),
+					jobs: overview.jobs,
+					// Other sessions' jobs with live or unpublished work: read-only, each with its control standing.
+					otherSessionJobs: overview.otherJobs,
+					otherSessionJobsOmitted: overview.otherJobsOmitted,
 					// Job files the listing skipped (corrupt or unreadable): bounded and content-free, so a bad
 					// record is visible here instead of silently missing.
 					skippedRecords: store.skippedRecords(),
 					permissionMode: "native-cli-unrestricted",
-					help: "Use fire_task to start a persistent interactive team. Missing Herdr is installed on demand. Questions use answer_question; ordinary follow-ups use send_followup.",
+					help: "Use fire_task to start a persistent interactive team. Missing Herdr is installed on demand. Questions use answer_question; ordinary follow-ups use send_followup. An orphaned job of another session is taken over with adopt_job.",
 				};
-			else if (action === "guard") {
+			} else if (action === "guard") {
 				const installation = await (options.provision ?? provisionHerdr)();
 				details = { guard: { allowed: true }, installation };
 			} else if (action === "list_templates") details = templates();
 			else if (action === "show_template") {
 				details = templates().find((item) => item.name === (params.teamTemplate ?? params.title));
 				if (!details) throw new Error("Unknown collaboration template.");
-			} else if (action === "list_jobs") details = store.list();
-			else if (["workspace_plan", "launch_workspace", "fire_task"].includes(action)) {
+			} else if (action === "list_jobs") {
+				const overview = store.overview();
+				details = {
+					jobs: overview.jobs,
+					otherSessionJobs: overview.otherJobs,
+					otherSessionJobsOmitted: overview.otherJobsOmitted,
+				};
+			} else if (action === "adopt_job") {
+				if (!params.jobId) throw new Error("adopt_job requires an exact jobId.");
+				if (params.dryRun === true) details = { dryRun: true, job: store.describe(params.jobId) };
+				else {
+					const adopted = store.adopt(params.jobId);
+					// Reconcile the adopted job (stranded stops, abandoned acquisitions, reattachment) and admit it to
+					// peer delivery; a reconciliation already in flight listed jobs before the adoption.
+					await recover(true);
+					details = { adopted: true, job: store.load(adopted.id) };
+				}
+			} else if (action === "job_status" && params.jobId && !store.controlsJob(params.jobId)) {
+				// Another session's job: shown read-only, never mutated from here.
+				details = { readOnly: true, job: store.describe(params.jobId) };
+			} else if (["workspace_plan", "launch_workspace", "fire_task"].includes(action)) {
 				const plan = await prepare(ctx, params, action !== "workspace_plan" && params.dryRun !== true, _id);
 				if (action === "workspace_plan" || params.dryRun) details = { dryRun: true, job: plan };
 				else {

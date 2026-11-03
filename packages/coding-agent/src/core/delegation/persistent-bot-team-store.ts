@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
+import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -23,8 +24,9 @@ import {
 	parseDurationIntervalMs,
 	parseRoutineRecord,
 	readDaemonLeaseStatus,
-	recordDaemonLeasePidFile,
+	recordDaemonLaunchPidFile,
 	releaseDaemonLeaseFile,
+	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
 	type UpsertPersistentRoutineInput,
 } from "./bot-team-routine-helpers.ts";
@@ -549,6 +551,8 @@ export class PersistentBotTeamStore {
 	private refreshQueued = false;
 	private watchGeneration = 0;
 	private loadedDigest: string | undefined;
+	/** The loaded file has a top-level `routines` array: the shape an earlier inline-script daemon acts on. */
+	private legacyRoutinesExposed = false;
 	private readonly onDiagnostic: (message: string) => void;
 
 	constructor(
@@ -629,13 +633,18 @@ export class PersistentBotTeamStore {
 		}
 	}
 
+	/**
+	 * Writes the store. Routines are kept under `routineSchedules`, never the version-1 `routines` key: an inline-script
+	 * daemon of an earlier build rewrites the store, unlocked and non-atomically, only while its top level holds a
+	 * `routines` array, so every save also seals the store against that writer (see `bot-daemon-legacy.ts`).
+	 */
 	private save(): void {
 		const data = {
-			version: 1,
+			version: 2,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
 			teamMessages: Object.fromEntries(this.teamMessages),
-			...(this.routines.size > 0 ? { routines: Array.from(this.routines.values()) } : {}),
+			...(this.routines.size > 0 ? { routineSchedules: Array.from(this.routines.values()) } : {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
@@ -694,7 +703,7 @@ export class PersistentBotTeamStore {
 			observeOnly &&
 			raw !== undefined &&
 			(!isRecordObject(parsed) ||
-				parsed.version !== 1 ||
+				(parsed.version !== 1 && parsed.version !== 2) ||
 				!Array.isArray(parsed.bots) ||
 				!Array.isArray(parsed.teams) ||
 				!isRecordObject(parsed.teamMessages))
@@ -706,6 +715,7 @@ export class PersistentBotTeamStore {
 		this.teamMessages.clear();
 		this.routines.clear();
 		this.loadedDigest = digest;
+		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
 		if (!isRecordObject(parsed)) return true;
 
 		if (Array.isArray(parsed.bots)) {
@@ -743,8 +753,10 @@ export class PersistentBotTeamStore {
 			}
 		}
 
-		if (Array.isArray(parsed.routines)) {
-			for (const rawRoutine of parsed.routines) {
+		// A version-1 store (or one an older build rewrote) keeps routines under `routines`.
+		const rawRoutines = Array.isArray(parsed.routineSchedules) ? parsed.routineSchedules : parsed.routines;
+		if (Array.isArray(rawRoutines)) {
+			for (const rawRoutine of rawRoutines) {
 				const routine = parseRoutineRecord(rawRoutine);
 				if (routine) {
 					this.routines.set(routine.routineId, routine);
@@ -1168,13 +1180,14 @@ export class PersistentBotTeamStore {
 		return claimDaemonLeaseFile(this.filePath, token, nowMs);
 	}
 
-	recordDaemonLeasePid(token: string, pid: number): void {
-		recordDaemonLeasePidFile(this.filePath, token, pid);
+	/** Records the pid of the process spawned for `token`; display only (it may be a launcher wrapper, never probed). */
+	recordDaemonLaunchPid(token: string, launcherPid: number): void {
+		recordDaemonLaunchPidFile(this.filePath, token, launcherPid);
 	}
 
-	/** The daemon's renewal; false once its lease was released or taken by another start. */
-	renewDaemonLease(token: string, pid: number, nowMs = Date.now()): boolean {
-		return renewDaemonLeaseFile(this.filePath, token, pid, nowMs);
+	/** The daemon's renewal with its own process identity; false once its lease was released or taken. */
+	renewDaemonLease(token: string, owner: ProcessOwner, nowMs = Date.now()): boolean {
+		return renewDaemonLeaseFile(this.filePath, token, owner, nowMs);
 	}
 
 	daemonLeaseBelongsTo(token: string): boolean {
@@ -1186,9 +1199,29 @@ export class PersistentBotTeamStore {
 		return releaseDaemonLeaseFile(this.filePath, token, nowMs);
 	}
 
+	/** Releases a first-generation `pi --bot-daemon` lease in the old lease file; that daemon exits on observing it. */
+	releaseLegacyTokenDaemonLease(nowMs = Date.now()): DaemonLeaseRelease {
+		return releaseLegacyTokenDaemonLeaseFile(this.filePath, nowMs);
+	}
+
+	/**
+	 * Rewrites the store in the current shape when the file still exposes the version-1 `routines` key, which is the
+	 * only shape an inline-script daemon of an earlier build writes to. True when a rewrite was needed. A store already
+	 * loaded in the current shape takes no lock; every save and every daemon tick reseal it anyway.
+	 */
+	sealRoutinesAgainstLegacyWriters(): boolean {
+		if (!this.legacyRoutinesExposed) return false;
+		return this.mutate(() => {
+			if (!this.legacyRoutinesExposed) return false;
+			this.save();
+			return true;
+		});
+	}
+
 	/**
 	 * The detached daemon's tick: every enabled due routine is advanced and marked queued, its bot's summary updated
 	 * or its team handed the routine prompt as a brain message, all in one locked transaction over the shared store.
+	 * A store an older build rewrote in the version-1 shape is resealed in the same transaction.
 	 */
 	queueDueRoutinesForDaemon(nowMs = Date.now()): number {
 		return this.mutate(() => {
@@ -1222,7 +1255,7 @@ export class PersistentBotTeamStore {
 					});
 				}
 			}
-			if (queued > 0) this.save();
+			if (queued > 0 || this.legacyRoutinesExposed) this.save();
 			return queued;
 		});
 	}

@@ -1,8 +1,10 @@
 import type { AgentSession } from "../core/agent-session.ts";
 import type { AgentSessionRuntime, AgentSessionRuntimeResource } from "../core/agent-session-runtime.ts";
+import { exitProcess, thrownDetail } from "../core/process-end-recorder.ts";
 import { assertReloadQuiescent } from "../core/reload-blockers.ts";
 import type { RuntimeRestartRequest } from "../core/runtime-update-controller.ts";
 import { isWorkerSession } from "../core/session-role.ts";
+import { describeCause, neutralizeControls } from "../core/terminal-warnings.ts";
 import type { Args } from "./args.ts";
 import { getRuntimeChildChannel } from "./runtime-channel.ts";
 
@@ -28,7 +30,10 @@ interface RuntimeRestartAdapter {
 	handoff(id: string): Promise<void>;
 	assertQuiescent(): void;
 	shutdown(): Promise<void>;
-	exit(code: number): never;
+	/** Ends the process once the handoff reached the supervisor. */
+	exitHandedOff(): never;
+	/** Ends the process, status 1, recording why the teardown or handoff failed. */
+	exitFailed(failure: unknown): never;
 }
 
 /** Teardown is fenced by the parent: even a partial failure resumes only after this process exits. */
@@ -54,11 +59,20 @@ export function createRuntimeRestartHandler(
 		try {
 			await adapter.shutdown();
 			await adapter.handoff(request.id);
-		} catch {
-			return adapter.exit(1);
+		} catch (error) {
+			return adapter.exitFailed(error);
 		}
-		return adapter.exit(0);
+		return adapter.exitHandedOff();
 	};
+}
+
+/**
+ * Ends a restart whose teardown or handoff failed: every failure is recorded with its stack (the supervisor sees only the status) and
+ * reported on stderr after the host's stop.
+ */
+function exitRestartFailed(failures: readonly unknown[]): never {
+	process.stderr.write(`${neutralizeControls(`Restart failed: ${failures.map(describeCause).join("; ")}`)}\n`);
+	return exitProcess(1, "restart-failed", failures.map(thrownDetail).join("\n\n"));
 }
 
 /** SDK/RPC hosts do not gain process replacement authority from a tool call. */
@@ -87,19 +101,24 @@ export async function bindInteractiveRuntimeRestart(runtime: AgentSessionRuntime
 						stopHost();
 						await runtime.dispose();
 					},
-					exit: (code) => process.exit(code),
+					exitHandedOff: () => exitProcess(0, "restart"),
+					exitFailed: (failure) => exitRestartFailed([failure]),
 				}),
 				{
 					commit: (id) => channel.request({ type: "commit", id }),
 					rollback: async () => {
-						if (channel.needsRollback()) {
+						if (!channel.needsRollback()) return;
+						// Both teardown steps run whatever the other did; the supervisor resumes the previous generation once this exits.
+						const failures: unknown[] = [];
+						for (const step of [stopHost, () => runtime.dispose()]) {
 							try {
-								stopHost();
-								await runtime.dispose();
-							} finally {
-								process.exit(1);
+								await step();
+							} catch (error) {
+								failures.push(error);
 							}
 						}
+						if (failures.length > 0) exitRestartFailed(failures);
+						exitProcess(1, "restart-rollback");
 					},
 				},
 			);

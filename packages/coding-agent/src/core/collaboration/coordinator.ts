@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { probeProcessIdentityLiveness } from "../../kernel/reliability/process-tree.ts";
+import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/managed-lane-records.ts";
 import { WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
@@ -43,14 +43,42 @@ export interface CollaborationCoordinatorDeps {
 	report(event: ManagedLaneEvent): void;
 }
 
+/**
+ * Why an owned agent is being stopped. The recorded status and evidence name the real reason: an operator's request,
+ * the turn deadline, or a failure the caller describes. Whichever cause runs the stop, a turn helper proven dead is
+ * named as the reason the turn failed.
+ */
+export type CollaborationStopCause = { kind: "operator" } | { kind: "deadline" } | { kind: "failure"; detail: string };
+
+/**
+ * What one stop records, given whether the turn helper is proven dead: the terminal status, the reason the turn
+ * ended, and the evidence once the owned agent's closure is proven (`stopped`). The reason alone never claims that
+ * the agent was stopped, so a stop whose pane closure is unproven cannot say it was.
+ */
+function stopOutcome(
+	cause: CollaborationStopCause,
+	agent: { helperPid?: number; status: string },
+	helperDead: boolean,
+): { status: "stopped" | "failed"; reason: string; stopped: string } {
+	if (cause.kind === "failure") return { status: "failed", reason: cause.detail, stopped: cause.detail };
+	const reason = helperDead
+		? `Turn helper exited without settling its turn (${cause.kind === "deadline" ? "found by the turn deadline" : "found by an operator stop"})`
+		: cause.kind === "deadline"
+			? `Turn deadline elapsed${agent.helperPid === undefined && agent.status === "reserved" ? " before its helper claimed the turn" : ""}`
+			: undefined;
+	if (reason === undefined)
+		return { status: "stopped", reason: "Stopped by operator request.", stopped: "Stopped by operator request." };
+	return { status: "failed", reason: `${reason}.`, stopped: `${reason}; the owned agent was stopped.` };
+}
+
 /** Helpers persist cleanup proof only; the owning parent publishes the durable handoff. */
 export async function stopCollaborationAgent(
 	store: CollaborationJobStore,
 	backendFactory: CollaborationCoordinatorDeps["backend"],
 	jobId: string,
 	agentId: string,
-	turnId?: string,
-	failure?: string,
+	turnId: string | undefined,
+	cause: CollaborationStopCause,
 ): Promise<boolean> {
 	const job = store.load(jobId);
 	const agent = store.beginStop(jobId, agentId, turnId);
@@ -63,8 +91,14 @@ export async function stopCollaborationAgent(
 		return false;
 	}
 	// Read from the stop snapshot: every settlement below releases the recorded helper identity.
+	// The helper is this host's own child, recorded without host facts: judged as a local owner.
 	const helperDead =
-		agent.helperPid !== undefined && probeProcessIdentityLiveness(agent.helperPid, agent.helperStartTime) === "dead";
+		agent.helperPid !== undefined &&
+		judgeOwner({
+			pid: agent.helperPid,
+			...(agent.helperStartTime !== undefined ? { startTime: agent.helperStartTime } : {}),
+		}) === "dead";
+	const outcome = stopOutcome(cause, agent, helperDead);
 	if (agent.paneId) {
 		let unproven: string | undefined;
 		try {
@@ -81,20 +115,14 @@ export async function stopCollaborationAgent(
 					jobId,
 					agent.id,
 					agent.turnId,
-					`${failure ?? "Owned collaboration agent stop requested."} Turn helper exited; pane closure was not proven when the stop ran because ${unproven}.`,
+					`${outcome.reason}${cause.kind === "failure" ? " Turn helper exited." : ""} The turn failed; the stop stays pending because pane closure was not proven: ${unproven}.`,
 				);
 			throw new Error(`Cannot prove collaboration pane closed: ${unproven}.`);
 		}
 	} else if (agent.helperPid !== undefined ? !helperDead : agent.status === "running") {
 		throw new Error("Cannot prove collaboration worker stopped without a pane identity.");
 	}
-	return store.finishStop(
-		jobId,
-		agent.id,
-		agent.turnId,
-		failure ? "failed" : "stopped",
-		failure ?? "Owned collaboration agent stopped.",
-	);
+	return store.finishStop(jobId, agent.id, agent.turnId, outcome.status, outcome.stopped);
 }
 
 /**
@@ -811,12 +839,10 @@ export class CollaborationCoordinator {
 			this.dispatch(job, agent);
 			await this.deps.launchTurn(job, agent, answer);
 		} catch (error) {
-			await this.stopAgent(
-				job.id,
-				agent.id,
-				agent.turnId,
-				`Follow-up failed; delivery is uncertain and will not be replayed. ${String(error).slice(0, 1000)}`,
-			);
+			await this.stopAgent(job.id, agent.id, agent.turnId, {
+				kind: "failure",
+				detail: `Follow-up failed; delivery is uncertain and will not be replayed. ${String(error).slice(0, 1000)}`,
+			});
 			throw error;
 		}
 	}
@@ -897,9 +923,14 @@ export class CollaborationCoordinator {
 			if (member) member.notifiedClosure = true;
 		});
 	}
-	async stopAgent(jobId: string, agentId: string, turnId?: string, failure?: string): Promise<boolean> {
+	async stopAgent(
+		jobId: string,
+		agentId: string,
+		turnId: string | undefined,
+		cause: CollaborationStopCause,
+	): Promise<boolean> {
 		if (turnId === undefined && this.stopPendingAdmission(jobId, agentId)) return false;
-		const stopped = await stopCollaborationAgent(this.deps.store, this.deps.backend, jobId, agentId, turnId, failure);
+		const stopped = await stopCollaborationAgent(this.deps.store, this.deps.backend, jobId, agentId, turnId, cause);
 		this.refresh();
 		return stopped;
 	}
@@ -908,7 +939,7 @@ export class CollaborationCoordinator {
 		const store = this.deps.store;
 		const job = store.load(jobId);
 		if (dismiss) store.dismiss(jobId);
-		else for (const agent of job.agents) await this.stopAgent(jobId, agent.id, agent.turnId);
+		else for (const agent of job.agents) await this.stopAgent(jobId, agent.id, agent.turnId, { kind: "operator" });
 		this.refresh();
 	}
 }

@@ -45,6 +45,28 @@ export function herdrRecord(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+/**
+ * A Herdr server error envelope (`{ code, message }`) as a backend error that keeps the server's own code
+ * (`pane_not_found`, `server_not_running`, `agent_blocked`, ...), so callers decide on what the server said: only
+ * `pane_not_found` proves a pane absent, and only `agent_blocked` has a documented pre-input guarantee. An envelope
+ * without a well-formed code is `backend_error`. `request` names the request kind in the message.
+ */
+export function herdrServerError(error: unknown, request: string): CollaborationBackendError {
+	const code =
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		typeof error.code === "string" &&
+		/^[a-z_]{1,64}$/.test(error.code)
+			? error.code
+			: "backend_error";
+	return new CollaborationBackendError(
+		code,
+		`Herdr rejected the ${request} (${code}).`,
+		code === "agent_blocked" ? "not-submitted" : "unknown",
+	);
+}
+
 export function parseHerdrPane(value: unknown): CollaborationPane {
 	if (!Value.Check(paneSchema, value)) return malformedHerdrResponse();
 	return {

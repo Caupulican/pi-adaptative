@@ -13,6 +13,22 @@ const shortText = Type.String({ maxLength: 4096 });
 
 export const digestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 
+/**
+ * A process as a record owner (`ProcessOwner` in kernel/reliability/owner-identity.ts): its pid, Linux start time and
+ * host. Written by `ownProcessOwner()` and judged only by `judgeOwner()`, so a reissued pid or a pid from another
+ * machine never reads as the recorded process.
+ */
+export const processOwnerSchema = Type.Object(
+	{
+		pid: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		startTime: Type.Optional(Type.String({ pattern: "^[0-9]{1,32}$" })),
+		// The bounds of `isProcessOwnerRecord`, so every owner `ownProcessOwner()` writes validates here.
+		hostname: Type.Optional(Type.String({ maxLength: 255 })),
+		machineId: Type.Optional(Type.String({ pattern: "^[0-9a-f]{32}$" })),
+	},
+	{ additionalProperties: false },
+);
+
 const startReceiptSchema = Type.Object(
 	{
 		key: identity,
@@ -90,6 +106,9 @@ const agentSchema = Type.Object(
 		 * been lost after the resource was created. Cleared only by an acquisition outcome or a terminal
 		 * transition, never inferred. */
 		acquiring: Type.Optional(Type.Boolean()),
+		/** The process that issued the outstanding acquisition. Only it can learn the request's outcome, so the
+		 * acquisition is abandoned exactly when this process is proven gone, whoever controls the job since. */
+		acquiredBy: Type.Optional(processOwnerSchema),
 		closed: Type.Optional(Type.Boolean()),
 		turn: Type.Integer({ minimum: 0, maximum: 128 }),
 		turnId: Type.String({ maxLength: 128 }),
@@ -132,16 +151,28 @@ export const jobSchema = Type.Object(
 		id: identity,
 		parentSessionId: shortText,
 		parentSessionFile: Type.Optional(shortText),
-		/** Effective task controller; launch provenance and the CLI's peer identity remain immutable. */
+		/**
+		 * Who controls the job. Two things: the SESSION it belongs to (`parentSessionId`, a durable identity that can be
+		 * resumed at any time) and the CONTROLLER binding serving it now (`owner`, the live process, fenced by
+		 * `generation`). The binding moves only through a fenced transfer that bumps the generation: creation, a session
+		 * taking back its own job, or an explicit adoption, which leaves `parentSessionId` unchanged and records the
+		 * adopting session in `adoptedBy`. Launch provenance and the CLI's peer identity remain immutable.
+		 * Records written before the owner existed carry `parentPid`/`parentStartTime`, upgraded on read.
+		 */
 		controller: Type.Optional(
 			Type.Object(
 				{
 					parentSessionId: shortText,
-					parentPid: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-					/** The controller's Linux start time beside `parentPid`, so a reissued pid never reads as the live
-					 * controller. Absent off Linux, when procfs cannot answer, and in records written before it existed. */
-					parentStartTime: Type.Optional(Type.String({ pattern: "^[0-9]{1,32}$" })),
 					generation: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+					/** The controlling process; absent only in records that predate controller recording. */
+					owner: Type.Optional(processOwnerSchema),
+					/** The serving session held a bundle lease in `owner` when bound: `owner` then serves it only while it is
+					 * still one of that session's lease holders (a process that switched sessions no longer does). */
+					leased: Type.Optional(Type.Boolean()),
+					/** The session whose process adopted the job; handoffs publish into it. Absent when the job's own session
+					 * serves it. */
+					adoptedBy: Type.Optional(shortText),
+					adoptedAt: Type.Optional(Type.Number()),
 				},
 				{ additionalProperties: false },
 			),

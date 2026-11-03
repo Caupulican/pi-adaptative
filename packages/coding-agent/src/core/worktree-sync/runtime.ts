@@ -27,11 +27,11 @@ export interface RuntimeSettingsSource {
 
 /**
  * Host-supplied process, file-probe and record-write boundary of the worktree engine. Members left out resolve to
- * the production defaults (real git executor, real `fs` probes, same-host pid liveness, system-time win32-only
- * rename retry).
+ * the production defaults (real git executor, real `fs` probes, this host's identity and OS pid liveness for owner
+ * judgement, this process as the recorded owner, system-time win32-only rename retry).
  */
 export type WorktreeSyncEnginePorts = Partial<
-	Pick<WorktreeSyncEngineDeps, "exec" | "fileExists" | "readFile" | "isPidAlive" | "now" | "pid" | "atomicWrite">
+	Pick<WorktreeSyncEngineDeps, "exec" | "fileExists" | "readFile" | "host" | "observe" | "now" | "pid" | "atomicWrite">
 >;
 
 export interface WorktreeSyncEngineConfig {

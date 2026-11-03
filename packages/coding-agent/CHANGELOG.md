@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- Every owner record (work-run leases, worktree-sync lanes and locks, process-matrix entries, continuous-chat lease, learning journals, accounting obligations, session leases, collaboration controllers) is written and judged through one shared owner identity; only a proven-dead owner is reclaimed. Abandoned accounting obligations expire after 7 days.
+- Collaboration jobs separate the session from the controller serving it, fence controller writes by generation, show other sessions' orphaned jobs read-only, and can be taken over with the new `adopt_job` action. Stopped agents record the real cause instead of "stopped", and herdr server error codes are preserved.
+- Every way the interactive runtime ends is recorded through one process-root recorder with declared reasons; clean quits write nothing and routine signals can no longer evict crash records.
+- A daemon of an older build can no longer disrupt the bot daemon or write the store; routines are stored under `routineSchedules`, and daemon status no longer depends on which pid was recorded first.
 - The Decision graph steps its springs on a monotonic clock, so a backwards system-clock step no longer crashes the session.
 - Every way the interactive runtime can end (signals, `process.exit`, shutdown failure, stdout failure, unhandled rejections) leaves a record under `state/crashes`, which keeps the last 100.
 - Release delivery and its registry admission run npm through the configured command or `npm` on PATH instead of deriving it from `process.execPath`, which is pi itself in the compiled binary.

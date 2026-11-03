@@ -5,6 +5,7 @@
 import { ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../config.ts";
 import { KeybindingsManager } from "../core/keybindings.ts";
+import { exitProcess } from "../core/process-end-recorder.ts";
 import type { SessionInfo, SessionListProgress } from "../kernel/node.ts";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.ts";
 
@@ -40,7 +41,7 @@ export async function selectSession(
 			},
 			() => {
 				ui.stop();
-				process.exit(0);
+				exitProcess(0, "completed");
 			},
 			() => ui.requestRender(),
 			{ agentDir: getAgentDir(), showRenameHint: false, keybindings },

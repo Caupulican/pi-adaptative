@@ -37,19 +37,19 @@ if (firstArg === BOT_DAEMON_COMMAND) {
 // instead of being echoed and having Enter turned into a newline. A supervised launch is decided here
 // too, before the session program loads: the parent only supervises, the child runs the session.
 let launchArgs: Args | undefined;
+let interactiveLaunch = false;
 if (!packageCommands.has(firstArg ?? "")) {
 	const [{ parseArgs, resolveAppMode }, { holdStartupTypeahead }] = await Promise.all([
 		import("./cli/args.ts"),
 		import("./cli/startup-typeahead.ts"),
 	]);
 	launchArgs = parseArgs(cliArgs);
-	if (
+	interactiveLaunch =
 		resolveAppMode(launchArgs, process.stdin.isTTY) === "interactive" &&
 		!launchArgs.help &&
 		launchArgs.listModels === undefined &&
-		!launchArgs.export
-	)
-		holdStartupTypeahead();
+		!launchArgs.export;
+	if (interactiveLaunch) holdStartupTypeahead();
 }
 
 const { configureHttpDispatcher } = await import("./core/http-dispatcher.ts");
@@ -77,13 +77,24 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.h
 
 const supervised = launchArgs !== undefined && (await superviseBeforeLoading(launchArgs));
 if (!supervised) {
-	// Extensions this process loads bind to its live modules; see host-extension-modules.ts.
-	await import("./core/extensions/host-extension-modules.ts");
-	// The built-in model providers are registered once, here, by the process root.
-	const { registerBuiltInApiProviders } = await import("@caupulican/pi-ai/register-builtins");
-	registerBuiltInApiProviders();
-	const { main } = await import("./main.ts");
-	await main(cliArgs);
+	const processEnd = await import("./core/process-end-recorder.ts");
+	// The interactive runtime (a supervisor's child, or an unsupervised interactive session) observes every end of its process from
+	// here, before its program loads; the supervisor parent never reaches this. Print and RPC hosts are not observed: their modes end
+	// through their own process.exit calls, which declare no end.
+	if (interactiveLaunch) processEnd.installProcessEndRecorder();
+	try {
+		// Extensions this process loads bind to its live modules; see host-extension-modules.ts.
+		await import("./core/extensions/host-extension-modules.ts");
+		// The built-in model providers are registered once, here, by the process root.
+		const { registerBuiltInApiProviders } = await import("@caupulican/pi-ai/register-builtins");
+		registerBuiltInApiProviders();
+		const { main } = await import("./main.ts");
+		await main(cliArgs);
+	} catch (error: unknown) {
+		processEnd.exitForEntryFailure(error);
+	}
+	// The program finished: the event loop draining from here is this process's declared end.
+	processEnd.declareExit("completed");
 }
 
 /** Runs a supervised interactive launch without loading the session program into this process. */

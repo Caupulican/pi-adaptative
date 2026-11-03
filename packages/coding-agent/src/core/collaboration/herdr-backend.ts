@@ -20,6 +20,7 @@ import { connectHerdrChannel, type HerdrEventChannel } from "./herdr-channel.ts"
 import {
 	parseHerdrAgent as agent,
 	herdrHandle as handle,
+	herdrServerError,
 	malformedHerdrResponse as malformed,
 	parseHerdrPane as pane,
 	herdrRecord as record,
@@ -125,17 +126,7 @@ export class HerdrBackend implements CollaborationBackend {
 			return malformed();
 		}
 		const envelope = record(decoded);
-		if (output.code !== 0 || envelope.error) {
-			const error = record(envelope.error);
-			const code =
-				typeof error.code === "string" && /^[a-z_]{1,64}$/.test(error.code) ? error.code : "backend_error";
-			// Only this server error has a documented pre-input guarantee. Do not guess for timeouts/stalls.
-			throw new CollaborationBackendError(
-				code,
-				`Herdr rejected the control request (${code}).`,
-				code === "agent_blocked" ? "not-submitted" : "unknown",
-			);
-		}
+		if (output.code !== 0 || envelope.error) throw herdrServerError(record(envelope.error), "control request");
 		const result = record(envelope.result);
 		if (type !== undefined && result.type !== type) return malformed();
 		return result;

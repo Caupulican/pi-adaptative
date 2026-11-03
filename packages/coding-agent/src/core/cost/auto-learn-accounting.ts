@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, rmSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
-import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import {
+	isOwnerMachineIdField,
+	isOwnerProvenDead,
+	isProcessOwnerRecord,
+	ownProcessOwner,
+	type ProcessOwner,
+} from "../../kernel/reliability/owner-identity.ts";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { holdWorkRun, releaseWorkRunHold, type WorkRunHold, type WorkRunLease } from "../../utils/work-directory.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -20,6 +28,19 @@ import type { SpawnedUsageReceiptDisposition, SpawnedUsageReceiptOptions } from 
 const MAX_OBLIGATIONS = 64;
 const MAX_RECORD_BYTES = 16 * 1024;
 const FAILED_EVIDENCE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long an obligation whose owning session process is proven dead stays open for that session to reopen. */
+const ABANDONED_OBLIGATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+/** Expired obligations are kept as receipts in this subdirectory, outside the counted obligation namespace. */
+const EXPIRED_DIRECTORY = "expired";
+/** Bound on the expired-receipt ledger; the oldest receipt is dropped (and announced) to admit a new one. */
+const MAX_EXPIRED_RECEIPTS = 256;
+const PHASES = ["registering", "prepared", "not_spawned", "running", "terminal", "captured", "confirmed", "expired"];
+const EXPIRABLE_PHASES = ["prepared", "running", "terminal", "captured", "confirmed"] as const;
+type ExpirablePhase = (typeof EXPIRABLE_PHASES)[number];
+
+function isExpirablePhase(value: unknown): value is ExpirablePhase {
+	return (EXPIRABLE_PHASES as readonly unknown[]).includes(value);
+}
 
 export interface AutoLearnAccountingOwner {
 	sessionId: string;
@@ -28,6 +49,26 @@ export interface AutoLearnAccountingOwner {
 	deliver(usage: Usage, options: SpawnedUsageReceiptOptions): SpawnedUsageReceiptDisposition;
 }
 
+/**
+ * Why and how an obligation ended without its session settling it. `usage` keeps the accounting honest: only an
+ * obligation that expired after its usage was confirmed into the session is `delivered`; every other one is
+ * `unaccounted`, and its `snapshot` (when one was captured) is the usage that was never charged.
+ */
+interface ObligationExpiry {
+	at: number;
+	from: ExpirablePhase;
+	usage: "delivered" | "unaccounted";
+	reason: string;
+}
+
+/**
+ * One learner run's charge to its parent session. Two processes are named:
+ * - the learner child, `pid` on the registering host (`host` is its hostname, `machineId` its machine id when
+ *   readable). Records written before `machineId` was recorded are judged by hostname alone.
+ * - `owner`, the session process that registered the obligation or adopted it when its session reopened, with
+ *   `ownedAt` the time it took custody. Records written before the owner was recorded carry neither until adopted,
+ *   and cannot expire before then.
+ */
 interface Obligation {
 	version: 1;
 	runId: string;
@@ -37,12 +78,26 @@ interface Obligation {
 	childSessionId: string;
 	workRunPath: string;
 	hold: WorkRunHold;
-	phase: "registering" | "prepared" | "not_spawned" | "running" | "terminal" | "captured" | "confirmed";
+	phase: "registering" | "prepared" | "not_spawned" | ExpirablePhase | "expired";
 	host: string;
+	machineId?: string;
 	pid?: number;
+	owner?: ProcessOwner;
+	ownedAt?: number;
 	handoffPersisted: boolean;
 	cleanupAfter: number;
 	snapshot?: AutoLearnUsageSnapshot;
+	expiry?: ObligationExpiry;
+}
+
+function isExpiry(value: unknown): value is ObligationExpiry {
+	return (
+		isPlainRecord(value) &&
+		Number.isFinite(value.at) &&
+		isExpirablePhase(value.from) &&
+		(value.usage === "delivered" || value.usage === "unaccounted") &&
+		typeof value.reason === "string"
+	);
 }
 
 function validId(value: unknown): value is string {
@@ -122,18 +177,23 @@ export class AutoLearnAccounting {
 			!isPlainRecord(value.hold) ||
 			value.hold.id !== runId ||
 			typeof value.hold.token !== "string" ||
-			!["registering", "prepared", "not_spawned", "running", "terminal", "captured", "confirmed"].includes(
-				String(value.phase),
-			) ||
+			!PHASES.includes(String(value.phase)) ||
 			typeof value.host !== "string" ||
-			(value.pid !== undefined && (!Number.isSafeInteger(value.pid) || Number(value.pid) <= 0)) ||
-			(!["registering", "prepared", "not_spawned"].includes(String(value.phase)) && value.pid === undefined) ||
+			!isOwnerMachineIdField(value.machineId) ||
+			(value.pid !== undefined && !isPositiveSafePid(value.pid)) ||
+			(value.owner !== undefined && !isProcessOwnerRecord(value.owner)) ||
+			(value.ownedAt !== undefined && !Number.isFinite(value.ownedAt)) ||
+			(value.phase === "expired" ? !isExpiry(value.expiry) : value.expiry !== undefined) ||
 			typeof value.handoffPersisted !== "boolean" ||
 			!Number.isFinite(value.cleanupAfter) ||
 			Number(value.cleanupAfter) < 0
 		)
 			throw new Error("Invalid Auto Learn obligation");
-		if (value.phase === "captured" || value.phase === "confirmed") {
+		// An expired obligation keeps the shape of the phase it expired from.
+		const shape = value.phase === "expired" && isExpiry(value.expiry) ? value.expiry.from : String(value.phase);
+		if (!["registering", "prepared", "not_spawned"].includes(shape) && value.pid === undefined)
+			throw new Error("Invalid Auto Learn obligation");
+		if (shape === "captured" || shape === "confirmed" || value.snapshot !== undefined) {
 			if (
 				!isPlainRecord(value.snapshot) ||
 				typeof value.snapshot.sourceFile !== "string" ||
@@ -172,6 +232,8 @@ export class AutoLearnAccounting {
 			if (recordNames(this.directory).length >= MAX_OBLIGATIONS)
 				throw new Error("Auto Learn accounting capacity reached");
 			const hold: WorkRunHold = { id: input.runId, token: randomUUID() };
+			// The learner runs on this host: its pid is judged against this host's identity.
+			const host = readHostIdentity();
 			const record: Obligation = {
 				version: 1,
 				...input,
@@ -179,7 +241,10 @@ export class AutoLearnAccounting {
 				workRunPath: resolve(this.workRun.path),
 				hold,
 				phase: "registering",
-				host: hostname(),
+				host: host.hostname,
+				...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
+				owner: ownProcessOwner(),
+				ownedAt: Date.now(),
 				handoffPersisted: false,
 				cleanupAfter: 0,
 			};
@@ -278,22 +343,25 @@ export class AutoLearnAccounting {
 				});
 				return;
 			}
-			if (
-				record.parentSessionId !== owner.sessionId ||
-				record.parentSessionFile !== (owner.sessionFile ? resolve(owner.sessionFile) : null) ||
-				!owner.isCurrent()
-			)
+			if (record.phase === "expired") {
+				// A previous expiry stopped after recording it; finish moving it out of the counted namespace.
+				this.locked(() => this.settleExpired(this.read(runId)));
 				return;
+			}
+			if (record.parentSessionId !== owner.sessionId) {
+				this.expireIfAbandoned(runId);
+				return;
+			}
+			if (record.parentSessionFile !== (owner.sessionFile ? resolve(owner.sessionFile) : null) || !owner.isCurrent())
+				return;
+			record = this.adopt(runId);
+			if (record.phase === "expired") return;
 			if (record.phase === "prepared") {
 				this.warn(`Auto Learn accounting ${runId} requires launch reconciliation; evidence retained.`);
 				return;
 			}
-			if (record.phase === "running") {
-				if (record.host !== hostname() || record.pid === undefined || probeProcessLiveness(record.pid) !== "dead")
-					return;
-				this.terminal(runId, record.pid, null);
-				record = this.locked(() => this.read(runId));
-			}
+			record = this.settleExitedLearner(runId, record);
+			if (record.phase === "running") return;
 			if (record.phase === "terminal") {
 				const snapshot = readAutoLearnUsageSnapshot(this.sessionDirectory(record), record.childSessionId);
 				record = this.locked(() => {
@@ -351,6 +419,124 @@ export class AutoLearnAccounting {
 			if (!isMissingFileError(error) || existsSync(this.file(runId)))
 				this.warn(`Auto Learn accounting ${runId} remains pending: ${String(error).slice(0, 512)}`);
 		}
+	}
+
+	/**
+	 * The live owning session takes custody of its obligation: it becomes `owner` from now on, so no other session can
+	 * judge the obligation abandoned while this process lives. Custody is taken under the lock before any delivery, and
+	 * an obligation that expired first stays expired.
+	 */
+	private adopt(runId: string): Obligation {
+		return this.locked(() => {
+			const current = this.read(runId);
+			const self = ownProcessOwner();
+			if (current.phase === "expired" || isDeepStrictEqual(current.owner, self)) return current;
+			this.write({ ...current, owner: self, ownedAt: Date.now() });
+			return this.read(runId);
+		});
+	}
+
+	/** A `running` learner proven gone (its exit event was lost with its parent) becomes `terminal`. */
+	private settleExitedLearner(runId: string, record: Obligation): Obligation {
+		if (record.phase !== "running" || record.pid === undefined) return record;
+		const learner: ProcessOwner = { pid: record.pid, hostname: record.host, machineId: record.machineId };
+		if (!isOwnerProvenDead(learner)) return record;
+		this.terminal(runId, record.pid, null);
+		return this.locked(() => this.read(runId));
+	}
+
+	/**
+	 * Abandoned: the session that owns this obligation is gone, so it can never be delivered and must not pin the
+	 * obligation capacity. That requires all of: an owner was recorded (or adopted) and is proven dead on this host
+	 * (`foreign` and `unknown` keep it), it took custody at least {@link ABANDONED_OBLIGATION_EXPIRY_MS} ago, and the
+	 * obligation is in a phase that only its session could still settle.
+	 */
+	private isAbandoned(record: Obligation, now: number): boolean {
+		return (
+			isExpirablePhase(record.phase) &&
+			record.owner !== undefined &&
+			record.ownedAt !== undefined &&
+			now - record.ownedAt >= ABANDONED_OBLIGATION_EXPIRY_MS &&
+			isOwnerProvenDead(record.owner)
+		);
+	}
+
+	/**
+	 * Settles an abandoned obligation as expired, with its reason and accounting outcome recorded, and moves the receipt
+	 * out of the counted namespace. A learner still running (or whose state is unprovable) keeps the obligation open;
+	 * a learner that ended has its usage captured first, so the receipt states what went unaccounted.
+	 */
+	private expireIfAbandoned(runId: string): void {
+		let record = this.locked(() => this.read(runId));
+		if (!this.isAbandoned(record, Date.now())) return;
+		record = this.settleExitedLearner(runId, record);
+		if (record.phase === "running") return;
+		// The learner ended: its own session file states the usage that will go unaccounted. Evidence that cannot be
+		// read is recorded as the reason, never replaced by a guess.
+		let snapshot: AutoLearnUsageSnapshot | undefined;
+		let captureFailure: string | undefined;
+		if (record.phase === "terminal") {
+			try {
+				snapshot = readAutoLearnUsageSnapshot(this.sessionDirectory(record), record.childSessionId);
+			} catch (error) {
+				captureFailure = String(error).slice(0, 512);
+			}
+		}
+		this.locked(() => {
+			let current = this.read(runId);
+			const now = Date.now();
+			if (!this.isAbandoned(current, now) || current.phase === "running") return;
+			if (current.phase === "terminal") {
+				// It became terminal after the evidence read above; the next recovery reads it.
+				if (!snapshot && captureFailure === undefined) return;
+				if (snapshot) current = { ...current, phase: "captured", snapshot };
+			}
+			const from = current.phase;
+			if (!isExpirablePhase(from)) return;
+			const reasons: Record<ExpirablePhase, string> = {
+				prepared: "the owning session ended before the learner launch was reconciled",
+				running: "the owning session ended while the learner ran",
+				terminal: `the owning session ended and the learner usage is unreadable (${captureFailure ?? "no evidence"})`,
+				captured: "the owning session ended before the captured learner usage was charged to it",
+				confirmed: "the owning session ended before the handoff and cleanup completed",
+			};
+			const expired: Obligation = {
+				...current,
+				phase: "expired",
+				expiry: { at: now, from, usage: from === "confirmed" ? "delivered" : "unaccounted", reason: reasons[from] },
+			};
+			this.write(expired);
+			this.settleExpired(expired);
+		});
+	}
+
+	/**
+	 * Under the lock: releases an expired obligation's work-run hold and moves its receipt into the bounded expired
+	 * ledger. Both steps are idempotent, so an interrupted settlement is finished by the next reader.
+	 */
+	private settleExpired(record: Obligation): void {
+		if (record.phase !== "expired" || !record.expiry) throw new Error("Only an expired obligation can be settled");
+		releaseWorkRunHold(this.workRun, record.hold);
+		const ledger = join(this.directory, EXPIRED_DIRECTORY);
+		mkdirSync(ledger, { recursive: true });
+		const receipts = readBoundedDirectoryNamesSync(
+			ledger,
+			MAX_EXPIRED_RECEIPTS + 16,
+			"Auto Learn expired obligations",
+		)
+			.filter((name) => name.endsWith(".json"))
+			.map((name) => ({ name, at: lstatSync(join(ledger, name)).mtimeMs }))
+			.sort((left, right) => left.at - right.at);
+		for (const oldest of receipts.slice(0, Math.max(0, receipts.length - MAX_EXPIRED_RECEIPTS + 1))) {
+			unlinkSync(join(ledger, oldest.name));
+			this.warn(
+				`Auto Learn expired obligation receipt ${oldest.name.slice(0, -5)} dropped from its bounded ledger.`,
+			);
+		}
+		renameSync(this.file(record.runId), join(ledger, `${record.runId}.json`));
+		this.warn(
+			`Auto Learn accounting ${record.runId} expired (${record.expiry.usage}): ${record.expiry.reason}. Receipt kept in ${ledger}.`,
+		);
 	}
 
 	private sessionDirectory(record: Obligation): string {

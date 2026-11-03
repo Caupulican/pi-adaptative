@@ -975,10 +975,14 @@ export class BotTeamChatController {
 					this.host.showWarning("Daemon status unavailable.");
 					return;
 				}
+				const counts = `${status.activeRoutines} active routines, ${status.dueRoutines} due`;
+				const legacyNote = status.legacy
+					? ` An older build's daemon${status.legacy.pid === undefined ? "" : ` (pid ${status.legacy.pid})`} is still running; it can no longer write the store.`
+					: "";
 				this.host.showStatus(
 					status.running
-						? `Detached bot daemon running (pid ${status.pid}, ${status.activeRoutines} active routines, ${status.dueRoutines} due).`
-						: `Detached bot daemon stopped (${status.activeRoutines} active routines, ${status.dueRoutines} due).`,
+						? `Detached bot daemon running (${status.pid === undefined ? "" : `pid ${status.pid}, `}${counts}).${legacyNote}`
+						: `Detached bot daemon stopped (${counts}).${legacyNote}`,
 				);
 				return;
 			}

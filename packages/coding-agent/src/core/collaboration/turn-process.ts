@@ -107,7 +107,10 @@ export async function launchCollaborationTurnProcess(
 					job.id,
 					agent.id,
 					agent.turnId,
-					"Collaboration controller exited; delivery will not be replayed.",
+					{
+						kind: "failure",
+						detail: "Turn helper exited before settling its turn; delivery will not be replayed.",
+					},
 				);
 			})().catch(() => {
 				/* An exact-turn watchdog still owns uncertain live work. */

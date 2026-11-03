@@ -38,7 +38,6 @@ import {
 	observeCacheStateFromMessages,
 } from "../../core/cache-miss-notice.ts";
 import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
-import { writeCrashRecord } from "../../core/crash-record.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
@@ -71,7 +70,7 @@ import type {
 } from "../../core/settings/settings-schema.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
-import type { TerminalWarnings } from "../../core/terminal-warnings.ts";
+import { describeCause, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
@@ -1345,17 +1344,11 @@ export class InteractiveMode {
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
-		const message = error instanceof Error ? error.message : String(error);
-		const text = `${prefix}: ${message}`;
-		// The UI draws on the alternate screen, so a message shown in it is erased by the stop below: record it, stop, then print it.
-		const recordPath = writeCrashRecord(
-			"fatal runtime error; exit 1",
-			error instanceof Error ? (error.stack ?? text) : text,
-		);
-		stopThemeWatcher();
-		this.stop();
-		process.stderr.write(`${text}\n(record: ${recordPath})\n`);
-		process.exit(1);
+		const text = `${prefix}: ${describeCause(error)}`;
+		// The UI draws on the alternate screen, so a message shown in it is erased by the stop: the lifecycle records it, stops, then prints it.
+		this.signals.fatalRuntimeError(text, error instanceof Error ? (error.stack ?? text) : text, stopThemeWatcher);
+		// The lifecycle's exit ends the process. Only an injected exit returns, and the failure then stays with the caller.
+		throw error;
 	}
 
 	private handleNonFatalSessionReplacementError(
@@ -2759,8 +2752,8 @@ export class InteractiveMode {
 		return this.signals.shutdown(options);
 	}
 
-	private emergencyTerminalExit(): never {
-		return this.signals.emergencyTerminalExit();
+	private emergencyTerminalExit(): void {
+		this.signals.emergencyTerminalExit();
 	}
 
 	private uncaughtCrash(error: unknown): void {

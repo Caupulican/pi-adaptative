@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, opendirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { Value } from "typebox/value";
-import { probeProcessIdentityLiveness, readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
+import { isRecordedOnHost, readHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import { judgeOwner, ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import { readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
+import type { SessionLeaseHolder } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
 import type { ProcessParentOwnership } from "../process-matrix/runtime.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -54,39 +57,189 @@ import {
 	selectCollaborationSpecialist,
 } from "./specialist-selection.ts";
 
-/** An untransferred record is still controlled by its immutable birth parent. */
-export function collaborationController(job: CollaborationJob): {
-	parentSessionId: string;
-	parentPid?: number;
-	parentStartTime?: string;
-	generation: number;
-} {
+export type CollaborationController = NonNullable<CollaborationJob["controller"]>;
+
+/** A record that predates controller recording is controlled by its immutable birth parent, with no known process. */
+export function collaborationController(job: CollaborationJob): CollaborationController {
 	return job.controller ?? { parentSessionId: job.parentSessionId, generation: 1 };
 }
 
-/**
- * The recorded controller process is proven gone: its pid answers dead, or answers for a process whose
- * Linux start time differs from the recorded one. This process, as the recorded controller, reads alive.
- * Without a recorded pid, or when the probe cannot tell, nothing is proven. Records written before the
- * start time existed fall back to the plain pid probe.
- */
-export function collaborationControllerExited(job: CollaborationJob): boolean {
-	const { parentPid, parentStartTime } = collaborationController(job);
-	return parentPid !== undefined && probeProcessIdentityLiveness(parentPid, parentStartTime) === "dead";
+/** The session whose process serves the job now, and into whose ledger its handoffs publish. */
+export function collaborationServingSession(job: CollaborationJob): string {
+	const controller = collaborationController(job);
+	return controller.adoptedBy ?? controller.parentSessionId;
 }
 
-/** This process as a job controller: its pid and, where procfs answers, its start time. */
-function ownControllerIdentity(
-	parentSessionId: string,
-	generation: number,
-): NonNullable<CollaborationJob["controller"]> {
-	const parentStartTime = readOwnProcessStartTime();
-	return {
-		parentSessionId,
-		parentPid: process.pid,
-		...(parentStartTime === undefined ? {} : { parentStartTime }),
-		generation,
+/**
+ * The process that issued a member's outstanding acquisition is proven gone, so nobody remains who can learn the
+ * request's outcome. Judged on the issuer, not on whoever controls the job now: a take-back or an adoption never
+ * hides an abandoned acquisition, and a live issuer's request is never treated as abandoned.
+ */
+export function collaborationAcquisitionAbandoned(agent: CollaborationAgent): boolean {
+	return agent.acquiring === true && agent.acquiredBy !== undefined && judgeOwner(agent.acquiredBy) === "dead";
+}
+
+let ownStartTime: { value: string | undefined } | undefined;
+
+/**
+ * The recorded owner is this very process: same pid, same host and, wherever this process can read its start time,
+ * the same start time. An owner without a start time on a host where this process has one was written by another
+ * process, which the pid merely reissued.
+ */
+function isThisProcess(owner: ProcessOwner): boolean {
+	if (owner.pid !== process.pid) return false;
+	if ((owner.hostname !== undefined || owner.machineId !== undefined) && !isRecordedOnHost(owner, readHostIdentity()))
+		return false;
+	ownStartTime ??= { value: readOwnProcessStartTime() };
+	return owner.startTime === ownStartTime.value;
+}
+
+/** Two recorded owners name the same process; facts only one of them recorded cannot tell them apart. */
+function isSameProcess(left: ProcessOwner, right: ProcessOwner): boolean {
+	if (left.pid !== right.pid) return false;
+	if (left.startTime !== undefined && right.startTime !== undefined && left.startTime !== right.startTime)
+		return false;
+	if (left.machineId !== undefined && right.machineId !== undefined) return left.machineId === right.machineId;
+	return left.hostname === undefined || right.hostname === undefined || left.hostname === right.hostname;
+}
+
+/**
+ * Whether the controller binding still serves the job: `live` (its process serves it), `gone` (its process is proven
+ * dead, or is alive but no longer holds the leased session it was bound for) or `unproven` (nothing decides it here).
+ */
+function judgeBinding(
+	controller: CollaborationController,
+	serving: string,
+	servers: CollaborationSessionServers | undefined,
+): { state: "live" | "gone" | "unproven"; reason: string } {
+	const owner = controller.owner;
+	if (owner === undefined) return { state: "unproven", reason: "The record never recorded its controller process." };
+	// This pid is this process; a recorded owner that is not this process (another start time) is a reissued pid.
+	if (owner.pid === process.pid && !isThisProcess(owner) && judgeOwner(owner) !== "foreign")
+		return { state: "gone", reason: `Controller pid ${owner.pid} exited (the pid now names another process).` };
+	const standing = judgeOwner(owner);
+	if (standing === "dead") return { state: "gone", reason: `Controller pid ${owner.pid} exited.` };
+	if (standing === "foreign")
+		return { state: "unproven", reason: `Controller pid ${owner.pid} runs on another host.` };
+	if (standing === "unknown")
+		return { state: "unproven", reason: `Controller pid ${owner.pid} liveness cannot be determined.` };
+	if (!controller.leased)
+		return { state: "live", reason: `Live pid ${owner.pid} serves the job for session ${serving}.` };
+	if (!servers)
+		return {
+			state: "unproven",
+			reason: `Controller pid ${owner.pid} is alive; session leases are not readable here.`,
+		};
+	let holders: readonly SessionLeaseHolder[];
+	try {
+		holders = servers(serving);
+	} catch (error) {
+		return {
+			state: "unproven",
+			reason: `Controller pid ${owner.pid} is alive; the lease registry of session ${serving} is unreadable (${String(error).slice(0, 160)}).`,
+		};
+	}
+	return holders.some((holder) => isSameProcess(holder.owner, owner))
+		? { state: "live", reason: `Live pid ${owner.pid} serves the job for session ${serving}.` }
+		: { state: "gone", reason: `Controller pid ${owner.pid} is alive but no longer holds session ${serving}.` };
+}
+
+/**
+ * How one process sees a job's control. Exactly one store controls a job: the one whose session the job's binding
+ * serves, in the process the binding names. Everything else is read-only until a fenced transfer:
+ * - `controlled`: this store serves the binding.
+ * - `claimable`: the binding is gone and this process serves one of the job's sessions; taken back automatically.
+ * - `orphaned`: the binding is gone and no live process holds a lease on any of the job's sessions; `adopt_job` may
+ *   take it over.
+ * - `owned_by_live_session`: a live process serves the binding.
+ * - `awaiting_session`: the binding is gone, but a live process holds one of the job's sessions and will take it back.
+ * - `unproven`: the binding cannot be judged (another host, an inconclusive probe, an unreadable lease registry, or a
+ *   record that never recorded its controller process). Never reclaimed on that basis.
+ * A binding is gone when its process is proven dead, or is alive but no longer holds the leased session it was bound
+ * for (it switched sessions).
+ */
+export type CollaborationControl =
+	| "controlled"
+	| "claimable"
+	| "orphaned"
+	| "owned_by_live_session"
+	| "awaiting_session"
+	| "unproven";
+
+export interface CollaborationControlStanding {
+	control: CollaborationControl;
+	/** One bounded sentence naming the evidence, for the operator. */
+	reason: string;
+}
+
+/** The live servers of a persisted session: its bundle lease holders. Throws when they cannot be read. */
+export type CollaborationSessionServers = (sessionId: string) => readonly SessionLeaseHolder[];
+
+export interface CollaborationJobStoreOptions {
+	/**
+	 * `controller` (default): mutations require this store to control the job. `turn`: the finite turn helper, which
+	 * controls nothing; every mutation it makes is fenced by the exact turn identity its controller handed it, so a
+	 * turn already running keeps reporting into the job whichever controller serves it by then.
+	 */
+	role?: "controller" | "turn";
+	/** Required to judge another process's binding against session leases, and to adopt. */
+	sessionServers?: CollaborationSessionServers;
+}
+
+/** A read-only view of a job this store does not control, small enough to list many. */
+export interface CollaborationJobSummary {
+	id: string;
+	title: string;
+	parentSessionId: string;
+	createdAt: number;
+	placement?: CollaborationJob["placement"];
+	workspaceId?: string;
+	dismissed: boolean;
+	control: CollaborationControl;
+	reason: string;
+	controller: {
+		servingSessionId: string;
+		generation: number;
+		pid?: number;
+		adoptedAt?: number;
 	};
+	agents: Array<
+		Pick<CollaborationAgent, "id" | "name" | "provider" | "status" | "turn" | "notifiedTurn"> & {
+			stopping?: boolean;
+			acquiring?: boolean;
+			closed?: boolean;
+		}
+	>;
+}
+
+/** A transfer whose preconditions did not hold inside the job lock; nothing was written. */
+export class CollaborationControlRefusal extends Error {}
+
+/**
+ * Reads a record written before the controller was a `ProcessOwner` in the current shape: the `parentPid` /
+ * `parentStartTime` pair becomes `owner` (no host was recorded, which `judgeOwner` reads as this host, the only one
+ * that ever wrote these records), and an outstanding acquisition is attributed to that controller, the only process
+ * that ever began one. Every other record is returned as is.
+ */
+function upgradeLegacyRecord(raw: unknown): unknown {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+	const record = raw as RawJobRecord;
+	const controller = record.controller;
+	if (typeof controller !== "object" || controller === null || !("parentPid" in controller)) return raw;
+	const { parentPid, parentStartTime, ...rest } = controller as Record<string, unknown>;
+	const owner = { pid: parentPid, ...(parentStartTime !== undefined ? { startTime: parentStartTime } : {}) };
+	const agents = Array.isArray(record.agents)
+		? record.agents.map((agent: unknown) =>
+				typeof agent === "object" &&
+				agent !== null &&
+				"acquiring" in agent &&
+				agent.acquiring === true &&
+				!("acquiredBy" in agent)
+					? { ...agent, acquiredBy: owner }
+					: agent,
+			)
+		: record.agents;
+	return { ...record, controller: { ...rest, owner }, agents };
 }
 
 /** The persisted evidence and parent handoff share one UTF-8 byte ceiling. */
@@ -161,12 +314,55 @@ const MAX_LISTED_RECORDS = 256;
 
 type RawJobRecord = Record<string, unknown>;
 
-/** The session that controls a raw record: its transferred controller, else its immutable birth parent. */
-function rawControllerParent(raw: RawJobRecord): unknown {
+/** A raw record's own session (its controller's, else its birth parent) and the session that adopted it, if any. */
+function rawSessions(raw: RawJobRecord): { own: unknown; adoptedBy: unknown } {
 	const controller = raw.controller;
-	return typeof controller === "object" && controller !== null && "parentSessionId" in controller
-		? controller.parentSessionId
-		: raw.parentSessionId;
+	if (typeof controller !== "object" || controller === null) return { own: raw.parentSessionId, adoptedBy: undefined };
+	return {
+		own: "parentSessionId" in controller ? controller.parentSessionId : raw.parentSessionId,
+		adoptedBy: "adoptedBy" in controller ? controller.adoptedBy : undefined,
+	};
+}
+
+/** The session that serves a raw record, as {@link collaborationServingSession} reads a validated one. */
+function rawServingSession(raw: RawJobRecord): unknown {
+	const { own, adoptedBy } = rawSessions(raw);
+	return adoptedBy ?? own;
+}
+
+/** Other sessions' jobs one overview shows. */
+const MAX_OTHER_JOB_SUMMARIES = 24;
+
+function summarizeJob(job: CollaborationJob, standing: CollaborationControlStanding): CollaborationJobSummary {
+	const controller = collaborationController(job);
+	return {
+		id: job.id,
+		title: job.title,
+		parentSessionId: controller.parentSessionId,
+		createdAt: job.createdAt,
+		...(job.placement ? { placement: job.placement } : {}),
+		...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
+		dismissed: job.dismissed,
+		control: standing.control,
+		reason: standing.reason,
+		controller: {
+			servingSessionId: collaborationServingSession(job),
+			generation: controller.generation,
+			...(controller.owner ? { pid: controller.owner.pid } : {}),
+			...(controller.adoptedAt !== undefined ? { adoptedAt: controller.adoptedAt } : {}),
+		},
+		agents: job.agents.map((agent) => ({
+			id: agent.id,
+			name: agent.name,
+			provider: agent.provider,
+			status: agent.status,
+			turn: agent.turn,
+			notifiedTurn: agent.notifiedTurn,
+			...(agent.stopping ? { stopping: true } : {}),
+			...(agent.acquiring ? { acquiring: true } : {}),
+			...(agent.closed ? { closed: true } : {}),
+		})),
+	};
 }
 
 function skipReason(error: unknown): string {
@@ -240,11 +436,15 @@ export function prepareCollaborationPrompt(
 export class CollaborationJobStore {
 	readonly directory: string;
 	readonly parentSessionId: string;
+	private readonly role: "controller" | "turn";
+	private readonly sessionServers: CollaborationSessionServers | undefined;
 	private readonly observedGenerations = new Map<string, number>();
 	private readonly skippedRecordFiles = new Map<string, string>();
-	constructor(directory: string, parentSessionId: string) {
+	constructor(directory: string, parentSessionId: string, options: CollaborationJobStoreOptions = {}) {
 		this.directory = directory;
 		this.parentSessionId = parentSessionId;
+		this.role = options.role ?? "controller";
+		this.sessionServers = options.sessionServers;
 		mkdirSync(directory, { recursive: true, mode: 0o700 });
 		if (lstatSync(directory).isSymbolicLink()) throw new Error("Collaboration state cannot be a symlink.");
 	}
@@ -260,19 +460,110 @@ export class CollaborationJobStore {
 		if (previous === encoded) return;
 		writeFileAtomicSync(this.path(job.id), encoded, { mode: 0o600 });
 	}
+	/** The job, when this store controls it (any job, for the turn role); otherwise why it does not. */
 	load(id: string): CollaborationJob {
 		const job = this.read(id);
-		this.assertController(job);
+		if (this.role !== "turn") this.assertControlled(job);
 		return job;
 	}
+	/** {@link assertController}, failing with the job's control standing so the operator learns what to do. */
+	private assertControlled(job: CollaborationJob): void {
+		try {
+			this.assertController(job);
+		} catch (error) {
+			if (!(error instanceof ForeignCollaborationJobError)) throw error;
+			const { control, reason } = this.judgeControl(job);
+			throw new ForeignCollaborationJobError(
+				`${error.message} Job ${job.id} is ${control.replaceAll("_", " ")}: ${reason}${control === "orphaned" ? " Take it over with adopt_job." : ""}`,
+			);
+		}
+	}
+	/** Whether this store controls the job now (see {@link assertController}). */
+	private controls(job: CollaborationJob): boolean {
+		try {
+			this.assertController(job);
+			return true;
+		} catch (error) {
+			if (error instanceof ForeignCollaborationJobError) return false;
+			throw error;
+		}
+	}
+	/**
+	 * This store controls the job: the binding names this very process and serves this store's session. The generation
+	 * fence then refuses a store that observed an earlier binding, so a transfer made by another store (another process,
+	 * or a take-back) is never written over by one acting on its pre-transfer view.
+	 */
 	private assertController(job: CollaborationJob): void {
-		const owner = collaborationController(job);
-		if (owner.parentSessionId !== this.parentSessionId)
-			throw new ForeignCollaborationJobError("Invalid collaboration controller parent.");
+		const controller = collaborationController(job);
+		if (
+			collaborationServingSession(job) !== this.parentSessionId ||
+			controller.owner === undefined ||
+			!isThisProcess(controller.owner)
+		)
+			throw new ForeignCollaborationJobError("This session does not control the collaboration job.");
 		const observed = this.observedGenerations.get(job.id);
-		if (observed !== undefined && observed !== owner.generation)
+		if (observed !== undefined && observed !== controller.generation)
 			throw new ForeignCollaborationJobError("Stale collaboration controller generation.");
-		this.observedGenerations.set(job.id, owner.generation);
+		this.observedGenerations.set(job.id, controller.generation);
+	}
+	/**
+	 * Judges the job's control from this store's point of view (see {@link CollaborationControl}). Pure reading: no
+	 * lock, no write. `servers` reads a session's lease holders; a transfer passes the live registry, a listing passes
+	 * a per-listing memo.
+	 */
+	judgeControl(
+		job: CollaborationJob,
+		servers: CollaborationSessionServers | undefined = this.sessionServers,
+	): CollaborationControlStanding {
+		const controller = collaborationController(job);
+		const serving = collaborationServingSession(job);
+		const owner = controller.owner;
+		if (serving === this.parentSessionId && owner !== undefined && isThisProcess(owner))
+			return { control: "controlled", reason: "This session's process serves the job." };
+		const ownSession =
+			this.parentSessionId === controller.parentSessionId || this.parentSessionId === controller.adoptedBy;
+		const binding = judgeBinding(controller, serving, servers);
+		if (binding.state === "live") return { control: "owned_by_live_session", reason: binding.reason };
+		if (binding.state === "unproven") {
+			// The job's own session resuming a record that never recorded its controller: the one fenced claim decides.
+			if (ownSession && owner === undefined)
+				return { control: "claimable", reason: `${binding.reason} This session is the job's own session.` };
+			return { control: "unproven", reason: binding.reason };
+		}
+		if (ownSession)
+			return {
+				control: "claimable",
+				reason: `${binding.reason} This session ${this.parentSessionId === controller.parentSessionId ? "is the job's own session" : "adopted the job"}.`,
+			};
+		if (!servers) return { control: "unproven", reason: `${binding.reason} Session leases are not readable here.` };
+		const sessions = new Set([controller.parentSessionId, ...(controller.adoptedBy ? [controller.adoptedBy] : [])]);
+		for (const session of sessions) {
+			let holders: readonly SessionLeaseHolder[];
+			try {
+				holders = servers(session);
+			} catch (error) {
+				return {
+					control: "unproven",
+					reason: `${binding.reason} The lease registry of session ${session} is unreadable (${String(error).slice(0, 160)}).`,
+				};
+			}
+			for (const holder of holders) {
+				if (holder.self || holder.standing === "dead") continue;
+				return holder.standing === "alive"
+					? {
+							control: "awaiting_session",
+							reason: `${binding.reason} Session ${session} is open in live pid ${holder.owner.pid}, which takes the job back.`,
+						}
+					: {
+							control: "unproven",
+							reason: `${binding.reason} Session ${session} has a lease holder (pid ${holder.owner.pid}) that cannot be judged here (${holder.standing}).`,
+						};
+			}
+		}
+		return {
+			control: "orphaned",
+			reason: `${binding.reason} No live process holds session ${controller.parentSessionId}${controller.adoptedBy ? ` or ${controller.adoptedBy}` : ""}.`,
+		};
 	}
 	private assertPeerParent(job: CollaborationJob): void {
 		if (
@@ -285,7 +576,8 @@ export class CollaborationJobStore {
 		const file = this.path(id);
 		return this.parseRecord(id, JSON.parse(readBoundedTextFileSync(file, 1024 * 1024, "Collaboration state file")));
 	}
-	private parseRecord(id: string, job: unknown): CollaborationJob {
+	private parseRecord(id: string, raw: unknown): CollaborationJob {
+		const job = upgradeLegacyRecord(raw);
 		if (!Value.Check(jobSchema, job) || job.id !== id) throw new Error("Invalid collaboration job.");
 		assertJobIntegrity(job);
 		return job as CollaborationJob;
@@ -304,24 +596,66 @@ export class CollaborationJobStore {
 			this.skippedRecordFiles.delete(oldest);
 		}
 	}
+	/** The jobs this store controls. */
 	list(): CollaborationJob[] {
-		return this.listRecords((raw) => rawControllerParent(raw) === this.parentSessionId).filter((job) => {
-			try {
-				this.assertController(job);
-				return true;
-			} catch (error) {
-				if (error instanceof ForeignCollaborationJobError) return false;
-				throw error;
+		return this.listRecords((raw) => rawServingSession(raw) === this.parentSessionId).filter((job) =>
+			this.controls(job),
+		);
+	}
+	/**
+	 * The jobs this store controls, plus a bounded read-only view of every other session's job that still has live or
+	 * unpublished work, each with its control standing, newest first. Lease registries are read once per session.
+	 */
+	overview(limit = MAX_OTHER_JOB_SUMMARIES): {
+		jobs: CollaborationJob[];
+		otherJobs: CollaborationJobSummary[];
+		otherJobsOmitted: number;
+	} {
+		const jobs = this.list();
+		const controlled = new Set(jobs.map((job) => job.id));
+		const others = this.listRecords(
+			(raw) => typeof raw.id === "string" && !controlled.has(raw.id) && raw.dismissed !== true,
+			false,
+		)
+			.filter((job) => job.agents.some((agent) => !agent.closed || agent.notifiedTurn < agent.turn))
+			.sort((left, right) => right.createdAt - left.createdAt);
+		const servers = this.memoizedSessionServers();
+		return {
+			jobs,
+			otherJobs: others.slice(0, limit).map((job) => summarizeJob(job, this.judgeControl(job, servers))),
+			otherJobsOmitted: Math.max(0, others.length - limit),
+		};
+	}
+	/** The session lease registry, read at most once per session for one listing; a failed read is replayed as is. */
+	private memoizedSessionServers(): CollaborationSessionServers | undefined {
+		const read = this.sessionServers;
+		if (!read) return undefined;
+		const memo = new Map<string, { holders: readonly SessionLeaseHolder[] } | { error: unknown }>();
+		return (sessionId) => {
+			let entry = memo.get(sessionId);
+			if (!entry) {
+				try {
+					entry = { holders: read(sessionId) };
+				} catch (error) {
+					entry = { error };
+				}
+				memo.set(sessionId, entry);
 			}
-		});
+			if ("error" in entry) throw entry.error;
+			return entry.holders;
+		};
 	}
 	/**
 	 * The state directory is shared by every session on the machine, so one session's listing must not depend
 	 * on another's files. Entries stream one at a time; `accept` sees the cheaply parsed record and runs before
-	 * schema validation, so foreign records are never validated. A record that cannot be read or validated is
-	 * skipped with a diagnostic (and left on disk), never thrown for the whole listing.
+	 * schema validation, so records a listing does not want are never validated. A record that cannot be read or
+	 * validated is skipped (and left on disk), never thrown for the whole listing; with `diagnose` (default) the skip is
+	 * kept as this store's diagnostic, which a read-only view of other sessions' jobs never adds to.
 	 */
-	private listRecords(accept: (raw: RawJobRecord) => boolean): CollaborationJob[] {
+	private listRecords(accept: (raw: RawJobRecord) => boolean, diagnose = true): CollaborationJob[] {
+		const noteSkippedRecord = (file: string, reason?: string): void => {
+			if (diagnose) this.noteSkippedRecord(file, reason);
+		};
 		const result: CollaborationJob[] = [];
 		const directory = opendirSync(this.directory);
 		try {
@@ -335,7 +669,7 @@ export class CollaborationJobStore {
 					if (typeof raw !== "object" || raw === null || Array.isArray(raw))
 						throw new Error("Invalid collaboration job.");
 					if (!accept(raw as RawJobRecord)) {
-						this.noteSkippedRecord(entry.name);
+						noteSkippedRecord(entry.name);
 						continue;
 					}
 					const job = this.parseRecord(id, raw);
@@ -345,22 +679,22 @@ export class CollaborationJobStore {
 						for (let index = 1; index < result.length; index++)
 							if (result[index].createdAt < result[oldest].createdAt) oldest = index;
 						if (job.createdAt <= result[oldest].createdAt) {
-							this.noteSkippedRecord(entry.name, "listing record limit reached; oldest record left out");
+							noteSkippedRecord(entry.name, "listing record limit reached; oldest record left out");
 							continue;
 						}
-						this.noteSkippedRecord(
+						noteSkippedRecord(
 							`${result[oldest].id}.json`,
 							"listing record limit reached; oldest record left out",
 						);
 						result.splice(oldest, 1);
 					}
 					result.push(job);
-					this.noteSkippedRecord(entry.name);
+					noteSkippedRecord(entry.name);
 				} catch (error) {
 					// A record archived or removed between enumeration and read is not a fault.
 					const vanished =
 						typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-					this.noteSkippedRecord(entry.name, vanished ? undefined : skipReason(error));
+					noteSkippedRecord(entry.name, vanished ? undefined : skipReason(error));
 				}
 			}
 		} finally {
@@ -397,7 +731,7 @@ export class CollaborationJobStore {
 						entry.key === input.id && (entry.parentSessionId ?? job.parentSessionId) === this.parentSessionId,
 				);
 				if (!receipt) continue;
-				this.assertController(job);
+				this.assertControlled(job);
 				if (receipt.digest !== digest) throw new Error("Collaboration start identity has different intent.");
 				if (
 					receipt.turns.some(
@@ -407,33 +741,31 @@ export class CollaborationJobStore {
 					throw new Error("Collaboration start was already accepted; its historical turn will not be replayed.");
 				return { job, kind: "replay" };
 			}
-			// A team whose live members lack credential files (admitted before the credential contract) cannot report,
-			// so it is never reused; a fresh team is admitted instead.
-			const reusable = jobs.filter((job) =>
-				job.agents.every((agent) => agent.closed || hasPeerCredentialFile(this.directory, job.id, agent.id)),
+			// A team this store controls is reused as is. Another session's team is reused only when it is orphaned (its
+			// controller exited and no live process holds its session), through the same fenced transfer as `adopt`,
+			// re-verified under the job lock; a team a live process serves is never taken. A team whose live members
+			// lack credential files (admitted before the credential contract) cannot report, so it is never reused; a
+			// fresh team is admitted instead.
+			const servers = this.memoizedSessionServers();
+			const reusable = jobs.filter(
+				(job) =>
+					(this.controls(job) ||
+						(servers !== undefined &&
+							["orphaned", "claimable"].includes(this.judgeControl(job, servers).control))) &&
+					job.agents.every((agent) => agent.closed || hasPeerCredentialFile(this.directory, job.id, agent.id)),
 			);
 			const selected = selectCollaborationSpecialist(reusable, input, intent);
 			if (!selected) return { job: this.createAdmitted(input, task, digest), kind: "fresh" };
+			const adopting = !this.controls(selected);
 			const job = this.updateRecord(
 				selected.id,
 				(current) => {
+					if (adopting) this.rebind(current, "adopt");
 					// Peer delivery and explicit follow-ups use this same job lock. Revalidate after acquiring
 					// it so admission cannot act on a snapshot from before a concurrent reservation.
 					selectCollaborationSpecialist([current], input, { jobId: current.id });
 					if ((current.startReceipts?.length ?? 0) >= 128)
 						throw new Error("Collaboration start receipt limit reached.");
-					const owner = collaborationController(current);
-					if (owner.parentSessionId === this.parentSessionId) this.assertController(current);
-					// The full process identity: a reissued pid with a stale start time is a different controller.
-					if (
-						owner.parentSessionId !== this.parentSessionId ||
-						owner.parentPid !== process.pid ||
-						owner.parentStartTime !== readOwnProcessStartTime()
-					) {
-						if (owner.generation === Number.MAX_SAFE_INTEGER)
-							throw new Error("Collaboration controller generation exhausted.");
-						current.controller = ownControllerIdentity(this.parentSessionId, owner.generation + 1);
-					}
 					if (task)
 						for (const agent of input.agents)
 							this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {
@@ -447,7 +779,7 @@ export class CollaborationJobStore {
 						turns: current.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })),
 					});
 				},
-				"transfer",
+				adopting ? "transfer" : "controller",
 			);
 			this.observedGenerations.set(job.id, collaborationController(job).generation);
 			return { job, kind: "reuse" };
@@ -466,7 +798,7 @@ export class CollaborationJobStore {
 		const job: CollaborationJob = {
 			...input,
 			version: 1,
-			controller: ownControllerIdentity(this.parentSessionId, 1),
+			controller: { parentSessionId: this.parentSessionId, generation: 1, ...this.ownBinding() },
 			variables: {},
 			metadata: {},
 			mailbox: { messages: [], receipts: [] },
@@ -517,12 +849,110 @@ export class CollaborationJobStore {
 		}
 	}
 	update(id: string, apply: (job: CollaborationJob) => void): CollaborationJob {
-		return this.updateRecord(id, apply, "controller");
+		return this.updateRecord(id, apply, this.role === "turn" ? "turn" : "controller");
+	}
+	/** This process as a new controller binding for this store's session. */
+	private ownBinding(): { owner: ProcessOwner; leased?: true } {
+		// Bound as leased only when this process provably holds the session's lease now; an unreadable registry binds
+		// unleased, which other sessions then judge by the process's liveness alone (never reclaimed while it lives).
+		let leased = false;
+		try {
+			leased = this.sessionServers?.(this.parentSessionId).some((holder) => holder.self) ?? false;
+		} catch {
+			leased = false;
+		}
+		return { owner: ownProcessOwner(), ...(leased ? { leased: true as const } : {}) };
+	}
+	/**
+	 * The one fenced transfer of a job's controller binding to this process and session. Under the job lock it judges
+	 * control again from the live lease registry and refuses unless the standing allows the transfer (`claim`: the
+	 * job's own or adopting session takes back a job whose binding is gone; `adopt`: also an orphaned job of another
+	 * session). It then binds this process, bumps the generation (fencing every store that observed the old binding),
+	 * keeps `parentSessionId`, and records `adoptedBy`/`adoptedAt` when this is not the job's own session. When the
+	 * serving session changes, each member whose last terminal is unpublished gets its dispatch publication reopened,
+	 * so the new serving session's managed-lane ledger learns the lane before its terminal arrives.
+	 */
+	private takeControl(id: string, mode: "claim" | "adopt"): CollaborationJob {
+		const job = this.updateRecord(id, (current) => this.rebind(current, mode), "transfer");
+		this.observedGenerations.set(id, collaborationController(job).generation);
+		return job;
+	}
+	/** The mutation of {@link takeControl}, applied to a record its caller read under the job lock. */
+	private rebind(current: CollaborationJob, mode: "claim" | "adopt"): void {
+		if (this.role === "turn") throw new Error("A turn helper never controls a collaboration job.");
+		const { control, reason } = this.judgeControl(current, this.sessionServers);
+		if (!(control === "claimable" || (mode === "adopt" && control === "orphaned")))
+			throw new CollaborationControlRefusal(
+				`Collaboration job ${current.id} cannot be ${mode === "adopt" ? "adopted" : "taken back"}: it is ${control.replaceAll("_", " ")}. ${reason} Nothing was changed.`,
+			);
+		const controller = collaborationController(current);
+		if (controller.generation === Number.MAX_SAFE_INTEGER)
+			throw new Error("Collaboration controller generation exhausted.");
+		const servingBefore = collaborationServingSession(current);
+		const adopting = this.parentSessionId !== controller.parentSessionId;
+		current.controller = {
+			parentSessionId: controller.parentSessionId,
+			generation: controller.generation + 1,
+			...this.ownBinding(),
+			...(adopting
+				? {
+						adoptedBy: this.parentSessionId,
+						adoptedAt:
+							controller.adoptedBy === this.parentSessionId && controller.adoptedAt !== undefined
+								? controller.adoptedAt
+								: Date.now(),
+					}
+				: {}),
+		};
+		if (servingBefore === this.parentSessionId) return;
+		for (const agent of current.agents)
+			if (agent.turn > 0 && agent.notifiedTurn < agent.turn)
+				agent.notifiedDispatchTurn = Math.min(agent.notifiedDispatchTurn ?? agent.turn - 1, agent.turn - 1);
+	}
+	/** A read-only view of any job in the state directory, with its control standing as this store sees it. */
+	describe(id: string): CollaborationJobSummary {
+		const job = this.read(id);
+		return summarizeJob(job, this.judgeControl(job));
+	}
+	/** Whether this store controls the job now. */
+	controlsJob(id: string): boolean {
+		return this.controls(this.read(id));
+	}
+	/**
+	 * Explicitly takes over another session's orphaned job (or takes back this session's own). Requires the session
+	 * lease registry, since "no live session holds it" is the condition. Never changes the job's `parentSessionId`.
+	 */
+	adopt(id: string): CollaborationJob {
+		if (!this.sessionServers) throw new Error("Adopting a collaboration job requires the session lease registry.");
+		return this.takeControl(id, "adopt");
+	}
+	/**
+	 * Takes back every job of this session (its own, or one it adopted) whose controller binding is gone: the resumed
+	 * session becomes the controller again through the same fenced transfer. Makes no backend call and publishes
+	 * nothing; the caller's reconciliation and publication run on the jobs this store now controls.
+	 */
+	reclaimSessionJobs(): CollaborationJob[] {
+		if (this.role === "turn") return [];
+		const candidates = this.listRecords((raw) => {
+			const { own, adoptedBy } = rawSessions(raw);
+			return own === this.parentSessionId || adoptedBy === this.parentSessionId;
+		});
+		const claimed: CollaborationJob[] = [];
+		for (const job of candidates) {
+			if (this.judgeControl(job).control !== "claimable") continue;
+			try {
+				claimed.push(this.takeControl(job.id, "claim"));
+			} catch (error) {
+				// The standing changed between the listing and the lock (another process claimed it first).
+				if (!(error instanceof CollaborationControlRefusal)) throw error;
+			}
+		}
+		return claimed;
 	}
 	private updateRecord(
 		id: string,
 		apply: (job: CollaborationJob) => void,
-		access: "controller" | "peer" | "transfer",
+		access: "controller" | "peer" | "transfer" | "turn",
 	): CollaborationJob {
 		return withFileLockSync(this.path(id), () => {
 			const job = this.read(id);
@@ -550,7 +980,7 @@ export class CollaborationJobStore {
 			const callerTerminalIdBefore = job.callerTerminalId;
 			apply(job);
 			if (access !== "transfer" && ownerBefore !== JSON.stringify(job.controller))
-				throw new Error("Collaboration controller can change only during specialist admission.");
+				throw new Error("Collaboration controller changes only through a fenced control transfer.");
 			if (JSON.stringify((job.startReceipts ?? []).slice(0, receiptCount)) !== receiptsBefore)
 				throw new Error("Collaboration accepted start receipts are immutable.");
 			if (immutableIdentity(job) !== identityBefore) throw new Error("Collaboration launch identity is immutable.");
@@ -650,14 +1080,20 @@ export class CollaborationJobStore {
 			throw new Error("Collaboration sender is inactive.");
 		return sender;
 	}
-	/** The retained CLI may follow supervision only through its original authenticated job binding. */
+	/**
+	 * The retained CLI follows supervision through its authenticated job binding: the process serving the job now and
+	 * the session it serves (an adopter's, after an adoption), which is the session whose master entry supervision
+	 * matches against that pid.
+	 */
 	getPeerParentOwnership(id: string, senderId: string, token: string): ProcessParentOwnership | undefined {
 		const job = this.read(id);
 		this.assertPeerParent(job);
 		this.authenticatePeer(job, senderId, token);
-		const { parentSessionId, parentPid, generation } = collaborationController(job);
-		// Exactly the supervision contract's fields; the controller's start time stays a store-internal fact.
-		return parentPid === undefined ? undefined : { parentSessionId, parentPid, generation };
+		const { owner, generation } = collaborationController(job);
+		// Exactly the supervision contract's fields; the controller's start time and host stay store-internal facts.
+		return owner === undefined
+			? undefined
+			: { parentSessionId: collaborationServingSession(job), parentPid: owner.pid, generation };
 	}
 	/** Answers mint a fresh dispatch identity; workers discover it without exposing credentials. */
 	currentPeerTurn(id: string, senderId: string, token: string): { turnId: string } {
@@ -965,11 +1401,15 @@ export class CollaborationJobStore {
 			agent.evidence = boundCollaborationEvidence(`Steering interrupt failed: ${failure}; work state is uncertain.`);
 		});
 	}
-	/** Record that a backend resource request is outstanding for this member, before it is issued. */
+	/**
+	 * Record that a backend resource request is outstanding for this member, before it is issued, and which process
+	 * issued it: only that process can learn the request's outcome, so only its proven exit abandons the request.
+	 */
 	beginAcquisition(id: string, agentId: string): void {
 		this.updateAgent(id, agentId, (agent) => {
 			if (!agent) return;
 			agent.acquiring = true;
+			agent.acquiredBy = ownProcessOwner();
 		});
 	}
 	/**
@@ -984,6 +1424,7 @@ export class CollaborationJobStore {
 		this.updateAgent(id, agentId, (agent) => {
 			if (!agent) return;
 			delete agent.acquiring;
+			delete agent.acquiredBy;
 			if (!pane) return;
 			agent.paneId = pane.paneId;
 			agent.terminalId = pane.terminalId;
@@ -1045,14 +1486,14 @@ export class CollaborationJobStore {
 		});
 	}
 	/**
-	 * Explicit operator release of an acquisition that an exited controller abandoned before any pane was
+	 * Explicit operator release of an acquisition that its exited issuer abandoned before any pane was
 	 * recorded. No recorded fact identifies a pane the lost request may have created (the backend name is
 	 * minted after the reply and non-Pi members carry no job environment), so nothing is verified or closed
 	 * and the release itself records no closure: it leaves `closed` unset, settles an active turn failed, and
 	 * the evidence names where an untracked pane must be inspected and closed by hand. A later explicit stop
 	 * of the released member is the operator's own decision and records closure through `finishStop`. The
-	 * controller's exit is proven
-	 * again under the job lock, so a live controller's in-flight acquisition is never released.
+	 * issuer's exit ({@link collaborationAcquisitionAbandoned}) is proven again under the job lock, so a live
+	 * process's in-flight acquisition is never released.
 	 */
 	releaseAbandonedAcquisition(id: string, agentId: string): CollaborationAgent {
 		return this.updateAgent(id, agentId, (agent, job) => {
@@ -1062,9 +1503,9 @@ export class CollaborationJobStore {
 				throw new Error(
 					"Collaboration agent has a recorded pane; run job_status so reconciliation verifies and closes it.",
 				);
-			if (!collaborationControllerExited(job))
+			if (!collaborationAcquisitionAbandoned(agent))
 				throw new Error(
-					"Collaboration controller is not proven exited; its acquisition may still resolve. Nothing was released.",
+					"The process that issued this acquisition is not proven exited; it may still resolve. Nothing was released.",
 				);
 			const location =
 				job.placement === "current-pane"
@@ -1072,8 +1513,9 @@ export class CollaborationJobStore {
 					: job.workspaceId
 						? `Herdr workspace ${job.workspaceId}`
 						: `an unrecorded Herdr workspace labelled "${job.title}" in session ${job.sessionName}`;
-			const note = `Acquisition released by operator after controller pid ${collaborationController(job).parentPid} exited; no pane was observed or closed. Any untracked pane in ${location} must be inspected and closed manually.`;
+			const note = `Acquisition released by operator after its issuing pid ${agent.acquiredBy?.pid} exited; no pane was observed or closed. Any untracked pane in ${location} must be inspected and closed manually.`;
 			delete agent.acquiring;
+			delete agent.acquiredBy;
 			delete agent.stopping;
 			releaseTurnProcess(agent);
 			if (["idle", "reserved", "running"].includes(agent.status)) agent.status = "failed";

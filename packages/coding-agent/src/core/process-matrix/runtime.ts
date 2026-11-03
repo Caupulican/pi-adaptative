@@ -27,12 +27,9 @@
  */
 
 import { isDeepStrictEqual } from "node:util";
-import { readHostIdentity, warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
-import {
-	type ProcessObservation,
-	probeProcessIdentityLiveness,
-	readOwnProcessStartTime,
-} from "../../kernel/reliability/process-tree.ts";
+import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import { judgeOwner, ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
@@ -69,8 +66,8 @@ import {
 	markResumable,
 	markTerminal,
 	markTerminalNotificationDelivered,
+	type OwnerJudge,
 	pollWorkerDirective,
-	type RecordedProcessObserver,
 	reconcileMatrix,
 } from "./supervisor.ts";
 
@@ -221,27 +218,24 @@ function nowIso(now: () => number): string {
 }
 
 /**
- * How every recorded entry pid is judged: `config.observeProcess` answers for the pid (this process is alive by
- * construction), and a recorded `processStartTime` that the pid no longer has proves the pid was reissued.
+ * How every recorded owner (an entry, or a worker's parent) is judged: `judgeOwner` on this host, with
+ * `config.observeProcess` as its pid probe (this process is alive by construction). The host is read per judgement,
+ * so a macOS/Windows machine id that `warmHostIdentity` finishes reading mid-session is used from then on.
  */
-function recordedProcessObserver(config: ProcessMatrixRuntimeConfig): RecordedProcessObserver {
-	const observePid = (pid: number): ProcessObservation => (pid === process.pid ? "alive" : config.observeProcess(pid));
-	return (pid, startTime) => probeProcessIdentityLiveness(pid, startTime, observePid);
+function ownerJudge(config: ProcessMatrixRuntimeConfig): OwnerJudge {
+	const observe = (pid: number): ProcessObservation => (pid === process.pid ? "alive" : config.observeProcess(pid));
+	return (owner) => judgeOwner(owner, { observe });
 }
 
 /**
- * `entry` re-pointed at another OS process on this host (a resumed replacement). The recorded start time described
- * the previous process: keeping it beside the new pid would judge the live replacement a reissued pid.
+ * `entry` re-pointed at another OS process on this host (a resumed replacement): this host's identity with the new pid
+ * and no start time. The recorded start time described the previous process, and this process's own describes neither;
+ * either beside the new pid would judge the live replacement a reissued pid.
  */
 function rebindEntryProcess(entry: ProcessMatrixEntry, pid: number): ProcessMatrixEntry {
-	const { processStartTime: _previous, machineId: _machineId, ...rest } = entry;
-	const host = readHostIdentity();
-	return {
-		...rest,
-		pid,
-		hostname: host.hostname,
-		...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
-	};
+	const { startTime: _previous, machineId: _machineId, ...rest } = entry;
+	const { pid: _self, startTime: _own, ...host } = ownProcessOwner();
+	return { ...rest, ...host, pid };
 }
 
 /** Session custom-entry type for a wall-clock discontinuity. Read by the latency census. */
@@ -322,13 +316,7 @@ async function startMasterBranch(
 	now: () => number,
 ): Promise<ProcessMatrixRuntimeHandle> {
 	const store = resolveProcessMatrixStore(config);
-	let entry = buildMasterEntry({
-		agent: config.agent,
-		pid: process.pid,
-		host: readHostIdentity(),
-		processStartTime: readOwnProcessStartTime(),
-		now: nowIso(now),
-	});
+	let entry = buildMasterEntry({ agent: config.agent, owner: ownProcessOwner(), now: nowIso(now) });
 	try {
 		await store.writeEntry(config.agentDir, entry);
 	} catch (error) {
@@ -461,8 +449,7 @@ async function reconcileAndRunOrphanScan(
 	}
 	if (signal.aborted) return [];
 	const reconciled = reconcileMatrix(entries, {
-		observeProcess: recordedProcessObserver(config),
-		host: readHostIdentity(),
+		judge: ownerJudge(config),
 		now: now(),
 		resumableTtlMs: PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	});
@@ -554,12 +541,8 @@ async function runOrphanScan(
 	entries: ProcessMatrixEntry[],
 	signal: AbortSignal,
 ): Promise<ProcessMatrixEntry[]> {
-	const observeRecorded = recordedProcessObserver(config);
-	const orphans = detectOrphanedWorkers(entries, {
-		observeProcess: observeRecorded,
-		host: readHostIdentity(),
-		ownSessionId: config.agent.resumeContext.sessionId,
-	});
+	const judge = ownerJudge(config);
+	const orphans = detectOrphanedWorkers(entries, { judge, ownSessionId: config.agent.resumeContext.sessionId });
 	const awaitingOwner: ProcessMatrixEntry[] = [];
 
 	for (const orphan of orphans) {
@@ -575,19 +558,18 @@ async function runOrphanScan(
 			// bounded reconciliation (see reconcileAndRunOrphanScan) already ages it out over
 			// PROCESS_MATRIX_RESUMABLE_RETENTION_MS without help from this diagnostic, so
 			// repeating the warning on every startup until that TTL elapses is pure noise.
-			const observation = observeRecorded(orphan.pid, orphan.processStartTime);
-			if (observation === "alive") {
+			if (judge(orphan) === "alive") {
 				reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
 				awaitingOwner.push(orphan);
 			}
 			continue;
 		}
-		const observation = observeRecorded(orphan.pid, orphan.processStartTime);
-		if (observation === "dead") {
+		const standing = judge(orphan);
+		if (standing === "dead") {
 			await resumeDeadOrphan(config, orphan, signal);
 			continue;
 		}
-		if (observation === "alive") {
+		if (standing === "alive") {
 			await adoptLiveOrphan(config, orphan, signal);
 		}
 	}
@@ -687,9 +669,9 @@ async function requestWorkerCleanup(
 	try {
 		// The worker may legitimately advance its own lifecycle (running -> winding_down -> resumable)
 		// while the owner reads the question; the fence is the process generation the owner was shown.
-		const observeRecorded = recordedProcessObserver(config);
+		const judge = ownerJudge(config);
 		for (let attempt = 0; attempt < 3; attempt++) {
-			if (observeRecorded(expected.pid, expected.processStartTime) !== "alive") {
+			if (judge(expected) !== "alive") {
 				config.onDiagnostic?.(
 					`process-matrix: orphan ${shown.entryId} exited before cleanup was requested; nothing written`,
 				);
@@ -911,9 +893,7 @@ async function startWorkerBranch(
 
 	let entry = buildWorkerEntry({
 		agent: config.agent,
-		pid: process.pid,
-		host: readHostIdentity(),
-		processStartTime: readOwnProcessStartTime(),
+		owner: ownProcessOwner(),
 		now: nowIso(now),
 		parentPid: initialParentPid,
 		...(parentSessionId !== undefined ? { parentSessionId } : {}),

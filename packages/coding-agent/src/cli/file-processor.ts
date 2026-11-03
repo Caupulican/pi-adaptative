@@ -6,6 +6,7 @@ import { access, open, readFile, stat } from "node:fs/promises";
 import type { ImageContent } from "@caupulican/pi-ai";
 import chalk from "chalk";
 import { resolve } from "path";
+import { exitProcess } from "../core/process-end-recorder.ts";
 import { resolveReadPath } from "../core/tools/path-utils.ts";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../utils/mime.ts";
@@ -37,7 +38,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			console.error(chalk.red(`Error: ${reason}`));
-			process.exit(1);
+			exitProcess(1, "refused", reason);
 		}
 
 		// Check if file is empty
@@ -121,7 +122,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
 				console.error(chalk.red(`Error: Could not read file ${absolutePath}: ${message}`));
-				process.exit(1);
+				exitProcess(1, "refused", message);
 			}
 		}
 	}

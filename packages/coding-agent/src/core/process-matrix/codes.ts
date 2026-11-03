@@ -12,6 +12,7 @@
  *   silently -- when that parent disappears.
  */
 
+import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 
 export type ProcessRole = "master" | "worker";
@@ -45,24 +46,17 @@ export interface ProcessTerminalHandoff {
 	notificationDeliveredAt?: string;
 }
 
-/** One process-matrix entry: one file under `state/process-matrix/<entryId>.json` (see `store.ts`). */
-export interface ProcessMatrixEntry {
+/**
+ * One process-matrix entry: one file under `state/process-matrix/<entryId>.json` (see `store.ts`). The entry IS its
+ * process's owner record: `pid`, `startTime`, `hostname` and `machineId` are the shared {@link ProcessOwner} written by
+ * `ownProcessOwner` and judged by `judgeOwner`. Every entry names its host by hostname. `startTime` is absent off
+ * Linux and on an entry whose pid was rewritten to a process it cannot read; entries written before the shared shape
+ * stored it as `processStartTime`, which the store reads into `startTime`.
+ */
+export interface ProcessMatrixEntry extends ProcessOwner {
 	entryId: string;
 	role: ProcessRole;
 	agent: AgentIdentityContract;
-	pid: number;
-	/** `os.hostname()` when the entry was written. Decides locality only for an entry without {@link machineId}. */
-	hostname: string;
-	/**
-	 * The writer's stable machine id (`kernel/reliability/host-identity.ts`). When present it alone decides whether
-	 * the entry's pid belongs to this host. Absent on entries written before it was recorded, or by a host without one.
-	 */
-	machineId?: string;
-	/**
-	 * Linux start time of {@link pid} (`readOwnProcessStartTime`), so a reissued pid is judged dead rather than alive.
-	 * Absent on older entries, off Linux, and on an entry whose pid was rewritten to a process it cannot read.
-	 */
-	processStartTime?: string;
 	startedAt: string;
 	heartbeatAt: string;
 	status: ProcessStatus;

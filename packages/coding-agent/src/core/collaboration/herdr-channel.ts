@@ -1,5 +1,6 @@
 import { connect, type Socket } from "node:net";
 import { CollaborationBackendError } from "./backend.ts";
+import { herdrServerError } from "./herdr-codec.ts";
 
 export interface HerdrEventChannel {
 	request(method: string, params: Record<string, unknown>): Promise<unknown>;
@@ -136,9 +137,7 @@ export async function connectHerdrChannel(path: string, signal: AbortSignal): Pr
 						if (!acknowledged) {
 							if (envelope.id !== id) return fail();
 							if (envelope.error) {
-								reject(
-									new CollaborationBackendError("backend_error", "Herdr rejected the event-channel request."),
-								);
+								reject(herdrServerError(envelope.error, "event-channel request"));
 								finish();
 								return;
 							}

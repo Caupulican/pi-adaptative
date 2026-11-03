@@ -211,12 +211,18 @@ rejected rather than represented as enforced across a boundary the host cannot s
   recoverable for at most 30 days before expiry. An entry recorded on another host is never judged
   by a local pid probe, and a foreign or `unknown` running entry is kept while its `heartbeatAt` is
   within that 30 days, then removed; neither is ever marked resumable by this host.
+- Each entry is its process's owner record, the shared shape every reclaimable store uses
+  (`kernel/reliability/owner-identity.ts`): `pid`, Linux `startTime`, `hostname` and, when readable,
+  `machineId`, written by `ownProcessOwner` and judged by `judgeOwner` as `alive`, `dead`, `foreign`
+  or `unknown`. Only `dead` recovers or prunes a running entry or marks a worker orphaned; a worker's
+  parent is judged as an owner on the worker's host.
 - Host locality is the stable machine id each entry records beside its hostname (Linux `machine-id`,
   macOS `IOPlatformUUID`, Windows `MachineGuid`, stored as a digest): a renamed host still judges its
   own entries, and a different machine with the same hostname never matches. An entry without a
   machine id (written before it was recorded, or by a host that exposes none) is located by hostname.
-- Each entry records its process's Linux start time (`processStartTime`). A pid that now names a
-  process with another start time is a reissued pid and reads dead, so a reused pid no longer pins an
-  entry as `running`; when the pid answers but its start time cannot be read the observation is
-  `unknown` and the entry ages out by heartbeat. A resumed replacement's entry drops the previous
-  process's start time when its pid is rewritten. Entries without a start time are judged by pid alone.
+- A pid that now names a process with another start time is a reissued pid and reads `dead`, so a
+  reused pid no longer pins an entry as `running`; when the pid answers but its start time cannot be
+  read the standing is `unknown` and the entry ages out by heartbeat. A resumed replacement's entry
+  drops the previous process's start time when its pid is rewritten. Entries without a start time
+  are judged by pid alone. Entries written before the shared shape stored the start time as
+  `processStartTime`; the store reads it as `startTime`, and the next write of the entry drops it.

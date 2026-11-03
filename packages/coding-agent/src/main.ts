@@ -64,6 +64,7 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
 import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
@@ -154,11 +155,13 @@ function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]
 	}
 }
 
+/** Disposes the runtime and ends the process as `reason`; a failing dispose is reported and ends it as a shutdown failure instead. */
 export async function disposeRuntimeAndExit(
 	runtime: Pick<AgentSessionRuntime, "dispose">,
 	exitCode: number,
-	exit: (code: number) => void = (code) => process.exit(code),
-): Promise<void> {
+	reason: ProcessEndReason,
+	detail = "",
+): Promise<never> {
 	const failures: unknown[] = [];
 	for (const dispose of [() => runtime.dispose(), () => disposeHttpDispatcher()]) {
 		try {
@@ -167,12 +170,19 @@ export async function disposeRuntimeAndExit(
 			failures.push(error);
 		}
 	}
-	if (failures.length > 0) {
-		console.error(neutralizeControls(`Shutdown failed: ${failures.map(describeCause).join("; ")}`));
-	}
-	exit(failures.length > 0 && exitCode === 0 ? 1 : exitCode);
-	if (failures.length === 1) throw failures[0];
-	if (failures.length > 1) throw new AggregateError(failures, "Runtime and HTTP shutdown failed");
+	if (failures.length === 0) return exitProcess(exitCode, reason, detail);
+	console.error(neutralizeControls(`Shutdown failed: ${failures.map(describeCause).join("; ")}`));
+	return exitProcess(
+		exitCode === 0 ? 1 : exitCode,
+		"shutdown-failed",
+		`while ending as ${reason}\n\n${failures.map(thrownDetail).join("\n\n")}`,
+	);
+}
+
+/** Refuses this invocation: the reason is printed and recorded, and the process ends with status 1. */
+function refuseInvocation(message: string): never {
+	console.error(chalk.red(message));
+	return exitProcess(1, "refused", message);
 }
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
@@ -290,8 +300,7 @@ function validateForkFlags(parsed: Args): void {
 
 	const conflictingFlags = collectSessionModeConflicts(parsed);
 	if (conflictingFlags.length > 0) {
-		console.error(chalk.red(`Error: --fork cannot be combined with ${conflictingFlags.join(", ")}`));
-		process.exit(1);
+		refuseInvocation(`Error: --fork cannot be combined with ${conflictingFlags.join(", ")}`);
 	}
 }
 
@@ -300,16 +309,14 @@ function validateSessionIdFlags(parsed: Args): void {
 
 	const conflictingFlags = collectSessionModeConflicts(parsed);
 	if (conflictingFlags.length > 0) {
-		console.error(chalk.red(`Error: --session-id cannot be combined with ${conflictingFlags.join(", ")}`));
-		process.exit(1);
+		refuseInvocation(`Error: --session-id cannot be combined with ${conflictingFlags.join(", ")}`);
 	}
 
 	try {
 		assertValidSessionId(parsed.sessionId);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
-		console.error(chalk.red(`Error: ${message}`));
-		process.exit(1);
+		refuseInvocation(`Error: ${message}`);
 	}
 }
 
@@ -318,8 +325,7 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 		return forkSession(sourcePath, cwd, sessionDir, { id: sessionId });
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
-		console.error(chalk.red(`Error: ${message}`));
-		process.exit(1);
+		refuseInvocation(`Error: ${message}`);
 	}
 }
 
@@ -338,8 +344,7 @@ async function createSessionManager(
 		if (parsed.sessionId) {
 			const existingTarget = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
 			if (existingTarget) {
-				console.error(chalk.red(`Session already exists with id '${parsed.sessionId}'`));
-				process.exit(1);
+				refuseInvocation(`Session already exists with id '${parsed.sessionId}'`);
 			}
 		}
 
@@ -352,8 +357,7 @@ async function createSessionManager(
 				return forkSessionOrExit(resolved.path, cwd, sessionDir, parsed.sessionId);
 
 			case "not_found":
-				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
-				process.exit(1);
+				refuseInvocation(`No session found matching '${resolved.arg}'`);
 		}
 	}
 
@@ -367,28 +371,25 @@ async function createSessionManager(
 
 			case "global": {
 				if (!hasHumanUI) {
-					console.error(chalk.red("Cannot open a cross-project session without a user approval UI."));
-					process.exit(1);
+					refuseInvocation("Cannot open a cross-project session without a user approval UI.");
 				}
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
 					console.log(chalk.dim("Aborted."));
-					process.exit(0);
+					exitProcess(0, "completed");
 				}
 				return forkSessionOrExit(resolved.path, cwd, sessionDir);
 			}
 
 			case "not_found":
-				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
-				process.exit(1);
+				refuseInvocation(`No session found matching '${resolved.arg}'`);
 		}
 	}
 
 	if (parsed.resume) {
 		if (!hasHumanUI) {
-			console.error(chalk.red("Error: --resume requires --session-mode user; use --session <id> for workers."));
-			process.exit(1);
+			refuseInvocation("Error: --resume requires --session-mode user; use --session <id> for workers.");
 		}
 		const { initTheme, stopThemeWatcher } = await import("./presentation/theme/theme.ts");
 		initTheme(settingsManager.getTheme(), true);
@@ -399,7 +400,7 @@ async function createSessionManager(
 			);
 			if (!selectedPath) {
 				console.log(chalk.dim("No session selected"));
-				process.exit(0);
+				exitProcess(0, "completed");
 			}
 			return openSession(selectedPath, sessionDir);
 		} finally {
@@ -717,8 +718,9 @@ export async function main(args: string[], options?: MainOptions) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;
 			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
 		}
-		if (parsed.diagnostics.some((d) => d.type === "error")) {
-			process.exit(1);
+		const errors = parsed.diagnostics.filter((d) => d.type === "error");
+		if (errors.length > 0) {
+			exitProcess(1, "refused", errors.map((d) => d.message).join("\n"));
 		}
 	}
 	time("parseArgs");
@@ -742,7 +744,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (parsed.version) {
 		console.log(VERSION);
-		process.exit(0);
+		exitProcess(0, "completed");
 	}
 
 	if (parsed.export) {
@@ -752,16 +754,14 @@ export async function main(args: string[], options?: MainOptions) {
 			result = await exportFromFile(parsed.export, outputPath);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Failed to export session";
-			console.error(chalk.red(`Error: ${message}`));
-			process.exit(1);
+			refuseInvocation(`Error: ${message}`);
 		}
 		console.log(`Exported to: ${result}`);
-		process.exit(0);
+		exitProcess(0, "completed");
 	}
 
 	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
-		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
-		process.exit(1);
+		refuseInvocation("Error: @file arguments are not supported in RPC mode");
 	}
 
 	validateForkFlags(parsed);
@@ -795,19 +795,17 @@ export async function main(args: string[], options?: MainOptions) {
 		if (hasHumanUI) {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
-				process.exit(0);
+				exitProcess(0, "completed");
 			}
 			sessionManager = openSession(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
-			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
-			process.exit(1);
+			refuseInvocation(new MissingSessionCwdError(missingSessionCwdIssue).message);
 		}
 	}
 	if (parsed.name !== undefined) {
 		const name = parsed.name.trim();
 		if (!name) {
-			console.error(chalk.red("Error: --name requires a non-empty value"));
-			process.exit(1);
+			refuseInvocation("Error: --name requires a non-empty value");
 		}
 		sessionManager.appendSessionInfo(name);
 	}
@@ -1123,7 +1121,7 @@ export async function main(args: string[], options?: MainOptions) {
 					),
 				);
 			}
-			await disposeRuntimeAndExit(runtime, 1);
+			await disposeRuntimeAndExit(runtime, 1, "refused", message);
 			return;
 		}
 		// What a tool-only extension grant ignores, at startup or later during a tool call, is recorded on the
@@ -1174,7 +1172,7 @@ export async function main(args: string[], options?: MainOptions) {
 			onDiagnostic: (message) => {
 				console.error(chalk.yellow(`Warning: ${message}`));
 			},
-			requestExit: () => disposeRuntimeAndExit(runtime, 0),
+			requestExit: () => disposeRuntimeAndExit(runtime, 0, "wind-down"),
 		});
 		runtime.registerSessionResource(supervision);
 		await supervision.start(session, runtime);
@@ -1214,14 +1212,14 @@ export async function main(args: string[], options?: MainOptions) {
 			.getExtensions()
 			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
 		printHelp(extensionFlags);
-		await disposeRuntimeAndExit(runtime, 0);
+		await disposeRuntimeAndExit(runtime, 0, "completed");
 		return;
 	}
 
 	if (parsed.listModels !== undefined) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
-		await disposeRuntimeAndExit(runtime, 0);
+		await disposeRuntimeAndExit(runtime, 0, "completed");
 		return;
 	}
 
@@ -1255,22 +1253,29 @@ export async function main(args: string[], options?: MainOptions) {
 
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
-	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
-		await disposeRuntimeAndExit(runtime, 1);
+	const diagnosticErrors = runtime.diagnostics.filter((diagnostic) => diagnostic.type === "error");
+	if (diagnosticErrors.length > 0) {
+		await disposeRuntimeAndExit(
+			runtime,
+			1,
+			"refused",
+			diagnosticErrors.map((diagnostic) => diagnostic.message).join("\n"),
+		);
 		return;
 	}
 	time("createAgentSession");
 
 	if (appMode !== "interactive" && !session.model) {
-		console.error(chalk.red(formatNoModelsAvailableMessage()));
-		await disposeRuntimeAndExit(runtime, 1);
+		const message = formatNoModelsAvailableMessage();
+		console.error(chalk.red(message));
+		await disposeRuntimeAndExit(runtime, 1, "refused", message);
 		return;
 	}
 
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
-		await disposeRuntimeAndExit(runtime, 1);
+		await disposeRuntimeAndExit(runtime, 1, "refused");
 		return;
 	}
 
@@ -1313,7 +1318,7 @@ export async function main(args: string[], options?: MainOptions) {
 			if (process.stderr.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
 			}
-			await disposeRuntimeAndExit(runtime, 0);
+			await disposeRuntimeAndExit(runtime, 0, "completed");
 			return;
 		}
 

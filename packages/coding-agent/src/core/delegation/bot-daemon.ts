@@ -4,7 +4,10 @@
  * A session claims the daemon lease with a fresh token, then launches `pi --bot-daemon <agentDir> <token>` through
  * the stable self-launch target. The daemon renews that lease while it is still its own and stops as soon as it is
  * not: released by `/bot daemon stop`, or claimed by a later start after this daemon's lease went stale. Ownership
- * changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
+ * changes are observed through a watch on the lease directory, and the renewal tick rechecks them. Each renewal
+ * records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn may be a
+ * launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it in the
+ * shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`).
  *
  * A lock held by another process through every bounded retry (`ELOCKED`) skips one tick: renewal recurs well inside
  * the lease's stale window and due routines stay due. Any other failure ends the process, and its unrenewed lease
@@ -12,6 +15,7 @@
  */
 import { type FSWatcher, watch } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
+import { ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { daemonLeasePath, isDaemonLeaseToken } from "./bot-team-routine-helpers.ts";
 import { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
@@ -28,6 +32,7 @@ export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
 		return Promise.resolve(2);
 	const store = new PersistentBotTeamStore(agentDir);
 	const leaseFile = daemonLeasePath(store.getStoreFilePath());
+	const owner = ownProcessOwner();
 	return new Promise((resolve) => {
 		let stopped = false;
 		let timer: ReturnType<typeof setInterval> | undefined;
@@ -49,7 +54,7 @@ export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
 			if (stopped) return;
 			const now = Date.now();
 			try {
-				if (!store.renewDaemonLease(token, process.pid, now)) {
+				if (!store.renewDaemonLease(token, owner, now)) {
 					stop();
 					return;
 				}

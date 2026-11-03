@@ -1,14 +1,23 @@
 /**
- * Lifetime ownership of one project's ICM chat: a single durable lease file naming its owner by an unguessable token,
- * pid, host and start time. A lease is replaced only when its owner is proven dead on this host. Any other lease,
- * including one whose owner cannot be checked, refuses the new owner. Ownership is fenced by re-reading the token under
- * the writer lock, never by a timer.
+ * Lifetime ownership of one project's ICM chat: a single durable lease file naming its owner by an unguessable token
+ * and its process identity ({@link ProcessOwner}: pid, process start time, hostname, machine id). A lease is replaced
+ * only when {@link judgeOwner} proves its owner dead on this host. Any other lease (alive, another host, or an owner
+ * that cannot be checked) refuses the new owner. Ownership is fenced by re-reading the token under the writer lock,
+ * never by a timer. Leases written before the start time and machine id were recorded carry only pid and hostname and
+ * are judged by those.
  */
 
 import { randomBytes } from "node:crypto";
 import { readFileSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
-import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import {
+	isOwnerMachineIdField,
+	isOwnerProvenDead,
+	isOwnerStartTimeField,
+	judgeOwner,
+	ownProcessOwner,
+	type ProcessOwner,
+} from "../../kernel/reliability/owner-identity.ts";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { ContinuousChatCorruptError, readJsonFile } from "./continuous-chat-index.ts";
 
@@ -17,12 +26,12 @@ const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const TOKEN_BYTES = 32;
 const MAX_HOST_CHARACTERS = 253;
 const MAX_LABEL_CHARACTERS = 256;
-const LEASE_KEYS = ["schemaVersion", "token", "pid", "hostname", "startedAt", "label"];
+const LEASE_KEYS = ["schemaVersion", "token", "pid", "startTime", "hostname", "machineId", "startedAt", "label"];
 
-export interface ContinuousChatLeaseRecord {
+/** The owner is the lease's {@link ProcessOwner}; `hostname` is always recorded and names the owner to an operator. */
+export interface ContinuousChatLeaseRecord extends ProcessOwner {
 	schemaVersion: typeof CONTINUOUS_CHAT_LEASE_SCHEMA_VERSION;
 	token: string;
-	pid: number;
 	hostname: string;
 	startedAt: string;
 	/** The session that owns the chat, as its caller named it. Shown to the next owner when the lease is refused. */
@@ -43,11 +52,15 @@ export function createContinuousChatLeaseRecord(options: { label?: string; now: 
 	if (options.label !== undefined && !isBoundedLine(options.label, MAX_LABEL_CHARACTERS)) {
 		throw new TypeError("Continuous-chat session label must be a bounded single line.");
 	}
+	const owner = ownProcessOwner();
+	if (!isBoundedLine(owner.hostname, MAX_HOST_CHARACTERS)) {
+		throw new Error("Continuous-chat lease requires this host's name, which is unreadable or unbounded.");
+	}
 	const record: ContinuousChatLeaseRecord = {
 		schemaVersion: CONTINUOUS_CHAT_LEASE_SCHEMA_VERSION,
 		token: randomBytes(TOKEN_BYTES).toString("hex"),
-		pid: process.pid,
-		hostname: hostname(),
+		...owner,
+		hostname: owner.hostname,
 		startedAt: options.now.toISOString(),
 	};
 	if (options.label !== undefined) record.label = options.label;
@@ -61,11 +74,15 @@ export function parseContinuousChatLeaseRecord(value: unknown): ContinuousChatLe
 	if (!isPositiveSafePid(value.pid)) return undefined;
 	if (!isBoundedLine(value.hostname, MAX_HOST_CHARACTERS)) return undefined;
 	if (typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt))) return undefined;
+	const { startTime, machineId } = value;
+	if (!isOwnerStartTimeField(startTime) || !isOwnerMachineIdField(machineId)) return undefined;
 	const record: ContinuousChatLeaseRecord = {
 		schemaVersion: CONTINUOUS_CHAT_LEASE_SCHEMA_VERSION,
 		token: value.token,
 		pid: value.pid,
+		...(startTime !== undefined ? { startTime } : {}),
 		hostname: value.hostname,
+		...(machineId !== undefined ? { machineId } : {}),
 		startedAt: value.startedAt,
 	};
 	const { label } = value;
@@ -86,11 +103,12 @@ export async function readContinuousChatLease(filePath: string): Promise<Continu
 }
 
 /**
- * Whether the owner is proven dead: it ran on this host and its pid answers ESRCH. A live pid, a pid on another host,
- * and a probe that cannot classify its failure are all unproven, and never authorize a takeover.
+ * Whether the owner is proven dead ({@link judgeOwner} `dead`): it ran on this host and its pid answers ESRCH or now
+ * names a process with another start time. A live owner, an owner on another host, and an owner the probe cannot
+ * classify are all unproven, and never authorize a takeover.
  */
 export function isContinuousChatLeaseOwnerProvenDead(record: ContinuousChatLeaseRecord): boolean {
-	return record.hostname === hostname() && probeProcessLiveness(record.pid) === "dead";
+	return isOwnerProvenDead(record);
 }
 
 /** The owner as an operator sees it. The token is never shown. */
@@ -100,9 +118,11 @@ function describeOwner(record: ContinuousChatLeaseRecord): string {
 }
 
 function heldMessage(owner: ContinuousChatLeaseRecord): string {
+	const standing = judgeOwner(owner);
 	let state: string;
-	if (owner.hostname !== hostname()) state = "on another host, which this session cannot check";
-	else if (probeProcessLiveness(owner.pid) === "alive") state = "still running";
+	if (standing === "foreign") state = "on another host, which this session cannot check";
+	else if (standing === "alive") state = "still running";
+	else if (standing === "dead") state = "which exited while this session was checking it";
 	else state = "whose state could not be checked";
 	return (
 		`The ICM chat for this project is owned by ${describeOwner(owner)}, ${state}. ` +

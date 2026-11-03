@@ -10,7 +10,11 @@ interface DeadlineEntry {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-/** Admission is durable before cleanup I/O, so replacing the observer cannot reset its retry budget. */
+/**
+ * Admission is durable before cleanup I/O, so replacing the observer cannot reset its retry budget. The budget belongs
+ * to one controller binding (its generation): a controller that took the job over (a take-back or an adoption) gets
+ * its own budget for the same turn instead of inheriting the exhausted one of a process that is gone.
+ */
 export function reserveCollaborationCleanupAttempt(
 	store: CollaborationJobStore,
 	turn: CollaborationDeadline,
@@ -23,9 +27,13 @@ export function reserveCollaborationCleanupAttempt(
 		const previous: unknown = job.metadata[key] ? JSON.parse(job.metadata[key]) : undefined;
 		if (previous !== undefined && !Value.Check(cleanupAttemptsSchema, previous))
 			throw new Error("Invalid durable collaboration cleanup budget.");
-		const count = previous && previous.turnId === turn.turnId ? previous.attempts : 0;
+		const generation = collaborationController(job).generation;
+		// A budget recorded before generations were recorded belongs to the first binding.
+		const sameBudget =
+			previous !== undefined && previous.turnId === turn.turnId && (previous.generation ?? 1) === generation;
+		const count = sameBudget ? previous.attempts : 0;
 		attempt = count >= 3 ? 0 : count + 1;
-		if (attempt) job.metadata[key] = JSON.stringify({ turnId: turn.turnId, attempts: attempt });
+		if (attempt) job.metadata[key] = JSON.stringify({ turnId: turn.turnId, generation, attempts: attempt });
 	});
 	return attempt;
 }
@@ -91,9 +99,13 @@ export class CollaborationDeadlines {
 
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import type { CollaborationJobStore } from "./job-store.ts";
+import { type CollaborationJobStore, collaborationController } from "./job-store.ts";
 
 const cleanupAttemptsSchema = Type.Object(
-	{ turnId: Type.String({ maxLength: 128 }), attempts: Type.Integer({ minimum: 0, maximum: 3 }) },
+	{
+		turnId: Type.String({ maxLength: 128 }),
+		generation: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+		attempts: Type.Integer({ minimum: 0, maximum: 3 }),
+	},
 	{ additionalProperties: false },
 );

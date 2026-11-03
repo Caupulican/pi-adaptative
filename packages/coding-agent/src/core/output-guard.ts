@@ -1,5 +1,4 @@
-import { writeCrashRecord } from "./crash-record.ts";
-import { describeCause } from "./terminal-warnings.ts";
+import { exitProcess, thrownDetail } from "./process-end-recorder.ts";
 
 interface StdoutTakeoverState {
 	rawStdoutWrite: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
@@ -102,7 +101,7 @@ let rawStdoutFailureHandler: ((error: unknown) => void) | undefined;
 
 /**
  * Registers the owner of the raw stdout stream to be told when a queued write fails or its callback times out (a client that went
- * away). With no owner registered the process records the failure under state/crashes and exits with status 1; an owner that registers takes over the
+ * away). With no owner registered the process records the failure under state/crashes (routine class) and exits with status 1; an owner that registers takes over the
  * shutdown (its own orderly dispose, then its own exit). Returns the unregistration.
  */
 export function setRawStdoutFailureHandler(handler: (error: unknown) => void): () => void {
@@ -122,12 +121,9 @@ export function writeRawStdout(text: string): void {
 			rawStdoutFailureHandler(error);
 			return;
 		}
-		// The stream that would carry a message is the one that failed: the record is the trace of this exit.
-		writeCrashRecord(
-			"raw stdout write failed with no owner registered; exit 1",
-			error instanceof Error ? (error.stack ?? error.message) : describeCause(error),
-		);
-		process.exit(1);
+		// The stream that would carry a message is the one that failed: the record is the trace of this exit. A reader that went away
+		// is an ordinary end, so it is a routine record.
+		exitProcess(1, "stdout-failed", thrownDetail(error));
 	});
 }
 

@@ -68,7 +68,9 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 	let claimed = false;
 	let backend: CollaborationBackend | undefined;
 	try {
-		store = new CollaborationJobStore(directory, parent);
+		// The turn role: this helper controls nothing; every write it makes is fenced by this exact turn, so the turn
+		// keeps reporting into its job even after another process took control of it (a take-back or an adoption).
+		store = new CollaborationJobStore(directory, parent, { role: "turn" });
 		claimed = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
 		if (!claimed) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
 		notifyParent({ type: "ready", turnId });
@@ -138,7 +140,12 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 						jobId,
 						agentId,
 						turnId,
-						cancellation.signal.aborted ? undefined : String(error).slice(0, 2000),
+						{
+							kind: "failure",
+							detail: cancellation.signal.aborted
+								? "Turn helper was terminated by a signal before its turn settled."
+								: String(error).slice(0, 2000),
+						},
 					);
 				} catch {
 					/* The parent's exact-turn watchdog retains control; no false stopped-work claim. */

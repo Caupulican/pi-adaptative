@@ -282,10 +282,10 @@ function createGuardHost(options: GuardHostOptions): GuardHost {
 				stderr.push(text);
 			},
 			stdout: () => {},
-			writeCrashRecord: () => "",
+			declareExit: () => "",
+			recordRejection: () => {},
 			prependListener: install,
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
-			observeProcessEnd: () => () => {},
 		},
 	);
 	return { lifecycle, installs, log, warnings, stderr, exits, guardsAtDispose, forcesAtDispose, reached, hold };
@@ -564,10 +564,10 @@ async function createInteractiveHarness(
 			stdout: (text) => {
 				stdout.push(text);
 			},
-			writeCrashRecord: () => "",
+			declareExit: () => "",
+			recordRejection: () => {},
 			prependListener: install,
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
-			observeProcessEnd: () => () => {},
 		},
 	});
 	const realDispose = runtime.dispose.bind(runtime);

@@ -31,6 +31,7 @@ import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/l
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
+import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
@@ -1185,8 +1186,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Starts the detached bot daemon as pi's own `--bot-daemon` command through the stable self-launch target (it
-	 * outlives this session and its runtime generation). The lease is claimed with a fresh token before the spawn and
-	 * the token travels in argv, so the daemon's identity is the lease it renews, never a pid read back from disk.
+	 * outlives this session and its runtime generation). Earlier-generation daemons are retired first (the store is
+	 * sealed against them on every platform; see `bot-daemon-legacy.ts`). The lease is claimed with a fresh token
+	 * before the spawn and the token travels in argv, so the daemon's identity is the lease it renews, never a pid read
+	 * back from disk; the spawned pid is recorded for display only (on Windows it can be a launcher wrapper's).
 	 */
 	startPersistentBotDaemon(): { started: boolean; pid?: number; detail: string } {
 		const store = this.getBotTeamStore();
@@ -1198,15 +1201,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				detail: "Detached bot daemon unavailable: this host has no stable pi launch target.",
 			};
 		}
+		const legacy = describeLegacyDaemonRetirement(retireLegacyBotDaemons(store));
+		const withLegacy = (detail: string): string => (legacy ? `${detail} ${legacy}` : detail);
 		const token = randomUUID();
 		if (!store.claimDaemonLease(token)) {
 			const current = store.getDaemonStatus();
+			const starting = current.lastHeartbeatAt === undefined;
 			return {
 				started: false,
-				...(current.pid ? { pid: current.pid } : {}),
-				detail: current.pid
-					? `Detached bot daemon is already running (pid ${current.pid}, ${current.activeRoutines} active routines).`
-					: "Detached bot daemon is already starting.",
+				...(current.pid !== undefined ? { pid: current.pid } : {}),
+				detail: withLegacy(
+					starting
+						? `Detached bot daemon is already starting${current.pid !== undefined ? ` (launched as pid ${current.pid})` : ""}.`
+						: `Detached bot daemon is already running (pid ${current.pid ?? "unknown"}, ${current.activeRoutines} active routines).`,
+				),
 			};
 		}
 		const args = [...target.argsPrefix, ...botDaemonCommandArgs(this.deps.getAgentDir(), token)];
@@ -1216,39 +1224,55 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			windowsHide: true,
 			env: target.environment ? { ...process.env, ...target.environment } : process.env,
 		});
-		child.once("error", (error) => this._safeWarn(`Detached bot daemon failed to start: ${error.message}`));
+		child.once("error", (error) => {
+			this._safeWarn(`Detached bot daemon failed to start: ${error.message}`);
+			// The daemon never ran, so its claim is released now rather than left to go stale.
+			try {
+				store.releaseDaemonLease(token);
+			} catch (releaseError) {
+				this._safeWarn(
+					`Detached bot daemon lease stays claimed until it goes stale: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+				);
+			}
+		});
 		child.unref();
 		const pid = child.pid;
 		if (pid === undefined) {
 			store.releaseDaemonLease(token);
-			return { started: false, detail: "Failed to spawn detached bot daemon process." };
+			return { started: false, detail: withLegacy("Failed to spawn detached bot daemon process.") };
 		}
-		store.recordDaemonLeasePid(token, pid);
+		store.recordDaemonLaunchPid(token, pid);
 		return {
 			started: true,
 			pid,
-			detail: `Started detached bot daemon (pid ${pid}) watching ${store.getStoreFilePath()} across TUI restarts.`,
+			detail: withLegacy(
+				`Started detached bot daemon (pid ${pid}) watching ${store.getStoreFilePath()} across TUI restarts.`,
+			),
 		};
 	}
 
 	/**
 	 * Stops the detached daemon by releasing its lease; the daemon exits when it observes the release. No signal is
-	 * sent: a pid in the lease may belong to an unrelated process by now, while the lease token is the daemon's own.
+	 * sent to it: a pid in the lease may belong to an unrelated process by now, while the lease token is the daemon's
+	 * own. Earlier-generation daemons are then retired as on start, signalling only an identity proven on this host.
 	 */
 	stopPersistentBotDaemon(): { stopped: boolean; detail: string } {
-		const released = this.getBotTeamStore().releaseDaemonLease();
+		const store = this.getBotTeamStore();
+		store.reload();
+		const released = store.releaseDaemonLease();
+		const retirement = retireLegacyBotDaemons(store);
+		const legacy = describeLegacyDaemonRetirement(retirement);
+		const legacyStopped = retirement.releasedTokenDaemon?.held === true || retirement.sweep.signalled.length > 0;
 		if (released.released && released.held) {
 			return {
 				stopped: true,
-				detail: `Released the detached bot daemon's lease${released.pid ? ` (pid ${released.pid})` : ""}; it exits as soon as it observes the release.`,
+				detail: `Released the detached bot daemon's lease${released.pid !== undefined ? ` (pid ${released.pid})` : ""}; it exits as soon as it observes the release.${legacy ? ` ${legacy}` : ""}`,
 			};
 		}
-		return {
-			stopped: false,
-			detail: released.released
-				? "Detached bot daemon is not running; its stale lease was released."
-				: "Detached bot daemon is not running.",
-		};
+		const current = released.released
+			? "Detached bot daemon is not running; its stale lease was released."
+			: "Detached bot daemon is not running.";
+		return { stopped: legacyStopped, detail: legacy ? `${current} ${legacy}` : current };
 	}
 
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {

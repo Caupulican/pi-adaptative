@@ -15,7 +15,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { withFileLock } from "../util/atomic-file.ts";
@@ -45,11 +45,9 @@ import {
 	acquireIntegrationLock,
 	appendAuditEvent,
 	clearLandingTransaction,
-	isRecordedOwnerAlive,
 	listLanes,
-	type OwnerPidProbe,
-	ownerStartTimeFor,
-	type RecordedProcessOwner,
+	type OwnerJudgementOptions,
+	processOwnerFor,
 	readEpoch,
 	readLandingTransaction,
 	readLane,
@@ -77,7 +75,12 @@ export interface WorktreeSyncEngineOptions {
 	maxLanes: number;
 }
 
-export interface WorktreeSyncEngineDeps {
+/**
+ * `host` and `observe` are the lane- and lock-owner judgement's injection seams (`judgeOwner`): deterministic hosts
+ * supply their own host identity and same-host pid probe; foreign-host owners never reach the probe. Defaults: this
+ * host and the OS probe.
+ */
+export interface WorktreeSyncEngineDeps extends OwnerJudgementOptions {
 	exec: WorktreeSyncExec;
 	/** Session cwd -- any directory inside the repo (hub checkout or a lane worktree). */
 	cwd: string;
@@ -86,6 +89,7 @@ export interface WorktreeSyncEngineDeps {
 	options: WorktreeSyncEngineOptions;
 	signal?: AbortSignal;
 	now?: () => string;
+	/** The pid recorded as lane and lock owner ({@link processOwnerFor}). Default: this process. */
 	pid?: number;
 	sessionId?: string;
 	/** Injectable fs probe for deterministic tests. Default: `existsSync`. */
@@ -93,11 +97,6 @@ export interface WorktreeSyncEngineDeps {
 	/** Injectable file reader (conflict-marker scan, rebase progress). Default: `readFileSync`,
 	 * returning undefined on any read error. */
 	readFile?: (path: string) => string | undefined;
-	/**
-	 * Injectable same-host pid probe for deterministic hosts; `false` must mean proven dead. Foreign-host owners never
-	 * reach it. Default: the identity-aware OS probe ({@link isRecordedOwnerAlive}).
-	 */
-	isPidAlive?: OwnerPidProbe;
 	/** Clock and transient classifier of the store's record replacements. Default: system time, win32-only retry. */
 	atomicWrite?: SyncStoreWriteOptions;
 }
@@ -341,23 +340,16 @@ export async function deriveLaneFacts(
 		aheadOfMain,
 		behindMain,
 		worktreePresent,
-		...(owner !== undefined ? { ownerAlive: isRecordedOwnerAlive(owner, deps.isPidAlive) } : {}),
+		...(owner !== undefined ? { ownerAlive: judgeOwner(owner, deps) !== "dead" } : {}),
 	};
 }
 
 /**
- * The process recorded as owning `lane`, or undefined when the record names no valid pid. A record without
- * `ownerMachineId` is located by `ownerHostname`; one with neither predates both and was written on this host; one
- * without `ownerStartTime` is judged by pid alone.
+ * The process recorded as owning `lane`, or undefined when the record names no valid pid (it owns nothing). An owner
+ * naming no host predates host recording and is judged as this host's; one without a start time is judged by pid alone.
  */
-function laneOwner(lane: LaneRegistration): RecordedProcessOwner | undefined {
-	if (!isPositiveSafePid(lane.ownerPid)) return undefined;
-	return {
-		pid: lane.ownerPid,
-		hostname: lane.ownerHostname,
-		machineId: lane.ownerMachineId,
-		startTime: lane.ownerStartTime,
-	};
+function laneOwner(lane: LaneRegistration): ProcessOwner | undefined {
+	return isPositiveSafePid(lane.owner?.pid) ? lane.owner : undefined;
 }
 
 function sanitizeScope(scope: string): string {
@@ -427,9 +419,6 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 		if (add.code !== 0) return gitError(`git worktree add failed for lane '${laneKey}'`, add);
 
 		const at = nowIso(deps);
-		const ownerPid = deps.pid ?? process.pid;
-		const ownerStartTime = ownerStartTimeFor(ownerPid);
-		const host = readHostIdentity();
 		const lane: LaneRegistration = {
 			laneKey,
 			branch,
@@ -439,10 +428,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			updatedAt: at,
 			...(args.goalId !== undefined ? { goalId: args.goalId } : {}),
 			...(args.requirementId !== undefined ? { requirementId: args.requirementId } : {}),
-			ownerPid,
-			ownerHostname: host.hostname,
-			...(host.machineId !== undefined ? { ownerMachineId: host.machineId } : {}),
-			...(ownerStartTime !== undefined ? { ownerStartTime } : {}),
+			owner: processOwnerFor(deps.pid),
 			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
 		};
 		await writeLane(ctx.paths, lane, ctx.write);
@@ -452,8 +438,8 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 }
 
 /**
- * Does `lane` have a DIFFERENT, still-alive session owning it? Same {@link isRecordedOwnerAlive} rule
- * used elsewhere: a foreign-host owner, or one whose probe is inconclusive, is alive. A lane with no
+ * Does `lane` have a DIFFERENT, still-alive session owning it? Same `judgeOwner` rule used elsewhere:
+ * only `dead` releases the claim, so a foreign-host owner, or one whose probe is inconclusive, conflicts. A lane with no
  * recorded owner, owned by THIS session, or whose owner is proven dead never conflicts --
  * `reconcile` already clears dead owners, but a race can still observe one here, and a dead owner
  * must never block land/release (D6, per R1: land/release ONLY -- sync/continue/abort_sync stay
@@ -462,7 +448,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 function ownerConflicts(deps: WorktreeSyncEngineDeps, lane: LaneRegistration): boolean {
 	if (lane.ownerSessionId == null || lane.ownerSessionId === deps.sessionId) return false;
 	const owner = laneOwner(lane);
-	return owner !== undefined && isRecordedOwnerAlive(owner, deps.isPidAlive);
+	return owner !== undefined && judgeOwner(owner, deps) !== "dead";
 }
 
 export interface BindLaneWorkerArgs {
@@ -527,7 +513,7 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 		if (ownerConflicts(deps, lane)) {
 			return {
 				code: "lane_owner_conflict",
-				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may release it`,
+				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.owner?.pid}); only its owner may release it`,
 			};
 		}
 
@@ -673,8 +659,8 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	if (landingTransaction) {
 		const recoveryLock = await acquireIntegrationLock(
 			ctx.paths,
-			{ pid: deps.pid ?? process.pid, sessionId: deps.sessionId, laneKey: "reconcile" },
-			{ now: deps.now, isPidAlive: deps.isPidAlive },
+			{ ...processOwnerFor(deps.pid), sessionId: deps.sessionId, laneKey: "reconcile" },
+			{ now: deps.now, host: deps.host, observe: deps.observe },
 		);
 		if (!recoveryLock.acquired) {
 			return { code: "git_error", message: "landing transaction recovery is blocked by an active integration lock" };
@@ -734,17 +720,10 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 			await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey: lane.laneKey }, at);
 		}
 
-		// Only a proven-dead same-host owner is cleared; a record whose ownerPid names no valid pid owns nothing.
+		// Only an owner `judgeOwner` finds `dead` is cleared; a record whose owner names no valid pid owns nothing.
 		const owner = laneOwner(next);
-		if (next.ownerPid !== undefined && (owner === undefined || !isRecordedOwnerAlive(owner, deps.isPidAlive))) {
-			const {
-				ownerPid: _pid,
-				ownerHostname: _hostname,
-				ownerMachineId: _machineId,
-				ownerStartTime: _startTime,
-				ownerSessionId: _session,
-				...rest
-			} = next;
+		if (next.owner !== undefined && (owner === undefined || judgeOwner(owner, deps) === "dead")) {
+			const { owner: _owner, ownerSessionId: _session, ...rest } = next;
 			next = { ...rest, updatedAt: at };
 			ownerClearedLaneKeys.push(lane.laneKey);
 		}
@@ -773,7 +752,7 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	// Provably-stale integration lock: proven-dead same-host owner (never a foreign, live, or unprovable one).
 	let staleLockReleased = false;
 	const holder = await readLockHolder(ctx.paths);
-	if (holder && !isRecordedOwnerAlive(holder, deps.isPidAlive)) {
+	if (holder && judgeOwner(holder, deps) === "dead") {
 		staleLockReleased = await releaseIntegrationLock(ctx.paths, holder.token, { now: deps.now });
 	}
 
@@ -1242,7 +1221,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 		if (ownerConflicts(deps, lane)) {
 			return {
 				code: "lane_owner_conflict",
-				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may land it`,
+				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.owner?.pid}); only its owner may land it`,
 			};
 		}
 		if (args.gate === "on" && !args.gateCommand?.trim()) {
@@ -1256,11 +1235,11 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 		const acquisition = await acquireIntegrationLock(
 			ctx.paths,
 			{
-				pid: deps.pid ?? process.pid,
+				...processOwnerFor(deps.pid),
 				...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
 				laneKey: lane.laneKey,
 			},
-			{ now: deps.now, isPidAlive: deps.isPidAlive },
+			{ now: deps.now, host: deps.host, observe: deps.observe },
 		);
 		if (!acquisition.acquired) {
 			return {
@@ -1529,7 +1508,7 @@ export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncSt
 		...(hub ? { hub } : {}),
 		lock: {
 			held: holder !== undefined,
-			...(holder ? { holder, holderAlive: isRecordedOwnerAlive(holder, deps.isPidAlive) } : {}),
+			...(holder ? { holder, holderAlive: judgeOwner(holder, deps) !== "dead" } : {}),
 		},
 		lanes,
 		...(advice ? { advice } : {}),

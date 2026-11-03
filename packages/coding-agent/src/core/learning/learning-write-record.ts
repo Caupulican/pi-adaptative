@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { isOwnerMachineIdField, isOwnerStartTimeField } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { MAX_PERSISTED_CUSTOM_ENTRY_BYTES } from "../session-entry-persistence.ts";
 import type { SessionAppendAnchor } from "../session-snapshot.ts";
@@ -13,7 +14,8 @@ export interface LearningWriteRecord {
 	phase: "intent" | "settled" | "publishing" | "cancelled";
 	planned: LearningAuditRecord;
 	receipt?: LearningAuditRecord;
-	publisher?: { host: string; pid: number; ownerId: string; active: boolean };
+	/** `host` is the hostname (the persisted name); `startTime`/`machineId` complete the owner shape on newer records. */
+	publisher?: { host: string; pid: number; startTime?: string; machineId?: string; ownerId: string; active: boolean };
 }
 
 const MAX_AUDIT_BYTES = MAX_PERSISTED_CUSTOM_ENTRY_BYTES - 4096;
@@ -53,6 +55,8 @@ export function parseLearningWriteRecord(value: unknown, id: string): LearningWr
 			(!isPlainRecord(value.publisher) ||
 				typeof value.publisher.host !== "string" ||
 				!isPositiveSafePid(value.publisher.pid) ||
+				!isOwnerStartTimeField(value.publisher.startTime) ||
+				!isOwnerMachineIdField(value.publisher.machineId) ||
 				typeof value.publisher.active !== "boolean" ||
 				typeof value.publisher.ownerId !== "string" ||
 				!/^[a-f0-9-]{36}$/.test(value.publisher.ownerId)))

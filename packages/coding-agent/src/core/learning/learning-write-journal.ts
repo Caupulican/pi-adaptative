@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { judgeOwner, ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { stateFile } from "../agent-paths.ts";
 import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
@@ -73,13 +72,24 @@ export class LearningWriteJournal {
 	private readonly contexts = new WeakMap<LearningApplicationGuard, CapturedContext>();
 	private readonly pending = new Map<string, PendingWrite>();
 	private readonly receipts: LearningReceiptStore;
-	private readonly publisher = { host: hostname(), pid: process.pid, ownerId: randomUUID() };
+	/**
+	 * This process under the record's publisher field names (`host` is the hostname), plus this journal's identity.
+	 */
+	private readonly publisher: { host: string; pid: number; startTime?: string; machineId?: string; ownerId: string };
 	private recovering = false;
 	private recoveryOffset = 0;
 	private directory: string | undefined;
 
 	constructor(deps: JournalDeps) {
 		this.deps = deps;
+		const { pid, hostname, startTime, machineId } = ownProcessOwner();
+		this.publisher = {
+			host: hostname,
+			pid,
+			...(startTime !== undefined ? { startTime } : {}),
+			...(machineId !== undefined ? { machineId } : {}),
+			ownerId: randomUUID(),
+		};
 		this.receipts = new LearningReceiptStore(deps.getAgentDir(), (message) => this.warn("terminal-history", message));
 	}
 
@@ -373,16 +383,19 @@ export class LearningWriteJournal {
 				let acknowledged = false;
 				if (current.phase === "publishing") {
 					acknowledged = this.findPublishedReceipt(context.manager, current);
-					if (
-						!acknowledged &&
-						current.publisher?.active &&
-						(current.publisher.host !== hostname() || current.publisher.pid !== process.pid) &&
-						current.publisher?.ownerId !== this.publisher.ownerId &&
-						(current.publisher?.host !== hostname() ||
-							!current.publisher ||
-							probeProcessLiveness(current.publisher.pid) !== "dead")
-					)
-						return false;
+					const publisher = current.publisher;
+					if (!acknowledged && publisher?.active && publisher.ownerId !== this.publisher.ownerId) {
+						// Publication runs under this lock, so an active marker left by this very process is a failed
+						// attempt: on one host only this process holds its own pid. Another publisher is taken over only
+						// when proven dead; one on another host, or whose state is unprovable, keeps its attempt.
+						const standing = judgeOwner({
+							pid: publisher.pid,
+							hostname: publisher.host,
+							startTime: publisher.startTime,
+							machineId: publisher.machineId,
+						});
+						if (!(publisher.pid === process.pid && standing === "alive") && standing !== "dead") return false;
+					}
 				}
 				if (!acknowledged) {
 					const entries = cachedReceipts(context.manager, record.id);

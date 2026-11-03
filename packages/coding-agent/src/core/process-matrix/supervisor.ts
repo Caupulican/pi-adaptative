@@ -6,7 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
-import { type HostIdentity, isRecordedOnHost } from "../../kernel/reliability/host-identity.ts";
+import type { OwnerStanding, ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
@@ -22,24 +22,9 @@ import { buildEntryId } from "./store.ts";
 
 export interface BuildMasterEntryFacts {
 	agent: AgentIdentityContract;
-	pid: number;
-	/** The registering host: both its hostname and (when readable) its machine id are recorded. */
-	host: HostIdentity;
-	/** {@link pid}'s own Linux start time, when readable. */
-	processStartTime?: string;
+	/** The registering process (`ownProcessOwner`): pid, start time, hostname and machine id as readable. */
+	owner: ProcessOwner;
 	now: string;
-}
-
-/** Host and process identity of a newly registered entry. Absent values are omitted, never written as undefined. */
-function processIdentityFields(
-	host: HostIdentity,
-	processStartTime: string | undefined,
-): Pick<ProcessMatrixEntry, "hostname" | "machineId" | "processStartTime"> {
-	return {
-		hostname: host.hostname,
-		...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
-		...(processStartTime !== undefined ? { processStartTime } : {}),
-	};
 }
 
 export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEntry {
@@ -47,8 +32,7 @@ export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEnt
 		entryId: buildEntryId("master", facts.agent.resumeContext.sessionId),
 		role: "master",
 		agent: structuredClone(facts.agent),
-		pid: facts.pid,
-		...processIdentityFields(facts.host, facts.processStartTime),
+		...facts.owner,
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
 		status: "running",
@@ -57,11 +41,8 @@ export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEnt
 
 export interface BuildWorkerEntryFacts {
 	agent: AgentIdentityContract;
-	pid: number;
-	/** The registering host: both its hostname and (when readable) its machine id are recorded. */
-	host: HostIdentity;
-	/** {@link pid}'s own Linux start time, when readable. */
-	processStartTime?: string;
+	/** The registering process (`ownProcessOwner`): pid, start time, hostname and machine id as readable. */
+	owner: ProcessOwner;
 	now: string;
 	parentPid: number;
 	parentSessionId?: string;
@@ -76,8 +57,7 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 		entryId: buildEntryId("worker", facts.agent.resumeContext.sessionId),
 		role: "worker",
 		agent: structuredClone(facts.agent),
-		pid: facts.pid,
-		...processIdentityFields(facts.host, facts.processStartTime),
+		...facts.owner,
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
 		status: "running",
@@ -96,24 +76,22 @@ export function applyHeartbeat(entry: ProcessMatrixEntry, now: string): ProcessM
 }
 
 /**
- * Local observation of a recorded process: `startTime` is the start time recorded with `pid`, or undefined when
- * none was. A pid that now names a process with another start time must read `dead`.
+ * The standing of a recorded owner (`judgeOwner` with the runtime's host and pid observation): only `dead` proves a
+ * same-host owner gone; `foreign` (another host) and `unknown` prove nothing about it.
  */
-export type RecordedProcessObserver = (pid: number, startTime: string | undefined) => ProcessObservation;
+export type OwnerJudge = (owner: ProcessOwner) => OwnerStanding;
 
 export interface DetectOrphanedWorkersDeps {
-	/** Local pid observation. Only consulted for entries recorded on {@link host}. */
-	observeProcess: RecordedProcessObserver;
-	/** This host: an entry recorded on another host ({@link isRecordedOnHost}) is never judged by a local pid probe. */
-	host: HostIdentity;
+	judge: OwnerJudge;
 	/** This session's own sessionId -- never treat yourself as an orphan you found. */
 	ownSessionId?: string;
 }
 
 /**
- * Worker entries on this host whose `parentPid` is dead, excluding this session's own entry and
- * anything already `closed` (a closed worker isn't "orphaned", it's already done). A worker
- * recorded on another host is skipped: its parent pid names a process on that host.
+ * Worker entries whose `parentPid` is judged `dead`, excluding this session's own entry and anything
+ * already `closed` (a closed worker isn't "orphaned", it's already done). The parent is judged as an
+ * owner on the worker's own host (it launched the worker there, with no recorded start time), so a
+ * worker recorded on another host is `foreign` and never an orphan here.
  */
 export function detectOrphanedWorkers(
 	entries: ProcessMatrixEntry[],
@@ -122,10 +100,9 @@ export function detectOrphanedWorkers(
 	return entries.filter((entry) => {
 		if (entry.role !== "worker") return false;
 		if (entry.status === "closed") return false;
-		if (!isRecordedOnHost(entry, deps.host)) return false;
 		if (deps.ownSessionId !== undefined && entry.agent.resumeContext.sessionId === deps.ownSessionId) return false;
 		if (entry.parentPid === undefined) return false;
-		return deps.observeProcess(entry.parentPid, undefined) === "dead";
+		return deps.judge({ pid: entry.parentPid, hostname: entry.hostname, machineId: entry.machineId }) === "dead";
 	});
 }
 
@@ -235,10 +212,8 @@ export function pollWorkerDirective(
 }
 
 export interface ReconcileMatrixDeps {
-	/** Local observation of an entry's pid and recorded start time. Only consulted for entries recorded on {@link host}. */
-	observeProcess: RecordedProcessObserver;
-	/** This host: an entry recorded on another host ({@link isRecordedOnHost}) is never judged by a local pid probe. */
-	host: HostIdentity;
+	/** Judges each `running`/`winding_down` entry as its own process's owner record. */
+	judge: OwnerJudge;
 	/** Epoch ms "now", compared against an entry's `heartbeatAt` (or terminal `observedAt`). */
 	now: number;
 	resumableTtlMs: number;
@@ -255,12 +230,12 @@ function isExpired(at: string, now: number, ttlMs: number): boolean {
  * before persisting its own resumable transition is repaired from its already-durable logical-agent
  * identity. `resumable`/`adopted` entries are kept until they age past `resumableTtlMs`.
  *
- * Only a same-host `dead` observation proves a `running`/`winding_down` process gone: ESRCH, or a pid that now
- * names a process whose start time differs from the entry's `processStartTime` (a reissued pid). An entry from
- * another host is never observed here, and a same-host `unknown` observation proves nothing either
- * way: both are kept while their own heartbeat (every live runtime refreshes it) is within
- * `resumableTtlMs`, then pruned. Neither is ever recovered to `resumable`: that would let this host
- * relaunch a worker that may still be running.
+ * Only a `dead` standing proves a `running`/`winding_down` process gone: same host, and ESRCH or a pid that
+ * now names a process whose start time differs from the entry's `startTime` (a reissued pid). A `foreign`
+ * entry (another host) is never probed here, and an `unknown` one proves nothing either way: both are
+ * kept while their own heartbeat (every live runtime refreshes it) is within `resumableTtlMs`, then
+ * pruned. Neither is ever recovered to `resumable`: that would let this host relaunch a worker that
+ * may still be running.
  */
 export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMatrixDeps): ReconcileMatrixResult {
 	const kept: ProcessMatrixEntry[] = [];
@@ -275,15 +250,13 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 			continue;
 		}
 		if (entry.status === "running" || entry.status === "winding_down") {
-			const observation = isRecordedOnHost(entry, deps.host)
-				? deps.observeProcess(entry.pid, entry.processStartTime)
-				: "unknown";
-			if (observation === "unknown") {
+			const standing = deps.judge(entry);
+			if (standing === "foreign" || standing === "unknown") {
 				if (isExpired(entry.heartbeatAt, deps.now, deps.resumableTtlMs)) prunedEntryIds.push(entry.entryId);
 				else kept.push(entry);
 				continue;
 			}
-			if (observation === "dead") {
+			if (standing === "dead") {
 				if (entry.role === "worker" && entry.agent.resumeContext.provider === "pi") {
 					const payload: ResumablePayload = {
 						agent: structuredClone(entry.agent),

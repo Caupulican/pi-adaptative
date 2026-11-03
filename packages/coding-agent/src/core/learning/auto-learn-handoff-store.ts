@@ -1,9 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import {
+	isOwnerMachineIdField,
+	isOwnerProvenDead,
+	isOwnerStartTimeField,
+	ownProcessOwner,
+} from "../../kernel/reliability/owner-identity.ts";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
@@ -27,12 +33,24 @@ export interface AutoLearnClaim {
 	readonly sourceDigest: string;
 }
 
+/**
+ * The claiming process as a {@link ProcessOwner} under the journal's original field names (`host` is the hostname),
+ * plus the claiming session. Journals written before `startTime`/`machineId` were recorded carry only host and pid.
+ */
+interface ClaimOwner {
+	host: string;
+	pid: number;
+	startTime?: string;
+	machineId?: string;
+	sessionId: string;
+}
+
 interface ClaimJournal {
 	version: 1;
 	id: string;
 	runId: string;
 	sourceDigest: string;
-	owner: { host: string; pid: number; sessionId: string };
+	owner: ClaimOwner;
 	phase: "applying" | "completed";
 	completion?: AutoLearnHandoffRecord;
 }
@@ -179,9 +197,11 @@ function readJournal(file: string): ClaimJournal {
 		typeof value.sourceDigest !== "string" ||
 		!/^[a-f0-9]{64}$/.test(value.sourceDigest) ||
 		!isPlainRecord(value.owner) ||
-		!hasOnlyKeys(value.owner, ["host", "pid", "sessionId"]) ||
+		!hasOnlyKeys(value.owner, ["host", "pid", "startTime", "machineId", "sessionId"]) ||
 		typeof value.owner.host !== "string" ||
 		!isPositiveSafePid(value.owner.pid) ||
+		!isOwnerStartTimeField(value.owner.startTime) ||
+		!isOwnerMachineIdField(value.owner.machineId) ||
 		typeof value.owner.sessionId !== "string" ||
 		(value.phase !== "applying" && value.phase !== "completed") ||
 		(value.phase === "applying" ? value.completion !== undefined : !isHandoffRecord(value.completion)) ||
@@ -376,12 +396,13 @@ export class AutoLearnHandoffStore {
 				recordText(readRecord(`${file}${NOTICE_SUFFIX}`)) !== recordText(record)
 			)
 				throw new Error("Auto Learn pending notice changed");
+			const { hostname: _recordedAsHost, ...identity } = ownProcessOwner();
 			const journal: ClaimJournal = {
 				version: 1,
 				id: randomUUID(),
 				runId,
 				sourceDigest: digest(record),
-				owner: { host: hostname(), pid: process.pid, sessionId },
+				owner: { host: readHostIdentity().hostname, ...identity, sessionId },
 				phase: "applying",
 			};
 			// Hide the source from older readers before any effect is authorized. A crash here leaves
@@ -526,7 +547,9 @@ export class AutoLearnHandoffStore {
 				const journal = readJournal(`${file}${JOURNAL_SUFFIX}`);
 				if (journal.runId !== runId) return { status: "conflict", reason: "claim_run_mismatch" };
 				if (journal.phase === "completed") return this.finish(file, { journal, completion: journal.completion });
-				if (journal.owner.host !== hostname() || probeProcessLiveness(journal.owner.pid) !== "dead") {
+				const { host, sessionId: _claimSession, ...identity } = journal.owner;
+				// Only a same-host owner proven gone authorizes recovery; another host or an unprovable owner holds.
+				if (!isOwnerProvenDead({ ...identity, hostname: host })) {
 					return { status: "held", reason: "claim_owner_not_proven_dead" };
 				}
 				const source = readRecord(`${file}${OWNED_SUFFIX}`);

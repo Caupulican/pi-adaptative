@@ -397,10 +397,17 @@ A worker session's `worktree_sync` calls are narrowed at the tool layer (indepen
 ### Land/release ownership
 
 `land` and `release_lane` refuse `lane_owner_conflict` when the target lane is owned (its
-registration's `ownerSessionId`) by a **different, still-alive** session -- identity-aware owner
-liveness (a foreign-host or inconclusive owner counts as alive; a reused pid is detected by start time),
-the same pattern the integration lock and `reconcile` already use. Lane and lock owners record the
-owner's hostname and, when the OS exposes one, its stable machine id (Linux `machine-id`, macOS
+registration's `ownerSessionId`) by a **different, still-alive** session. Lane owners (the
+registration's nested `owner`) and integration-lock holders (the lock manifest itself) are the
+shared owner record (`kernel/reliability/owner-identity.ts`: `pid`, Linux `startTime`, `hostname`,
+`machineId`), written by `ownProcessOwner` and judged by `judgeOwner`. Only a `dead` standing (same
+host, and the pid is gone or reissued to a process with another start time) clears a lane owner,
+releases or takes over the lock, or lifts the ownership conflict; a `foreign` or `unknown` owner
+counts as alive. The engine's `host` and `observe` ports inject the judgement's host and pid probe.
+Lane records written before the owner was nested carried flat `ownerPid`, `ownerHostname`,
+`ownerMachineId` and `ownerStartTime`; the store reads them into `owner` (one with no host field was
+written on this host) and the next write of the lane drops them. The host is the owner's hostname
+and, when the OS exposes one, its stable machine id (Linux `machine-id`, macOS
 `IOPlatformUUID`, Windows `MachineGuid`, stored as a digest). A record carrying a machine id is local
 only when that id matches, so a renamed host still recognizes and reclaims its own dead owners and a
 different machine with the same hostname never looks local; a record without one is located by its

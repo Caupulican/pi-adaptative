@@ -2,11 +2,12 @@
  * Process signal handling, shutdown, and crash/suspend lifecycle extracted from
  * interactive-mode.
  *
- * These register SIGTERM/SIGHUP/uncaughtException/dead-terminal handlers and the
- * process-end observer (every end not performed here leaves a crash record), run the
+ * These register SIGTERM/SIGHUP/uncaughtException/dead-terminal handlers, run the
  * graceful and emergency shutdown paths (preserving the #4144/#5080 ordering
  * where signal-triggered shutdown emits extension cleanup before terminal
- * writes), and implement Ctrl+Z suspend/resume. They operate through a
+ * writes), and implement Ctrl+Z suspend/resume. Every end they perform is
+ * declared to the process-end recorder with its reason (see process-end-recorder.ts),
+ * which owns the observation of every other end. They operate through a
  * `SignalLifecycle` class that owns the lifecycle state (`isShuttingDown`, the
  * registered listeners' cleanup handlers) and reaches the host only through a
  * small `SignalLifecyclePort` of closures.
@@ -15,8 +16,9 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { writeCrashRecord, writeRejectionRecord } from "../../core/crash-record.ts";
+import { writeRejectionRecord } from "../../core/crash-record.ts";
 import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
+import { declareExit, exitProcess, type ProcessEndReason } from "../../core/process-end-recorder.ts";
 import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -65,11 +67,17 @@ type ProcessListener = Parameters<NodeJS.EventEmitter["on"]>[1];
 
 /** The process effects of a shutdown. The defaults are the process itself; a harness supplies its own. */
 export interface SignalLifecycleIo {
-	exit(code: number): void;
+	/** Ends the process as the declared end `reason`. */
+	exit(code: number, reason: ProcessEndReason): void;
 	stderr(text: string): void;
 	stdout(text: string): void;
-	/** Persists why the process is ending and returns the record's path (or the failure text), before any cleanup touches the terminal. */
-	writeCrashRecord(kind: string, detail: string): string;
+	/**
+	 * Declares how the process is ending and records it before any cleanup touches the terminal. Returns the record's path (or the
+	 * failure text), or undefined when the reason writes nothing or was already declared.
+	 */
+	declareExit(reason: ProcessEndReason, detail: string): string | undefined;
+	/** Records an unhandled rejection the session survived. */
+	recordRejection(detail: string): void;
 	/** Adds a process listener at the front of its queue and returns the function that removes it. */
 	prependListener(
 		event: NodeJS.Signals | "uncaughtException" | "unhandledRejection",
@@ -77,19 +85,16 @@ export interface SignalLifecycleIo {
 	): () => void;
 	/** Adds an error listener to a standard stream and returns the function that removes it. */
 	onStreamError(stream: "stdout" | "stderr", handler: (error: Error) => void): () => void;
-	/**
-	 * Observes how the process ends: wraps `process.exit` so a call keeps its caller's stack, and listens for the process `exit` event,
-	 * which hands `onEnd` the exit code and that stack (undefined when the process ended without a call through the wrapper: the event
-	 * loop drained, or a caller held an `exit` reference taken before the wrap). Returns the function that undoes both.
-	 */
-	observeProcessEnd(onEnd: (code: number, exitCallerStack: string | undefined) => void): () => void;
 }
 
 const PROCESS_IO: SignalLifecycleIo = {
-	exit: (code) => process.exit(code),
+	exit: (code, reason) => exitProcess(code, reason),
 	stderr: (text) => process.stderr.write(text),
 	stdout: (text) => process.stdout.write(text),
-	writeCrashRecord,
+	declareExit,
+	recordRejection: (detail) => {
+		writeRejectionRecord(detail);
+	},
 	prependListener: (event, handler) => {
 		const events: Pick<NodeJS.EventEmitter, "off" | "prependListener"> = process;
 		events.prependListener(event, handler);
@@ -99,24 +104,6 @@ const PROCESS_IO: SignalLifecycleIo = {
 		const target = stream === "stdout" ? process.stdout : process.stderr;
 		target.on("error", handler);
 		return () => target.off("error", handler);
-	},
-	observeProcessEnd: (onEnd) => {
-		const exitProcess = process.exit;
-		let exitCallerStack: string | undefined;
-		const tracedExit: typeof process.exit = (code) => {
-			// The first call is the one that ended the process; a later call from an exit listener only changes the status.
-			const call = `process.exit(${String(code)}) called`;
-			exitCallerStack ??= new Error(call).stack ?? call;
-			return exitProcess.call(process, code);
-		};
-		const onExit = (code: number) => onEnd(code, exitCallerStack);
-		process.exit = tracedExit;
-		process.prependListener("exit", onExit);
-		return () => {
-			process.off("exit", onExit);
-			// A wrapper installed over this one keeps calling it; only this wrapper is undone.
-			if (process.exit === tracedExit) process.exit = exitProcess;
-		};
 	},
 };
 
@@ -136,11 +123,6 @@ export class SignalLifecycle {
 	private readonly io: SignalLifecycleIo;
 	/** Set when the port's stop has been started, so no path (cleanup, forced exit, crash during shutdown) runs it a second time. */
 	private stopStarted = false;
-	/**
-	 * Set when the lifecycle itself ends the process. Each of its own ends is either the orderly quit, which writes nothing, or one it
-	 * recorded before exiting; every other end of the process is recorded by the process-end observer.
-	 */
-	private ownExit = false;
 
 	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
 		this.port = port;
@@ -149,33 +131,19 @@ export class SignalLifecycle {
 			exit: io.exit ?? PROCESS_IO.exit,
 			stderr: io.stderr ?? PROCESS_IO.stderr,
 			stdout: io.stdout ?? PROCESS_IO.stdout,
-			writeCrashRecord: io.writeCrashRecord ?? PROCESS_IO.writeCrashRecord,
+			declareExit: io.declareExit ?? PROCESS_IO.declareExit,
+			recordRejection: io.recordRejection ?? PROCESS_IO.recordRejection,
 			prependListener: io.prependListener ?? PROCESS_IO.prependListener,
 			onStreamError: io.onStreamError ?? PROCESS_IO.onStreamError,
-			observeProcessEnd: io.observeProcessEnd ?? PROCESS_IO.observeProcessEnd,
 		};
 	}
 
-	/** Ends the process as the lifecycle's own end: the process-end observer leaves it to the caller, which recorded it if abnormal. */
-	private exitProcess(code: number): void {
-		this.ownExit = true;
-		this.io.exit(code);
-	}
-
 	/**
-	 * Records an end of the process the lifecycle did not perform itself: a `process.exit` from anywhere else (with its caller's stack),
-	 * or the process ending with no exit call at all. Synchronous, as the `exit` event allows nothing else.
+	 * Ends the process as the declared end `reason`. An end that leaves a record declared it before its cleanup (the record must exist if
+	 * the cleanup hangs or the terminal dies); the same reason at the exit is not recorded again.
 	 */
-	private recordForeignEnd(code: number, exitCallerStack: string | undefined): void {
-		if (this.ownExit) return;
-		const how =
-			exitCallerStack === undefined
-				? "process ended without a traced process.exit call (event loop drained, or an exit taken before the trace)"
-				: "process.exit called outside the interactive lifecycle";
-		const phase = this.shuttingDown
-			? "shutdown in progress, the lifecycle's exit not reached"
-			: "no shutdown started, runtime not disposed";
-		this.io.writeCrashRecord(`${how}; exit ${code}; ${phase}`, exitCallerStack ?? "");
+	private exitProcess(code: number, reason: ProcessEndReason): void {
+		this.io.exit(code, reason);
 	}
 
 	get isShuttingDown(): boolean {
@@ -193,12 +161,12 @@ export class SignalLifecycle {
 		try {
 			await this.runShutdown(options);
 		} catch (error: unknown) {
-			this.io.writeCrashRecord(
-				"shutdown failed; exit 1",
+			this.io.declareExit(
+				"shutdown-failed",
 				`${describeCause(error)}\n\n${errorDetail(asError(error), MAX_REJECTION_DETAIL)}`,
 			);
 			this.io.stderr(`${neutralizeControls(`Shutdown failed: ${describeCause(error)}`)}\n`);
-			this.exitProcess(1);
+			this.exitProcess(1, "shutdown-failed");
 		}
 	}
 
@@ -235,8 +203,8 @@ export class SignalLifecycle {
 			} finally {
 				for (const remove of forceRemovals) remove();
 			}
-			// The signal that started this path was recorded when it arrived (registerSignalHandlers).
-			this.exitProcess(0);
+			// The signal that started this path was declared, and recorded, when it arrived (registerSignalHandlers).
+			this.exitProcess(0, "signal-graceful");
 			// An injected exit returns: the interactive quit below must not run after a signal shutdown.
 			return;
 		}
@@ -267,7 +235,7 @@ export class SignalLifecycle {
 		}
 
 		// The orderly quit: every cleanup step succeeded, so it writes no record.
-		this.exitProcess(0);
+		this.exitProcess(0, "quit");
 	}
 
 	private stopOnce(): void {
@@ -305,7 +273,7 @@ export class SignalLifecycle {
 		return signals.map((signal) =>
 			this.io.prependListener(signal, () => {
 				const status = signal === "SIGHUP" ? 129 : signal === "SIGINT" ? 130 : 143;
-				this.io.writeCrashRecord(`${signal} during shutdown cleanup; forced exit ${status}`, "");
+				this.io.declareExit("signal-forced", `${signal} during shutdown cleanup; forced exit ${status}`);
 				killTrackedDetachedChildren();
 				try {
 					this.stopOnce();
@@ -314,20 +282,53 @@ export class SignalLifecycle {
 						`${neutralizeControls(`Stop failed during forced shutdown: ${describeCause(stopError)}`)}\n`,
 					);
 				}
-				this.exitProcess(status);
+				this.exitProcess(status, "signal-forced");
 			}),
 		);
 	}
 
-	emergencyTerminalExit(): never {
+	emergencyTerminalExit(): void {
 		this.shuttingDown = true;
 		// Nothing can be shown on a dead terminal, so the record is the only trace of this exit.
-		this.io.writeCrashRecord("dead terminal (EIO/EPIPE/ENOTCONN on stdout or stderr); exit 129", "");
+		this.io.declareExit("dead-terminal", "EIO/EPIPE/ENOTCONN on stdout or stderr; exit 129");
 		this.unregisterSignalHandlers();
 		killTrackedDetachedChildren();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
-		process.exit(129);
+		this.exitProcess(129, "dead-terminal");
+	}
+
+	/**
+	 * Ends the process for a runtime failure the interactive session cannot continue from (a session replacement that left no usable
+	 * session). The record is written first; the host is released and the terminal restored, each step attempted whatever the others
+	 * did, and the report is printed only after the restore (the alternate screen would erase it), then the process exits 1 whatever
+	 * the teardown threw.
+	 */
+	fatalRuntimeError(message: string, detail: string, releaseHost: () => void): void {
+		// Set first: a second fatal failure or a signal now finds the process ending, and stop() leaves the guards armed until the exit.
+		this.shuttingDown = true;
+		const recordPath = this.io.declareExit("fatal-runtime-error", detail);
+		try {
+			try {
+				// A termination signal during this teardown must not start a graceful shutdown of a runtime that is already ending.
+				this.unregisterTerminationSignals();
+			} catch {}
+			try {
+				killTrackedDetachedChildren();
+			} catch {}
+			for (const step of [releaseHost, () => this.stopOnce()]) {
+				try {
+					step();
+				} catch (stopError: unknown) {
+					this.io.stderr(
+						`${neutralizeControls(`Stop failed during fatal runtime error: ${describeCause(stopError)}`)}\n`,
+					);
+				}
+			}
+		} finally {
+			this.io.stderr(`${neutralizeControls(message)}\n(record: ${recordPath})\n`);
+			this.exitProcess(1, "fatal-runtime-error");
+		}
 	}
 
 	/**
@@ -348,7 +349,7 @@ export class SignalLifecycle {
 	reportUnhandledRejection(reason: unknown): void {
 		const error = asError(reason);
 		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-		writeRejectionRecord(this.shuttingDown ? `during shutdown\n\n${detail}` : detail, this.io.writeCrashRecord);
+		this.io.recordRejection(this.shuttingDown ? `during shutdown\n\n${detail}` : detail);
 		if (this.shuttingDown) {
 			// The UI is going away: the rejection is reported on stderr, escaped, and the shutdown keeps running.
 			this.io.stderr(`${neutralizeControls(`Unhandled promise rejection during shutdown. ${detail}`)}\n`);
@@ -385,9 +386,9 @@ export class SignalLifecycle {
 				killTrackedDetachedChildren();
 			} catch {}
 			const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-			this.io.writeCrashRecord("uncaughtException during shutdown; exit 1", detail);
+			this.io.declareExit("crash-during-shutdown", detail);
 			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
-			this.exitProcess(1);
+			this.exitProcess(1, "crash-during-shutdown");
 			// An injected exit returns: the crash must not fall through to the non-shutdown path below.
 			return;
 		}
@@ -395,7 +396,7 @@ export class SignalLifecycle {
 		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
 		// The record goes first and synchronously, so a reentrant crash or an exit cannot lose it. The screen report goes AFTER the
 		// terminal is restored: the interactive UI draws on the alternate screen, and leaving it erases what was printed there.
-		const recordPath = this.io.writeCrashRecord("uncaughtException; exit 1", detail);
+		const recordPath = this.io.declareExit("crash", detail);
 		try {
 			try {
 				// Fatal cleanup can also reject pending work. Keep the process guards armed until exit,
@@ -414,7 +415,7 @@ export class SignalLifecycle {
 			this.io.stderr(
 				`${neutralizeControls(`pi exiting due to uncaughtException: ${detail}\n(record: ${recordPath})`)}\n`,
 			);
-			this.exitProcess(1);
+			this.exitProcess(1, "crash");
 		}
 	}
 
@@ -433,8 +434,8 @@ export class SignalLifecycle {
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr
 				// error handler converts into emergencyTerminalExit (see #4144, #5080).
-				// Recorded on arrival: a graceful path that then hangs and is killed leaves this as its only trace.
-				this.io.writeCrashRecord(`${signal} received; graceful shutdown started`, "");
+				// Declared, and recorded, on arrival: a graceful path that then hangs and is killed leaves this as its only trace.
+				this.io.declareExit("signal-graceful", `${signal} received; graceful shutdown started`);
 				killTrackedDetachedChildren();
 				void this.shutdown({ fromSignal: true });
 			};
@@ -462,12 +463,6 @@ export class SignalLifecycle {
 		// uncaughtException, which is the point: an async failure must not end the session.
 		const unhandledRejectionHandler = (reason: unknown) => this.reportUnhandledRejection(reason);
 		this.cleanupHandlers.push(this.io.prependListener("unhandledRejection", unhandledRejectionHandler));
-
-		// Every end of the process the lifecycle does not perform itself is recorded with its exit code and the caller of
-		// process.exit. Armed with the guards above, so it stays through a shutdown until the process exits, and removed with them.
-		this.cleanupHandlers.push(
-			this.io.observeProcessEnd((code, exitCallerStack) => this.recordForeignEnd(code, exitCallerStack)),
-		);
 	}
 
 	unregisterSignalHandlers(): void {

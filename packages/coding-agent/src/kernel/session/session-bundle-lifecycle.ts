@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
 import { resolve } from "node:path";
-import { probeProcessLiveness } from "../reliability/process-tree.ts";
+import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
+import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
 	type AtomicFileLockOptions,
 	currentSynchronousFileLockScope,
@@ -24,15 +24,18 @@ export interface SessionBundleDeletionReservation {
 
 interface DeletionOperation {
 	token: string;
-	host: string;
-	pid: number;
+	/** The remover process, judged by {@link judgeOwner} before anyone else may recover the operation. */
+	owner: ProcessOwner;
 	processInstanceId: string;
 	/** Only this operation created the absent marker; a resumed operation never inherits it. */
 	fresh: boolean;
 }
 
+/** Schema 3 records the remover as a {@link ProcessOwner}; schema 2 (`host` + `pid`) is still read. */
+const MARKER_SCHEMA_VERSION = 3;
+
 interface DeletionMarker {
-	schemaVersion: 2;
+	schemaVersion: typeof MARKER_SCHEMA_VERSION;
 	parentSessionId: string;
 	policy: SessionBundleDeletionPolicy;
 	operation?: DeletionOperation;
@@ -52,9 +55,39 @@ export function hasCurrentSessionBundleAdmission(agentDir: string, parentSession
 
 interface BundleHolder {
 	token: string;
-	host: string;
-	pid: number;
+	/** The holding process, judged by {@link judgeOwner}; only a `dead` holder stops serving the session. */
+	owner: ProcessOwner;
 	processInstanceId: string;
+}
+
+/** Schema 2 records each holder as a {@link ProcessOwner}; schema 1 (`host` + `pid`) is still read. */
+const HOLDERS_SCHEMA_VERSION = 2;
+const OWNER_KEYS: readonly string[] = ["pid", "startTime", "hostname", "machineId"];
+
+/**
+ * A persisted owner identity, or undefined when it is malformed. The same checks gate both the current shape and
+ * the legacy `host` + `pid` pair it is upgraded from, so an older file is judged exactly like a fresh one.
+ */
+function parseProcessOwner(value: unknown): ProcessOwner | undefined {
+	if (!isPlainRecord(value) || Object.keys(value).some((key) => !OWNER_KEYS.includes(key))) return undefined;
+	const { pid, startTime, hostname, machineId } = value;
+	if (!isPositiveSafePid(pid)) return undefined;
+	if (startTime !== undefined && (typeof startTime !== "string" || !/^[0-9]{1,32}$/.test(startTime))) return undefined;
+	if (hostname !== undefined && (typeof hostname !== "string" || !hostname || hostname.length > 512)) return undefined;
+	if (machineId !== undefined && (typeof machineId !== "string" || !/^[0-9a-f]{1,128}$/.test(machineId)))
+		return undefined;
+	return {
+		pid,
+		...(startTime !== undefined ? { startTime } : {}),
+		...(hostname !== undefined ? { hostname } : {}),
+		...(machineId !== undefined ? { machineId } : {}),
+	};
+}
+
+/** The owner a record names: `owner` in the current shape, `host` + `pid` in the legacy one. */
+function parseRecordedOwner(record: Record<string, unknown>, legacy: boolean): ProcessOwner | undefined {
+	if (!legacy) return parseProcessOwner(record.owner);
+	return typeof record.host === "string" ? parseProcessOwner({ pid: record.pid, hostname: record.host }) : undefined;
 }
 
 interface BundleLeaseState {
@@ -81,33 +114,32 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 	if (
 		!isPlainRecord(value) ||
 		Object.keys(value).length !== 3 ||
-		value.schemaVersion !== 1 ||
+		(value.schemaVersion !== 1 && value.schemaVersion !== HOLDERS_SCHEMA_VERSION) ||
 		value.parentSessionId !== parentSessionId ||
 		!Array.isArray(value.holders) ||
 		value.holders.length > MAX_BUNDLE_HOLDERS
 	)
 		throw new Error("Session bundle lifetime leases require inspection.");
+	const legacy = value.schemaVersion === 1;
 	const tokens = new Set<string>();
+	const holders: BundleHolder[] = [];
 	for (const holder of value.holders) {
+		const owner = isPlainRecord(holder) ? parseRecordedOwner(holder, legacy) : undefined;
 		if (
 			!isPlainRecord(holder) ||
-			Object.keys(holder).length !== 4 ||
+			!owner ||
+			Object.keys(holder).length !== (legacy ? 4 : 3) ||
 			typeof holder.token !== "string" ||
 			!UUID_PATTERN.test(holder.token) ||
 			tokens.has(holder.token) ||
 			typeof holder.processInstanceId !== "string" ||
-			!UUID_PATTERN.test(holder.processInstanceId) ||
-			typeof holder.host !== "string" ||
-			!holder.host ||
-			holder.host.length > 512 ||
-			typeof holder.pid !== "number" ||
-			!Number.isSafeInteger(holder.pid) ||
-			holder.pid < 1
+			!UUID_PATTERN.test(holder.processInstanceId)
 		)
 			throw new Error("Session bundle lifetime lease identity is invalid.");
 		tokens.add(holder.token);
+		holders.push({ token: holder.token, owner, processInstanceId: holder.processInstanceId });
 	}
-	return value.holders as BundleHolder[];
+	return holders;
 }
 
 function writeHolders(file: string, parentSessionId: string, holders: BundleHolder[]): void {
@@ -115,16 +147,43 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 		unlinkSync(file);
 		return;
 	}
-	const text = `${JSON.stringify({ schemaVersion: 1, parentSessionId, holders })}\n`;
+	const text = `${JSON.stringify({ schemaVersion: HOLDERS_SCHEMA_VERSION, parentSessionId, holders })}\n`;
 	if (Buffer.byteLength(text) > MAX_HOLDER_BYTES) throw new Error("Session bundle lifetime leases are too large.");
 	writeFileAtomicSync(file, text);
 }
 
+/** Prunes only holders PROVEN gone; an `alive`, `foreign` or `unknown` holder keeps serving the session. */
 function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const holders = readHolders(file, parentSessionId);
-	const live = holders.filter((holder) => holder.host !== hostname() || probeProcessLiveness(holder.pid) !== "dead");
+	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
 	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
 	return live;
+}
+
+/** One process currently holding a lifetime lease on a persisted session, as {@link readSessionLeaseHolders} sees it. */
+export interface SessionLeaseHolder {
+	readonly owner: ProcessOwner;
+	readonly processInstanceId: string;
+	/** {@link judgeOwner}'s standing. Only `dead` proves the holder no longer serves the session. */
+	readonly standing: OwnerStanding;
+	/** The holder is this very process. */
+	readonly self: boolean;
+}
+
+/**
+ * Who is serving a persisted session right now, answerable from any process: every recorded lifetime lease holder,
+ * each judged by {@link judgeOwner}. Read-only: it neither locks the registry nor prunes dead holders (the file is
+ * replaced atomically, so a reader always sees one whole snapshot). A session that is not persisted, or that no
+ * process holds, has no holders. A registry that cannot be parsed throws; a caller must treat that as unknown.
+ */
+export function readSessionLeaseHolders(agentDir: string, parentSessionId: string): SessionLeaseHolder[] {
+	const file = `${orchestrationSessionDeletionFile(resolve(agentDir), parentSessionId)}.leases.json`;
+	return readHolders(file, parentSessionId).map((holder) => ({
+		owner: holder.owner,
+		processInstanceId: holder.processInstanceId,
+		standing: judgeOwner(holder.owner),
+		self: holder.processInstanceId === PROCESS_INSTANCE_ID,
+	}));
 }
 
 function releaseBundleLease(state: BundleLeaseState): void {
@@ -152,8 +211,7 @@ export function acquireSessionBundleLease(agentDir: string, parentSessionId: str
 	const file = `${tombstone}.leases.json`;
 	const holder: BundleHolder = {
 		token: randomUUID(),
-		host: hostname(),
-		pid: process.pid,
+		owner: ownProcessOwner(),
 		processInstanceId: PROCESS_INSTANCE_ID,
 	};
 	withSessionBundleAdmission(directory, parentSessionId, () => {
@@ -240,33 +298,40 @@ function readMarker(file: string, parentSessionId: string): DeletionMarker | und
 	const value: unknown = JSON.parse(text);
 	if (
 		!isPlainRecord(value) ||
-		value.schemaVersion !== 2 ||
+		(value.schemaVersion !== 2 && value.schemaVersion !== MARKER_SCHEMA_VERSION) ||
 		value.parentSessionId !== parentSessionId ||
 		(value.policy !== "retention" && value.policy !== "permanent") ||
 		Object.keys(value).some((key) => !["schemaVersion", "parentSessionId", "policy", "operation"].includes(key))
 	) {
 		throw new Error("Session bundle deletion marker requires inspection; its ownership or policy is unknown.");
 	}
-	const operation = value.operation;
+	const legacy = value.schemaVersion === 2;
+	const recorded = value.operation;
+	if (recorded === undefined) return { schemaVersion: MARKER_SCHEMA_VERSION, parentSessionId, policy: value.policy };
+	const owner = isPlainRecord(recorded) ? parseRecordedOwner(recorded, legacy) : undefined;
 	if (
-		operation !== undefined &&
-		(!isPlainRecord(operation) ||
-			Object.keys(operation).length !== 5 ||
-			typeof operation.token !== "string" ||
-			!UUID_PATTERN.test(operation.token) ||
-			typeof operation.processInstanceId !== "string" ||
-			!UUID_PATTERN.test(operation.processInstanceId) ||
-			typeof operation.host !== "string" ||
-			!operation.host ||
-			operation.host.length > 512 ||
-			typeof operation.pid !== "number" ||
-			!Number.isSafeInteger(operation.pid) ||
-			operation.pid < 1 ||
-			typeof operation.fresh !== "boolean")
+		!isPlainRecord(recorded) ||
+		!owner ||
+		Object.keys(recorded).length !== (legacy ? 5 : 4) ||
+		typeof recorded.token !== "string" ||
+		!UUID_PATTERN.test(recorded.token) ||
+		typeof recorded.processInstanceId !== "string" ||
+		!UUID_PATTERN.test(recorded.processInstanceId) ||
+		typeof recorded.fresh !== "boolean"
 	) {
 		throw new Error("Session bundle deletion operation is invalid.");
 	}
-	return value as unknown as DeletionMarker;
+	return {
+		schemaVersion: MARKER_SCHEMA_VERSION,
+		parentSessionId,
+		policy: value.policy,
+		operation: {
+			token: recorded.token,
+			owner,
+			processInstanceId: recorded.processInstanceId,
+			fresh: recorded.fresh,
+		},
+	};
 }
 
 function writeMarker(file: string, marker: DeletionMarker): void {
@@ -275,12 +340,12 @@ function writeMarker(file: string, marker: DeletionMarker): void {
 	writeFileAtomicSync(file, text);
 }
 
+/** This process may take over an operation it finished itself, or one whose remover is PROVEN gone. */
 function canRecoverOperation(operation: DeletionOperation): boolean {
-	if (operation.host !== hostname()) return false;
-	if (operation.pid === process.pid && operation.processInstanceId === PROCESS_INSTANCE_ID) {
+	if (operation.owner.pid === process.pid && operation.processInstanceId === PROCESS_INSTANCE_ID) {
 		return !activeOperations.has(operation.token);
 	}
-	return probeProcessLiveness(operation.pid) === "dead";
+	return judgeOwner(operation.owner) === "dead";
 }
 
 /** A retained cleanup already passed age admission; its own partial writes do not restart that age. */
@@ -424,10 +489,10 @@ export function reserveSessionBundleDeletion(
 		if (!canDelete(marker?.policy)) return undefined;
 		const token = randomUUID();
 		const next: DeletionMarker = {
-			schemaVersion: 2,
+			schemaVersion: MARKER_SCHEMA_VERSION,
 			parentSessionId,
 			policy,
-			operation: { token, host: hostname(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, fresh },
+			operation: { token, owner: ownProcessOwner(), processInstanceId: PROCESS_INSTANCE_ID, fresh },
 		};
 		activeOperations.add(token);
 		try {
@@ -501,7 +566,7 @@ export function settleSessionBundleDeletion(
 				unlinkSync(tombstone);
 			} else {
 				writeMarker(tombstone, {
-					schemaVersion: 2,
+					schemaVersion: MARKER_SCHEMA_VERSION,
 					parentSessionId: marker.parentSessionId,
 					policy: marker.policy,
 				});

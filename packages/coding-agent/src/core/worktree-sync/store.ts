@@ -12,19 +12,20 @@
  * Writes are tmp+rename atomic (`util/atomic-file.ts`); the audit log uses the shared bounded JSONL
  * sink, which serializes concurrent writers and atomically rotates to its newest low-water tail.
  * The integration lock is a mkdir-atomic directory with an owner manifest: mkdir either succeeds
- * (lock acquired) or fails EEXIST (held), with takeover ONLY for a provably-dead same-host owner
- * ({@link isRecordedOwnerAlive}: ESRCH or a reissued pid, never an unclassified probe failure).
+ * (lock acquired) or fails EEXIST (held), with takeover ONLY for an owner `judgeOwner` finds `dead`
+ * (same host, and ESRCH or a reissued pid; never a foreign-host owner or an unclassified probe failure).
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsPromises, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { isRecordedOnHost, readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import {
-	isPositiveSafePid,
-	probeProcessIdentityLiveness,
-	readOwnProcessStartTime,
-} from "../../kernel/reliability/process-tree.ts";
+	type JudgeOwnerOptions,
+	judgeOwner,
+	ownProcessOwner,
+	type ProcessOwner,
+} from "../../kernel/reliability/owner-identity.ts";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { type AtomicFileWriteOptions, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { appendBoundedJsonLine, type BoundedJsonlLimits } from "../util/bounded-jsonl.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -180,8 +181,34 @@ function laneFile(paths: SyncStorePaths, laneKey: string): string {
 	return join(paths.lanesDir, `${laneKey}.json`);
 }
 
+/** Legacy flat owner fields, read into {@link LaneRegistration.owner} and never written again. */
+const LEGACY_LANE_OWNER_FIELDS = ["ownerPid", "ownerHostname", "ownerMachineId", "ownerStartTime"] as const;
+
+/**
+ * A lane record as read from disk. A record from before the owner was nested carries flat `ownerPid`, `ownerHostname`,
+ * `ownerMachineId` and `ownerStartTime`: they become `owner` (missing host facts stay missing, so a record with neither
+ * host field is judged as written on this host, as before) and are dropped, so the next write carries the nested shape
+ * only. Every other field passes through unvalidated, as it always has.
+ */
+function parseLane(value: unknown): LaneRegistration | undefined {
+	if (!isPlainRecord(value) || typeof value.laneKey !== "string" || value.laneKey === "") return undefined;
+	if (!LEGACY_LANE_OWNER_FIELDS.some((field) => field in value)) return value as unknown as LaneRegistration;
+	const { ownerPid, ownerHostname, ownerMachineId, ownerStartTime, ...rest } = value;
+	const lane = rest as unknown as LaneRegistration;
+	if (lane.owner !== undefined || ownerPid === undefined) return lane;
+	return {
+		...lane,
+		owner: {
+			pid: ownerPid as number,
+			...(typeof ownerHostname === "string" ? { hostname: ownerHostname } : {}),
+			...(typeof ownerMachineId === "string" ? { machineId: ownerMachineId } : {}),
+			...(typeof ownerStartTime === "string" ? { startTime: ownerStartTime } : {}),
+		},
+	};
+}
+
 export async function readLane(paths: SyncStorePaths, laneKey: string): Promise<LaneRegistration | undefined> {
-	return readJsonFile<LaneRegistration>(laneFile(paths, laneKey));
+	return parseLane(await readJsonFile<unknown>(laneFile(paths, laneKey)));
 }
 
 export async function writeLane(
@@ -202,8 +229,8 @@ export async function listLanes(paths: SyncStorePaths): Promise<LaneRegistration
 	const lanes: LaneRegistration[] = [];
 	for (const entry of entries.sort()) {
 		if (!entry.endsWith(".json")) continue;
-		const lane = await readJsonFile<LaneRegistration>(join(paths.lanesDir, entry));
-		if (lane?.laneKey) lanes.push(lane);
+		const lane = parseLane(await readJsonFile<unknown>(join(paths.lanesDir, entry)));
+		if (lane) lanes.push(lane);
 	}
 	return lanes;
 }
@@ -218,47 +245,21 @@ export async function appendAuditEvent(
 }
 
 /**
- * Same-host liveness of a recorded owner pid. `false` means PROVEN gone and nothing else: the pid answers ESRCH, or it
- * now names a process whose Linux start time differs from the recorded one (a reissued pid). Every probe failure the
- * OS does not classify, and every identity procfs cannot read, answers `true`, so it never authorizes a takeover.
+ * The owner to record for `pid` on this host. This process is {@link ownProcessOwner} in full. Any other pid (a
+ * deterministic host's substitute) gets this host's facts without a start time: only a process can read its own, and
+ * this process's start time beside another pid would judge that owner a reissued pid, so `dead`.
  */
-export type OwnerPidProbe = (pid: number, startTime: string | undefined) => boolean;
-
-/**
- * A recorded process owner. Its host is `machineId` when recorded, else `hostname` (`isRecordedOnHost`); a lane
- * record carrying neither predates host recording and was written by this host.
- */
-export interface RecordedProcessOwner {
-	pid: number;
-	hostname?: string;
-	machineId?: string;
-	/** Linux start time recorded with the pid ({@link ownerStartTimeFor}); absent on older records and off Linux. */
-	startTime?: string;
+export function processOwnerFor(pid: number | undefined): ProcessOwner {
+	const own = ownProcessOwner();
+	if (pid === undefined || pid === own.pid) return own;
+	const { pid: _self, startTime: _own, ...host } = own;
+	return { ...host, pid };
 }
 
-/** The start time to record beside `pid`. Only this process can read its own; any other pid records none. */
-export function ownerStartTimeFor(pid: number): string | undefined {
-	return pid === process.pid ? readOwnProcessStartTime() : undefined;
-}
+/** The host and same-host pid probe an owner judgement uses (`judgeOwner`); deterministic hosts inject both. */
+export type OwnerJudgementOptions = Pick<JudgeOwnerOptions, "host" | "observe">;
 
-/**
- * Whether a recorded owner is NOT proven dead. A foreign-host owner is never judged by a local pid probe and is
- * therefore always alive here -- never taken over, never cleared. Locality is the stable machine id when the record
- * carries one (a renamed host still recognizes its own owners), else the recorded hostname. `probe` is the
- * same-host pid probe (injectable for deterministic hosts); it defaults to the shared identity-aware OS probe.
- */
-export function isRecordedOwnerAlive(
-	owner: RecordedProcessOwner,
-	probe: OwnerPidProbe = (pid, startTime) => probeProcessIdentityLiveness(pid, startTime) !== "dead",
-): boolean {
-	const predatesHostRecording = owner.hostname === undefined && owner.machineId === undefined;
-	if (!predatesHostRecording && !isRecordedOnHost(owner, readHostIdentity())) return true;
-	return probe(owner.pid, owner.startTime);
-}
-
-export interface IntegrationLockDeps {
-	/** Injectable same-host pid probe (deterministic hosts). Default: the identity-aware OS probe. */
-	isPidAlive?: OwnerPidProbe;
+export interface IntegrationLockDeps extends OwnerJudgementOptions {
 	now?: () => string;
 	nowMs?: () => number;
 }
@@ -306,34 +307,25 @@ async function tryMkdirLock(paths: SyncStorePaths): Promise<boolean> {
 /**
  * Acquire the single integration lock (G1: landing is serialized). Non-blocking: a held lock
  * returns `{acquired:false, holder, holderAlive}` immediately -- callers surface `lock_busy` and
- * retry on their own cadence rather than spinning here. Takeover happens ONLY when the recorded
- * owner is provably dead on this host -- its pid answers ESRCH or was reissued to a process with another
- * start time -- (or the lock dir is ownerless and older than {@link OWNERLESS_LOCK_STALE_MS}); every
- * takeover is audited. The manifest records this host (hostname, and machine id when readable) and the owner's
- * start time when the owner is this process.
+ * retry on their own cadence rather than spinning here. Takeover happens ONLY when `judgeOwner` finds the
+ * recorded holder `dead` -- same host, and its pid answers ESRCH or was reissued to a process with another
+ * start time -- (or the lock dir is ownerless and older than {@link OWNERLESS_LOCK_STALE_MS}); a foreign or
+ * unknown holder is held. Every takeover is audited. The manifest is `claim`: the holder's
+ * {@link processOwnerFor} identity plus the session and lane it lands for.
  */
 export async function acquireIntegrationLock(
 	paths: SyncStorePaths,
-	owner: Omit<IntegrationLockOwner, "acquiredAt" | "token" | "startTime" | "hostname" | "machineId">,
+	claim: Omit<IntegrationLockOwner, "acquiredAt" | "token">,
 	deps: IntegrationLockDeps = {},
 ): Promise<IntegrationLockAcquisition> {
 	return withFileLock(paths.lockGuardFile, async () => {
 		const now = deps.now ?? (() => new Date().toISOString());
 		const nowMs = deps.nowMs ?? (() => Date.now());
-		const isAlive = (holder: IntegrationLockOwner): boolean => isRecordedOwnerAlive(holder, deps.isPidAlive);
+		const isAlive = (holder: IntegrationLockOwner): boolean => judgeOwner(holder, deps) !== "dead";
 		for (let attempt = 0; attempt < 2; attempt++) {
 			if (await tryMkdirLock(paths)) {
 				const token = randomUUID();
-				const startTime = ownerStartTimeFor(owner.pid);
-				const host = readHostIdentity();
-				const manifest: IntegrationLockOwner = {
-					...owner,
-					hostname: host.hostname,
-					...(host.machineId !== undefined ? { machineId: host.machineId } : {}),
-					...(startTime !== undefined ? { startTime } : {}),
-					token,
-					acquiredAt: now(),
-				};
+				const manifest: IntegrationLockOwner = { ...claim, token, acquiredAt: now() };
 				await fsPromises.writeFile(paths.lockOwnerFile, `${JSON.stringify(manifest)}\n`, "utf-8");
 				await appendAuditEvent(
 					paths,

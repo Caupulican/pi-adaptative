@@ -2711,7 +2711,7 @@ export class HarnessWorld {
 					command === "git"
 						? this.git.exec(command, args, options)
 						: this.shell.execEngine(command, args, options),
-				isPidAlive: (pid) => this.processTable.isAlive(pid),
+				observe: (pid) => (this.processTable.isAlive(pid) ? "alive" : "dead"),
 				pid: this.processTable.self,
 				// A share-mode rename failure the virtual IO raises retries on every platform, on the session clock.
 				atomicWrite: { isTransientError: isTransientFsShareError },
@@ -6380,7 +6380,8 @@ export async function runSignalShutdown(script: {
 			stdout: (text) => {
 				stdout.push(text);
 			},
-			writeCrashRecord: () => "",
+			declareExit: () => "",
+			recordRejection: () => {},
 		},
 	);
 	await lifecycle.shutdown({ fromSignal: script.fromSignal });
