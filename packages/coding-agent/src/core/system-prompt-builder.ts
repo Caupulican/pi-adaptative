@@ -21,9 +21,9 @@ import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts"
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
 	LEDGER_READ_TOOL_NAME,
-	type LedgerEntry,
 	loadLedgerCatalog,
 	renderLedgerIndex,
+	requireLedgerEntry,
 } from "./ledger/ledger-catalog.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
@@ -402,7 +402,7 @@ export class SystemPromptBuilder {
 		// The detailed phase rule is a ledger entry; the phase names and owners stay resident.
 		const phases = ledgerActive
 			? "- Survey → Contract → Plan/Route → Execute → Prove/Deliver. Scale phases to the outcome."
-			: this._requireLedgerEntry("work-lifecycle").body;
+			: requireLedgerEntry("work-lifecycle").body;
 		return `PI WORK LIFECYCLE
 ${phases}${ownerRule}`;
 	}
@@ -416,16 +416,10 @@ ${phases}${ownerRule}`;
 		);
 	}
 
-	private _requireLedgerEntry(topic: string): LedgerEntry {
-		const entry = loadLedgerCatalog().find((candidate) => candidate.topic === topic);
-		if (!entry) throw new Error(`Ledger topic ${topic} is missing from the bundled ledger.`);
-		return entry;
-	}
-
 	/** The delegation rule rendered inline, for a surface where `ledger_read` does not carry it. */
 	private _buildInlineDelegationPrompt(delegateActive: boolean, ledgerActive: boolean): string | undefined {
 		if (ledgerActive || !this._delegationApplies(delegateActive)) return undefined;
-		return `PI DELEGATION\n${this._requireLedgerEntry("delegation").body}`;
+		return `PI DELEGATION\n${requireLedgerEntry("delegation").body}`;
 	}
 
 	/** The index of ledger rules whose gates pass, or undefined when the ledger is not active. */

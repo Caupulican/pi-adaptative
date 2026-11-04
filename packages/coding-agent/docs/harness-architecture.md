@@ -71,8 +71,8 @@ footprint must omit that extension at the resource layer, not merely block one o
 The root's `PI DELEGATION` policy requires delegation when a concrete independent task offers more
 speed or verification benefit than coordination and context-transfer cost. It applies at every
 reasoning level and across providers whenever delegation is enabled and the tool is active;
-it is not an Ultra-only switch. User restrictions remain binding. The bundled ledger rule
-`delegation` (`src/bundled-resources/ledger/delegation.md`) owns the decision rule. The root reads it on
+it is not an Ultra-only switch. User restrictions remain binding. The ledger rule
+`delegation` (`src/core/ledger/ledger-rules.ts`) owns the decision rule. The root reads it on
 demand through `ledger_read`; `SystemPromptBuilder` renders it inline when that tool is not active, including
 with custom and routed prompts; bundled commands defer to that policy. Child sessions never receive this root policy.
 

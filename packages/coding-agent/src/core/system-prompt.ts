@@ -7,7 +7,7 @@ import { getReadmePath } from "../config.ts";
 import { TOOL_FAILURE_RETRY_MODEL_RULE } from "../kernel/index.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
-import { findLedgerEntry, type LedgerEntry } from "./ledger/ledger-catalog.ts";
+import { requireLedgerEntry } from "./ledger/ledger-catalog.ts";
 import { enforceModelCapabilitySystemPromptBudget } from "./model-capability.ts";
 import {
 	normalizeSteStrictness,
@@ -59,12 +59,6 @@ OPERATING CONTRACT
 /** Standing invariant that stays in the prompt while the detailed noticed-items rule lives in the ledger. */
 const NOTICED_ITEMS_POINTER =
 	"Noticed items (defects, risks, odd output beyond the ask): never call work done or complete a goal while a relevant one is unresolved.";
-
-function requireLedgerEntry(topic: string): LedgerEntry {
-	const entry = findLedgerEntry(topic);
-	if (!entry) throw new Error(`Ledger topic ${topic} is missing from the bundled ledger.`);
-	return entry;
-}
 
 /** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
 function inlineLedgerRule(topic: string): string {
