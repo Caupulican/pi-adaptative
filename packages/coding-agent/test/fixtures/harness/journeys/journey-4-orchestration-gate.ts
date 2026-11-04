@@ -5,6 +5,9 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
+/** The intake judgments a plain prompt consumes here: a start without a profile asks no capability question. */
+const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTAKE_JUDGMENTS;
+
 /** The text the delegation gate's refusal opens with; the refused call's result carries it. */
 const REFUSAL = "The root orchestrates and does not carry out task work itself";
 const ORIGINAL_LIMITS = "export const MAX_RETRIES = 3;\n";
@@ -50,7 +53,8 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			check: (request) => {
 				const offered = (request.context.tools ?? []).map((tool) => tool.name);
 				if (!offered.includes("bash")) throw new Error(`the worker is not offered bash: ${offered.join(", ")}`);
-				if (!JSON.stringify(request.context.messages).includes(instructionsPath)) {
+				// The request shows the path through the model-visible alias legend, so the file name is the stable evidence.
+				if (!JSON.stringify(request.context.messages).includes("j4-limits.md")) {
 					throw new Error("the worker's instructions do not name the instruction file the root wrote");
 				}
 			},
@@ -154,7 +158,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			reply: { content: [{ type: "text", text: "The worker is still settling." }] },
 		},
 	);
-	world.systemOne.enterPhase("j4-delegate", { ...ICM_INTAKE_JUDGMENTS, ...OPERATION_JUDGMENTS });
+	world.systemOne.enterPhase("j4-delegate", { ...INTAKE_JUDGMENTS, ...OPERATION_JUDGMENTS });
 	await withDeadline(
 		trace,
 		"J4 turn 1",
@@ -198,7 +202,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			},
 		);
 		world.systemOne.enterPhase("j4-shell-refused", {
-			...ICM_INTAKE_JUDGMENTS,
+			...INTAKE_JUDGMENTS,
 			...OPERATION_JUDGMENTS,
 			performs_task_work: { kind: "noul", probability: 0.97 },
 		});
@@ -229,7 +233,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			},
 		);
 		world.systemOne.enterPhase("j4-shell-allowed", {
-			...ICM_INTAKE_JUDGMENTS,
+			...INTAKE_JUDGMENTS,
 			...OPERATION_JUDGMENTS,
 			performs_task_work: { kind: "noul", probability: 0.02 },
 		});
