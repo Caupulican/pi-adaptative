@@ -43,6 +43,7 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"delegate",
 	"tool_task",
 	"ask_question",
+	"ledger_read",
 ]);
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
