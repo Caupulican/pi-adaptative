@@ -13,11 +13,13 @@ import {
 	renderCommsErrView,
 	renderCommsStateLine,
 	renderTaskBrief,
+	TASK_BRIEF_CURRENT_VERSION,
 	TASK_EVIDENCE_KINDS,
 	TASK_OUTPUT_KINDS,
 	type TaskBrief,
 	type TaskEvidenceKind,
 	type TaskOutputKind,
+	taskBriefProblem,
 } from "../comms/comms-records.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
@@ -624,32 +626,32 @@ function resolveTaskBrief(
 			},
 		};
 	}
-	const goal = input.goal.trim();
-	if (!goal) {
-		return { input, violation: { message: "delegate start goal is empty.", skipReason: "goal_empty" } };
-	}
 	const note = input.note?.trim();
 	const refs = input.refs?.map((ref) => ref.trim()).filter(Boolean);
-	const limit = (
-		skipReason: string,
-		what: string,
-		max: number,
-	): { input: DelegateToolInput; violation: ActionViolation } => ({
-		input,
-		violation: { message: `delegate start ${what} may not exceed ${max} characters.`, skipReason },
-	});
-	if (goal.length > MAX_TASK_GOAL_CHARS) return limit("goal_too_long", "goal", MAX_TASK_GOAL_CHARS);
-	if (note && note.length > MAX_TASK_NOTE_CHARS) return limit("note_too_long", "note", MAX_TASK_NOTE_CHARS);
-	if (refs?.some((ref) => ref.length > MAX_TASK_REF_CHARS))
-		return limit("refs_too_long", "each ref", MAX_TASK_REF_CHARS);
 	const brief: TaskBrief = {
-		v: COMMS_RECORD_VERSION,
-		goal,
+		v: TASK_BRIEF_CURRENT_VERSION,
+		goal: input.goal.trim(),
 		...(note ? { note } : {}),
 		...(input.evid ? { evid: input.evid } : {}),
 		...(input.out ? { out: input.out } : {}),
 		...(refs && refs.length > 0 ? { refs } : {}),
 	};
+	const problem = taskBriefProblem(brief);
+	if (problem) {
+		const maxima = { goal: MAX_TASK_GOAL_CHARS, note: MAX_TASK_NOTE_CHARS, refs: MAX_TASK_REF_CHARS } as const;
+		return {
+			input,
+			violation: {
+				message:
+					problem.kind === "limit"
+						? `delegate start ${problem.field === "refs" ? `refs (at most ${MAX_TASK_REFS}, each` : problem.field} may not exceed ${maxima[problem.field]} characters${problem.field === "refs" ? ")" : ""}.`
+						: problem.field === "goal"
+							? "delegate start goal must be one non-empty line without line breaks or control characters; put detail in note."
+							: `delegate start ${problem.field} is not usable: each ref is one non-empty line without control characters.`,
+				skipReason: `${problem.field}_${problem.kind === "limit" ? "too_long" : "invalid"}`,
+			},
+		};
+	}
 	return { input: { ...input, instructions: renderTaskBrief(brief) }, brief };
 }
 

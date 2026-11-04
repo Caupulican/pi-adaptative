@@ -1,5 +1,5 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
-import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
+import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
@@ -401,10 +401,16 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	if (executionContract && executionKind === "managed-process") {
 		throw new DurableTaskRuntimeError(`${label} cannot combine a worker execution contract with managed execution.`);
 	}
+	const instructions = dispatchInstructions(dispatch.instructions, `${label}.instructions`);
+	// A brief and its text are one fact stated twice: the stored text must be exactly what the brief's own renderer
+	// produces, or recovery would run a task the record does not state. A dispatch without a brief is free text.
+	if (brief && renderTaskBrief(brief) !== instructions) {
+		throw new DurableTaskRuntimeError(`${label}.brief does not render its instructions.`);
+	}
 	return {
 		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
-		instructions: dispatchInstructions(dispatch.instructions, `${label}.instructions`),
+		instructions,
 		...(brief ? { brief } : {}),
 		resourcePointerIds: dispatchIdentifierArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
 		...(dispatch.receiptOrigin === undefined

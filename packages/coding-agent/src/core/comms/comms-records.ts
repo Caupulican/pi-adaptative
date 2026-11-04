@@ -103,31 +103,34 @@ export const MAX_TASK_NOTE_CHARS = 1_500;
 export const MAX_TASK_REFS = 16;
 export const MAX_TASK_REF_CHARS = 256;
 
-/** Version of the renderer that turns a brief into the worker's task text; the stored text never changes with it. */
-export const TASK_BRIEF_RENDER_VERSION = 1 as const;
+/**
+ * Version of a stored brief, and the selector of the renderer that turned it into the worker's task text. A renderer
+ * is frozen once a record carries its version, so a later layout never changes how an older record reads or
+ * verifies. Version 1 is the first layout (not injective: a goal with a line break could pass for a note); new
+ * briefs are written at the current version.
+ */
+export type TaskBriefVersion = 1 | 2;
+export const TASK_BRIEF_CURRENT_VERSION = 2 as const;
 
 /**
  * A task as the root stated it, in fields. The worker's `TASK` text is rendered from this record at admission and
- * stored as the dispatch `instructions`; the record is stored beside it. A dispatch without a brief is a free-text
- * task and stays legacy.
+ * stored as the dispatch `instructions`; the record is stored beside it, and the dispatch decoder rejects a pair
+ * whose renderer does not reproduce the text. A dispatch without a brief is a free-text task and stays legacy.
  */
 export interface TaskBrief {
-	readonly v: CommsRecordVersion;
-	/** The task statement, one sentence. */
+	readonly v: TaskBriefVersion;
+	/** The task statement, one line. */
 	readonly goal: string;
-	/** Constraints and a stop condition that no id expresses. */
+	/** Constraints and a stop condition that no id expresses; may span lines. */
 	readonly note?: string;
 	readonly evid?: TaskEvidenceKind;
 	readonly out?: TaskOutputKind;
-	/** Paths and ids to read; references, never pasted content. */
+	/** Paths and ids to read, one line each; references, never pasted content. */
 	readonly refs?: readonly string[];
 }
 
-/**
- * The worker's task text for a brief: a pure function of the record. The goal opens the text (it is the task's
- * label); the other fields follow as plain words a worker needs no glossary to read.
- */
-export function renderTaskBrief(brief: TaskBrief): string {
+/** Layout of version 1: kept exactly as first written, so records stored with it still verify. */
+function renderTaskBriefV1(brief: TaskBrief): string {
 	return [
 		brief.goal,
 		...(brief.note ? [`Note: ${brief.note}`] : []),
@@ -145,19 +148,91 @@ export function renderTaskBrief(brief: TaskBrief): string {
 	].join("\n");
 }
 
+/**
+ * Layout of version 2, injective for records that pass {@link taskBriefProblem}: the goal is the single first line, each
+ * ref is its own `Ref:` line, one `Evidence:`/`Output:` line follows, and the note comes last behind its label, so no
+ * field can imitate the start of another.
+ */
+function renderTaskBriefV2(brief: TaskBrief): string {
+	return [
+		brief.goal,
+		...(brief.refs ?? []).map((ref) => `Ref: ${ref}`),
+		...(brief.evid || brief.out
+			? [
+					[
+						brief.evid ? `Evidence: ${TASK_EVIDENCE_KINDS[brief.evid]}.` : undefined,
+						brief.out ? `Output: ${TASK_OUTPUT_KINDS[brief.out]}.` : undefined,
+					]
+						.filter((part): part is string => part !== undefined)
+						.join(" "),
+				]
+			: []),
+		...(brief.note ? [`Note: ${brief.note}`] : []),
+	].join("\n");
+}
+
+const TASK_BRIEF_RENDERERS: Readonly<Record<TaskBriefVersion, (brief: TaskBrief) => string>> = {
+	1: renderTaskBriefV1,
+	2: renderTaskBriefV2,
+};
+
+/** The worker's task text for a brief: a pure function of the record, selected by its version. */
+export function renderTaskBrief(brief: TaskBrief): string {
+	return TASK_BRIEF_RENDERERS[brief.v](brief);
+}
+
+/** Why a brief cannot be stored: the field, and whether a bound or the shape is at fault. */
+export interface TaskBriefProblem {
+	readonly field: "goal" | "note" | "refs";
+	readonly kind: "limit" | "invalid";
+}
+
+function isOneCanonicalLine(value: string): boolean {
+	return value.length > 0 && value === value.trim() && !/\p{Cc}/u.test(value);
+}
+
+/**
+ * The shape a version 2 brief must have for its rendering to be unambiguous: a canonical one-line goal, canonical
+ * one-line refs, a trimmed note, each inside its budget. Version 1 records are read as they were written.
+ */
+export function taskBriefProblem(brief: TaskBrief): TaskBriefProblem | undefined {
+	if (brief.goal.length > MAX_TASK_GOAL_CHARS) return { field: "goal", kind: "limit" };
+	if (brief.note !== undefined && brief.note.length > MAX_TASK_NOTE_CHARS) return { field: "note", kind: "limit" };
+	if ((brief.refs ?? []).some((ref) => ref.length > MAX_TASK_REF_CHARS)) return { field: "refs", kind: "limit" };
+	if ((brief.refs?.length ?? 0) > MAX_TASK_REFS) return { field: "refs", kind: "limit" };
+	if (!isOneCanonicalLine(brief.goal)) return { field: "goal", kind: "invalid" };
+	if (brief.note !== undefined && (brief.note.length === 0 || brief.note !== brief.note.trim())) {
+		return { field: "note", kind: "invalid" };
+	}
+	if ((brief.refs ?? []).some((ref) => !isOneCanonicalLine(ref))) return { field: "refs", kind: "invalid" };
+	return undefined;
+}
+
+/** Whether two briefs state the same task field for field; two absent briefs are the same (both free text). */
+export function sameTaskBrief(left: TaskBrief | undefined, right: TaskBrief | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	return (
+		left.v === right.v &&
+		left.goal === right.goal &&
+		left.note === right.note &&
+		left.evid === right.evid &&
+		left.out === right.out &&
+		(left.refs?.length ?? 0) === (right.refs?.length ?? 0) &&
+		(left.refs ?? []).every((ref, index) => ref === right.refs?.[index])
+	);
+}
+
 /** Reads a stored brief back, rejecting anything outside the record's shape and budgets. */
 export function parseTaskBrief(value: unknown): TaskBrief {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("brief must be an object.");
 	const record = value as Record<string, unknown>;
 	const unknownField = Object.keys(record).find((key) => !["v", "goal", "note", "evid", "out", "refs"].includes(key));
 	if (unknownField) throw new Error(`brief.${unknownField} is unsupported.`);
-	if (record.v !== COMMS_RECORD_VERSION) throw new Error("brief.v is unsupported.");
-	const { goal, note, evid, out, refs } = record;
-	if (typeof goal !== "string" || !goal.trim() || goal.length > MAX_TASK_GOAL_CHARS) {
-		throw new Error("brief.goal must be a non-empty string within its budget.");
-	}
-	if (note !== undefined && (typeof note !== "string" || !note.trim() || note.length > MAX_TASK_NOTE_CHARS)) {
-		throw new Error("brief.note must be a non-empty string within its budget.");
+	const { v, goal, note, evid, out, refs } = record;
+	if (v !== 1 && v !== 2) throw new Error("brief.v is unsupported.");
+	if (typeof goal !== "string" || !goal.trim()) throw new Error("brief.goal must be a non-empty string.");
+	if (note !== undefined && (typeof note !== "string" || !note.trim())) {
+		throw new Error("brief.note must be a non-empty string.");
 	}
 	if (evid !== undefined && (typeof evid !== "string" || !Object.hasOwn(TASK_EVIDENCE_KINDS, evid))) {
 		throw new Error("brief.evid is invalid.");
@@ -165,20 +240,20 @@ export function parseTaskBrief(value: unknown): TaskBrief {
 	if (out !== undefined && (typeof out !== "string" || !Object.hasOwn(TASK_OUTPUT_KINDS, out))) {
 		throw new Error("brief.out is invalid.");
 	}
-	if (
-		refs !== undefined &&
-		(!Array.isArray(refs) ||
-			refs.length > MAX_TASK_REFS ||
-			refs.some((ref) => typeof ref !== "string" || !ref.trim() || ref.length > MAX_TASK_REF_CHARS))
-	) {
-		throw new Error("brief.refs must be a bounded list of non-empty strings.");
+	if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string" || !ref.trim()))) {
+		throw new Error("brief.refs must be a list of non-empty strings.");
 	}
-	return {
-		v: COMMS_RECORD_VERSION,
+	const brief: TaskBrief = {
+		v,
 		goal,
 		...(note !== undefined ? { note: note as string } : {}),
 		...(evid !== undefined ? { evid: evid as TaskEvidenceKind } : {}),
 		...(out !== undefined ? { out: out as TaskOutputKind } : {}),
 		...(refs !== undefined ? { refs: [...(refs as string[])] } : {}),
 	};
+	// Version 1 was stored with its own bounds only; version 2 must also be canonical so its text is unambiguous.
+	const problem = v === 2 ? taskBriefProblem(brief) : undefined;
+	if (problem)
+		throw new Error(`brief.${problem.field} is ${problem.kind === "limit" ? "over its budget" : "not canonical"}.`);
+	return brief;
 }

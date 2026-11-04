@@ -47,6 +47,7 @@ import {
 	type WorkerToolAdapterRegistry,
 	type WorkerToolAdapterSources,
 } from "../autonomy/worker-tool-adapter-registry.ts";
+import { sameTaskBrief } from "../comms/comms-records.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -3128,6 +3129,8 @@ export class WorkerDelegationController {
 		namespaceKeyOf: (root: string | undefined) => string,
 	): boolean {
 		if (admitted.dispatch.instructions !== request.instructions) return false;
+		// The rendered text can read the same for different fields, so a structured task is compared field for field.
+		if (!sameTaskBrief(admitted.dispatch.brief, request.brief)) return false;
 		const admittedContract = admitted.dispatch.executionContract;
 		if (!admittedContract) return false;
 		const admittedSpecialization = describeWorkerSpecialization(
@@ -3366,6 +3369,7 @@ export class WorkerDelegationController {
 					(attempt) =>
 						attempt !== undefined &&
 						attempt.dispatch.instructions === admission.instructions &&
+						sameTaskBrief(attempt.dispatch.brief, request.brief) &&
 						attempt.dispatch.parentAgentId === request.parentAgentId &&
 						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
 						(proposedReference === undefined ||
