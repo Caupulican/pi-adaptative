@@ -1,4 +1,5 @@
 import type { TSchema } from "typebox";
+import { isVacantArgument } from "../../kernel/index.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import type { ToolDefinition } from "./types.ts";
@@ -19,7 +20,7 @@ export class ExtensionSessionScope {
 		if (!stored || stored.size === 0) return args;
 		let next: Record<string, unknown> | undefined;
 		for (const key of identityKeys) {
-			if (!isVacantIdentity(args[key])) continue;
+			if (!isVacantArgument(args[key])) continue;
 			const value = stored.get(key);
 			if (!value) continue;
 			next ??= { ...args };
@@ -137,10 +138,6 @@ function shouldRetainIdentity(details: unknown): boolean {
 	const status = details.status;
 	if (typeof status !== "string") return true;
 	return status === "resolved" || status === "ok" || status === "success";
-}
-
-function isVacantIdentity(value: unknown): boolean {
-	return value === undefined || value === null || value === "";
 }
 
 function isIdentityValue(value: unknown): value is string {

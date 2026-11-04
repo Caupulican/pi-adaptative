@@ -3,6 +3,7 @@
 ### Changed
 
 - Extension tools declare the parameters that carry a session identity with `ToolDefinition.sessionIdentity` (names of the tool's own string parameters). Only declared parameters are retained from successful results and filled into a later call from the same extension that leaves them empty; registration rejects a name that is not a parameter. The harness no longer infers identity from parameter names, and the builtin/non-builtin source distinction no longer decides whether a tool is healed. An extension that relied on the old inference (a `boardId` reused after `resolve_project_scope`, for example) adds `sessionIdentity: ["boardId"]` to its tool.
+- A call that runs with a host-filled declared parameter now says so. The persisted assistant message keeps the arguments as the model wrote them, so the result carries a `[harness] The omitted boardId="..." was filled from this session...` line, and a failed call's record names the filled value in its correction, which the failure ledger and a refused replay repeat. Retained identity is scoped to the registering extension's entry path instead of the directory it shares with other extensions (the three bundled extensions shared one).
 
 ### Fixed
 

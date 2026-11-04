@@ -22,10 +22,11 @@ export function wrapRegisteredTool(
 	runner: ExtensionRunner,
 	getExecutionContext?: () => ExecutionContext | undefined,
 ): AgentTool {
-	const { baseDir, path } = registeredTool.sourceInfo;
+	// One scope per registering extension: its entry path. A directory shared by several extensions (the bundled
+	// ones) is not an owner, and an SDK tool is its own owner.
 	const definition = applyExtensionSessionHeal(
 		registeredTool.definition,
-		baseDir ?? path,
+		registeredTool.sourceInfo.path,
 		extensionSessionScopeFor(runner),
 	);
 	return wrapToolDefinition(definition, () => runner.createToolContext(registeredTool, getExecutionContext?.()));

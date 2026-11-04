@@ -59,6 +59,12 @@ import {
 	type ToolFailureRecoveryReservation,
 } from "./tool-failure-recovery-gate.ts";
 import { readToolFailureTimeoutMs } from "./tool-failure-timeout.ts";
+import {
+	type HostFilledArgument,
+	hostFilledArguments,
+	hostFilledArgumentsCorrection,
+	hostFilledArgumentsNote,
+} from "./tool-host-filled-arguments.ts";
 import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-binding.ts";
 import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
 import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
@@ -1652,6 +1658,8 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+	/** Declared parameters the model left empty and the call runs with, reported in the call's outcome. */
+	hostFilled: readonly HostFilledArgument[];
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -2143,6 +2151,7 @@ async function prepareToolCall(
 	};
 	let admitted = false;
 	try {
+		const modelArguments = toolCall.arguments;
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
@@ -2159,6 +2168,7 @@ async function prepareToolCall(
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
 		}
+		const hostFilled = hostFilledArguments(tool.sessionIdentity, modelArguments, validatedArgs);
 		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);
 		if (binding) tool = binding.tool;
 		if (
@@ -2260,6 +2270,7 @@ async function prepareToolCall(
 			toolCall,
 			tool,
 			args: validatedArgs,
+			hostFilled,
 			validationEvent,
 		};
 	} catch (error) {
@@ -2699,6 +2710,7 @@ async function finalizeExecutedToolCall(
 	const outputSignature = executed.outputSignature;
 	const errorKind = executed.errorKind;
 	let afterHookFailed = false;
+	let failureRecorded = false;
 	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
 
 	if (config.afterToolCall) {
@@ -2787,11 +2799,18 @@ async function finalizeExecutedToolCall(
 				currentContext.tools ?? [],
 				prepared.binding?.executionScope,
 			);
-			const correction =
+			const recoveryCorrection =
 				recoveryPlan.correction ??
 				(assessment.policyGuidance
 					? `${assessment.policyGuidance} ${recoveryPlan.guidance}`
 					: recoveryPlan.guidance);
+			// The record carries the cause of a failure that ran on host-filled arguments, so the ledger and a
+			// refused replay name it too; the persisted call does not show them.
+			const correction =
+				prepared.hostFilled.length > 0
+					? `${recoveryCorrection} ${hostFilledArgumentsCorrection(prepared.hostFilled)}`
+					: recoveryCorrection;
+			failureRecorded = true;
 			const record = rememberToolFailure(
 				toolFailureMemory,
 				prepared.toolCall.name,
@@ -2826,7 +2845,21 @@ async function finalizeExecutedToolCall(
 		}
 	}
 
-	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	const taught = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	// A failure record already names the filled arguments in its correction; every other outcome says it here.
+	const repaired = {
+		taught: taught.taught,
+		result:
+			!failureRecorded && prepared.hostFilled.length > 0
+				? {
+						...taught.result,
+						content: [
+							...taught.result.content,
+							{ type: "text" as const, text: hostFilledArgumentsNote(prepared.hostFilled) },
+						],
+					}
+				: taught.result,
+	};
 	const projectedDetails = detailsWithoutVerification(repaired.result.details);
 	const executorFailureIdentity =
 		executed.failureCode === undefined ? {} : { failureCode: boundedFailureCode(executed.failureCode) };

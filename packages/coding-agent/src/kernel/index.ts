@@ -23,6 +23,8 @@ export * from "./session/message-retention.ts";
 export * from "./tool-failure-memory.ts";
 // Shared model-facing recovery doctrine
 export * from "./tool-failure-recovery-protocol.ts";
+// Arguments the host filled for a call and how a result reports them
+export * from "./tool-host-filled-arguments.ts";
 export { executionContextScope } from "./tool-invocation-binding.ts";
 export * from "./tool-invocation-receipt.ts";
 export * from "./tool-invocation-report.ts";

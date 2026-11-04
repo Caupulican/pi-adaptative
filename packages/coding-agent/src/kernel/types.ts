@@ -418,6 +418,12 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
+	/**
+	 * Parameters the host fills from the session when the model leaves them empty (see
+	 * `ToolDefinition.sessionIdentity`). The loop reports every such fill in the call's result, because the
+	 * persisted assistant message keeps the arguments as the model wrote them.
+	 */
+	sessionIdentity?: readonly string[];
 	/** Explicit failure-recovery authority; the agent loop never infers recovery from argument text. */
 	failureRecovery?: AgentToolFailureRecoveryContract<TParameters>;
 	/**

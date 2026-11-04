@@ -463,8 +463,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * resolves and later calls reuse. After a successful call the harness retains, for the registering
 	 * extension, the value the call passed or the one its result reports (`details.<name>`, or `details.<base>.id`
 	 * for a name ending in `Id`). A later call from the same extension that leaves the parameter empty is filled
-	 * with it before validation, after `prepareArguments`. A result with `error`, `ok: false`, or a `status`
-	 * other than `resolved`, `ok` or `success` retains nothing.
+	 * with it before validation, after `prepareArguments`, and that call's result says so (`[harness] The omitted
+	 * boardId="..." was filled from this session...`, or in the failure record's correction when the call
+	 * failed), because the persisted assistant message keeps the arguments as the model wrote them. A result with `error`,
+	 * `ok: false`, or a `status` other than `resolved`, `ok` or `success` retains nothing.
 	 *
 	 * Nothing is inferred from parameter names: an undeclared parameter is never filled, so an omitted optional
 	 * selector keeps its meaning ("none", "start new"). Every name must be a property of `parameters`;
