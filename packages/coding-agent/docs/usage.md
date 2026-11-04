@@ -114,6 +114,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
 | `/bot [list\|new <id> [--write] [model] [soul]\|soul <id>\|open <id>\|msg <id> <text>\|stop <id>\|retire <id>]` | Manage persistent bots. A bot's soul (threat-scanned, no size limit of its own) opens its worker system prompt on every turn; `/bot soul <id>` edits it in a panel, and a bot with a live worker must be retired first |
+| `/soul [show\|review\|history\|restore <n>]` | Edit the agent's `soul.md` in a panel (owner edits pass the threat scan, skip the System One review, and apply from the next session); `show` prints it, `review` runs the System One soul review on the current text, `history` lists the recorded writes (the agent's are System One reviewed when System One is available) and `restore <n>` writes one back through the same scan |
 | `/sysprompt [default\|reset]` | Edit this session's system prompt in a panel; the override is session-only |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |

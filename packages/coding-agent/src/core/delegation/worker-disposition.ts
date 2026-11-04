@@ -1,6 +1,7 @@
 import type { WorkerClaim, WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { boundedText } from "../util/bounded-line.ts";
 
 /**
@@ -237,6 +238,39 @@ export function describeWorkerHostVerdict(hostVerdict: WorkerHostVerdict): strin
 		hostVerdict.missing.length > 0 ? `missing: ${verdictList(hostVerdict.missing)}` : undefined,
 	].filter((part): part is string => part !== undefined);
 	return `Host verdict: ${hostVerdict.verdict}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`;
+}
+
+/**
+ * Whether the host's own check lets the root read a worker's report and the transcript on demand. Only an
+ * accepted verdict, judged by code against the host's receipts, that names nothing missing, on a claim no parent
+ * review is asked for, covers every task requirement. Any other verdict, or none (a legacy claim), leaves something the
+ * report alone does not settle, so the root reads the whole transcript.
+ */
+export function workerReportSufficesForAcceptance(
+	claim: Pick<WorkerDispositionClaim, "hostVerdict" | "parentReviewRequired"> | undefined,
+): boolean {
+	return (
+		claim?.hostVerdict?.verdict === "accepted" &&
+		claim.hostVerdict.judgedBy === "code" &&
+		claim.hostVerdict.missing.length === 0 &&
+		claim.parentReviewRequired !== true
+	);
+}
+
+/**
+ * The host state codes of one ended lane, as a handoff or status record states them: why the lane ended
+ * (`BLOCKED`, `BUDGET`, `FAILED`) and how much of the worker the root reads before judging it.
+ */
+export function workerLaneStateCodes(
+	lane: { status: string; reasonCode?: string },
+	claim?: Pick<WorkerDispositionClaim, "hostVerdict" | "parentReviewRequired">,
+): CommsStateCode[] {
+	return [
+		...(lane.reasonCode === "worker_blocked" ? (["BLOCKED"] as const) : []),
+		...(lane.status === "budget_exhausted" ? (["BUDGET"] as const) : []),
+		...(lane.reasonCode === "completion_error" ? (["FAILED"] as const) : []),
+		workerReportSufficesForAcceptance(claim) ? "READ_REPORT" : "READ_ALL",
+	];
 }
 
 export const WORKER_DISPOSITION_ADVICE_NOTE = "The disposition is advice; you decide.";

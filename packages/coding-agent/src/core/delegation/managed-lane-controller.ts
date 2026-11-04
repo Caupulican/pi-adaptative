@@ -1,6 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest } from "../autonomy/contracts.ts";
+import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
@@ -358,7 +359,7 @@ export class ManagedLaneController {
 			);
 			throw error;
 		}
-		const tamper = this.protectedPathWatches.get(event.laneId)?.finishBlockers() ?? [];
+		const tamper = this.protectedPathWatches.get(event.laneId)?.finishFindings() ?? [];
 		const review = reviewManagedLaneChangedFiles({
 			changedFiles: claim.changedFiles,
 			envelope: this.deps.getCapabilityEnvelope() ?? {},
@@ -375,7 +376,12 @@ export class ManagedLaneController {
 				review.reviewRequired ? ` Changed files require parent review (${review.reasonCode}).` : ""
 			}`,
 			parentReviewRequired: review.reviewRequired || inconclusive.length > 0 || tamper.length > 0,
-			...(tamper.length > 0 ? { blockers: [...(claim.blockers ?? []), ...tamper] } : {}),
+			...(tamper.length > 0
+				? {
+						blockers: [...(claim.blockers ?? []), ...tamper.map(hostFindingBlockerLine)],
+						hostFindings: tamper,
+					}
+				: {}),
 			...(inconclusive.length > 0 ? { inconclusive } : {}),
 			...(ownerFollowUp ? { ownerFollowUp } : {}),
 		});

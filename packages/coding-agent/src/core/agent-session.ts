@@ -219,7 +219,6 @@ import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import { ObjectiveExecutionInterruptedError } from "./objective-execution/current-objective-execution.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
-import { RULE_CONFLICT_NOTE } from "./objective-execution/local-commit-delivery.ts";
 import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
 import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
 import { type TrustedDeployAdapter, TrustedDeployAdapterRegistry } from "./objective-execution/release-delivery.ts";
@@ -250,7 +249,7 @@ import {
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { DurableOwnerRuleStore, type OwnerRulePolicy } from "./project-rules/durable-owner-rules.ts";
-import { SessionProjectRules } from "./project-rules/session-project-rules.ts";
+import type { SessionProjectRules } from "./project-rules/session-project-rules.ts";
 import type { RuleRepairWork } from "./project-rules/types.ts";
 import { PromptSubmissionController } from "./prompt-submission-controller.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
@@ -310,6 +309,7 @@ import type { SettingsManager } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
+import { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
@@ -460,6 +460,8 @@ export class AgentSession {
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
 	/** The owner's session-scoped system prompt override (`/sysprompt`). */
 	readonly ownerSystemPrompt: SessionSystemPromptController;
+	/** The agent-soul file: the root agent's write gate, and the owner's edit, review and history. */
+	readonly soul: SoulController;
 	/** Autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
 	 * the latest gate outcome and the bounded gate-outcome history. */
 	private readonly _autonomyTelemetry: AutonomyTelemetry;
@@ -967,6 +969,12 @@ export class AgentSession {
 				this._baseSystemPrompt = prompt;
 				this.agent.state.systemPrompt = prompt;
 			},
+		});
+		this.soul = new SoulController({
+			agentDir: this._agentDir,
+			isRootSession: () => !this._isChildSession,
+			getEngine: () => this._semanticPlane.recordingSemanticEngine(),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -2303,22 +2311,9 @@ export class AgentSession {
 			getSystemOneController: () => this._semanticPlane.controller,
 			reviewNewCode: ({ toolName, args, cwd }) => this._unsettledLadder.codeDuplicates.review(toolName, args, cwd),
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
-			validateMutationAcceptance: async ({ changedFiles }) => {
-				if (this._edgeIntent.ruleAuthority === "user") return { blocked: false };
-				const result = await this._projectRules.validateMutation(
-					{ changedFiles },
-					{ record: this._edgeIntent.ruleAuthority !== "ask" },
-				);
-				if (!SessionProjectRules.blocks(result)) return { blocked: false };
-				if (this._edgeIntent.ruleAuthority === "ask") {
-					return { blocked: true, explanation: RULE_CONFLICT_NOTE };
-				}
-				return {
-					blocked: true,
-					explanation: result.violations[0]?.explanation,
-					repairId: result.repairWork?.repair_id,
-				};
-			},
+			validateMutationAcceptance: ({ changedFiles }) =>
+				this._projectRules.acceptMutation(changedFiles, this._edgeIntent.ruleAuthority),
+			checkSoulWrite: (tool, args, cwd, signal) => this.soul.checkWrite(tool, args, cwd, signal),
 			noteOwnedWrites: (paths, cwd) => {
 				const objectiveId = this.objectiveMutationId();
 				for (const filePath of paths) this._mutationLedger.recordOwnedWrite(objectiveId, cwd, filePath);

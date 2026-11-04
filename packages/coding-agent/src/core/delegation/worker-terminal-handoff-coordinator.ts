@@ -16,9 +16,6 @@ export interface WorkerTerminalHandoff {
 	record: LaneRecord;
 }
 
-export const WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: completion_error records a failed worker execution; inspect reasonDetail and retained evidence to identify its cause. Provider/model/API/network failures and exhausted retries do not by themselves establish an orchestration defect. A delivered terminal handoff establishes delivery only, not correctness of admission, accounting, execution, or persistence. Investigate worker_protocol_error at the harness boundary. NEVER stop, cancel, or interrupt healthy siblings solely because another worker failed. Continue or replan from the evidence.";
-
 /**
  * The durable bound of every string field a retained lane record carries, in UTF-16 code units: the
  * bound the orchestration codec already enforced on the state the record is projected from. Bounding the

@@ -45,6 +45,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "context", description: "Context composition dashboard: what rides on every request", duringWork: "local" },
 	{ name: "sysprompt", description: "Edit this session's system prompt in a panel: /sysprompt [default|reset]" },
+	{
+		name: "soul",
+		description: "Edit the agent's soul file in a panel: /soul [show|review|history|restore <n>]",
+	},
 	{ name: "toolhealth", description: "Show tool repair diagnostics and learned standing rules", duringWork: "local" },
 	{ name: "toolprobe", description: "Probe native/text tool-call support (/toolprobe [provider/model])" },
 	{

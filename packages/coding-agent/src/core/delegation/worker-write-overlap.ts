@@ -13,7 +13,8 @@
  */
 
 import path from "node:path";
-import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
+import type { WorkerHostFinding } from "../autonomy/contracts.ts";
+import { hostFinding } from "../autonomy/host-findings.ts";
 import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 
 const MAX_FINISHED_SPANS = 128;
@@ -57,12 +58,15 @@ const MAX_CLAIM_HOST_FINDINGS = 8;
  * The host findings one claim carries: the first {@link MAX_CLAIM_HOST_FINDINGS}, then one bounded line saying how
  * many were left out, so a cut is always visible. A claim holds at most 32 blockers of 1,000 characters.
  */
-export function boundHostFindings(findings: readonly string[]): string[] {
+export function boundHostFindings(findings: readonly WorkerHostFinding[]): WorkerHostFinding[] {
 	if (findings.length <= MAX_CLAIM_HOST_FINDINGS) return [...findings];
 	const omitted = findings.length - MAX_CLAIM_HOST_FINDINGS;
 	return [
 		...findings.slice(0, MAX_CLAIM_HOST_FINDINGS),
-		`${HOST_FINDING_PREFIX.omitted} ${omitted} further host finding(s) were omitted from this claim to keep it bounded; review the protected paths and the files this worker changed directly.`,
+		hostFinding(
+			"omitted",
+			`${omitted} further host finding(s) were omitted from this claim to keep it bounded; review the protected paths and the files this worker changed directly.`,
+		),
 	];
 }
 
@@ -79,7 +83,7 @@ export class WorkerWriteOverlapTracker {
 	 * One finding per path this worker changed that another worker, whose run overlapped this one, also
 	 * changed. Read-only: it can be asked repeatedly (and again after the run ends) and never alters a worker.
 	 */
-	findingsFor(laneId: string, now = Date.now()): string[] {
+	findingsFor(laneId: string, now = Date.now()): WorkerHostFinding[] {
 		const mine = this.active.get(laneId);
 		if (!mine) return [];
 		const myFiles = absoluteFiles(mine.cwd, mine.changedFiles());
@@ -98,7 +102,7 @@ export class WorkerWriteOverlapTracker {
 			if (done.endedAt < mine.startedAt || done.startedAt > now) continue;
 			others.push(done);
 		}
-		const findings: string[] = [];
+		const findings: WorkerHostFinding[] = [];
 		let omitted = 0;
 		for (const other of others) {
 			for (const file of myFiles) {
@@ -108,12 +112,14 @@ export class WorkerWriteOverlapTracker {
 					continue;
 				}
 				findings.push(
-					`${HOST_FINDING_PREFIX.overlap} ${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
+					hostFinding(
+						"overlap",
+						`${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
+					),
 				);
 			}
 		}
-		if (omitted > 0)
-			findings.push(`${HOST_FINDING_PREFIX.overlap} ${omitted} further overlapping path(s) not listed.`);
+		if (omitted > 0) findings.push(hostFinding("overlap", `${omitted} further overlapping path(s) not listed.`));
 		return findings;
 	}
 

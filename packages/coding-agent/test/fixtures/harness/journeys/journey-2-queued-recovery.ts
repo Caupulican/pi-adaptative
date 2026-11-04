@@ -134,7 +134,9 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		}),
 	});
 	await withDeadline(trace, "E7 queue B", e7Owner.session.prompt("Queue the second check behind it."));
-	const e7Start = (toolCallId: string): { started: boolean; agentId: string; laneId: string; text: string } => {
+	const e7Start = (
+		toolCallId: string,
+	): { started: boolean; agentId: string; laneId: string; text: string; h: unknown } => {
 		const entry = e7Owner.sessionManager
 			.getBranch()
 			.find(
@@ -146,7 +148,9 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		if (entry?.type !== "message" || entry.message.role !== "toolResult") {
 			throw new Error(`no durable start result for ${toolCallId}`);
 		}
-		const details = entry.message.details as { started?: unknown; agentId?: unknown; laneId?: unknown } | undefined;
+		const details = entry.message.details as
+			| { started?: unknown; agentId?: unknown; laneId?: unknown; h?: unknown }
+			| undefined;
 		if (typeof details?.agentId !== "string" || typeof details.laneId !== "string") {
 			throw new Error(`the start result ${toolCallId} carries no agent or lane id`);
 		}
@@ -154,12 +158,18 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			started: details.started === true,
 			agentId: details.agentId,
 			laneId: details.laneId,
+			h: details.h,
 			text: entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join(""),
 		};
 	};
 	const e7StartA = e7Start("e7-start-a-1");
 	const e7StartB = e7Start("e7-start-b-1");
 	expect({ a: e7StartA.started, b: e7StartB.started }, "both starts are accepted").toEqual({ a: true, b: true });
+	// The host's state code for a queued lane rides in the record (`details.h`); a running lane carries none.
+	expect({ a: e7StartA.h, b: e7StartB.h }, "only the queued start carries the QUEUED state code").toEqual({
+		a: undefined,
+		b: ["QUEUED"],
+	});
 	expect(
 		e7StartB.text.includes("capacity: 1 running of 1 allowed"),
 		`B queues behind the natural capacity cap; its start receipt: ${e7StartB.text}`,

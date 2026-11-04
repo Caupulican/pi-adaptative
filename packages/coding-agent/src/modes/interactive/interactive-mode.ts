@@ -142,6 +142,7 @@ import * as sessionIoCommands from "./session-io-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import * as signalLifecycle from "./signal-lifecycle.ts";
+import { handleSoulCommand } from "./soul-command.ts";
 import * as startupChecks from "./startup-checks.ts";
 import { handleSystemPromptCommand } from "./system-prompt-command.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
@@ -1782,6 +1783,11 @@ export class InteractiveMode {
 			if (text === "/sysprompt" || text.startsWith("/sysprompt ")) {
 				this.editor.setText("");
 				await this.handleSystemPromptCommand(text);
+				return;
+			}
+			if (text === "/soul" || text.startsWith("/soul ")) {
+				this.editor.setText("");
+				await this.handleSoulCommand(text);
 				return;
 			}
 			if (text === "/toolhealth") {
@@ -4055,15 +4061,23 @@ export class InteractiveMode {
 		if (statusMessage) this.activityLane?.announce(statusMessage, "neutral");
 	}
 
+	/** The editor panel and status surface shared by the owner commands that edit text verbatim. */
+	private ownerTextCommandSurface() {
+		return {
+			promptForEdit: (title: string, prefill: string) =>
+				this.extensionUiHost.showExtensionEditor(title, prefill, { exactText: true }),
+			showStatus: (message: string) => this.showStatus(message),
+			showError: (message: string) => this.showError(message),
+		};
+	}
+
+	private async handleSoulCommand(text: string): Promise<void> {
+		await handleSoulCommand({ soul: this.session.soul, ...this.ownerTextCommandSurface() }, text);
+	}
+
 	private async handleSystemPromptCommand(text: string): Promise<void> {
 		await handleSystemPromptCommand(
-			{
-				prompt: this.session.ownerSystemPrompt,
-				promptForEdit: (title, prefill) =>
-					this.extensionUiHost.showExtensionEditor(title, prefill, { exactText: true }),
-				showStatus: (message) => this.showStatus(message),
-				showError: (message) => this.showError(message),
-			},
+			{ prompt: this.session.ownerSystemPrompt, ...this.ownerTextCommandSurface() },
 			text,
 		);
 	}

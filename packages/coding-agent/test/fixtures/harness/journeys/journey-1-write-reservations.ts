@@ -1807,7 +1807,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			e13hFirstOperation.path,
 		);
 		const e13hHoldReason = `${e13hReasonPrefix}${e13hBoundedCause}`;
-		const e13hRefusalText = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
+		// The refusal is an `err` record (delegate-rejections.ts specialistReleaseHoldRejection, rendered by comms-records.ts
+		// renderCommsErrView): its reason `m` states the fact, the cause and the next action; the class, field, hint and the
+		// specialist ride in `c`, `f`, `h` and `x`. One line of at most 640 characters, which this reason stays inside.
+		const e13hRefusalText = `${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
 		// The model reads that text in the session's path-alias spelling (path-alias-session.ts renderFrozen: a fresh span is
 		// spelled rewriteText(table, text)). The head ends at the quote, before the path, and nothing behind the ellipsis is a
 		// boundary a path or alias form starts at (path-alias-table.ts LEFT_BOUNDARY_CLASS), so no cut path prefix is minted or
@@ -1817,19 +1820,29 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		expect(e13hModelRefusalText, "the alias spelling respells nothing in the bounded refusal").toBe(e13hRefusalText);
 		for (const id of e13hRefusedIds) {
 			const refusal = e13hDurableRefusal(id);
-			const details = refusal.details as { skipReason?: unknown; piToolFailureMemory?: unknown } | undefined;
+			const details = refusal.details as
+				| { skipReason?: unknown; piToolFailureMemory?: unknown; v?: unknown; err?: unknown }
+				| undefined;
 			expect(
 				{ isError: refusal.isError, skipReason: details?.skipReason },
 				`the ${id} refusal is refused with the retained release as its reason`,
 			).toEqual({ isError: true, skipReason: e13hHoldReason });
+			// The canonical fact is the typed record in `details`; the content below is its tagged rendering.
+			expect(
+				{ v: details?.v, err: details?.err },
+				`the ${id} refusal is a version 1 state error naming the held specialist, with the wait hint`,
+			).toEqual({
+				v: 1,
+				err: { v: 1, k: "err", c: "E_STATE", f: "agentId", h: "WAIT", x: e13hAgentId, m: e13hRefusalText },
+			});
 			// Forbidden: the specialist's state, not the call, refused the start, so it is an operation outcome and never a failure record
 			// whose execution-error classifier would read the embedded cause as the call's own error and cut the text.
 			expect(details?.piToolFailureMemory, `the ${id} refusal records no tool failure`).toBeUndefined();
-			// Aliasing is a request projection: the durable result keeps the tool's text with the cause verbatim.
+			// Aliasing is a request projection: the durable result keeps the tool's tagged view with the cause verbatim.
 			expect(
 				refusal.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n"),
 				`the durable ${id} refusal keeps the retained cause verbatim`,
-			).toContain(e13hRefusalText);
+			).toContain(`err c=E_STATE f=agentId h=WAIT x=${e13hAgentId}\nm ${e13hRefusalText}`);
 			const requestText = e13hRequestTexts.get(id) ?? "";
 			expect(requestText.startsWith("[harness]"), `the ${id} refusal reaches the model as the tool wrote it`).toBe(
 				false,

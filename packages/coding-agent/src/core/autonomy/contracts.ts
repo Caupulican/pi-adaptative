@@ -227,6 +227,22 @@ export interface WorkerClaimVerificationDecision {
 	reasonCodes: readonly string[];
 }
 
+/** Which observation the host made about a worker: concurrent writes, a protected path, its lane, findings left out. */
+export type WorkerHostFindingCode = "overlap" | "protected_path" | "lane" | "omitted";
+
+/**
+ * Something the host itself observed about a worker. Only the host writes it, and the review gate reads this
+ * field; the blocker line it renders beside the worker's own blockers is a display of the same fact.
+ */
+export interface WorkerHostFinding {
+	readonly code: WorkerHostFindingCode;
+	/** The observation, bounded to fit one claim blocker line with its label. */
+	readonly text: string;
+}
+
+/** A state the host holds a claim in until something settles it. */
+export type WorkerClaimPending = "verification";
+
 /** Untrusted worker-authored report. Only host adjudication can turn this into a durable result. */
 export interface WorkerClaim {
 	requestId: string;
@@ -238,6 +254,10 @@ export interface WorkerClaim {
 	evidence?: EvidenceBundle;
 	changedFiles: readonly string[];
 	blockers?: readonly string[];
+	/** What the host itself observed about this worker; any of them makes a non-completed claim a parent review. */
+	hostFindings?: readonly WorkerHostFinding[];
+	/** Host states that hold this claim open; `verification` lasts until an independent verifier settles it. */
+	pending?: readonly WorkerClaimPending[];
 	/** Findings the worker could not settle (System One left them below the gate, or the evidence ran out).
 	 * Reported honestly instead of rounded up; the parent reviews them and they reach the owner. */
 	inconclusive?: readonly string[];

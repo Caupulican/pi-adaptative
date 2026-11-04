@@ -242,32 +242,21 @@ function readSummaryContract(
 	return items && items.length > 0 ? createBackgroundActivitySummaryContract(kind, items) : undefined;
 }
 
-/** Which model ran and what it did, in a few words, so a subagent completion says more than a count. */
-function agentDetailSuffix(
-	message: CustomMessage<unknown>,
-	records: readonly Record<string, unknown>[],
-): string | undefined {
+/**
+ * Which model ran and what it did, in a few words, so a subagent completion says more than a count. Both
+ * facts come from the record's own fields (`modelRef`, `claim.summary`); the rendered message text is never read.
+ */
+function agentDetailSuffix(records: readonly Record<string, unknown>[]): string | undefined {
 	const models: string[] = [];
 	for (const record of records.slice(0, 2)) {
 		if (typeof record.modelRef !== "string") continue;
 		const model = record.modelRef.split("/").pop();
 		if (model && !models.includes(model)) models.push(model);
 	}
-	let snippet: string | undefined;
-	const firstRecord = records[0];
-	if (typeof firstRecord?.summary === "string" && firstRecord.summary.trim()) {
-		snippet = firstRecord.summary.trim();
-	} else if (records.length === 1 && typeof message.content === "string") {
-		snippet = message.content
-			.split("\n")
-			.map((line) => line.trim())
-			.find((line) => line.length > 0 && !line.startsWith("#"))
-			?.replace(/\[worker-[^\]]*\]/g, "")
-			.replace(/worker-ref:\S+/g, "")
-			.replace(/\s+/g, " ")
-			.trim();
-	}
-	const capped = snippet && snippet.length > 90 ? `${snippet.slice(0, 89)}…` : snippet;
+	const firstClaim = records[0]?.claim;
+	const claimSummary = isPlainRecord(firstClaim) && typeof firstClaim.summary === "string" ? firstClaim.summary : "";
+	const snippet = claimSummary.replace(/[\p{Cc}\s]+/gu, " ").trim();
+	const capped = snippet.length > 90 ? `${snippet.slice(0, 89)}…` : snippet;
 	const parts = [models.length > 0 ? models.join(" · ") : undefined, capped || undefined].filter(
 		(part): part is string => part !== undefined,
 	);
@@ -305,7 +294,7 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 	]
 		.filter((part): part is string => part !== undefined)
 		.join(" | ");
-	const detail = kind === "agent" ? agentDetailSuffix(message, records) : undefined;
+	const detail = kind === "agent" ? agentDetailSuffix(records) : undefined;
 	return {
 		text: detail ? `${text} · ${detail}` : text,
 		status:

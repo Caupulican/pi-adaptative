@@ -95,7 +95,7 @@ import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delega
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
-import { workerReportClaimText } from "./delegation/worker-report.ts";
+import { SUBMIT_REPORT_TOOL_NAME, workerReportClaimText } from "./delegation/worker-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
@@ -1723,14 +1723,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				const shown: AgentMessage[] = [];
 				for (const msg of filtered) {
 					if (msg.role === "assistant") {
+						// A bot that answers through `submit_report` said its summary: the chat shows those words, not the call.
 						shown.push({
 							...msg,
-							content: msg.content.map((part) =>
-								part.type === "text" ? { ...part, text: botReplyText(part.text) } : part,
-							),
+							content: msg.content.map((part) => {
+								if (part.type === "text") return { ...part, text: botReplyText(part.text) };
+								if (part.type === "toolCall" && part.name === SUBMIT_REPORT_TOOL_NAME) {
+									const summary: unknown = part.arguments.summary;
+									return { type: "text" as const, text: typeof summary === "string" ? summary : "" };
+								}
+								return part;
+							}),
 						});
 						continue;
 					}
+					if (msg.role === "toolResult" && msg.toolName === SUBMIT_REPORT_TOOL_NAME) continue;
 					if (msg.role !== "user") {
 						shown.push(msg);
 						continue;

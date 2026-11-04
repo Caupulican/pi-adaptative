@@ -369,7 +369,8 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		provider,
 		modelId,
 		thinkingLevel,
-		soul,
+		soul: storedSoul,
+		instructions: legacyInstructions,
 		profileId,
 		canWrite,
 		createdAt,
@@ -380,6 +381,8 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		lastMessageAt,
 		lastReadAt,
 	} = value;
+	// Records written before the soul concept stored the same text under `instructions`; the next save writes `soul`.
+	const soul = storedSoul ?? legacyInstructions;
 
 	if (
 		typeof agentId !== "string" ||

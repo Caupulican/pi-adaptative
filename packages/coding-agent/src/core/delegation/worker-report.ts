@@ -60,69 +60,89 @@ const requirementStatus = Type.Union([
 	Type.Literal("not_applicable"),
 ]);
 
-export const submitReportParameters = Type.Object({
-	status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")], {
-		description: "completed when the task is done; blocked when something outside your grant stops it.",
-	}),
-	summary: Type.String({ minLength: 1, description: "What you did or concluded, in a few sentences." }),
-	requirements: Type.Optional(
-		Type.Array(
-			Type.Object({
-				id: Type.String({ description: "A task requirement id, exactly as listed in the report request." }),
-				status: requirementStatus,
-				evidence: Type.Optional(
-					Type.Array(Type.String(), {
-						description:
-							"What shows it: stable receipt names (c-...) of commands you ran, changed file paths, or finding ids.",
-					}),
-				),
-				note: Type.Optional(Type.String()),
-			}),
-			{ description: "One entry per task requirement id." },
-		),
-	),
-	checks: Type.Optional(
-		Type.Array(
-			Type.Object({
-				command: Type.String({
-					description: "Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
-				}),
-				receiptId: Type.Optional(
-					Type.String({ description: "The stable host receipt name (c-...) or id of that command." }),
-				),
-				result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
-				note: Type.Optional(Type.String()),
-			}),
-			{ description: "The checks you ran or chose not to run, with what each showed." },
-		),
-	),
-	changes: Type.Optional(
-		Type.Array(
-			Type.Object({
-				file: Type.String(),
-				what: Type.String(),
-				serves: Type.Optional(Type.Array(Type.String(), { description: "Requirement ids this change serves." })),
-			}),
-			{ description: "Each file you changed and what the change does." },
-		),
-	),
-	assumptions: Type.Optional(Type.Array(Type.String())),
-	regressions: Type.Optional(Type.Array(Type.String(), { description: "Behavior this change could break." })),
-	remaining: Type.Optional(Type.Array(Type.String(), { description: "What is not done yet." })),
-	blockers: Type.Optional(Type.Array(Type.String())),
-	inconclusive: Type.Optional(
-		Type.Array(Type.String(), { description: "Findings you could not settle: what is missing." }),
-	),
-	findings: Type.Optional(
-		Type.Array(Type.Object({ summary: Type.String(), confidence: Type.Optional(Type.Number()) })),
-	),
-	verdict: Type.Optional(
-		Type.Union([Type.Literal("accepted"), Type.Literal("rejected")], {
-			description: "Verifier workers only: whether the subject's evidence proves it.",
+export const submitReportParameters = Type.Object(
+	{
+		status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")], {
+			description: "completed when the task is done; blocked when something outside your grant stops it.",
 		}),
-	),
-	reasonCodes: Type.Optional(Type.Array(Type.String())),
-});
+		summary: Type.String({ minLength: 1, description: "What you did or concluded, in a few sentences." }),
+		requirements: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{
+						id: Type.String({ description: "A task requirement id, exactly as listed in the report request." }),
+						status: requirementStatus,
+						evidence: Type.Optional(
+							Type.Array(Type.String(), {
+								description:
+									"What shows it: stable receipt names (c-...) of commands you ran, changed file paths, or finding ids.",
+							}),
+						),
+						note: Type.Optional(Type.String()),
+					},
+					{ additionalProperties: false },
+				),
+				{ description: "One entry per task requirement id." },
+			),
+		),
+		checks: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{
+						command: Type.String({
+							description:
+								"Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
+						}),
+						receiptId: Type.Optional(
+							Type.String({ description: "The stable host receipt name (c-...) or id of that command." }),
+						),
+						result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
+						note: Type.Optional(Type.String()),
+					},
+					{ additionalProperties: false },
+				),
+				{ description: "The checks you ran or chose not to run, with what each showed." },
+			),
+		),
+		changes: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{
+						file: Type.String(),
+						what: Type.String(),
+						serves: Type.Optional(
+							Type.Array(Type.String(), { description: "Requirement ids this change serves." }),
+						),
+					},
+					{ additionalProperties: false },
+				),
+				{ description: "Each file you changed and what the change does." },
+			),
+		),
+		assumptions: Type.Optional(Type.Array(Type.String())),
+		regressions: Type.Optional(Type.Array(Type.String(), { description: "Behavior this change could break." })),
+		remaining: Type.Optional(Type.Array(Type.String(), { description: "What is not done yet." })),
+		blockers: Type.Optional(Type.Array(Type.String())),
+		inconclusive: Type.Optional(
+			Type.Array(Type.String(), { description: "Findings you could not settle: what is missing." }),
+		),
+		findings: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{ summary: Type.String(), confidence: Type.Optional(Type.Number()) },
+					{ additionalProperties: false },
+				),
+			),
+		),
+		verdict: Type.Optional(
+			Type.Union([Type.Literal("accepted"), Type.Literal("rejected")], {
+				description: "Verifier workers only: whether the subject's evidence proves it.",
+			}),
+		),
+		reasonCodes: Type.Optional(Type.Array(Type.String())),
+	},
+	{ additionalProperties: false },
+);
 
 export type SubmitReportArguments = Static<typeof submitReportParameters>;
 

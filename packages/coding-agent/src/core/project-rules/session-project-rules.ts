@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { createRetentionDecisionEngine } from "../compaction/retention-decision-engine.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import { RULE_CONFLICT_NOTE } from "../objective-execution/local-commit-delivery.ts";
 import type { OwnerRulePolicy } from "./durable-owner-rules.ts";
 import { ownerRuleToSemanticRule } from "./durable-owner-rules.ts";
 import { compileRulesFromText, SemanticProjectRuleController } from "./semantic-project-rule-controller.ts";
@@ -114,6 +115,26 @@ export class SessionProjectRules {
 		}
 		if (result.advisory || SessionProjectRules.blocks(result)) this.deps.emitViolation?.(result);
 		return result;
+	}
+
+	/**
+	 * The tool gate's verdict on a mutation under the owner's rule authority: `user` accepts without checking, `ask`
+	 * blocks a violation with the conflict note and records nothing, any other authority blocks it with the violation and
+	 * the RepairWork it queued.
+	 */
+	async acceptMutation(
+		changedFiles: readonly string[],
+		authority: "unset" | "ask" | "user" | "written",
+	): Promise<{ blocked: boolean; explanation?: string; repairId?: string }> {
+		if (authority === "user") return { blocked: false };
+		const result = await this.validateMutation({ changedFiles }, { record: authority !== "ask" });
+		if (!SessionProjectRules.blocks(result)) return { blocked: false };
+		if (authority === "ask") return { blocked: true, explanation: RULE_CONFLICT_NOTE };
+		return {
+			blocked: true,
+			explanation: result.violations[0]?.explanation,
+			repairId: result.repairWork?.repair_id,
+		};
 	}
 
 	/** RCG-041: mutation acceptance. */

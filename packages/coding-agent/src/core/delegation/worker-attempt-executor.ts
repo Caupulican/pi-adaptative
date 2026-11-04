@@ -980,6 +980,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					cwd: options.cwd,
 					processCapable: options.processCapable,
 					systemOneCapable: options.toolSurface.allowedTools.includes(SYSTEM_ONE_TOOL_NAME),
+					reportTool: reportHandshake,
 					...(options.verificationSubjectTaskId
 						? { verificationSubjectTaskId: options.verificationSubjectTaskId }
 						: {}),

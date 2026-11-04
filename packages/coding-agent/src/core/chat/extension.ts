@@ -11,7 +11,7 @@ import {
 	MAX_REPLY_HOPS,
 } from "./constants.ts";
 import { createRuntimeIdentity, resolveIdentity } from "./identity.ts";
-import { incomingPrompt, incomingSummary, lineCount } from "./incoming.ts";
+import { incomingPeerRecord, incomingPrompt, incomingSummary, lineCount } from "./incoming.ts";
 import { ChatMesh, type IncomingPeerMessage } from "./mesh.ts";
 import { getChatPlatformInfo } from "./platform.ts";
 import { appendChatAudit, type ChatIdentity, readChatIdentity } from "./state.ts";
@@ -92,6 +92,9 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 				from: message.from,
 				to: message.to,
 				expectReply: message.expectReply,
+				replyAllowed: incomingPeerRecord(message, hops, MAX_REPLY_HOPS).replyAllowed,
+				hops,
+				maxHops: MAX_REPLY_HOPS,
 				metadata: message.metadata,
 				message: message.message,
 				messageBytes: bytes,

@@ -112,6 +112,8 @@ export interface WorkerRunnerOptions {
 	processCapable?: boolean;
 	/** The lane holds `systemone`: the prompt asks the worker to validate findings with System One. */
 	systemOneCapable?: boolean;
+	/** The completion offers the `submit_report` tool: the prompts then end the task with it and the text envelope is a fallback. */
+	reportTool?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
@@ -141,13 +143,18 @@ export interface WorkerRunOutcome {
 export const EARLIER_SESSION_NOTE =
 	"Earlier turns in this conversation ran in a previous session: files and tool results above may have changed since. Read again what this task relies on before reporting it.";
 
-export function buildWorkerUserPrompt(request: WorkerRequest, options: { earlierSession?: boolean } = {}): string {
+export function buildWorkerUserPrompt(
+	request: WorkerRequest,
+	options: { earlierSession?: boolean; reportTool?: boolean } = {},
+): string {
 	return [
 		...(options.earlierSession ? [EARLIER_SESSION_NOTE] : []),
 		"TASK",
 		request.instructions,
 		"END TASK",
-		'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
+		options.reportTool
+			? "Finish by calling submit_report."
+			: 'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
 	].join("\n");
 }
 
@@ -449,13 +456,21 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		execute: (signal) =>
 			options.complete({
 				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, options.systemOneCapable === true)
+					? buildVerifierSystemPrompt(
+							options.verificationSubjectTaskId,
+							options.systemOneCapable === true,
+							options.reportTool === true,
+						)
 					: buildWorkerSystemPrompt({
 							write: writeCapable,
 							process: options.processCapable === true,
 							systemOne: options.systemOneCapable === true,
+							report: options.reportTool === true,
 						}),
-				userPrompt: buildWorkerUserPrompt(options.request, { earlierSession: options.earlierSession === true }),
+				userPrompt: buildWorkerUserPrompt(options.request, {
+					earlierSession: options.earlierSession === true,
+					reportTool: options.reportTool === true,
+				}),
 				signal,
 			}),
 	});

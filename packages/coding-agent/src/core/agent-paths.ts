@@ -181,6 +181,16 @@ export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");
 }
 
+/** `<agentDir>/state/soul/history.jsonl` -- append-only record of every write to `soul.md` (bounded to the last entries). */
+export function soulHistoryFile(agentDir: string): string {
+	return stateFile(agentDir, "soul", "history.jsonl");
+}
+
+/** `<agentDir>/state/soul/versions` -- the whole text of each version `soul.md` had, keyed by its sha256. */
+export function soulVersionsDir(agentDir: string): string {
+	return stateFile(agentDir, "soul", "versions");
+}
+
 /** `<agentDir>/state/follow-ups` -- per-session owner follow-up documents. */
 export function ownerFollowUpsDir(agentDir: string): string {
 	return stateFile(agentDir, "follow-ups");

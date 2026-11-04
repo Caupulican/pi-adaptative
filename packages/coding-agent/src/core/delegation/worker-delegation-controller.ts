@@ -20,7 +20,13 @@ import type {
 	WorkerDelegationRunOutcome,
 } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
-import type { CapabilityEnvelope, WorkerClaim, WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
+import type {
+	CapabilityEnvelope,
+	WorkerClaim,
+	WorkerCommandReceipt,
+	WorkerHostFinding,
+	WorkerRequest,
+} from "../autonomy/contracts.ts";
 import {
 	buildToolkitScriptOperation,
 	classifyAllEdgeOperations,
@@ -28,6 +34,7 @@ import {
 	edgeBlockReason,
 	isEdgeOperationGranted,
 } from "../autonomy/edge-policy.ts";
+import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface, type SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -194,11 +201,13 @@ import {
 } from "./worker-authority-resolver.ts";
 import {
 	boundedWorkerClaimStrings,
-	INDEPENDENT_VERIFICATION_PENDING_BLOCKER,
+	isVerificationPending,
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
 	normalizeWorkerClaimForHost,
 	validateWorkerClaim,
+	withoutVerificationPending,
+	withVerificationPending,
 } from "./worker-claim.ts";
 import {
 	type WorkerContextForkSnapshot,
@@ -688,7 +697,7 @@ type InFlightWorkerLedger = {
 	sealChangedFiles: () => readonly string[];
 	getUsage: () => AttemptUsageSnapshot;
 	/** What the host observed about this worker so far (concurrent-write overlap, protected-path changes). */
-	getHostFindings: () => readonly string[];
+	getHostFindings: () => readonly WorkerHostFinding[];
 	request: WorkerRequest;
 	handle: StartedDelegationAttempt;
 	cwd: string;
@@ -1269,7 +1278,9 @@ export class WorkerDelegationController {
 			usageReportId: `worker:${this.deps.getSessionId()}:${laneId}`,
 			createdAt: new Date().toISOString(),
 			// What the host observed before it stopped the worker is attributed and bounded like a finished claim's.
-			...(hostFindings.length > 0 ? { blockers: hostFindings, parentReviewRequired: true } : {}),
+			...(hostFindings.length > 0
+				? { blockers: hostFindings.map(hostFindingBlockerLine), hostFindings, parentReviewRequired: true }
+				: {}),
 		};
 		const canceled = finalizeWorkerClaim(this.getWorkerLifecycle(), {
 			handle: ledger.handle,
@@ -2445,9 +2456,10 @@ export class WorkerDelegationController {
 			record.laneId,
 			record.attemptId,
 		);
-		if (!stored?.claim.blockers?.includes(INDEPENDENT_VERIFICATION_PENDING_BLOCKER)) return;
+		if (!stored || !isVerificationPending(stored.claim)) return;
+		const settled = withoutVerificationPending(stored.claim);
 		const blockers = [
-			...stored.claim.blockers.filter((blocker) => blocker !== INDEPENDENT_VERIFICATION_PENDING_BLOCKER),
+			...(settled.blockers ?? []),
 			...(verification.verdict === "accepted"
 				? []
 				: [
@@ -2457,7 +2469,7 @@ export class WorkerDelegationController {
 						),
 					]),
 		];
-		const { blockers: _pending, ...claim } = stored.claim;
+		const { blockers: _settledBlockers, ...claim } = settled;
 		try {
 			this.deps.saveWorkerClaimSnapshot({ ...claim, ...(blockers.length > 0 ? { blockers } : {}) }, stored.request, {
 				cwd: attempt?.dispatch.executionContract?.worker.authority.cwd,
@@ -5658,7 +5670,7 @@ export class WorkerDelegationController {
 						changedFiles: executor.ledger.changedFiles,
 						getHostFindings: () => [
 							...this.writeOverlaps.findingsFor(startedRecord.laneId),
-							...(protectedPathWatch?.finishBlockers() ?? []),
+							...(protectedPathWatch?.finishFindings() ?? []),
 						],
 						sealChangedFiles: () => executor.ledger.sealChangedFiles(),
 						getUsage: () => executor.ledger.getUsage(),
@@ -5886,8 +5898,9 @@ export class WorkerDelegationController {
 				const hostFindings = [
 					...(laneFinding ? [laneFinding] : []),
 					...this.writeOverlaps.findingsFor(startedRecord.laneId),
-					...(protectedPathWatch?.finishBlockers() ?? []),
+					...(protectedPathWatch?.finishFindings() ?? []),
 				];
+				const boundedFindings = boundHostFindings(hostFindings);
 				const reviewedOutcome: WorkerRunOutcome =
 					hostFindings.length === 0
 						? reportReviewedOutcome
@@ -5901,15 +5914,19 @@ export class WorkerDelegationController {
 												outcome: "ask-user" as const,
 												gate: "worker_host_findings",
 												reasonCode: "worker_host_findings",
-												message: boundedText(hostFindings.join("; "), MAX_WORKER_CLAIM_BLOCKER_CHARS),
+												message: boundedText(
+													hostFindings.map(hostFindingBlockerLine).join("; "),
+													MAX_WORKER_CLAIM_BLOCKER_CHARS,
+												),
 											},
 										}
 									: {}),
 								claim: {
 									...reportReviewedOutcome.claim,
 									parentReviewRequired: true,
+									hostFindings: boundedFindings,
 									blockers: [
-										...boundHostFindings(hostFindings),
+										...boundedFindings.map(hostFindingBlockerLine),
 										...(reportReviewedOutcome.claim.blockers ?? []),
 									].slice(0, MAX_WORKER_CLAIM_BLOCKERS),
 								},
@@ -5930,11 +5947,7 @@ export class WorkerDelegationController {
 								reasonCode: "independent_verification_required",
 								message: "The owner-authored profile requires an independent verifier before acceptance.",
 							},
-							claim: {
-								...reviewedOutcome.claim,
-								parentReviewRequired: true,
-								blockers: [...(reviewedOutcome.claim.blockers ?? []), INDEPENDENT_VERIFICATION_PENDING_BLOCKER],
-							},
+							claim: withVerificationPending({ ...reviewedOutcome.claim, parentReviewRequired: true }),
 						}
 					: reviewedOutcome;
 				// The host names the generation this claim belongs to; an identity the report carried is

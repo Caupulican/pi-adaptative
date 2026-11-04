@@ -17,8 +17,9 @@
 
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
-import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
-import { boundedText, quotedSpan } from "../util/bounded-line.ts";
+import type { WorkerHostFinding } from "../autonomy/contracts.ts";
+import { hostFinding } from "../autonomy/host-findings.ts";
+import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
 import {
@@ -48,9 +49,6 @@ const EXPECTED_SHARED_REASONS: ReadonlySet<string> = new Set([
 	"checkout_dirty",
 	"dependencies_installed_in_checkout",
 ]);
-
-/** The longest lane claim finding, inside a claim blocker's 1000-character bound. */
-const MAX_LANE_FINDING_CHARS = 960;
 
 /** Lane release refusals a later retry may not meet. */
 const RETRYABLE_LANE_RELEASE_CODES: ReadonlySet<string> = new Set([
@@ -163,7 +161,7 @@ export class WorkerLaneIsolation {
 	 * The claim finding for a worker that worked in a lane and left changes there; `undefined` when `cwd` is not
 	 * a lane or the lane holds nothing. Bounded to fit a claim blocker.
 	 */
-	async claimFinding(cwd: string): Promise<string | undefined> {
+	async claimFinding(cwd: string): Promise<WorkerHostFinding | undefined> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
 		try {
@@ -173,10 +171,10 @@ export class WorkerLaneIsolation {
 				...(state.facts.dirty ? ["uncommitted changes"] : []),
 				...(state.facts.aheadOfMain > 0 ? [`${state.facts.aheadOfMain} commit(s) ahead of main`] : []),
 			].join(" and ");
-			const line = `${HOST_FINDING_PREFIX.lane} this worker worked in its own worktree lane '${state.laneKey}' (${quotedSpan(state.worktreePath)}, branch ${state.branch}), not the shared checkout; its changes are there: ${holds}. Review with worktree_sync git_diff laneKey=${state.laneKey}; integrate with git_add and git_commit (laneKey), sync, then land; release_lane when done.`;
+			const text = `this worker worked in its own worktree lane '${state.laneKey}' (${quotedSpan(state.worktreePath)}, branch ${state.branch}), not the shared checkout; its changes are there: ${holds}. Review with worktree_sync git_diff laneKey=${state.laneKey}; integrate with git_add and git_commit (laneKey), sync, then land; release_lane when done.`;
 			// Never cut inside the quoted lane key or the quoted lane path; the kept tail starts at a path separator when one
 			// is in reach.
-			return boundedText(line, MAX_LANE_FINDING_CHARS);
+			return hostFinding("lane", text);
 		} catch (error) {
 			this.deps.warn(`Worker lane report failed: ${error instanceof Error ? error.message : String(error)}`);
 			return undefined;

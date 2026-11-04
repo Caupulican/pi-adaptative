@@ -1,6 +1,7 @@
 import type { Finding, WorkerClaim } from "../autonomy/contracts.ts";
 import { normalizeEvidenceFinding } from "../autonomy/evidence-finding-projection.ts";
-import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
+import { type CommsErrRecord, commsErr, renderCommsErrView, renderCommsStateLine } from "../comms/comms-records.ts";
 import type { WorkerClaimSnapshotPayload } from "../delegation/session-worker-claim.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import {
@@ -13,10 +14,11 @@ import {
 	type WorkerHostVerdictView,
 	workerDispositionGuidance,
 	workerHostVerdictView,
+	workerLaneStateCodes,
 } from "../delegation/worker-disposition.ts";
-import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "../delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "../delegation/worker-terminal-output-artifact.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import {
 	MAX_EVIDENCE_FINDING_ID_CHARS,
 	MAX_EVIDENCE_FINDINGS,
@@ -63,9 +65,6 @@ export function projectClaimFindings(findings: readonly Finding[] | undefined): 
 	return projected;
 }
 
-export const WORKER_QUEUED_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: A queued worker is admitted, durable, and nonterminal. It is not a stall or harness failure. The host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear (the waiting line names which one and since when), or when the foreground turn ends if the worker and the foreground share a local model. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
-
 export const DELEGATE_STATUS_ACTIONS = ["status", "review"] as const;
 
 export type DelegateStatusAction = (typeof DELEGATE_STATUS_ACTIONS)[number];
@@ -92,11 +91,15 @@ export interface DelegateStatusLaneView {
 	recommendedDisposition?: WorkerDispositionAdvice;
 	/** Present only for a queued lane this controller generation has evaluated and parked. */
 	waitReason?: string;
+	/** Host state codes for this lane; the glossary lives in the root prompt. */
+	h?: readonly CommsStateCode[];
 	unreviewed: boolean;
 }
 
 export interface DelegateStatusToolDetails {
 	started: boolean;
+	/** Present when the call was refused: the canonical record of the model-facing `err` view. */
+	err?: CommsErrRecord;
 	action: DelegateStatusAction;
 	kind: "overview" | "lane" | "review" | "error";
 	count?: number;
@@ -166,6 +169,13 @@ function isUnreviewed(claim: WorkerClaim | undefined): boolean {
 
 function isDelegatedWorkerLane(record: LaneRecord): boolean {
 	return record.type === "worker" || record.type === "tmux-worker";
+}
+
+/** The host state codes of one lane: queued, or why and how it ended. A running lane has none. */
+function laneStateCodes(record: LaneRecord, claim: WorkerClaim | undefined): CommsStateCode[] {
+	if (record.status === "queued") return ["QUEUED"];
+	if (!isLaneTerminalStatus(record.status)) return [];
+	return workerLaneStateCodes(record, claim);
 }
 
 function formattedRecordStatus(record: LaneRecord): string {
@@ -298,16 +308,9 @@ function formatRecord(
 			`effective model: ${record.modelRef.slice(0, 256)}; thinking: ${record.thinkingLevel ?? "unknown"}`,
 		);
 	}
-	if (record.status === "queued") {
-		if (record.waitReason) headerLines.push(`waiting: ${record.waitReason.slice(0, 512)}`);
-		headerLines.push(WORKER_QUEUED_CAVEMAN_GUIDANCE);
-	}
-	if (record.reasonCode === "worker_blocked") {
-		headerLines.push(
-			"CAVEMAN MODE - MANDATORY: worker_blocked is a delivered task claim with blockers, not harness failure or lost state. Verify the claim, then continue or replan the parent task.",
-		);
-	}
-	if (record.reasonCode === "completion_error") headerLines.push(WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE);
+	if (record.status === "queued" && record.waitReason) headerLines.push(`waiting: ${record.waitReason.slice(0, 512)}`);
+	const stateLine = renderCommsStateLine(laneStateCodes(record, claim));
+	if (stateLine) headerLines.push(stateLine);
 	const outputArtifact = workerTerminalOutputArtifact(result);
 	if (outputArtifact) {
 		headerLines.push(
@@ -464,6 +467,7 @@ function laneView(
 	claim: WorkerClaim | undefined,
 	disposition: WorkerDispositionAdvice | undefined,
 ): DelegateStatusLaneView {
+	const stateCodes = laneStateCodes(record, claim);
 	return {
 		laneId: record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS),
 		...(record.label ? { label: record.label.slice(0, 256) } : {}),
@@ -478,6 +482,7 @@ function laneView(
 		...(claim?.hostVerdict ? { hostVerdict: workerHostVerdictView(claim.hostVerdict) } : {}),
 		...(disposition ? { recommendedDisposition: disposition } : {}),
 		...(record.status === "queued" && record.waitReason ? { waitReason: record.waitReason.slice(0, 512) } : {}),
+		...(stateCodes.length > 0 ? { h: stateCodes } : {}),
 		unreviewed: isUnreviewed(claim),
 	};
 }
@@ -563,37 +568,71 @@ export function delegateStatusPanelModel(details: DelegateStatusToolDetails): Or
 	};
 }
 
+/**
+ * A refused status or review call: nothing was inspected or acknowledged. A refusal that states the lane's own
+ * state (already reviewed, not flagged, unsupported here) is an operation outcome, not a mistake the failure ledger
+ * should hold against the model; a bad or unknown id is the model's mistake.
+ */
+function statusRefusal(err: CommsErrRecord, details: DelegateStatusToolDetails) {
+	return {
+		content: [{ type: "text" as const, text: renderCommsErrView(err) }],
+		details: { ...details, err },
+		isError: true as const,
+		...(err.c === "E_STATE" ? { errorKind: "operation_outcome" as const } : {}),
+	};
+}
+
 export function executeDelegateStatusAction(
 	action: DelegateStatusAction,
 	input: DelegateStatusInput,
 	deps: DelegateStatusDependencies,
-): { content: Array<{ type: "text"; text: string }>; details: DelegateStatusToolDetails } {
+): {
+	content: Array<{ type: "text"; text: string }>;
+	details: DelegateStatusToolDetails;
+	isError?: true;
+	errorKind?: "operation_outcome";
+} {
 	if (action === "review") {
 		if (!input.laneId?.trim()) {
-			return {
-				content: [{ type: "text", text: "delegate review requires laneId" }],
-				details: { started: false, action, kind: "review", reviewed: false, reason: "missing_lane_id" },
-			};
+			return statusRefusal(commsErr({ c: "E_FIELD", f: "laneId", m: "delegate review requires laneId" }), {
+				started: false,
+				action,
+				kind: "review",
+				reviewed: false,
+				reason: "missing_lane_id",
+			});
 		}
 		if (input.laneId.length > MAX_WORKER_CONTROL_ID_CHARS) {
-			return {
-				content: [{ type: "text", text: "delegate review laneId is invalid" }],
-				details: { started: false, action, kind: "review", reviewed: false, reason: "invalid_lane_id" },
-			};
+			return statusRefusal(
+				commsErr({ c: "E_FIELD", f: "laneId", h: "USE_ID", m: "delegate review laneId is invalid" }),
+				{
+					started: false,
+					action,
+					kind: "review",
+					reviewed: false,
+					reason: "invalid_lane_id",
+				},
+			);
 		}
 		const laneId = input.laneId.trim();
 		if (!deps.acknowledgeWorkerReview) {
-			return {
-				content: [{ type: "text", text: "review acknowledgement is not available in this session" }],
-				details: { started: false, action, kind: "review", reviewed: false, reason: "review_unsupported" },
-			};
+			return statusRefusal(
+				commsErr({ c: "E_STATE", f: "action", m: "review acknowledgement is not available in this session" }),
+				{ started: false, action, kind: "review", reviewed: false, reason: "review_unsupported" },
+			);
 		}
 		const outcome = deps.acknowledgeWorkerReview(laneId);
 		if (!outcome.ok) {
-			return {
-				content: [{ type: "text", text: `review not acknowledged (${laneId}): ${outcome.reason}` }],
-				details: { started: false, action, kind: "review", laneId, reviewed: false, reason: outcome.reason },
-			};
+			return statusRefusal(
+				commsErr({
+					c: outcome.reason === "unknown_worker_claim" ? "E_REF" : "E_STATE",
+					f: "laneId",
+					...(outcome.reason === "unknown_worker_claim" ? { h: "USE_ID" as const } : {}),
+					x: laneId,
+					m: `review not acknowledged: ${outcome.reason}`,
+				}),
+				{ started: false, action, kind: "review", laneId, reviewed: false, reason: outcome.reason },
+			);
 		}
 		return {
 			content: [{ type: "text", text: `reviewed ${laneId} at ${outcome.reviewedAt} — notice cleared` }],
@@ -619,18 +658,22 @@ export function executeDelegateStatusAction(
 
 	if (input.laneId !== undefined) {
 		if (input.laneId.length > MAX_WORKER_CONTROL_ID_CHARS || !input.laneId.trim()) {
-			return {
-				content: [{ type: "text", text: "worker lane id is invalid" }],
-				details: { started: false, action, kind: "error", reason: "invalid_lane_id" },
-			};
+			return statusRefusal(commsErr({ c: "E_FIELD", f: "laneId", h: "USE_ID", m: "worker lane id is invalid" }), {
+				started: false,
+				action,
+				kind: "error",
+				reason: "invalid_lane_id",
+			});
 		}
 		const laneId = input.laneId.trim();
 		const record = records.find((candidate) => candidate.laneId === laneId);
 		if (!record) {
-			return {
-				content: [{ type: "text", text: "unknown_worker_lane" }],
-				details: { started: false, action, kind: "error", reason: "unknown_worker_lane" },
-			};
+			return statusRefusal(commsErr({ c: "E_REF", f: "laneId", h: "USE_ID", x: laneId, m: "unknown_worker_lane" }), {
+				started: false,
+				action,
+				kind: "error",
+				reason: "unknown_worker_lane",
+			});
 		}
 		const claim = terminalSnapshots.get(record)?.claim;
 		const workerResult = terminalSnapshots.get(record)?.result;

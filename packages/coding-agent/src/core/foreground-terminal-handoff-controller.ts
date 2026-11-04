@@ -8,6 +8,7 @@ import {
 	projectBackgroundToolTerminalDelivery,
 	sameBackgroundToolTerminal,
 } from "./background-tool-task-controller.ts";
+import { COMMS_RECORD_VERSION, renderCommsStateLine } from "./comms/comms-records.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import {
 	fenceWorkerClaimValues,
@@ -23,17 +24,18 @@ import {
 	WORKER_DISPOSITION_ADVICE_NOTE,
 	type WorkerDispositionAdvice,
 	workerDispositionGuidance,
+	workerLaneStateCodes,
 } from "./delegation/worker-disposition.ts";
 import {
 	type WorkerTerminalHandoffRecord,
 	workerTerminalGenerationIdentity,
 } from "./delegation/worker-notification-coordinator.ts";
-import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
+import type { CommsStateCode } from "./provider-prompt-contracts.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { boundedUtf8Text } from "./util/bounded-line.ts";
 
@@ -217,6 +219,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		hostVerdict?: WorkerHostVerdict;
 		/** Host advice on the worker's lifecycle; the root decides. */
 		recommendedDisposition?: WorkerDispositionAdvice;
+		/** Host state codes for this lane (see `workerHandoffStateCodes`); the glossary lives in the root prompt. */
+		h?: readonly CommsStateCode[];
 		claim?: {
 			summary?: string;
 			status?: string;
@@ -281,26 +285,17 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			}
 			if (record.hostVerdict) lines.push(`  ${describeWorkerHostVerdict(record.hostVerdict)}`);
 			if (record.recommendedDisposition) lines.push(`  ${describeWorkerDisposition(record.recommendedDisposition)}`);
+			const stateLine = renderCommsStateLine(record.h ?? []);
+			if (stateLine) lines.push(`  ${stateLine}`);
 			return lines;
 		}),
 		...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
-		"CAVEMAN MODE - MANDATORY: this event proves terminal persistence and delivery. Do not report missed completion or lost worker state from these records.",
+		"h DELIVERED",
 		...(wakeParent
 			? workerHandoffGuidanceLines(included)
 			: [
 					"The owning parent is no longer eligible for automatic continuation. Persist this handoff, but do not continue or replan automatically.",
 				]),
-		...(records.some((record) => record.reasonCode === "worker_blocked")
-			? ["worker_blocked is a task claim with blockers, not harness failure."]
-			: []),
-		...(records.some((record) => record.status === "budget_exhausted")
-			? [
-					"CAVEMAN MODE - MANDATORY: budget_exhausted means an admitted limit ended work, not harness failure. Terminal reason is authoritative; never replace it with earlier transcript errors. Read evidence, then replan only within remaining authority.",
-				]
-			: []),
-		...(records.some((record) => record.reasonCode === "completion_error")
-			? [WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE]
-			: []),
 		...(wakeParent
 			? [
 					'Parent woke. Evaluated terminal claim payload above. Use delegate { action: "status", laneId } for deep view if needed.',
@@ -537,6 +532,7 @@ export class ForegroundTerminalHandoffController {
 				...(fanout ? { fanout } : {}),
 				...(claim?.hostVerdict ? { hostVerdict: claim.hostVerdict } : {}),
 				...(recommendedDisposition ? { recommendedDisposition } : {}),
+				h: workerLaneStateCodes(record, claim),
 				...(claim
 					? {
 							claim: {
@@ -570,6 +566,7 @@ export class ForegroundTerminalHandoffController {
 				}),
 				display: true,
 				details: {
+					v: COMMS_RECORD_VERSION,
 					records: included,
 					summary: createBackgroundActivitySummaryContract(
 						"agent",

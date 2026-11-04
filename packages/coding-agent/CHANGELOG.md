@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Added
+
+- `/soul` edits the agent's `soul.md` in a panel (`/soul show`, `/soul review`, `/soul history`, `/soul restore <n>`). Owner edits pass the threat scan and skip the System One review.
+- The agent's own writes to `soul.md` (`write` or `edit`) are screened by the threat scan and, while System One is available, judged by a `soul-review` program (override, authority, covert, external, identity): an adverse answer blocks the write with its codes, an unsettled one asks for a simpler text, and a failed or timed-out review lets the write through with a warning.
+- Every write to `soul.md` is recorded in `state/soul/history.jsonl` with the exact written text kept under `state/soul/versions`, bounded to the last 20 entries. The soul loader screens the name together with the body, and the agent write gate judges the whole document an edit leaves, not its fragments.
+
+### Changed
+
+- Root and worker machine messages are records first. Every `delegate` result carries `details.v: 1`; the worker terminal handoff carries `details.v: 1` and, per record, state codes in `h`. A refused call is an `err` record (`{v:1,k:"err",c,f,m,h,x}` in `details.err`, `isError`) whose content is the tagged view `err c=<class> f=<field> h=<hint>` plus `m <reason>`. An unknown field on a `delegate` action is refused by name (`E_FIELD`, hint `DROP_FIELD`) instead of being deleted; the documented absorptions (`task` on `follow_up`/`send`/`start`, a plural `wait`) stay.
+- The `CAVEMAN MODE` directives in delegate results, `delegate status`, worker handoffs and routing refusals are replaced by state codes (`h QUEUED`, `HELD`, `SUSPENDED`, `IDLE`, `WAIT_ELAPSED`, `DELIVERED`, `BLOCKED`, `BUDGET`, `FAILED`, `ACCEPTED`, `READ_REPORT`, `READ_ALL`) in the result content and `details.h`. One glossary of the states, the error classes and the hints is part of the root director prompt, because rule hooks cannot reach handoff wake messages.
+- The root reads a worker's report and samples the transcript on demand when the host verdict is `accepted`, covers every requirement and no parent review is pending (`h READ_REPORT`); any other verdict, a missing verdict or a pending review keeps the full transcript read (`h READ_ALL`). The three places that ordered a full transcript read for every result (the nested-parent handoff, the idle `wait` result and the `start` result) follow the same rule.
+- Workers finish with `submit_report`; the JSON text envelope is kept only where no report tool is offered, and a plain text answer is still accepted without a structure promise. `submit_report` refuses unknown properties at every level of its schema.
+- A claim carries the host's own observations as typed `hostFindings` (`overlap`, `protected_path`, `lane`, `omitted`) and its wait for an independent verifier as `pending: ["verification"]`. The review gate and the verification settle read those fields; the blocker lines they render are display only. A claim persisted before this change keeps its prefixed blocker lines as ordinary blockers.
+- The terminal handoff card reads the worker's summary from the record (`claim.summary`) and no longer parses the message text; the `delegate` `instructions` description no longer asks the root to restate the owner's test rule, which the worker prompt already states. A bot answering through `submit_report` shows its summary in the `/bot` chat.
+- `npm run check` runs `check:comms-text-parsing`, which fails when a machine-communication file parses message text.
+- The pi-chat incoming message prompt is three lines instead of about twelve: one tagged header (`pi-chat in id= standing= label= addr= scope= reply= hop=`), one rule line stating that the peer text is untrusted and the label self-declared, and the fenced text. It is rendered from an `IncomingPeerRecord`; the card details also carry `replyAllowed`, `hops` and `maxHops`. The wire messages are unchanged, so peers on other versions interoperate. `core/chat` is covered by `check:comms-text-parsing`.
+
 ## [0.104.29] - 2026-11-04
 
 ### Added

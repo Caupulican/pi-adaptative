@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import { formatWallClockCap } from "../autonomy/bounded-completion.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import {
+	COMMS_RECORD_VERSION,
+	type CommsErrRecord,
+	type CommsResultEnvelope,
+	renderCommsErrView,
+	renderCommsStateLine,
+} from "../comms/comms-records.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
 	normalizeWorkerAgentDependencyTaskIds,
@@ -30,7 +37,6 @@ import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { WorkerTaskSessionView } from "../delegation/worker-task-view.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import { laneWorkerRefusalSkipRemedy } from "../model-capability.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -44,14 +50,21 @@ import {
 import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
+import {
+	delegateRejection,
+	delegateStartRejection,
+	isSpecialistStateRefusal,
+	parseSpecialistReleaseHold,
+	type RejectionOverrides,
+} from "./delegate-rejections.ts";
 import {
 	DELEGATE_STATUS_ACTIONS,
 	type DelegateStatusDependencies,
 	type DelegateStatusToolDetails,
 	delegateStatusPanelModel,
 	executeDelegateStatusAction,
-	WORKER_QUEUED_CAVEMAN_GUIDANCE,
 } from "./delegate-status.ts";
 import {
 	emptyOrchestrationCall,
@@ -193,7 +206,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 					description:
-						"Self-contained leaf-worker task; state the owner's test rule: no tests, test files or test runs unless the owner asked.",
+						"Self-contained leaf-worker task. Workers run no tests, test files or test runs unless the task says the owner asked.",
 				}),
 			),
 			agentId: Type.Optional(
@@ -475,7 +488,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
  * ambiguity these actions exist to avoid. Spellings with exactly one reading are absorbed instead
  * (`task` on follow_up/send is the message, `agentId` on status is that agent's latest lane,
  * `message` on interrupt is queued for the paused worker) — see sanitizeExactActionInput and the
- * executor. Every other disallowed field keeps the sanitize-and-proceed contract below.
+ * executor. Every other disallowed field is refused by name (`E_FIELD`), never deleted.
  */
 const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	readonly actions: readonly DelegateAction[];
@@ -509,14 +522,18 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	})),
 ];
 
+/** A refused action input: the reason, the dispatch-level skip code, and the record fields the refusal sets. */
+interface ActionViolation {
+	readonly message: string;
+	readonly skipReason: string;
+	readonly overrides?: RejectionOverrides;
+}
+
 /**
  * Runs against the ORIGINAL input before any deletion or adoption, so a mapped violation can never
  * follow a partial sanitization and the verdict never depends on object-key order.
  */
-function correctExactActionInput(
-	input: DelegateToolInput,
-	action: DelegateAction,
-): { message: string; skipReason: string } | undefined {
+function correctExactActionInput(input: DelegateToolInput, action: DelegateAction): ActionViolation | undefined {
 	for (const entry of EXACT_ACTION_FIELD_CORRECTIONS) {
 		if (!entry.actions.includes(action)) continue;
 		if (Reflect.get(input, entry.field) === undefined) continue;
@@ -524,7 +541,11 @@ function correctExactActionInput(
 			entry.counterpart && Reflect.get(input, entry.counterpart.field) !== undefined
 				? ` ${entry.counterpart.conflict}`
 				: "";
-		return { message: `${entry.correction(action)}${conflict}`, skipReason: "action_field_forbidden" };
+		return {
+			message: `${entry.correction(action)}${conflict}`,
+			skipReason: "action_field_forbidden",
+			overrides: { f: entry.field, h: "DROP_FIELD" },
+		};
 	}
 	return undefined;
 }
@@ -532,7 +553,7 @@ function correctExactActionInput(
 function sanitizeExactActionInput(
 	input: DelegateToolInput,
 	action: DelegateAction,
-): { input: DelegateToolInput; violation?: { message: string; skipReason: string } } {
+): { input: DelegateToolInput; violation?: ActionViolation } {
 	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly string[];
 	const correction = correctExactActionInput(input, action);
 	if (correction) return { input: { ...input }, violation: correction };
@@ -547,127 +568,144 @@ function sanitizeExactActionInput(
 			violation: {
 				message: `delegate ${action} takes one selector: agentId (the agent's latest lane) or laneId, not both. Nothing was inspected or acknowledged.`,
 				skipReason: "action_field_forbidden",
+				overrides: { f: "agentId", h: "DROP_FIELD" },
 			},
 		};
 	}
 	for (const field of Object.keys(exactInput)) {
-		if (Reflect.get(exactInput, field) !== undefined && !allowed.includes(field)) {
-			if ((action === "follow_up" || action === "send") && field === "task") {
-				const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
-				const messageText = typeof exactInput.message === "string" ? exactInput.message.trim() : "";
-				// `task` is the start/profile_create brief on the shared schema; on a message action
-				// it can only be the message. Both fields together is a conflict; drop neither.
-				if (taskText && !messageText) {
-					exactInput.message = exactInput.task;
-					delete exactInput.task;
-					continue;
-				}
-				return {
-					input: exactInput,
-					violation: {
-						message: `delegate ${action} does not accept field task alongside message. Nothing was queued. Both task and message were sent; keep only message.`,
-						skipReason: "action_field_forbidden",
-					},
-				};
+		if (Reflect.get(exactInput, field) === undefined || allowed.includes(field)) continue;
+		if ((action === "follow_up" || action === "send") && field === "task") {
+			const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
+			const messageText = typeof exactInput.message === "string" ? exactInput.message.trim() : "";
+			// `task` is the start/profile_create brief on the shared schema; on a message action
+			// it can only be the message. Both fields together is a conflict; drop neither.
+			if (taskText && !messageText) {
+				exactInput.message = exactInput.task;
+				delete exactInput.task;
+				continue;
 			}
-			if (action === "profile_create" && field === "resourceProfileNames") {
-				return {
-					input: exactInput,
-					violation: {
-						message:
-							"delegate profile_create field resourceProfileNames is forbidden. Profiles may narrow only model, thinkingLevel, path, and toolNames; inherited resources remain host-owned.",
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if (action === "start" && field === "authority") {
-				return {
-					input: exactInput,
-					violation: {
-						message:
-							"CAVEMAN MODE - MANDATORY: delegate start field authority is forbidden. No worker started. Use only optional model, thinkingLevel, path, and toolNames overrides; the host compiles the execution grant.",
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if (action === "start" && field === "task") {
-				const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
-				const instructionsText = typeof exactInput.instructions === "string" ? exactInput.instructions.trim() : "";
-				// `task` is a profile_create field on the shared schema. A start that only
-				// populated it still has the worker brief — use it. Both fields together is a
-				// conflict; do not drop either.
-				if (taskText && !instructionsText) {
-					exactInput.instructions = exactInput.task;
-					delete exactInput.task;
-					continue;
-				}
-				return {
-					input: exactInput,
-					violation: {
-						message:
-							"CAVEMAN MODE - MANDATORY: delegate start field task is forbidden. This is expected API correction, not harness failure. No worker started; nothing was dropped. Retry once now: move the complete task text unchanged into instructions.",
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if (action === "start" && field === "budget") {
-				return {
-					input: exactInput,
-					violation: {
-						message:
-							"CAVEMAN MODE - MANDATORY: delegate start does not accept model-authored budgets. This is expected API correction, not harness failure. No worker started; nothing was dropped. Ceilings come only from host settings or an owner-authored profileId. Retry once now without budget and keep the task unchanged.",
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if (action === "profile_create" && field === "budget") {
-				return {
-					input: exactInput,
-					violation: {
-						message:
-							"delegate profile_create does not accept model-authored budgets; the immutable task profile inherits its owner-authored base ceiling",
-						skipReason: "profile_budget_forbidden",
-					},
-				};
-			}
-			if ((action === "follow_up" || action === "send") && field === "writePaths") {
-				return {
-					input: exactInput,
-					violation: {
-						message: `delegate ${action} cannot change a worker's write scope: a reused worker keeps the scope it was created with. Nothing was queued. Start a new worker with \`writePaths\` for the extra roots.`,
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if (field === "laneId") {
-				return {
-					input: exactInput,
-					violation: {
-						message: `delegate ${action} field laneId is forbidden; laneId is only for status or review. Omit it when starting a fresh worker, then use the returned agentId to reuse that worker`,
-						skipReason: "action_field_forbidden",
-					},
-				};
-			}
-			if ((action === "send" || action === "follow_up") && field === "replyToMessageId") {
-				return {
-					input: exactInput,
-					violation: {
-						message: `delegate ${action} cannot answer a request; use reply`,
-						skipReason: "reply_action_required",
-					},
-				};
-			}
-			if (action === "reply" && (field === "agentId" || field === "threadId" || field === "expectReply")) {
-				return {
-					input: exactInput,
-					violation: {
-						message: `delegate reply field ${field} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,
-						skipReason: "reply_target_forbidden",
-					},
-				};
-			}
-			Reflect.deleteProperty(exactInput, field);
+			return {
+				input: exactInput,
+				violation: {
+					message: `delegate ${action} does not accept field task alongside message. Nothing was queued. Both task and message were sent; keep only message.`,
+					skipReason: "action_field_forbidden",
+					overrides: { f: "task", h: "DROP_FIELD" },
+				},
+			};
 		}
+		if (action === "profile_create" && field === "resourceProfileNames") {
+			return {
+				input: exactInput,
+				violation: {
+					message:
+						"delegate profile_create field resourceProfileNames is forbidden. Profiles may narrow only model, thinkingLevel, path, and toolNames; inherited resources remain host-owned.",
+					skipReason: "action_field_forbidden",
+					overrides: { c: "E_AUTH", f: field, h: "DROP_FIELD" },
+				},
+			};
+		}
+		if (action === "start" && field === "authority") {
+			return {
+				input: exactInput,
+				violation: {
+					message:
+						"delegate start field authority is not accepted; no worker started. Use only the optional model, thinkingLevel, path, writePaths and toolNames overrides: the host compiles the execution grant.",
+					skipReason: "action_field_forbidden",
+					overrides: { c: "E_AUTH", f: field, h: "DROP_FIELD" },
+				},
+			};
+		}
+		if (action === "start" && field === "task") {
+			const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
+			const instructionsText = typeof exactInput.instructions === "string" ? exactInput.instructions.trim() : "";
+			// `task` is a profile_create field on the shared schema. A start that only
+			// populated it still has the worker brief — use it. Both fields together is a
+			// conflict; do not drop either.
+			if (taskText && !instructionsText) {
+				exactInput.instructions = exactInput.task;
+				delete exactInput.task;
+				continue;
+			}
+			return {
+				input: exactInput,
+				violation: {
+					message:
+						"delegate start field task is not a start field; no worker started and nothing was dropped. The task text belongs in instructions.",
+					skipReason: "action_field_forbidden",
+					overrides: { f: field, h: "MOVE_FIELD", x: "instructions" },
+				},
+			};
+		}
+		if (action === "start" && field === "budget") {
+			return {
+				input: exactInput,
+				violation: {
+					message:
+						"delegate start does not accept model-authored budgets; no worker started. Ceilings come only from host settings or an owner-authored profileId.",
+					skipReason: "action_field_forbidden",
+					overrides: { c: "E_AUTH", f: field, h: "DROP_FIELD" },
+				},
+			};
+		}
+		if (action === "profile_create" && field === "budget") {
+			return {
+				input: exactInput,
+				violation: {
+					message:
+						"delegate profile_create does not accept model-authored budgets; the immutable task profile inherits its owner-authored base ceiling",
+					skipReason: "profile_budget_forbidden",
+				},
+			};
+		}
+		if ((action === "follow_up" || action === "send") && field === "writePaths") {
+			return {
+				input: exactInput,
+				violation: {
+					message: `delegate ${action} cannot change a worker's write scope: a reused worker keeps the scope it was created with. Nothing was queued. Start a new worker with \`writePaths\` for the extra roots.`,
+					skipReason: "action_field_forbidden",
+					overrides: { c: "E_AUTH", f: field, h: "DROP_FIELD" },
+				},
+			};
+		}
+		if (field === "laneId") {
+			return {
+				input: exactInput,
+				violation: {
+					message: `delegate ${action} field laneId is forbidden; laneId is only for status or review. Omit it when starting a fresh worker, then use the returned agentId to reuse that worker`,
+					skipReason: "action_field_forbidden",
+					overrides: { f: field, h: "DROP_FIELD" },
+				},
+			};
+		}
+		if ((action === "send" || action === "follow_up") && field === "replyToMessageId") {
+			return {
+				input: exactInput,
+				violation: {
+					message: `delegate ${action} cannot answer a request; use reply`,
+					skipReason: "reply_action_required",
+				},
+			};
+		}
+		if (action === "reply" && (field === "agentId" || field === "threadId" || field === "expectReply")) {
+			return {
+				input: exactInput,
+				violation: {
+					message: `delegate reply field ${field} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,
+					skipReason: "reply_target_forbidden",
+					overrides: { f: field },
+				},
+			};
+		}
+		// Every other field outside the action's list is refused by name: deleting it and proceeding ran a call the model
+		// did not write, and the reply never said which of its fields the host ignored.
+		return {
+			input: exactInput,
+			violation: {
+				message: `delegate ${action} does not accept field ${field}; nothing ran.`,
+				skipReason: "action_field_forbidden",
+				overrides: { f: field, h: "DROP_FIELD" },
+			},
+		};
 	}
 	return { input: exactInput };
 }
@@ -750,7 +788,45 @@ export type DelegateToolDetails = (
 	| DelegateStatusToolDetails
 	| DelegateProfileToolDetails
 ) &
-	DelegateDispatchDetailProjection;
+	DelegateDispatchDetailProjection &
+	CommsResultEnvelope;
+
+interface DelegateToolResult {
+	content: Array<{ type: "text"; text: string }>;
+	details: DelegateToolDetails;
+	isError?: boolean;
+	errorKind?: "operation_outcome";
+}
+
+/** Every `delegate` result carries the machine-record version in `details`, whichever action produced it. */
+type DelegateExecute = (
+	toolCallId: string,
+	input: DelegateToolInput,
+	signal: AbortSignal | undefined,
+) => Promise<DelegateToolResult>;
+
+function stampCommsVersion(run: DelegateExecute): DelegateExecute {
+	return async (toolCallId, input, signal) => {
+		const result = await run(toolCallId, input, signal);
+		return { ...result, details: { ...result.details, v: COMMS_RECORD_VERSION } };
+	};
+}
+
+/** A refusal: nothing ran. The record is the canonical fact; the content is its tagged model view. */
+function refusalResult(err: CommsErrRecord, details: DelegateToolDetails, errorKind?: "operation_outcome") {
+	return {
+		content: [{ type: "text" as const, text: renderCommsErrView(err) }],
+		details: { ...details, err },
+		isError: true as const,
+		...(errorKind ? { errorKind } : {}),
+	};
+}
+
+/** The content line of a result's host state codes, appended after the result's own text. */
+function withStateLine(text: string, codes: readonly CommsStateCode[]): string {
+	const line = renderCommsStateLine(codes);
+	return line ? `${text}\n${line}` : text;
+}
 
 export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentId: string };
 
@@ -849,23 +925,11 @@ const DELEGATE_DESCRIPTION_CORE =
 // result surfaces later through the event-driven terminal handoff and a bounded transcript/status read. The
 // synchronous wiring awaits `runWorkerDelegation` and answers in the same call, so it omits this suffix.
 const ASYNC_DELEGATE_DESCRIPTION_SUFFIX =
-	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn, read bounded transcript pages after the handoff, and use wait/wait_many only when this turn cannot proceed without the result.";
+	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn, read the report after the handoff (delegate status; transcript pages on demand, or in full when the handoff says h READ_ALL), and use wait/wait_many only when this turn cannot proceed without the result.";
 
 // Fresh-start authority clause; an owner model pin policy replaces it (see createDelegateToolDefinition).
 const DELEGATE_AUTHORITY_CLAUSE =
 	"Fresh start: omit overrides to inherit; allowed overrides are model, thinkingLevel, path, writePaths, toolNames, with existing ids only.";
-
-const CAVEMAN_WAIT_TIMEOUT_DIRECTIVE =
-	"CAVEMAN MODE - MANDATORY: A timeout is not a failure. Idle means the worker finished and can be reused, so read its transcript. Active means you continue or wait again. The inbox never reports completion. Never claim a stall, lost state, or missed completion from this result.";
-
-const CAVEMAN_WORKER_FOREGROUND_HELD_DIRECTIVE =
-	"CAVEMAN MODE - MANDATORY: A worker held for the foreground is admitted and healthy, not stalled or lost. It starts when this turn ends. Do not wait on it again; continue other work or end your turn.";
-
-const CAVEMAN_WORKER_SUSPENDED_DIRECTIVE =
-	"CAVEMAN MODE - MANDATORY: A suspended worker is in a durable nonterminal state. It is not a missed completion or a harness failure. Never report it as terminal. Do not resume, cancel, or retry it: the host resumes a transient retry automatically and the terminal handoff notifies the parent.";
-
-const CAVEMAN_WORKER_IDLE_DIRECTIVE =
-	"CAVEMAN MODE - MANDATORY: Idle means the task is terminal and the worker is reusable. Idle is an activity state, not the task outcome. Completion claims are durable in status and the transcript, not in the inbox. Read all transcript pages or the root status before judging. Never claim missing completion, lost state, or harness failure from idle.";
 
 function delegatePanelModel(details: DelegateToolDetails | undefined): OrchestrationPanelModel {
 	if (!details) {
@@ -1118,7 +1182,7 @@ function boundedWaitTimeoutProjection(observes: string, nextAction: string) {
 		workerStallProven: false,
 		reasonCode: "bounded_wait_elapsed" as const,
 		nextAction,
-		cavemanDirective: CAVEMAN_WAIT_TIMEOUT_DIRECTIVE,
+		h: ["WAIT_ELAPSED"] as readonly CommsStateCode[],
 	};
 }
 
@@ -1169,7 +1233,7 @@ function workerWaitProjection(
 			reasonCode: "worker_held_for_foreground" as const,
 			nextAction:
 				"This worker shares the local model with this turn, so it starts by itself when the turn ends; waiting now cannot help. Continue other work, or end your turn: its terminal handoff wakes you. Do not wait again.",
-			cavemanDirective: CAVEMAN_WORKER_FOREGROUND_HELD_DIRECTIVE,
+			h: ["HELD"] as readonly CommsStateCode[],
 		};
 	}
 	if (timedOut) return workerWaitTimeoutProjection(statuses);
@@ -1182,8 +1246,8 @@ function workerWaitProjection(
 			workerHarnessFailureProven: false,
 			reasonCode: "worker_idle" as const,
 			nextAction:
-				"Read every bounded transcript page through nextCursor, or as session root call delegate status, before judging the terminal claim. Inbox actions observe explicit replies only.",
-			cavemanDirective: CAVEMAN_WORKER_IDLE_DIRECTIVE,
+				"Read the terminal report with delegate status (session root): each lane names its reading mode (h READ_REPORT or READ_ALL) before you judge the claim. Inbox actions observe explicit replies only.",
+			h: ["IDLE"] as readonly CommsStateCode[],
 		};
 	}
 	if (steered) return waitSteeredProjection("worker_activity", "worker terminals");
@@ -1196,7 +1260,7 @@ function workerWaitProjection(
 		reasonCode: "worker_suspended" as const,
 		nextAction:
 			"Continue independent work; host-owned transient retry resumes automatically and the terminal handoff notifies the parent.",
-		cavemanDirective: CAVEMAN_WORKER_SUSPENDED_DIRECTIVE,
+		h: ["SUSPENDED"] as readonly CommsStateCode[],
 	};
 }
 
@@ -1215,7 +1279,7 @@ function workerTaskSessionJson(
 						queueState: "admitted_nonterminal" as const,
 						workerStallProven: false,
 						workerHarnessFailureProven: false,
-						cavemanDirective: WORKER_QUEUED_CAVEMAN_GUIDANCE,
+						h: ["QUEUED"] as readonly CommsStateCode[],
 					}
 				: {}),
 			tasks,
@@ -1293,99 +1357,6 @@ function buildDelegateStartRequest(input: {
 	};
 }
 
-interface SpecialistReleaseHold {
-	readonly retained: boolean;
-	readonly agentId: string;
-	readonly cause: string;
-}
-
-/** The failed release that holds a specialist, read back from its `specialistReleaseSkipReason`. */
-function parseSpecialistReleaseHold(reason: string | undefined): SpecialistReleaseHold | undefined {
-	const kind = reason?.match(/^worker_specialist_release_(retained|abandoned):/)?.[1];
-	if (reason === undefined || kind === undefined) return undefined;
-	const rest = reason.slice(`worker_specialist_release_${kind}:`.length);
-	const separator = rest.indexOf(":");
-	return {
-		retained: kind === "retained",
-		agentId: separator < 0 ? rest : rest.slice(0, separator),
-		cause: separator < 0 ? "" : rest.slice(separator + 1),
-	};
-}
-
-/**
- * The specialist's own state refused the start: it is still running, or a failed release holds it. The call was right
- * and the host decided it, so the refusal is an operation outcome the model reads verbatim -- not a failure record,
- * whose execution-error classifier would read a release cause embedded in the text (an ETIMEDOUT, an ENOENT) as the
- * call's own error, cut the text to its bounded diagnostic and attach that error's guidance.
- */
-function isSpecialistStateRefusal(reason: string | undefined): boolean {
-	return reason === "worker_specialist_busy" || parseSpecialistReleaseHold(reason) !== undefined;
-}
-
-/** A start refused because a failed release holds the specialist: the fact, the cause, then the next action. */
-function specialistReleaseHoldText(hold: SpecialistReleaseHold): string {
-	const { agentId } = hold;
-	const cause = hold.cause ? ` Cause: ${hold.cause}.` : "";
-	return hold.retained
-		? `delegate not started: ${agentId} finished its run but its resource release failed; the host retries it.${cause} Next: follow_up to ${agentId} (queued until released) or parallelWork { independentOf: [${agentId}], justification }.`
-		: `delegate not started: ${agentId} finished its run but its resource release failed; nothing retries it this session.${cause} Next: parallelWork { independentOf: [${agentId}], justification } if independent, or report it to the user.`;
-}
-
-function delegateStartSkipText(reason: string): string {
-	if (reason.startsWith("worker_duplicate_of:")) {
-		const laneId = reason.slice("worker_duplicate_of:".length);
-		return `delegate not started: ${laneId} is already running these same instructions; no second copy was started. Use wait, status, or transcript on ${laneId}. To run the task twice on purpose, change the instructions to say what differs (scope, model, angle).`;
-	}
-	if (reason === "worker_model_pins_invalid") {
-		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_model_pins_invalid is an owner configuration error. Fresh workers are blocked. Do not retry, remove model overrides, or select a fallback; report that the user must repair workerDelegation.modelPins.";
-	}
-	if (reason.includes("worker_model_pin_unavailable:")) {
-		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the owner-pinned model cannot be used. Fail closed. Do not retry another model, omit fields, or fall back; report the exact role and let the user repair availability or configuration.`;
-	}
-	if (reason.includes("worker_model_pin_conflict:")) {
-		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the explicit model/thinking request conflicts with an owner pin. No different model was started. Do not silently omit or replace the requested binding; report the exact role so the user can choose whether to change the request or owner policy.`;
-	}
-	if (reason.startsWith("worker_model_not_allowed:")) {
-		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the requested model is outside the owner's model policy or favorite pool. No different model was started. Do not omit the model or pick another silently; report the exact model so the user can pin it as a favorite, allow its provider, or choose a pooled model.`;
-	}
-	if (reason === "orchestration_profile_not_found") {
-		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_profile_not_found is expected routing policy, not harness failure. Retry once with profileId omitted to use adaptive authority, or use an exact listed profile; never invent profile IDs.";
-	}
-	// The reason names each refusal cause, for example model_not_found or model_account_unlisted.
-	if (reason.startsWith("orchestration_model_unavailable:")) {
-		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} is a routing refusal, not a harness failure. Retry once with model omitted to inherit, or select an exact listed model that has configured credentials, is available and supports the requested thinkingLevel. A thinking_level_unsupported(levels) refusal lists the levels that model accepts: retry with one of them or omit thinkingLevel. Never invent model IDs.`;
-	}
-	if (reason.startsWith("orchestration_profile_model_unavailable:")) {
-		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} is a routing refusal, not a harness failure. Retry once with profileId omitted to use adaptive authority, or select a listed preset whose model has configured credentials and is available.`;
-	}
-	if (reason === "worker_agent_session_limit_reached") {
-		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_agent_session_limit_reached is expected policy capacity, not harness instability. Reuse an idle worker returned by delegate list, or return the constraint to the user.";
-	}
-	if (reason === "worker_specialist_busy") {
-		return "delegate not started: a compatible worker is still running this kind of work, and a second copy would duplicate it. Wait for its completion event or use status on it. If this task is independent of the running work, retry with parallelWork { independentOf: [<running worker id>], justification } to start a separate worker.";
-	}
-	const releaseHold = parseSpecialistReleaseHold(reason);
-	if (releaseHold) return specialistReleaseHoldText(releaseHold);
-	if (reason.startsWith("worker_specialist_choice_required")) {
-		const candidates = reason.slice("worker_specialist_choice_required".length).replace(/^:/, "");
-		return `delegate not started: more than one idle worker fits this task${candidates ? ` (${candidates.split(",").join(", ")})` : ""}. You are the orchestrator: choose the recipient. Retry with agentId set to one of them (delegate list shows each one's recent work), or pass parallelWork { independentOf, justification } to start a separate worker.`;
-	}
-	if (reason.startsWith("orchestration_tool_unavailable:")) {
-		// Measured live: an orchestrator asked a worker for tools outside the live parent surface,
-		// lost the turn and armed the failure ledger. A parent with bash lends grep/find/ls/repo_read
-		// natively before this branch; remaining misses still name the inheritance rule.
-		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call; a session with bash also lends grep, find, ls and repo_read); omit toolNames to inherit every compatible tool.`;
-	}
-	if (reason.startsWith("orchestration_tool_capability_missing:")) {
-		return `delegate skipped: ${reason}. The compiled grant has no capability for that tool: readOnly keeps reads (read, grep, find, ls, repo_read, skill, memory query) and bash limited to commands that edit nothing, and a base profile's capability ceiling can exclude more. Drop the tool from toolNames, drop readOnly, or choose a base profile that grants it.`;
-	}
-	const capabilityRemedy = laneWorkerRefusalSkipRemedy(reason);
-	if (capabilityRemedy) {
-		return `delegate not started: ${reason}. This worker model cannot carry complex agentic work, so no worker was started and nothing ran. ${capabilityRemedy} Report this to the user if you cannot choose another model yourself.`;
-	}
-	return `delegate skipped: ${reason}`;
-}
-
 /**
  * `delegate start` with `slices` or `race`: one ordinary start per member under one fan-out group. Every
  * member passes the same admission as any start (grant, fleet caps, verifier headroom, budgets, the
@@ -1404,11 +1375,8 @@ async function executeDelegateFanoutStart(args: {
 	signal: AbortSignal | undefined;
 }): Promise<{ content: Array<{ type: "text"; text: string }>; details: DelegateToolDetails; isError?: true }> {
 	const { deps, caller, input } = args;
-	const fail = (text: string, skipReason: string) => ({
-		content: [{ type: "text" as const, text }],
-		details: { started: false, action: "start" as const, skipReason },
-		isError: true as const,
-	});
+	const fail = (text: string, skipReason: string) =>
+		refusalResult(delegateRejection(skipReason, text), { started: false, action: "start" as const, skipReason });
 	if (caller.kind !== "session_root") {
 		return fail("delegate slices/race are available only to the session root", "root_only_action");
 	}
@@ -1494,17 +1462,16 @@ async function executeDelegateFanoutStart(args: {
 	});
 	if (started.length === 0) {
 		const firstReason = refused[0]?.reason ?? "not_started";
-		return {
-			content: [{ type: "text", text: delegateStartSkipText(firstReason) }],
-			details: {
-				started: false,
-				action: "start",
-				skipReason: firstReason,
-				fanout: { groupId, kind: plan.kind, members },
-			},
-			isError: true,
-		};
+		return refusalResult(delegateStartRejection(firstReason), {
+			started: false,
+			action: "start",
+			skipReason: firstReason,
+			fanout: { groupId, kind: plan.kind, members },
+		});
 	}
+	const queuedLine = started.some(({ record }) => record.status === "queued")
+		? renderCommsStateLine(["QUEUED"])
+		: undefined;
 	const noun = plan.kind === "partition" ? "slices" : "candidates";
 	const lines = [
 		`fan-out ${groupId} (${plan.kind}, ${plan.members.length} ${noun}): ${started.length} started`,
@@ -1521,7 +1488,7 @@ async function executeDelegateFanoutStart(args: {
 		plan.kind === "partition"
 			? "Coverage: delegate status lists the group and every terminal handoff carries its line; a slice with no accepted result is a finding, never a block on other work."
 			: "Race: the first accepted result wins and the host cancels the other candidates; each terminal handoff carries the outcome.",
-		...(started.some(({ record }) => record.status === "queued") ? [WORKER_QUEUED_CAVEMAN_GUIDANCE] : []),
+		...(queuedLine ? [queuedLine] : []),
 	];
 	const first = started[0]?.record;
 	return {
@@ -1531,6 +1498,7 @@ async function executeDelegateFanoutStart(args: {
 			action: "start",
 			agentIds: started.map(({ record }) => record.agentId ?? record.laneId),
 			...(first ? { laneId: first.laneId, status: first.status } : {}),
+			...(queuedLine ? { h: ["QUEUED" as const] } : {}),
 			fanout: { groupId, kind: plan.kind, members },
 		},
 	};
@@ -1582,22 +1550,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				expanded,
 			});
 		},
-		async execute(
-			toolCallId,
-			originalInput: DelegateToolInput,
-			signal,
-		): Promise<{
-			content: Array<{ type: "text"; text: string }>;
-			details: DelegateToolDetails;
-			isError?: boolean;
-			errorKind?: "operation_outcome";
-		}> {
+		execute: stampCommsVersion(async (toolCallId, originalInput, signal) => {
 			const requestedAction = originalInput.action ?? "start";
-			const invalid = (message: string, actionDetails: DelegateToolDetails) => ({
-				content: [{ type: "text" as const, text: message }],
-				details: actionDetails,
-				isError: true as const,
-			});
+			// Every refusal is an `err` record: the class, field and hint come from the skip reason's table entry.
+			const invalid = (message: string, actionDetails: DelegateToolDetails, overrides?: RejectionOverrides) =>
+				refusalResult(delegateRejection(actionDetails.skipReason, message, overrides), actionDetails);
 			if (!isDelegateAction(requestedAction)) {
 				return invalid(`delegate action is invalid: ${requestedAction}`, {
 					started: false,
@@ -1626,11 +1583,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				pluralWait && originalInput.mode === undefined ? { ...originalInput, mode: "all" as const } : originalInput;
 			const { input, violation } = sanitizeExactActionInput(normalizedInput, action);
 			if (violation) {
-				return invalid(violation.message, {
-					started: false,
-					action,
-					skipReason: violation.skipReason,
-				});
+				return invalid(
+					violation.message,
+					{ started: false, action, skipReason: violation.skipReason },
+					violation.overrides,
+				);
 			}
 			let agentIds: string[] | undefined;
 			if (input.parallelWork !== undefined) {
@@ -2419,10 +2376,13 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							content: [
 								{
 									type: "text" as const,
-									text: `CAVEMAN MODE - MANDATORY: follow_up ${outcome.messageId} ${state} for ${agentId}${lane}${reason ? `; reason ${reason}` : ""}.${idleNote} An idle worker or an older task report does not prove this message completed. Worker completion uses delegate wait/wait_many or the owning parent terminal handoff. Never use inbox_wait for completion; inbox_wait observes explicit replies only.`,
+									text: withStateLine(
+										`follow_up ${outcome.messageId} ${state} for ${agentId}${lane}${reason ? `; reason ${reason}` : ""}.${idleNote}`,
+										["ACCEPTED"],
+									),
 								},
 							],
-							details,
+							details: { ...details, h: ["ACCEPTED"] },
 						};
 					}
 					if (action === "interrupt") {
@@ -2627,10 +2587,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							// Options that match the worker, refused by its own state (still running, or held by a failed
 							// release), are not different work: the refusal says what it waits for.
 							if (validated.skipReason && isSpecialistStateRefusal(validated.skipReason)) {
-								return {
-									...invalid(delegateStartSkipText(validated.skipReason), refusedDetails),
-									errorKind: "operation_outcome" as const,
-								};
+								return refusalResult(
+									delegateStartRejection(validated.skipReason),
+									refusedDetails,
+									"operation_outcome",
+								);
 							}
 							return invalid(
 								`delegate start could not apply those options to worker ${reuseAgentId}: ${validated.skipReason ?? "not_started"}. They describe different work; start without agentId to run it as its own worker.${
@@ -2639,6 +2600,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 										: ""
 								}`,
 								refusedDetails,
+								{ c: "E_STATE", f: "agentId", h: "RETRY_OMIT" },
 							);
 						}
 						const validatedRecord = "record" in validated ? validated.record : undefined;
@@ -2647,12 +2609,16 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							content: [
 								{
 									type: "text" as const,
-									text: `worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"}${validatedWaiting ? `; ${validatedWaiting}` : ""})${validatedRecord?.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+									text: withStateLine(
+										`worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"}${validatedWaiting ? `; ${validatedWaiting}` : ""})`,
+										validatedRecord?.status === "queued" ? ["QUEUED"] : [],
+									),
 								},
 							],
 							details: {
 								started: true,
 								action,
+								...(validatedRecord?.status === "queued" ? { h: ["QUEUED" as const] } : {}),
 								agentId: validatedRecord?.agentId ?? reuseAgentId,
 								laneId: validatedRecord?.laneId,
 								status: validatedRecord?.status,
@@ -2677,19 +2643,15 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						const skipReason = followed.skipReason ?? "not_started";
 						const followedReleaseHold = parseSpecialistReleaseHold(skipReason);
 						if (followedReleaseHold) {
-							return {
-								...invalid(specialistReleaseHoldText(followedReleaseHold), {
-									started: false,
-									action,
-									agentId: reuseAgentId,
-									skipReason,
-								}),
-								errorKind: "operation_outcome" as const,
-							};
+							return refusalResult(
+								delegateStartRejection(skipReason),
+								{ started: false, action, agentId: reuseAgentId, skipReason },
+								"operation_outcome",
+							);
 						}
 						return invalid(
 							skipReason === "unknown_agent"
-								? `CAVEMAN MODE - MANDATORY: unknown_agent means no reusable worker was found for ${reuseAgentId} in this caller's control scope. This is expected API correction, not lost worker state or harness failure. No worker started; nothing was dropped. If this is fresh work, no worker identity exists yet. Retry once now without agentId; keep instructions unchanged and put any intended overrides/profileId only on that fresh start. If this is reuse, use an exact returned agentId; never invent one.`
+								? `unknown_agent: no reusable worker named ${reuseAgentId} in this caller's control scope; nothing started or dropped. For fresh work omit agentId and keep instructions unchanged (put any overrides or profileId on that fresh start); for reuse use an exact returned agentId.`
 								: `delegate start could not reuse worker ${reuseAgentId}: ${skipReason}`,
 							{
 								started: false,
@@ -2697,6 +2659,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId: reuseAgentId,
 								skipReason: followed.skipReason ?? "reuse_failed",
 							},
+							skipReason === "unknown_agent"
+								? { c: "E_REF", f: "agentId", h: "USE_ID", x: reuseAgentId }
+								: undefined,
 						);
 					}
 					const queued =
@@ -2712,12 +2677,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState}${effectiveBinding}${followedWaiting ? `; ${followedWaiting}` : ""})${followed.record?.status === "queued" || followed.record === undefined ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: withStateLine(
+									`worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState}${effectiveBinding}${followedWaiting ? `; ${followedWaiting}` : ""})`,
+									followed.record?.status === "queued" || followed.record === undefined ? ["QUEUED"] : [],
+								),
 							},
 						],
 						details: {
 							started: true,
 							action,
+							...(followed.record?.status === "queued" || followed.record === undefined
+								? { h: ["QUEUED" as const] }
+								: {}),
 							agentId: reuseAgentId,
 							laneId: followed.record?.laneId,
 							status: followed.record?.status,
@@ -2798,18 +2769,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					);
 					const started = await deps.startWorkerDelegation(request, signal);
 					if (!started.started) {
-						return {
-							content: [{ type: "text" as const, text: delegateStartSkipText(started.skipReason) }],
-							details: {
-								started: false,
-								skipReason: started.skipReason,
-								...(profileId ? { profileId } : {}),
-							},
-							isError: true,
-							...(isSpecialistStateRefusal(started.skipReason)
-								? { errorKind: "operation_outcome" as const }
-								: {}),
-						};
+						return refusalResult(
+							delegateStartRejection(started.skipReason),
+							{ started: false, skipReason: started.skipReason, ...(profileId ? { profileId } : {}) },
+							isSpecialistStateRefusal(started.skipReason) ? "operation_outcome" : undefined,
+						);
 					}
 					const startedAgentId = started.record.agentId ?? started.record.laneId;
 					const passedOver = (
@@ -2830,11 +2794,15 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds)}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${idleHint ? `\n${idleHint}` : ""}${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: withStateLine(
+									`${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds)}; the owning parent will receive its terminal handoff, then read the report with delegate status (transcript pages on demand)${idleHint ? `\n${idleHint}` : ""}`,
+									started.record.status === "queued" ? ["QUEUED"] : [],
+								),
 							},
 						],
 						details: {
 							started: true,
+							...(started.record.status === "queued" ? { h: ["QUEUED" as const] } : {}),
 							...((started.record.profileId ?? profileId)
 								? { profileId: started.record.profileId ?? profileId }
 								: {}),
@@ -2853,16 +2821,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				const run = await deps.runWorkerDelegation(request);
 				if (!run.started) {
 					const reason = run.skipReason ?? "unknown";
-					return {
-						content: [{ type: "text" as const, text: delegateStartSkipText(reason) }],
-						details: {
-							started: false,
-							skipReason: reason,
-							...(profileId ? { profileId } : {}),
-						},
-						isError: true,
-						...(isSpecialistStateRefusal(reason) ? { errorKind: "operation_outcome" as const } : {}),
-					};
+					return refusalResult(
+						delegateStartRejection(reason),
+						{ started: false, skipReason: reason, ...(profileId ? { profileId } : {}) },
+						isSpecialistStateRefusal(reason) ? "operation_outcome" : undefined,
+					);
 				}
 
 				const outcome = run.outcome;
@@ -2922,6 +2885,6 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					skipReason: "worker_agent_control_error",
 				});
 			}
-		},
+		}),
 	};
 }

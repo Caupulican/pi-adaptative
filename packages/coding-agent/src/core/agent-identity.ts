@@ -57,17 +57,21 @@ function screenSoulText(text: string): { cleaned: string; findings: string[] } {
 }
 
 /**
- * Renders a soul body for the prompt. The file is agent-writable, so it is screened like any context file
- * before it becomes standing instructions: a threat finding replaces it with a notice naming the findings.
- * The soul has no size limit: it is expected to grow.
+ * The identity a `soul.md` projects into the prompt. The file is agent-writable and both the name (the prompt's first
+ * line) and the body become standing text, so the whole document is screened once, before either is read: invisible
+ * unicode is removed, and a threat finding anywhere in it replaces the whole identity (default name included) with a
+ * notice naming the findings. The soul has no size limit: it is expected to grow.
  */
-export function renderSoul(body: string, file: string): string | undefined {
-	const { cleaned, findings } = screenSoulText(body);
-	if (cleaned.length === 0) return undefined;
+export function projectAgentIdentity(markdown: string, file: string): AgentIdentity {
+	const { cleaned, findings } = screenSoulText(markdown);
 	if (findings.length > 0) {
-		return `[soul.md was not loaded: it matched the threat scan (${findings.join(", ")}). Ask the owner to review ${file}.]`;
+		return {
+			name: DEFAULT_AGENT_NAME,
+			soul: `[soul.md was not loaded: it matched the threat scan (${findings.join(", ")}). Ask the owner to review ${file}.]`,
+		};
 	}
-	return cleaned;
+	const body = parseSoulBody(cleaned);
+	return { name: parseAgentName(cleaned) ?? DEFAULT_AGENT_NAME, ...(body.length > 0 ? { soul: body } : {}) };
 }
 
 /**
@@ -92,7 +96,5 @@ export function checkSoulText(text: string): { ok: true; soul: string | undefine
 export function readAgentIdentity(agentDir: string): AgentIdentity {
 	const file = configFile(agentDir, SOUL_FILE_NAME);
 	if (!existsSync(file)) return { name: DEFAULT_AGENT_NAME, missingSoulPath: file };
-	const markdown = readFileSync(file, "utf8");
-	const soul = renderSoul(parseSoulBody(markdown), file);
-	return { name: parseAgentName(markdown) ?? DEFAULT_AGENT_NAME, ...(soul ? { soul } : {}) };
+	return projectAgentIdentity(readFileSync(file, "utf8"), file);
 }

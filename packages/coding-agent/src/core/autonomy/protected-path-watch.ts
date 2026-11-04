@@ -22,8 +22,9 @@ import path from "node:path";
 import { hostExplainsFileChange, hostFileIdentity } from "../../utils/host-write-transition.ts";
 import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
-import { boundedText, quotedSpan } from "../util/bounded-line.ts";
-import { HOST_FINDING_PREFIX } from "./host-finding-prefixes.ts";
+import { quotedSpan } from "../util/bounded-line.ts";
+import type { WorkerHostFinding } from "./contracts.ts";
+import { hostFinding } from "./host-findings.ts";
 import { getHarnessWriteProtectedPaths } from "./lane-private-paths.ts";
 
 /** Agent-root entries the host writes during normal operation; fingerprinting them would only produce noise. */
@@ -82,13 +83,6 @@ export interface ProtectedPathWatchOptions {
 }
 
 type Fingerprints = Map<string, string>;
-
-/** Longest claim blocker the host keeps (`MAX_WORKER_CLAIM_BLOCKER_CHARS` is 1000); a longer one is dropped whole. */
-const MAX_BLOCKER_CHARS = 960;
-
-function clipBlocker(line: string): string {
-	return boundedText(line, MAX_BLOCKER_CHARS);
-}
 
 function fingerprintOf(target: string): string {
 	if (path.basename(target) === "settings.json") {
@@ -251,28 +245,27 @@ export class ProtectedPathWatch {
 			: hostWroteDuring(change.path, from, to);
 	}
 
-	/** Run the end-of-run comparison, then return the claim blocker lines for everything recorded. */
-	finishBlockers(): string[] {
+	/** Run the end-of-run comparison, then return the host findings for everything recorded. */
+	finishFindings(): WorkerHostFinding[] {
 		this.finish();
-		return this.blockers();
+		return this.findings();
 	}
 
 	/**
-	 * Claim blocker lines for the findings so far, one per finding plus one disclosure line when the finding bound
-	 * cut it short. Each line fits a claim blocker (a longer line would be dropped by claim normalization).
+	 * Host findings for the changes so far, one per change plus one disclosure finding when the finding bound cut it
+	 * short. Each renders a line that fits a claim blocker (a longer line would be dropped by claim normalization).
 	 */
-	blockers(): string[] {
-		const lines = this.recorded.map((finding) =>
-			clipBlocker(
-				`${HOST_FINDING_PREFIX.protectedPath} ${quotedSpan(finding.path)} (${finding.before} -> ${finding.after}) changed while worker ${finding.workerId}'s ${finding.scope === "command" ? "command was running" : "run was in progress"}. A process tool can write harness files the structural write tool refuses: review it and revert it if unintended. Not proof of authorship; the root or another worker may also have written.`,
+	findings(): WorkerHostFinding[] {
+		const findings = this.recorded.map((finding) =>
+			hostFinding(
+				"protected_path",
+				`${quotedSpan(finding.path)} (${finding.before} -> ${finding.after}) changed while worker ${finding.workerId}'s ${finding.scope === "command" ? "command was running" : "run was in progress"}. A process tool can write harness files the structural write tool refuses: review it and revert it if unintended. Not proof of authorship; the root or another worker may also have written.`,
 			),
 		);
 		if (this.omitted > 0) {
-			lines.push(
-				`${HOST_FINDING_PREFIX.protectedPath} ${this.omitted} further protected-path change(s) not listed.`,
-			);
+			findings.push(hostFinding("protected_path", `${this.omitted} further protected-path change(s) not listed.`));
 		}
-		return lines;
+		return findings;
 	}
 
 	/** True when the entry or depth bound cut a snapshot short, so part of the set was not fingerprinted. */

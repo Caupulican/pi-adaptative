@@ -4,13 +4,15 @@ import type {
 	CapabilityEnvelope,
 	GateOutcome,
 	WorkerClaim,
+	WorkerClaimPending,
 	WorkerCommandReceipt,
+	WorkerHostFinding,
+	WorkerHostFindingCode,
 	WorkerHostVerdict,
 	WorkerReportRequirementStatus,
 	WorkerRequest,
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
-import { HOST_FINDING_BLOCKER_PREFIXES } from "../autonomy/host-finding-prefixes.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/managed-lane-records.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
@@ -39,8 +41,43 @@ export const MAX_WORKER_REPORT_ENTRIES = 64;
 export const MAX_WORKER_REPORT_TEXT_CHARS = 2_000;
 export const MAX_WORKER_REPORT_REFS = 32;
 
-/** The blocker a claim carries while its owner-required independent verification has not settled. */
-export const INDEPENDENT_VERIFICATION_PENDING_BLOCKER = "independent verification is required before acceptance";
+/**
+ * The blocker line shown while a claim's owner-required independent verification has not settled. It is display only:
+ * the host holds the claim open through `pending: ["verification"]` and no decision reads this text.
+ */
+const VERIFICATION_PENDING_BLOCKER_LINE = "independent verification is required before acceptance";
+
+/**
+ * Whether the claim waits for its independent verifier: the typed flag, or, for a claim stored before the flag
+ * existed, the one line that showed it. The legacy line is read only where a verifier verdict already exists
+ * for the claim's own attempt, so a worker's blocker text cannot hold or release anything.
+ */
+export function isVerificationPending(claim: WorkerClaim): boolean {
+	if (claim.pending !== undefined) return claim.pending.includes("verification");
+	// comms-legacy-decoder: a claim stored before `pending` existed carries the wait only as this display line.
+	return (claim.blockers ?? []).some((blocker) => blocker === VERIFICATION_PENDING_BLOCKER_LINE);
+}
+
+/** The claim held open until its independent verifier settles it: the typed flag, and the line that shows it. */
+export function withVerificationPending(claim: WorkerClaim): WorkerClaim {
+	return {
+		...claim,
+		pending: [...new Set([...(claim.pending ?? []), "verification" as const])],
+		blockers: [...(claim.blockers ?? []), VERIFICATION_PENDING_BLOCKER_LINE],
+	};
+}
+
+/** The claim once its verifier has settled it: the flag and the line that showed it are gone. */
+export function withoutVerificationPending(claim: WorkerClaim): WorkerClaim {
+	const { pending, blockers, ...rest } = claim;
+	const remainingPending = (pending ?? []).filter((entry) => entry !== "verification");
+	const remainingBlockers = (blockers ?? []).filter((blocker) => blocker !== VERIFICATION_PENDING_BLOCKER_LINE);
+	return {
+		...rest,
+		...(remainingPending.length > 0 ? { pending: remainingPending } : {}),
+		...(remainingBlockers.length > 0 ? { blockers: remainingBlockers } : {}),
+	};
+}
 
 export interface BoundedWorkerClaimStrings {
 	values: string[];
@@ -165,13 +202,16 @@ export function boundedWorkerClaimStrings(
 	return bounded;
 }
 
-/** The findings a report marks inconclusive, one per `INCONCLUSIVE:` line, bounded like blockers. */
+/**
+ * The findings a collaboration (tmux) worker's free-text report marks inconclusive, one per `INCONCLUSIVE:` line,
+ * bounded like blockers. That report carries no typed field; its prefixed lines are the only structure it gives.
+ */
 export function inconclusiveLinesIn(text: string | undefined): string[] {
 	if (!text) return [];
+	// comms-legacy-decoder: an external CLI worker reports free text, so its line prefix is read until the report command carries a typed list.
+	const reportedLines = text.split(/\r?\n/).map((line) => line.trim());
 	return collectBoundedWorkerClaimBlockers(
-		text
-			.split(/\r?\n/)
-			.map((line) => line.trim())
+		reportedLines
 			.filter((line) => line.toUpperCase().startsWith(INCONCLUSIVE_LINE_PREFIX))
 			.map((line) => line.slice(INCONCLUSIVE_LINE_PREFIX.length)),
 	).values;
@@ -391,6 +431,31 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 	};
 }
 
+const HOST_FINDING_CODES: ReadonlySet<unknown> = new Set<WorkerHostFindingCode>([
+	"overlap",
+	"protected_path",
+	"lane",
+	"omitted",
+]);
+const CLAIM_PENDING_STATES: ReadonlySet<unknown> = new Set<WorkerClaimPending>(["verification"]);
+
+function normalizeHostFindings(value: unknown): WorkerHostFinding[] {
+	return workerClaimRecordArray(value, "claim.hostFindings", MAX_WORKER_CLAIM_BLOCKERS).map((entry, index) => {
+		const label = `claim.hostFindings[${index}]`;
+		if (!HOST_FINDING_CODES.has(entry.code)) invalidWorkerClaim(`${label}.code is invalid.`);
+		return {
+			code: entry.code as WorkerHostFindingCode,
+			text: requiredWorkerClaimString(entry.text, `${label}.text`, MAX_WORKER_CLAIM_BLOCKER_CHARS),
+		};
+	});
+}
+
+function normalizePending(value: unknown): WorkerClaimPending[] {
+	const states = workerClaimStringArray(value, "claim.pending", CLAIM_PENDING_STATES.size, 32);
+	if (!states.every((state) => CLAIM_PENDING_STATES.has(state))) invalidWorkerClaim("claim.pending is invalid.");
+	return states as WorkerClaimPending[];
+}
+
 function normalizeHostVerdict(value: unknown): WorkerHostVerdict {
 	const verdict = ownWorkerClaimDataRecord(value, "claim.hostVerdict");
 	if (!HOST_VERDICT_KINDS.has(verdict.verdict)) invalidWorkerClaim("claim.hostVerdict.verdict is invalid.");
@@ -500,6 +565,8 @@ export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 					),
 				}
 			: {}),
+		...(claim.hostFindings !== undefined ? { hostFindings: normalizeHostFindings(claim.hostFindings) } : {}),
+		...(claim.pending !== undefined ? { pending: normalizePending(claim.pending) } : {}),
 		...(claim.inconclusive !== undefined
 			? {
 					inconclusive: workerClaimStringArray(
@@ -616,12 +683,7 @@ export function isParentReviewRequired(args: { request: WorkerRequest; claim: Wo
 	// A claim that did not complete (cancelled, failed, blocked) is not an ask-user outcome of the gate, but what the
 	// host itself observed about the worker is evidence the parent must review. The marker is still derived from
 	// the claim as it stands, never carried over, so it cannot outlive the findings that justify it.
-	return args.claim.status !== "completed" && (args.claim.blockers ?? []).some(isHostFindingBlocker);
-}
-
-/** Blocker lines the host itself writes about a worker: see {@link HOST_FINDING_BLOCKER_PREFIXES}. */
-function isHostFindingBlocker(blocker: unknown): boolean {
-	return typeof blocker === "string" && HOST_FINDING_BLOCKER_PREFIXES.some((prefix) => blocker.startsWith(prefix));
+	return args.claim.status !== "completed" && (args.claim.hostFindings?.length ?? 0) > 0;
 }
 
 export function validateWorkerClaim(args: {

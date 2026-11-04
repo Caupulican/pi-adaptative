@@ -108,6 +108,18 @@ resume. A process-backed Pi worker similarly retains its logical agent ID and re
 woken with `/resume` against the same session, worktree, orchestration preset, and checkpoint
 pointers when present.
 
+Messages between the root and its workers are canonical records with a model view. A `delegate`
+result carries `details.v` and, when the call was refused, an `err` record (`c` class, `f` field, `m`
+reason, `h` hint, `x` value) beside its tagged content; the terminal handoff carries `details.v` and
+each lane's state codes (`h`). The host states a fact as a code (`QUEUED`, `HELD`, `DELIVERED`,
+`READ_REPORT`, `READ_ALL`, and so on) whose meaning is defined once in the root director prompt, and a
+decision reads the record, never the rendered text. A worker ends its task with `submit_report`
+(its schema refuses unknown properties); the host judges that report against its own receipts. An
+`accepted` verdict with every requirement covered and no parent review pending lets the root read the
+report and sample the transcript on demand (`READ_REPORT`); any other verdict keeps the full read
+(`READ_ALL`). A claim carries what the host itself observed in typed `hostFindings` and its wait for
+an independent verifier in `pending`.
+
 The model-facing `delegate tasks` action is a bounded read model over that same durable DAG, not a
 second task list. It exposes task dependencies, status, latest attempt/agent dispatch, terminal
 reason, verifier state, and durable retry metadata. `delegate start` may attach existing

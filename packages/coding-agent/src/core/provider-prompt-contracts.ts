@@ -12,7 +12,7 @@ export const OWNER_PRECEDENCE_POLICY = "Owner instructions override conflicting 
  * (system-prompt.ts) render it once per capability class; tool text states only each tool's own limits.
  */
 export const OWNER_AUTHORIZATION_RULE =
-	"YOLO: decide and act; never ask permission or confirmation. The only question for the owner is information that only the owner holds and you cannot find yourself.";
+	"YOLO: decide and act; never ask permission or confirmation for what the task already covers. Ask the owner only for information or an authority grant that only the owner holds and you cannot find yourself.";
 
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
@@ -28,6 +28,73 @@ export const ORIENTATION_SURVEY_RULE =
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 /**
+ * Host facts the root reads in `delegate` results and worker handoffs, stated once as codes. A result or
+ * handoff names a state as `h CODE[,CODE]` and a refused call as `err c=<code> f=<field> h=<hint>`; this table
+ * is the only place the meaning is spelled out, so the result text carries the code and not the prose.
+ */
+export const COMMS_STATE_GLOSSARY = {
+	QUEUED:
+		"admitted, nonterminal; the host starts it when dependencies, capacity or reservations clear (`waiting:` says which). Not a stall: never poll, interrupt or cancel it.",
+	HELD: "starts when this turn ends (shared local model); do not wait on it.",
+	SUSPENDED: "nonterminal; the host resumes a transient retry. Do not resume, cancel or retry it.",
+	IDLE: "task terminal, worker reusable; idle is activity, not outcome. The claim is in the handoff and delegate status.",
+	WAIT_ELAPSED: "deadline passed; nonterminal, not a stall. Idle: read the report. Active: continue or wait again.",
+	DELIVERED: "the handoff proves persisted state and delivery; never report missed completion or lost state.",
+	BLOCKED:
+		"worker_blocked is a delivered claim with blockers, not harness failure; answer it with follow_up on the same agentId.",
+	BUDGET:
+		"an admitted limit ended the work; the lane reasonCode is authoritative; replan within the remaining authority.",
+	FAILED:
+		"completion_error is a failed worker run; read reasonDetail. Provider or network failures are not a harness defect; never stop healthy siblings for it.",
+	ACCEPTED:
+		"the message is durably in the mailbox; idle or an older report does not prove it completed. Completion arrives through wait, wait_many or the handoff, never inbox_wait.",
+	READ_REPORT:
+		"the host verified the report against its receipts and every requirement is covered: the report is the evidence; read a transcript range (cursor) only for a claim you doubt.",
+	READ_ALL: "verdict not accepted or review pending: read every transcript page (nextCursor) before judging.",
+} as const;
+
+export type CommsStateCode = keyof typeof COMMS_STATE_GLOSSARY;
+
+/** What a refused call asks of the root next. The hint is the retry guidance; `x` carries any value it needs. */
+export const COMMS_HINT_GLOSSARY = {
+	DROP_FIELD: "remove f and retry once",
+	MOVE_FIELD: "move f's value into the field named in x and retry once",
+	USE_ID: "use an id delegate returned, never an invented one",
+	RETRY_OMIT: "retry once without f so the host inherits or routes",
+	REUSE: "reuse an idle worker (list) or tell the owner",
+	NARROW: "fit the bound in m",
+	WAIT: "the target's state refuses it now, do not retry unchanged",
+	ASK_OWNER: "report the cause to the owner, do not retry or substitute",
+} as const;
+
+export type CommsHintCode = keyof typeof COMMS_HINT_GLOSSARY;
+
+/** Error classes of a refused call (`err c=...`); the field `f` and the message `m` say which input and why. */
+export const COMMS_ERR_GLOSSARY = {
+	E_FIELD: "bad or missing value",
+	E_REF: "unknown or unavailable id",
+	E_LIMIT: "over a bound",
+	E_AUTH: "not the model's to set (the host compiles grants and budgets)",
+	E_STATE: "target state or caller role refuses",
+	E_DUP: "same work already running",
+} as const;
+
+export type CommsErrCode = keyof typeof COMMS_ERR_GLOSSARY;
+
+const glossaryLine = (label: string, table: Readonly<Record<string, string>>): string =>
+	`${label} ${Object.entries(table)
+		.map(([code, text]) => `${code} ${text}`)
+		.join("; ")}.`;
+
+/** The one glossary the root prompt carries; rule hooks cannot reach handoff wake messages, so it lives in the prefix. */
+export const COMMS_GLOSSARY_PROMPT = [
+	"COMMS: delegate results and worker handoffs state host facts as codes. `h CODE,...` names states; a refused call returns `err c=<class> f=<field> h=<hint> x=<value>` plus `m <reason>`, and then nothing ran or was queued. A state code is never a failure unless it says so.",
+	...Object.entries(COMMS_STATE_GLOSSARY).map(([code, text]) => `- ${code}: ${text}`),
+	glossaryLine("Err classes:", COMMS_ERR_GLOSSARY),
+	glossaryLine("Hints:", COMMS_HINT_GLOSSARY),
+].join("\n");
+
+/**
  * The root's role in every root prompt that can delegate (full class, worker delegation on, `delegate` active).
  * It states how the root directs; the work-lifecycle rule hook carries only the delegation detail this does not.
  */
@@ -39,6 +106,7 @@ export const ROOT_DIRECTOR_ROLE_PROMPT = [
 	"- Keep working while workers run; wait only at a true dependency.",
 	"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 	"- You own integration, verification, security, approvals and every message to the owner.",
+	COMMS_GLOSSARY_PROMPT,
 ].join("\n");
 
 /** The sentences of the worker execution discipline; the collaboration turn prompt renders them as one line. */
@@ -185,11 +253,26 @@ export const SYSTEM_ONE_VALIDATION_RULE =
 export const WORKER_NO_SELF_REVIEW_RULE =
 	"Do not use systemone to review your own completion: the host checks your report against its receipts. Use it for judgments about the task.";
 
+/** The fields a report carries, as the report tool and the text envelope both name them. */
+const WORKER_REPORT_FIELDS_RULE =
+	"Finish by calling submit_report: status completed or blocked, summary (a few sentences), blockers, findings, inconclusive, and, when the task lists requirement ids, one entry per id with the evidence you rely on; list each check you ran and each file you changed. Calling it ends your task. A plain text answer is accepted but the host cannot check it.";
+
+/** The only way a write-capable worker without usable write/edit tools can change a file: actions in a text answer. */
+const WORKER_REPORT_ACTIONS_FALLBACK_RULE =
+	'Fallback when write/edit tools are unavailable: answer in text with STRICT JSON holding "summary", "status" and "actions": [{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}].';
+
+/** The host asks for the receipt ids after the worker declares itself done; the worker cannot see them before. */
+const WORKER_REPORT_RECEIPTS_RULE =
+	"The host checks the report against the commands it recorded and may reply with their receipt ids: you cannot see them before that, so never rerun a command to get one and never list a finding as inconclusive for want of one.";
+
 export function buildWorkerSystemPrompt(capabilities: {
 	write: boolean;
 	process: boolean;
 	systemOne?: boolean;
+	/** The `submit_report` tool is offered to this worker; without it the text envelope is the report. */
+	report?: boolean;
 }): string {
+	const report = capabilities.report === true;
 	const resultShape = capabilities.write
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"]}';
@@ -205,24 +288,36 @@ export function buildWorkerSystemPrompt(capabilities: {
 					"run_process: constrained direct argv, allowlisted executable, no shell; not an OS sandbox. Nonzero/timeout/abort/output-limit is a blocker.",
 				]
 			: []),
-		"STRICT JSON only:",
-		resultShape,
-		"Done: answer in the shape above. The host may then ask for a structured report (submit_report) and gives you the receipt ids of the commands it recorded; you cannot see them before that, so never rerun a command to get one and never list a finding as inconclusive for want of one.",
+		...(report
+			? [
+					WORKER_REPORT_FIELDS_RULE,
+					WORKER_REPORT_RECEIPTS_RULE,
+					...(capabilities.write ? [WORKER_REPORT_ACTIONS_FALLBACK_RULE] : []),
+				]
+			: ["STRICT JSON only:", resultShape, "Done: answer in the shape above."]),
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
-		'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
+		report
+			? 'If blocked by the grant, submit status "blocked" with blockers. Never invent facts or output.'
+			: 'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
 		"Unconfirmed findings go in inconclusive, never findings.",
 		...(capabilities.systemOne ? [SYSTEM_ONE_VALIDATION_RULE, WORKER_NO_SELF_REVIEW_RULE] : []),
 	].join("\n");
 }
 
-export function buildVerifierSystemPrompt(subjectTaskId: string, systemOne = false): string {
+export function buildVerifierSystemPrompt(subjectTaskId: string, systemOne = false, report = false): string {
 	return [
 		"ROLE: independent verifier, not the implementer; the root integrates.",
 		"Independent verifier; you did not implement the subject. Use read/inspection tools; run no tests unless the task states the owner asked; never modify files.",
-		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
-		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
+		...(report
+			? [
+					`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. Finish by calling submit_report with the verdict (accepted or rejected), reasonCodes, summary (the verification performed and its evidence), blockers, findings and inconclusive; a text answer is accepted but the host cannot check it.`,
+				]
+			: [
+					`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
+					'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
+				]),
 		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete. Unsettled checks go in inconclusive, never count as proof.",
-		"submit_report carries the same fields and also works; a text answer stays accepted.",
+		...(report ? [] : ["submit_report carries the same fields and also works; a text answer stays accepted."]),
 		...(systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
 	].join("\n");
 }

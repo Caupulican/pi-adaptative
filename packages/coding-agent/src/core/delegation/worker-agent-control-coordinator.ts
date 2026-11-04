@@ -5,6 +5,7 @@ import type { AgentHaltRequest } from "../../kernel/index.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { renderCommsStateLine } from "../comms/comms-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
@@ -84,6 +85,7 @@ import {
 	type WorkerDispositionAdvice,
 	workerDispositionGuidance,
 	workerHostVerdictView,
+	workerLaneStateCodes,
 } from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
@@ -92,7 +94,6 @@ import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
-import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
 
 export interface WorkerAgentControlCoordinatorOptions {
@@ -203,6 +204,7 @@ export function buildWorkerTerminalHandoffContent(args: {
 		inconclusive?: readonly string[];
 		systemOneSettled?: readonly string[];
 		ownerFollowUp?: string;
+		parentReviewRequired?: boolean;
 	};
 	/** The host's judgment of the claim against the receipts; absent on a legacy claim. */
 	hostVerdict?: WorkerHostVerdict;
@@ -218,6 +220,12 @@ export function buildWorkerTerminalHandoffContent(args: {
 		.slice(0, 32);
 	const fence = (values: readonly string[], path = false): string =>
 		fenceWorkerClaimValues(values, handoffClaimValue, source, nonce, path);
+	const laneCodes = workerLaneStateCodes(args.record, {
+		...(args.hostVerdict ? { hostVerdict: args.hostVerdict } : {}),
+		...(args.claim?.parentReviewRequired ? { parentReviewRequired: true } : {}),
+	});
+	const readsWholeTranscript = laneCodes.includes("READ_ALL");
+	const stateLine = renderCommsStateLine(["DELIVERED", ...laneCodes]);
 	return [
 		"Worker terminal handoff",
 		`childAgentId=${args.childAgentId}`,
@@ -252,19 +260,16 @@ export function buildWorkerTerminalHandoffContent(args: {
 					`${WORKER_DISPOSITION_ADVICE_NOTE} Next step: ${workerDispositionGuidance(args.recommendedDisposition, args.hostVerdict)}.`,
 				]
 			: []),
-		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
-		"MANDATORY: read every transcript page before judging this result.",
-		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
-		"Entries complete only after pagination ends. omittedMessages means whole entries were left out of that page. While nextCursor exists, call transcript again with cursor=nextCursor. Stop only when nextCursor is absent.",
-		...(args.record.reasonCode === "worker_blocked"
+		...(stateLine ? [stateLine] : []),
+		...(readsWholeTranscript
 			? [
-					"worker_blocked means the durable claim has blockers; it does not mean worker state or transcript was lost.",
-					`The worker is idle and waiting on you: answer its blocker or redirect it with delegate action="follow_up" agentId="${args.childAgentId}"; it keeps its transcript. list marks it awaitingParent until a newer task starts.`,
+					`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
+					"Entries complete only after pagination ends. omittedMessages means whole entries were left out of that page. While nextCursor exists, call transcript again with cursor=nextCursor. Stop only when nextCursor is absent.",
 				]
 			: []),
-		...(args.record.status === "budget_exhausted"
+		...(args.record.reasonCode === "worker_blocked"
 			? [
-					"CAVEMAN MODE - MANDATORY: budget_exhausted means an admitted limit ended work, not harness failure. Terminal reasonCode is authoritative; never replace it with earlier transcript errors. Read evidence, then replan only within remaining authority.",
+					`The worker is idle and waiting on you: answer its blocker or redirect it with delegate action="follow_up" agentId="${args.childAgentId}"; it keeps its transcript. list marks it awaitingParent until a newer task starts.`,
 				]
 			: []),
 		...(args.record.reasonCode === "worker_interrupted"
@@ -272,7 +277,6 @@ export function buildWorkerTerminalHandoffContent(args: {
 					"worker_interrupted means you stopped this worker and the claim above is its own report. Its state and transcript are retained: continue it with delegate follow_up on the same agentId, or retire it.",
 				]
 			: []),
-		...(args.record.reasonCode === "completion_error" ? [WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE] : []),
 	].join("\n");
 }
 
@@ -2156,6 +2160,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							...(snapshot.claim.inconclusive ? { inconclusive: snapshot.claim.inconclusive } : {}),
 							...(snapshot.claim.systemOneSettled ? { systemOneSettled: snapshot.claim.systemOneSettled } : {}),
 							...(snapshot.claim.ownerFollowUp ? { ownerFollowUp: snapshot.claim.ownerFollowUp } : {}),
+							...(snapshot.claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
 						},
 					}
 				: {}),
