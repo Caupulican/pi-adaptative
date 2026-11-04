@@ -6,6 +6,11 @@ const BINDING_TYPE = "pi_bot_runtime_bindings";
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_BINDINGS = 1024;
 
+/** Whether `id` is in the bot id domain; anything else (a managed lane id such as `collaboration:<job>:<agent>`) is not a bot. */
+export function isBotId(id: string): boolean {
+	return ID.test(id);
+}
+
 export interface BotRuntimeContext {
 	agentId: string;
 	teamId?: string;
@@ -108,7 +113,7 @@ export class BotRuntimeBindings {
 	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime or a managed lane, which is not a bot. */
 	alias(runtime: string): string | undefined {
 		const context = this.generationContext(runtime);
-		if (!ID.test(context.agentId)) return undefined;
+		if (!isBotId(context.agentId)) return undefined;
 		return this.runtime(context.agentId, context.teamId, context.teamIncarnationId) === runtime
 			? context.agentId
 			: undefined;

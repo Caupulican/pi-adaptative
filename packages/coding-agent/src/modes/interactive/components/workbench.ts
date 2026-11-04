@@ -1,4 +1,5 @@
 import { type Component, Container, hyperlink, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import type { ManagedLaneView } from "../../../core/delegation/managed-lane-views.ts";
 import type {
 	ActiveChatTarget,
 	PersistentBotView,
@@ -56,6 +57,8 @@ export interface WorkbenchChatRosterSnapshot {
 	readonly rootModelLabel: string;
 	readonly rootRunning: boolean;
 	readonly bots: readonly PersistentBotView[];
+	/** Live managed lanes: listed read-only, never a chat target. */
+	readonly lanes: readonly ManagedLaneView[];
 	readonly teams: readonly PersistentTeamRecord[];
 }
 
@@ -1237,6 +1240,14 @@ export class WorkbenchComponent extends Container {
 			);
 			const detail = `${bot.state}${bot.teamIds.length > 0 ? ` · [${bot.teamIds.join(",")}]` : ""}${bot.currentSummary ? ` · ${bot.currentSummary}` : ""}`;
 			add(`    ${theme.fg("muted", detail)}`, target);
+		}
+		if (roster.lanes.length > 0) {
+			add(theme.fg("muted", ` LANES (${roster.lanes.length})`));
+			for (const lane of roster.lanes) {
+				add(
+					`  ${botStateGlyph(lane.state)} ${theme.fg("text", lane.label)}${lane.modelRef ? ` ${theme.fg("muted", lane.modelRef)}` : ""}`,
+				);
+			}
 		}
 		add(`  ${theme.fg("dim", "Click row to resume · @id to msg")}`);
 		this.chatTargetsByRow = targets;

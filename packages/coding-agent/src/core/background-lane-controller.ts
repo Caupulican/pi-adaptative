@@ -36,6 +36,7 @@ import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delega
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
+import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -184,6 +185,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _botViews:
 		| { defaultModelRef: string; delegateActive: boolean; bindings: object; views: PersistentBotView[] }
 		| undefined;
+	/** The live managed lanes of the roster, dropped with every lane record change. */
+	private _managedLaneViews: ManagedLaneView[] | undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
@@ -471,6 +474,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _laneRecordsChanged(): void {
 		this._botViews = undefined;
+		this._managedLaneViews = undefined;
 		this._cachedLaneRecords = undefined;
 		if (this._laneRecordListeners.size === 0 || this._laneRecordsNotifyQueued) return;
 		this._laneRecordsNotifyQueued = true;
@@ -1461,13 +1465,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				liveAgents = [];
 			}
 		}
-		let laneRecords: LaneRecord[];
-		if (hasWorkerState) {
-			laneRecords = this.getLaneRecords();
-		} else {
-			this._hydrateManagedLanes();
-			laneRecords = this._laneTracker.getRecords();
-		}
+		const laneRecords = this._rosterLaneRecords();
 		const views = this.getBotTeamStore().projectBotViews(
 			liveAgents
 				.filter((agent) => inContext(agent.agentId))
@@ -1486,6 +1484,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		);
 		if (!teamId) this._botViews = { defaultModelRef, delegateActive, bindings, views };
 		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
+	}
+
+	/**
+	 * The live managed lanes (collaboration agents and other externally hosted workers), apart from the bot roster:
+	 * they are not bots and have no chat. Served until a lane record changes.
+	 */
+	listManagedLanes(): ManagedLaneView[] {
+		this._managedLaneViews ??= projectManagedLaneViews(this._rosterLaneRecords());
+		return [...this._managedLaneViews];
+	}
+
+	/** The lane records the roster projections read; reading them never constructs the worker runtime. */
+	private _rosterLaneRecords(): LaneRecord[] {
+		if (this._hasWorkerState()) return this.getLaneRecords();
+		this._hydrateManagedLanes();
+		return this._laneTracker.getRecords();
 	}
 
 	/**

@@ -105,6 +105,7 @@ import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
 import { CostGuardController } from "./cost-guard-controller.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
+import type { ManagedLaneView } from "./delegation/managed-lane-views.ts";
 import type {
 	PersistentBotRecord,
 	PersistentBotView,
@@ -5916,6 +5917,9 @@ export class AgentSession {
 	}
 	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[] {
 		return this._backgroundLanes.listPersistentBots(defaultModelRef, teamId);
+	}
+	listManagedLanes(): ManagedLaneView[] {
+		return this._backgroundLanes.listManagedLanes();
 	}
 	listPersistentTeams(): PersistentTeamRecord[] {
 		return this._backgroundLanes.listPersistentTeams();

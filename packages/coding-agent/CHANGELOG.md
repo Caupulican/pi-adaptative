@@ -3,6 +3,7 @@
 ### Fixed
 
 - The TUI no longer exits with `Invalid agentId` while a managed collaboration lane (id `collaboration:<job>:<agent>`) is live. Managed lanes are not bots: the bot roster, its change notifications and the turn-outcome record no longer treat a lane id as a bot alias, so the roster never lists a lane as a chat target it cannot open.
+- The Chats pane lists live managed lanes (collaboration agents and other externally hosted workers) in a read-only LANES section under BOTS. They are not bots: no chat target, memory or routines. Finished lanes stay in the graph's Lanes view.
 
 ## [0.104.32] - 2026-11-04
 

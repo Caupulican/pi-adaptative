@@ -663,6 +663,7 @@ export class InteractiveMode {
 					rootModelLabel: this.session.getRootModelLabel(),
 					rootRunning: this.session.isStreaming,
 					bots: this.chatBots(),
+					lanes: this.session.listManagedLanes(),
 					teams: this.session.listPersistentTeams(),
 				};
 			},
