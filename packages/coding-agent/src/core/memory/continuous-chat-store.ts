@@ -90,7 +90,6 @@ import {
 	createContinuousChatView,
 	parseContinuousChatView,
 	refreshContinuousChatView,
-	renderContinuousChatTurnView,
 	renderContinuousChatView,
 } from "./continuous-chat-view.ts";
 import {
@@ -130,7 +129,7 @@ export interface ContinuousChatTurnSnapshot {
 	birthView: string;
 }
 
-/** The built part of the causal view: `<chat>` text covering messages [0, viewedMessages). */
+/** The built part of the causal view: `<chat>` text covering messages [0, viewedMessages), collapsed past its high-water mark. */
 export interface ContinuousChatCausalPrefix {
 	text: string;
 	viewedMessages: number;
@@ -727,7 +726,9 @@ export class ContinuousChatStore {
 
 	/**
 	 * The causal view for a compaction ending before `endMessage`, stopping at the first unbuilt message. The queue is
-	 * read first and the nodes second, because a leaf's node is published before its queue item completes.
+	 * read first and the nodes second, because a leaf's node is published before its queue item completes. Like every
+	 * view a model reads it is bounded when rendered: unbuilt or failed parents keep the stored view above its marks, and
+	 * every compaction request would carry that excess, so the oldest pairs collapse down to the low-water mark instead.
 	 */
 	async readCausalPrefix(endMessage: number): Promise<ContinuousChatCausalPrefix> {
 		if (!Number.isSafeInteger(endMessage) || endMessage < 0) {
@@ -747,7 +748,8 @@ export class ContinuousChatStore {
 		}
 		const entries = await this.causalCut(view.entries, viewed, filePath);
 		const causal = { ...view, totalMessages: viewed, batchPending: false, entries };
-		const nodes = await this.presentNodes(entries, false);
+		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
+		const nodes = await this.presentNodes(entries, continuousChatViewBytes(causal) > causal.highBytes);
 		return { text: renderContinuousChatView(causal, nodes), viewedMessages: viewed };
 	}
 
@@ -1437,7 +1439,7 @@ export class ContinuousChatStore {
 		const rendered = this.renderedBirth;
 		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
 		const nodes = await this.presentNodes(turn.entries, true);
-		const text = renderContinuousChatTurnView(
+		const text = renderContinuousChatView(
 			{
 				...turn,
 				lowBytes: CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
@@ -1455,7 +1457,7 @@ export class ContinuousChatStore {
 		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
 		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
 		const nodes = await this.presentNodes(turn.entries, continuousChatViewBytes(turn) > turn.highBytes);
-		const text = renderContinuousChatTurnView(turn, nodes);
+		const text = renderContinuousChatView(turn, nodes);
 		this.rendered = { revision, text };
 		return text;
 	}

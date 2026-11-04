@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+
+- A continuous-chat compaction request no longer grows with the backlog. Its causal view was only merged where parents were already built, so pending and failed nodes held it far above its 32,000-byte mark (320 KB and requests of up to 49,000 tokens in one recorded session, about a third of that session's summary spend). It is now collapsed when read, the oldest sibling pairs first, down to its 16,000-byte mark, the same way the turn view and a worker's birth view already were.
 ## [0.104.34] - 2026-11-04
 
 ### Changed
