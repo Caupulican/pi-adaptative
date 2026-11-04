@@ -16,7 +16,7 @@
  * a restart cut 3 to 5 s, and real backoff waits at their asserted lower bounds. It is not a budget and nothing gates on it.
  */
 
-export type FaultMatrixJourney = 1 | 2 | 3;
+export type FaultMatrixJourney = 1 | 2 | 3 | 4;
 export type SystemOneMode = "on" | "off";
 /** The harness extensions of the fault census that open rows wait for. */
 export type HarnessExtension = "X1" | "X2" | "X3" | "X4" | "X5" | "X6" | "X7" | "X8" | "X9";
@@ -1048,6 +1048,43 @@ const rows: readonly FaultMatrixRow[] = [
 		witness: "at the queued turn's first request it holds its own execution and the kept claim",
 		control: "no release diagnostic follows the cleared refusal",
 		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "OR1",
+		owner: "core/system-one/delegation-gate.ts",
+		journey: 4,
+		phase: "orchestration-gate OR1",
+		fault: "the root edits a project file itself",
+		witness: "the edit is refused with the delegation directive and the project file is untouched",
+		control: "the root's write of an instruction file in the agent directory passes",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "OR2",
+		owner: "core/system-one/delegation-gate.ts",
+		journey: 4,
+		phase: "orchestration-gate OR2",
+		fault: "System One reads the root's shell call as task work",
+		witness: "the call is refused with the delegation directive and never reaches the shell",
+		control: "a shell call System One reads as inspection runs",
+		estSeconds: 1,
+		status: "covered",
+		// With System One off there is no engine, so a shell call is never gated and neither turn runs.
+		modes: ["on"],
+	},
+	{
+		id: "OR3",
+		owner: "core/delegation/worker-notification-coordinator.ts",
+		journey: 4,
+		phase: "orchestration-gate OR3",
+		fault: "the work the root was refused is delegated to a worker",
+		witness: "the worker runs the build through the shell once and its handoff wakes the root",
+		control: "the root never edits the project file: it stays as it was",
+		estSeconds: 2,
 		status: "covered",
 		modes: BOTH,
 	},

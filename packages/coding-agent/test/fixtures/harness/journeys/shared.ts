@@ -63,7 +63,7 @@ for (const name of ["lock", "lockSync", "unlock", "unlockSync", "check", "checkS
  */
 const JOURNEY_BUDGET_MS = 285_000;
 
-/** Each of the three journeys runs completely in both modes, with fresh storage and the same native owners. */
+/** Each journey runs completely in both modes, with fresh storage and the same native owners. */
 export async function runJourney(
 	options: Omit<HarnessWorldOptions, "systemOneEnabled">,
 	body: (world: HarnessWorld) => Promise<void>,

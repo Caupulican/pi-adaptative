@@ -9,7 +9,7 @@
  * check when a TypeScript source is staged (per-file type checking is unsound:
  * an importer of the changed file can break). The full static check remains separate. Other
  * validation procedures remain explicit commands. Tests are never launched by this hook: the
- * owner's allowed tests are the three harness journeys. Browser smoke remains a separate command
+ * owner's allowed tests are the four harness journeys. Browser smoke remains a separate command
  * and is not authorized by a commit.
  * The hook also reports the branch's last recorded CI verdict (see ci-status.mjs) as a warning.
  *
@@ -218,7 +218,7 @@ export function main(argv = process.argv.slice(2)) {
 	}
 	run("contract-doctrine gate", process.execPath, [join(scriptsDir, "check-contract-doctrine.mjs")]);
 	if (plan.browserSmoke) {
-		process.stdout.write("precommit: browser inputs changed; smoke not run (owner permits only the three harness journeys)\n");
+		process.stdout.write("precommit: browser inputs changed; smoke not run (owner permits only the four harness journeys)\n");
 	}
 	reportCiVerdict();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);

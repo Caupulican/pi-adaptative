@@ -1,6 +1,6 @@
 name: CI
 
-# Normal CI runs builds, static checks and the three existing harness journeys only.
+# Normal CI runs builds, static checks and the four harness journeys only.
 # Explicitly authorized release calls additionally supply the unchanged release verifier's evidence.
 on:
   push:
@@ -15,7 +15,7 @@ on:
         required: false
         type: string
       full_suite:
-        description: Kept for callers; normal CI tests remain limited to the three harness journeys
+        description: Kept for callers; normal CI tests remain limited to the four harness journeys
         required: false
         type: boolean
         default: false

@@ -11,6 +11,7 @@ import { describe, it } from "vitest";
 import { runJourney1 } from "./fixtures/harness/journeys/journey-1.ts";
 import { runJourney2 } from "./fixtures/harness/journeys/journey-2.ts";
 import { runJourney3 } from "./fixtures/harness/journeys/journey-3.ts";
+import { runJourney4 } from "./fixtures/harness/journeys/journey-4.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it("standalone root conversation: greeting, task with tools and memory, compaction, queued input, continuation", async () => {
@@ -23,5 +24,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("mixed: a root lane and a worker lane in separate worktrees, a real conflict, explicit resolution, integration, owner edits kept", async () => {
 		await runJourney3();
+	}, 360_000);
+
+	it("orchestration gate: the root orchestrates, a refused edit and build are delegated, a worker does them and its handoff wakes the root", async () => {
+		await runJourney4();
 	}, 360_000);
 });
