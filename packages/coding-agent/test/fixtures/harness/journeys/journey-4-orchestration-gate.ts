@@ -169,7 +169,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			reply: { content: [{ type: "text", text: "The worker is still settling." }] },
 		},
 	);
-	world.systemOne.enterPhase("j4-delegate", INTAKE_JUDGMENTS);
+	world.systemOne.enterPhase("j4-delegate", { ...INTAKE_JUDGMENTS, ...NO_DELIVERY_CLAIMS });
 	await withDeadline(
 		trace,
 		"J4 turn 1",
