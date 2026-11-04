@@ -129,22 +129,22 @@ export interface TaskBrief {
 	readonly refs?: readonly string[];
 }
 
+/** The one `Evidence:`/`Output:` line both layouts share, or none when the brief states neither. */
+function taskBriefExpectationLines(brief: TaskBrief): string[] {
+	const parts = [
+		brief.evid ? `Evidence: ${TASK_EVIDENCE_KINDS[brief.evid]}.` : undefined,
+		brief.out ? `Output: ${TASK_OUTPUT_KINDS[brief.out]}.` : undefined,
+	].filter((part): part is string => part !== undefined);
+	return parts.length > 0 ? [parts.join(" ")] : [];
+}
+
 /** Layout of version 1: kept exactly as first written, so records stored with it still verify. */
 function renderTaskBriefV1(brief: TaskBrief): string {
 	return [
 		brief.goal,
 		...(brief.note ? [`Note: ${brief.note}`] : []),
 		...(brief.refs && brief.refs.length > 0 ? [`Refs: ${brief.refs.join(", ")}`] : []),
-		...(brief.evid || brief.out
-			? [
-					[
-						brief.evid ? `Evidence: ${TASK_EVIDENCE_KINDS[brief.evid]}.` : undefined,
-						brief.out ? `Output: ${TASK_OUTPUT_KINDS[brief.out]}.` : undefined,
-					]
-						.filter((part): part is string => part !== undefined)
-						.join(" "),
-				]
-			: []),
+		...taskBriefExpectationLines(brief),
 	].join("\n");
 }
 
@@ -157,16 +157,7 @@ function renderTaskBriefV2(brief: TaskBrief): string {
 	return [
 		brief.goal,
 		...(brief.refs ?? []).map((ref) => `Ref: ${ref}`),
-		...(brief.evid || brief.out
-			? [
-					[
-						brief.evid ? `Evidence: ${TASK_EVIDENCE_KINDS[brief.evid]}.` : undefined,
-						brief.out ? `Output: ${TASK_OUTPUT_KINDS[brief.out]}.` : undefined,
-					]
-						.filter((part): part is string => part !== undefined)
-						.join(" "),
-				]
-			: []),
+		...taskBriefExpectationLines(brief),
 		...(brief.note ? [`Note: ${brief.note}`] : []),
 	].join("\n");
 }
