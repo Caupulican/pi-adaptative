@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The TUI no longer exits with `Invalid agentId` when a managed collaboration lane (id `collaboration:<job>:<agent>`) is in the roster: only a stored bot is given a bot memory file path, a lane that is not a bot has none.
+
 ## [0.104.32] - 2026-11-04
 
 ### Changed

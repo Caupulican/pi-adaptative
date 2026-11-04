@@ -1713,7 +1713,8 @@ export class PersistentBotTeamStore {
 				lastReadAt: botRecord?.lastReadAt,
 				unreadCount,
 				routineCount,
-				memoryFilePath: this.getBotMemoryFilePath(agentId),
+				// Only a stored bot owns a memory file; managed lane IDs (e.g. `collaboration:<job>:<agent>`) are not bot IDs.
+				memoryFilePath: botRecord ? this.getBotMemoryFilePath(agentId) : undefined,
 			});
 		}
 
