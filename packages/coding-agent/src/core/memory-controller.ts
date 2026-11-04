@@ -86,6 +86,7 @@ import {
 } from "./memory/continuous-chat-navigation.ts";
 import {
 	type ContinuousChatWire,
+	continuousChatRequestHistory,
 	createBlockedContinuousChatPlanWrapper,
 	createContinuousChatPlanWrapper,
 	renderContinuousChatTurnState,
@@ -2054,6 +2055,15 @@ export class MemoryController {
 	/** The settled ICM generation's project chat; undefined in every other state, so no turn binds a stale one. */
 	continuousChatHost(): ContinuousChatHost | undefined {
 		return this._activeMemorySystem === "icm" && !this._transitioning ? this._continuousChat : undefined;
+	}
+
+	/**
+	 * The part of `messages` the next provider request carries from durable history: under ICM the running turn's own
+	 * messages, otherwise (a child session, or no chat projection) all of them. See `continuousChatRequestHistory`.
+	 */
+	requestHistory(messages: readonly AgentMessage[]): readonly AgentMessage[] {
+		const wire = this.deps.isChildSession() ? undefined : this._continuousChatWire;
+		return continuousChatRequestHistory({ wire, host: this.continuousChatHost() }, messages);
 	}
 
 	/**

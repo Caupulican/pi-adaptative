@@ -5,7 +5,11 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import { formatRuleHook, loadRuleHooks, RULE_MARKER_PREFIX } from "./rule-hook-catalog.ts";
 
 export interface RuleHookDeliveryDeps {
-	/** The session's current messages, read fresh: compaction and branch changes replace them. */
+	/**
+	 * The messages the model will actually receive on its next request, read fresh: compaction and branch changes
+	 * replace them, and under ICM continuous chat only the running turn's own messages ride the wire (the owner of that
+	 * windowing is `continuousChatRequestHistory`), so a rule delivered in an earlier turn is not in context any more.
+	 */
 	getMessages(): readonly AgentMessage[];
 	/** A worker session receives only the rules that are not `rootOnly`. */
 	isRootSession(): boolean;

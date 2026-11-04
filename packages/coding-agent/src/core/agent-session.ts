@@ -423,7 +423,7 @@ export class AgentSession {
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
 	private readonly _ruleHooks = new RuleHookDelivery({
-		getMessages: () => this.agent.state.messages,
+		getMessages: () => this._memory.requestHistory(this.agent.state.messages),
 		isRootSession: () => !this._isChildSession,
 	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();

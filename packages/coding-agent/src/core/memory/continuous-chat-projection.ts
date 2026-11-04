@@ -135,6 +135,18 @@ export function splitContinuousChatRequest(
 }
 
 /**
+ * The durable history the next provider request carries: the running turn's own messages under ICM (earlier turns are
+ * only summarized in the view), the whole `messages` when no chat projection owns the wire. The one definition of what
+ * the model can see of the session's messages; a message outside it is not in the model's context.
+ */
+export function continuousChatRequestHistory(
+	source: ContinuousChatRequestSource,
+	messages: readonly AgentMessage[],
+): readonly AgentMessage[] {
+	return splitContinuousChatRequest(source, messages)?.own ?? messages;
+}
+
+/**
  * Where the running turn's own messages begin in the planned history. Before any compaction that is the turn's start
  * message. A continuation that resumed at a compaction summary did not apply it: that summary is pre-turn history the
  * view already carries, so the turn's own messages begin right after it (an index past the end while the turn has none
