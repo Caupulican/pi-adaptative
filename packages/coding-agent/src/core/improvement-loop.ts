@@ -953,6 +953,27 @@ export function planOwnedDiscard(input: OwnedDiscardPlanInput): OwnedDiscardPlan
 	};
 }
 
+/** Keep/discard thresholds, defined once for the loop and decision tools. */
+const improvementThresholdFields = {
+	minDelta: Type.Optional(Type.Number({ description: "Minimum absolute improvement required to keep. Default 0." })),
+	minRelativeDelta: Type.Optional(
+		Type.Number({ description: "Minimum relative improvement required to keep, e.g. 0.01 for 1%. Default 0." }),
+	),
+	confidenceMode: Type.Optional(
+		StringEnum(["none", "mad"] as const, {
+			description: "Noise/confidence policy. Use mad with minConfidence to reject noisy wins.",
+		}),
+	),
+	minConfidence: Type.Optional(
+		Type.Number({ description: "Minimum confidence multiple over MAD noise floor. Default 0." }),
+	),
+	lowConfidenceAction: Type.Optional(
+		StringEnum(["retry", "discard"] as const, {
+			description: "Decision when confidence evidence is missing or too low. Default retry.",
+		}),
+	),
+};
+
 const DecisionToolParams = Type.Object(
 	{
 		currentMetric: Type.Number({ description: "Measured primary metric for the candidate run." }),
@@ -963,25 +984,7 @@ const DecisionToolParams = Type.Object(
 		checksPass: Type.Optional(
 			Type.Boolean({ description: "Whether correctness checks passed. false forces discard." }),
 		),
-		minDelta: Type.Optional(
-			Type.Number({ description: "Minimum absolute improvement required to keep. Default 0." }),
-		),
-		minRelativeDelta: Type.Optional(
-			Type.Number({ description: "Minimum relative improvement required to keep, e.g. 0.01 for 1%. Default 0." }),
-		),
-		confidenceMode: Type.Optional(
-			StringEnum(["none", "mad"] as const, {
-				description: "Noise/confidence policy. Use mad with minConfidence to reject noisy wins.",
-			}),
-		),
-		minConfidence: Type.Optional(
-			Type.Number({ description: "Minimum confidence multiple over MAD noise floor. Default 0." }),
-		),
-		lowConfidenceAction: Type.Optional(
-			StringEnum(["retry", "discard"] as const, {
-				description: "Decision when confidence evidence is missing or too low. Default retry.",
-			}),
-		),
+		...improvementThresholdFields,
 		noiseMetrics: Type.Optional(
 			Type.Array(Type.Number(), { description: "Previous metric samples for MAD confidence calculation." }),
 		),
@@ -1038,26 +1041,7 @@ const LoopToolParams = Type.Object(
 				description: "For action=init, replace existing user-level loop state for this workspace/loop id.",
 			}),
 		),
-		minDelta: Type.Optional(
-			Type.Number({ description: "Minimum absolute improvement required to keep. Default 0." }),
-		),
-		minRelativeDelta: Type.Optional(
-			Type.Number({ description: "Minimum relative improvement required to keep, e.g. 0.01 for 1%. Default 0." }),
-		),
-		confidenceMode: Type.Optional(
-			StringEnum(["none", "mad"] as const, {
-				description:
-					"Noise/confidence policy; mad with minConfidence rejects noisy wins. Default none unless minConfidence > 0.",
-			}),
-		),
-		minConfidence: Type.Optional(
-			Type.Number({ description: "Minimum confidence multiple over MAD noise floor. Default 0." }),
-		),
-		lowConfidenceAction: Type.Optional(
-			StringEnum(["retry", "discard"] as const, {
-				description: "Decision when confidence evidence is missing or too low. Default retry.",
-			}),
-		),
+		...improvementThresholdFields,
 		currentMetric: Type.Optional(Type.Number({ description: "record: measured primary metric." })),
 		checksPass: Type.Optional(Type.Boolean({ description: "record: correctness result; false forces discard." })),
 		hypothesis: Type.Optional(Type.String({ description: "What this run tried." })),
