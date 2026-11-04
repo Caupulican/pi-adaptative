@@ -22,15 +22,6 @@ const NO_DELIVERY_CLAIMS = {
 	states_files_changed: { kind: "noul", probability: 0.02 },
 } as const;
 
-/** The effect questions the operation gate asks about a shell call it judges, answered "no effect". */
-const OPERATION_JUDGMENTS = {
-	leaves_machine: { kind: "noul", probability: 0.02 },
-	cannot_be_undone: { kind: "noul", probability: 0.02 },
-	touches_outside_task: { kind: "noul", probability: 0.02 },
-	acquires_external_code: { kind: "noul", probability: 0.02 },
-	request_authorizes: { kind: "noul", probability: 0.02 },
-} as const;
-
 /**
  * Orchestration enabled (`orchestrator.delegationGate`): the root orchestrates and its workers carry out the work.
  *
@@ -82,6 +73,17 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 				}
 			},
 			reply: { content: [{ type: "text", text: "The build ran: j4-build." }] },
+		},
+		{
+			// Diagnostic: a request after the worker's report is not part of the script; its tail is shown so the cause is named.
+			name: "j4-worker-extra",
+			optional: true,
+			check: (request) => {
+				console.info(
+					`J4_EXTRA_WORKER_REQUEST ${JSON.stringify(request.context.messages.slice(-2)).slice(0, 1_500)}`,
+				);
+			},
+			reply: { content: [{ type: "text", text: "Nothing further." }] },
 		},
 	);
 	world.provider.enqueue(
@@ -244,8 +246,6 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 		);
 		world.systemOne.enterPhase("j4-shell-allowed", {
 			...INTAKE_JUDGMENTS,
-			...NO_DELIVERY_CLAIMS,
-			...OPERATION_JUDGMENTS,
 			performs_task_work: { kind: "noul", probability: 0.02 },
 		});
 		await withDeadline(trace, "J4 turn 3", session.prompt("Check the current state."));
