@@ -12,7 +12,17 @@ const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTA
 const REFUSAL = "The root orchestrates and does not carry out task work itself";
 const ORIGINAL_LIMITS = "export const MAX_RETRIES = 3;\n";
 
-/** The effect questions the operation gate asks about a call outside the task, answered "no effect". */
+/** What a final answer is checked for once a work unit is open: nothing in these answers claims a delivery. */
+const NO_DELIVERY_CLAIMS = {
+	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_committed: { kind: "noul", probability: 0.02 },
+	states_pushed: { kind: "noul", probability: 0.02 },
+	states_published: { kind: "noul", probability: 0.02 },
+	states_files_changed: { kind: "noul", probability: 0.02 },
+} as const;
+
+/** The effect questions the operation gate asks about a shell call it judges, answered "no effect". */
 const OPERATION_JUDGMENTS = {
 	leaves_machine: { kind: "noul", probability: 0.02 },
 	cannot_be_undone: { kind: "noul", probability: 0.02 },
@@ -158,7 +168,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			reply: { content: [{ type: "text", text: "The worker is still settling." }] },
 		},
 	);
-	world.systemOne.enterPhase("j4-delegate", { ...INTAKE_JUDGMENTS, ...OPERATION_JUDGMENTS });
+	world.systemOne.enterPhase("j4-delegate", INTAKE_JUDGMENTS);
 	await withDeadline(
 		trace,
 		"J4 turn 1",
@@ -203,7 +213,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 		);
 		world.systemOne.enterPhase("j4-shell-refused", {
 			...INTAKE_JUDGMENTS,
-			...OPERATION_JUDGMENTS,
+			...NO_DELIVERY_CLAIMS,
 			performs_task_work: { kind: "noul", probability: 0.97 },
 		});
 		await withDeadline(trace, "J4 turn 2", session.prompt("Run the build yourself."));
@@ -234,6 +244,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 		);
 		world.systemOne.enterPhase("j4-shell-allowed", {
 			...INTAKE_JUDGMENTS,
+			...NO_DELIVERY_CLAIMS,
 			...OPERATION_JUDGMENTS,
 			performs_task_work: { kind: "noul", probability: 0.02 },
 		});
