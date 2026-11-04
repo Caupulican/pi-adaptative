@@ -576,6 +576,8 @@ export class InteractiveMode {
 			showStatus: (message) => this.showStatus(message),
 			showWarning: (message) => this.showWarning(message),
 			showError: (message) => this.showError(message),
+			promptForEdit: (title, prefill) =>
+				this.extensionUiHost.showExtensionEditor(title, prefill, { exactText: true }),
 			openSelectorModal: () => this.showBotTeamSelector(),
 			onActiveTargetChanged: () => {
 				this.defaultEditor.setPlaceholder(this.editorPlaceholder());

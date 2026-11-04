@@ -41,6 +41,7 @@ import {
 	type BotTeamChange,
 	botReplyText,
 	normalizeBotOrTeamId,
+	normalizeBotSoul,
 	operatorTextOf,
 	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
@@ -1573,13 +1574,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this.getBotTeamStore().getTeam(teamId);
 	}
 
-	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord {
+	upsertPersistentBot(rawInput: UpsertPersistentBotInput): PersistentBotRecord {
 		const store = this.getBotTeamStore();
-		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+		const agentId = normalizeBotOrTeamId(rawInput.agentId, "agentId");
+		// Judge the soul before the grant guard: an invalid soul is the error to show, whatever the bot is doing.
+		const input = rawInput.soul === undefined ? rawInput : { ...rawInput, soul: normalizeBotSoul(rawInput.soul) };
 		this.assertBotDispatchIdle(agentId);
 		store.reload();
 		const existing = store.getBot(agentId);
-		const bindingFields = ["provider", "modelId", "thinkingLevel", "profileId", "canWrite", "instructions"] as const;
+		const bindingFields = ["provider", "modelId", "thinkingLevel", "profileId", "canWrite", "soul"] as const;
 		const bindingChanged =
 			existing &&
 			bindingFields.some((field) => {
@@ -1597,7 +1600,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			)
 		)
 			throw new Error(
-				`Retire bot ${input.agentId} before changing its model, profile, permissions or instructions; an existing worker's grant is immutable.`,
+				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions or soul: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
 			);
 		return store.upsertBot({ ...input, agentId });
 	}
@@ -1956,12 +1959,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const spec = { provider: bot.provider, modelId: bot.modelId };
 
 		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
-		const baseInstructions = bot.instructions ? `${bot.instructions}\n\nTask:\n${message}` : message;
 		// The memory block follows the task: the lane label, the roster line and the chat open on what the operator sent.
 		const fullInstructions =
-			memoryCtx.promptBlock.length > 0
-				? `${baseInstructions}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}`
-				: baseInstructions;
+			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
 
 		const activeIds = Array.from(
 			new Set(
@@ -1978,6 +1978,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
 		const started = await this.startWorkerDelegation({
 			instructions: fullInstructions,
+			// The soul is admitted into the worker's contract, so every turn of this worker generation carries it.
+			...(bot.soul ? { botSoul: bot.soul } : {}),
 			...(bot.profileId ? { profileId: bot.profileId } : {}),
 			authority: {
 				...(!bot.profileId ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),

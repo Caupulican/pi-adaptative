@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import { checkSoulText } from "../agent-identity.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
@@ -17,6 +18,7 @@ import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../m
 import { defaultModelPerProvider } from "../model-resolver.ts";
 import {
 	type HarnessCapability,
+	MAX_WORKER_SOUL_LENGTH,
 	ORCHESTRATION_SCHEMA_VERSION,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationModelBinding,
@@ -30,6 +32,7 @@ import {
 	type OrchestrationModelUnusableCause,
 	resolvePinnedOrchestrationModelResolution,
 } from "../orchestration/model-binding.ts";
+import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 import { DEFAULT_WORKER_DELEGATION_ACCOUNT, DEFAULT_WORKER_DELEGATION_THINKING } from "../settings/settings-rules.ts";
 import type { WorkerAccountRouting, WorkerThinkingPolicy } from "../settings/settings-schema.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
@@ -171,6 +174,40 @@ export function bindCompiledToolSurface(
 		}),
 	};
 	return { ...shipment, profile };
+}
+
+/**
+ * Place a persistent bot's soul before the profile soul of a new worker's shipment, so the admitted contract carries it
+ * and every turn of that worker (mailbox reuse, queued dispatch, retry, restart recovery) opens its system prompt with it.
+ * The soul is judged again here because this is where it becomes standing instructions: the stored record can have been
+ * edited by hand. The soul has no size limit of its own; the combined soul must fit the worker contract limit and, with
+ * the subagent core, the model's system prompt budget, or the executor would fail on the first provider request. Each
+ * refusal is a skip reason that names the limit exceeded, never a throw.
+ */
+export function bindBotSoul(
+	shipment: ResolvedWorkerProfile,
+	botSoul: string,
+	systemPromptMaxChars: number | undefined,
+): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
+	const checked = checkSoulText(botSoul);
+	if (!checked.ok) return { ok: false, skipReason: `bot_soul_invalid:${checked.reason}` };
+	if (checked.soul === undefined) return { ok: true, shipment };
+	const soul = shipment.soul ? `${checked.soul}\n\n${shipment.soul}` : checked.soul;
+	if (soul.length > MAX_WORKER_SOUL_LENGTH) {
+		return {
+			ok: false,
+			skipReason: `bot_soul_exceeds_worker_contract_limit:the bot soul and the profile soul total ${soul.length} characters; the worker contract limit (MAX_WORKER_SOUL_LENGTH) is ${MAX_WORKER_SOUL_LENGTH}`,
+		};
+	}
+	// Separator included: the prompt is the core, a blank line, then the soul.
+	const minimumPromptChars = SUBAGENT_CORE_SYSTEM_PROMPT.length + 2 + soul.length;
+	if (systemPromptMaxChars !== undefined && minimumPromptChars > systemPromptMaxChars) {
+		return {
+			ok: false,
+			skipReason: `bot_soul_exceeds_prompt_budget:the worker core and the soul take ${minimumPromptChars} characters; this model's system prompt budget (systemPromptMaxChars) is ${systemPromptMaxChars}`,
+		};
+	}
+	return { ok: true, shipment: { ...shipment, soul } };
 }
 
 /**

@@ -113,6 +113,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
+| `/bot [list\|new <id> [--write] [model] [soul]\|soul <id>\|open <id>\|msg <id> <text>\|stop <id>\|retire <id>]` | Manage persistent bots. A bot's soul (threat-scanned, no size limit of its own) opens its worker system prompt on every turn; `/bot soul <id>` edits it in a panel, and a bot with a live worker must be retired first |
 | `/sysprompt [default\|reset]` | Edit this session's system prompt in a panel; the override is session-only |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
@@ -180,7 +181,26 @@ Replace the default system prompt with:
 
 Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location. Project copies are discovered only when **Project instructions** is **on-demand** and the project is trusted; otherwise matching global files remain the fallback.
 
-Name the agent with `~/.pi/agent/soul.md`: the prompt opens with `You are "<name>", a creative, self-evolving agent.`, where `<name>` is the front matter `name:` field or the first `# ` heading of that file. Without the file the name is `Pi-Adaptative` and the prompt tells the agent it may write the file from its memory and sessions. The rest of the file is the agent's soul: it appears directly under the first line, screened for prompt injection and cut at 2000 characters. The identity is read once per session.
+### Soul
+
+`~/.pi/agent/soul.md` is the agent's identity. The prompt opens with `You are "<name>", a creative, self-evolving agent.` and the body of the file sits directly under that line. Without the file the name is `Pi-Adaptative` and the prompt tells the agent it may write the file from its memory and sessions. The soul has no size limit; it is screened for prompt injection each time it is loaded or written. The identity is read once per session, so a change applies from the next session.
+
+How to write it:
+
+```markdown
+---
+name: Ada
+---
+You are curious and direct. You prefer the simplest design that is proven by evidence.
+You work by reading the source first, then changing the smallest thing that fixes the cause.
+You say plainly what you know, what you inferred and what you guessed.
+```
+
+- Front matter `name:` sets the name; without it, the first `# ` heading does.
+- Write the body in the second person, as prose about who the agent is and how it works: character, values, working style, how it reasons and what it cares about.
+- Keep it stable. Put facts that change in memory, rules in `AGENTS.md`, and permissions in settings: a soul grants no authority.
+- Never put tasks, step lists, commands, credentials or text copied from the web or from tool output in it. The screen replaces a soul that reads like an instruction override with a notice.
+- It can grow as the agent learns who it is; the agent may rewrite it, and you can edit it at any time.
 
 ## Exporting and Sharing Sessions
 

@@ -3,6 +3,7 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, watch,
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -59,7 +60,8 @@ export interface PersistentBotRecord {
 	readonly provider: string;
 	readonly modelId: string;
 	readonly thinkingLevel?: string;
-	readonly instructions?: string;
+	/** The bot's soul: owner-authored text that opens its worker system prompt on every turn of every worker generation. */
+	readonly soul?: string;
 	readonly profileId?: string;
 	/** A bot edits files only when asked to: its replies are then structured reports, not chat. */
 	readonly canWrite?: boolean;
@@ -80,7 +82,7 @@ export interface PersistentBotView {
 	readonly modelId: string;
 	readonly modelRef: string;
 	readonly thinkingLevel?: string;
-	readonly instructions?: string;
+	readonly soul?: string;
 	readonly profileId?: string;
 	readonly state: PersistentBotLiveState;
 	readonly currentTaskId?: string;
@@ -140,7 +142,8 @@ export interface UpsertPersistentBotInput {
 	readonly provider?: string;
 	readonly modelId?: string;
 	readonly thinkingLevel?: string;
-	readonly instructions?: string;
+	/** Replaces the soul; an empty string clears it. Refused when threat-flagged; it has no size limit. */
+	readonly soul?: string;
 	readonly profileId?: string;
 	readonly canWrite?: boolean;
 	readonly retired?: boolean;
@@ -227,6 +230,17 @@ export function normalizeBotOrTeamId(raw: string, label = "identifier"): string 
 		);
 	}
 	return trimmed;
+}
+
+/**
+ * The stored form of a bot soul. The text becomes standing instructions in every worker generation of the bot, so it
+ * is screened when written: a flagged soul is refused with the findings. It has no size limit here; admission checks
+ * the worker contract and prompt-budget limits. An empty result means the soul is cleared.
+ */
+export function normalizeBotSoul(text: string): string {
+	const checked = checkSoulText(text);
+	if (!checked.ok) throw new Error(`Bot soul rejected: ${checked.reason}.`);
+	return checked.soul ?? "";
 }
 
 export function sameActiveChatTarget(a: ActiveChatTarget, b: ActiveChatTarget): boolean {
@@ -355,7 +369,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		provider,
 		modelId,
 		thinkingLevel,
-		instructions,
+		soul,
 		profileId,
 		canWrite,
 		createdAt,
@@ -386,7 +400,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		provider,
 		modelId,
 		thinkingLevel: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
-		instructions: typeof instructions === "string" ? instructions : undefined,
+		soul: typeof soul === "string" ? soul : undefined,
 		profileId: typeof profileId === "string" ? profileId : undefined,
 		canWrite: typeof canWrite === "boolean" ? canWrite : undefined,
 		createdAt,
@@ -815,8 +829,7 @@ export class PersistentBotTeamStore {
 			modelId,
 			thinkingLevel:
 				input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
-			instructions:
-				input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
+			soul: input.soul !== undefined ? normalizeBotSoul(input.soul) || undefined : existing?.soul,
 			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
 			canWrite: input.canWrite ?? existing?.canWrite,
 			createdAt: existing?.createdAt ?? now,
@@ -1325,8 +1338,7 @@ export class PersistentBotTeamStore {
 			const bot = this.bots.get(normId);
 			const displayName = bot?.displayName ?? normId;
 			const model = bot ? `${bot.provider}/${bot.modelId}` : "anthropic/claude-haiku-5-5";
-			const role = bot?.instructions || "general specialist";
-			const header = `# Bot Memory: ${displayName} (${normId})\n\n- Model: ${model}\n- Role: ${role}\n\n## Continuity & Notes\n`;
+			const header = `# Bot Memory: ${displayName} (${normId})\n\n- Model: ${model}\n\n## Continuity & Notes\n`;
 			createMemoryHeader(filePath, header);
 		}
 		return filePath;
@@ -1613,7 +1625,7 @@ export class PersistentBotTeamStore {
 			const description = botRecord?.description;
 			const thinkingLevel =
 				lane?.thinkingLevel !== undefined ? String(lane.thinkingLevel) : botRecord?.thinkingLevel;
-			const instructions = botRecord?.instructions;
+			const soul = botRecord?.soul;
 			const profileId = botRecord?.profileId ?? lane?.profileId;
 
 			const currentTaskId = liveAgent?.attemptId ?? lane?.attemptId ?? lane?.laneId;
@@ -1659,7 +1671,7 @@ export class PersistentBotTeamStore {
 				modelId,
 				modelRef,
 				thinkingLevel,
-				instructions,
+				soul,
 				profileId,
 				state,
 				currentTaskId,

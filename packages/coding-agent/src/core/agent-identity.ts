@@ -6,8 +6,6 @@ import { scanContextFileThreats, stripInvisibleUnicode } from "./security/contex
 export const DEFAULT_AGENT_NAME = "Pi-Adaptative";
 export const SOUL_FILE_NAME = "soul.md";
 const MAX_AGENT_NAME_CHARS = 64;
-/** The soul rides in every request, so its text is bounded; the file stays readable for the rest. */
-export const MAX_SOUL_CHARS = 2_000;
 
 function cleanName(value: string): string | undefined {
 	const cleaned = value
@@ -38,7 +36,7 @@ export interface AgentIdentity {
 	readonly name: string;
 	/**
 	 * The soul text that opens the prompt under the first line: the file without its front matter and
-	 * name heading, scanned for injection and bounded. Absent when the file has no body.
+	 * name heading, scanned for injection. Absent when the file has no body.
 	 */
 	readonly soul?: string;
 	/** Where `soul.md` belongs, set only while it does not exist so the agent can write it. */
@@ -52,20 +50,39 @@ export function parseSoulBody(markdown: string): string {
 	return withoutFrontMatter.replace(/^\s*#[ \t]+.*(?:\n|$)/, "").trim();
 }
 
+/** A soul text with invisible unicode removed, and the threat findings that make it unfit to become standing instructions. */
+function screenSoulText(text: string): { cleaned: string; findings: string[] } {
+	const { cleaned } = stripInvisibleUnicode(text);
+	return { cleaned, findings: scanContextFileThreats(cleaned) };
+}
+
 /**
  * Renders a soul body for the prompt. The file is agent-writable, so it is screened like any context file
- * before it becomes standing instructions: a threat finding replaces it with a notice naming the findings,
- * and an over-long body is cut with a marker that names the file to read for the rest.
+ * before it becomes standing instructions: a threat finding replaces it with a notice naming the findings.
+ * The soul has no size limit: it is expected to grow.
  */
 export function renderSoul(body: string, file: string): string | undefined {
-	const { cleaned } = stripInvisibleUnicode(body);
+	const { cleaned, findings } = screenSoulText(body);
 	if (cleaned.length === 0) return undefined;
-	const findings = scanContextFileThreats(cleaned);
 	if (findings.length > 0) {
 		return `[soul.md was not loaded: it matched the threat scan (${findings.join(", ")}). Ask the owner to review ${file}.]`;
 	}
-	if (cleaned.length <= MAX_SOUL_CHARS) return cleaned;
-	return `${cleaned.slice(0, MAX_SOUL_CHARS)}\n[soul.md truncated at ${MAX_SOUL_CHARS} of ${cleaned.length} characters: read ${file} for the rest.]`;
+	return cleaned;
+}
+
+/**
+ * Judges an owner-authored soul that will be stored and delivered whole (a persistent bot's): invisible unicode is
+ * removed and the result trimmed, and the text is refused when it matches the threat scan. It has no size limit;
+ * the worker contract and the model's prompt budget bound it where it is delivered. A soul that is empty after
+ * trimming is accepted as `undefined`, which clears it.
+ */
+export function checkSoulText(text: string): { ok: true; soul: string | undefined } | { ok: false; reason: string } {
+	const { cleaned, findings } = screenSoulText(text);
+	const soul = cleaned.trim();
+	if (findings.length > 0) {
+		return { ok: false, reason: `the soul matched the threat scan (${findings.join(", ")})` };
+	}
+	return { ok: true, soul: soul.length > 0 ? soul : undefined };
 }
 
 /**

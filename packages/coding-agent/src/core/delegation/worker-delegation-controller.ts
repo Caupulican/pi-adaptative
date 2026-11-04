@@ -183,6 +183,7 @@ import {
 	type WorkerToolSelection,
 } from "./worker-attempt-executor.ts";
 import {
+	bindBotSoul,
 	bindCompiledToolSurface,
 	bindCompiledVerifierIdentity,
 	defaultWorkerRole,
@@ -2187,6 +2188,16 @@ export class WorkerDelegationController {
 		}
 		if (verifierShipment) {
 			shipment = bindCompiledVerifierIdentity(shipment, verifierShipment.profile.profileId);
+		}
+		// A pinned contract already carries the soul its worker was admitted with; only a new worker takes the bot's.
+		if (!pinnedContract && request.botSoul !== undefined) {
+			const withSoul = bindBotSoul(
+				shipment,
+				request.botSoul,
+				this.laneCapabilityProfile(shipment.model).systemPromptMaxChars,
+			);
+			if (!withSoul.ok) return withSoul;
+			shipment = withSoul.shipment;
 		}
 		const inheritedVerifierAuthority = parentContract?.verifier?.authority ?? parentContract?.worker.authority;
 		const boundedVerifierExecutionPlan =

@@ -63,6 +63,8 @@ export interface BotTeamChatHost {
 	showStatus(message: string): void;
 	showWarning(message: string): void;
 	showError(message: string): void;
+	/** Opens a multi-line editor panel with `prefill`; undefined when the owner cancels. Text is returned exactly as typed. */
+	promptForEdit(title: string, prefill: string): Promise<string | undefined>;
 	openSelectorModal(): void;
 	onActiveTargetChanged?(target: ActiveChatTarget): void;
 }
@@ -318,6 +320,9 @@ export class BotTeamChatController {
 					await this.openBot(id, port);
 					return;
 				}
+				case "soul":
+					await this.editBotSoul(rest, port);
+					return;
 				case "msg":
 				case "send":
 					await this.sendToBotFromCommand(rest, port, undefined);
@@ -373,7 +378,7 @@ export class BotTeamChatController {
 					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [instructions...] | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick] | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -656,21 +661,52 @@ export class BotTeamChatController {
 		const canWrite = maybeFlag === "--write";
 		const afterId = canWrite ? afterFlag : afterIdRaw;
 		const [maybeModel, afterModel] = splitHead(afterId);
-		// A token that names a registry model is the model; anything else begins the instructions.
+		// A token that names a registry model is the model; anything else begins the soul.
 		const hasModel = isModelReference(maybeModel, port.modelRegistry.getAll());
 		const modelSpec = port.resolveModelSpec(hasModel ? maybeModel : undefined);
-		const instructions = (hasModel ? afterModel : afterId).trim();
+		const soul = (hasModel ? afterModel : afterId).trim();
 		const bot = port.upsertPersistentBot({
 			agentId,
 			provider: modelSpec.provider,
 			modelId: modelSpec.modelId,
 			thinkingLevel: modelSpec.thinkingLevel,
-			instructions: instructions.length > 0 ? instructions : undefined,
+			soul: soul.length > 0 ? soul : undefined,
 			...(canWrite ? { canWrite } : {}),
 		});
 		await this.switchTarget({ kind: "bot", agentId: bot.agentId });
 		this.host.showStatus(
 			`Created bot ${bot.agentId} on ${bot.provider}/${bot.modelId} and switched to its live chat.`,
+		);
+	}
+
+	/** `/bot soul <id>`: edit the bot's soul in a panel and store it through the same write path as `/bot new`. */
+	private async editBotSoul(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		const [rawId] = splitHead(rest);
+		if (rawId.length === 0) {
+			this.host.showWarning("Usage: /bot soul <id>");
+			return;
+		}
+		const agentId = normalizeBotOrTeamId(rawId, "agentId");
+		const bot = port.listPersistentBots().find((b) => b.agentId === agentId && b.persistent);
+		if (!bot) {
+			this.host.showWarning(`No bot named ${agentId}. Create it with /bot new ${agentId} <model> [soul...].`);
+			return;
+		}
+		const edited = await this.host.promptForEdit(`Edit soul of bot ${agentId}`, bot.soul ?? "");
+		if (edited === undefined) {
+			this.host.showStatus("Soul edit cancelled.");
+			return;
+		}
+		if (edited.trim() === (bot.soul ?? "")) {
+			this.host.showStatus(`Soul of ${agentId} unchanged.`);
+			return;
+		}
+		// A rejected soul and a bot with a live worker both throw with their reason; the command handler shows it.
+		const saved = port.upsertPersistentBot({ agentId, soul: edited });
+		this.host.showStatus(
+			saved.soul
+				? `Soul of ${agentId} saved (${saved.soul.length} characters). It opens the bot's system prompt from its next worker start.`
+				: `Soul of ${agentId} cleared.`,
 		);
 	}
 
@@ -737,7 +773,7 @@ export class BotTeamChatController {
 
 	private formatBotList(bots: readonly PersistentBotView[]): string {
 		if (bots.length === 0) {
-			return "No bots. Create one with /bot new <id> [--write] [model] [instructions...].";
+			return "No bots. Create one with /bot new <id> [--write] [model] [soul...].";
 		}
 		return bots
 			.map((b) => {
