@@ -13,7 +13,11 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 	const created = await world.createRootSession("root", {
 		agentDir: `${world.agentDir}-${label}`,
 		sessionManager: world.createSessionManager(`${world.agentDir}-${label}`),
-		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+		// This scenario's checkpoint keeps the second warm reply and everything after it. The cut lands there while the entries after
+		// that reply weigh less than the keep budget and the budget does not exceed their weight plus that reply's (2,670 tokens): the
+		// journey-wide 1,000 left no room once the first delegate receipt carried the rule blocks (the tail weighed 1,009 to 1,057), so
+		// this session keeps 2,000, which sits inside the whole range with more than 900 tokens to spare on each side.
+		settings: { memorySystem: "okf", autoLearn: { enabled: false }, compaction: { keepRecentTokens: 2_000 } },
 	});
 	const session = created.session;
 	const ownerJudgments = {
