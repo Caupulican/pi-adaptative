@@ -1868,6 +1868,10 @@ export interface BuildSystemPromptOptions {
 	 * ledger owns are rendered inline so no rule is lost.
 	 */
 	ledgerActive?: boolean;
+	/** The agent's name, read from the agent directory's soul.md; the full prompt opens by stating it. */
+	agentName?: string;
+	/** Set while soul.md does not exist: the path the agent may create it at from its memory and sessions. */
+	missingSoulPath?: string;
 }
 
 export interface MemoryProvider {

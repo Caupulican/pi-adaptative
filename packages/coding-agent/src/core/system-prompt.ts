@@ -317,7 +317,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
 	const introduction = fullPrompt
-		? "Pi-Adaptative: self-evolving assistant. Deliver the user's goals; preserve continuity; own integration."
+		? `You are "${options.agentName ?? "Pi-Adaptative"}", a creative, self-evolving agent.${options.missingSoulPath ? ` ${options.missingSoulPath} does not exist: when memory and sessions show who you are, write it (front matter name:, then a short self-description).` : ""}`
 		: leanPrompt
 			? "Pi-Adaptative bounded coding agent. Complete current goal with active surface; preserve handoff evidence."
 			: capabilityClass === "minimal"

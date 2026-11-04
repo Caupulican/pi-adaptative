@@ -28,6 +28,7 @@ import {
 import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import type { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import { readAgentIdentity } from "./agent-identity.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
 import {
@@ -948,6 +949,7 @@ export class AgentSession {
 			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
+			getAgentIdentity: () => readAgentIdentity(this._agentDir),
 		});
 		this.ownerSystemPrompt = new SessionSystemPromptController({
 			builder: this._systemPromptBuilder,

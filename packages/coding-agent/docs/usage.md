@@ -180,6 +180,8 @@ Replace the default system prompt with:
 
 Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location. Project copies are discovered only when **Project instructions** is **on-demand** and the project is trusted; otherwise matching global files remain the fallback.
 
+Name the agent with `~/.pi/agent/soul.md`: the prompt opens with `You are "<name>", a creative, self-evolving agent.`, where `<name>` is the front matter `name:` field or the first `# ` heading of that file. Without the file the name is `Pi-Adaptative` and the prompt tells the agent it may write the file from its memory and sessions. The identity is read once per session.
+
 ## Exporting and Sharing Sessions
 
 Use `/export [file]` to write a session to HTML.

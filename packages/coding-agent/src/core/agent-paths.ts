@@ -83,6 +83,8 @@ export const AGENT_ROOT_FILE_NAMES = [
 	"USER.md",
 	"SYSTEM.md",
 	"APPEND_SYSTEM.md",
+	// The agent's identity: its name (front matter `name:` or the first `# ` heading) opens the system prompt.
+	"soul.md",
 	// Global context files the resource loader reads from the agent root (any casing it accepts).
 	"AGENTS.md",
 	"AGENTS.MD",

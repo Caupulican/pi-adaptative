@@ -2,6 +2,7 @@
 
 ### Added
 
+- The system prompt opens with `You are "<name>", a creative, self-evolving agent.`, where the name comes from `soul.md` in the agent directory (front matter `name:` or the first `# ` heading) and defaults to `Pi-Adaptative`. While the file does not exist the prompt names its path and tells the agent to write it from its memory and sessions when it knows who it is; the line disappears once the file exists. The identity is read once per session so the cached prompt prefix stays stable.
 - `/sysprompt` opens the session system prompt in an editor panel: edit the active prompt, start from the generated one with `/sysprompt default`, or return to it with `/sysprompt reset`. The override belongs to the session branch, survives `/resume`, and is applied to the next request as a sanctioned prompt-cache break.
 - A rule ledger: standing rules for delegation, work lifecycle, output formats, engineering skills and noticed items are product constants read whole, on demand, through the new `ledger_read` tool. The system prompt carries only an index of ids and triggers; each id is derived from the rule's content. Without the tool, the same rules render inline.
 - A ledger rule can gate the tools it governs: the host blocks the first `delegate` call with a short reason naming the rule until `ledger_read` has put the rule into the context, then the repeated call runs. YOLO mode does not skip the gate.

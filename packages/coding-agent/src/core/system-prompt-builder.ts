@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../kernel/index.ts";
 import { resolvePath } from "../utils/paths.ts";
+import type { AgentIdentity } from "./agent-identity.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
@@ -95,6 +96,8 @@ export interface SystemPromptBuilderDeps {
 	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
 	 */
 	getSystemPromptOverride?(): string | undefined;
+	/** The agent's identity (soul.md). Read once per builder so the cached prompt prefix stays stable. */
+	getAgentIdentity?(): AgentIdentity;
 }
 
 export function collectSelfModificationSourceCandidates(settings: {
@@ -153,6 +156,7 @@ export class SystemPromptBuilder {
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	/** The date every prompt this session builds states, pinned until `advancePromptDate` at a cold moment. */
 	private _promptDate: string | undefined;
+	private _agentIdentity: AgentIdentity | undefined;
 
 	constructor(deps: SystemPromptBuilderDeps) {
 		this.deps = deps;
@@ -419,6 +423,8 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
+		this._agentIdentity ??= this.deps.getAgentIdentity?.();
+		const identity = this._agentIdentity;
 		const modelCapability = this.deps.getModelCapabilityProfile();
 		const validToolNames = toolNames.filter((name) => this.deps.hasTool(name));
 		// Standing rules are read on demand only where the full prompt and the ledger tool both exist.
@@ -484,6 +490,8 @@ export class SystemPromptBuilder {
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 			ledgerActive,
+			agentName: identity?.name,
+			missingSoulPath: identity?.missingSoulPath,
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its
