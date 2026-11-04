@@ -10,6 +10,7 @@ export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 		topic: "delegation",
 		when: "before starting, reusing, steering or waiting on a worker",
 		requires: "delegate",
+		gates: ["delegate"],
 		body: `- Orientation stays local unless a team is requested. Otherwise you must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test or review task. Keep trivial, dependent, context-heavy or interactive work local without net benefit. Long work alone never mandates a team.
 - Start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence and write ownership; do not duplicate running or queued work.
 - Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.

@@ -80,6 +80,8 @@ export interface ToolGateControllerDeps {
 	getExtensionRunner(): ExtensionRunner;
 	/** Host-owned relevance gate for optional extension and credential tools. */
 	checkToolApplicability?(toolName: string, args: unknown): BeforeToolCallResult | undefined;
+	/** Guidance gate (not a permission check): a short reason while the ledger rule governing the tool is not in context. */
+	checkLedgerRule?(toolName: string): string | undefined;
 	/** Observe an execution only after all pre-execution gates and extension hooks allow it. */
 	getToolSelectionController?(): ToolSelectionController | undefined;
 	/**
@@ -292,6 +294,8 @@ export class ToolGateController {
 		if (selfCompactionBlock) return selfCompactionBlock;
 		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);
 		if (applicabilityBlock) return applicabilityBlock;
+		const ledgerReason = this.deps.checkLedgerRule?.(toolCall.name);
+		if (ledgerReason) return { block: true, reason: ledgerReason };
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);

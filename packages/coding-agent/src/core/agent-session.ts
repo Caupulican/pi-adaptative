@@ -171,6 +171,7 @@ import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
+import { ledgerGateReason } from "./ledger/ledger-gate.ts";
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import { ActiveBranchProbe } from "./memory/active-branch-probe.ts";
@@ -2244,6 +2245,8 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
+			checkLedgerRule: (toolName) =>
+				ledgerGateReason(toolName, this.getActiveToolNames(), this.agent.state.messages),
 			checkToolApplicability: (toolName, args) => {
 				const source = this._runtimeBuilder.getToolSourceInfo(toolName);
 				const aliases = optionalToolRequestAliases(toolName, source, () => {

@@ -26,6 +26,8 @@ export interface LedgerRuleSource {
 	readonly when: string;
 	/** Tool that must be active for the rule to apply; the entry is omitted from the index otherwise. */
 	readonly requires?: string;
+	/** Tools whose calls this rule governs; the host blocks such a call until the rule is in context. */
+	readonly gates?: readonly string[];
 	readonly body: string;
 }
 
@@ -39,13 +41,19 @@ export function ledgerEntryId(topic: string, body: string): string {
 
 /** Validates one rule; an invalid constant is a programming error and fails the first prompt build loudly. */
 export function buildLedgerEntry(source: LedgerRuleSource): LedgerEntry {
-	const { topic, when, requires } = source;
+	const { topic, when, requires, gates } = source;
 	if (!TOPIC_PATTERN.test(topic)) throw new Error(`Ledger topic ${topic} must be kebab-case.`);
 	if (when.length === 0 || when.length > MAX_WHEN_CHARS) {
 		throw new Error(`Ledger topic ${topic} needs a when trigger of at most ${MAX_WHEN_CHARS} characters.`);
 	}
 	if (requires !== undefined && !TOOL_PATTERN.test(requires)) {
 		throw new Error(`Ledger topic ${topic} has an invalid requires tool name.`);
+	}
+	if (gates?.some((tool) => !TOOL_PATTERN.test(tool))) {
+		throw new Error(`Ledger topic ${topic} has an invalid gates tool name.`);
+	}
+	if (gates && new Set(gates).size !== gates.length) {
+		throw new Error(`Ledger topic ${topic} lists a gated tool more than once.`);
 	}
 	const body = source.body.replace(/\r\n?/g, "\n").trim();
 	if (body.length === 0) throw new Error(`Ledger topic ${topic} has no body.`);
@@ -54,7 +62,14 @@ export function buildLedgerEntry(source: LedgerRuleSource): LedgerEntry {
 			`Ledger topic ${topic} is ${body.length} characters; the limit is ${MAX_LEDGER_ENTRY_CHARS}. Split it into smaller topics.`,
 		);
 	}
-	return { topic, when, body, id: ledgerEntryId(topic, body), ...(requires ? { requires } : {}) };
+	return {
+		topic,
+		when,
+		body,
+		id: ledgerEntryId(topic, body),
+		...(requires ? { requires } : {}),
+		...(gates?.length ? { gates } : {}),
+	};
 }
 
 let catalog: readonly LedgerEntry[] | undefined;
@@ -66,12 +81,25 @@ export function loadLedgerCatalog(): readonly LedgerEntry[] {
 	if (new Set(entries.map((entry) => entry.topic)).size !== entries.length) {
 		throw new Error("Ledger topics must be unique.");
 	}
+	const gatedBy = new Map<string, string>();
+	for (const entry of entries) {
+		for (const tool of entry.gates ?? []) {
+			const owner = gatedBy.get(tool);
+			if (owner) throw new Error(`Ledger tool ${tool} is gated by both ${owner} and ${entry.topic}.`);
+			gatedBy.set(tool, entry.topic);
+		}
+	}
 	catalog = entries;
 	return entries;
 }
 
 export function findLedgerEntry(topic: string): LedgerEntry | undefined {
 	return loadLedgerCatalog().find((entry) => entry.topic === topic);
+}
+
+/** The rule that governs calls to `toolName`, if any. */
+export function ledgerEntryGating(toolName: string): LedgerEntry | undefined {
+	return loadLedgerCatalog().find((entry) => entry.gates?.includes(toolName));
 }
 
 export function requireLedgerEntry(topic: string): LedgerEntry {
