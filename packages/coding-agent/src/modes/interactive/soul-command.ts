@@ -47,7 +47,7 @@ export async function handleSoulCommand(host: SoulCommandHost, text: string): Pr
 				host.showStatus("Soul unchanged.");
 				return;
 			}
-			const saved = soul.saveFromOwner(edited);
+			const saved = soul.saveFromOwner(edited, { text: current });
 			if (!saved.ok) {
 				host.showError(`Soul not saved: ${saved.reason}.`);
 				return;

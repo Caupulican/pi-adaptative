@@ -88,6 +88,14 @@ export class SoulHistory {
 		return existsSync(file) ? readFileSync(file, "utf8") : undefined;
 	}
 
+	/** Stores a text whole under its hash (idempotent) and returns the hash; a revert keeps what it restores before it restores. */
+	keep(text: string): string {
+		const sha256 = soulSha256(text);
+		const file = join(this.versionsDir, `${sha256}.md`);
+		if (!existsSync(file)) writeFileAtomicSync(file, text);
+		return sha256;
+	}
+
 	/**
 	 * Records one write of `text`, the exact content of the document after it. A kept text is stored whole by its hash.
 	 * `standing` is what the file holds right now: when no kept version has that text (the owner or a shell wrote it,

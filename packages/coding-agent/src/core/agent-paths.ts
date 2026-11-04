@@ -181,6 +181,11 @@ export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");
 }
 
+/** `<agentDir>/state/soul/write` -- the advisory lock every harness mutation of `soul.md` and its accounting takes. */
+export function soulLockFile(agentDir: string): string {
+	return stateFile(agentDir, "soul", "write");
+}
+
 /** `<agentDir>/state/soul/history.jsonl` -- append-only record of every write to `soul.md` (bounded to the last entries). */
 export function soulHistoryFile(agentDir: string): string {
 	return stateFile(agentDir, "soul", "history.jsonl");

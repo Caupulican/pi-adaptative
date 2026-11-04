@@ -1,64 +1,95 @@
-import { statSync } from "node:fs";
-import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 
-/** File systems stamp whole seconds (FAT: two); a change within this much before a call started still counts as inside it. */
-const MTIME_SLACK_MS = 2_000;
-
+/** `ctime` moves on any content write, whatever a writer does to `mtime`; `ino` moves when the file is replaced. */
 interface SoulStamp {
 	readonly mtimeMs: number;
+	readonly ctimeMs: number;
 	readonly size: number;
 	readonly ino: number;
 }
 
+/**
+ * One exact revision of `soul.md`: its text, the digest of that text and the stamp it was read under. A decision about
+ * a revision is only valid while the file still has that digest; `undefined` text is an absent file.
+ */
+export interface SoulRevision {
+	readonly text: string | undefined;
+	readonly digest: string | undefined;
+	readonly stamp: SoulStamp | undefined;
+}
+
+/** A read that sees the stamp move under it is repeated this many times, then taken as read: the next check catches it. */
+const MAX_READ_ATTEMPTS = 3;
+
 function stampOf(path: string): SoulStamp | undefined {
 	const stats = statSync(path, { throwIfNoEntry: false });
-	return stats ? { mtimeMs: stats.mtimeMs, size: stats.size, ino: stats.ino } : undefined;
+	return stats ? { mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs, size: stats.size, ino: stats.ino } : undefined;
 }
 
 function sameStamp(left: SoulStamp | undefined, right: SoulStamp | undefined): boolean {
 	if (!left || !right) return left === right;
-	return left.mtimeMs === right.mtimeMs && left.size === right.size && left.ino === right.ino;
+	return (
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs &&
+		left.size === right.size &&
+		left.ino === right.ino
+	);
 }
 
-/** What `SoulWatch.observe` found since the last time the harness accounted for the file. */
-export type SoulObservation =
-	| { readonly kind: "unchanged" }
-	/** `inWindow`: the change happened while the observed call was running, so that call is its cause. */
-	| { readonly kind: "changed"; readonly inWindow: boolean };
+function revisionOf(path: string): SoulRevision {
+	let stamp = stampOf(path);
+	let revision: SoulRevision = { text: undefined, digest: undefined, stamp };
+	for (let attempt = 0; attempt < MAX_READ_ATTEMPTS && stamp; attempt++) {
+		const text = readFileSync(path, "utf8");
+		const after = stampOf(path);
+		revision = { text, digest: createHash("sha256").update(text, "utf8").digest("hex"), stamp: after };
+		if (sameStamp(stamp, after)) break;
+		stamp = after;
+	}
+	return revision;
+}
 
 /**
- * Tracks the last state of `soul.md` the harness accounted for (a load, an owner write, a gated write, a judged
- * ungated change): its text, which a revert restores, and its stamp, which makes the check after a tool call one
- * `stat`. A change is attributed to a call only when it falls inside that call's run (a created or changed file by its
- * own modification time, a deleted one by the directory's), so an owner editing the file by hand between calls is
- * not mistaken for the agent.
+ * The last state of `soul.md` the harness accounted for: a load, an owner write, a gated write or a judged change. It
+ * is a revision, not a time: whether the file changed is a question about its stamp and digest, so an unchanged file
+ * costs one `stat` and nothing about when a change happened is guessed.
  */
 export class SoulWatch {
 	private readonly path: string;
-	private knownText: string | undefined;
-	private stamp: SoulStamp | undefined;
+	private accounted: SoulRevision;
 
-	constructor(path: string, text: string | undefined) {
+	constructor(path: string) {
 		this.path = path;
-		this.knownText = text;
-		this.stamp = stampOf(path);
+		this.accounted = revisionOf(path);
 	}
 
-	/** The last accounted-for text; undefined when the file did not exist. */
+	/** The accounted-for text, which a revert restores; undefined when the file did not exist. */
 	get known(): string | undefined {
-		return this.knownText;
+		return this.accounted.text;
 	}
 
-	/** Accounts for the file as it is now, with `text` as its content (undefined when it does not exist). */
-	adopt(text: string | undefined): void {
-		this.knownText = text;
-		this.stamp = stampOf(this.path);
+	/** The file as it is right now. */
+	current(): SoulRevision {
+		return revisionOf(this.path);
 	}
 
-	observe(callStartedAt: number): SoulObservation {
-		const now = stampOf(this.path);
-		if (sameStamp(now, this.stamp)) return { kind: "unchanged" };
-		const changedAt = now ? now.mtimeMs : statSync(dirname(this.path), { throwIfNoEntry: false })?.mtimeMs;
-		return { kind: "changed", inWindow: changedAt !== undefined && changedAt >= callStartedAt - MTIME_SLACK_MS };
+	/**
+	 * The file's revision when its content differs from the accounted one, else undefined. A stamp that moved over the
+	 * same content (a touch) is absorbed.
+	 */
+	reconcile(): SoulRevision | undefined {
+		if (sameStamp(stampOf(this.path), this.accounted.stamp)) return undefined;
+		const now = revisionOf(this.path);
+		if (now.digest === this.accounted.digest) {
+			this.accounted = now;
+			return undefined;
+		}
+		return now;
+	}
+
+	/** Accounts for exactly this revision: its text, digest and stamp advance together. */
+	adopt(revision: SoulRevision): void {
+		this.accounted = revision;
 	}
 }
