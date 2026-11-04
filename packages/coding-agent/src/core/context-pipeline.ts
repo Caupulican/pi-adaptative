@@ -32,7 +32,7 @@ import {
 	getApplicableAssistantUsageInfo,
 } from "../kernel/compaction/compaction.ts";
 import { TokenBudget } from "../kernel/compaction/token-budget.ts";
-import type { AgentContextPlan } from "../kernel/index.ts";
+import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -653,12 +653,11 @@ export class ContextPipeline {
 			sentPrefixCount: number;
 			toolNames: readonly string[];
 			signal?: AbortSignal;
-			wireTexts?: readonly string[];
+			wire?: AgentContextWire;
 		},
 		getEdgeGrants: () => readonly EdgeGrantView[],
 	): Promise<AgentContextPlan> {
-		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal, wireTexts } =
-			input;
+		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal, wire } = input;
 		const lane = {
 			model,
 			compactionTriggerTokens,
@@ -686,7 +685,7 @@ export class ContextPipeline {
 				this.applyContextGc(history, writePayloads, frozenBelow, lane),
 			applyPathAliases: (history) => this.applyPathAliases(history),
 			getEdgeGrants,
-		}).plan(messages, sentPrefixCount, signal, wireTexts);
+		}).plan(messages, sentPrefixCount, signal, wire);
 	}
 
 	/** The session is disposed: no worker conversation plans again, so their context-policy lanes go. */

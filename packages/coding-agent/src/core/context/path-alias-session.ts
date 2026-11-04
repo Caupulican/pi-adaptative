@@ -108,8 +108,14 @@ export class PathAliasRuntime {
 	 */
 	private pendingScanned: string[] = [];
 	private scannedPersistedAt = 0;
-	/** Ids ever rendered in a message: the legend budget's cost side (`getAliasEconomics`). */
+	/** Ids ever rendered in a message: whose mentions the legend budget's savings side counts (`getAliasEconomics`). */
 	private readonly legendIds = new Set<string>();
+	/**
+	 * Characters of every distinct legend record seen in a synced history: the legend budget's cost side. A record is
+	 * one object per conversation it was sent in, so a line re-sent to another conversation, or again after a
+	 * compaction or in a continuous-chat turn, is paid again.
+	 */
+	private emittedLegendChars = 0;
 	/** The alias ids each wire message references, read once per message object. */
 	private readonly referencedIds = new WeakMap<AgentMessage, ReadonlySet<string>>();
 	/** The alias ids each durable legend record lists, read once per record object. */
@@ -235,7 +241,7 @@ export class PathAliasRuntime {
 		// Reservations persist with the table whenever they grow, so texts scanned on an earlier
 		// request have already reserved every standalone token they carry; only new texts need scanning.
 		// Whole-table budget: an alias pays for itself per mention, but the legend is paid per line
-		// for the rest of the session. Once the lines cost more than every mention saves, minting
+		// in every record that carries it. Once the lines cost more than every mention saves, minting
 		// stops (existing aliases keep working) until the balance recovers.
 		this.mintingPaused = this.legendCostExceedsSavings();
 		const unscanned = messages.filter((message) => !this.scanned.has(this.scanFingerprint(message)));
@@ -351,28 +357,27 @@ export class PathAliasRuntime {
 				const record = readPathAliasLegendRecord(readTransientRecordPayload(message.details));
 				listed = record ? record.entries.map((entry) => entry.id) : legacyLegendIds(message.content);
 				this.legendRecordIds.set(message, listed);
+				this.emittedLegendChars += typeof message.content === "string" ? message.content.length : 0;
 			}
 			for (const id of listed) ids.add(id);
 		}
 		return ids;
 	}
 
-	/** The legend budget as the census reads it: legend bytes owed against bytes the aliases saved. */
+	/** The legend budget: the legend characters actually sent against the characters the aliases saved. */
 	getAliasEconomics(): { legendChars: number; savedChars: number; paused: boolean } {
 		const byId = new Map(this.table.entries.map((entry) => [entry.id, entry] as const));
-		let legendChars = 0;
 		let savedChars = 0;
 		for (const id of this.legendIds) {
 			const entry = byId.get(id);
 			if (!entry) continue;
-			legendChars += entry.id.length + entry.path.length + 2;
 			savedChars += (this.mentionsById.get(id) ?? 0) * Math.max(0, entry.path.length - entry.id.length);
 		}
-		return { legendChars, savedChars, paused: this.mintingPaused };
+		return { legendChars: this.emittedLegendChars, savedChars, paused: this.mintingPaused };
 	}
 
 	private legendCostExceedsSavings(): boolean {
-		if (this.legendIds.size === 0) return false;
+		if (this.emittedLegendChars === 0) return false;
 		const economics = this.getAliasEconomics();
 		// A floor keeps a young table minting (every alias starts at one mention); above it the
 		// legend must have paid for itself or minting stops until the mentions catch up.

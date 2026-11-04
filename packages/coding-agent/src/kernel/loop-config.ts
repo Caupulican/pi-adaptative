@@ -359,13 +359,23 @@ export interface AgentContextPlanRequest {
 	 * `sentPrefixCount` entries are identical. `0` means nothing has been sent yet.
 	 */
 	sentPrefixCount: number;
+	/** What the request carries to the model outside `messages` and outside the plan's own transients. */
+	wire?: AgentContextWire;
+}
+
+/**
+ * Model-visible content a request carries outside the planned history. A plan reads it only to learn what the model
+ * sees on the wire (the path-alias legend names every alias visible there); it never rewrites, reorders or reconciles
+ * it.
+ */
+export interface AgentContextWire {
 	/**
-	 * Model-visible text the request carries outside `messages` and outside the plan's own transients: the kernel's
-	 * trailing records (the tool-failure ledger, the verification obligation) and a host projection's envelope (a turn
-	 * view and its state). A plan reads it only to learn what the model sees on the wire (the path-alias legend names
-	 * every alias visible there); it never rewrites, reorders or reconciles it.
+	 * Messages a host projection places around the plan (a continuous-chat turn view and its state). Each object is
+	 * immutable and reused for as long as its content holds, so a reader may key what it derives by identity.
 	 */
-	wireTexts?: readonly string[];
+	readonly messages?: readonly AgentMessage[];
+	/** Text that may change on every request: the kernel's trailing records (the tool-failure ledger, the verification obligation). */
+	readonly texts?: readonly string[];
 }
 
 /**

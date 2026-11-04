@@ -36,6 +36,32 @@ export interface SoulControllerDeps {
 /** Evaluations one identical candidate gets: the first, and one retry after an unsettled answer. */
 const UNSETTLED_EVALUATIONS_PER_CANDIDATE = 2;
 const MAX_TRACKED_CANDIDATES = 64;
+type GatedWrite = { reviewedText: string; before: string | undefined; reviewer: SoulReviewer };
+
+type HistoryRecord = Parameters<SoulHistory["record"]>[0];
+type DeferredAudit = HistoryRecord;
+
+/**
+ * A verdict whose commit the soul lock refused. It keeps the exact revision it was made on, the accounting baseline
+ * that gave it authority to restore, and the commit itself; it is resolved before anything else is accounted for, so
+ * the revision it rejected is never adopted as the owner's in the meantime.
+ */
+interface DeferredSettlement {
+	readonly observed: SoulRevision;
+	/** Digest of the accounted revision when the verdict was made: if the accounting moved since, its authority is gone. */
+	readonly baselineDigest: string | undefined;
+	readonly action: () => string | undefined;
+	/** The verdict reverts the file (rather than accepting it). */
+	readonly rejects: boolean;
+	readonly since: number;
+	attempts: number;
+}
+
+/** A deferred verdict is retried at each admission and settlement, then given up on. */
+const MAX_DEFERRED_ATTEMPTS = 5;
+const DEFERRED_TTL_MS = 10 * 60 * 1000;
+const MAX_DEFERRED_AUDIT = 32;
+
 /** A verdict that went stale because the file moved is made again at most this many times, then the file is adopted. */
 const MAX_REJUDGE_ROUNDS = 3;
 /** A call admitted this long ago and never settled was blocked after admission. */
@@ -60,6 +86,10 @@ export type SoulReviewReport =
 export type SoulSaveResult =
 	| { readonly ok: true; readonly bytes: number }
 	| { readonly ok: false; readonly reason: string };
+
+function joinNotices(first: string | undefined, second: string | undefined): string | undefined {
+	return first && second ? `${first} ${second}`.slice(0, MAX_BLOCK_REASON_CHARS) : (first ?? second);
+}
 
 /** The same text, allowing for the line endings the tool preserved. */
 function sameText(left: string, right: string): boolean {
@@ -109,16 +139,21 @@ export class SoulController {
 	private readonly historyStore: SoulHistory;
 	private readonly evaluations = new Map<string, number>();
 	/** Allowed writes whose tool call has not finished, keyed by the call itself. */
-	private readonly pending = new WeakMap<
-		AgentToolCall,
-		{ reviewedText: string; before: string | undefined; reviewer: SoulReviewer }
-	>();
+	private readonly pending = new WeakMap<AgentToolCall, GatedWrite>();
 
 	private readonly watch: SoulWatch;
 	/** Calls of the root agent admitted and not yet settled, with when: a change found while any run is theirs. */
 	private readonly running = new Map<AgentToolCall, number>();
 	/** Settling is one at a time: two calls ending together must not judge the same change twice. */
 	private settling: Promise<undefined> = Promise.resolve(undefined);
+	/** True while this process holds the soul lock: history operations inside it must not acquire it again. */
+	private holding = false;
+	/** A verdict on an exact revision that could not be committed because the soul lock stayed held elsewhere. */
+	private deferred: DeferredSettlement | undefined;
+	/** History entries that could not be written for the same reason; flushed under the lock at the next chance. */
+	private readonly deferredAudit: DeferredAudit[] = [];
+	/** A notice produced while no call was settling (a deferred revert completing at admission), told at the next settle. */
+	private carriedNotice: string | undefined;
 
 	constructor(deps: SoulControllerDeps) {
 		this.deps = deps;
@@ -187,7 +222,10 @@ export class SoulController {
 		for (const [other, admittedAt] of this.running) {
 			if (now - admittedAt > MAX_CALL_RUN_MS) this.running.delete(other);
 		}
-		if (this.running.size === 0 && this.watch.reconcile()) this.adoptOwner();
+		this.carriedNotice = joinNotices(this.carriedNotice, this.resolveDeferred());
+		if (this.deferredAudit.length > 0) this.withLock(() => undefined);
+		// A revision a deferred verdict still owns is not between-call change: it is never adopted as the owner's.
+		if (!this.deferred && this.running.size === 0 && this.watch.reconcile()) this.adoptOwner();
 		this.running.set(call, now);
 	}
 
@@ -303,20 +341,25 @@ export class SoulController {
 		const pending = this.pending.get(call);
 		this.pending.delete(call);
 		this.running.delete(call);
+		const carried = joinNotices(this.carriedNotice, this.resolveDeferred());
+		this.carriedNotice = undefined;
+		if (this.deferred) return carried;
 		const observed = this.watch.reconcile();
-		if (!observed) return undefined;
-		return this.judge(observed, pending && succeeded ? pending : undefined, 0);
+		if (!observed) return carried;
+		return joinNotices(carried, await this.judge(observed, pending && succeeded ? pending : undefined, 0));
 	}
 
 	private async judge(
 		observed: SoulRevision,
-		gated: { reviewedText: string; before: string | undefined; reviewer: SoulReviewer } | undefined,
+		gated: GatedWrite | undefined,
 		round: number,
 	): Promise<string | undefined> {
 		const known = this.watch.known;
 		const restoreTo = gated?.reviewedText ?? known;
 		let action: () => string | undefined;
+		let rejects = false;
 		if (observed.text === undefined) {
+			rejects = restoreTo !== undefined;
 			action =
 				restoreTo === undefined
 					? () => undefined
@@ -336,6 +379,7 @@ export class SoulController {
 		} else {
 			const text = observed.text;
 			const verdict = await this.verdict(text, known);
+			rejects = !verdict.accept;
 			action = verdict.accept
 				? () => {
 						if (verdict.warning) this.deps.emitWarning(verdict.warning);
@@ -356,7 +400,21 @@ export class SoulController {
 						);
 		}
 		const outcome = this.commit(observed, action);
-		if (outcome !== STALE) return outcome;
+		if (outcome.kind === "done") return outcome.notice;
+		if (outcome.kind === "deferred") {
+			this.deferred = {
+				observed,
+				baselineDigest: this.watch.accountedDigest,
+				action,
+				rejects,
+				since: Date.now(),
+				attempts: 0,
+			};
+			this.deps.emitWarning(
+				"soul.md is locked by another session; the verdict on its change is kept and retried at the next tool call, and the change is not adopted meanwhile.",
+			);
+			return undefined;
+		}
 		// The file moved while this verdict was being made: it says nothing about the new revision.
 		const next = this.watch.reconcile();
 		if (!next) return undefined;
@@ -370,45 +428,115 @@ export class SoulController {
 
 	/**
 	 * Runs `action` under the soul lock, only if the file still is the revision the verdict was made on, and accounts for
-	 * the file as `action` left it: the text, digest and stamp advance together, after the history entry. Returns the
-	 * action's notice, or {@link STALE} when the file is not the observed revision (nothing was written or advanced).
+	 * the file as `action` left it: the text, digest and stamp advance together, after the history entry. `stale`: the
+	 * file is not the observed revision (nothing was written or advanced). `deferred`: the lock stayed held elsewhere
+	 * (nothing was written or advanced either; the caller owns the obligation).
 	 */
-	private commit(observed: SoulRevision, action: () => string | undefined): string | undefined | typeof STALE {
-		return this.locked(() => {
+	private commit(
+		observed: SoulRevision,
+		action: () => string | undefined,
+	): { kind: "done"; notice: string | undefined } | { kind: "stale" } | { kind: "deferred" } {
+		const result = this.withLock(() => {
 			if (this.watch.current().digest !== observed.digest) return STALE;
 			const notice = action();
 			this.watch.adopt(this.watch.current());
 			return notice;
 		});
+		if (!result.held) return { kind: "deferred" };
+		return result.value === STALE ? { kind: "stale" } : { kind: "done", notice: result.value };
 	}
 
-	/** Holds the cross-process soul lock; when it stays held elsewhere the change is left for the next reconcile. */
-	private locked<T>(operation: () => T): T | undefined {
+	/**
+	 * Holds the cross-process soul lock for `operation`; pending history entries are written first, inside it. Nested use
+	 * runs directly. `held: false` means the lock stayed held elsewhere and nothing ran.
+	 */
+	private withLock<T>(operation: () => T): { held: true; value: T } | { held: false } {
+		if (this.holding) return { held: true, value: operation() };
 		try {
-			return withFileLockSync(soulLockFile(this.deps.agentDir), operation, { retries: LOCK_RETRIES });
+			return withFileLockSync(
+				soulLockFile(this.deps.agentDir),
+				() => {
+					this.holding = true;
+					try {
+						while (this.deferredAudit.length > 0) {
+							this.historyStore.record(this.deferredAudit[0]!);
+							this.deferredAudit.shift();
+						}
+						return { held: true as const, value: operation() };
+					} finally {
+						this.holding = false;
+					}
+				},
+				{ retries: LOCK_RETRIES },
+			);
 		} catch (error) {
 			if (!isLockContention(error)) throw error;
-			this.deps.emitWarning(`soul.md is locked by another session; its accounting waits for the next tool call.`);
-			return undefined;
+			return { held: false };
 		}
 	}
 
-	/** A change no running call can have made (found at admission, or after a verdict went stale): the owner's. */
-	private adoptOwner(): void {
-		this.locked(() => {
-			const now = this.watch.current();
-			if (now.digest === undefined) {
-				this.watch.adopt(now);
-				return;
-			}
-			this.historyStore.record({
-				text: now.text ?? "",
-				keepText: checkSoulText(now.text ?? "").ok,
-				standing: this.watch.known,
-				author: "owner",
-				reviewer: "unreviewed",
+	/**
+	 * Finishes a verdict the lock refused, before anything else is accounted for. Its authority is the exact revision it
+	 * was made on and the accounting baseline it was made against: if the file is a newer revision, or an owner save
+	 * advanced the accounting, it is dropped (owner priority). Otherwise the commit is tried again; after
+	 * {@link MAX_DEFERRED_ATTEMPTS} tries or {@link DEFERRED_TTL_MS} the revision is adopted with a warning and a typed
+	 * `unresolved` entry, so no obligation outlives its bound. Returns the notice of a revert that completed.
+	 */
+	private resolveDeferred(): string | undefined {
+		const deferred = this.deferred;
+		if (!deferred) return undefined;
+		if (
+			this.watch.accountedDigest !== deferred.baselineDigest ||
+			this.watch.current().digest !== deferred.observed.digest
+		) {
+			this.deferred = undefined;
+			return undefined;
+		}
+		const outcome = this.commit(deferred.observed, deferred.action);
+		if (outcome.kind === "done") {
+			this.deferred = undefined;
+			return outcome.notice;
+		}
+		if (outcome.kind === "stale") {
+			this.deferred = undefined;
+			return undefined;
+		}
+		deferred.attempts += 1;
+		if (deferred.attempts >= MAX_DEFERRED_ATTEMPTS || Date.now() - deferred.since > DEFERRED_TTL_MS) {
+			this.deferred = undefined;
+			this.watch.adopt(this.watch.current());
+			this.recordAudit({
+				text: deferred.observed.text ?? "",
+				keepText: false,
+				standing: undefined,
+				author: "agent",
+				reviewer: deferred.rejects ? "block" : "unreviewed",
+				event: "unresolved",
+				now: new Date(),
 			});
-			this.watch.adopt(now);
+			this.deps.emitWarning(
+				`soul.md could not be settled because the soul lock stayed held elsewhere; the current text was adopted without its verdict. ${this.path}`,
+			);
+		}
+		return undefined;
+	}
+
+	/**
+	 * A change no running call can have made (found at admission, or after a verdict went stale): the owner's. The
+	 * accounting advances at once; the history entry takes the lock or waits for it.
+	 */
+	private adoptOwner(): void {
+		const now = this.watch.current();
+		const standing = this.watch.known;
+		this.watch.adopt(now);
+		if (now.digest === undefined) return;
+		this.recordAudit({
+			text: now.text ?? "",
+			keepText: checkSoulText(now.text ?? "").ok,
+			standing,
+			author: "owner",
+			reviewer: "unreviewed",
+			now: new Date(),
 		});
 	}
 
@@ -472,13 +600,27 @@ export class SoulController {
 
 	/** An agent write of `text`: kept whole unless the gate blocked it. */
 	private record(text: string, reviewer: SoulReviewer): void {
-		this.historyStore.record({
+		this.recordAudit({
 			text,
 			keepText: reviewer !== "block",
 			standing: this.read(),
 			author: "agent",
 			reviewer,
+			now: new Date(),
 		});
+	}
+
+	/**
+	 * Every history read-modify-write goes through the soul lock, because the history file is rewritten whole and its
+	 * versions pruned: an unlocked writer could drop a concurrent entry and delete its version. Inside a locked
+	 * operation it runs directly; outside, it takes the lock, and when the lock stays held elsewhere the entry is kept
+	 * (bounded) and written by the next locked operation instead of being lost.
+	 */
+	private recordAudit(input: HistoryRecord): void {
+		if (this.withLock(() => this.historyStore.record(input)).held) return;
+		this.deferredAudit.push(input);
+		if (this.deferredAudit.length > MAX_DEFERRED_AUDIT) this.deferredAudit.shift();
+		this.deps.emitWarning("soul.md history is locked by another session; the entry is written at the next chance.");
 	}
 
 	/**
@@ -498,7 +640,7 @@ export class SoulController {
 		if (screened.soul === undefined)
 			return { ok: false, reason: "an empty soul is not saved; delete the file to remove it" };
 		const content = `${screened.soul}\n`;
-		const result = this.locked((): SoulSaveResult => {
+		const result = this.withLock((): SoulSaveResult => {
 			const now = this.watch.current();
 			if (basedOn && now.text !== basedOn.text) {
 				return { ok: false, reason: "soul.md changed while you were editing it; reopen /soul to see the new text" };
@@ -516,7 +658,7 @@ export class SoulController {
 			this.watch.adopt(written);
 			return { ok: true, bytes: Buffer.byteLength(written.text ?? content, "utf8") };
 		});
-		return result ?? { ok: false, reason: "soul.md is locked by another session; try again" };
+		return result.held ? result.value : { ok: false, reason: "soul.md is locked by another session; try again" };
 	}
 
 	/**

@@ -69,6 +69,11 @@ export class SoulWatch {
 		return this.accounted.text;
 	}
 
+	/** The digest of the accounted revision: what a verdict's authority to restore was made against. */
+	get accountedDigest(): string | undefined {
+		return this.accounted.digest;
+	}
+
 	/** The file as it is right now. */
 	current(): SoulRevision {
 		return revisionOf(this.path);

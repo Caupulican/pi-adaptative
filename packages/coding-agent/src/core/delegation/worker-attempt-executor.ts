@@ -2,7 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact } from "../../kernel/compaction/compaction.ts";
-import type { AgentContextPlan, AgentContextPlanRequest } from "../../kernel/index.ts";
+import type { AgentContextPlan, AgentContextPlanRequest, AgentContextWire } from "../../kernel/index.ts";
 import type { FollowUpState } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import {
@@ -263,7 +263,7 @@ export interface WorkerAttemptExecutorOptions {
 		messages: AgentMessage[],
 		sentPrefixCount: number,
 		signal?: AbortSignal,
-		wireTexts?: readonly string[],
+		wire?: AgentContextWire,
 	): Promise<AgentContextPlan>;
 	/**
 	 * The cache guard: each accepted provider request of this worker, as its recorded snapshot, with the
@@ -1408,7 +1408,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													planContext: async ({
 														messages,
 														sentPrefixCount,
-														wireTexts,
+														wire,
 													}: AgentContextPlanRequest) => {
 														planningMessages = messages;
 														const retain = async (
@@ -1468,7 +1468,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														// The sent mark indexes `messages`; re-anchor it by reference on what retention left.
 														const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, retained);
 														return options.planRequest
-															? options.planRequest(retained, frozenBelow, signal, wireTexts)
+															? options.planRequest(retained, frozenBelow, signal, wire)
 															: { messages: retained };
 													},
 												}

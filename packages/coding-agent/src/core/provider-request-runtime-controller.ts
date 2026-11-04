@@ -161,7 +161,7 @@ export class ProviderRequestRuntimeController {
 				basePlan.messages,
 				request.sentPrefixCount,
 				signal,
-				request.wireTexts,
+				request.wire,
 			);
 			return {
 				messages: sessionPlan.messages,

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { AgentContextPlan } from "../kernel/index.ts";
+import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -238,14 +238,14 @@ export class ProviderRequestContextController {
 	}
 
 	/**
-	 * `wireTexts` is model-visible text the request carries outside these messages and this plan's transients (see
-	 * `AgentContextPlanRequest.wireTexts`); it is read only to name every alias the model can see.
+	 * `wire` is what the request carries to the model outside these messages and this plan's transients (see
+	 * `AgentContextWire`); it is read only to name every alias the model can see.
 	 */
 	async plan(
 		messages: AgentMessage[],
 		sentPrefixCount: number,
 		signal?: AbortSignal,
-		wireTexts: readonly string[] = [],
+		wire: AgentContextWire = {},
 	): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = this.deps.transformExtensions
@@ -395,7 +395,7 @@ export class ProviderRequestContextController {
 		const beforeLegend = appendActiveSkillContext(withAuthority, skillContext);
 		// The legend names every alias the model can see on this request's wire: the planned messages, the transients
 		// before it, and what the kernel and a host projection carry around them. Committed lines are never retracted.
-		const legend = pathAliasPlan.legendFor?.(beforeLegend, wireTexts);
+		const legend = pathAliasPlan.legendFor?.([...(wire.messages ?? []), ...beforeLegend], wire.texts ?? []);
 		const transientMessages = appendPathAliasLegend(beforeLegend, legend);
 		const contextProjection = this.deps.previewContextProjection?.([...compactableMessages, ...transientMessages]);
 

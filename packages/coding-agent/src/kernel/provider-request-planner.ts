@@ -4,6 +4,7 @@ import type { Context, Message } from "@caupulican/pi-ai/types";
 import type {
 	AgentContext,
 	AgentContextPlan,
+	AgentContextWire,
 	AgentLoopConfig,
 	ProviderRequestPrefixState,
 	RequestPreflightContext,
@@ -261,10 +262,10 @@ async function buildContextPlan(
 	sentPrefixCount: number,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
-	wireTexts: readonly string[],
+	wire: AgentContextWire,
 ): Promise<AgentContextPlan> {
 	if (config.planContext)
-		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model, wireTexts }, signal);
+		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model, wire }, signal);
 	return {
 		messages: config.transformContext ? await config.transformContext(messages, signal) : messages,
 	};
@@ -437,14 +438,9 @@ export async function startPlannedAgentProviderRequestWithId(
 		const trailingTexts = sourceContext.instructionTail
 			? []
 			: [sourceContext.trailingInstruction, ledgerView].filter((text): text is string => text !== undefined);
-		const plan = await buildContextPlan(
-			sanitized.messages,
-			admissionAttempt,
-			sentPrefixCount,
-			config,
-			signal,
-			trailingTexts,
-		);
+		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, sentPrefixCount, config, signal, {
+			texts: trailingTexts,
+		});
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees
 		// the full extent of what its own planContext/transformContext did - not just what survived
 		// into an accepted request. Gated on the hook being registered: skipped entirely otherwise.
