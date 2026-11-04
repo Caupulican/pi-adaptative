@@ -158,7 +158,6 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 	} as const;
 	world.systemOne.enterPhase(`${label}-start`, {
 		...ownerJudgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	try {
 		await withDeadline(
@@ -342,7 +341,6 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			);
 			world.systemOne.enterPhase(`${label}-foreign-start`, {
 				...ownerJudgments,
-				worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			});
 			await withDeadline(
 				world.trace,
@@ -438,9 +436,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 				readWorkerMailboxRecord(workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId)).mailbox,
 			).toEqual(pendingMailbox);
 		}
-		world.systemOne.enterPhase(`${label}-resume`, {
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
-		});
+		world.systemOne.enterPhase(`${label}-resume`, {});
 		// Reopening can itself recover; enroll both real response tracks before constructing its SDK owner.
 		world.provider.enqueue("worker-c", {
 			...calls(`${label}-resumed-report`, [

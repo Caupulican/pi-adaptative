@@ -464,10 +464,10 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	const session = created.session;
 	rootSession = session;
 	trace.mark("root", "session.created");
-	// Judgments per turn: setup asks worker fitness, completion state claims and two read-output claims; resolution
-	// asks the steering family. Each phase declares exactly what its turns ask.
+	// Judgments per turn: setup declares completion state claims and two read-output claims; resolution
+	// asks the steering family. Worker task fitness stays undeclared because these journeys leave
+	// modelRouter.fitnessGate off. Each phase declares exactly what its turns ask.
 	const setupJudgments = {
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
@@ -627,7 +627,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		{
 			...lateJudgments,
 			...lateClaimJudgments,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		},
 		{ expect: ownerWords("Start a late worker on a third lane.") },
 	);
@@ -1364,7 +1363,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	world.systemOne.enterPhase(
 		"e10",
 		{
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },
 			full_handoff: { kind: "noul", probability: 0.02 },

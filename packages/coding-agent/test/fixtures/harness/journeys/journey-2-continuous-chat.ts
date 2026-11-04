@@ -280,7 +280,6 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		});
 		world.systemOne.enterPhase("w-icm-start", {
 			...ICM_INTAKE_JUDGMENTS,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		});
 		await withDeadline(trace, "w-icm start turn", wRoot.session.prompt("Start the ICM reader worker."));
 		await withDeadline(trace, "w-icm worker reported", wWorkerDone.promise);

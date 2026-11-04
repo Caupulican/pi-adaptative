@@ -86,7 +86,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13 first writer started", e13Session.prompt("Start the scope writer."));
 	await withDeadline(trace, "E13 writer admitted", e13Admitted.promise);
@@ -243,7 +242,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	).toHaveLength(0);
 	world.systemOne.enterPhase("e13-second", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13 second writer started", e13Fresh.session.prompt("Start the second scope writer."));
 	const e13Failures: unknown[] = [];
@@ -370,7 +368,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13a-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13A first writer started", e13aSession.prompt("Start the after-mutation writer."));
 	await withDeadline(trace, "E13A writer admitted", e13aAdmitted.promise);
@@ -514,7 +511,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13j-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13J first writer started", e13jSession.prompt("Start the joined-teardown writer."));
 	await withDeadline(trace, "E13J writer admitted", e13jAdmitted.promise);
@@ -700,7 +696,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13w-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13W first writer started", e13wSession.prompt("Start the joined-teardown writer."));
 	await withDeadline(trace, "E13W writer admitted", e13wAdmitted.promise);
@@ -916,7 +911,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13r-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13R first writer started", e13rSession.prompt("Start the retained-release writer."));
 	await withDeadline(trace, "E13R writer admitted", e13rAdmitted.promise);
@@ -1073,7 +1067,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		);
 		world.systemOne.enterPhase("e13r-second", {
 			...e4Judgments,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		});
 		await withDeadline(trace, "E13R waiting writer started", e13rSession.prompt("Start the waiting writer."));
 		const e13rSecondReceipt = e13rCreated.sessionManager
@@ -1304,7 +1297,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		});
 		world.systemOne.enterPhase(`e13q-${tag}-first`, {
 			...e4Judgments,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		});
 		await withDeadline(trace, `E13Q ${tag} writer started`, owner.prompt(`Start the ${tag} receipt writer.`));
 		await withDeadline(trace, `E13Q ${tag} writer admitted`, admitted.promise);
@@ -1415,7 +1407,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			);
 			world.systemOne.enterPhase(`e13q-${tag}-dispatch`, {
 				...e4Judgments,
-				worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			});
 			await withDeadline(trace, `E13Q ${tag} dispatch`, owner.prompt(`Hand the ${tag} task to the idle writer.`));
 			const receipt = created.sessionManager
@@ -1627,7 +1618,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13h-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "E13H writer started", e13hOwner.prompt("Start the retained-execution writer."));
 	await withDeadline(trace, "E13H writer admitted", e13hAdmitted.promise);
@@ -1923,7 +1913,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		);
 		world.systemOne.enterPhase("e13h-follow-up", {
 			...e4Judgments,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		});
 		await withDeadline(trace, "E13H follow_up accepted", e13hOwner.prompt("Hand the queued task to the writer."));
 		const e13hReceipt = e13hCreated.sessionManager
@@ -2085,7 +2074,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.systemOne.enterPhase("e13b-first", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		leaves_machine: { kind: "noul", probability: 0.02 },
 		cannot_be_undone: { kind: "noul", probability: 0.02 },
 		touches_outside_task: { kind: "noul", probability: 0.02 },
@@ -2397,7 +2385,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	} as const;
 	world.systemOne.enterPhase("vu-start", {
 		...vuJudgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "VU subject started", vuOwner.prompt("Start the verification subject."));
 	await withDeadline(trace, "VU verifier held at its shell check", vuAdmitted.promise, 90_000);
@@ -2498,7 +2485,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	// resumes on its own.
 	world.systemOne.enterPhase("vu-continue", {
 		...vuJudgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	const vuFresh = await world.restart({
 		owner: vuOwner,

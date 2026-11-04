@@ -139,7 +139,6 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },
 			full_handoff: { kind: "noul", probability: 0.02 },
 			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		},
 		{
 			expect: (request) => {
@@ -292,9 +291,7 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			oldControlEntries: oldControlEntries.length,
 		};
 		// Arm both tracks before fresh construction: constructor recovery is itself an observable producer.
-		world.systemOne.enterPhase(`${label}-reopen`, {
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
-		});
+		world.systemOne.enterPhase(`${label}-reopen`, {});
 		world.provider.enqueue("worker-c", {
 			...calls(`${label}-potential-b-report`, [
 				{

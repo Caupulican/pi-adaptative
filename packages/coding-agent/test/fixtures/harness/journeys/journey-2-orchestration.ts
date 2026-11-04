@@ -343,7 +343,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"orchestration-goal",
 		{
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -520,7 +519,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"steer-start",
 		{
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -570,7 +568,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 
 	await withDeadline(trace, "interrupt turn settled", session.waitForForegroundIdle(), 90_000);
 	world.systemOne.enterPhase("objective-cycle", {
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		objective_coherent: { kind: "noul", probability: 0.97 },
 		ambiguity_severity: { kind: "score", level: 0, confidence: 1 },
 		missing_information: { kind: "noul", probability: 0.02 },
@@ -888,7 +885,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		{
 			...verifyJudgments,
 			...completionStates,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		},
 		{ expect: ownerWords("Revise the limit to 4, run the test, and start the checks.") },
 	);
@@ -1305,7 +1301,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	world.systemOne.enterPhase(
 		"verify-budget-worker",
-		{ ...verifyJudgments, worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 } },
+		{ ...verifyJudgments },
 		{
 			expect: ownerWords("Start the cost-capped check, then check completion."),
 		},
@@ -2244,10 +2240,9 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			]),
 			{ name: "e11-done", reply: { content: [{ type: "text", text: "Both reports are read." }] } },
 		);
-		// This auxiliary root has no goal: its owner-policy keys and explicit worker fitness answer are declared here,
-		// without the goal's per-turn families.
+		// This auxiliary root has no goal: its owner-policy keys are declared here, without the goal's
+		// per-turn families. Worker task fitness stays undeclared while modelRouter.fitnessGate is off.
 		world.systemOne.enterPhase("e11", {
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -2667,7 +2662,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			"the host reads the same bytes from the artifact file",
 		).toBe(largeSha);
 	}
-	// Still in the "e11" phase: the prompts and steer use its owner-policy keys; worker starts use its fitness answer.
+	// Still in the "e11" phase: the prompts and steer use its owner-policy keys.
 	await steeredDelegateWait(world, eSession);
 	await heldOrchestrationStoreLock(world, eSession, eAux.sessionManager.getSessionId());
 	const r30AgentId = await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());

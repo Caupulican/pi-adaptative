@@ -63,7 +63,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	} as const;
 	const e7AHeldReached = createBarrier();
 	const e7AHeld = createBarrier();

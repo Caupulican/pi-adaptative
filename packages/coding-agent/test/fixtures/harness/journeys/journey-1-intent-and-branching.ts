@@ -1403,7 +1403,6 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	);
 	world.systemOne.enterPhase("m4-start", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(trace, "M4 start turn", m4Session.prompt("Start a reader for the short-functions preference."));
 	const m4Runtime = m4Session.backgroundLanes.getTaskRuntimeSnapshot();
@@ -1554,7 +1553,6 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	);
 	world.systemOne.enterPhase("m4d-start", {
 		...e4Judgments,
-		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	});
 	await withDeadline(
 		trace,

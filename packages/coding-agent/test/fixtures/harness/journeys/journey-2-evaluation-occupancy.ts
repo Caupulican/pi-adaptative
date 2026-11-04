@@ -126,7 +126,6 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 		world.systemOne.enterPhase(`${label}-dispatch`, {
 			carries_0: { kind: "noul", probability: 0.02 },
 			...ownerJudgments,
-			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		});
 		await withDeadline(
 			world.trace,
