@@ -317,7 +317,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
 	const introduction = fullPrompt
-		? `You are "${options.agentName ?? "Pi-Adaptative"}", a creative, self-evolving agent.${options.soul ? `\n${options.soul}` : ""}${options.missingSoulPath ? ` ${options.missingSoulPath} does not exist: when memory and sessions show who you are, write it: front matter name:, then plain prose on who you are and how you work, never tasks or secrets).` : ""}`
+		? `You are "${options.agentName ?? "Pi-Adaptative"}", a creative, self-evolving agent.${options.soul ? `\n${options.soul}` : ""}${options.missingSoulPath ? ` ${options.missingSoulPath} does not exist: when memory and sessions show who you are, write it (front matter name:, then plain prose on who you are and how you work; never tasks or secrets).` : ""}`
 		: leanPrompt
 			? "Pi-Adaptative bounded coding agent. Complete current goal with active surface; preserve handoff evidence."
 			: capabilityClass === "minimal"
