@@ -158,7 +158,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 		label: "Pipeline",
 		description:
 			"Run an ICM folder pipeline for repeating sequential workflows: numbered stages, only the current stage contract loaded. increment completes the current stage once its output/ has files and starts the next.",
-		promptSnippet: "Folder pipelines: list, start, status, increment, abandon.",
+		promptSnippet: "Stage-by-stage folder pipelines",
 		parameters: pipelineSchema,
 		executionMode: "sequential",
 		renderShell: "self",

@@ -746,20 +746,13 @@ function createShellToolDefinition(
 	const contractDescription = options?.forceCwd
 		? "Run a command in a persistent shell with a host-pinned working directory: each invocation starts in the pinned directory, and cd inside a command still works. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
 		: routesWindowsContract
-			? "Run Pi's Bash-like command contract in a persistent per-agent shell session that starts at the project working directory. Every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present; unsupported constructs (job control, process substitution, and similar) fail closed by name. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
+			? "Run Pi's Bash-like command contract in a persistent per-agent shell session that starts at the project working directory. Every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present; unsupported constructs (job control, process substitution, and similar) fail closed by name. Write ordinary Linux bash (GNU flags, loops, functions, pipes), never PowerShell, and never ask the owner to choose a shell; use literal paths and verify targets before recursive rm/cp/mv. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
 			: "Run a Bash command in a persistent per-agent shell session that starts at the project working directory; a timed-out or aborted command resets the session. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly.";
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr as a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; the full output is saved to a managed file named in the notice. Recognized test runners and large search, compiler and JSON output are reduced to a bounded projection the same way. Broad rg/grep/find/fd scans run with their output routed to a managed file instead of model context.`,
-		promptSnippet: routesWindowsContract ? "Run Bash commands (bundled Windows engine)" : "Run Bash commands",
-		promptGuidelines: routesWindowsContract
-			? [
-					"On Windows, write ordinary Linux bash (GNU flags, loops, functions, pipes); never PowerShell, and never ask the owner to choose a shell.",
-					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
-					"When grep, find or ls tools are active, prefer them over shell search.",
-				]
-			: ["When grep, find or ls tools are active, prefer them over shell search."],
+		description: `${contractDescription} Returns stdout and stderr as a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; recognized test runners and large search, compiler and JSON output are reduced to a bounded projection.`,
+		promptSnippet: "Run shell commands",
 		parameters: bashSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {

@@ -178,9 +178,8 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 	return {
 		name: "run_process",
 		label: "Run Process",
-		description: `Run one owner-allowed executable with direct argv and no shell (not an OS sandbox). Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
+		description: `Run one owner-allowed executable with direct argv and no shell (not an OS sandbox). Project credentials are injected only when the execution profile also allows the variable names. Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
 		promptSnippet: "Run an allowlisted executable",
-		promptGuidelines: ["Project credentials inject only when execution profile also allows variable names."],
 		parameters: runProcessSchema,
 		async execute(_toolCallId, input: RunProcessInput, signal) {
 			const args = validateProcessInput(input);

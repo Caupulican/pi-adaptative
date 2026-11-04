@@ -87,7 +87,12 @@ const parameters = Type.Object({
 			"adopt_job",
 		]),
 	),
-	placement: Type.Optional(Type.Union([Type.Literal("current-pane"), Type.Literal("managed-workspace")])),
+	placement: Type.Optional(
+		Type.Union([Type.Literal("current-pane"), Type.Literal("managed-workspace")], {
+			description:
+				"In Herdr defaults to current-pane (sibling panels in the active tab); managed-workspace uses a private isolated daemon.",
+		}),
+	),
 	agents: Type.Optional(Type.Array(agentSpec, { minItems: 1, maxItems: 12 })),
 	task: Type.Optional(Type.String({ maxLength: 32768 })),
 	body: Type.Optional(Type.String({ maxLength: 32768 })),
@@ -542,18 +547,8 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		label: "Persistent collaboration",
 		parameters,
 		description:
-			"Persistent native-CLI subagents (Pi, Codex, Claude, agy) in Herdr, for interactive environments that outlive a turn; use delegate for in-process workers. status discovers and authenticates providers; fire_task starts a team (workspace_plan or dryRun previews). Answer a stopped agent's question with answer_question on the same jobId/agentId; assign new tasks with send_followup. stop_job and stop_session terminate exact owned agent panes (dryRun previews). release_acquisition (jobId + agentId) settles a member whose exited issuing process abandoned a pane request before any pane was recorded: it closes nothing, is refused while that process is alive, and any untracked pane its evidence names must be closed by hand. adopt_job (exact jobId) takes over an orphaned job (controller exited, no live process holds its session) after the host re-verifies it under the job lock; dryRun shows the standing. Only stopped-work and question handoffs reach the parent. External CLIs run unrestricted by explicit user policy (Claude/agy: --dangerously-skip-permissions; Codex: --dangerously-bypass-approvals-and-sandbox); Pi enforces neither their permissions nor their token budgets.",
-		promptSnippet: "Persistent multi-provider subagents with terminal/question-only handoffs.",
-		promptGuidelines: [
-			"Starts reuse a compatible idle team; busy or ambiguous ones are refused: pass an exact jobId or justify parallelWork.",
-			"Never change a grant merely to evade reuse.",
-			"In Herdr, placement defaults to current-pane (sibling panels in the active tab); set managed-workspace for a private isolated daemon.",
-			"Never poll or read panes for progress, and never re-submit an uncertain prompt.",
-			"For external CLIs set reasoning effort through args (e.g. ['--effort','high']); thinkingLevel is Pi-only.",
-			"Reported success is an untrusted claim until you review the evidence.",
-			"Tasks, answers, environments and results may persist; never include secrets.",
-			"status and list_jobs show other sessions' jobs read-only by standing: owned_by_live_session, awaiting_session, orphaned or unproven.",
-		],
+			"Persistent native-CLI subagents (Pi, Codex, Claude, agy) in Herdr, for interactive environments that outlive a turn; use delegate for in-process workers. status discovers and authenticates providers; fire_task starts a team (workspace_plan or dryRun previews). Answer a stopped agent's question with answer_question on the same jobId/agentId; assign new tasks with send_followup. stop_job and stop_session terminate exact owned agent panes (dryRun previews). release_acquisition (jobId + agentId) settles a member whose exited issuing process abandoned a pane request before any pane was recorded: it closes nothing, is refused while that process is alive, and any untracked pane its evidence names must be closed by hand. adopt_job (exact jobId) takes over an orphaned job (controller exited, no live process holds its session) after the host re-verifies it under the job lock; dryRun shows the standing. Only stopped-work and question handoffs reach the parent: never poll or read panes for progress, and never re-submit an uncertain prompt. Starts reuse a compatible idle team; busy or ambiguous ones are refused, so pass an exact jobId or justify parallelWork, and never change a grant merely to evade reuse. For external CLIs set reasoning effort through args (e.g. ['--effort','high']); thinkingLevel is Pi-only. Reported success is an untrusted claim until you review the evidence. Tasks, answers, environments and results may persist: never include secrets. status and list_jobs show other sessions' jobs read-only by standing: owned_by_live_session, awaiting_session, orphaned or unproven. External CLIs run unrestricted by explicit user policy (Claude/agy: --dangerously-skip-permissions; Codex: --dangerously-bypass-approvals-and-sandbox); Pi enforces neither their permissions nor their token budgets.",
+		promptSnippet: "Persistent native-CLI subagents",
 		async execute(_id, input, signal, _update, ctx) {
 			const params = input as Params;
 			const action = params.action ?? "status";

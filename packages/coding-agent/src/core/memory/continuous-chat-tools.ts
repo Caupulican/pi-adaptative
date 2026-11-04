@@ -187,7 +187,7 @@ export function createContinuousChatNavigationTools(
 		navigationTool(
 			CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
 			"Chat Zoom",
-			options.agentLogs ? "Expand a chat line, a message or an agent's chat" : "Expand a chat line or a message",
+			options.agentLogs ? "Expand chat lines, messages, agent chats" : "Expand chat lines and messages",
 			options.agentLogs ? ZOOM_PARAMETERS : MESSAGE_ZOOM_PARAMETERS,
 			zoomDescription,
 			execute,
@@ -195,7 +195,7 @@ export function createContinuousChatNavigationTools(
 		navigationTool(
 			CONTINUOUS_CHAT_DATE_TOOL_NAME,
 			"Chat Date",
-			"Date and time of a chat message",
+			"Date of a chat message",
 			DATE_PARAMETERS,
 			describeTool(CONTINUOUS_CHAT_DATE_TOOL_NAME),
 			execute,

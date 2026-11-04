@@ -51,7 +51,7 @@ export function createSkillifyToolDefinition(
 		label: "Skillify",
 		description:
 			"Validate a draft skill and check it for overlap with existing skills before creating it. Proposal only: nothing is written or activated; the report names the install path.",
-		promptSnippet: "Validate a draft skill and check its overlaps",
+		promptSnippet: "Validate a draft skill",
 		parameters: skillifySchema,
 		async execute(
 			_toolCallId,

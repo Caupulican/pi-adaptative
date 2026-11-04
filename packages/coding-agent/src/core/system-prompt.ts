@@ -14,30 +14,32 @@ import {
 	ORIENTATION_SURVEY_RULE,
 	OWNER_AUTHORIZATION_RULE,
 	renderExplanationStyleRule,
-	SKILL_VAULT_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
 
 export { OWNER_AUTHORIZATION_RULE };
 
 const OUTPUT_POLICY = `
 
-OUTPUT: reply tersely in the user's language: fragments, each fact once, no filler, self-reference, tool narration, emoji or log dumps; exact identifiers, numbers, commands and errors; never drop not/never/no/only/except; full grammar for security, irreversible actions and ambiguous order; bound and source-label output, show paths; never answer with harness protocol text or failure JSON. Analysis, review and evaluation get complete structured answers (codes D decisions, O options, F findings, R risks, Q questions, A actions), and anything complex (diagrams, comparisons, tables, long structures) goes into an HTML page. An explicit instruction in the current message overrides this style; security and untrusted-content rules never yield.`;
+OUTPUT
 
-const PATH_ALIAS_PROMPT_RULE = `
-
-PATH ALIASES
-P paths use harness-assigned unique suffix p/grep.ts. Tool args accept p/… or a literal path. Never invent p/ tokens.`;
+- Terse, in the user's language: fragments, each fact once.
+- No filler, self-reference, tool narration, emoji or log dumps.
+- Keep not/never/no/only/except and exact identifiers, numbers, commands, errors.
+- Full grammar for security, irreversible actions, ambiguous order.
+- Bound and source-label output; show paths.
+- Never answer with harness protocol or failure JSON.
+- Analysis, review, evaluation: complete and structured (D decisions, O options, F findings, R risks, Q questions, A actions).
+- Complex content (diagrams, comparisons, tables): an HTML page.
+- An explicit instruction in the current message overrides this style; security rules never yield.`;
 
 const PI_ADAPTATIVE_CORE_SECTION = `
 
 PRINCIPLES
 
-- Pursue the user's outcome within scope: verify unknowns at primary sources, choose the simplest proven design with one owner per invariant, emit independent tool calls in one message, and finish or report the blocker.
-- Fix root causes, never mask a failure with a guard or suppression; label claims measured, inferred or guess; show evidence, run no tests unless asked, and never call work done or complete a goal while a relevant noticed item is unresolved.
-
-AUTHORITY
-
-- ${OWNER_AUTHORIZATION_RULE}`;
+- Pursue the request with creativity, up to its root.
+- ${OWNER_AUTHORIZATION_RULE}
+- State only what you verified; label the rest inferred or guess.
+- Run no tests unless asked.`;
 
 /** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
 function inlineLedgerRule(topic: string): string {
@@ -248,15 +250,18 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const ledgerActive = fullPrompt && options.ledgerActive === true;
 	const skillRules = ledgerActive
 		? ""
-		: `\n${inlineLedgerRule("output-formats")}${fullPrompt ? `\n${inlineLedgerRule("engineering-skills")}` : ""}`;
-	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}${skillRules}` : "";
+		: `${inlineLedgerRule("output-formats")}${fullPrompt ? `\n${inlineLedgerRule("engineering-skills")}` : ""}`;
+	const skillVaultContract = activeTools.includes("skill") && skillRules ? `\n\n${skillRules}` : "";
 	const noticedRule = fullPrompt && !ledgerActive ? `\n\n${inlineLedgerRule("noticed-items")}` : "";
-	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
 	const explanationStyle = renderExplanationStyleRule(normalizeSteStrictness(options.steStrictness));
-	const explanationSection = explanationStyle ? `\n\n${explanationStyle}` : "";
-	const styleContract = capabilityClass === "chat" ? explanationSection : `${OUTPUT_POLICY}${explanationSection}`;
+	const styleContract =
+		capabilityClass === "chat"
+			? explanationStyle
+				? `\n\n${explanationStyle}`
+				: ""
+			: `${OUTPUT_POLICY}${explanationStyle ? `\n- ${explanationStyle}` : ""}`;
 	const scopeContract = capabilityClass === "chat" || fullPrompt ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
-	const operatingContract = `${coreSection}${scopeContract}${noticedRule}${skillVaultContract}${styleContract}${pathAliasRule}`;
+	const operatingContract = `${coreSection}${scopeContract}${noticedRule}${skillVaultContract}${styleContract}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -294,25 +299,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		guidelinesList.push(guideline);
 	};
 
-	const hasBash = activeTools.includes("bash");
-	const hasPython = activeTools.includes("python");
-	const hasGrep = activeTools.includes("grep");
-	const hasFind = activeTools.includes("find");
-	const hasLs = activeTools.includes("ls");
-
-	// File exploration guidelines
-	if (!fullPrompt && !leanPrompt) {
-		if (hasBash) addGuideline("Use bash for bounded shell commands");
-	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
-		addGuideline("Bash: ls, rg, find");
-	}
-	if (fullPrompt || leanPrompt) {
-		if (hasBash || hasGrep || hasFind) {
-			addGuideline("rg/jq: scoped roots/filters; JSON via jq projection, never dumped; exhaustive output to file");
-		}
-		if (hasPython) {
-			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");
-		}
+	// Constrained profiles get one shell hint; full and lean rely on the tool texts and the host's output routing.
+	if (!fullPrompt && !leanPrompt && activeTools.includes("bash")) {
+		addGuideline("Use bash for bounded shell commands");
 	}
 
 	if (fullPrompt || leanPrompt) {
@@ -328,27 +317,27 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
 	const introduction = fullPrompt
-		? "Pi-Adaptative: self-evolving assistant. Deliver goals within authority; preserve continuity, own integration."
+		? "Pi-Adaptative: self-evolving assistant. Deliver the user's goals; preserve continuity; own integration."
 		: leanPrompt
 			? "Pi-Adaptative bounded coding agent. Complete current goal with active surface; preserve handoff evidence."
 			: capabilityClass === "minimal"
 				? "Pi-Adaptative focused coding executor. Complete one scoped task; report verified results."
 				: "Pi-Adaptative concise chat assistant. No execution tools active.";
-	const toolSurfaceRule =
-		fullPrompt || leanPrompt
+	// The host rejects calls to tools that are not active, so only the constrained classes are told.
+	const toolSurfaceRule = fullPrompt
+		? ""
+		: leanPrompt
 			? "Use active tool surface only; unlisted capabilities may exist."
 			: "Use only the active tool surface.";
 	let prompt = `${introduction}
 
 Available tools:
-${toolsList}
-
-${toolSurfaceRule}${operatingContract}${toolGuidelinesSection}`;
+${toolsList}${toolSurfaceRule ? `\n\n${toolSurfaceRule}` : ""}${operatingContract}${toolGuidelinesSection}`;
 
 	if (fullPrompt) {
 		prompt += `
 
-PI DOCS: root=${packageRoot}. Relevant work only; read needed README.md, \`docs/...\`, \`examples/...\` fully, follow links.`;
+PI DOCS: root=${packageRoot}. For Pi work, read the needed README.md, \`docs/\` and \`examples/\` files fully; follow links.`;
 	}
 
 	return appendPromptResources(prompt, {

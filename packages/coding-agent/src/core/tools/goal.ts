@@ -93,7 +93,15 @@ const goalSchema = Type.Object(
 			Type.Literal("grant_edge"),
 			Type.Literal("amend_goal"),
 		]),
-		edgeClass: Type.Optional(Type.Union(EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)))),
+		edgeClass: Type.Optional(
+			Type.Union(
+				EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)),
+				{
+					description:
+						"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing and settings edits need no grant. A granted class is not asked again.",
+				},
+			),
+		),
 		toolkitScript: Type.Optional(
 			Type.String({
 				description:
@@ -162,7 +170,7 @@ const goalSchema = Type.Object(
 		uri: Type.Optional(
 			Type.String({
 				description:
-					"Evidence locator: file path; tool/test toolCallId or exact command; worker laneId; user message entry id (summary quotes its full text). Only host-verified evidence satisfies a requirement; finding never does.",
+					"Evidence locator: file path; tool/test toolCallId or exact command; background tool_task taskId (kind=tool; a failed or canceled task is terminal but never verified evidence); worker laneId; user message entry id (summary quotes its full text). Only host-verified evidence satisfies a requirement; finding never does.",
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Required for block_requirement and block_goal." })),
@@ -171,7 +179,7 @@ const goalSchema = Type.Object(
 				description: "Native by default; collaboration for a persistent interactive session.",
 			}),
 		),
-		account: Type.Optional(completionAccountInputSchema),
+		account: Type.Optional(completionAccountInputSchema(COMPLETION_ACCOUNT_GUIDANCE)),
 	},
 	{ additionalProperties: false },
 );
@@ -213,7 +221,7 @@ const updateGoalSchema = Type.Object(
 			Type.Literal("paused"),
 		]),
 		reason: Type.Optional(Type.String({ minLength: 1, description: "Required for blocked." })),
-		account: Type.Optional(completionAccountInputSchema),
+		account: Type.Optional(completionAccountInputSchema("complete: same shape as the goal tool's account.")),
 	},
 	{ additionalProperties: false },
 );
@@ -834,17 +842,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		name: LEGACY_GOAL_TOOL_NAME,
 		label: "goal",
 		description:
-			"Durable goal record: requirements and their checks, evidence, worker dispatch, progress, completion, owner grants and amendments. create_goal, get_goal and update_goal cover start, get and status changes.",
-		promptSnippet: "Manage the durable goal record.",
-		promptGuidelines: [
-			"Record the delivery contract (work-lifecycle rule) in the goal requirements.",
-			"Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
-			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
-			"amend_goal extends this objective only; handle unrelated work separately and leave this goal and its workers unchanged.",
-			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once.",
-			COMPLETION_ACCOUNT_GUIDANCE,
-			"Failed or canceled tool_task results are terminal but never become verified evidence automatically. block_requirement only when the same verified owner/approval boundary or capability impossibility persists despite distinct recovery approaches; otherwise keep working.",
-		],
+			"Durable goal record: requirements and their checks, evidence, worker dispatch, progress, completion, owner grants and amendments. create_goal, get_goal and update_goal cover start, get and status changes. Record the delivery contract (work-lifecycle rule) as requirements. increment satisfies the current open requirement from unused evidence, or completes when none remain. block_requirement only at the bar update_goal sets for blocked; otherwise keep working.",
+		promptSnippet: "Manage the durable goal record",
 		parameters: goalSchema,
 		failureRecovery: {
 			getFailureEvidence: (params) => {
@@ -1324,7 +1323,7 @@ export function createGoalLifecycleToolDefinitions(
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		description:
 			"Start a durable goal when persistent autonomous continuation materially benefits the work, or when the user/system explicitly asks; skip routine short tasks. Pass every known requirement in `requirements` so the goal is set up in one call, then record the plan with one task_steps set.",
-		promptSnippet: "Start the durable goal.",
+		promptSnippet: "Start a durable goal",
 		parameters: createGoalSchema,
 		async execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
 			// All or nothing: a check the goal could never run refuses the whole call before the goal
@@ -1374,7 +1373,7 @@ export function createGoalLifecycleToolDefinitions(
 		name: GOAL_LIFECYCLE_TOOL_NAMES[1],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[1],
 		description: "Read the current goal: status, budget, requirements, evidence, progress.",
-		promptSnippet: "Read the durable goal.",
+		promptSnippet: "Read the durable goal",
 		parameters: getGoalSchema,
 		execute(toolCallId, _input, signal, onUpdate, context) {
 			return goalTool.execute(toolCallId, { action: "get" }, signal, onUpdate, context);
@@ -1386,7 +1385,7 @@ export function createGoalLifecycleToolDefinitions(
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
 			"Update the goal's status. active records progress after verifiable progress in the current turn; it never resumes a stopped goal. complete needs current evidence that proves the full objective, with no required work remaining. blocked needs the same verified owner/approval boundary or capability impossibility for three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress possible without owner input or external change; put the evidence and attempted approaches in reason; never use it because work is hard, slow, uncertain or would benefit from clarification. paused only when the owner explicitly asks to stop or pause this goal; then stop goal work (only the owner resumes it, with /goal resume).",
-		promptSnippet: "Update goal status; complete or block only with evidence.",
+		promptSnippet: "Update goal status",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
 			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;

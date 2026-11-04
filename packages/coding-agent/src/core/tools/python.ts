@@ -184,13 +184,8 @@ export function createPythonToolDefinition(
 		name: "python",
 		label: "python",
 		description:
-			"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to the process work directory, not the repository.",
-		promptSnippet: "Run Python code or a script (no shell)",
-		promptGuidelines: [
-			"Python file transforms: preserve encoding and newlines, write atomically, verify the diff.",
-			"Never scan the home directory or filesystem recursively.",
-			"Never inspect/print credentials; use activated environment only through credential consumer.",
-		],
+			"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to the process work directory, not the repository. Edit source with read/edit/write; Python file transforms must preserve encoding and newlines, write atomically and verify the diff.",
+		promptSnippet: "Run Python code or a script",
 		parameters: pythonSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {

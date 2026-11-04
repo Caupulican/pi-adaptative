@@ -117,5 +117,5 @@ export function formatLedgerEntry(entry: LedgerEntry): string {
 export function renderLedgerIndex(entries: readonly LedgerEntry[]): string | undefined {
 	if (entries.length === 0) return undefined;
 	const lines = entries.map((entry) => `- ${entry.id}: ${entry.when}`);
-	return `LEDGER: when a trigger applies, read the whole rule first with ledger_read(topic) and cite its id in the action it governs.\n${lines.join("\n")}`;
+	return `LEDGER: when a trigger applies, first read the rule with ledger_read(topic); cite its id in the action.\n${lines.join("\n")}`;
 }

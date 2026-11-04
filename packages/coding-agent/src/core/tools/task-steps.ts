@@ -73,7 +73,12 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 		note: Type.Optional(
 			Type.String({ maxLength: 4_000, description: "One short line; put long evidence in goal add_evidence." }),
 		),
-		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
+		evidence: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), {
+				maxItems: 32,
+				description: "Evidence refs, e.g. completed tool_task ids.",
+			}),
+		),
 	};
 }
 
@@ -140,7 +145,8 @@ const taskStepsSchema = Type.Union([
 				Type.Array(batchUpdateItemSchema, {
 					minItems: 1,
 					maxItems: MAX_TASK_STEPS,
-					description: "Batched transitions, each naming its step. Omit the top-level id and fields.",
+					description:
+						'Batched transitions [{id: "3", status, note}, …]: use instead of one call per step. Omit the top-level id and fields.',
 				}),
 			),
 		},
@@ -447,16 +453,9 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 	return {
 		name: "task_steps",
 		label: "Task Steps",
-		description: "Track the session's ordered multi-step checklist with status, notes, and evidence.",
-		promptSnippet: "Session checklist: set, update, advance steps.",
-		promptGuidelines: [
-			"Use for multi-step work; keep one in_progress step while runnable work remains, and leave blocked steps blocked until their condition changes.",
-			"Link steps to goal requirements with requirementIds.",
-			'Finish several steps in one call: update with updates: [{id: "3", status, note}, …]; never one call per step.',
-			"Completing the active step auto-starts the next pending one; advance does the same.",
-			"Attach completed tool_task ids as step evidence.",
-			"Before the final answer, resolve or defer open steps.",
-		],
+		description:
+			"Track the session's ordered multi-step checklist with status, notes, and evidence. Keep one step in_progress while runnable work remains and leave blocked steps blocked until their condition changes. Completing the active step auto-starts the next pending one (advance does the same). Resolve or defer open steps before the final answer.",
+		promptSnippet: "Session step checklist",
 		parameters: taskStepsSchema,
 		// INVESTIGATED, not assumed (turn-economics remediation, TASK 6): this tool previously
 		// declared `executionMode: "sequential"`, which gives a tool call its own barrier group and

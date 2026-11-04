@@ -40,12 +40,8 @@ export function createTaskAutomationToolDefinition(controller: TaskAutomationCon
 		name: "task_automation",
 		label: "task_automation",
 		description:
-			"Lifecycle controller for deterministic task-local automations. status inspects automations and evidence; spec authors the contract (preconditions, effects, verifier); validate runs the verifier and negative controls to admit the script; run executes an admitted script after hash verification; bind ties a task step to an automation.",
-		promptSnippet: "Task-local deterministic scripts: spec, validate, run, bind.",
-		promptGuidelines: [
-			"Hierarchy: an existing adequate tool first (native tools are cheap); else an existing validated script; else author a deterministic script; else model judgment.",
-			"A generic shell/Python executor is not an existing implementation of a new deterministic procedure: persist it as a task-local script, validate, then run.",
-		],
+			"Lifecycle controller for deterministic task-local automations. Hierarchy: an existing adequate tool first (native tools are cheap); else an existing validated script; else author a deterministic script; else model judgment. A generic shell/Python executor is not an existing implementation of a new deterministic procedure: persist it as a task-local script, validate, then run. status inspects automations and evidence; spec authors the contract (preconditions, effects, verifier); validate runs the verifier and negative controls to admit the script; run executes an admitted script after hash verification; bind ties a task step to an automation.",
+		promptSnippet: "Task-local deterministic automations",
 		parameters: taskAutomationSchema,
 		async execute(
 			_toolCallId: string,

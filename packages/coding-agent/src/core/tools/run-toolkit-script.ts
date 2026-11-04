@@ -77,9 +77,8 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 		name: "run_toolkit_script",
 		label: "run_toolkit_script",
 		description:
-			"Run one of the user's registered toolkit scripts (daily-ops allowlist). Lookup is a registry match: an ambiguous request returns a shortlist, never a guess. Always returns exit code, stdout and stderr; a failed script is an error. Dangerous scripts run only under a host grant.",
-		promptSnippet: "Registered daily-ops toolkit scripts.",
-		promptGuidelines: ["On a shortlist, pick one only if the request clearly names it; otherwise ask the owner."],
+			"Run one of the user's registered toolkit scripts (daily-ops allowlist). Lookup is a registry match: an ambiguous request returns a shortlist, never a guess: pick one only if the request clearly names it, otherwise ask the owner. Always returns exit code, stdout and stderr; a failed script is an error. Dangerous scripts run only under a host grant.",
+		promptSnippet: "Run registered toolkit scripts",
 		parameters: runToolkitScriptSchema,
 		failureRecovery: {
 			getFailureEvidence: (_params, failure) => {

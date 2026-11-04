@@ -26,7 +26,7 @@ export function createLedgerReadToolDefinition(): ToolDefinition<typeof ledgerRe
 		readOnly: true,
 		description:
 			"Read one standing rule from the system prompt's ledger index. Always returns the whole rule and its LEDGER-ID.",
-		promptSnippet: "Read a whole ledger rule by topic.",
+		promptSnippet: "Read a ledger rule",
 		parameters: ledgerReadSchema,
 		async execute(_toolCallId, input) {
 			const topic = input.topic.trim().replace(/@[0-9a-f]{8}$/, "");

@@ -29,7 +29,7 @@ export function createToolSchemaSearchDefinition(): ToolDefinition<
 		readOnly: true,
 		description:
 			"Load the schemas of deferred tools before calling them, by capability keywords or select:name1,name2 for known names. Batch every likely tool into one search. Read-only: returns only tools already granted in this request.",
-		promptSnippet: "Load deferred tool schemas by keyword or exact name",
+		promptSnippet: "Load deferred tool schemas",
 		parameters: toolSchemaSearchSchema,
 		async execute(_toolCallId, { query, maxResults = 5 }: ToolSchemaSearchInput) {
 			return {

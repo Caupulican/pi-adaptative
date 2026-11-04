@@ -569,7 +569,6 @@ export interface SessionContextCompositionDeps {
 	readonly model?: Model<Api>;
 	readonly systemPrompt: string;
 	readonly unboundToolGrantWarnings: readonly string[];
-	readonly delegatePromptGuidelineWarnings: readonly string[];
 	readonly skillVault: Pick<SkillVaultController, "previewRequestSystemPrompt">;
 	readonly resourceLoader: {
 		getExtensions(): {
@@ -685,7 +684,6 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 			...deps.profileFilter.profileDeniedResourceObservations(),
 			...deps.profileFilter.getInertExtensionWarnings(),
 			...deps.unboundToolGrantWarnings,
-			...deps.delegatePromptGuidelineWarnings,
 			// Auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
 			// live preview when no turn has run yet so /context always shows the current scope.
 			formatForegroundEnvelopeObservation(

@@ -31,7 +31,7 @@ export function createImageGenerateToolDefinition(cwd: string, options: ImageGen
 		label: "image_generate",
 		description:
 			"Generate or edit one image with the ChatGPT subscription (openai-codex OAuth only; uses subscription limits, never API-key credits). For edits pass referenced_image_paths or num_last_images_to_include, not both; prefer local paths, since recent-image selection is best-effort. Saves the original and returns a bounded inline result; may take several minutes. Never regenerate automatically after an entitlement, limit, cancellation or ambiguous failure.",
-		promptSnippet: "Generate or edit an image (ChatGPT subscription)",
+		promptSnippet: "Generate or edit an image",
 		parameters: schema,
 		async execute(callId, input, signal) {
 			return controller.generate(callId, input, signal);

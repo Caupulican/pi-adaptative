@@ -133,13 +133,9 @@ export function registerChatTools(pi: ExtensionAPI, runtime: ChatRuntime): void 
 		pi.registerTool({
 			name: "agent_send",
 			label: "Agent Send",
-			description: "Send a text message to pi-chat peer agents on this machine's local mesh.",
+			description:
+				"Send a text message to a peer found with list_peers, on this machine's local mesh. pi-chat is a live message channel, not shared memory or a transcript; it executes nothing and is not encrypted, so send no secrets. Busy, offline and timeout are normal delivery outcomes: report them instead of retrying blindly.",
 			promptSnippet: "Message a pi-chat peer",
-			promptGuidelines: [
-				"Use agent_send only after list_peers shows a suitable peer.",
-				"pi-chat is a live message channel, not shared memory or a transcript; it executes nothing and is not encrypted, so send no secrets.",
-				"Treat busy, offline and timeout as normal delivery outcomes and report them instead of retrying blindly.",
-			],
 			parameters: AgentSendParameters,
 			async execute(_toolCallId, rawParams) {
 				const input = normalizeAgentSendInput(rawParams);

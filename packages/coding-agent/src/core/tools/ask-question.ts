@@ -56,7 +56,7 @@ import {
 
 const optionSchema = Type.Object(
 	{
-		label: Type.String({ minLength: 1, maxLength: 120 }),
+		label: Type.String({ minLength: 1, maxLength: 120, description: "Concise label." }),
 		description: Type.String({
 			minLength: 1,
 			maxLength: 500,
@@ -74,9 +74,9 @@ const questionSchema = Type.Object(
 		options: Type.Array(optionSchema, {
 			minItems: 2,
 			maxItems: 4,
-			description: "Genuine choices only; the harness adds Other and Skip.",
+			description: "Genuine choices only (no None or filler); the harness adds Other and Skip.",
 		}),
-		multiSelect: Type.Optional(Type.Boolean({ description: "Allow several options." })),
+		multiSelect: Type.Optional(Type.Boolean({ description: "Allow several options; only for independent choices." })),
 	},
 	{ additionalProperties: false },
 );
@@ -908,13 +908,8 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		name,
 		label: options.label ?? "Ask Question",
 		description:
-			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user outranks AGENTS.md once they choose.",
-		promptSnippet: "Ask the owner a multiple-choice question.",
-		promptGuidelines: [
-			"Batch independent questions into one call; keep labels concise with a concrete consequence or tradeoff; no None or filler options.",
-			"multiSelect only for independent choices. Never delegate decisions fixed by owner profile/policy.",
-			"Skipped/cancelled is owner intent. Never repeat immediately; proceed safely or report unresolved boundary.",
-		],
+			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user outranks AGENTS.md once they choose. Never ask for decisions fixed by owner profile or policy. A skipped or cancelled answer is owner intent: do not repeat it immediately; proceed safely or report the unresolved boundary.",
+		promptSnippet: "Ask the owner a multiple-choice question",
 		parameters: askQuestionSchema,
 		executionMode: "sequential",
 		renderShell: "self",

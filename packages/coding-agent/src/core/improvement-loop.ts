@@ -994,13 +994,8 @@ export function createImprovementDecisionTool(): ToolDefinition<typeof DecisionT
 		name: "improvement_decision",
 		label: "Improvement Decision",
 		description:
-			"Deterministically decide keep/discard/retry/blocked for an improvement candidate from metric, direction, thresholds, checks, and optional noise samples. The model proposes; code judges.",
-		promptSnippet: "Gate measured improvement candidate: keep/discard/retry/blocked.",
-		promptGuidelines: [
-			"After measurement, use improvement_decision for evidence-based keep/discard; never rely on model intuition.",
-			"Never claim kept unless decision=keep or stronger project validator passes.",
-			"Correctness overrides metrics; checksPass=false always discards.",
-		],
+			"Deterministically decide keep/discard/retry/blocked for an improvement candidate from metric, direction, thresholds, checks, and optional noise samples. The model proposes; code judges: use it after measurement instead of intuition, and never claim a candidate was kept unless decision=keep or a stronger project validator passes.",
+		promptSnippet: "Gate a measured improvement candidate",
 		parameters: DecisionToolParams,
 		async execute(_toolCallId, params) {
 			const decision = decideImprovement(params);
@@ -1026,7 +1021,7 @@ const LoopToolParams = Type.Object(
 			["init", "status", "record", "measure", "sandbox_create", "sandbox_export", "sandbox_cleanup"] as const,
 			{
 				description:
-					"init creates user-level loop state, status reads it, record appends a supplied measurement, measure runs and records a bounded command, sandbox_create/export/cleanup manage disposable git worktrees and keep patches.",
+					"init creates user-level loop state, status reads it, record appends a supplied measurement, measure runs and records a bounded command, sandbox_create/export/cleanup manage disposable git worktrees: edit only the sandbox worktree, never the real repo, and sandbox_export a kept candidate's diff as a user-level patch before sandbox_cleanup removes the worktree.",
 			},
 		),
 		loopId: Type.Optional(Type.String({ description: "Loop id within the current workspace. Default: default." })),
@@ -1035,7 +1030,7 @@ const LoopToolParams = Type.Object(
 		metricUnit: Type.Optional(Type.String({ description: "Display unit." })),
 		direction: Type.Optional(
 			StringEnum(["lower", "higher"] as const, {
-				description: "Whether lower or higher metric values are better. Default lower.",
+				description: "As improvement_decision.",
 			}),
 		),
 		reset: Type.Optional(
@@ -1043,23 +1038,17 @@ const LoopToolParams = Type.Object(
 				description: "For action=init, replace existing user-level loop state for this workspace/loop id.",
 			}),
 		),
-		minDelta: Type.Optional(
-			Type.Number({ description: "Minimum absolute improvement required to keep. Default 0." }),
-		),
-		minRelativeDelta: Type.Optional(
-			Type.Number({ description: "Minimum relative improvement required to keep. Default 0." }),
-		),
+		minDelta: Type.Optional(Type.Number({ description: "As improvement_decision." })),
+		minRelativeDelta: Type.Optional(Type.Number({ description: "As improvement_decision." })),
 		confidenceMode: Type.Optional(
 			StringEnum(["none", "mad"] as const, {
-				description: "Noise/confidence policy. Default none unless minConfidence > 0.",
+				description: "As improvement_decision (default none unless minConfidence > 0).",
 			}),
 		),
-		minConfidence: Type.Optional(
-			Type.Number({ description: "Minimum confidence multiple over MAD noise floor. Default 0." }),
-		),
+		minConfidence: Type.Optional(Type.Number({ description: "As improvement_decision." })),
 		lowConfidenceAction: Type.Optional(
 			StringEnum(["retry", "discard"] as const, {
-				description: "Decision when confidence evidence is missing or low. Default retry.",
+				description: "As improvement_decision.",
 			}),
 		),
 		currentMetric: Type.Optional(Type.Number({ description: "record: measured primary metric." })),
@@ -1149,12 +1138,7 @@ export function createImprovementLoopTool(
 		label: "Improvement Loop",
 		description:
 			"Persist and evaluate a deterministic improvement loop in user-level state, never in the target repo. Code derives keep/discard/retry/blocked from metrics and checks; a decision is only a record, and the tool never commits, applies or reverts real-repo files.",
-		promptSnippet: "Metric-gated improvement loop: runs, sandboxes, decisions.",
-		promptGuidelines: [
-			"init before iterative metric-gated optimization.",
-			"sandbox_create before risky self-modification; edit the disposable worktree, never the real repo.",
-			"To keep a candidate, sandbox_export its diff as a user-level patch before sandbox_cleanup; cleanup removes only the sandbox record and worktree.",
-		],
+		promptSnippet: "Metric-gated improvement loop",
 		parameters: LoopToolParams,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {

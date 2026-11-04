@@ -254,7 +254,7 @@ export function createSkillAuditToolDefinition(
 		readOnly: true,
 		description:
 			"Report skills whose names or descriptions overlap (keyword similarity of 55% or more) and name collisions, across installed skills and, when draftName or draftDescription is given, a draft. Read-only.",
-		promptSnippet: "Find overlapping or colliding skills",
+		promptSnippet: "Find overlapping skills",
 		parameters: skillAuditSchema,
 		async execute(
 			_toolCallId,

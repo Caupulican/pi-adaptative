@@ -54,6 +54,7 @@ import {
 	mailboxMessagesOf,
 	matchedSubmitReceiptIn,
 	persistedGenerationText,
+	readDelegationRule,
 	receiptsOf,
 	requestTexts,
 	settlementFacts,
@@ -87,6 +88,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		calls("goal-requirement", [
 			{ id: "goal-2", name: "goal", arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" } },
 		]),
+		readDelegationRule("dispatch-rule"),
 		calls("dispatch-three", [
 			{
 				id: "dispatch-a",
@@ -2050,6 +2052,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		);
 		world.provider.enqueue(
 			"root",
+			readDelegationRule("e11-rule"),
 			calls("e11-start", [
 				{
 					id: "e11-start-1",

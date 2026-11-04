@@ -468,12 +468,8 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Replace exact text in an existing file, preserving its bytes, line endings and encoding (detected by the harness). Send all of a file's edits in one call.",
-		promptSnippet: "Exact text replacements in existing files",
-		promptGuidelines: [
-			"oldText: exact, unique, minimal, from the original file; pass range (read's inclusive lines) when known; merge overlapping edits.",
-			"After a successful edit do not reread the file automatically.",
-		],
+			"Replace exact text in an existing file, preserving its bytes, line endings and encoding (detected by the harness). Send all of a file's edits in one call and merge overlapping edits. Do not reread the file after a successful edit.",
+		promptSnippet: "Replace exact text in a file",
 		parameters: editSchema,
 		mutationTarget: resolveMutationPathTarget,
 		renderShell: "self",

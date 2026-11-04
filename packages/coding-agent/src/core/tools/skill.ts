@@ -221,7 +221,7 @@ export function createSkillVaultToolDefinition(
 	return {
 		name: "skill",
 		label: "Skill",
-		description: `${SKILL_VAULT_DESCRIPTION} Repair (inspect first for expectedVersion) rewrites a skill's source and works only when settings allow skill evolution.`,
+		description: `${SKILL_VAULT_DESCRIPTION} When specialist help is useful and the skill is inactive, search and load it by exact name before the work; idle skills expire. Repair (inspect first for expectedVersion) rewrites a skill's source and works only when settings allow skill evolution.`,
 		promptSnippet: "Search, load and manage skills",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {

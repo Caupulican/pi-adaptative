@@ -14,7 +14,7 @@ import { localFileMutationIntentOperations } from "../../../../src/core/tools/fi
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
-import { HARNESS_PROVIDER } from "../scripted-provider.ts";
+import { calls, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessRestartChecks,
@@ -1125,6 +1125,18 @@ export function isStaleRefusal(details: unknown): boolean {
 
 export function isGateCommandRefusal(details: unknown): boolean {
 	return typeof details === "object" && details !== null && "code" in details && details.code === "gate_command_unset";
+}
+
+/**
+ * The model reading the delegation rule before its first `delegate` call. The ledger gate admits a `delegate` call only
+ * while the active branch holds a successful `ledger_read` result for that rule, so a scripted root, owner or auxiliary
+ * session enqueues this step ahead of its first `delegate` step (and again after anything that drops the earlier result
+ * from its branch: a compaction, a fresh session, a navigation to a branch that predates the read). The read is its own
+ * request, so its result is in the session's messages before the following `delegate` call reaches the gate. `name` must
+ * be unique in the session's track; it also derives the tool call id.
+ */
+export function readDelegationRule(name: string): ScriptStep {
+	return calls(name, [{ id: `${name}-call`, name: "ledger_read", arguments: { topic: "delegation" } }]);
 }
 
 /** A step whose tool calls depend on what production reported earlier. */

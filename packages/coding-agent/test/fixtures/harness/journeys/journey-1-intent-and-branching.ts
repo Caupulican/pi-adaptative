@@ -37,6 +37,7 @@ import {
 	LIMITS_PATH,
 	lastToolResultDetails,
 	latestBatchResults,
+	readDelegationRule,
 } from "./shared.ts";
 
 export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): Promise<void> {
@@ -1293,6 +1294,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	const m4SecretQuery = `Look up the staging maps key ${ICM_CREDENTIAL_KEY}`;
 	world.provider.enqueue(
 		"root",
+		readDelegationRule("m4-rule"),
 		calls("m4-start", [
 			{
 				id: "m4-start-1",
@@ -1482,6 +1484,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	const m4DefaultWake = createBarrier();
 	world.provider.enqueue(
 		"root",
+		readDelegationRule("m4d-rule"),
 		calls("m4d-start", [
 			{
 				id: "m4d-start-1",

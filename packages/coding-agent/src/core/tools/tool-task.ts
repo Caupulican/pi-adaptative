@@ -111,10 +111,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		label: "tool_task",
 		description:
 			"List, wait for, cancel, or view retained images from this session's background tool calls. list shows status only; wait blocks until the task ends or timeoutMs; image returns one stored image by taskId and imageIndex, resized for display.",
-		promptSnippet: "Background tool calls: list, wait, image, cancel",
-		promptGuidelines: [
-			"The completion wake-up carries the result; wait once, only for a dependency or a task marked output omitted. Never poll.",
-		],
+		promptSnippet: "Control background tool calls",
 		parameters: schema,
 		foregroundWait: (input) => input.action === "wait",
 		async execute(_toolCallId, input: Input, signal) {

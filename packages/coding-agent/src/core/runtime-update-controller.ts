@@ -181,7 +181,7 @@ export class RuntimeUpdateController {
 			label: "Runtime update",
 			description:
 				"Reload extensions or restart the core after this tool batch. Name verificationTool and run it in the new runtime, then complete to resume the original task. Repair a failed update before anything else, or stop if unsafe.",
-			promptSnippet: "Reload extensions or restart core with a verification gate.",
+			promptSnippet: "Reload extensions or restart core",
 			parameters: toolSchema,
 			execute: async (toolCallId, input, signal) => {
 				if (!this.deps.isRoot()) throw new Error("Only the root session may update its runtime.");

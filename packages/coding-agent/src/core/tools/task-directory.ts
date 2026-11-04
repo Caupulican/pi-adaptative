@@ -38,12 +38,8 @@ export function createTaskDirectoryToolDefinition(
 		name: "task_directory",
 		label: "Task directory",
 		description:
-			"Manage persistent working directories: register an absolute native path, select the workspace that unpinned tasks follow, bind a task_steps id with pinned true/false, reattach a moved or foreign-host workspace, forget a binding. status shows the effective context; pass nextCursor as cursor to continue. A binding never expands file authority.",
-		promptSnippet: "Persistent workspaces and per-task working directories.",
-		promptGuidelines: [
-			"Use task_directory to retain project directories; do not rely on shell cd between calls.",
-			"Pin tasks that must stay in one project.",
-		],
+			"Manage persistent working directories, instead of relying on shell cd between calls: register an absolute native path, select the workspace that unpinned tasks follow, bind a task_steps id with pinned true/false (pin tasks that must stay in one project), reattach a moved or foreign-host workspace, forget a binding. status shows the effective context; pass nextCursor as cursor to continue. A binding never expands file authority.",
+		promptSnippet: "Workspaces and task working directories",
 		parameters: schema,
 		executionMode: "sequential",
 		async execute(_id, input: Static<typeof schema>, signal) {

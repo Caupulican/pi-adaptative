@@ -106,11 +106,7 @@ export const HISTORY_TOOL_VARIANTS = [
 
 /** The sentence a `memory` tool description uses for its history actions. */
 export const HISTORY_TOOL_DESCRIPTION =
-	"Read-only recall of past conversations: 'history_search' (query) finds cited evidence and lists the approved summaries ([txn:...]) covering the hits, 'history_source' (ref) opens one cited source's exact text, 'history_expand' (ref = a txn: handle) opens a summary into its two children or covered sources.";
-
-/** The prompt guideline every `memory` tool that offers the history actions carries. */
-export const HISTORY_TOOL_GUIDELINE =
-	"A history status such as pending or unavailable means the evidence is not available yet, not that it does not exist.";
+	"Read-only recall of past conversations: 'history_search' (query) finds cited evidence and lists the approved summaries ([txn:...]) covering the hits, 'history_source' (ref) opens one cited source's exact text, 'history_expand' (ref = a txn: handle) opens a summary into its two children or covered sources. A status such as pending or unavailable means the evidence is not available yet, not that it does not exist.";
 
 /**
  * The `memory` tool's failure result: typed error code in `details`, the tool's own text, never thrown. By
@@ -219,8 +215,7 @@ export function createHistoryMemoryTool(backends: HistoryToolBackends): ToolDefi
 		name: ROOT_MEMORY_TOOL_NAME,
 		label: "History Recall",
 		description: `${HISTORY_TOOL_DESCRIPTION} Nothing from past conversations is loaded automatically.`,
-		promptSnippet: "Recall past conversations on demand",
-		promptGuidelines: [HISTORY_TOOL_GUIDELINE],
+		promptSnippet: "Recall past conversations",
 		parameters: historyOnlySchema,
 		readOnly: true,
 		execute: async (_toolCallId, params: HistoryToolParams) => executeHistoryAction(backends, params),

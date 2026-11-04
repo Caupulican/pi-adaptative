@@ -151,12 +151,9 @@ export type CompletionAccount = Omit<CompletionAccountInput, "changes"> & { chan
  * schema weighed about 700 tokens on each. The account is checked against {@link completionAccountSchema} when it
  * is used, and a malformed one is refused with the first thing wrong.
  */
-export const completionAccountInputSchema = Type.Object(
-	{},
-	{
-		additionalProperties: true,
-	},
-);
+export function completionAccountInputSchema(description: string) {
+	return Type.Object({}, { additionalProperties: true, description });
+}
 
 export function parseCompletionAccount(
 	value: unknown,

@@ -27,10 +27,8 @@ export function createContextScoutToolDefinition(deps: ContextScoutToolDependenc
 	return {
 		name: "context_scout",
 		label: "context_scout",
-		description:
-			"Delegate repository exploration to a bounded read-only scout subagent; returns a summary with validated file:line citations. Skip it for a file already read, a single grep in a known file, or pure generation.",
-		promptSnippet: "Read-only repository exploration by a scout subagent",
-		promptGuidelines: [CONTEXT_SCOUT_GUIDANCE],
+		description: `Delegate repository exploration to a bounded read-only scout subagent; returns a summary with validated file:line citations. ${CONTEXT_SCOUT_GUIDANCE} Skip it for a file already read, a single grep in a known file, or pure generation.`,
+		promptSnippet: "Explore the repository via a scout",
 		parameters: contextScoutSchema,
 		async execute(_toolCallId, input: ContextScoutToolInput, signal) {
 			const result = await deps.runScout(input, signal);

@@ -33,7 +33,6 @@ import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/at
 import {
 	executeHistoryAction,
 	HISTORY_TOOL_DESCRIPTION,
-	HISTORY_TOOL_GUIDELINE,
 	HISTORY_TOOL_PROPERTIES,
 	HISTORY_TOOL_VARIANTS,
 	type HistoryToolBackends,
@@ -107,7 +106,7 @@ const memoryFields = Type.Object({
 	target: Type.Optional(
 		Type.Union([Type.Literal("memory"), Type.Literal("project"), Type.Literal("user"), Type.Literal("okf")], {
 			description:
-				"'project' (default): this project's MEMORY.md (paths, tickets, branches, build steps); 'memory': general MEMORY.md (facts true in any repo or task); 'user': USER.md preferences; 'okf': structured project records",
+				"'project' (default): this project's MEMORY.md (paths, tickets, branches, build steps); 'memory': general MEMORY.md (facts true in any repo or task); 'user': USER.md preferences, never a one-off task instruction; 'okf': structured project records",
 		}),
 	),
 	content: Type.Optional(
@@ -1867,12 +1866,8 @@ export class FileStoreProvider implements MemoryProvider {
 			{
 				name: ROOT_MEMORY_TOOL_NAME,
 				label: "Persistent Memory Manager",
-				description: `Add, replace, remove or list durable facts and preferences. Use target 'okf' for durable project decisions, architecture, rules, debugging findings and references. ${HISTORY_TOOL_DESCRIPTION}`,
-				promptSnippet: "Write durable memory; recall past conversations",
-				promptGuidelines: [
-					"A one-off task instruction is not a preference, and a repeatable procedure is not a fact: draft it as a skill with skillify.",
-					HISTORY_TOOL_GUIDELINE,
-				],
+				description: `Add, replace, remove or list durable facts and preferences. Use target 'okf' for durable project decisions, architecture, rules, debugging findings and references. A repeatable procedure is not a fact: draft it as a skill with skillify. ${HISTORY_TOOL_DESCRIPTION}`,
+				promptSnippet: "Persistent memory and history recall",
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, signal, _onUpdate, _execCtx) => {
 					const {

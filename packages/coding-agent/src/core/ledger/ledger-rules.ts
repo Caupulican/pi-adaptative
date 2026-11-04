@@ -8,7 +8,7 @@ import type { LedgerRuleSource } from "./ledger-catalog.ts";
 export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 	{
 		topic: "delegation",
-		when: "before starting, reusing, steering or waiting on a worker",
+		when: "before starting, reusing or steering a worker",
 		requires: "delegate",
 		gates: ["delegate"],
 		body: `- Orientation stays local unless a team is requested. Otherwise you must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test or review task. Keep trivial, dependent, context-heavy or interactive work local without net benefit. Long work alone never mandates a team.
@@ -21,7 +21,7 @@ export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 	},
 	{
 		topic: "engineering-skills",
-		when: "before engineering work that matches a named skill situation",
+		when: "before engineering work matching a skill situation",
 		requires: "skill",
 		body: `load before the work: architecture or performance design: n-plus-2-architecture (keep it loaded while the design is active); failing check or defect: root-cause-debugging; new type, module or API: design-before-code; .ts files: typescript-discipline; risky change or done claim: prove-it-and-blast-radius; parallel workers or second opinion: fan-out-and-review; how/why/recall question: explain-and-recall; docs, commit or PR text: technical-writing; unattended or metric run: long-run-discipline; project verify script: verification-skill.`,
 	},
@@ -36,15 +36,14 @@ export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 	},
 	{
 		topic: "output-formats",
-		when: "when showing complex content or when the owner demands a diagram, HTML page or explainer video",
+		when: "when showing complex content, or the owner demands a diagram, HTML page or video",
 		requires: "skill",
 		body: `complex content to show, or the owner demands a diagram, HTML page or explainer video: load skill explain-diagram, explain-html or explain-video first; unclear or several fit: systemone choice over those names. Artifacts are local discardable files.`,
 	},
 	{
 		topic: "work-lifecycle",
-		when: "when planning, routing or closing work that spans several steps",
-		body: `Survey → Contract → Plan/Route → Execute → Prove/Deliver. Scale phases to the outcome.
-- Survey: bounded and read-only first.
+		when: "when planning, routing or closing multi-step work",
+		body: `- Survey: bounded and read-only first.
 - Contract: project-relative. POC/MVP proves the requested capability; complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration and cleanup.
 - Plan before mutation. Scale solo/team routing, independent review and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost and cognitive load; loop until accepted.
 - Deliver: a local commit follows green checks; publish under active owner grants and release conditions.`,

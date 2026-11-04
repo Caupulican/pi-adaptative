@@ -113,7 +113,7 @@ export function createDecisionLedgerReadToolDefinition(
 		readOnly: true,
 		description:
 			"Read the decision ledger: stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with times and loops, and System One evaluations with verdicts and reasons, for this session or a recorded one.",
-		promptSnippet: "Read stage transitions and System One verdicts of a session",
+		promptSnippet: "Read the decision ledger",
 		parameters: decisionLedgerReadSchema,
 		async execute(_toolCallId, { action, sessionId, limit }: DecisionLedgerReadToolInput) {
 			let ledger: DecisionLedgerStore | undefined;

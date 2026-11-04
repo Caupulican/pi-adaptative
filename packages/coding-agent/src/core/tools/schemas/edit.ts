@@ -3,7 +3,7 @@ import type { OpenEditFileInspection } from "../file-mutation-intent.ts";
 
 export const replaceEditSchema = Type.Object(
 	{
-		oldText: Type.String({ minLength: 1 }),
+		oldText: Type.String({ minLength: 1, description: "Exact, unique, minimal text from the original file." }),
 		newText: Type.String(),
 		range: Type.Optional(
 			Type.Object(
@@ -11,7 +11,7 @@ export const replaceEditSchema = Type.Object(
 					startLine: Type.Integer({ minimum: 1 }),
 					endLine: Type.Integer({ minimum: 1 }),
 				},
-				{ additionalProperties: false },
+				{ additionalProperties: false, description: "Inclusive lines of oldText as read showed them, when known." },
 			),
 		),
 	},

@@ -416,8 +416,6 @@ export class AgentSession {
 	private _requestedActiveToolNames: string[] | undefined;
 
 	private _unboundToolGrantWarnings: string[] = [];
-	/** Delegate provider-prompt-guideline bounding diagnostics (root-session delegate tool only). */
-	private _delegatePromptGuidelineWarnings: string[] = [];
 
 	private readonly _modelSelection: ModelSelectionController;
 	private readonly _bash: BashExecutionController;
@@ -1901,9 +1899,6 @@ export class AgentSession {
 				this._unboundToolGrantWarnings = warnings;
 			},
 			getUnboundToolGrantWarnings: () => this._unboundToolGrantWarnings,
-			setDelegatePromptGuidelineWarnings: (warnings) => {
-				this._delegatePromptGuidelineWarnings = warnings;
-			},
 			createProfileFilterReloadSnapshot: () => this._profileFilter.createReloadSnapshot(),
 			restoreProfileFilterReloadSnapshot: (snapshot) => this._profileFilter.restoreReloadSnapshot(snapshot),
 			getActiveToolNames: () => this.getActiveToolNames(),
@@ -3439,7 +3434,6 @@ export class AgentSession {
 			model: this.model,
 			systemPrompt: this.systemPrompt,
 			unboundToolGrantWarnings: this._unboundToolGrantWarnings,
-			delegatePromptGuidelineWarnings: this._delegatePromptGuidelineWarnings,
 			skillVault: this._skillVault,
 			resourceLoader: this._resourceLoader,
 			profileFilter: this._profileFilter,

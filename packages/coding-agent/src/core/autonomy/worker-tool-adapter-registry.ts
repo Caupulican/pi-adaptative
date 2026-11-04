@@ -179,7 +179,7 @@ export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSource
 				const definition = createBotMessageToolDefinition(broker);
 				return wrapToolDefinition({
 					...definition,
-					promptSnippet: `${definition.description}\n${definition.promptGuidelines?.join("\n")}`,
+					promptSnippet: definition.description,
 				});
 			},
 		});
@@ -204,10 +204,10 @@ export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSource
 						...(credentialBoundary ? { credentialBoundary } : {}),
 					}),
 				);
-				// Isolated workers do not use the foreground prompt-guideline composer.
+				// Isolated workers receive the full tool description as their provider description.
 				return wrapToolDefinition<typeof definition.parameters, unknown>({
 					...definition,
-					promptSnippet: `${definition.description}\n${definition.promptGuidelines.join("\n")}`,
+					promptSnippet: definition.description,
 				});
 			},
 		});

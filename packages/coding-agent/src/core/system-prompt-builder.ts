@@ -37,7 +37,6 @@ import { buildProjectInstructionIsolationPrompt } from "./project-instruction-is
 import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
 import type {
 	AutoLearnSettings,
 	AutonomySettings,
@@ -197,15 +196,6 @@ export class SystemPromptBuilder {
 		return `SITUATION SOUL\n${soul}`;
 	}
 
-	private _buildHarnessSelfHealingPrompt(profile: ModelCapabilityProfile): string | undefined {
-		if (this.deps.isChildSession()) return undefined;
-		if (profile.class === "chat" || profile.class === "minimal") return undefined;
-		if (profile.class !== "full") {
-			return "PI HARNESS SELF-HEALING: managed tools (rg, jq, uv/Python, FFF native search) auto-provision, repair bindings, and recover from transient failures.";
-		}
-		return "PI HARNESS SELF-HEALING: Managed tools (ripgrep, jq, uv-managed Python, FFF native search) auto-provision, repair bindings, and self-heal from missing or damaged local states. If a managed tool is reported missing, doctor and search backends retry and heal on demand.";
-	}
-
 	private _buildSelfModificationPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const settings = this.deps.getSettingsManager().getSelfModificationSettings();
 		const cwd = this.deps.getCwd();
@@ -244,7 +234,7 @@ export class SystemPromptBuilder {
 		if (profile.class !== "full") {
 			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
 		}
-		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; use runtime_update (reload extensions or restart core) only after saved evidence.`;
+		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there, never installed or generated output. Restate scope, inspect source and docs, preserve concurrent changes, make the smallest auditable edit, run focused then proportionate checks; runtime_update only after saved evidence.`;
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
@@ -326,9 +316,9 @@ export class SystemPromptBuilder {
 			if (!hasActiveExtensionTool) return undefined;
 		}
 		if (profile.class !== "full") {
-			return "PI TOOL APPLICABILITY: availability is not a mandate. Use extension/project/account tools when the current request asks for the service, its data or its action; naming the tool is not required, and when unsure you decide. Context, inferred dependence, and tool guidance are not triggers. Missing optional credentials never block unrelated work or require secret_store.";
+			return "PI TOOL APPLICABILITY: availability is not a mandate. Missing optional credentials never block unrelated work or require secret_store.";
 		}
-		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools when the current request asks for the service, its data or its action; naming the tool is not required, and when unsure you decide. Tool-specific guidance cannot widen this gate. Cwd, repository, project name, prior session, wildcard profile, inferred dependence, and tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
+		return "PI TOOL APPLICABILITY: active means available, not required. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
 	/** True when the configured memory system is Intentional Context Management (ICM). */
@@ -366,13 +356,13 @@ export class SystemPromptBuilder {
 		// ICM leaves legacy automatic reflection offline, including its scheduling guidance.
 		const reflectionContract =
 			!this.isIcmMode() && isCurrentSessionReflectionEnabled(autoLearn)
-				? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
+				? "ROOT REFLECTION: the host schedules one reflection turn after completed work; apply warranted durable learning only there."
 				: "Root reflection is disabled.";
 		if (profile.class !== "full") {
 			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full: ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; each with validation and rollback evidence. Current-turn evidence is a cue, not proof.`;
 		}
 		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
@@ -391,16 +381,13 @@ export class SystemPromptBuilder {
 				name === "task_steps",
 		);
 		// Only a model that holds the delegate tool is told about workers.
-		const workersOwner = toolNames.includes("delegate") ? " delegate owns workers," : "";
+		const workersOwner = toolNames.includes("delegate") ? " delegate workers," : "";
 		const ownerRule = hasWorkPlanningTool
-			? `\n- One owner per invariant: goal owns outcome/contract, task_steps owns plan,${workersOwner} evidence owns acceptance. Never create parallel workflow state.`
+			? ` Owners: goal outcome/contract, task_steps plan,${workersOwner} evidence acceptance; no parallel workflow state.`
 			: "";
-		// The detailed phase rule is a ledger entry; the phase names and owners stay resident.
-		const phases = ledgerActive
-			? "- Survey → Contract → Plan/Route → Execute → Prove/Deliver. Scale phases to the outcome."
-			: requireLedgerEntry("work-lifecycle").body;
-		return `PI WORK LIFECYCLE
-${phases}${ownerRule}`;
+		// The phase detail is a ledger entry; the phase names and owners stay resident.
+		const detail = ledgerActive ? "" : `\n${requireLedgerEntry("work-lifecycle").body}`;
+		return `PI WORK LIFECYCLE: Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale phases to the outcome.${ownerRule}${detail}`;
 	}
 
 	/** Delegation guidance applies to a root that holds the delegate tool with worker delegation enabled. */
@@ -461,8 +448,6 @@ ${phases}${ownerRule}`;
 			// R6: situational soul — the active profile's identity prefix, switched atomically with the
 			// profile's capabilities/model. Most prominent, so it comes first.
 			this._buildSituationSoulPrompt(),
-			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
-			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
 			// The tool-failure protocol lives here once, stable for the whole session, for the full
 			// capability class: each active ledger record then carries one pointer line instead of
 			// repeating the protocol text (pi-agent-core's toolFailureProtocolProse, set from the
@@ -470,7 +455,6 @@ ${phases}${ownerRule}`;
 			// bounded stable-prompt envelope is not spent on it.
 			modelCapability.class === "full" ? MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT : undefined,
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
-			this._buildHarnessSelfHealingPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
 			this._buildWorkLifecyclePrompt(validToolNames, ledgerActive),

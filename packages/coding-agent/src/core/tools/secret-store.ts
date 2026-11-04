@@ -64,7 +64,8 @@ const secretStoreSchema = Type.Object(
 				minLength: 1,
 				maxLength: 96,
 				pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-				description: "Profile to activate or create during migration.",
+				description:
+					"Profile to activate or create during migration; omit with one project binding, otherwise pick an authorized profile from list.",
 			}),
 		),
 		path: Type.Optional(
@@ -277,21 +278,8 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		name: "secret_store",
 		label: "Secret Store",
 		description:
-			"Check status, list, discover sources for, migrate and activate Bitwarden credential profiles for the current project, model-blind: values are never exposed.",
-		promptSnippet: "Manage Bitwarden credential profiles model-blind.",
-		promptGuidelines: [
-			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
-			"Use existing credential consumers directly; Bitwarden activation is no prerequisite. Never probe or activate for an optional integration.",
-			"Use discover for unknown sources; never ask the owner for source paths or environment-variable names.",
-			"A truncated or empty discovery does not prove credentials are absent; follow owner-given locations with targeted host-side inspection.",
-			"Discovery returns names/paths only; migrate when a stored profile is needed. Migration keeps its sources.",
-			"Bitwarden uses machine BWS_ACCESS_TOKEN, BW_SESSION, or supported bootstrap/session files. Pi never prompts for a session key.",
-			"activate loads a stored profile; TUI/print/RPC return metadata only.",
-			"One project binding: omit profile. Multiple: use list, select authorized profile.",
-			"Never request credentials in chat/tool arguments.",
-			"After activation, run consumer normally; never print/inspect/grep/echo credential environment values.",
-			"owner_setup_required affects only Bitwarden profile operations; continue via existing consumers, never request setup or retry unchanged.",
-		],
+			"Check status, list, discover sources for, migrate and activate Bitwarden credential profiles for the current project, model-blind: values are never exposed, and credentials are never requested in chat or tool arguments. The active user-plane host gate authorizes migration; never ask duplicate confirmation. Use existing credential consumers directly; Bitwarden activation is no prerequisite, so never probe or activate for an optional integration. discover returns names/paths only: never ask the owner for source paths or environment-variable names, and treat a truncated or empty discovery as no proof that credentials are absent (follow owner-given locations with targeted host-side inspection). migrate stores sources as a profile and keeps the sources. activate loads a stored profile (TUI/print/RPC return metadata only); afterwards run the consumer normally and never print, inspect, grep or echo credential environment values. Bitwarden uses machine BWS_ACCESS_TOKEN, BW_SESSION or supported bootstrap/session files; Pi never prompts for a session key. owner_setup_required affects only Bitwarden profile operations: continue via existing consumers, never request setup or retry unchanged.",
+		promptSnippet: "Bitwarden credential profiles",
 		parameters: secretStoreSchema,
 		executionMode: "sequential",
 		renderShell: "self",

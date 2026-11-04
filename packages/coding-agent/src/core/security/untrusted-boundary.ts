@@ -9,9 +9,7 @@
 
 import { randomBytes } from "node:crypto";
 import { escapeAttribute as escapeAttr } from "@caupulican/pi-ai";
-import { UNTRUSTED_BOUNDARY_SYSTEM_RULE, UNTRUSTED_BOUNDARY_TAG } from "../provider-prompt-contracts.ts";
-
-export { UNTRUSTED_BOUNDARY_SYSTEM_RULE };
+import { UNTRUSTED_BOUNDARY_TAG, UNTRUSTED_FENCE_POLICY } from "../provider-prompt-contracts.ts";
 
 export type ToolTrustLevel = "trusted" | "untrusted";
 
@@ -59,5 +57,5 @@ export function wrapUntrustedText(
 		.replace(/<(\s*\/?\s*)untrusted_content/gi, "&lt;$1untrusted_content")
 		.replaceAll(nonce, "[NONCE_NEUTRALIZED]");
 	const freshnessAttr = options?.freshness ? ` freshness="${escapeAttr(options.freshness)}"` : "";
-	return `<${UNTRUSTED_BOUNDARY_TAG} id="${nonce}" source="${escapeAttr(source)}"${freshnessAttr}>\n${neutralized}\n</${UNTRUSTED_BOUNDARY_TAG}>`;
+	return `<${UNTRUSTED_BOUNDARY_TAG} id="${nonce}" source="${escapeAttr(source)}" policy="${escapeAttr(UNTRUSTED_FENCE_POLICY)}"${freshnessAttr}>\n${neutralized}\n</${UNTRUSTED_BOUNDARY_TAG}>`;
 }

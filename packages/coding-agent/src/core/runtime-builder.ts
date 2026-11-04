@@ -419,7 +419,6 @@ export interface RuntimeBuilderDeps {
 	 * RuntimeBuilderDeps without this seam keep working; the diagnostic is then silently dropped
 	 * rather than required for correct delegate operation.
 	 */
-	setDelegatePromptGuidelineWarnings?(warnings: string[]): void;
 	createProfileFilterReloadSnapshot(): ProfileFilterReloadSnapshot;
 	restoreProfileFilterReloadSnapshot(snapshot: ProfileFilterReloadSnapshot): void;
 
@@ -2001,10 +2000,6 @@ export class RuntimeBuilder {
 									workerAgentControl.createTaskProfile!(input),
 							}
 						: undefined;
-				// Collected synchronously: normalizeProviderPromptGuidelines's onBounded callback fires
-				// only while createDelegateToolDefinition below computes promptGuidelines, so the whole
-				// batch is ready to hand to the /context sink the moment construction returns.
-				const delegatePromptGuidelineWarnings: string[] = [];
 				const delegateToolDefinition = createDelegateToolDefinition({
 					caller: { kind: "session_root" },
 					resolveMessageReplayScope: () => {
@@ -2064,10 +2059,8 @@ export class RuntimeBuilder {
 							}),
 					},
 					...(profileWriter ? { profileWriter } : {}),
-					warn: (message) => delegatePromptGuidelineWarnings.push(message),
 				});
 				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
-				this.deps.setDelegatePromptGuidelineWarnings?.(delegatePromptGuidelineWarnings);
 			}
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).

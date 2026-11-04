@@ -59,6 +59,7 @@ import {
 	legendPath,
 	matchedSubmitReceipt,
 	OWNER_DRAFT_DIRTY,
+	readDelegationRule,
 	requirementIdOf,
 	toolOutcomes,
 	utf8Text,
@@ -137,6 +138,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				},
 			},
 		]),
+		readDelegationRule("delegation-rule"),
 		calls("create-rootwork-lane", [
 			{
 				id: "lane-rootwork",

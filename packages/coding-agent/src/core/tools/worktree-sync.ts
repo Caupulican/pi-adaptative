@@ -138,21 +138,13 @@ function formatStatus(status: SyncStatus): string[] {
 	return lines;
 }
 
-const WORKTREE_SYNC_PROMPT_GUIDELINES = [
-	"Work only in your lane worktree/branch, never hub/main; main moves only through land.",
-	"Commit the lane, then land; if stale, sync first. On a sync conflict edit the listed files, then call continue.",
-	"After another land, mutations fail until sync; git_add/git_commit may still save WIP.",
-	"status is the authoritative sync state; never infer it from raw git.",
-];
-
 export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): ToolDefinition {
 	return {
 		name: "worktree_sync",
 		label: "worktree_sync",
 		description:
-			"Parallel work in git worktree lanes: each agent has its own worktree/branch, integrated by rebase onto main and a serialized ff-only land that runs the gate command at the landing tip. Landing while stale is refused; every refusal names the exact recovery step.",
-		promptSnippet: "Lane worktrees: sync to main, gated land",
-		promptGuidelines: WORKTREE_SYNC_PROMPT_GUIDELINES,
+			"Parallel work in git worktree lanes: each agent has its own worktree/branch, integrated by rebase onto main and a serialized ff-only land that runs the gate command at the landing tip. Work only in your lane, never hub/main; main moves only through land. Commit the lane, then land; if stale, sync first, and on a sync conflict edit the listed files, then call continue. Landing while stale is refused and every refusal names the exact recovery step; git_add/git_commit may still save WIP while stale. status is the authoritative sync state; never infer it from raw git.",
+		promptSnippet: "Manage lane worktrees and landing",
 		parameters: worktreeSyncSchema,
 		executionMode: "sequential",
 		async execute(_toolCallId, input: WorktreeSyncToolInput, signal) {
