@@ -1030,7 +1030,7 @@ const LoopToolParams = Type.Object(
 		metricUnit: Type.Optional(Type.String({ description: "Display unit." })),
 		direction: Type.Optional(
 			StringEnum(["lower", "higher"] as const, {
-				description: "As improvement_decision.",
+				description: "Whether lower or higher metric values are better. Default lower.",
 			}),
 		),
 		reset: Type.Optional(
@@ -1038,17 +1038,24 @@ const LoopToolParams = Type.Object(
 				description: "For action=init, replace existing user-level loop state for this workspace/loop id.",
 			}),
 		),
-		minDelta: Type.Optional(Type.Number({ description: "As improvement_decision." })),
-		minRelativeDelta: Type.Optional(Type.Number({ description: "As improvement_decision." })),
+		minDelta: Type.Optional(
+			Type.Number({ description: "Minimum absolute improvement required to keep. Default 0." }),
+		),
+		minRelativeDelta: Type.Optional(
+			Type.Number({ description: "Minimum relative improvement required to keep, e.g. 0.01 for 1%. Default 0." }),
+		),
 		confidenceMode: Type.Optional(
 			StringEnum(["none", "mad"] as const, {
-				description: "As improvement_decision (default none unless minConfidence > 0).",
+				description:
+					"Noise/confidence policy; mad with minConfidence rejects noisy wins. Default none unless minConfidence > 0.",
 			}),
 		),
-		minConfidence: Type.Optional(Type.Number({ description: "As improvement_decision." })),
+		minConfidence: Type.Optional(
+			Type.Number({ description: "Minimum confidence multiple over MAD noise floor. Default 0." }),
+		),
 		lowConfidenceAction: Type.Optional(
 			StringEnum(["retry", "discard"] as const, {
-				description: "As improvement_decision.",
+				description: "Decision when confidence evidence is missing or too low. Default retry.",
 			}),
 		),
 		currentMetric: Type.Optional(Type.Number({ description: "record: measured primary metric." })),
