@@ -184,10 +184,21 @@ export class ProviderLimitStore {
 		return changedLimits.subscribe(this.limitPath(provider), onChange);
 	}
 
-	/** The live limit for `provider`, or undefined (an expired record is removed on read). */
+	/**
+	 * The live limit for `provider`, or undefined (an expired record is removed on read). A fully used
+	 * subscription window does not hold while the account reports credits: the provider keeps serving
+	 * from them, and its own refusal records the real limit.
+	 */
 	read(provider: string): ProviderLimitRecord | undefined {
 		const path = this.limitPath(provider);
-		return withFileLockSync(path, () => this.readPath(path));
+		const record = withFileLockSync(path, () => this.readPath(path));
+		return record && this.coveredByCredits(record) ? undefined : record;
+	}
+
+	private coveredByCredits(record: ProviderLimitRecord): boolean {
+		if (record.reason !== "usage_window") return false;
+		const credits = this.readUsage(record.provider)?.credits;
+		return credits !== undefined && (credits.unlimited || credits.hasCredits);
 	}
 
 	/** Caller holds the path lock through any subsequent decision/write; cleanup mutates the file. */
@@ -226,7 +237,7 @@ export class ProviderLimitStore {
 			if (!name.endsWith(".json")) continue;
 			const path = join(this.limitsDir, name);
 			const record = withFileLockSync(path, () => this.readPath(path));
-			if (record) records.push(record);
+			if (record && !this.coveredByCredits(record)) records.push(record);
 		}
 		return records.sort((a, b) => a.provider.localeCompare(b.provider));
 	}
