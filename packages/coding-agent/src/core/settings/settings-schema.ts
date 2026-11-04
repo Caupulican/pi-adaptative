@@ -34,6 +34,14 @@ export interface ScoutSettings {
 	model?: string; // default: "auto" — resolve an installed FastContext model, else return unavailable from the tool
 }
 
+export interface OrchestratorSettings {
+	/**
+	 * The root orchestrates and workers carry out the work: a root call that is task work is refused with the way to
+	 * delegate it (core/system-one/delegation-gate). Default true; applies only while the `delegate` tool is active.
+	 */
+	delegationGate?: boolean;
+}
+
 export interface SystemOneSettings {
 	enabled?: boolean; // default: true
 	/** Which key System One authenticates with; `auto` (default) prefers TypeSafe, then OpenRouter. The engine version is pinned (Jev 1.13). */
@@ -635,6 +643,7 @@ export interface Settings {
 	catalogDir?: string;
 	compaction?: CompactionSettings;
 	scout?: ScoutSettings;
+	orchestrator?: OrchestratorSettings;
 	/** TypeSafe System One configuration (direct API or OpenRouter) */
 	systemOne?: SystemOneSettings;
 	/** Proactive per-turn cost guard (#34). */

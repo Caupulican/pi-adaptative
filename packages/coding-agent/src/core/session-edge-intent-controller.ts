@@ -3,7 +3,9 @@
  * local-commit delivery bindings, model-pool policy updates, and session edge grants.
  */
 
+import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { CONFIG_DIR_NAME } from "../config.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
@@ -61,6 +63,7 @@ import {
 	USER_REQUEST_RULE_BUDGET,
 	type UserRequestClassificationOutcome,
 } from "./system-one/controller.ts";
+import { DelegationGate } from "./system-one/delegation-gate.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
 import { operationGateLedgerBindings } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type OwnerWords } from "./system-one/owner-policy-queue.ts";
@@ -177,6 +180,8 @@ export interface SessionEdgeIntentControllerDeps {
 	getCwd(): string;
 	getAgentDir(): string;
 	isChildSession(): boolean;
+	/** A worker can be started: the `delegate` tool is active. */
+	isDelegateToolActive(): boolean;
 	isDisposed(): boolean;
 	getReflectionAbortSignal(): AbortSignal;
 	getSystemOneController(): SystemOneController | undefined;
@@ -207,6 +212,7 @@ export class SessionEdgeIntentController {
 	readonly modelPolicy: OwnerModelPolicy;
 	private poolPolicyRead?: { branchKey: string; policy: ModelPoolPolicy | undefined };
 	private operationGateInstance?: OperationGate;
+	private delegationGateInstance?: DelegationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
 	/** The committed optional-tool judgment in flight (one at a time: the owner-policy queue runs them); its paused entry heads the chain. */
 	private committedIntentAbort?: AbortController;
@@ -307,6 +313,31 @@ export class SessionEdgeIntentController {
 			lines.push("RULE AUTHORITY: the user's request is above AGENTS.md and standing user rules for this task.");
 		}
 		return lines.filter((line) => line.length > 0).join("\n");
+	}
+
+	/** The root's own tool calls are checked here: the delegation gate (steers, so YOLO does not skip it) and the operation gate. */
+	rootCallChecks() {
+		return {
+			checkDelegation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
+				this.delegationGate.check(tool, args, cwd ?? this.deps.getCwd(), signal),
+			checkOperation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
+				this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), "root", signal),
+		};
+	}
+
+	get delegationGate(): DelegationGate {
+		this.delegationGateInstance ??= new DelegationGate({
+			isActive: () =>
+				!this.deps.isChildSession() &&
+				this.deps.getSettingsManager().getOrchestratorSettings().delegationGate &&
+				this.deps.isDelegateToolActive(),
+			getEngine: () => this.deps.getSemanticDecisionEngine(),
+			getRequest: () => this.deps.getLastUserRequest(),
+			getTurnKey: () => `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.deps.getLastUserRequest()}`,
+			getOrchestrationDirectories: () => [this.deps.getAgentDir(), join(this.deps.getCwd(), CONFIG_DIR_NAME)],
+			notify: (message) => this.deps.emitWarning(message),
+		});
+		return this.delegationGateInstance;
 	}
 
 	get operationGate(): OperationGate {

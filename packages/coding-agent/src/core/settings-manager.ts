@@ -2438,6 +2438,10 @@ export class SettingsManager {
 		};
 	}
 
+	getOrchestratorSettings(): { delegationGate: boolean } {
+		return { delegationGate: this.settings.orchestrator?.delegationGate ?? true };
+	}
+
 	getScoutSettings(): { enabled: boolean; model: string } {
 		return {
 			enabled: this.settings.scout?.enabled ?? false,

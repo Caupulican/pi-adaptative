@@ -665,6 +665,7 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
 			isChildSession: () => this._isChildSession,
+			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,
 			getSystemOneController: () => this._semanticPlane.controller,
@@ -2278,8 +2279,7 @@ export class AgentSession {
 			},
 			getToolSelectionController: () => this._toolSelection,
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
-			checkOperation: (tool, args, cwd, signal) =>
-				this._edgeIntent.operationGate.check(tool, args, cwd ?? this._cwd, "root", signal),
+			...this._edgeIntent.rootCallChecks(),
 			localCommitBranch: () => this._edgeIntent.localCommitBranch(),
 			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery
 			// step the projection reports as DELIVER until that call ends.

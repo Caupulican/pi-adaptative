@@ -2479,6 +2479,8 @@ export class HarnessWorld {
 				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
 				// These journeys exercise legacy memory and reflection; production defaults to ICM.
 				memorySystem: "okf",
+				// The journeys drive the root's own tool calls; the delegation gate (root orchestrates, workers execute) is off here.
+				orchestrator: { delegationGate: false },
 				...options.settings,
 				systemOne: { ...options.settings?.systemOne, enabled: options.systemOneEnabled },
 			};

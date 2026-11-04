@@ -301,6 +301,14 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.routeProvidersByRole` | object | - | Per worker role (`explorer`, `implementer`, `verifier`, ...), an ordered candidate list that replaces `routeProviders` for that role, so a verifier can run on a stronger account than an explorer |
 | `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
 
+### Orchestrator
+
+The root orchestrates and its workers carry out the work. While the `delegate` tool is active, the delegation gate checks each root call before it runs: a `write` or `edit` outside the orchestration directories (the agent directory and the project's `.pi`), and a `bash`, `run_process`, `powershell` or `python` call System One establishes as task work (changing project files, or running a build, test, install or program) are refused, and the refusal says how to delegate. Reading, searching, planning, reviewing, and writing agent definitions and instruction files for workers always pass. A System One doubt or outage lets the call run; without a System One engine only the typed-write rule applies. The gate never applies to a worker, and YOLO does not skip it.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `orchestrator.delegationGate` | `true` | Refuse root calls that are task work. `false` returns the root to direct execution. |
+
 ### Tool Repair
 
 | Setting | Type | Default | Description |

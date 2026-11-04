@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- The root orchestrates and workers execute. A delegation gate checks each root call while `delegate` is active: a `write` or `edit` outside the agent directory and the project's `.pi`, and a `bash`, `run_process`, `powershell` or `python` call that System One establishes as task work, are refused with the way to delegate (write the instructions to a file, start a worker that reads and follows it). Agent definitions, instruction files, reading, searching and planning pass; a System One doubt or outage lets the call run; workers and YOLO are unaffected by it. `orchestrator.delegationGate: false` restores direct root execution. The root prompt's director role now states the same split.
+
 ### Changed
 
 - tmux is retired as a worker host; herdr is the only one. The managed lane type `tmux-worker` is now `managed-worker` (session snapshots written with the old name are no longer read), lane labels read "managed" instead of "tmux", the reload blocker of a managed lane is labelled `managed:<lane>`, and the unused `tmuxSession`/`tmuxPanePid` process-matrix fields are gone. Running pi inside tmux stays supported as a terminal environment (keyboard setup check, `docs/tmux.md`).

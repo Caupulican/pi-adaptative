@@ -121,6 +121,16 @@ export interface ToolGateControllerDeps {
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
 	/**
+	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
+	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
+	 */
+	checkDelegation?(
+		toolName: string,
+		args: unknown,
+		executionCwd: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<BeforeToolCallResult | undefined>;
+	/**
 	 * The owner's words decide what a call may do (grants, a delivery limit, a forbidden tool). They are
 	 * classified lazily, so this settles them before the first gate reads any of that state.
 	 */
@@ -407,6 +417,8 @@ export class ToolGateController {
 			// 4. Single edge authorization on the actual final operation
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
+			const delegation = await this.deps.checkDelegation?.(toolCall.name, args, executionContext?.cwd, signal);
+			if (delegation) return delegation;
 			const operation = yolo
 				? undefined
 				: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
