@@ -6,6 +6,7 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { assertSessionIdentityDeclaration } from "./extension-session-scope.ts";
 import { disposeExtensionEventSubscriptions, isExtensionGenerationInactive } from "./lifecycle.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import { createExtensionStorage } from "./storage.ts";
@@ -186,6 +187,7 @@ export function createExtensionAPI(
 					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
 				);
 			}
+			assertSessionIdentityDeclaration(tool);
 			extension.tools.set(tool.name, { definition: tool, sourceInfo: extension.sourceInfo });
 			runtime.refreshTools();
 		},

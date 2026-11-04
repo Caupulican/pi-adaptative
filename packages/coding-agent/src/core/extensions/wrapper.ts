@@ -2,17 +2,13 @@
  * Tool wrappers for extension-registered tools.
  *
  * These wrappers adapt tool execution so extension tools receive the runner context
- * and reuse session-scoped identity from prior successful results of the same extension.
+ * and reuse the session identity they declare (`sessionIdentity`) from prior successful results of the same extension.
  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
  */
 
 import type { AgentTool, ExecutionContext } from "../../kernel/index.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
-import {
-	applyExtensionSessionHeal,
-	extensionScopeOwnerKey,
-	extensionSessionScopeFor,
-} from "./extension-session-scope.ts";
+import { applyExtensionSessionHeal, extensionSessionScopeFor } from "./extension-session-scope.ts";
 import type { ExtensionRunner } from "./runner.ts";
 import type { RegisteredTool } from "./types.ts";
 
@@ -26,11 +22,12 @@ export function wrapRegisteredTool(
 	runner: ExtensionRunner,
 	getExecutionContext?: () => ExecutionContext | undefined,
 ): AgentTool {
-	const ownerKey = extensionScopeOwnerKey(registeredTool.sourceInfo);
-	const definition =
-		ownerKey === undefined
-			? registeredTool.definition
-			: applyExtensionSessionHeal(registeredTool.definition, ownerKey, extensionSessionScopeFor(runner));
+	const { baseDir, path } = registeredTool.sourceInfo;
+	const definition = applyExtensionSessionHeal(
+		registeredTool.definition,
+		baseDir ?? path,
+		extensionSessionScopeFor(runner),
+	);
 	return wrapToolDefinition(definition, () => runner.createToolContext(registeredTool, getExecutionContext?.()));
 }
 

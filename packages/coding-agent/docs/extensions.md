@@ -1960,6 +1960,20 @@ async execute(toolCallId, params) {
 
 **Argument preparation:** `prepareArguments(args)` is optional. If defined, it runs before schema validation and before `execute()`. Use it to mimic an older accepted input shape when pi resumes an older session whose stored tool call arguments no longer match the current schema. Return the object you want validated against `parameters`. Keep the public schema strict. Do not add deprecated compatibility fields to `parameters` just to keep old resumed sessions working.
 
+**Session identity:** `sessionIdentity` is optional. It lists the names of string parameters that carry an identity one call establishes and later calls reuse, such as a `boardId` resolved by a `resolve_project_scope` action. After a successful call the harness retains, for the registering extension, the value the call passed or the one its result reports: `details.<name>`, or `details.<base>.id` for a name ending in `Id` (`boardId` reads `details.board.id`). A later call from the same extension that leaves the parameter empty is filled with it before schema validation, after `prepareArguments`. A result carrying `error`, `ok: false`, or a `status` other than `resolved`, `ok` or `success` retains nothing. Nothing is inferred from parameter names: a parameter that is not declared is never filled, so an omitted optional selector keeps its meaning (for example "no job named, start a new one"). Every declared name must be a property of `parameters`; registration throws otherwise.
+
+```typescript
+pi.registerTool({
+  name: "trello",
+  parameters: Type.Object({
+    action: Type.String(),
+    boardId: Type.Optional(Type.String()),
+  }),
+  sessionIdentity: ["boardId"],
+  // ...
+});
+```
+
 Example: an older session may contain an `edit` tool call with top-level `oldText` and `newText`, while the current schema only accepts `edits: [{ oldText, newText }]`.
 
 ```typescript
@@ -2690,7 +2704,7 @@ const highlighted = highlightCode(code, lang, theme);
 - Extension errors are logged, agent continues
 - `tool_call` errors block the tool (fail-safe)
 - Tool `execute` errors must be signaled by throwing; the thrown error is caught, reported to the LLM with `isError: true`, and execution continues
-- After a successful extension tool result, the harness retains identity fields that also exist on that extension's tool schema (`*Id`, `card`, `project`, `board`, including nested `board.id` → `boardId`). The next call from the same extension that omits those fields is filled before validation. Unresolved statuses (`needs_*`, `ambiguous*`) and builtin tools are not retained. An extension `prepareArguments` still runs first and can override this.
+- A tool that declares `sessionIdentity` has those parameters retained after a successful result and filled into a later call from the same extension that leaves them empty (see Session identity). A tool that declares nothing is never filled.
 
 ## Mode Behavior
 

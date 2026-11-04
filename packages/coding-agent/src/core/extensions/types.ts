@@ -458,6 +458,19 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
+	/**
+	 * Names of this tool's string parameters that carry a session identity, such as a `boardId` that one call
+	 * resolves and later calls reuse. After a successful call the harness retains, for the registering
+	 * extension, the value the call passed or the one its result reports (`details.<name>`, or `details.<base>.id`
+	 * for a name ending in `Id`). A later call from the same extension that leaves the parameter empty is filled
+	 * with it before validation, after `prepareArguments`. A result with `error`, `ok: false`, or a `status`
+	 * other than `resolved`, `ok` or `success` retains nothing.
+	 *
+	 * Nothing is inferred from parameter names: an undeclared parameter is never filled, so an omitted optional
+	 * selector keeps its meaning ("none", "start new"). Every name must be a property of `parameters`;
+	 * registration throws otherwise.
+	 */
+	sessionIdentity?: readonly string[];
 	/** Explicit tool-owned failure targets, corrective actions, and exact recovery evidence. */
 	failureRecovery?: AgentToolFailureRecoveryContract<TParams>;
 	/** Host-owned invocation binding, preserved through the definition-first tool registry. */

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Extension tools declare the parameters that carry a session identity with `ToolDefinition.sessionIdentity` (names of the tool's own string parameters). Only declared parameters are retained from successful results and filled into a later call from the same extension that leaves them empty; registration rejects a name that is not a parameter. The harness no longer infers identity from parameter names, and the builtin/non-builtin source distinction no longer decides whether a tool is healed. An extension that relied on the old inference (a `boardId` reused after `resolve_project_scope`, for example) adds `sessionIdentity: ["boardId"]` to its tool.
+
+### Fixed
+
+- `pi_collaboration` `fire_task` no longer fails with `Invalid independent parallel work intent.` or `Named collaboration specialist is unavailable or incompatible.` after an earlier `job_status` (or any successful call naming a `jobId`) in the same session. The old inference filled the omitted `jobId` of every later call from that result, turning each team start into a request for an old team. Optional selectors of the other bundled tools (`agent_send.messageId`) are no longer filled either.
+
 ## [0.104.33] - 2026-11-04
 
 ### Added
