@@ -2313,7 +2313,8 @@ export class AgentSession {
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
 			validateMutationAcceptance: ({ changedFiles }) =>
 				this._projectRules.acceptMutation(changedFiles, this._edgeIntent.ruleAuthority),
-			checkSoulWrite: (tool, args, cwd, signal) => this.soul.checkWrite(tool, args, cwd, signal),
+			checkSoulWrite: (call, args, cwd, signal) => this.soul.checkWrite(call, args, cwd, signal),
+			settleSoulWrite: (call, succeeded) => this.soul.settleWrite(call, succeeded),
 			noteOwnedWrites: (paths, cwd) => {
 				const objectiveId = this.objectiveMutationId();
 				for (const filePath of paths) this._mutationLedger.recordOwnedWrite(objectiveId, cwd, filePath);

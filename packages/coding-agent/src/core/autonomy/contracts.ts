@@ -217,6 +217,12 @@ export interface WorkerHostVerdict {
 	/** The proof a `needs_more` or `rejected` verdict names. */
 	readonly missing: readonly string[];
 	readonly reasonCodes: readonly string[];
+	/**
+	 * Host-owned fact stamped by the judge: the task named required requirement ids and every one is in
+	 * `coveredRequirementIds`. Absent on a legacy verdict and on any verdict the judge did not compute, which never
+	 * proves coverage. A requirement waived as not applicable is not covered.
+	 */
+	readonly allRequirementsCovered?: boolean;
 	readonly judgedBy: "code" | "system_one";
 	readonly at: string;
 }

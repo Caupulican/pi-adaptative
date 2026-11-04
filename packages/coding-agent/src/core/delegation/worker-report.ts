@@ -299,6 +299,11 @@ function receiptIndex(receipts: readonly WorkerCommandReceipt[]): Map<string, Wo
 	return index;
 }
 
+/** What the host's receipts and recorded changes say about one evidence reference a requirement cites. */
+type EvidenceAdjudication =
+	| { kind: "passed" | "incomplete" | "unknown" }
+	| { kind: "failed"; receipt: WorkerCommandReceipt };
+
 type CheckEvidence =
 	| { kind: "missing" | "ambiguous" | "unavailable" | "mismatch" | "incomplete" }
 	| { kind: "resolved"; receipt: WorkerCommandReceipt; outcome: "passed" | "failed" };
@@ -373,6 +378,9 @@ const ACTIONABLE_REASON_CODES: ReadonlySet<string> = new Set([
 	"requirement_missing",
 	"requirement_without_evidence",
 	"requirement_unknown_evidence",
+	"requirement_evidence_failed",
+	"requirement_evidence_incomplete",
+	"requirement_not_applicable_without_reason",
 	"verifier_without_verdict",
 ]);
 
@@ -400,12 +408,18 @@ export function buildNeedsMoreRequest(verdict: WorkerHostVerdict): string {
 
 function verdict(
 	kind: WorkerHostVerdict["verdict"],
-	parts: { covered?: readonly string[]; missing?: readonly string[]; reasonCodes: readonly string[] },
+	parts: {
+		covered?: readonly string[];
+		missing?: readonly string[];
+		reasonCodes: readonly string[];
+		allRequirementsCovered?: boolean;
+	},
 	now: () => string,
 ): WorkerHostVerdict {
 	return {
 		verdict: kind,
 		coveredRequirementIds: [...(parts.covered ?? [])],
+		...(parts.allRequirementsCovered !== undefined ? { allRequirementsCovered: parts.allRequirementsCovered } : {}),
 		// A claim keeps a missing line of at most MAX_WORKER_REPORT_TEXT_CHARS and rejects a longer one, so each is bounded
 		// here: a line quotes a path, a list of paths or a worker's note, any of which can reach that bound alone.
 		missing: [...(parts.missing ?? [])]
@@ -490,7 +504,22 @@ export function judgeSubmittedReport(input: {
 		}
 	}
 
-	const evidenceKnown = (ref: string) => receipts.get(ref) !== undefined || changed.has(spelled(ref));
+	// One adjudicated-evidence rule for a requirement: a cited receipt counts only when the host's own record of
+	// it shows a pass, and a cited file only when the host recorded that change. The worker's `checks` list plays no
+	// part: a command it left out of `checks` is judged here by its receipt all the same.
+	const adjudicate = (ref: string): EvidenceAdjudication => {
+		if (receipts.has(ref)) {
+			const receipt = receipts.get(ref);
+			if (!receipt) return { kind: "unknown" };
+			const outcome = workerCommandOutcome(receipt);
+			return outcome === "passed"
+				? { kind: "passed" }
+				: outcome === "failed"
+					? { kind: "failed", receipt }
+					: { kind: "incomplete" };
+		}
+		return changed.has(spelled(ref)) ? { kind: "passed" } : { kind: "unknown" };
+	};
 	const entries = new Map(submitted.report.requirements.map((entry) => [entry.id, entry]));
 	const covered: string[] = [];
 	for (const id of context.requirementIds) {
@@ -499,21 +528,42 @@ export function judgeSubmittedReport(input: {
 			missing.push(`requirement ${id} has no entry`);
 			reasons.push("requirement_missing");
 		} else if (entry.status === "met") {
-			const unknown = entry.evidence.filter((ref) => !evidenceKnown(ref));
+			const adjudications = entry.evidence.map((ref) => ({ ref, result: adjudicate(ref) }));
+			const failed = adjudications.filter(
+				(item): item is { ref: string; result: { kind: "failed"; receipt: WorkerCommandReceipt } } =>
+					item.result.kind === "failed",
+			);
 			if (entry.evidence.length === 0) {
 				missing.push(`requirement ${id} is reported met with no evidence`);
 				reasons.push("requirement_without_evidence");
-			} else if (unknown.length === entry.evidence.length) {
+			} else if (failed.length > 0) {
+				contradicted.push(
+					`requirement ${id} is reported met but cites receipt ${failed[0]!.ref} (${quotedSpan(failed[0]!.result.receipt.command)}), which the host recorded as failed`,
+				);
+				reasons.push("requirement_evidence_failed");
+			} else if (adjudications.some((item) => item.result.kind === "passed")) {
+				covered.push(id);
+			} else if (adjudications.some((item) => item.result.kind === "incomplete")) {
+				missing.push(`requirement ${id} cites a receipt with no explicit exit outcome`);
+				reasons.push("requirement_evidence_incomplete");
+			} else {
 				missing.push(
-					`requirement ${id} cites evidence the host has no record of: ${unknown.slice(0, 6).map(quotedSpan).join(", ")}`,
+					`requirement ${id} cites evidence the host has no record of: ${entry.evidence.slice(0, 6).map(quotedSpan).join(", ")}`,
 				);
 				reasons.push("requirement_unknown_evidence");
-			} else covered.push(id);
+			}
 		} else if (entry.status === "partial" || entry.status === "not_met") {
 			missing.push(`requirement ${id} is ${entry.status}${entry.note ? `: ${entry.note}` : ""}`);
 			reasons.push(`requirement_${entry.status}`);
-		} else covered.push(id);
+		} else if (!entry.note?.trim()) {
+			// Not applicable is the worker's own claim and the host cannot check it: it needs a stated reason, and even with
+			// one it resolves the requirement without covering it, so no coverage rests on it.
+			missing.push(`requirement ${id} is reported not_applicable with no reason`);
+			reasons.push("requirement_not_applicable_without_reason");
+		}
 	}
+	const allRequirementsCovered =
+		context.requirementIds.length > 0 && context.requirementIds.every((id) => covered.includes(id));
 	for (const entry of submitted.report.requirements) {
 		if (!context.requirementIds.includes(entry.id) && context.requirementIds.length > 0) {
 			reasons.push("requirement_id_unknown");
@@ -524,10 +574,17 @@ export function judgeSubmittedReport(input: {
 		reasons.push("verifier_without_verdict");
 	}
 
-	if (contradicted.length > 0)
-		return verdict("rejected", { covered, missing: [...contradicted, ...missing], reasonCodes: reasons }, now);
-	if (missing.length > 0) return verdict("needs_more", { covered, missing, reasonCodes: reasons }, now);
-	return verdict("accepted", { covered, reasonCodes: ["report_matches_receipts"] }, now);
+	if (contradicted.length > 0) {
+		return verdict(
+			"rejected",
+			{ covered, missing: [...contradicted, ...missing], reasonCodes: reasons, allRequirementsCovered },
+			now,
+		);
+	}
+	if (missing.length > 0) {
+		return verdict("needs_more", { covered, missing, reasonCodes: reasons, allRequirementsCovered }, now);
+	}
+	return verdict("accepted", { covered, reasonCodes: ["report_matches_receipts"], allRequirementsCovered }, now);
 }
 
 /**

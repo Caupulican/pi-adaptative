@@ -456,6 +456,11 @@ function normalizePending(value: unknown): WorkerClaimPending[] {
 	return states as WorkerClaimPending[];
 }
 
+function workerClaimBoolean(value: unknown, label: string): boolean {
+	if (typeof value !== "boolean") invalidWorkerClaim(`${label} must be boolean.`);
+	return value;
+}
+
 function normalizeHostVerdict(value: unknown): WorkerHostVerdict {
 	const verdict = ownWorkerClaimDataRecord(value, "claim.hostVerdict");
 	if (!HOST_VERDICT_KINDS.has(verdict.verdict)) invalidWorkerClaim("claim.hostVerdict.verdict is invalid.");
@@ -481,6 +486,14 @@ function normalizeHostVerdict(value: unknown): WorkerHostVerdict {
 			MAX_WORKER_CLAIM_REASON_CODES,
 			MAX_WORKER_CLAIM_REASON_CODE_CHARS,
 		),
+		...(verdict.allRequirementsCovered !== undefined
+			? {
+					allRequirementsCovered: workerClaimBoolean(
+						verdict.allRequirementsCovered,
+						"claim.hostVerdict.allRequirementsCovered",
+					),
+				}
+			: {}),
 		judgedBy: verdict.judgedBy,
 		at: requiredWorkerClaimString(verdict.at, "claim.hostVerdict.at", MAX_WORKER_CLAIM_TIMESTAMP_CHARS),
 	};

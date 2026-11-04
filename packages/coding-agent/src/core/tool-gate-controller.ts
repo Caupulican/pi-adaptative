@@ -103,11 +103,13 @@ export interface ToolGateControllerDeps {
 	 * (see soul/soul-controller.ts). Not a permission check, so YOLO does not skip it.
 	 */
 	checkSoulWrite?(
-		toolName: string,
+		call: AgentToolCall,
 		args: unknown,
 		cwd: string,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/** The allowed soul write's call has finished: its history entry is recorded from the file as it now is. */
+	settleSoulWrite?(call: AgentToolCall, succeeded: boolean): void;
 	/**
 	 * System One's operation gate: an operation the deterministic gates cannot decide is judged, then
 	 * runs, asks the operator, or is refused (see system-one/operation-gate.ts).
@@ -409,7 +411,7 @@ export class ToolGateController {
 				? undefined
 				: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (operation) return operation;
-			const soulWrite = await this.deps.checkSoulWrite?.(toolCall.name, args, effectiveCwd, signal);
+			const soulWrite = await this.deps.checkSoulWrite?.(toolCall, args, effectiveCwd, signal);
 			if (soulWrite) return soulWrite;
 
 			// 5. System One semantic tool gate
@@ -547,6 +549,7 @@ export class ToolGateController {
 		const selection = invocation?.selection;
 		let finishSucceeded = !isError;
 		try {
+			this.deps.settleSoulWrite?.(toolCall, !isError);
 			const runner = this.deps.getExtensionRunner();
 			let content = result.content;
 			let details = result.details;

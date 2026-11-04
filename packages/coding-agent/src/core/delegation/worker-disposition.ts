@@ -242,9 +242,11 @@ export function describeWorkerHostVerdict(hostVerdict: WorkerHostVerdict): strin
 
 /**
  * Whether the host's own check lets the root read a worker's report and the transcript on demand. Only an
- * accepted verdict, judged by code against the host's receipts, that names nothing missing, on a claim no parent
- * review is asked for, covers every task requirement. Any other verdict, or none (a legacy claim), leaves something the
- * report alone does not settle, so the root reads the whole transcript.
+ * accepted verdict, judged by code against the host's receipts, that names nothing missing and carries the judge's
+ * `allRequirementsCovered` fact (the task named required ids and every one has passing evidence; a requirement waived
+ * as not applicable is not covered), on a claim no parent review is asked for. Any other verdict, a task with no
+ * required ids, or a legacy verdict without the fact, leaves something the report alone does not settle, so the
+ * root reads the whole transcript.
  */
 export function workerReportSufficesForAcceptance(
 	claim: Pick<WorkerDispositionClaim, "hostVerdict" | "parentReviewRequired"> | undefined,
@@ -252,6 +254,7 @@ export function workerReportSufficesForAcceptance(
 	return (
 		claim?.hostVerdict?.verdict === "accepted" &&
 		claim.hostVerdict.judgedBy === "code" &&
+		claim.hostVerdict.allRequirementsCovered === true &&
 		claim.hostVerdict.missing.length === 0 &&
 		claim.parentReviewRequired !== true
 	);

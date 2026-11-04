@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { BeforeToolCallResult } from "../../kernel/index.ts";
+import type { AgentToolCall, BeforeToolCallResult } from "../../kernel/index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { checkSoulText, DEFAULT_AGENT_NAME, SOUL_FILE_NAME } from "../agent-identity.ts";
 import { configFile } from "../agent-paths.ts";
@@ -83,6 +83,11 @@ export class SoulController {
 	private readonly deps: SoulControllerDeps;
 	private readonly historyStore: SoulHistory;
 	private readonly evaluations = new Map<string, number>();
+	/** Allowed writes whose tool call has not finished, keyed by the call itself. */
+	private readonly pending = new WeakMap<
+		AgentToolCall,
+		{ reviewedText: string; before: string | undefined; reviewer: SoulReviewer }
+	>();
 
 	constructor(deps: SoulControllerDeps) {
 		this.deps = deps;
@@ -148,11 +153,12 @@ export class SoulController {
 	 * evaluation that fails or times out while System One is available allows and says so.
 	 */
 	async checkWrite(
-		toolName: string,
+		call: AgentToolCall,
 		args: unknown,
 		cwd: string,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined> {
+		const toolName = call.name;
 		if ((toolName !== "write" && toolName !== "edit") || !this.deps.isRootSession()) return undefined;
 		if (typeof args !== "object" || args === null) return undefined;
 		const input = args as Record<string, unknown>;
@@ -169,7 +175,7 @@ export class SoulController {
 		}
 
 		const engine = this.deps.getEngine();
-		if (!engine || screened.soul === undefined) return this.allow(candidate.text, "unreviewed");
+		if (!engine || screened.soul === undefined) return this.hold(call, candidate.text, current, "unreviewed");
 
 		const identity = soulSha256(candidate.text);
 		if ((this.evaluations.get(identity) ?? 0) >= UNSETTLED_EVALUATIONS_PER_CANDIDATE) {
@@ -186,7 +192,7 @@ export class SoulController {
 		switch (outcome.kind) {
 			case "allow":
 				this.evaluations.delete(identity);
-				return this.allow(candidate.text, "allow");
+				return this.hold(call, candidate.text, current, "allow");
 			case "adverse": {
 				this.record(candidate.text, "block");
 				const adverse = outcome.findings.filter((finding) => finding.answer === "adverse");
@@ -201,14 +207,60 @@ export class SoulController {
 				return block("System One could not settle this soul.md text. Simplify the text and write it again.");
 			case "failed":
 				this.deps.emitWarning(`soul written without Jev review: ${outcome.error}`);
-				return this.allow(candidate.text, "unreviewed");
+				return this.hold(call, candidate.text, current, "unreviewed");
 		}
 	}
 
-	/** The gate lets the call through; the version it will write is recorded first. */
-	private allow(text: string, reviewer: SoulReviewer): undefined {
-		this.record(text, reviewer);
+	/**
+	 * The gate lets the call through. Nothing is recorded yet: the tool re-reads the file and may fail or find other
+	 * text, so the version is recorded by `settleWrite`, from what is on disk once the call has run.
+	 */
+	private hold(
+		call: AgentToolCall,
+		reviewedText: string,
+		before: string | undefined,
+		reviewer: SoulReviewer,
+	): undefined {
+		this.pending.set(call, { reviewedText, before, reviewer });
 		return undefined;
+	}
+
+	/**
+	 * The history boundary of an allowed write: called once its tool call has finished. A failed call recorded nothing
+	 * restorable; a successful one is recorded from the text actually on disk. When that differs from the reviewed
+	 * text (another writer got in between the review and the write; this is detected after the fact, not prevented),
+	 * the write is recorded `unreviewed`, the on-disk text goes through the deterministic screen, and the owner is told.
+	 */
+	settleWrite(call: AgentToolCall, succeeded: boolean): void {
+		const pending = this.pending.get(call);
+		if (!pending) return;
+		this.pending.delete(call);
+		const onDisk = this.read();
+		if (!succeeded || onDisk === undefined) return;
+		const reviewed = onDisk === pending.reviewedText || normalizeToLF(onDisk) === normalizeToLF(pending.reviewedText);
+		if (reviewed) {
+			this.historyStore.record({
+				text: onDisk,
+				keepText: true,
+				standing: pending.before,
+				author: "agent",
+				reviewer: pending.reviewer,
+			});
+			return;
+		}
+		const screened = checkSoulText(onDisk);
+		this.deps.emitWarning(
+			screened.ok
+				? "soul.md on disk differs from the text that was reviewed (another writer changed it); recorded as unreviewed."
+				: `soul.md on disk differs from the text that was reviewed and ${screened.reason}; it is not loaded. Review ${this.path}.`,
+		);
+		this.historyStore.record({
+			text: onDisk,
+			keepText: screened.ok,
+			standing: pending.before,
+			author: "agent",
+			reviewer: "unreviewed",
+		});
 	}
 
 	/** An agent write of `text`: kept whole unless the gate blocked it. */
@@ -228,9 +280,12 @@ export class SoulController {
 		if (screened.soul === undefined)
 			return { ok: false, reason: "an empty soul is not saved; delete the file to remove it" };
 		const content = `${screened.soul}\n`;
-		this.historyStore.record({ text: content, keepText: true, standing: this.read(), author, reviewer });
+		const standing = this.read();
 		writeFileAtomicSync(this.path, content);
-		return { ok: true, bytes: Buffer.byteLength(content, "utf8") };
+		// Recorded after the write succeeded, from what the file now holds.
+		const written = this.read() ?? content;
+		this.historyStore.record({ text: written, keepText: true, standing, author, reviewer });
+		return { ok: true, bytes: Buffer.byteLength(written, "utf8") };
 	}
 
 	/**

@@ -49,7 +49,7 @@ export const COMMS_STATE_GLOSSARY = {
 	ACCEPTED:
 		"the message is durably in the mailbox; idle or an older report does not prove it completed. Completion arrives through wait, wait_many or the handoff, never inbox_wait.",
 	READ_REPORT:
-		"the host verified the report against its receipts and every requirement is covered: the report is the evidence; read a transcript range (cursor) only for a claim you doubt.",
+		"every required id has passing evidence in the host's receipts: the report is the evidence; read a transcript range (cursor) only for a claim you doubt.",
 	READ_ALL: "verdict not accepted or review pending: read every transcript page (nextCursor) before judging.",
 } as const;
 

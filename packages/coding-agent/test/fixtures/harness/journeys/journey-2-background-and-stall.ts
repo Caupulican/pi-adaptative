@@ -1322,6 +1322,17 @@ async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Pro
 	);
 	expect(ready.timedOut, `${label}: the worker settles inside its wait`).toBe(false);
 	expect(ready.status, `${label}: the worker is idle once its resources are released`).toBe("idle");
+	// The report waived the requirement as not applicable and gave a reason: the host resolves it (no missing item, so the verdict
+	// is accepted) without covering it, so no coverage and no "the report suffices" fact rest on the worker's own word.
+	const claim = session.getWorkerClaimSnapshots().find((candidate) => candidate.requestId === laneId);
+	expect(
+		{
+			verdict: claim?.hostVerdict?.verdict,
+			covered: claim?.hostVerdict?.coveredRequirementIds,
+			allRequirementsCovered: claim?.hostVerdict?.allRequirementsCovered,
+		},
+		`${label}: a not-applicable requirement with a reason is resolved, not covered`,
+	).toEqual({ verdict: "accepted", covered: [], allRequirementsCovered: false });
 	expect(
 		world.timers.armedDelays(WAKE_OWNER),
 		`${label}: nothing is left armed on the goal-continuation port`,
