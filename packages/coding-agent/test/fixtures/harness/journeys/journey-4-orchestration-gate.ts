@@ -72,18 +72,17 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 					throw new Error(`the worker's build did not run through the shell: ${build?.text ?? "no result"}`);
 				}
 			},
-			reply: { content: [{ type: "text", text: "The build ran: j4-build." }] },
-		},
-		{
-			// Diagnostic: a request after the worker's report is not part of the script; its tail is shown so the cause is named.
-			name: "j4-worker-extra",
-			optional: true,
-			check: (request) => {
-				console.info(
-					`J4_EXTRA_WORKER_REQUEST ${JSON.stringify(request.context.messages.slice(-2)).slice(0, 1_500)}`,
-				);
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j4-report-1",
+						name: "submit_report",
+						arguments: { status: "completed", summary: "The build ran: j4-build." },
+					},
+				],
+				stopReason: "toolUse",
 			},
-			reply: { content: [{ type: "text", text: "Nothing further." }] },
 		},
 	);
 	world.provider.enqueue(
