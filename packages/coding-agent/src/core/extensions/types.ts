@@ -1872,6 +1872,8 @@ export interface BuildSystemPromptOptions {
 	agentName?: string;
 	/** Set while soul.md does not exist: the path the agent may create it at from its memory and sessions. */
 	missingSoulPath?: string;
+	/** The agent's soul text (soul.md body, screened and bounded); the full prompt states it under its first line. */
+	soul?: string;
 }
 
 export interface MemoryProvider {

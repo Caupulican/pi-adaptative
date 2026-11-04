@@ -492,6 +492,7 @@ export class SystemPromptBuilder {
 			ledgerActive,
 			agentName: identity?.name,
 			missingSoulPath: identity?.missingSoulPath,
+			soul: identity?.soul,
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its
