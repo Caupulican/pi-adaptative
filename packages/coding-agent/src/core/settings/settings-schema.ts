@@ -48,7 +48,7 @@ export interface SemanticMemoryGcSettings {
 	enabled?: boolean; // default: true
 	preserveRecentPages?: number; // default: 1 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
 	minChars?: number; // default: 900 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
-	markers?: string[]; // default: memory/automata recall markers + the task_steps_context checklist marker
+	markers?: string[]; // default: memory/automata recall and pipeline page markers; the task_steps page is matched by type
 }
 
 export interface ContextGcSettings {

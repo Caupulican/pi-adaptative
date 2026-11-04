@@ -3,6 +3,8 @@ import { posix, win32 } from "node:path";
 import { escapeRegExp } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/paths.ts";
+import { COMMS_RECORD_VERSION } from "../comms/comms-records.ts";
+import type { PathAliasLegendRecord } from "../comms/host-injection-records.ts";
 
 const MIN_ALIAS_CHARS = 20;
 const MIN_SEPARATORS = 2;
@@ -507,29 +509,27 @@ export function formatPathAliasLegendForIds(table: PathAliasTable, ids: Readonly
 	return lines.join("\n");
 }
 
-export const PATH_ALIAS_LEGEND_DELTA_HEADER =
-	"PATH ALIASES (cumulative: this record adds to every earlier PATH ALIASES record; earlier lines stay valid)";
-export const PATH_ALIAS_LEGEND_PAUSED_LINE = "(alias minting paused: the legend costs more than the aliases save)";
-
 /**
- * Render only the legend lines for `ids` that were not committed before, as a cumulative delta
- * record. A durable record per change must carry what changed, not the whole table again: the
- * whole table per change was the single largest prompt cost measured live (91 copies, 1.36 MB
- * for a session whose tool output was 0.5 MB).
+ * The legend record for only the `ids` not committed before, as a cumulative delta. A durable record
+ * per change must carry what changed, not the whole table again: the whole table per change was the
+ * single largest prompt cost measured live (91 copies, 1.36 MB for a session whose tool output was
+ * 0.5 MB). Its model view is `renderPathAliasLegend`.
  */
-export function formatPathAliasLegendDeltaForIds(
+export function buildPathAliasLegendDelta(
 	table: PathAliasTable,
 	ids: ReadonlySet<string>,
 	committed: ReadonlySet<string>,
 	options?: { paused?: boolean },
-): string | undefined {
+): PathAliasLegendRecord | undefined {
 	if (table.entries.length === 0) return undefined;
 	const pending = table.entries.filter((entry) => ids.has(entry.id) && !committed.has(entry.id));
 	if (pending.length === 0) return undefined;
-	const lines = [PATH_ALIAS_LEGEND_DELTA_HEADER];
-	if (options?.paused) lines.push(PATH_ALIAS_LEGEND_PAUSED_LINE);
-	for (const entry of pending) lines.push(`${entry.id}=${entry.path}`);
-	return lines.join("\n");
+	return {
+		v: COMMS_RECORD_VERSION,
+		k: "path_alias_legend",
+		paused: options?.paused === true,
+		entries: pending.map((entry) => ({ id: entry.id, path: entry.path })),
+	};
 }
 
 export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: string[]): string | undefined {
@@ -834,6 +834,39 @@ function textsFromMessage(message: AgentMessage): string[] {
 
 export function collectMessageTexts(messages: readonly AgentMessage[]): string[] {
 	return messages.flatMap(textsFromMessage);
+}
+
+/**
+ * Every text of a message the model reads on the wire, for the legend's visibility rule: text and thinking blocks,
+ * tool-call arguments as the model wrote them, a summary, a bash command and its output, and a host record's text.
+ * The legend's own records are excluded: they define aliases, they do not mention them.
+ */
+export function collectWireTexts(message: AgentMessage): string[] {
+	if (message.role === "custom") {
+		return message.customType === PATH_ALIAS_LEGEND_CUSTOM_TYPE ? [] : contentTexts(message.content);
+	}
+	if (message.role !== "assistant") return textsFromMessage(message);
+	const texts: string[] = [];
+	for (const part of message.content) {
+		if (part.type === "text") texts.push(part.text);
+		else if (part.type === "thinking") texts.push(part.thinking);
+		else if (part.type === "toolCall") texts.push(JSON.stringify(part.arguments ?? {}));
+	}
+	return texts;
+}
+
+/**
+ * The alias ids a set of texts references: every standalone alias token and every alias id that prefixes one
+ * (`p/lane/src/a.ts` references `p/lane` and `p/lane/src`), so a directory alias seen only through a path under it
+ * still counts. Ids the table does not hold are filtered by the caller.
+ */
+export function collectReferencedAliasIds(texts: readonly string[]): Set<string> {
+	const ids = new Set<string>();
+	for (const token of collectActiveAliasIds(texts)) {
+		ids.add(token);
+		for (let end = token.indexOf("/", 2); end !== -1; end = token.indexOf("/", end + 1)) ids.add(token.slice(0, end));
+	}
+	return ids;
 }
 
 function rewriteContentWith(content: unknown, hooks: MessageRewriteHooks): unknown {

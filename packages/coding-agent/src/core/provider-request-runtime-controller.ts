@@ -157,7 +157,12 @@ export class ProviderRequestRuntimeController {
 			// future previous hook ever DOES reshape messages, `ProviderRequestContextController.plan`
 			// re-anchors the mark by reference (`frozenPrefixLength`) rather than trusting the raw
 			// index, so a misaligned mark here degrades to under-freezing, never to a corrupted rewrite.
-			const sessionPlan = await this.deps.context.plan(basePlan.messages, request.sentPrefixCount, signal);
+			const sessionPlan = await this.deps.context.plan(
+				basePlan.messages,
+				request.sentPrefixCount,
+				signal,
+				request.wireTexts,
+			);
 			return {
 				messages: sessionPlan.messages,
 				transientMessages: [...(basePlan.transientMessages ?? []), ...(sessionPlan.transientMessages ?? [])],

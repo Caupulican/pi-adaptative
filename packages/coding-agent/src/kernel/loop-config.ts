@@ -359,6 +359,13 @@ export interface AgentContextPlanRequest {
 	 * `sentPrefixCount` entries are identical. `0` means nothing has been sent yet.
 	 */
 	sentPrefixCount: number;
+	/**
+	 * Model-visible text the request carries outside `messages` and outside the plan's own transients: the kernel's
+	 * trailing records (the tool-failure ledger, the verification obligation) and a host projection's envelope (a turn
+	 * view and its state). A plan reads it only to learn what the model sees on the wire (the path-alias legend names
+	 * every alias visible there); it never rewrites, reorders or reconciles it.
+	 */
+	wireTexts?: readonly string[];
 }
 
 /**

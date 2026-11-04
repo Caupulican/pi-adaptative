@@ -120,6 +120,24 @@ report and sample the transcript on demand (`READ_REPORT`); any other verdict ke
 (`READ_ALL`). A claim carries what the host itself observed in typed `hostFindings` and its wait for
 an independent verifier in `pending`.
 
+Host injections follow the same rule. The tool-failure ledger, the authority context, the task
+directory context and the path-alias legend are each built as one versioned record (`{v: 1, k, ...}`)
+by the code that owns the fact and rendered into a tagged view: a header line, then one line per
+failure, grant, workspace or alias. The transient-record planner stores the record in the durable
+record's `details.record`; the legend's committed alias ids are read from it, and the per-call
+failure envelope's readers (the recovery gate's refused-replay check, the progress signature) read
+typed `details` rather than its text. The views stay at the request tail, so a view change never
+rewrites bytes the provider has cached. Transient records themselves are recognized by
+`details.superseding` / `details.cumulative`, not by their superseding note, and a tool result is a
+harness failure by `isError`, not by a `[harness]` text prefix.
+
+The path-alias legend names only what the model can see. Each request's legend record lists the
+aliases referenced on its wire (the rendered messages, the transients before the legend, and the
+text the kernel and a host projection carry beside them: the failure ledger, the verification
+obligation, a continuous-chat turn view) that no legend record in the history lists yet. Records
+are tail appends and are never retracted, so cached prefix bytes do not change. Tool arguments do
+not depend on the legend: the tool wrapper expands any minted alias against the full table.
+
 A message the host writes into a worker's transcript (a mailbox control message or the attempt's task prompt) carries a typed identity on its session entry, and readers recognize it by that record instead of its rendered header. A mailbox message carries a version header that selects the replay digest, and a replay of an identity accepted by an older build is judged under the older digest.
 
 A `delegate start` may state its task as fields (`goal`, `note`, `refs`, `evid`, `out`) instead of free text. The host renders the worker's task text from them and persists the record as the dispatch `brief` beside the rendered `instructions`; requirement ids, dependencies and the grant stay separate, host-validated fields.

@@ -259,7 +259,12 @@ export interface WorkerAttemptExecutorOptions {
 	 * lane (context GC, path aliases, the authority context; the head-only steps absent).
 	 * `sentPrefixCount` indexes `messages`.
 	 */
-	planRequest?(messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal): Promise<AgentContextPlan>;
+	planRequest?(
+		messages: AgentMessage[],
+		sentPrefixCount: number,
+		signal?: AbortSignal,
+		wireTexts?: readonly string[],
+	): Promise<AgentContextPlan>;
 	/**
 	 * The cache guard: each accepted provider request of this worker, as its recorded snapshot, with the
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
@@ -1400,7 +1405,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										// compaction, then context GC packing what went stale, priced on this lane.
 										...(retentionPolicy || options.planRequest
 											? {
-													planContext: async ({ messages, sentPrefixCount }: AgentContextPlanRequest) => {
+													planContext: async ({
+														messages,
+														sentPrefixCount,
+														wireTexts,
+													}: AgentContextPlanRequest) => {
 														planningMessages = messages;
 														const retain = async (
 															policy: WorkerConversationRetentionPolicy,
@@ -1459,7 +1468,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														// The sent mark indexes `messages`; re-anchor it by reference on what retention left.
 														const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, retained);
 														return options.planRequest
-															? options.planRequest(retained, frozenBelow, signal)
+															? options.planRequest(retained, frozenBelow, signal, wireTexts)
 															: { messages: retained };
 													},
 												}

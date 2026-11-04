@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- The tool-failure ledger, authority context, task-directory context and path-alias legend are typed records rendered as compact tagged lines: about 10% fewer ledger bytes, 21% fewer authority bytes and 19% fewer directory bytes on recorded session shapes. The record rides in the message details, and the legend's committed aliases and the refused-replay and progress checks read typed details instead of message text.
+- Transient records carry a typed `superseding` marker, read by the compaction carry and the reconciler instead of the note text; tail pointers name their record from the producer's header. The failure ledger no longer counts a successful tool result whose only text is a cleanup or progress-delivery notice as a failure, and a background task's failure summary reads the typed failure record.
+- The path-alias legend lists only aliases the model can see on the request: ids referenced by the rendered messages, the request's other transients, the failure ledger, the verification obligation and a continuous-chat turn view, including directory aliases seen only through a path under them, minus the lines already in the history. Under continuous chat the legend was re-sent in full each turn (63% of recorded legend bytes were repeats, up to 80 KB in one record); a worker conversation no longer receives aliases only another conversation saw. Committed lines are never retracted, and a tool argument naming any minted alias still resolves.
+- Context GC recognizes the task-steps checklist page by its message type instead of a `<task_steps_context` marker; the default `contextGc.semanticMemory.markers` no longer lists it, and a custom marker list no longer disables packing that page.
+- `scripts/feature-ledger.mjs` and `scripts/refusal-census.mjs` count a refusal by the failure record in the result details (`piToolFailureMemory`, `piToolFailureDirective`); the `[harness]` text is read only for sessions recorded before results carried it.
+
 ## [0.104.31] - 2026-11-04
 
 ### Changed

@@ -211,10 +211,8 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 		"<automata_doctor",
 		"<automata_optimizer",
 		"<automata_mesh",
-		// Injected task_steps checklist page (tasks/task-state.ts formatTaskStepsContext), re-derived
-		// fresh every turn from live TaskStepsState -- same GC treatment as a memory recall page (Bug
-		// #7 lineage): pack stale turn-copies down to the most recent one instead of accumulating.
-		"<task_steps_context",
+		// The host's own task_steps page is recognized by its type (isTaskStepsContextMessage), not
+		// by a marker. A pipeline page also arrives in `pipeline` tool results, so it keeps its marker.
 		"<pipeline_context",
 	],
 };
@@ -362,6 +360,18 @@ function joinedPartsContainAnyMarker(parts: string[], markers: readonly string[]
 	return markers.some((marker) => joinedPartsContainMarker(parts, marker));
 }
 
+/**
+ * The injected task_steps checklist page (tasks/task-state.ts formatTaskStepsContext), re-derived fresh every turn
+ * from live TaskStepsState: packed like a memory recall page (stale turn-copies go down to the most recent one) and
+ * recognized by the type the host gives it, whatever the configured markers. Every persisted page has carried this
+ * type since the page first existed, so no page is recognized by its text.
+ */
+const TASK_STEPS_CONTEXT_TYPE = "task_steps_context";
+
+function isTaskStepsContextMessage(message: AgentMessage): boolean {
+	return message.role === "custom" && message.customType === TASK_STEPS_CONTEXT_TYPE;
+}
+
 // Gates which custom-message types are eligible for the semantic-memory packer below. Despite the
 // name, this also covers deterministic injected task_steps and pipeline pages. They are
 // re-derivable from live state exactly like a memory recall page, so they get the same GC treatment.
@@ -375,7 +385,7 @@ function isSemanticMemoryCustomMessage(message: AgentMessage): boolean {
 		customType.includes("automata") ||
 		customType.includes("memory") ||
 		customType.includes("mind") ||
-		customType.includes("task_steps") ||
+		customType === TASK_STEPS_CONTEXT_TYPE ||
 		customType === "pipeline_context"
 	);
 }
@@ -395,6 +405,7 @@ const semanticMarkerScans = new WeakMap<AgentMessage, { readonly markersKey: str
 
 function semanticMessageHasMarker(message: AgentMessage, settings: Required<SemanticMemoryGcSettings>): boolean {
 	if (message.role !== "toolResult" && !isSemanticMemoryCustomMessage(message)) return false;
+	if (isTaskStepsContextMessage(message)) return true;
 	const markersKey = settings.markers.join("\0");
 	const cached = semanticMarkerScans.get(message);
 	if (cached && cached.markersKey === markersKey) return cached.result;

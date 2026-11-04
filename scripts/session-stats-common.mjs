@@ -206,6 +206,34 @@ export function messageText(content, separator = "") {
 		.join(separator);
 }
 
+/**
+ * The harness failure a recorded tool result carries, as `{ diagnostic, nextAction }`, or undefined when the result
+ * is not one. The failure is read from `details`: the failure ledger record (`piToolFailureMemory`) or a discarded
+ * attempt's directive (`piToolFailureDirective`). A result with an engine receipt and neither is not a harness
+ * failure, whatever its text says.
+ */
+export function toolFailureOf(message) {
+	if (message?.role !== "toolResult" || message.isError !== true) return undefined;
+	const details = message.details && typeof message.details === "object" ? message.details : {};
+	const memory = details.piToolFailureMemory;
+	if (memory && typeof memory === "object") return { diagnostic: memory.diagnostic, nextAction: memory.correction };
+	const directive = details.piToolFailureDirective;
+	if (directive && typeof directive === "object") {
+		return { diagnostic: directive.diagnostic, nextAction: directive.nextAction };
+	}
+	if (details.piToolInvocation !== undefined) return undefined;
+	// comms-legacy-decoder: a session recorded before failures carried their record in `details` (and before engine
+	// receipts) is read by its `[harness] {json}` text; an unparsable envelope is still a failure, without fields.
+	const text = messageText(message.content, " ");
+	if (!text.startsWith("[harness] ")) return undefined;
+	try {
+		const record = JSON.parse(text.slice("[harness] ".length));
+		return { diagnostic: record.diagnostic, nextAction: record.next_action };
+	} catch {
+		return {};
+	}
+}
+
 /** Every `.jsonl` under `target` (a file is returned as-is), sorted by name, recursively. */
 export function listSessionFiles(target) {
 	if (statSync(target).isFile()) return [target];

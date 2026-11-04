@@ -10,6 +10,13 @@ import {
 	type TaskAutomationContextPlan,
 } from "./automation/task-automation-runtime-adapter.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
+import {
+	type AuthorityContextRecord,
+	buildAuthorityContextRecord,
+	type PathAliasLegendRecord,
+	renderAuthorityContext,
+	renderPathAliasLegend,
+} from "./comms/host-injection-records.ts";
 import { SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE } from "./compaction/self-compaction.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { ContextProjection } from "./context/context-projection.ts";
@@ -86,8 +93,11 @@ export interface ProviderRequestContextControllerDeps {
 	getEdgeGrants?(): readonly EdgeGrantView[];
 	applyPathAliases(messages: AgentMessage[]): {
 		messages: AgentMessage[];
-		legend?: string;
-		legendIds?: readonly string[];
+		/** The legend delta for the aliases visible on this request's wire, given what it carries besides `messages`. */
+		legendFor?(
+			visibleMessages: readonly AgentMessage[],
+			visibleTexts: readonly string[],
+		): PathAliasLegendRecord | undefined;
 	};
 }
 
@@ -150,67 +160,31 @@ function appendActiveSkillContext(transientMessages: AgentMessage[], context: st
 
 /** Durable record kind carrying the session authority and active edge grants projection. */
 export const AUTHORITY_CONTEXT_CUSTOM_TYPE = "authority_context";
-export const AUTHORITY_CONTEXT_CLEARED_TEXT =
-	"AUTHORITY CONTEXT: none. No active recorded edge grants; verify specific owner instructions or recorded grants before assuming delegated authority.";
 
-export const MAX_AUTHORITY_GRANT_FIELD_CHARS = 1000;
-
-export function formatAuthorityContext(grants: readonly EdgeGrantView[]): string {
-	const lines = [
-		"AUTHORITY CONTEXT: Active edge grants (respect explicit conditions and scope):",
-		"Do not ask for permission again for covered work; these grants already authorize execution. Continue task prerequisites and recoverable failures autonomously.",
-	];
-	for (const grant of grants) {
-		const cleanScopeKey = grant.scopeKey?.trim();
-		const scopePart = cleanScopeKey
-			? `, scope: narrow (only exact registered script/argv authorized, never broad class), scopeKey: ${cleanScopeKey}`
-			: ", scope: broad class-wide authorization";
-		const parts = [`- ${grant.class} (source: ${grant.source}${scopePart}`];
-		if (grant.quote) {
-			const cleanQuote = grant.quote.trim().replace(/[\r\n]+/g, " ");
-			if (cleanQuote.length <= MAX_AUTHORITY_GRANT_FIELD_CHARS) {
-				parts.push(`, quote: "${cleanQuote}"`);
-			} else {
-				parts.push(
-					`, quote exceeds context projection capacity (do not assume unconditioned authority; inspect durable entry ${grant.messageEntryId ?? grant.grantedAt ?? "record"} for full conditions and scope)`,
-				);
-			}
-		}
-		if (grant.note) {
-			const cleanNote = grant.note.trim().replace(/[\r\n]+/g, " ");
-			if (cleanNote.length <= MAX_AUTHORITY_GRANT_FIELD_CHARS) {
-				parts.push(`, note: "${cleanNote}"`);
-			} else {
-				parts.push(
-					`, note exceeds context projection capacity; see durable entry ${grant.messageEntryId ?? grant.grantedAt ?? "record"} for full text)`,
-				);
-			}
-		}
-		if (grant.grantedAt) {
-			parts.push(`, grantedAt: ${grant.grantedAt}`);
-		}
-		parts.push(")");
-		lines.push(parts.join(""));
-	}
-	return lines.join("\n");
-}
-
-function appendAuthorityContext(transientMessages: AgentMessage[], context: string | undefined): AgentMessage[] {
-	if (context === undefined) return transientMessages;
+function appendAuthorityContext(
+	transientMessages: AgentMessage[],
+	record: AuthorityContextRecord | undefined,
+): AgentMessage[] {
+	if (record === undefined) return transientMessages;
+	const context = renderAuthorityContext(record);
 	return [
 		...transientMessages,
 		createCustomMessage(
 			AUTHORITY_CONTEXT_CUSTOM_TYPE,
 			context,
 			false,
-			undefined,
+			{ record },
 			deterministicTransientTimestamp(context),
 		),
 	];
 }
 
-function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string | undefined): AgentMessage[] {
-	if (!legend) return transientMessages;
+function appendPathAliasLegend(
+	transientMessages: AgentMessage[],
+	record: PathAliasLegendRecord | undefined,
+): AgentMessage[] {
+	if (!record) return transientMessages;
+	const legend = renderPathAliasLegend(record);
 	return [
 		...transientMessages,
 		createCustomMessage(
@@ -219,7 +193,7 @@ function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string
 			false,
 			// A legend record is a cumulative delta: every earlier record of the kind stays current,
 			// so the planner must not stamp it as superseding and the GC must not pack the earlier ones.
-			{ cumulative: true },
+			{ cumulative: true, record },
 			deterministicTransientTimestamp(legend),
 		),
 	];
@@ -234,14 +208,15 @@ export function hasConversationSummaryMarker(
 	return messages.some(isSummary) || (extensionMessages?.some(isSummary) ?? false);
 }
 
+/** The authority record this request carries: the active grants, the cleared record (no grant), or none. */
 function resolveAuthorityContext(
 	getEdgeGrants: (() => readonly EdgeGrantView[]) | undefined,
 	messages: readonly AgentMessage[],
 	extensionMessages: readonly AgentMessage[],
-): string | undefined {
+): AuthorityContextRecord | undefined {
 	const grants = getEdgeGrants?.();
 	if (grants && grants.length > 0) {
-		return formatAuthorityContext(grants);
+		return buildAuthorityContextRecord(grants);
 	}
 	const hasAuthorityRecordInHistory =
 		messages.some((message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE) ||
@@ -249,7 +224,7 @@ function resolveAuthorityContext(
 			(message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
 		);
 	if (hasAuthorityRecordInHistory || hasConversationSummaryMarker(messages, extensionMessages)) {
-		return AUTHORITY_CONTEXT_CLEARED_TEXT;
+		return buildAuthorityContextRecord([]);
 	}
 	return undefined;
 }
@@ -262,7 +237,16 @@ export class ProviderRequestContextController {
 		this.deps = deps;
 	}
 
-	async plan(messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal): Promise<AgentContextPlan> {
+	/**
+	 * `wireTexts` is model-visible text the request carries outside these messages and this plan's transients (see
+	 * `AgentContextPlanRequest.wireTexts`); it is read only to name every alias the model can see.
+	 */
+	async plan(
+		messages: AgentMessage[],
+		sentPrefixCount: number,
+		signal?: AbortSignal,
+		wireTexts: readonly string[] = [],
+	): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = this.deps.transformExtensions
 			? await this.deps.transformExtensions(transformed)
@@ -319,7 +303,9 @@ export class ProviderRequestContextController {
 							TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
 							directoryContent,
 							false,
-							undefined,
+							directoryPlan?.content !== undefined && directoryPlan.record
+								? { record: directoryPlan.record }
+								: undefined,
 							deterministicTransientTimestamp(directoryContent),
 						),
 					]
@@ -380,7 +366,6 @@ export class ProviderRequestContextController {
 		if (!sameMessages(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
-		const legend = pathAliasPlan.legend;
 		const skillVault = this.deps.skillVault;
 		const skillSection = skillVault?.previewSystemPromptSection();
 		const skillRevision = skillVault?.getContextRevision() ?? 0;
@@ -407,7 +392,11 @@ export class ProviderRequestContextController {
 		const authorityContext = resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages);
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
-		const transientMessages = appendPathAliasLegend(appendActiveSkillContext(withAuthority, skillContext), legend);
+		const beforeLegend = appendActiveSkillContext(withAuthority, skillContext);
+		// The legend names every alias the model can see on this request's wire: the planned messages, the transients
+		// before it, and what the kernel and a host projection carry around them. Committed lines are never retracted.
+		const legend = pathAliasPlan.legendFor?.(beforeLegend, wireTexts);
+		const transientMessages = appendPathAliasLegend(beforeLegend, legend);
 		const contextProjection = this.deps.previewContextProjection?.([...compactableMessages, ...transientMessages]);
 
 		const dependenciesCurrent = () =>
@@ -422,7 +411,10 @@ export class ProviderRequestContextController {
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState?.() === goalState &&
 			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
-			resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages) === authorityContext;
+			isDeepStrictEqual(
+				resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages),
+				authorityContext,
+			);
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
 		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,
 		// and the curator digests the GC pass looked up -- which `previewGc.isCurrent()` re-resolves.

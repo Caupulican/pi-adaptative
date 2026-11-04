@@ -488,6 +488,8 @@ export interface WorkerDelegationControllerDeps {
 		/** The worker's own tool surface: what its lane's context policy can rely on (a retrieval tool). */
 		toolNames: readonly string[];
 		signal?: AbortSignal;
+		/** Model-visible text the request carries outside `messages` (`AgentContextPlanRequest.wireTexts`). */
+		wireTexts?: readonly string[];
 	}): Promise<AgentContextPlan>;
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
@@ -5517,7 +5519,12 @@ export class WorkerDelegationController {
 					: {}),
 				...(this.deps.planWorkerRequest
 					? {
-							planRequest: (messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal) =>
+							planRequest: (
+								messages: AgentMessage[],
+								sentPrefixCount: number,
+								signal?: AbortSignal,
+								wireTexts?: readonly string[],
+							) =>
 								this.deps.planWorkerRequest!({
 									agentId,
 									model,
@@ -5526,6 +5533,7 @@ export class WorkerDelegationController {
 									sentPrefixCount,
 									toolNames: toolSurface.tools.map((tool) => tool.name),
 									...(signal ? { signal } : {}),
+									...(wireTexts ? { wireTexts } : {}),
 								}),
 						}
 					: {}),

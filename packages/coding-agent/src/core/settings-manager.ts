@@ -2524,9 +2524,8 @@ export class SettingsManager {
 		// canonical default for every field it didn't set. Every fallback DERIVES from context-gc.ts's
 		// exported DEFAULT_CONTEXT_GC_SETTINGS (the same object applyContextGc's own normalizer falls
 		// back to) instead of a hand-kept copy, so this method and context-gc.ts's defaults can never
-		// drift again -- hand-copied fallbacks here previously (a) missed the "<task_steps_context"
-		// marker context-gc.ts's own default carries, silently disabling GC packing
-		// for that page under default settings, and (b) diverged on the `tools` list (missing
+		// drift again -- hand-copied fallbacks here previously (a) missed a marker context-gc.ts's own
+		// default carried, silently disabling GC packing for that page under default settings, and (b) diverged on the `tools` list (missing
 		// "run_toolkit_script", present only here) -- both classes of drift are now structurally
 		// impossible since there is exactly one place these defaults are written down.
 		return {

@@ -1,18 +1,22 @@
 import type { ToolResultMessage } from "@caupulican/pi-ai/types";
-import { getToolExecutionKey, normalizeToolSignature, stableToolFailureEnvelopeText } from "./tool-failure-memory.ts";
+import { getToolExecutionKey, normalizeToolSignature, stableToolFailureIdentity } from "./tool-failure-memory.ts";
 import type { AgentToolCall } from "./types.ts";
 
-/** Execution IDs and ledger occurrence stamps do not change observable tool output. */
+/**
+ * Execution IDs and ledger occurrence stamps do not change observable tool output. A harness failure is
+ * compared by its typed record without those stamps; any other result by its content.
+ */
 export function toolResultBatchSignature(toolResults: readonly ToolResultMessage[]): string {
 	return getToolExecutionKey(
 		"tool_result_batch",
-		toolResults.map((result) => ({
-			toolName: result.toolName,
-			content: result.content.map((block) =>
-				block.type === "text" ? { ...block, text: stableToolFailureEnvelopeText(block.text) } : block,
-			),
-			isError: result.isError,
-		})),
+		toolResults.map((result) => {
+			const failure = stableToolFailureIdentity(result.details);
+			return {
+				toolName: result.toolName,
+				...(failure !== undefined ? { failure } : { content: result.content }),
+				isError: result.isError,
+			};
+		}),
 	);
 }
 

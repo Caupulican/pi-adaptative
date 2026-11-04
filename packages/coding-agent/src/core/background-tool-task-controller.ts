@@ -14,6 +14,7 @@ import {
 	type ToolInvocationReceipt,
 } from "../kernel/index.ts";
 import type { SessionManager } from "../kernel/node.ts";
+import { readToolFailureTelemetry, type ToolFailureTelemetry } from "../kernel/tool-failure-memory.ts";
 import {
 	ownDataValue,
 	retainedVerificationDetails,
@@ -611,35 +612,32 @@ function renderCompletionOutput(completion: BackgroundToolCallCompletion): strin
 }
 
 /**
- * The model-facing half of a `[harness]` failure record, in cause-first order.
+ * The model-facing half of a harness failure, read from the result's typed failure record in cause-first order.
  *
  * Head-truncating the serialized record instead spends the budget on harness bookkeeping — `MUST`,
  * `occ`, `kind_mistakes`, `mistake_kind`, `failure_key` all precede `failure_code` — and cuts the
  * remaining text mid-key, so the one field that says why the task failed is the field that is lost.
  */
-function harnessFailureSummary(output: string): string | undefined {
-	const start = output.indexOf("[harness]");
-	if (start < 0) return undefined;
-	const braceStart = output.indexOf("{", start);
-	if (braceStart < 0) return undefined;
-	let record: unknown;
-	try {
-		record = JSON.parse(output.slice(braceStart));
-	} catch {
-		return undefined;
-	}
-	if (!isPlainRecord(record)) return undefined;
-	const parts: string[] = [];
-	for (const field of ["state", "phase", "failure_code", "diagnostic", "next_action"] as const) {
-		const value = record[field];
-		if (typeof value === "string" && value.trim()) parts.push(`${field}=${oneLine(value)}`);
-	}
+function failureSummary(failure: ToolFailureTelemetry): string | undefined {
+	const fields = [
+		["state", failure.state],
+		["phase", failure.phase],
+		["failure_code", failure.failureCode],
+		["diagnostic", failure.diagnostic],
+		["next_action", failure.nextAction],
+	] as const;
+	const parts = fields.flatMap(([field, value]) => (value?.trim() ? [`${field}=${oneLine(value)}`] : []));
 	return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
-function summaryFor(status: BackgroundToolTaskStatus, toolName: string, output: string): string {
+function summaryFor(
+	status: BackgroundToolTaskStatus,
+	toolName: string,
+	output: string,
+	failure: ToolFailureTelemetry | undefined,
+): string {
 	const prefix = `${toolName} ${status}`;
-	const firstLine = harnessFailureSummary(output) ?? oneLine(output);
+	const firstLine = (failure ? failureSummary(failure) : undefined) ?? oneLine(output);
 	if (!firstLine) return prefix;
 	const remaining = Math.max(0, MAX_SUMMARY_CHARS - prefix.length - 2);
 	return `${prefix}: ${firstLine.slice(0, remaining)}`;
@@ -1245,6 +1243,7 @@ export class BackgroundToolTaskController {
 			retainedToolVerification(completion.result.details),
 			invocation,
 			completion.result.content.filter((block): block is ImageContent => block.type === "image"),
+			readToolFailureTelemetry(completion.result.details),
 		);
 	}
 
@@ -1408,6 +1407,7 @@ export class BackgroundToolTaskController {
 		verification?: VerificationRecord,
 		invocation?: ToolInvocationReceipt,
 		images: readonly ImageContent[] = [],
+		failure?: ToolFailureTelemetry,
 	): void {
 		if (state.terminalWatchdog !== undefined) this.deps.timers.clearTimeout(state.terminalWatchdog);
 		state.terminalWatchdog = undefined;
@@ -1465,7 +1465,7 @@ export class BackgroundToolTaskController {
 			completedAt: new Date(
 				Math.max(this.now().getTime(), state.record.completedAt ? Date.parse(state.record.completedAt) + 1 : 0),
 			).toISOString(),
-			summary: summaryFor(status, state.record.toolName, output),
+			summary: summaryFor(status, state.record.toolName, output, failure),
 			output,
 			...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
 			...(imageCapture ? { images: imageCapture.manifest } : {}),

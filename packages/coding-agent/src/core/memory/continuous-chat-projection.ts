@@ -95,6 +95,15 @@ function continuousChatViewFrameMessages(view: string, startedAt: number, stateT
 	];
 }
 
+/** The text of the frame's messages, as the wire carries it. */
+function frameTexts(messages: readonly AgentMessage[]): string[] {
+	return messages.flatMap((message) => {
+		if (message.role !== "custom") return [];
+		if (typeof message.content === "string") return [message.content];
+		return message.content.flatMap((block) => (block.type === "text" ? [block.text] : []));
+	});
+}
+
 /** The projection and turns a dashboard reads to measure what a request carries under ICM. */
 export interface ContinuousChatRequestSource {
 	wire: ContinuousChatWire | undefined;
@@ -237,12 +246,12 @@ export function createContinuousChatPlanWrapper(
 	source: ContinuousChatProjectionSource,
 ): (base: AgentContextPlanFn) => AgentContextPlanFn {
 	// One frame per turn and state: every tool-loop request of the turn carries the same messages, byte for byte.
-	let frame: { handle: IcmTurnHandle; stateText: string; messages: AgentMessage[] } | undefined;
-	const frameFor = (handle: IcmTurnHandle, stateText: string): AgentMessage[] => {
-		if (frame?.handle === handle && frame.stateText === stateText) return frame.messages;
+	let frame: { handle: IcmTurnHandle; stateText: string; messages: AgentMessage[]; texts: string[] } | undefined;
+	const frameFor = (handle: IcmTurnHandle, stateText: string): { messages: AgentMessage[]; texts: string[] } => {
+		if (frame?.handle === handle && frame.stateText === stateText) return frame;
 		const messages = continuousChatFrameMessages(handle, stateText);
-		frame = { handle, stateText, messages };
-		return messages;
+		frame = { handle, stateText, messages, texts: frameTexts(messages) };
+		return frame;
 	};
 	return (base) => async (request, signal) => {
 		const current = source.current();
@@ -268,7 +277,18 @@ export function createContinuousChatPlanWrapper(
 			);
 		}
 		const sentPrefixCount = Math.max(0, request.sentPrefixCount - startIndex);
-		const plan = await base({ ...request, messages: turnMessages, sentPrefixCount }, signal);
+		// The frame leads the wire: the base plan reads its text to learn what the model sees (the legend names every
+		// alias the turn view or state mentions), never to rewrite it.
+		const { messages: frameMessages, texts: frameWireTexts } = frameFor(handle, stateText);
+		const plan = await base(
+			{
+				...request,
+				messages: turnMessages,
+				sentPrefixCount,
+				wireTexts: [...frameWireTexts, ...(request.wireTexts ?? [])],
+			},
+			signal,
+		);
 		const turnTimestamps = new Set(turnMessages.map((message) => message.timestamp));
 		if (plan.messages.some((message) => !turnTimestamps.has(message.timestamp))) {
 			throw new Error("Continuous-chat planned history does not end with the running turn.");
@@ -277,7 +297,6 @@ export function createContinuousChatPlanWrapper(
 			const now = source.current();
 			return now?.handle === handle && now.stateText === stateText;
 		};
-		const frameMessages = frameFor(handle, stateText);
 		return {
 			...plan,
 			messages: [...frameMessages, ...plan.messages],

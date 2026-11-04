@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { readTransientRecordPayload } from "../../kernel/index.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import { type PathAliasLegendRecord, readPathAliasLegendRecord } from "../comms/host-injection-records.ts";
 import {
+	buildPathAliasLegendDelta,
 	collectActiveAliasIds,
 	collectMessageTexts,
+	collectReferencedAliasIds,
+	collectWireTexts,
 	displayPath,
 	emptyPathAliasTable,
 	extendPathAliasTable,
-	formatPathAliasLegendDeltaForIds,
 	MAX_RESERVED_TOKENS,
 	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	type PathAliasTable,
@@ -43,9 +47,16 @@ interface PathAliasRecord {
  *   even after a later turn mints an alias that would also match it. Retro-rewriting already-sent
  *   history moves bytes deep inside the cached prefix and forces a full re-prefill of the
  *   conversation;
- * - the legend never retracts a line ({@link PathAliasRuntime.legendIds}). Scoping it to the ids
- *   visible in the current window makes it flap as the window slides, and the legend is re-sent
- *   verbatim on every request.
+ * - the legend never retracts a line: a legend record, once in the history, stays there, and a
+ *   later record only adds the lines of aliases that became visible since.
+ *
+ * VISIBILITY RULE: a legend record lists the aliases the model can see on this request's wire and
+ * no committed record lists - ids referenced by the rendered messages, the request's transients and
+ * the text the kernel and a host projection carry around them (the failure ledger, a turn view).
+ * An alias the model can no longer see gets no line: a projection that sends only the running turn
+ * (continuous chat) would otherwise re-send every alias minted in the session at every turn. Tool
+ * arguments never depend on the legend: the tool wrapper expands any minted alias against the full
+ * table (`wrapToolWithPathAliasExpansion`), so the rule is a model-visibility concern only.
  */
 /** Legend bytes below which the budget never pauses minting (a table this small cannot be the cost). */
 const LEGEND_BUDGET_FLOOR_CHARS = 4096;
@@ -58,10 +69,26 @@ const LEGEND_BUDGET_MARGIN = 1;
 
 export interface PathAliasSyncResult {
 	messages: AgentMessage[];
-	/** Cumulative delta legend record for this request, or undefined when nothing new was minted. */
-	legend?: string;
-	/** The ids whose lines `legend` carries. */
-	legendIds: readonly string[];
+	/**
+	 * The cumulative delta legend record for one request, or undefined when every visible alias already has a line:
+	 * the aliases the model can see on the wire (these rendered messages, plus the request's other `visibleMessages`
+	 * and `visibleTexts`) that no legend record in the synced history lists.
+	 */
+	legendFor(
+		visibleMessages: readonly AgentMessage[],
+		visibleTexts: readonly string[],
+	): PathAliasLegendRecord | undefined;
+}
+
+/**
+ * The alias ids of a legend record written before legend records carried `details.record`: its `<id>=<path>`
+ * lines. Such records are already in persisted histories and still name what the model can see.
+ */
+function legacyLegendIds(content: unknown): readonly string[] {
+	if (typeof content !== "string") return [];
+	// comms-legacy-decoder: legend records persisted before the typed record list their ids only as text lines.
+	const lines = content.split("\n");
+	return lines.map((line) => line.slice(0, line.indexOf("="))).filter((id) => id.length > 0);
 }
 
 export class PathAliasRuntime {
@@ -81,13 +108,11 @@ export class PathAliasRuntime {
 	 */
 	private pendingScanned: string[] = [];
 	private scannedPersistedAt = 0;
-	/**
-	 * Ids ever rendered into the legend. Monotone: an id whose last mention scrolls out of the
-	 * window keeps its line instead of retracting it, so the rendered legend only ever grows by
-	 * lines appended in table (mint) order.
-	 */
+	/** Ids ever rendered in a message: the legend budget's cost side (`getAliasEconomics`). */
 	private readonly legendIds = new Set<string>();
-	/** The alias ids each durable legend record lists, parsed once per record object. */
+	/** The alias ids each wire message references, read once per message object. */
+	private readonly referencedIds = new WeakMap<AgentMessage, ReadonlySet<string>>();
+	/** The alias ids each durable legend record lists, read once per record object. */
 	private readonly legendRecordIds = new WeakMap<object, readonly string[]>();
 	/** Mentions per alias id in rendered text, the savings side of the legend budget. */
 	private readonly mentionsById = new Map<string, number>();
@@ -280,18 +305,23 @@ export class PathAliasRuntime {
 			this.persistScanned();
 		}
 		const rewritten = this.renderFrozen(messages);
-		// The legend a request carries is the delta against the lines the model can actually see: the
-		// legend records in this history. Read from the history, not remembered by the process, so a
-		// restarted process does not re-send lines already there, and a compaction that summarized a
-		// record away re-sends the lines its aliases still need.
+		// The legend a request carries is the delta of the aliases visible on its wire against the lines
+		// the model can actually see: the legend records in this history. Read from the history, not
+		// remembered by the process, so a restarted process does not re-send lines already there, and a
+		// compaction that summarized a record away re-sends the lines its still-visible aliases need.
 		const committed = this.durableLegendIds(messages);
-		const pendingIds = [...this.legendIds].filter((id) => !committed.has(id));
+		const visible = new Set<string>();
+		for (const message of rewritten) for (const id of this.referencedAliasIds(message)) visible.add(id);
+		const table = this.table;
+		const paused = this.mintingPaused;
 		const result: PathAliasSyncResult = {
 			messages: rewritten,
-			legend: formatPathAliasLegendDeltaForIds(this.table, this.legendIds, committed, {
-				paused: this.mintingPaused,
-			}),
-			legendIds: pendingIds,
+			legendFor: (visibleMessages, visibleTexts) => {
+				const ids = new Set(visible);
+				for (const message of visibleMessages) for (const id of this.referencedAliasIds(message)) ids.add(id);
+				for (const id of collectReferencedAliasIds(visibleTexts)) ids.add(id);
+				return buildPathAliasLegendDelta(table, ids, committed, { paused });
+			},
 		};
 		this.lastSync = {
 			cwd: this.table.cwd,
@@ -301,18 +331,25 @@ export class PathAliasRuntime {
 		return result;
 	}
 
-	/** The alias ids listed by the durable legend records (`<id>=<path>` lines) in `messages`. */
+	/** The alias ids a wire message references (see {@link collectReferencedAliasIds}), read once per message object. */
+	private referencedAliasIds(message: AgentMessage): ReadonlySet<string> {
+		let ids = this.referencedIds.get(message);
+		if (!ids) {
+			ids = collectReferencedAliasIds(collectWireTexts(message));
+			this.referencedIds.set(message, ids);
+		}
+		return ids;
+	}
+
+	/** The alias ids listed by the durable legend records in `messages`, read from each record's `details.record`. */
 	private durableLegendIds(messages: readonly AgentMessage[]): Set<string> {
 		const ids = new Set<string>();
 		for (const message of messages) {
 			if (message.role !== "custom" || message.customType !== PATH_ALIAS_LEGEND_CUSTOM_TYPE) continue;
 			let listed = this.legendRecordIds.get(message);
 			if (!listed) {
-				const content = typeof message.content === "string" ? message.content : "";
-				listed = content
-					.split("\n")
-					.map((line) => line.slice(0, line.indexOf("=")))
-					.filter((id) => id.length > 0);
+				const record = readPathAliasLegendRecord(readTransientRecordPayload(message.details));
+				listed = record ? record.entries.map((entry) => entry.id) : legacyLegendIds(message.content);
 				this.legendRecordIds.set(message, listed);
 			}
 			for (const id of listed) ids.add(id);

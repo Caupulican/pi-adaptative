@@ -90,11 +90,48 @@ export interface TransientRecordSlot {
 	 * packed as superseded, and a new record is appended whenever the host offers new content.
 	 */
 	cumulative?: boolean;
+	/**
+	 * The canonical typed record this slot's `content` renders (`{v, k, ...}`), carried into the durable
+	 * record's `details.record` so a consumer or a human view reads the fact, never the rendering. The
+	 * content must be a total function of it: reconciliation appends on a text change only.
+	 */
+	record?: TransientRecordPayload;
+	/**
+	 * The record's one-line name, rendered by the slot's producer from the same fact as `content`. A pointer that
+	 * reclaims the trailing position repeats it (bounded), so only trailing slots need one; absent, the pointer
+	 * names the kind.
+	 */
+	header?: string;
+}
+
+/** A canonical machine record in a transient record's `details.record`: a version and a kind, then its fields. */
+export interface TransientRecordPayload {
+	readonly v: number;
+	readonly k: string;
+}
+
+/** The typed record a transient record (or a host transient offered as one) carries in `details.record`, if any. */
+export function readTransientRecordPayload(details: unknown): TransientRecordPayload | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const record = (details as { record?: unknown }).record;
+	if (typeof record !== "object" || record === null) return undefined;
+	const { v, k } = record as { v?: unknown; k?: unknown };
+	return typeof v === "number" && typeof k === "string" ? (record as TransientRecordPayload) : undefined;
 }
 
 /** Marks a record as a pointer ("unchanged, see above") so content comparison ignores it. */
 const POINTER_RECORD_DETAILS = { pointer: true } as const;
-const CUMULATIVE_RECORD_DETAILS = { cumulative: true } as const;
+
+/**
+ * `details.superseding` on a plain (non-cumulative) transient record: its content is the producer's content
+ * followed by {@link TRANSIENT_RECORD_SUPERSEDING_NOTE}, written by `buildTransientRecord`. The note is the
+ * model's view of that fact; this marker is the harness's.
+ */
+function isSupersedingRecordDetails(details: unknown): boolean {
+	return (
+		typeof details === "object" && details !== null && (details as { superseding?: unknown }).superseding === true
+	);
+}
 
 function isPointerRecord(message: AgentMessage): boolean {
 	return (
@@ -114,14 +151,10 @@ function isCumulativeTransient(message: AgentMessage): boolean {
 	);
 }
 
-/** The first line of a record, bounded, used to name the kind in a pointer record. */
-function recordHeader(content: string): string {
-	const line = content.split("\n", 1)[0]?.trim() ?? "";
-	return line.length > 80 ? `${line.slice(0, 77)}...` : line;
-}
-
-function buildPointerRecord(kind: string, content: string): AgentMessage {
-	const text = `${recordHeader(content)} unchanged; the last full record of this kind above is current.`;
+/** A pointer record naming its kind by the slot's header, bounded to 80 characters. */
+function buildPointerRecord(kind: string, header: string): AgentMessage {
+	const name = header.length > 80 ? `${header.slice(0, 77)}...` : header;
+	const text = `${name} unchanged; the last full record of this kind above is current.`;
 	return createCustomMessage(kind, text, false, POINTER_RECORD_DETAILS, deterministicRecordTimestamp(text));
 }
 
@@ -163,8 +196,8 @@ function deterministicRecordTimestamp(content: string): string {
 /** Text of a `CustomMessage`, or undefined for the array-content shape this module never produces
  * itself but may encounter when scanning durable history for a prior instance. */
 /**
- * Whether a persisted custom record was written by this module (a transient record): the superseding
- * note marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
+ * Whether a persisted custom record was written by this module (a transient record): `details.superseding`
+ * marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
  * `transientContentIndex` excludes them. The session context builder uses this to carry the current
  * record of each kind across a compaction cut: without it every kind is re-appended on the first
  * request after compaction (measured on a live session: the skill context re-sent 75 times for 7
@@ -180,7 +213,9 @@ export function classifyTransientRecord(
 		typeof details === "object" && details !== null && (details as { pointer?: unknown }).pointer === true;
 	if (pointer) return { transient: false, cumulative: false };
 	if (cumulative) return { transient: true, cumulative: true };
+	if (isSupersedingRecordDetails(details)) return { transient: true, cumulative: false };
 	return {
+		// comms-legacy-decoder: plain records persisted before `details.superseding` existed are known only by the note.
 		transient: typeof content === "string" && content.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE),
 		cumulative: false,
 	};
@@ -205,12 +240,17 @@ function customMessageText(message: AgentMessage): string | undefined {
  * unchanged, skip" path (both here and in the trailing tail-intact check) never actually fired for any
  * slot that had ever been durably written, for either the non-trailing or the trailing case: a fresh
  * copy was appended on every turn a slot had live content, regardless of whether that content had
- * actually changed. A message lacking the suffix (nothing this module wrote, in practice - defensive
- * only) is returned as-is rather than mis-stripped.
+ * actually changed. A record marked `details.superseding` carries the suffix by construction; the
+ * reconciliation base is the durable (never GC-packed) form, so its content is exactly that. Any other
+ * custom message (a cumulative record, a host page this module did not write) is returned as-is.
  */
 function durableTransientContent(message: AgentMessage): string | undefined {
-	const text = customMessageText(message);
-	if (text === undefined) return undefined;
+	if (message.role !== "custom" || typeof message.content !== "string") return undefined;
+	const text = message.content;
+	if (isSupersedingRecordDetails(message.details)) {
+		return text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length);
+	}
+	// comms-legacy-decoder: plain records persisted before `details.superseding` existed are known only by the note.
 	return text.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
 		? text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length)
 		: text;
@@ -268,18 +308,29 @@ function lastDurableTransientContent(messages: readonly AgentMessage[], kind: st
 	return transientContentIndex(messages).get(kind);
 }
 
-function buildTransientRecord(kind: string, content: string, cumulative = false): AgentMessage {
+function buildTransientRecord(
+	kind: string,
+	content: string,
+	cumulative = false,
+	record?: TransientRecordPayload,
+): AgentMessage {
 	if (cumulative) {
 		return createCustomMessage(
 			kind,
 			content,
 			false,
-			CUMULATIVE_RECORD_DETAILS,
+			{ cumulative: true, ...(record ? { record } : {}) },
 			deterministicRecordTimestamp(content),
 		);
 	}
 	const text = `${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`;
-	return createCustomMessage(kind, text, false, undefined, deterministicRecordTimestamp(text));
+	return createCustomMessage(
+		kind,
+		text,
+		false,
+		{ superseding: true, ...(record ? { record } : {}) },
+		deterministicRecordTimestamp(text),
+	);
 }
 
 /** This turn's true content for a slot: the slot's own current content, or - only on the transition
@@ -288,10 +339,15 @@ function buildTransientRecord(kind: string, content: string, cumulative = false)
 function resolveSlotContent(
 	durableMessages: readonly AgentMessage[],
 	slot: TransientRecordSlot,
-): { lastContent: string | undefined; nextContent: string | undefined } {
+): { lastContent: string | undefined; nextContent: string | undefined; nextRecord?: TransientRecordPayload } {
 	const lastContent = lastDurableTransientContent(durableMessages, slot.kind);
 	const nextContent = slot.content ?? (lastContent !== undefined ? slot.clearedText : undefined);
-	return { lastContent, nextContent };
+	// The record describes `content`; a cleared record carries only its cleared text.
+	return {
+		lastContent,
+		nextContent,
+		...(slot.content !== undefined && slot.record ? { nextRecord: slot.record } : {}),
+	};
 }
 
 /**
@@ -322,9 +378,9 @@ export function reconcileTransientRecords(
 	const newRecords: AgentMessage[] = [];
 	for (const slot of slots) {
 		if (slot.trailing) continue;
-		const { lastContent, nextContent } = resolveSlotContent(durableMessages, slot);
+		const { lastContent, nextContent, nextRecord } = resolveSlotContent(durableMessages, slot);
 		if (nextContent === undefined || nextContent === lastContent) continue;
-		newRecords.push(buildTransientRecord(slot.kind, nextContent, slot.cumulative === true));
+		newRecords.push(buildTransientRecord(slot.kind, nextContent, slot.cumulative === true, nextRecord));
 	}
 
 	const trailingSlots = slots.filter((slot) => slot.trailing);
@@ -363,11 +419,15 @@ export function reconcileTransientRecords(
 			expectedTailKinds.every((kind, index) => kind === actualTailKinds[index]);
 		const anyContentChanged = active.some((entry) => entry.nextContent !== entry.lastContent);
 		if (anyContentChanged) {
-			for (const entry of active) newRecords.push(buildTransientRecord(entry.slot.kind, entry.nextContent));
+			for (const entry of active) {
+				newRecords.push(buildTransientRecord(entry.slot.kind, entry.nextContent, false, entry.nextRecord));
+			}
 		} else if (!tailIntact) {
 			// Only the position changed: a pointer reclaims the tail without re-sending the full
 			// content (measured live: 119 ledger records for 19 distinct contents in one session).
-			for (const entry of active) newRecords.push(buildPointerRecord(entry.slot.kind, entry.nextContent));
+			for (const entry of active) {
+				newRecords.push(buildPointerRecord(entry.slot.kind, entry.slot.header ?? entry.slot.kind));
+			}
 		}
 	}
 
@@ -439,10 +499,12 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 				slots.push({ kind: message.customType, content: undefined, clearedText: text });
 				continue;
 			}
+			const record = readTransientRecordPayload(message.details);
 			slots.push({
 				kind: message.customType,
 				content: text,
 				...(isCumulativeTransient(message) ? { cumulative: true } : {}),
+				...(record ? { record } : {}),
 			});
 		} else {
 			passThrough.push(message);

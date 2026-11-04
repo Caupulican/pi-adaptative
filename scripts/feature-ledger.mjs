@@ -20,7 +20,7 @@
  * - output cap: responses that ended at the cap (stopReason length).
  * - output reduction: tool results a reducer touched, bytes in and out, share saved.
  */
-import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
+import { listSessionFiles, messageText, parseSessionEntries, toolFailureOf } from "./session-stats-common.mjs";
 import { join } from "node:path";
 
 const dirs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
@@ -127,7 +127,7 @@ for (const dir of dirs) {
 					totals.reductionOutputBytes += reduction.outputBytes;
 				}
 				const text = messageText(message.content, "\n");
-				if (message.isError && text.startsWith("[harness]")) totals.refusals += 1;
+				if (toolFailureOf(message)) totals.refusals += 1;
 				if (text.includes("[Context GC packed")) totals.packedToolResults += 1;
 				countAliases(text);
 			}

@@ -4,7 +4,7 @@
  *
  * A comms record is built by the code that owns the fact and carried in `details`; the text a model reads is a
  * rendering of it. A file listed below must therefore not call a parsing method (match, exec, test, search,
- * includes, startsWith, endsWith, indexOf, split) on a value named for message text (text, content, message,
+ * includes, startsWith, endsWith, indexOf, split) on a value named for message text (text, payload, content, message,
  * prompt, instructions, summary, output, body, reply) and must not hand such a value to a regex `test`/`exec`.
  * A line that must read persisted or foreign text written without a typed field (a legacy decoder) carries the
  * marker `comms-legacy-decoder: <reason>` on the same line or the line before, which names it in review.
@@ -36,10 +36,19 @@ const COMMS_FILES = [
 	`${SOURCE}/core/autonomy/host-findings.ts`,
 	`${SOURCE}/core/rule-hooks/rule-hook-delivery.ts`,
 	`${SOURCE}/modes/interactive/components/custom-message.ts`,
+	`${SOURCE}/kernel/tool-failure-ledger-record.ts`,
+	`${SOURCE}/kernel/tool-result-progress.ts`,
+	`${SOURCE}/core/tasks/task-directory-context.ts`,
+	`${SOURCE}/core/context/path-alias-session.ts`,
+	`${SOURCE}/kernel/tool-failure-recovery-gate.ts`,
+	`${SOURCE}/core/provider-request-context-controller.ts`,
+	`${SOURCE}/kernel/transient-records.ts`,
+	`${SOURCE}/kernel/tool-failure-memory.ts`,
+	`${SOURCE}/core/background-tool-task-controller.ts`,
 ];
 
 const LEGACY_MARKER = "comms-legacy-decoder:";
-const TEXT_WORDS = ["text", "content", "message", "msg", "body", "output", "prompt", "instructions", "summary", "reply"];
+const TEXT_WORDS = ["text", "payload", "content", "message", "msg", "body", "output", "prompt", "instructions", "summary", "reply"];
 const PARSING_METHODS = "match|matchAll|exec|test|search|includes|startsWith|endsWith|indexOf|split";
 const CAPITALIZED_TEXT_WORDS = TEXT_WORDS.map((word) => word[0].toUpperCase() + word.slice(1));
 /** A value named for message text: the bare lower-case word, or a camelCase name that ends in it (taskText, claimSummary). */

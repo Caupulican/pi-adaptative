@@ -289,6 +289,9 @@ export function createVerificationObligationSnapshotDetails(
 	};
 }
 
+/** First line of the obligation instruction and its cleared record; it also names the record in a tail pointer. */
+export const VERIFICATION_OBLIGATIONS_HEADER = "ACTIVE VERIFICATION FAILURES";
+
 function formatActiveVerificationFailures(
 	ids: readonly string[],
 	setupGroups: ReadonlyMap<string, string>,
@@ -303,7 +306,7 @@ function formatActiveVerificationFailures(
 		return `- ${id}${what}${setup}`;
 	};
 	return [
-		"ACTIVE VERIFICATION FAILURES",
+		VERIFICATION_OBLIGATIONS_HEADER,
 		"Trusted verification obligations remain unresolved. A trusted pass of the same command in the same directory resolves an obligation. An explicitly linked empty-test setup repair also requires matching test arguments within the same workspace and a later executed pass.",
 		"Analyze the red output and relevant changes, inspect and repair the authoritative owner, then rerun the same verification.",
 		"Unrelated successful tools do not clear an obligation. The goal cannot be completed while any verification obligation remains active.",
@@ -322,7 +325,8 @@ function formatActiveVerificationFailures(
  * active, unchanged since it was last sent".
  */
 export const VERIFICATION_OBLIGATIONS_CLEARED_TEXT =
-	"ACTIVE VERIFICATION FAILURES\nAll verification obligations that were active earlier in this " +
+	`${VERIFICATION_OBLIGATIONS_HEADER}\n` +
+	"All verification obligations that were active earlier in this " +
 	"conversation have since resolved through trusted passing verification, validated setup repair, or the " +
 	"operator's dismissal. None are currently active; no id-specific completion format is required.";
 

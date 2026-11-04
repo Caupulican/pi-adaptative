@@ -2,8 +2,8 @@
 /**
  * Refusal census over recorded sessions: how often the harness refused a tool call the model made,
  * per 100 assistant turns and per tool, and the diagnostic of every refusal. A refusal is a
- * `[harness]` failure result (a validation rejection, a policy rejection, or a tool that returned
- * `isError` through the failure ledger); an ordinary operation outcome (a non-zero exit, a failing
+ * harness failure result, read from its `details` record (`toolFailureOf`): a validation rejection,
+ * a policy rejection, or a tool that returned `isError` through the failure ledger; an ordinary operation outcome (a non-zero exit, a failing
  * test) is not a refusal and is not counted.
  *
  * This is the measure behind the surface-area gate of the harness ratchet model: a slip the
@@ -17,7 +17,7 @@
  */
 import { readFileSync } from "node:fs";
 
-import { listSessionFiles, messageText } from "./session-stats-common.mjs";
+import { listSessionFiles, messageText, toolFailureOf } from "./session-stats-common.mjs";
 
 const args = process.argv.slice(2);
 const list = args.includes("--list");
@@ -63,19 +63,15 @@ function census(file) {
 				message: (text.match(SHELL_CONTRACT_RE) ?? [""])[0],
 			});
 		}
-		if (message.isError !== true) continue;
-		if (!text.startsWith("[harness]")) continue;
+		const failure = toolFailureOf(message);
+		if (!failure) continue;
 		// A tool reporting that its own operation ended badly (a timeout, a non-zero exit) is an
 		// outcome the model must act on, not a harness refusal; it is counted apart.
 		if (message.errorKind === "operation_outcome") {
 			outcomes += 1;
 			continue;
 		}
-		let diagnostic = text.slice(0, 200);
-		try {
-			const record = JSON.parse(text.slice("[harness] ".length));
-			diagnostic = record.diagnostic ?? record.next_action ?? diagnostic;
-		} catch {}
+		const diagnostic = failure.diagnostic ?? failure.nextAction ?? text.slice(0, 200);
 		refusals.push({
 			turn: known?.turn ?? turns,
 			tool: known?.call.name ?? message.toolName ?? "?",

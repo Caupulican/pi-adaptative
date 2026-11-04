@@ -14,6 +14,7 @@ import type {
 } from "./loop-config.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
+import { renderToolFailureLedger, renderToolFailureLedgerHeader } from "./tool-failure-ledger-record.ts";
 import {
 	createToolFailureContextMemory,
 	sanitizeToolFailureContext,
@@ -31,6 +32,7 @@ import { uuidv7 } from "./uuid.ts";
 import {
 	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
 	VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+	VERIFICATION_OBLIGATIONS_HEADER,
 } from "./verification-obligations.ts";
 
 /**
@@ -259,9 +261,10 @@ async function buildContextPlan(
 	sentPrefixCount: number,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	wireTexts: readonly string[],
 ): Promise<AgentContextPlan> {
 	if (config.planContext)
-		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model }, signal);
+		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model, wireTexts }, signal);
 	return {
 		messages: config.transformContext ? await config.transformContext(messages, signal) : messages,
 	};
@@ -429,7 +432,19 @@ export async function startPlannedAgentProviderRequestWithId(
 			config.providerRequestPrefixState?.sanitizerMemory,
 			config.toolFailureProtocolProse ?? "full",
 		);
-		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, sentPrefixCount, config, signal);
+		// The trailing records the request carries behind the plan; a request whose tail is a host instruction takes none.
+		const ledgerView = sanitized.ledger ? renderToolFailureLedger(sanitized.ledger) : undefined;
+		const trailingTexts = sourceContext.instructionTail
+			? []
+			: [sourceContext.trailingInstruction, ledgerView].filter((text): text is string => text !== undefined);
+		const plan = await buildContextPlan(
+			sanitized.messages,
+			admissionAttempt,
+			sentPrefixCount,
+			config,
+			signal,
+			trailingTexts,
+		);
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees
 		// the full extent of what its own planContext/transformContext did - not just what survived
 		// into an accepted request. Gated on the hook being registered: skipped entirely otherwise.
@@ -478,11 +493,15 @@ export async function startPlannedAgentProviderRequestWithId(
 							kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
 							content: sourceContext.trailingInstruction,
 							clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+							header: VERIFICATION_OBLIGATIONS_HEADER,
 							trailing: true,
 						},
 						{
 							kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
-							content: sanitized.ledger,
+							content: ledgerView,
+							...(sanitized.ledger
+								? { record: sanitized.ledger, header: renderToolFailureLedgerHeader(sanitized.ledger) }
+								: {}),
 							clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 							trailing: true,
 						},

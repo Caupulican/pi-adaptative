@@ -446,6 +446,8 @@ Context GC only rewrites the provider-bound context view. It does not delete or 
 
 Semantic memory packing only targets tool results and Automata/Mind custom context messages; normal user prompts are preserved even if they contain matching marker text.
 
+The host's task_steps checklist page is packed the same way and is recognized by its message type, so it needs no marker and a custom `markers` list does not turn it off. `markers` governs memory-provider and other foreign pages, and pipeline pages, which also appear in `pipeline` tool results.
+
 ```json
 {
   "contextGc": {

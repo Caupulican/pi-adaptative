@@ -7,6 +7,7 @@ import {
 	getToolFailureRecordRawKey,
 	getToolRawOperationKey,
 	isPromptScopedFailureCode,
+	readToolFailureReplay,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
 	sanitizeToolFailureEvidence,
@@ -658,7 +659,9 @@ function walkTranscript(
 			replayRefused:
 				invocation?.execution !== "completed" &&
 				message.errorKind !== "operation_outcome" &&
-				readVisibleToolFailureCode(message) === "repeated_failed_operation",
+				(readToolFailureReplay(message.details) !== undefined ||
+					// comms-legacy-decoder: a refused replay persisted before `piToolFailureReplay` shows its code only in text.
+					readVisibleToolFailureCode(message) === "repeated_failed_operation"),
 		});
 	}
 	return worldCursor;

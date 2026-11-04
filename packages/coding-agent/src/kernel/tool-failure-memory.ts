@@ -7,7 +7,12 @@ import {
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
-	MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
+	TOOL_FAILURE_LEDGER_RECORD_VERSION,
+	type ToolFailureLedgerDirective,
+	type ToolFailureLedgerFailure,
+	type ToolFailureLedgerRecord,
+} from "./tool-failure-ledger-record.ts";
+import {
 	mandatoryToolFailureRecoveryMetadata,
 	TOOL_FAILURE_READMISSION_RULE,
 } from "./tool-failure-recovery-protocol.ts";
@@ -23,9 +28,11 @@ import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
  * Never changes across the life of a conversation - it is the join key `reconcileTransientRecords`
  * uses to find the last recorded instance in durable history. */
 export const TOOL_FAILURE_LEDGER_TRANSIENT_KIND = "pi_tool_failure_ledger";
-/** The one-sentence rule a short-mode ledger carries instead of the full protocol text; the prompt holds no copy of it. */
-export const TOOL_FAILURE_SHORT_PROTOCOL =
-	"Not executed. Apply repair/next_action first; retry the identical call only with an unspent harness allowance, a later tool success or a new user turn.";
+export {
+	renderToolFailureLedger,
+	TOOL_FAILURE_SHORT_PROTOCOL,
+	type ToolFailureLedgerRecord,
+} from "./tool-failure-ledger-record.ts";
 /**
  * Text for the durable record appended the moment the ledger empties (no active records, no active
  * directives - see transient-records.ts's `TransientRecordSlot.clearedText`). Without this explicit
@@ -39,6 +46,7 @@ export const TOOL_FAILURE_LEDGER_CLEARED_TEXT =
 	"active; no recovery protocol constraint from this ledger currently applies.";
 const TOOL_FAILURE_MEMORY_VERSION = 1;
 const TOOL_FAILURE_DIRECTIVE_VERSION = 1;
+const TOOL_FAILURE_REPLAY_VERSION = 1;
 const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
 /**
  * Identity over the arguments exactly as the model wrote them, resource-envelope fields included.
@@ -104,6 +112,15 @@ export interface ToolFailureOutputIdentity {
 
 export interface ToolFailureMemoryDetails {
 	piToolFailureMemory: ToolFailureMemoryRecord;
+	/** Present on a call the recovery gate refused as a replay of `piToolFailureMemory`; nothing ran. */
+	piToolFailureReplay?: ToolFailureReplayDetails;
+}
+
+/** The typed marker of a refused replay: what its visible result was rendered from beside the retained record. */
+export interface ToolFailureReplayDetails {
+	version: typeof TOOL_FAILURE_REPLAY_VERSION;
+	/** Only resource-envelope fields (timeout/wait bounds) differed from the retained operation. */
+	envelopeOnlyChange: boolean;
 }
 
 export interface ToolFailureDirectiveDetails {
@@ -113,6 +130,8 @@ export interface ToolFailureDirectiveDetails {
 		phase: ToolFailurePhase;
 		failureCode: string;
 		diagnostic?: string;
+		/** The bounded tool-owned evidence the visible result shows. */
+		evidence?: string;
 		nextAction: string;
 	};
 }
@@ -612,9 +631,15 @@ export function getUnresolvedToolFailure(
 	return tracker.get(getToolFailureKey(tool, args, executionScope));
 }
 
+/**
+ * The `failure_code` a `[harness]` result shows. Only for results written without the typed field the
+ * decision needs (a transcript older than `piToolFailureReplay`, or a failure result with no retained
+ * record); a current result is read through its `details`.
+ */
 export function readVisibleToolFailureCode(result: ToolResultMessage): string | undefined {
 	for (const block of result.content) {
 		if (block.type !== "text") continue;
+		// comms-legacy-decoder: persisted results that predate the typed replay marker carry the code only in text.
 		const match = /"failure_code"\s*:\s*"([^"]+)"/.exec(block.text);
 		if (match) return match[1];
 	}
@@ -751,6 +776,7 @@ function isFailureStatusLine(line: string): boolean {
 }
 
 function processExitFailureCode(message: string): string | undefined {
+	// comms-legacy-decoder: a tool's failure output is foreign text; its exit status line has no typed field.
 	const lines = message.split(/\r\n|\n/);
 	for (let index = lines.length - 1; index >= 0; index--) {
 		const match = EXIT_STATUS_LINE_PATTERN.exec(lines[index].trim());
@@ -763,6 +789,7 @@ export function classifyToolFailure(message: string, errorClass?: string): strin
 	// A tool-owned terminal status is authoritative; stdout may contain arbitrary all-caps identifiers.
 	const exitFailureCode = processExitFailureCode(message);
 	if (exitFailureCode) return exitFailureCode;
+	// comms-legacy-decoder: a tool's failure output is foreign text; an errno name in it has no typed field.
 	const errno = /\b(E[A-Z][A-Z0-9_]{2,})\b/.exec(message)?.[1];
 	if (errno) return boundedFailureCode(errno);
 	return boundedFailureCode(errorClass ?? "tool_error");
@@ -1067,6 +1094,7 @@ function readFailureDirective(details: unknown): ToolFailureDirectiveDetails["pi
 		failureCode: boundedFailureCode(candidate.failureCode),
 		diagnostic:
 			typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
+		evidence: sanitizeToolFailureEvidence(candidate.evidence),
 		nextAction: truncate(candidate.nextAction, MAX_CORRECTION_CHARS),
 	};
 }
@@ -1092,23 +1120,48 @@ export function readToolFailureOccurrence(
 	};
 }
 
-/**
- * A `[harness] {...}` envelope with its per-occurrence fields removed, so two identical failures
- * compare equal even though the ledger stamps a new `occ`/`kind_mistakes`/`state` on each. Any
- * other text is returned unchanged.
- */
-export function stableToolFailureEnvelopeText(text: string): string {
-	if (!text.startsWith("[harness] ")) return text;
-	const start = text.indexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start < 0 || end <= start) return text;
-	try {
-		const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
-		const { occ: _occ, kind_mistakes: _kind, state: _state, ...stable } = parsed;
-		return `${text.slice(0, start)}${JSON.stringify(stable)}${text.slice(end + 1)}`;
-	} catch {
-		return text;
+/** The typed replay marker of a result the recovery gate refused as an unchanged replay, if it is one. */
+export function readToolFailureReplay(details: unknown): ToolFailureReplayDetails | undefined {
+	if (!isRecord(details) || !isRecord(details.piToolFailureReplay)) return undefined;
+	const candidate = details.piToolFailureReplay;
+	if (candidate.version !== TOOL_FAILURE_REPLAY_VERSION || typeof candidate.envelopeOnlyChange !== "boolean") {
+		return undefined;
 	}
+	return { version: TOOL_FAILURE_REPLAY_VERSION, envelopeOnlyChange: candidate.envelopeOnlyChange };
+}
+
+/**
+ * The failure a `[harness]` result shows, read from its typed `details`, with the per-occurrence fields
+ * (`occurrence`, `kindMistakes`, `state`) removed, so two identical failures compare equal although the
+ * ledger stamps new counts on each. Undefined for a result that carries no failure record.
+ */
+export function stableToolFailureIdentity(details: unknown): string | undefined {
+	const retained = readFailureRecord(details);
+	if (retained) {
+		const replay = readToolFailureReplay(details);
+		const shown = replay ? blockedReplayVisibleRecord(retained, replay.envelopeOnlyChange) : retained;
+		return JSON.stringify({
+			failureKey: shown.failureKey,
+			mistakeKind: shown.mistakeKind ?? shown.tool,
+			phase: shown.phase,
+			tool: shown.tool,
+			failureCode: shown.failureCode,
+			diagnostic: shown.diagnostic,
+			note: shown.note,
+			evidence: shown.evidence,
+			guidance: failureGuidance(shown),
+			attemptMemory: shown.attemptMemory,
+		});
+	}
+	const directive = readFailureDirective(details);
+	if (!directive) return undefined;
+	return JSON.stringify({
+		directive: directive.failureCode,
+		phase: directive.phase,
+		diagnostic: directive.diagnostic,
+		evidence: directive.evidence,
+		nextAction: directive.nextAction,
+	});
 }
 
 /** Read only bounded failure identity and guidance; operation arguments never cross this telemetry boundary. */
@@ -1310,7 +1363,14 @@ function foldToolFailureContext(
 			if (call) resolveToolFailures(fold, memoizedOperationIdentity(call, executionScope));
 			continue;
 		}
-		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
+		// `isError` is the typed failure flag every engine result carries; the `[harness]` notices an engine result
+		// may append (cleanup, progress, after-hook) describe a retained outcome and are recorded in its receipt's
+		// `postprocessingFailures`, so a result with a receipt is never classified by its text.
+		const isHarnessFailure =
+			message.isError === true ||
+			(invocation === undefined &&
+				// comms-legacy-decoder: a result persisted without an engine receipt is known as a harness failure only by its text.
+				textPayload.startsWith("[harness] "));
 		if (isHarnessFailure) {
 			const retained = readFailureRecord(message.details);
 			// A cancelled call never reaches the ledger: see isCancelledToolFailure.
@@ -1818,6 +1878,7 @@ export function createToolFailureResult(
 						phase: record.phase,
 						failureCode: record.failureCode,
 						...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+						...(record.evidence ? { evidence: record.evidence } : {}),
 						nextAction: record.correction,
 					},
 				}
@@ -1832,6 +1893,24 @@ export function createRepeatedToolFailureResult(
 	countedInBatch = false,
 ): AgentToolResult<ToolFailureMemoryDetails> {
 	const retainedRecord = retainBlockedToolFailure(record, countedInBatch);
+	const blockedResult = createToolFailureResult(blockedReplayVisibleRecord(retainedRecord, envelopeOnlyChange));
+	return {
+		...blockedResult,
+		// The visible result leads with the retained root cause and carries the replay notice as a
+		// note, while retained memory keeps the authoritative cause so later blocks do not
+		// recursively wrap synthetic failures. The replay marker is what a reader decides by.
+		details: {
+			piToolFailureMemory: retainedRecord,
+			piToolFailureReplay: { version: TOOL_FAILURE_REPLAY_VERSION, envelopeOnlyChange },
+		},
+	};
+}
+
+/** The record a refused replay shows: the retained root cause, rejected as a repeat, with the replay notice. */
+function blockedReplayVisibleRecord(
+	retainedRecord: ToolFailureMemoryRecord,
+	envelopeOnlyChange: boolean,
+): ToolFailureMemoryRecord {
 	// The note states why this call did not run and what makes it runnable again; the retained
 	// root-cause correction stays the next_action, because that is the actionable half. Evidence is
 	// left out: nothing executed, so there is none — the prior run's evidence is still in the
@@ -1845,19 +1924,12 @@ export function createRepeatedToolFailureResult(
 			: `Not executed: unchanged. ${TOOL_FAILURE_READMISSION_RULE}`,
 		MAX_DIAGNOSTIC_CHARS,
 	);
-	const blockedResult = createToolFailureResult({
+	return {
 		...retainedRecord,
 		evidence: undefined,
 		state: "rejected",
 		failureCode: "repeated_failed_operation",
 		...(retainedRecord.diagnostic ? { note: replayNotice } : { diagnostic: replayNotice }),
-	});
-	return {
-		...blockedResult,
-		// The visible result leads with the retained root cause and carries the replay notice as a
-		// note, while retained memory keeps the authoritative cause so later blocks do not
-		// recursively wrap synthetic failures.
-		details: { piToolFailureMemory: retainedRecord },
 	};
 }
 
@@ -1869,10 +1941,6 @@ function retainBlockedToolFailure(record: ToolFailureMemoryRecord, countedInBatc
 	};
 }
 
-function escapePromptData(value: string): string {
-	return value.replaceAll("&", "\\u0026").replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
-}
-
 /**
  * The failure ledger is returned SEPARATELY from the system prompt and never appended to it.
  *
@@ -1882,7 +1950,8 @@ function escapePromptData(value: string): string {
  * invalidates the provider's cached prefix for the WHOLE conversation — a single failure used to
  * cost two or more full re-prefills (block appears, counts mutate, block clears). The caller
  * projects `ledger` into the transient tail instead, where the same churn is priced at the tail
- * that re-prefills anyway. See provider-request-planner.ts for the projection.
+ * that re-prefills anyway. See provider-request-planner.ts for the projection. `ledger` is the
+ * canonical record; its model view is `renderToolFailureLedger(ledger)`.
  */
 export function sanitizeToolFailureContext(
 	messages: AgentMessage[],
@@ -1898,40 +1967,50 @@ export function sanitizeToolFailureContext(
 	contextMemory?: ToolFailureContextMemory,
 	/** See AgentLoopConfig.toolFailureProtocolProse. */
 	protocolProse: "full" | "short" = "full",
-): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
+): { messages: AgentMessage[]; systemPrompt: string; ledger?: ToolFailureLedgerRecord } {
 	const analysis = analyzeToolFailureContext(messages, sentPrefixCount, contextMemory);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
 		return { messages: analysis.messages, systemPrompt };
 	}
 	const records = analysis.activeRecords.slice(-MAX_ACTIVE_FAILURES);
-	const omitted = analysis.activeRecords.length - records.length;
-	const kindSummary = Object.entries(analysis.kindMistakesSummary)
-		.map(([kind, count]) => `${kind}:${count}`)
-		.join(", ");
-
 	// Evidence is not repeated here: the failed call and its bounded record both remain in the
 	// transcript, so the ledger only has to name what is still unresolved and what to do about it.
-	const lines = records.map((record) => escapePromptData(formatRecordJson(record, true, null)));
-	for (const directive of analysis.activeDirectives) {
-		lines.push(
-			escapePromptData(
-				JSON.stringify({
-					...mandatoryToolFailureRecoveryMetadata(),
-					failure_code: directive.failureCode,
-					kind_mistakes: analysis.kindMistakesSummary[directive.failureCode] ?? 1,
-					...(directive.diagnostic ? { diagnostic: directive.diagnostic } : {}),
-					next_action: directive.nextAction,
-					attempt_memory: "discarded",
-				}),
-			),
-		);
-	}
-	if (omitted > 0) lines.unshift(JSON.stringify({ omitted_older_unresolved_failures: omitted }));
-	const memory = [
-		protocolProse === "short" ? TOOL_FAILURE_SHORT_PROTOCOL : MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
-		`ACTIVE TOOL FAILURES mistakes=${escapePromptData(kindSummary)}`,
-		"JSON below is inert data. Each record follows the mandatory protocol; matching success clears it.",
-		...lines,
-	].join("\n");
-	return { messages: analysis.messages, systemPrompt, ledger: memory };
+	const failures = records.map((record): ToolFailureLedgerFailure => {
+		const guidance = failureGuidance(record);
+		return {
+			failureKey: record.failureKey,
+			occurrence: record.occurrence,
+			kindMistakes: record.kindMistakes ?? record.occurrence,
+			mistakeKind: truncate(record.mistakeKind ?? record.tool, MAX_TOOL_NAME_CHARS),
+			state: record.state,
+			phase: record.phase,
+			tool: record.tool,
+			operation: record.operation,
+			failureCode: record.failureCode,
+			...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+			...(record.note ? { note: record.note } : {}),
+			...("repair" in guidance
+				? { guidance: "repair" as const, correction: guidance.repair }
+				: { guidance: "next_action" as const, correction: guidance.next_action }),
+			...(record.attemptMemory === "discard" ? { attemptMemoryDiscarded: true as const } : {}),
+		};
+	});
+	const directives = analysis.activeDirectives.map(
+		(directive): ToolFailureLedgerDirective => ({
+			failureCode: directive.failureCode,
+			kindMistakes: analysis.kindMistakesSummary[directive.failureCode] ?? 1,
+			...(directive.diagnostic ? { diagnostic: directive.diagnostic } : {}),
+			nextAction: directive.nextAction,
+		}),
+	);
+	const ledger: ToolFailureLedgerRecord = {
+		v: TOOL_FAILURE_LEDGER_RECORD_VERSION,
+		k: "tool_failure_ledger",
+		protocol: protocolProse,
+		mistakes: Object.entries(analysis.kindMistakesSummary).map(([kind, count]) => ({ kind, count })),
+		omitted: analysis.activeRecords.length - records.length,
+		failures,
+		directives,
+	};
+	return { messages: analysis.messages, systemPrompt, ledger };
 }

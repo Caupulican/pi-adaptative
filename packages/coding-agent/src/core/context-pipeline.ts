@@ -39,6 +39,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
+import type { PathAliasLegendRecord } from "./comms/host-injection-records.ts";
 import {
 	priceSentPrefixRewrite,
 	resolveEffectiveModelPricing,
@@ -417,8 +418,10 @@ export class ContextPipeline {
 
 	applyPathAliases(messages: AgentMessage[]): {
 		messages: AgentMessage[];
-		legend?: string;
-		legendIds?: readonly string[];
+		legendFor?(
+			visibleMessages: readonly AgentMessage[],
+			visibleTexts: readonly string[],
+		): PathAliasLegendRecord | undefined;
 	} {
 		// A request projection already in flight may arrive after session cleanup closed the index.
 		// It must not reacquire storage or a retention lease for a disposed owner.
@@ -650,10 +653,12 @@ export class ContextPipeline {
 			sentPrefixCount: number;
 			toolNames: readonly string[];
 			signal?: AbortSignal;
+			wireTexts?: readonly string[];
 		},
 		getEdgeGrants: () => readonly EdgeGrantView[],
 	): Promise<AgentContextPlan> {
-		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal } = input;
+		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal, wireTexts } =
+			input;
 		const lane = {
 			model,
 			compactionTriggerTokens,
@@ -681,7 +686,7 @@ export class ContextPipeline {
 				this.applyContextGc(history, writePayloads, frozenBelow, lane),
 			applyPathAliases: (history) => this.applyPathAliases(history),
 			getEdgeGrants,
-		}).plan(messages, sentPrefixCount, signal);
+		}).plan(messages, sentPrefixCount, signal, wireTexts);
 	}
 
 	/** The session is disposed: no worker conversation plans again, so their context-policy lanes go. */
