@@ -68,7 +68,7 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
-The root's `PI DELEGATION` policy requires delegation when a concrete independent task offers more
+The root's `delegation` rule requires delegation when a concrete independent task offers more
 speed or verification benefit than coordination and context-transfer cost. It applies at every
 reasoning level and across providers whenever delegation is enabled and the tool is active;
 it is not an Ultra-only switch. User restrictions remain binding. The ledger rule

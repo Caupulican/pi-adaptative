@@ -14,7 +14,9 @@ export function mandatoryToolFailureRecoveryMetadata(): {
 }
 
 export const MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT = [
-	`MANDATORY TOOL FAILURE RECOVERY v${TOOL_FAILURE_RECOVERY_PROTOCOL_VERSION}, non-negotiable: blocked/rejected means not executed; apply repair/next_action first.`,
-	TOOL_FAILURE_RETRY_MODEL_RULE,
-	"Cosmetic edits do not repair; a refused call keeps result pairing and runs no hooks or tools, and only that operation is refused.",
-].join(" ");
+	`MANDATORY TOOL FAILURE RECOVERY v${TOOL_FAILURE_RECOVERY_PROTOCOL_VERSION}`,
+	"- Non-negotiable: blocked/rejected means not executed; apply repair/next_action first.",
+	`- ${TOOL_FAILURE_RETRY_MODEL_RULE}`,
+	"- Cosmetic edits do not repair.",
+	"- A refused call keeps result pairing and runs no hooks or tools; only that operation is refused.",
+].join("\n");

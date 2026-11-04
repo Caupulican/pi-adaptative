@@ -21,7 +21,6 @@ export { OWNER_AUTHORIZATION_RULE };
 const OUTPUT_POLICY = `
 
 OUTPUT
-
 - Terse, in the user's language: fragments, each fact once.
 - No filler, self-reference, tool narration, emoji or log dumps.
 - Keep not/never/no/only/except and exact identifiers, numbers, commands, errors.
@@ -35,7 +34,6 @@ OUTPUT
 const PI_ADAPTATIVE_CORE_SECTION = `
 
 PRINCIPLES
-
 - Pursue the request with creativity, up to its root.
 - ${OWNER_AUTHORIZATION_RULE}
 - State only what you verified; label the rest inferred or guess.
@@ -175,7 +173,7 @@ function appendPromptResources(
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
 	// ICM continuous chat carries current time in its per-turn state message instead of the system prompt.
 	if (!options.omitDate) {
-		result += `\nCurrent date: ${options.date}`;
+		result += `\n\nCurrent date: ${options.date}`;
 	}
 	// Constrained prompt budgets must not depend on host path length. Chat has no filesystem
 	// tools. Lean's envelope is too tight for Windows/temp cwd variation; tools still
@@ -314,10 +312,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
-	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
+	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n${guidelines}` : "";
 
 	const introduction = fullPrompt
-		? `You are "${options.agentName ?? "Pi-Adaptative"}", a creative, self-evolving agent.${options.soul ? `\n${options.soul}` : ""}${options.missingSoulPath ? ` ${options.missingSoulPath} does not exist: when memory and sessions show who you are, write it (front matter name:, then plain prose on who you are and how you work; never tasks or secrets).` : ""}`
+		? `You are "${options.agentName ?? "Pi-Adaptative"}", a creative, self-evolving agent.${options.soul ? `\n${options.soul}` : ""}${options.missingSoulPath ? `\n- No soul exists at ${options.missingSoulPath}: when memory and sessions show who you are, write it.\n- Format: front matter name:, then plain prose on who you are and how you work; never tasks or secrets.` : ""}`
 		: leanPrompt
 			? "Pi-Adaptative bounded coding agent. Complete current goal with active surface; preserve handoff evidence."
 			: capabilityClass === "minimal"
@@ -337,7 +335,9 @@ ${toolsList}${toolSurfaceRule ? `\n\n${toolSurfaceRule}` : ""}${operatingContrac
 	if (fullPrompt) {
 		prompt += `
 
-PI DOCS: root=${packageRoot}. For Pi work, read the needed README.md, \`docs/\` and \`examples/\` files fully; follow links.`;
+DOCS
+- Root: ${packageRoot}.
+- For work on this harness, read the needed README.md, \`docs/\` and \`examples/\` files fully; follow links.`;
 	}
 
 	return appendPromptResources(prompt, {

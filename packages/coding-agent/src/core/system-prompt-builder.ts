@@ -218,7 +218,7 @@ export class SystemPromptBuilder {
 		}
 
 		if (rawCandidates.length === 0) {
-			return "PI SELF-MODIFICATION: enabled but sourcePaths/sourcePath is missing. Do not modify core/runtime output; ask for the pi-adaptative source checkout path.";
+			return "SELF-MODIFICATION: enabled but sourcePaths/sourcePath is missing. Do not modify core/runtime output; ask for the pi-adaptative source checkout path.";
 		}
 
 		const resolvedCandidates = rawCandidates.map((candidate) =>
@@ -233,12 +233,12 @@ export class SystemPromptBuilder {
 			? sourcePath
 			: `${sourcePath} (invalid source checkout; user must correct \`selfModification.sourcePaths\` before editing)`;
 		if (profile.class === "minimal") {
-			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Smallest change; validate.`;
+			return `SELF-MODIFICATION: edit core only under ${sourceStatus}. Smallest change; validate.`;
 		}
 		if (profile.class !== "full") {
-			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
+			return `SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
 		}
-		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there, never installed or generated output. Restate scope, inspect source and docs, preserve concurrent changes, make the smallest auditable edit, run focused then proportionate checks; runtime_update only after saved evidence.`;
+		return `SELF-MODIFICATION\n- Source: ${sourceStatus}; edit core/harness only there, never installed or generated output.\n- Restate scope, inspect source and docs, preserve concurrent changes.\n- Make the smallest auditable edit; run focused, then proportionate checks.\n- runtime_update only after saved evidence.`;
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
@@ -320,9 +320,9 @@ export class SystemPromptBuilder {
 			if (!hasActiveExtensionTool) return undefined;
 		}
 		if (profile.class !== "full") {
-			return "PI TOOL APPLICABILITY: availability is not a mandate. Missing optional credentials never block unrelated work or require secret_store.";
+			return "TOOL APPLICABILITY: availability is not a mandate. Missing optional credentials never block unrelated work or require secret_store.";
 		}
-		return "PI TOOL APPLICABILITY: active means available, not required. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
+		return "TOOL APPLICABILITY\n- Active means available, not required.\n- Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
 	/** True when the configured memory system is Intentional Context Management (ICM). */
@@ -363,19 +363,19 @@ export class SystemPromptBuilder {
 				? "ROOT REFLECTION: the host schedules one reflection turn after completed work; apply warranted durable learning only there."
 				: "Root reflection is disabled.";
 		if (profile.class !== "full") {
-			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary.`;
+			return `AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full: ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; each with validation and rollback evidence. Current-turn evidence is a cue, not proof.`;
+			return `AUTONOMY full\n- ${reflectionContract}\n- Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; each with validation and rollback evidence.\n- Current-turn evidence is a cue, not proof.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
+		return `AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[], ledgerActive: boolean): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
-		if (capabilityClass === "minimal") return `PI WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
+		if (capabilityClass === "minimal") return `WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
 		const hasWorkPlanningTool = toolNames.some(
 			(name) =>
 				name === "goal" ||
@@ -387,11 +387,11 @@ export class SystemPromptBuilder {
 		// Only a model that holds the delegate tool is told about workers.
 		const workersOwner = toolNames.includes("delegate") ? " delegate workers," : "";
 		const ownerRule = hasWorkPlanningTool
-			? ` Owners: goal outcome/contract, task_steps plan,${workersOwner} evidence acceptance; no parallel workflow state.`
+			? `\n- Owners: goal outcome/contract, task_steps plan,${workersOwner} evidence acceptance; no parallel workflow state.`
 			: "";
 		// The phase detail is a ledger entry; the phase names and owners stay resident.
 		const detail = ledgerActive ? "" : `\n${requireLedgerEntry("work-lifecycle").body}`;
-		return `PI WORK LIFECYCLE: Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale phases to the outcome.${ownerRule}${detail}`;
+		return `WORK LIFECYCLE\n- Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale phases to the outcome.${ownerRule}${detail}`;
 	}
 
 	/** Delegation guidance applies to a root that holds the delegate tool with worker delegation enabled. */
@@ -406,7 +406,7 @@ export class SystemPromptBuilder {
 	/** The delegation rule rendered inline, for a surface where `ledger_read` does not carry it. */
 	private _buildInlineDelegationPrompt(delegateActive: boolean, ledgerActive: boolean): string | undefined {
 		if (ledgerActive || !this._delegationApplies(delegateActive)) return undefined;
-		return `PI DELEGATION\n${requireLedgerEntry("delegation").body}`;
+		return `DELEGATION\n${requireLedgerEntry("delegation").body}`;
 	}
 
 	/** The index of ledger rules whose gates pass, or undefined when the ledger is not active. */
