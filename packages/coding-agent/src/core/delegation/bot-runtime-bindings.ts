@@ -105,8 +105,10 @@ export class BotRuntimeBindings {
 		return this.read();
 	}
 
+	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime or a managed lane, which is not a bot. */
 	alias(runtime: string): string | undefined {
 		const context = this.generationContext(runtime);
+		if (!ID.test(context.agentId)) return undefined;
 		return this.runtime(context.agentId, context.teamId, context.teamIncarnationId) === runtime
 			? context.agentId
 			: undefined;

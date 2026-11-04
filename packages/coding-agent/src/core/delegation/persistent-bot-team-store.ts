@@ -76,6 +76,7 @@ export interface PersistentBotRecord {
 }
 
 export interface PersistentBotView {
+	/** A bot alias: always a valid bot ID. Managed lanes (`collaboration:<job>:<agent>`) are not bots and are never projected. */
 	readonly agentId: string;
 	readonly displayName: string;
 	readonly description?: string;
@@ -1713,8 +1714,7 @@ export class PersistentBotTeamStore {
 				lastReadAt: botRecord?.lastReadAt,
 				unreadCount,
 				routineCount,
-				// Only a stored bot owns a memory file; managed lane IDs (e.g. `collaboration:<job>:<agent>`) are not bot IDs.
-				memoryFilePath: botRecord ? this.getBotMemoryFilePath(agentId) : undefined,
+				memoryFilePath: this.getBotMemoryFilePath(agentId),
 			});
 		}
 
