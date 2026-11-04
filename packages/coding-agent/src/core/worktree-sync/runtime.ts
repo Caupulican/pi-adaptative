@@ -2,10 +2,10 @@
  * Worktree-sync runtime composition: the pieces main.ts / RuntimeBuilder wire together.
  *
  * The lane binding is an ENVIRONMENT contract: a session launched with `PI_WORKTREE_LANE=<key>`
- * (set by the `--worktree-lane` CLI flag, or directly by any launcher -- tmux panes inherit it
+ * (set by the `--worktree-lane` CLI flag, or directly by any launcher -- herdr panes inherit it
  * from the launch command line) is lane-bound: its file-mutation tools run behind the lane gate
  * (G8/G10) and its epoch watcher injects staleness notices. The env form is deliberate -- it
- * crosses EVERY process boundary (tmux, exec, nested shells) without per-launcher plumbing.
+ * crosses EVERY process boundary (herdr, exec, nested shells) without per-launcher plumbing.
  */
 
 import { worktreesDir } from "../agent-paths.ts";

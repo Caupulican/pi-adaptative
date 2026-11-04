@@ -203,7 +203,7 @@ export function boundedWorkerClaimStrings(
 }
 
 /**
- * The findings a collaboration (tmux) worker's free-text report marks inconclusive, one per `INCONCLUSIVE:` line,
+ * The findings a collaboration (herdr) worker's free-text report marks inconclusive, one per `INCONCLUSIVE:` line,
  * bounded like blockers. That report carries no typed field; its prefixed lines are the only structure it gives.
  */
 export function inconclusiveLinesIn(text: string | undefined): string[] {
@@ -871,9 +871,9 @@ function inconclusiveReview(inconclusive: readonly string[]): GateOutcome {
 
 /**
  * Path-scope-only re-review for a SELF-REPORTED (out-of-process) worker's claimed `changedFiles`
- * -- e.g. a tmux worker's own completion report, which (unlike an in-process worker's) never
+ * -- e.g. a herdr worker's own completion report, which (unlike an in-process worker's) never
  * passed through this process's `applyWorkerActions` envelope enforcement before the write
- * happened; the tmux worker's tool loop runs in a separate process this session does not gate.
+ * happened; the herdr worker's tool loop runs in a separate process this session does not gate.
  * Reuses {@link validateWorkerClaim}'s exact symlink-safe scope check verbatim -- never
  * reimplement path resolution: synthesizes a minimal, always-"completed" request/claim pair
  * carrying only the reported `changedFiles` and the scope's `allowedPaths`/`deniedPaths`, so the

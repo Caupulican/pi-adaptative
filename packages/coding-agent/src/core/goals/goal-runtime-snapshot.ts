@@ -160,10 +160,10 @@ export function buildGoalRuntimeSnapshot(args: {
 		// writes `continuationWorkerSpendUsd` (see its doc comment on `GoalState`), so every read
 		// re-sums THIS goal's own lane records instead of trusting a stale/zero persisted value.
 		// `costUsd` is set today for in-process worker/research lane completions (LaneTracker.complete);
-		// it is NOT yet set for tmux-worker completions (`ManagedLaneEvent` carries no cost claim), so
-		// this sum is accurate for in-process lanes and a documented undercount for tmux workers until
+		// it is NOT yet set for managed-worker completions (`ManagedLaneEvent` carries no cost claim), so
+		// this sum is accurate for in-process lanes and a documented undercount for herdr workers until
 		// `reportSpawnedUsage` threads a goalId/lane correlation through. Forward-compatible: the moment
-		// tmux-worker costUsd is populated, this same sum picks it up with no further change here.
+		// managed-worker costUsd is populated, this same sum picks it up with no further change here.
 		let workerSpendUsd = 0;
 		for (const record of args.laneRecords) {
 			if (record.goalId !== goalId) continue;

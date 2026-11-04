@@ -63,7 +63,7 @@ export const WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS: ReadonlySet<string> = new Se
 ]);
 
 /**
- * The complete tool surface of a worker PROCESS (a managed tmux/herdr/resumed `pi` child or any
+ * The complete tool surface of a worker PROCESS (a managed herdr/resumed `pi` child or any
  * lane-bound session): an explicit allow-list, never a deny-list over the catalogue. File tools run
  * inside the structural path envelope; `bash`/`python`/`run_process` are the host-trust process
  * boundary under the execution grant; `worktree_sync` is narrowed to the session's own lane at the

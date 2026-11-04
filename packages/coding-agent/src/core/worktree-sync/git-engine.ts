@@ -646,7 +646,7 @@ async function reconcileLandingTransaction(
 }
 
 /**
- * Startup/repair pass (mirrors the tmux session reconcile): diff the registry against git
+ * Startup/repair pass (mirrors the herdr session reconcile): diff the registry against git
  * reality, mark orphans (never delete -- G11), re-register lane worktrees git still knows that
  * the registry lost (a deleted store is fully rebuildable), self-heal orphan registrations whose
  * worktree+branch actually exist, clear dead owners, and release a provably-stale lock.

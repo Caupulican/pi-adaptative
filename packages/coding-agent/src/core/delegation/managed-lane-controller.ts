@@ -155,7 +155,7 @@ export class ManagedLaneController {
 		let pending = false;
 		for (const legacy of getLatestLaneRecordSnapshots(getActiveSessionBranchEntries(this.deps.getSessionManager()))) {
 			if (
-				legacy.type !== "tmux-worker" ||
+				legacy.type !== "managed-worker" ||
 				(legacy.status !== "queued" && legacy.status !== "running") ||
 				durableIds.has(legacy.laneId)
 			) {
@@ -481,7 +481,7 @@ export class ManagedLaneController {
 
 	private ensureRegistration(laneId: string): void {
 		if (this.deregisterByLane.has(laneId)) return;
-		this.deregisterByLane.set(laneId, registerInFlightWork(this.deps.getAgentDir(), "lane", `tmux:${laneId}`));
+		this.deregisterByLane.set(laneId, registerInFlightWork(this.deps.getAgentDir(), "lane", `managed:${laneId}`));
 	}
 
 	private releaseRegistration(laneId: string): void {

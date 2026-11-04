@@ -1436,7 +1436,7 @@ export interface ExtensionAPI {
 	reportSpawnedUsage(usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 
 	/**
-	 * Report an out-of-process managed lane's dispatch or terminal outcome (e.g. a tmux worker) so the
+	 * Report an out-of-process managed lane's dispatch or terminal outcome (e.g. a herdr worker) so the
 	 * host's LaneTracker treats it as a first-class lane — visible in `/autonomy` + `delegate status`,
 	 * holding a reload-quiesce unit while dispatched, and leaving a bounded claim snapshot on terminal.
 	 *

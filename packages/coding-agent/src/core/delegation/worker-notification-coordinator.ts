@@ -40,7 +40,7 @@ export interface WorkerTerminalHandoffRecord {
 	 * Populated via `noteAttemptOwnerEpoch` at the three lane/attempt-creation surfaces that mint
 	 * genuinely new work: `WorkerDelegationController.prepareWorkerAttempt`'s fresh-creation branch
 	 * (ordinary in-process worker dispatch), `ManagedLaneController.record`'s dispatch phase (managed /
-	 * external-process workers, e.g. tmux-workers), and `WorkerAgentControlCoordinator`'s mailbox-turn
+	 * external-process workers, e.g. managed-workers), and `WorkerAgentControlCoordinator`'s mailbox-turn
 	 * call site (a persistent worker agent's follow-up turn), gated there on
 	 * `WorkerLifecycle.prepareAgentTurn`'s own `created` signal -- a replayed control message returns
 	 * an attempt that may predate the current process, shape-identical to a fresh mint otherwise, and

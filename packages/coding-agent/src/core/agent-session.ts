@@ -5584,7 +5584,7 @@ export class AgentSession {
 
 	/**
 	 * The one owner of the project chat's `[name]` worker reports. Every accepted terminal reaches it once: the parent
-	 * handoff, a managed (tmux) lane, and a terminal with no parent. The text is the attempt's persisted claim, or the
+	 * handoff, a managed (herdr) lane, and a terminal with no parent. The text is the attempt's persisted claim, or the
 	 * terminal status when no claim exists. A worker's private steps are never logged. The chat keys the report by its
 	 * attempt, or by the lane generation when no attempt is known, so a redelivered terminal logs nothing twice.
 	 */

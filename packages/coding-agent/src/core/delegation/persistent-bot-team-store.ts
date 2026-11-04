@@ -1576,7 +1576,7 @@ export class PersistentBotTeamStore {
 		defaultModelRef: string,
 		includeDirectContinuity = true,
 	): PersistentBotView[] {
-		const workerLanes = laneRecords.filter((lane) => lane.type === "worker" || lane.type === "tmux-worker");
+		const workerLanes = laneRecords.filter((lane) => lane.type === "worker" || lane.type === "managed-worker");
 
 		const laneByAgentId = new Map<string, LaneRecord>();
 		for (const lane of workerLanes) {

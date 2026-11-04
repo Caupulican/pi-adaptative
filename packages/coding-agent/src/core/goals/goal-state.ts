@@ -106,7 +106,7 @@ export interface GoalState {
 	continuationSpendUsd?: number;
 	/**
 	 * Observed cumulative USD attributed to WORKER/SUBAGENT spend for this goal's lanes (in-process worker
-	 * usage via `addSpawnedUsage`, out-of-process tmux-worker usage via the advisory
+	 * usage via `addSpawnedUsage`, out-of-process managed-worker usage via the advisory
 	 * `reportSpawnedUsage` claim) — the counterpart this goal's OWN model spend excludes (see
 	 * {@link continuationSpendUsd}). Populated by the runtime that sums lane spend by goalId; this
 	 * field is only the durable slot. Same backward-compat/undefined-as-0 note as the other

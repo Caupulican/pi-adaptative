@@ -1,6 +1,6 @@
 # Maintainer Workflows
 
-Issues and PRs, interactive-mode tmux testing, changelog rules and the release procedure. Moved out of AGENTS.md so they load only when needed; the rules are unchanged.
+Issues and PRs, interactive-mode herdr testing, changelog rules and the release procedure. Moved out of AGENTS.md so they load only when needed; the rules are unchanged.
 
 ## Issues and PRs
 
@@ -26,17 +26,18 @@ When closing issues via commit:
 
 - Include `fixes #<number>` or `closes #<number>` in the message so merging auto-closes the issue. For multiple issues, repeat the keyword per issue (`closes #1, closes #2`); a shared keyword (`closes #1, #2`) only closes the first.
 
-## Testing pi Interactive Mode with tmux
+## Testing pi Interactive Mode with herdr
 
-Run the TUI in a controlled terminal (from the repo root):
+Run the TUI in a controlled herdr pane (from the repo root, inside herdr: `HERDR_ENV=1`). Only touch panes you created; never run bare `herdr` (it launches the TUI) or `herdr server stop`.
 
 ```bash
-tmux new-session -d -s pi-test -x 80 -y 24
-tmux send-keys -t pi-test "./pi-test.sh" Enter
-sleep 3 && tmux capture-pane -t pi-test -p     # capture after startup
-tmux send-keys -t pi-test "your prompt here" Enter
-tmux send-keys -t pi-test Escape               # special keys (also C-o for ctrl+o, etc.)
-tmux kill-session -t pi-test
+PANE=$(herdr pane split --current --direction right | jq -r .result.pane.pane_id)   # new pane next to this one
+herdr pane run "$PANE" "./pi-test.sh"
+herdr pane wait-output "$PANE" --match "pi" --timeout 30000     # wait for startup
+herdr pane send-text "$PANE" "your prompt here" && herdr pane send-keys "$PANE" enter
+herdr pane send-keys "$PANE" esc                                # special keys (also ctrl+o, etc.)
+herdr pane read "$PANE" --source visible                        # capture the screen
+herdr pane close "$PANE"
 ```
 
 ## Changelog

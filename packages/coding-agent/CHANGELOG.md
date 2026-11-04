@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- tmux is retired as a worker host; herdr is the only one. The managed lane type `tmux-worker` is now `managed-worker` (session snapshots written with the old name are no longer read), lane labels read "managed" instead of "tmux", the reload blocker of a managed lane is labelled `managed:<lane>`, and the unused `tmuxSession`/`tmuxPanePid` process-matrix fields are gone. Running pi inside tmux stays supported as a terminal environment (keyboard setup check, `docs/tmux.md`).
+
 ### Fixed
 
 - The TUI no longer exits with `Invalid agentId` while a managed collaboration lane (id `collaboration:<job>:<agent>`) is live. Managed lanes are not bots: the bot roster, its change notifications and the turn-outcome record no longer treat a lane id as a bot alias, so the roster never lists a lane as a chat target it cannot open.

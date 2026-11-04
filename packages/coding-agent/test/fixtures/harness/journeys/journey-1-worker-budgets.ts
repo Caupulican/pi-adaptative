@@ -689,21 +689,21 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	trace.mark("root", "e4.held-bash-reload");
 	await runRuntimeGenerationReloadInteraction(world);
 
-	// R33 (legacy managed lane adoption): a session branch written before managed lanes had a durable lifecycle carries tmux-worker lane
+	// R33 (legacy managed lane adoption): a session branch written before managed lanes had a durable lifecycle carries managed-worker lane
 	// snapshots and no orchestration record. The first lane read of its owner adopts each queued or running one into the durable lifecycle
 	// (provider "legacy", profile "legacy-managed-process") and registers its reload blocker; a terminal snapshot is history and is not
 	// adopted. The owner runs in its own agent directory, so the adopted lane's durable record and blocker never reach the shared scope.
 	const legacyAgentDir = `${world.agentDir}-legacy-lanes`;
 	const legacyManager = world.createSessionManager(legacyAgentDir);
 	appendLaneRecordSnapshot(legacyManager, {
-		laneId: "legacy-tmux-running",
-		type: "tmux-worker",
+		laneId: "legacy-managed-running",
+		type: "managed-worker",
 		status: "running",
 		label: "Legacy external lane",
 	});
 	appendLaneRecordSnapshot(legacyManager, {
-		laneId: "legacy-tmux-done",
-		type: "tmux-worker",
+		laneId: "legacy-managed-done",
+		type: "managed-worker",
 		status: "succeeded",
 		label: "Legacy finished lane",
 	});
@@ -719,27 +719,27 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			systemOneEnabled: false,
 		})
 	).session;
-	const legacyLanes = legacyOwner.getLaneRecords().filter((record) => record.type === "tmux-worker");
+	const legacyLanes = legacyOwner.getLaneRecords().filter((record) => record.type === "managed-worker");
 	expect(
 		legacyLanes.map(({ laneId, status, profileId }) => ({ laneId, status, profileId })),
 		"the running legacy lane is adopted into the durable lifecycle as a running managed lane",
-	).toEqual([{ laneId: "legacy-tmux-running", status: "running", profileId: "legacy-managed-process" }]);
+	).toEqual([{ laneId: "legacy-managed-running", status: "running", profileId: "legacy-managed-process" }]);
 	expect(
 		getInFlightWorkUnits(legacyAgentDir)
 			.filter((unit) => unit.kind === "lane")
 			.map((unit) => unit.label),
 		"the adopted lane registers exactly its own reload blocker",
-	).toEqual(["tmux:legacy-tmux-running"]);
+	).toEqual(["managed:legacy-managed-running"]);
 	world.faultMatrix.witness("R33", { control: false });
 	expect(
-		legacyLanes.some((record) => record.laneId === "legacy-tmux-done"),
+		legacyLanes.some((record) => record.laneId === "legacy-managed-done"),
 		"the terminal legacy snapshot is history: it is not adopted",
 	).toBe(false);
 	world.faultMatrix.witness("R33", { control: true });
 	expect(
 		legacyOwner
 			.getLaneRecords()
-			.filter((record) => record.type === "tmux-worker")
+			.filter((record) => record.type === "managed-worker")
 			.map((record) => record.attemptId),
 		"a later lane read adopts nothing again: the same single durable attempt",
 	).toEqual(legacyLanes.map((record) => record.attemptId));

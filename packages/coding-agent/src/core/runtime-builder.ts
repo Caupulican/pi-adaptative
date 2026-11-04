@@ -1743,7 +1743,7 @@ export class RuntimeBuilder {
 			}
 			// Hoisted above the goal-tool registration (rather than declared only inside the
 			// worktreeSync-enabled block further below) so the SAME settings/deps factory backs both
-			// the goal->tmux lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
+			// the goal->herdr lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
 			// `worktree_sync` tool registration later in this method -- one source of truth, no drift.
 			const worktreeSyncSettings =
 				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || toolAccess.allows("worktree_sync")
@@ -2170,7 +2170,7 @@ export class RuntimeBuilder {
 			// file-mutation tools (edit/write, plus integration-sensitive bash checks), so a sync_required lane fails closed with the
 			// exact recovery step rather than relying on prompt compliance. `worktreeSyncSettings` /
 			// `worktreeSyncEngineDeps` are hoisted above (declared before the goal-tool registration)
-			// so the goal->tmux lane-first dispatch dep and this tool share one settings/deps source.
+			// so the goal->herdr lane-first dispatch dep and this tool share one settings/deps source.
 			if (toolAccess.allows("worktree_sync") && worktreeSyncSettings?.enabled) {
 				const worktreeSyncToolDefinition = createWorktreeSyncToolDefinition({
 					engineDeps: worktreeSyncEngineDeps,

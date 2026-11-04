@@ -626,7 +626,7 @@ evidence the last one did not have:
    irreversible action.
 
 Settled items return to the parent as `System One settled: …` and no longer hold the claim for
-review. Collaboration and tmux workers, whose transcripts the host cannot read, mark such findings
+review. Collaboration and herdr workers, whose transcripts the host cannot read, mark such findings
 with `INCONCLUSIVE:` lines in their report; those enter the same parent-review and owner-decision
 routing in step 3 without the host claiming to have inspected the worker's evidence.
 

@@ -47,7 +47,7 @@ export function encodeWorkerSessionAllowedPaths(paths: readonly string[]): strin
 
 /**
  * Structural filesystem envelope for a standalone worker process (for example a Pi child launched
- * in tmux). An empty allow list deliberately preserves the worker's host-wide project access while
+ * in herdr). An empty allow list deliberately preserves the worker's host-wide project access while
  * the private harness roots remain denied. Process tools are not path-confined by this envelope:
  * bash/python are explicit host-trust boundaries and retain their OS-visible filesystem surface.
  */

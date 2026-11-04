@@ -110,7 +110,7 @@ export function projectWorkerAttemptLaneRecord(
 	const costUsd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd;
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,
-		type: managed ? "tmux-worker" : "worker",
+		type: managed ? "managed-worker" : "worker",
 		attemptId: attempt.attemptId,
 		...(agentId ? { agentId } : {}),
 		status,

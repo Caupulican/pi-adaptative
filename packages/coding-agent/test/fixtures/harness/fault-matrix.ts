@@ -678,7 +678,7 @@ const rows: readonly FaultMatrixRow[] = [
 		phase: "worker-budgets R33",
 		fault: "a legacy managed lane is adopted",
 		witness:
-			"the first lane read adopts the running legacy tmux-worker snapshot as one running managed lane with its own reload blocker",
+			"the first lane read adopts the running legacy managed-worker snapshot as one running managed lane with its own reload blocker",
 		control: "the terminal legacy snapshot of the same branch is not adopted",
 		estSeconds: 0.5,
 		status: "covered",

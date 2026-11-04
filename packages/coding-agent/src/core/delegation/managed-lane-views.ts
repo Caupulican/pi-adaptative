@@ -26,7 +26,7 @@ function laneTimestamp(record: LaneRecord): string {
 export function projectManagedLaneViews(records: readonly LaneRecord[]): ManagedLaneView[] {
 	const byLane = new Map<string, LaneRecord>();
 	for (const record of records) {
-		if (record.type !== "tmux-worker") continue;
+		if (record.type !== "managed-worker") continue;
 		if (record.status !== "queued" && record.status !== "running") continue;
 		if (isBotId(record.agentId ?? record.laneId)) continue;
 		const existing = byLane.get(record.laneId);

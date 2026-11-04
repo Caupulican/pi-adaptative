@@ -224,7 +224,7 @@ the parent. Nothing below refuses a command, blocks a worker or reverts a change
   the bounds are not watched. Python and run_process get the same worker run environment as bash (committer
   identity, credential stripping, scratch directory, ownership marker), including a research lane that grants
   python, by design. Disposing a lane with any of them scans `/proc` (Linux) once for processes that still carry
-  its marker, also by design. A worker process (a collaboration or tmux `pi` child) runs its tool calls in a
+  its marker, also by design. A worker process (a collaboration or herdr `pi` child) runs its tool calls in a
   process the parent cannot see into, and a detector inside it would be under the control of what it watches,
   so the comparison for it runs in the parent: one fingerprint at dispatch and one at the worker's terminal
   report (the run scope), recorded as the same `protected_path_changed:` blocker on its claim. It is lost

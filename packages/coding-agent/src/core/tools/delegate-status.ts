@@ -168,7 +168,7 @@ function isUnreviewed(claim: WorkerClaim | undefined): boolean {
 }
 
 function isDelegatedWorkerLane(record: LaneRecord): boolean {
-	return record.type === "worker" || record.type === "tmux-worker";
+	return record.type === "worker" || record.type === "managed-worker";
 }
 
 /** The host state codes of one lane: queued, or why and how it ended. A running lane has none. */
@@ -493,7 +493,7 @@ function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusTool
 		view.profileId ? `profile ${view.profileId}` : undefined,
 		view.modelRef ? `model ${view.modelRef}` : undefined,
 		view.thinkingLevel ? `thinking ${view.thinkingLevel}` : undefined,
-		view.type === "tmux-worker" ? "tmux" : undefined,
+		view.type === "managed-worker" ? "managed" : undefined,
 		view.reasonCode,
 		view.agentStatus === "retired" ? "retired" : undefined,
 		view.unreviewed ? "review required" : undefined,

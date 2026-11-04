@@ -1,7 +1,7 @@
 /**
  * Process-matrix presence channel: the event source for "my parent is gone".
  *
- * A worker cannot rely on an inherited pipe or an IPC channel (tmux-launched and detached resumed
+ * A worker cannot rely on an inherited pipe or an IPC channel (herdr-launched and detached resumed
  * workers have neither), and Node has no pidfd or parent-death signal. A master therefore keeps one
  * local listening endpoint per session open for as long as it lives and never writes to it. A worker
  * connects once; when the master exits for any reason -- SIGKILL included -- the kernel closes the

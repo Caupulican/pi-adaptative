@@ -150,7 +150,7 @@ export function evaluateGoalContinuation(args: {
 	 * (`LaneFacts.rebaseInProgress`). The caller (`goal-runtime-snapshot.ts`) is responsible for
 	 * translating live per-worktree-lane status into this id-space by matching each status entry's
 	 * own `boundLaneId` against the requirement -- this function stays pure and never resolves a
-	 * worktree laneKey itself, exactly like `inFlightGoalLaneIds` never resolves a tmux job id.
+	 * worktree laneKey itself, exactly like `inFlightGoalLaneIds` never resolves a herdr job id.
 	 * Checked BEFORE the waiting branch (see `lane_sync_conflict` below): a stalled-but-conflicted
 	 * worker must get the resolve directive, not silently wait forever. Optional so every
 	 * pre-existing caller keeps compiling and behaving byte-identically when omitted or empty.

@@ -4,7 +4,7 @@
  *
  * Contract:
  * - A WORKER is any process launched with a known parent (`PI_PARENT_PID` -- set by the
- *   `--parent-pid` CLI flag, or directly by a launcher such as tmux dispatch). It self-registers
+ *   `--parent-pid` CLI flag, or directly by a launcher such as herdr dispatch). It self-registers
  *   its OWN entry (the single writer of that entry during normal operation) and watches its
  *   parent's liveness. On parent death it winds down GRACEFULLY -- never silently -- leaving a
  *   `resumable` payload, then exits on its own after a bounded grace window (during which it may

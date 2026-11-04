@@ -16,8 +16,8 @@ export class ManagedLaneRuntimeAdmissionError extends Error {
 }
 
 /**
- * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
- * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both
+ * Report for an out-of-process managed lane (e.g. a herdr worker) at dispatch or terminal. `laneId` is
+ * a stable identifier the CALLER chooses (e.g. a herdr job id or slug) and reuses unchanged across both
  * reports of the same lane. The host preserves it as the canonical durable lane identity so goal
  * bindings and terminal reports remain correlated across controller reloads.
  *
@@ -69,7 +69,7 @@ export type ManagedLaneEvent =
 			reasonCode?: string;
 			changedFiles?: readonly string[];
 			/**
-			 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a tmux worker's own
+			 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a herdr worker's own
 			 * usage report). ADVISORY, same trust level as every other field on this event — the host attributes
 			 * `usage.cost.total` onto the completed lane's `costUsd` verbatim, with NO re-pricing (the caller's
 			 * model is unknown to the host, so re-pricing is both impossible and unnecessary). Ignored on

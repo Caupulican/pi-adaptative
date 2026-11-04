@@ -199,13 +199,13 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 }
 
 function laneLabel(record: LaneRecord): string {
-	const runtime = record.type === "tmux-worker" ? "tmux" : "agent";
+	const runtime = record.type === "managed-worker" ? "managed" : "agent";
 	const label = record.label ?? record.laneId;
 	return boundedLabel(`${runtime} · ${label}`);
 }
 
 function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProjection {
-	const workers = records.filter((record) => record.type === "worker" || record.type === "tmux-worker");
+	const workers = records.filter((record) => record.type === "worker" || record.type === "managed-worker");
 	const active = workers
 		.filter((record) => record.status === "queued" || record.status === "running")
 		.map(
@@ -215,10 +215,10 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 				label: laneLabel(record),
 				status: record.status === "queued" ? "waiting" : "active",
 				tag:
-					record.type === "tmux-worker"
+					record.type === "managed-worker"
 						? record.status === "queued"
-							? "tmux agent queued"
-							: "tmux agent running"
+							? "managed agent queued"
+							: "managed agent running"
 						: record.status === "queued"
 							? "agent queued"
 							: "agent running",

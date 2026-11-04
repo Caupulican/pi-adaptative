@@ -387,7 +387,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	// One specialist reused by follow_up appears once: its active record, or else its most recent one.
 	const laneByKey = new Map<string, LaneRecord>();
 	for (const lane of lanes) {
-		if (lane.type !== "research" && lane.type !== "worker" && lane.type !== "tmux-worker") continue;
+		if (lane.type !== "research" && lane.type !== "worker" && lane.type !== "managed-worker") continue;
 		const key = lane.agentId ?? lane.laneId;
 		const previous = laneByKey.get(key);
 		if (!previous || rankLane(lane) >= rankLane(previous)) laneByKey.set(key, lane);

@@ -82,7 +82,7 @@ export interface LaneRegistration {
 	updatedAt: string;
 	goalId?: string;
 	requirementId?: string;
-	/** Host `LaneRecord.laneId` after dispatch correlation (tmux/in-process worker binding). */
+	/** Host `LaneRecord.laneId` after dispatch correlation (herdr/in-process worker binding). */
 	boundLaneId?: string;
 	/**
 	 * The process that owns the lane (`ownProcessOwner`), judged by `judgeOwner`. Records written before it was nested

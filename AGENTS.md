@@ -84,7 +84,7 @@ If rebase conflicts occur:
 
 ## Task-specific references (read only when the task needs them)
 
-- Issues, PRs, tmux testing of interactive mode, changelog and release procedure: `docs/maintainer-workflows.md`. Release commands stay unauthorized unless the owner says otherwise (see Commands).
+- Issues, PRs, herdr testing of interactive mode, changelog and release procedure: `docs/maintainer-workflows.md`. Release commands stay unauthorized unless the owner says otherwise (see Commands).
 - Invariants and sharp edges per subsystem (delegation, TUI, compaction, local models, providers, tooling, build traps): `docs/system-knowledge.md`. Read the matching section before changing that subsystem; add new durable facts there.
 
 ## User Override

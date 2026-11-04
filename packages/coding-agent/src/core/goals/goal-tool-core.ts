@@ -57,7 +57,7 @@ export type GoalAction =
 			requirementId: string;
 			instructions: string;
 			/**
-			 * LaneId returned by the tool layer's dispatch side effect (calling the real worker/tmux
+			 * LaneId returned by the tool layer's dispatch side effect (calling the real worker/herdr
 			 * dispatch). Computed by the tool layer -- which has session/runtime access -- and merged
 			 * onto the action before it reaches this pure reducer, exactly like `add_evidence`'s
 			 * `verified` field. Undefined when the dispatch side effect is unwired/stubbed.

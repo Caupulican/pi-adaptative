@@ -74,7 +74,7 @@ function workerElapsed(record: LaneRecord, nowMs: number): string {
 
 function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
 	const meta = [
-		record.type === "tmux-worker" ? "tmux" : "agent",
+		record.type === "managed-worker" ? "managed" : "agent",
 		record.profileId,
 		record.modelRef,
 		record.thinkingLevel,
@@ -123,7 +123,7 @@ const ACTIVE_BACKGROUND_TOOL_STATUSES = new Set<ActivityLaneItem["status"]>(["ac
 /** Keep active admissions and retained sessions, not terminal native lanes that never acquired a binding. */
 export function isRetainedWorkerLane(record: LaneRecord): boolean {
 	if (record.agentStatus === "retired") return false;
-	if (record.type === "tmux-worker") return true;
+	if (record.type === "managed-worker") return true;
 	return record.type === "worker" && (isActiveWorkerLane(record) || record.agentStatus !== undefined);
 }
 
@@ -376,7 +376,7 @@ export class AgentsOverlay implements Component {
 		this.setElapsedRedrawEnabled(
 			snapshot.laneRecords.some(
 				(record) =>
-					(record.type === "worker" || record.type === "tmux-worker") &&
+					(record.type === "worker" || record.type === "managed-worker") &&
 					record.status === "running" &&
 					record.startedAt !== undefined &&
 					!Number.isNaN(Date.parse(record.startedAt)),

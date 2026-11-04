@@ -22,7 +22,7 @@ An agent that has never seen the application can launch it, prove one feature, c
 1. Learn the project from the repository. Ask the owner only for what you cannot observe.
    - Surface: web page, terminal program, desktop application, service, library.
    - Run: the documented start command, ports, environment, seed data.
-   - Drive: existing harnesses the owner allows you to run first (a test suite only if the owner asked for tests). Then a browser for web, a pseudo-terminal or tmux for terminal programs, plain requests for services.
+   - Drive: existing harnesses the owner allows you to run first (a test suite only if the owner asked for tests). Then a browser for web, a pseudo-terminal or a herdr pane for terminal programs, plain requests for services.
    - Observe: screenshots, transcripts, response bodies, logs, exit codes, stored data.
    - Isolate: can two instances run side by side? If not, say so in the skill.
 2. If the project does not start, fix that first or report it exactly.

@@ -454,7 +454,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const leafId = typeof session.getLeafId === "function" ? session.getLeafId() : undefined;
 		if (leafId !== undefined && this._managedLaneAbsenceLeafId === leafId) return;
 		const hasPersistedActiveManagedLane = getLatestLaneRecordSnapshots(getActiveSessionBranchEntries(session)).some(
-			(record) => record.type === "tmux-worker" && (record.status === "queued" || record.status === "running"),
+			(record) => record.type === "managed-worker" && (record.status === "queued" || record.status === "running"),
 		);
 		if (hasPersistedActiveManagedLane) {
 			this._getManagedLaneController().ensureHydrated();
@@ -596,7 +596,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("abort model-fitness lanes", () => this._fitness.abort());
 		for (const record of this._laneTracker.getRecords()) {
 			if (record.status !== "queued" && record.status !== "running") continue;
-			if (record.type === "tmux-worker") continue;
+			if (record.type === "managed-worker") continue;
 			const canceled = this._laneTracker.complete(record.laneId, {
 				status: "canceled",
 				reasonCode: "session_disposed",

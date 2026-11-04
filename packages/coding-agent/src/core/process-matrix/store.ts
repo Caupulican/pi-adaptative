@@ -138,8 +138,6 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 		isProcessStatus(value.status) &&
 		(value.parentPid === undefined || isPositiveSafePid(value.parentPid)) &&
 		isOptionalString(value.parentSessionId, 512) &&
-		isOptionalString(value.tmuxSession, 512) &&
-		(value.tmuxPanePid === undefined || isPositiveSafePid(value.tmuxPanePid)) &&
 		isOptionalString(value.taskRef, 512) &&
 		isOptionalString(value.taskSummary, 2_000)
 	);

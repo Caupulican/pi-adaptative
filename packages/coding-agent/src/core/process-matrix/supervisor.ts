@@ -46,8 +46,6 @@ export interface BuildWorkerEntryFacts {
 	now: string;
 	parentPid: number;
 	parentSessionId?: string;
-	tmuxSession?: string;
-	tmuxPanePid?: number;
 	taskRef?: string;
 	taskSummary?: string;
 }
@@ -64,8 +62,6 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 		parentPid: facts.parentPid,
 	};
 	if (facts.parentSessionId !== undefined) entry.parentSessionId = facts.parentSessionId;
-	if (facts.tmuxSession !== undefined) entry.tmuxSession = facts.tmuxSession;
-	if (facts.tmuxPanePid !== undefined) entry.tmuxPanePid = facts.tmuxPanePid;
 	if (facts.taskRef !== undefined) entry.taskRef = facts.taskRef;
 	if (facts.taskSummary !== undefined) entry.taskSummary = facts.taskSummary;
 	return entry;

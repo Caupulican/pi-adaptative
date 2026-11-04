@@ -63,8 +63,6 @@ export interface ProcessMatrixEntry extends ProcessOwner {
 	/** Worker-only: the pid of the process that launched this one. */
 	parentPid?: number;
 	parentSessionId?: string;
-	tmuxSession?: string;
-	tmuxPanePid?: number;
 	taskRef?: string;
 	taskSummary?: string;
 	windDownReason?: WindDownReason;

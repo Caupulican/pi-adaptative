@@ -15,7 +15,7 @@ import {
 	type WorkerModelRouteSource,
 } from "../orchestration/contracts.ts";
 
-export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
+export type LaneType = "research" | "worker" | "learning" | "managed-worker";
 
 export type LaneTerminalStatus =
 	| "succeeded"
@@ -87,7 +87,7 @@ export interface LaneRecord {
 	routePinSource?: string;
 }
 
-const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];
+const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "managed-worker"];
 const TERMINAL_STATUSES: readonly string[] = [
 	"succeeded",
 	"partial",
