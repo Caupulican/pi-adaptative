@@ -183,12 +183,12 @@ export function createPythonToolDefinition(
 	return {
 		name: "python",
 		label: "python",
-		description: `Run a bounded Python snippet or script without a shell. Pi resolves Python through uv, defaults to a ${DEFAULT_PYTHON_TIMEOUT_SECONDS}-second wall-clock timeout (maximum ${MAX_PYTHON_TIMEOUT_SECONDS}), streams bounded stdout/stderr, and spills truncated full output to the process work directory rather than the repository.`,
-		promptSnippet: "Run bounded Python code/scripts through Pi's uv runtime.",
+		description:
+			"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to the process work directory, not the repository.",
+		promptSnippet: "Run Python code or a script (no shell)",
 		promptGuidelines: [
-			"Use python for bounded scripts/data transforms/cross-platform logic clearer than shell.",
-			"Small exact source edits: read/edit/write. Python transforms: preserve encoding/newlines, write atomically, verify diff.",
-			"Scope roots/filters; never scan home/filesystem recursively. Raise timeout only for justified bounded work.",
+			"Python file transforms: preserve encoding and newlines, write atomically, verify the diff.",
+			"Never scan the home directory or filesystem recursively.",
 			"Never inspect/print credentials; use activated environment only through credential consumer.",
 		],
 		parameters: pythonSchema,

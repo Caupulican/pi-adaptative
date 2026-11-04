@@ -14,37 +14,37 @@ export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
 export const MAX_COMMAND_TIMEOUT_SECONDS = 3600;
 
 export const bashSchema = Type.Object({
-	command: Type.String({ description: "Shell command to execute" }),
+	command: Type.String(),
 	repairOf: Type.Optional(
 		Type.String({
 			maxLength: MAX_VERIFICATION_ID_LENGTH,
 			pattern: VERIFICATION_ID_PATTERN.source,
 			description:
-				"Active verification id whose empty-test setup error this corrected invocation repairs. The host requires matching test arguments within this workspace and an executed pass; actual test failures cannot be replaced this way.",
+				"Active verification id whose empty-test setup error this corrected invocation repairs; test arguments must match and the run must pass.",
 		}),
 	),
 	timeout: Type.Optional(
 		Type.Number({
 			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
-			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS} (${MAX_COMMAND_TIMEOUT_SECONDS} for a background run); positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
+			description: `Wall-clock timeout in seconds, not milliseconds. Default ${DEFAULT_COMMAND_TIMEOUT_SECONDS} (${MAX_COMMAND_TIMEOUT_SECONDS} for a background run); also bounds commands that keep producing output.`,
 		}),
 	),
 	background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run as a session task at once and return its task id instead of waiting. It runs in its own shell started from the session's current directory (its cd and exports do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Its result arrives in the completion wake-up; tool_task wait is only for an omitted output (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
+				"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own shell from the current directory (cd and exports do not persist) and waits only for file writes emitted earlier in this message. Use only when other work can proceed meanwhile, never followed by an immediate tool_task wait; without the tool_task tool it runs in the foreground.",
 		}),
 	),
 	broadSearch: Type.Optional(
 		Type.Literal(BROAD_SEARCH_OUTPUT_ROUTE, {
 			description:
-				"Explicit override for a broad rg/grep/find/fd scan that cannot be narrowed. The command runs, but its complete output is routed to a file and excluded from model context.",
+				"Route a broad rg/grep/find/fd scan's complete output to a file, excluded from model context; detected broad scans are routed automatically.",
 		}),
 	),
 	fullOutput: Type.Optional(
 		Type.Boolean({
 			description:
-				"Return the complete raw output for this call: no output filters (test projection, family reducers, generic cleaning). Use only when the filtered notice says lines were omitted and you need them verbatim; the persisted full output named in the notice is usually enough.",
+				"Return complete raw output with no filters; use only when the notice says lines were omitted and the persisted file is not enough.",
 		}),
 	),
 });

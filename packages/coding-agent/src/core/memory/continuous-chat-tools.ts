@@ -19,7 +19,10 @@ import {
 	parseContinuousChatNavigationCommand,
 	renderContinuousChatNavigationResult,
 } from "./continuous-chat-navigation.ts";
-import { CONTINUOUS_CHAT_TOOL_DEFINITIONS } from "./continuous-chat-prompt.ts";
+import {
+	CONTINUOUS_CHAT_TOOL_DEFINITIONS,
+	CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION,
+} from "./continuous-chat-prompt.ts";
 import { memoryFailure } from "./history-tool.ts";
 import { TRANSCRIPT_RECALL_RESULT_MARKER } from "./transcript-memory-contracts.ts";
 import { CONTINUOUS_CHAT_DATE_TOOL_NAME, CONTINUOUS_CHAT_ZOOM_TOOL_NAME } from "./worker-memory-tools.ts";
@@ -58,12 +61,8 @@ function describeTool(name: ContinuousChatNavigationToolName): string {
 	return definition.description;
 }
 
-const ZOOM_N_PARAMETER = Type.Optional(
-	Type.Integer({ minimum: 1, description: "Messages covered by the line; a power of 2" }),
-);
-const ZOOM_PAGE_PARAMETER = Type.Optional(
-	Type.Integer({ minimum: 0, description: "Page of a long message or agent chat, from 0" }),
-);
+const ZOOM_N_PARAMETER = Type.Optional(Type.Integer({ minimum: 1, description: "Messages covered by the line" }));
+const ZOOM_PAGE_PARAMETER = Type.Optional(Type.Integer({ minimum: 0, description: "Page of a long text, from 0" }));
 const ZOOM_PARAMETERS = Type.Object(
 	{
 		id: Type.Union(
@@ -72,7 +71,7 @@ const ZOOM_PARAMETERS = Type.Object(
 				Type.String({ minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS }),
 			],
 			{
-				description: "Message id (with n), current-session agent name, or exact worker-ref transcript reference",
+				description: "Message id (with n), agent name, or worker-ref reference",
 			},
 		),
 		n: ZOOM_N_PARAMETER,
@@ -181,22 +180,22 @@ export function createContinuousChatNavigationTools(
 	execute: ContinuousChatNavigationExecutor,
 	options: { agentLogs: boolean },
 ): ToolDefinition[] {
-	const messageIdsOnly = options.agentLogs
-		? ""
-		: " Workers take message ids only; private worker logs stay root-readable.";
+	const zoomDescription = options.agentLogs
+		? describeTool(CONTINUOUS_CHAT_ZOOM_TOOL_NAME)
+		: CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION;
 	return [
 		navigationTool(
 			CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
 			"Chat Zoom",
-			"Open a line of the chat view into its two lines, one message whole, or an agent's chat log.",
+			options.agentLogs ? "Expand a chat line, a message or an agent's chat" : "Expand a chat line or a message",
 			options.agentLogs ? ZOOM_PARAMETERS : MESSAGE_ZOOM_PARAMETERS,
-			`${describeTool(CONTINUOUS_CHAT_ZOOM_TOOL_NAME)}${messageIdsOnly}`,
+			zoomDescription,
 			execute,
 		),
 		navigationTool(
 			CONTINUOUS_CHAT_DATE_TOOL_NAME,
 			"Chat Date",
-			"Read the date and time of one message in the chat.",
+			"Date and time of a chat message",
 			DATE_PARAMETERS,
 			describeTool(CONTINUOUS_CHAT_DATE_TOOL_NAME),
 			execute,

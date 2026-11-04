@@ -31,7 +31,7 @@ const decisionLedgerReadSchema = Type.Object({
 		],
 		{
 			description:
-				"'sessions': recorded sessions in this working directory, newest first. 'stages': the stage transitions of a session (this one by default). 'evaluations': recent Jev evaluations of a session with verdicts and reasons. 'failures': failed evaluations even when newer successes fill the recent results. 'replay': stages and evaluations of a session together, the graph as recorded.",
+				"'sessions': recorded sessions in this working directory, newest first. 'stages': a session's stage transitions (default: this session). 'evaluations': recent System One evaluations with verdicts and reasons. 'failures': failed or unavailable evaluations, even when newer successes fill the recent results. 'replay': stages and evaluations together, as recorded.",
 		},
 	),
 	sessionId: Type.Optional(
@@ -112,8 +112,8 @@ export function createDecisionLedgerReadToolDefinition(
 		label: DECISION_LEDGER_READ_TOOL_NAME,
 		readOnly: true,
 		description:
-			"Read the decision ledger: the stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with their times and loops, and the Jev evaluations with their verdicts and reasons, for this session or a recorded one. Use 'failures' to find rejected or unavailable evaluations beyond recent successes; 'replay' returns a past session's graph as recorded.",
-		promptSnippet: "Read the decision ledger: stage transitions and Jev verdicts of this or a recorded session",
+			"Read the decision ledger: stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with times and loops, and System One evaluations with verdicts and reasons, for this session or a recorded one.",
+		promptSnippet: "Read stage transitions and System One verdicts of a session",
 		parameters: decisionLedgerReadSchema,
 		async execute(_toolCallId, { action, sessionId, limit }: DecisionLedgerReadToolInput) {
 			let ledger: DecisionLedgerStore | undefined;

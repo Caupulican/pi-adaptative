@@ -2,14 +2,13 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ScoutRunResult } from "../scout-controller.ts";
 
-export const CONTEXT_SCOUT_GUIDANCE = `context_scout: delegate repository exploration to a fast read-only scout. Use it BEFORE editing/answering when the answer spans more than ~3 files or requires tracing logic across modules ("how does X work", "what calls Y", "what breaks if Z changes"). Do NOT use it for: a file you already read this session; a single obvious grep in a known file; pure generation with no exploration. The scout returns a summary plus file:line citations — read the cited regions yourself before acting on them.`;
+export const CONTEXT_SCOUT_GUIDANCE =
+	"Use before editing/answering when the answer spans over ~3 files or traces logic across modules; read cited regions before acting.";
 
 const contextScoutSchema = Type.Object(
 	{
-		query: Type.String({ minLength: 8, description: "Repository exploration question for the read-only scout." }),
-		maxTurns: Type.Optional(
-			Type.Number({ minimum: 1, maximum: 12, description: "Scout turn budget, clamped to 1-12." }),
-		),
+		query: Type.String({ minLength: 8 }),
+		maxTurns: Type.Optional(Type.Number({ minimum: 1, maximum: 12, description: "Scout turn budget." })),
 	},
 	{ additionalProperties: false },
 );
@@ -29,8 +28,8 @@ export function createContextScoutToolDefinition(deps: ContextScoutToolDependenc
 		name: "context_scout",
 		label: "context_scout",
 		description:
-			"Scout repository context with a bounded read-only subagent that returns validated file:line citations.",
-		promptSnippet: "Delegate broad repository exploration to the read-only context_scout tool.",
+			"Delegate repository exploration to a bounded read-only scout subagent; returns a summary with validated file:line citations. Skip it for a file already read, a single grep in a known file, or pure generation.",
+		promptSnippet: "Read-only repository exploration by a scout subagent",
 		promptGuidelines: [CONTEXT_SCOUT_GUIDANCE],
 		parameters: contextScoutSchema,
 		async execute(_toolCallId, input: ContextScoutToolInput, signal) {

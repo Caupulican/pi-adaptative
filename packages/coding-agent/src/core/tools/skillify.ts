@@ -11,10 +11,10 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const skillifySchema = Type.Object({
 	name: Type.String({
-		description: `Skill name (lowercase, a-z 0-9 hyphens only, max ${MAX_SKILL_NAME_LENGTH} chars)`,
+		description: `lowercase a-z, 0-9 and hyphens; max ${MAX_SKILL_NAME_LENGTH} chars`,
 	}),
-	description: Type.String({ description: `Skill description (max ${MAX_SKILL_DESCRIPTION_LENGTH} chars)` }),
-	body: Type.String({ description: "Skill body/implementation code" }),
+	description: Type.String({ description: `max ${MAX_SKILL_DESCRIPTION_LENGTH} chars` }),
+	body: Type.String({ description: "markdown skill body" }),
 });
 
 export type SkillifyInput = Static<typeof skillifySchema>;
@@ -50,14 +50,8 @@ export function createSkillifyToolDefinition(
 		name: "skillify",
 		label: "Skillify",
 		description:
-			"Validate a draft skill and audit for overlaps with existing skills. Pure analysis tool: generates a proposal with validation and audit report, but does NOT write files or activate the skill. Returns structured report with proposed install path.",
-		promptSnippet: "Validate and audit a draft skill",
-		promptGuidelines: [
-			"Use skillify to validate and audit draft skills before creating them.",
-			"When MEMORY.md holds a repeatable procedure, draft a skill from that procedure instead of leaving it as a fact.",
-			"Fix validation errors (name format, description length) and review audit findings before proceeding.",
-			"The tool returns a proposal only; persistent write and activation happen later.",
-		],
+			"Validate a draft skill and check it for overlap with existing skills before creating it. Proposal only: nothing is written or activated; the report names the install path.",
+		promptSnippet: "Validate a draft skill and check its overlaps",
 		parameters: skillifySchema,
 		async execute(
 			_toolCallId,

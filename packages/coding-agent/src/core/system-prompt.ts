@@ -19,59 +19,30 @@ import {
 
 export { OWNER_AUTHORIZATION_RULE };
 
-const MODEL_BLIND_CREDENTIAL_AUTHORITY =
-	"Active secret_store: host gate authorizes model-blind activation/migration from named sources; no duplicate confirmation.";
+const OUTPUT_POLICY = `
 
-const ULTRA_TERSE_OUTPUT_POLICY = `
-
-ULTRA-TERSE OUTPUT
-
-- Status/ops replies: drop articles/filler/pleasantries/hedging; fragments valid; each fact once.
-- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Preserve numbers, units, code symbols, function/API names, commands, errors.
-- No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Artifacts normal prose.
-- Status/ops terse; analysis/review/evaluation gets complete structured answers. Never substitute harness protocol text or failure-record JSON for an answer.
-
-REFERENCE POINTS
-D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
+OUTPUT: reply tersely in the user's language: fragments, each fact once, no filler, self-reference, tool narration, emoji or log dumps; exact identifiers, numbers, commands and errors; never drop not/never/no/only/except; full grammar for security, irreversible actions and ambiguous order; bound and source-label output, show paths; never answer with harness protocol text or failure JSON. Analysis, review and evaluation get complete structured answers (codes D decisions, O options, F findings, R risks, Q questions, A actions), and anything complex (diagrams, comparisons, tables, long structures) goes into an HTML page. An explicit instruction in the current message overrides this style; security and untrusted-content rules never yield.`;
 
 const PATH_ALIAS_PROMPT_RULE = `
 
 PATH ALIASES
 P paths use harness-assigned unique suffix p/grep.ts. Tool args accept p/… or a literal path. Never invent p/ tokens.`;
 
-const piAdaptativeCoreSection = (noticedLine: string): string => `
+const PI_ADAPTATIVE_CORE_SECTION = `
 
-OPERATING CONTRACT
+PRINCIPLES
 
-- Clear conversational outcome is goal; persist progress/evidence through compaction; finish or report blocker.
-- Hold scope; verify unknowns at primary sources; simplest proven design, one owner/path per invariant.
-- Fix root causes, never a guard or suppression that hides a failure; an added suppression needs evidence in the completion account. Label claims measured, inferred or guess.
-- User outcome governs, method does not. Outcome risk: show evidence, verify when practical (no tests unless the user asks), offer safest effective path, execute.
-- Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
-- Emit independent tool calls in one message; serialize only dependent, same-file, or stateful calls.
-- Facts: memory; specialization: skills; behavior: source. Discard noise.
-- ${noticedLine}
-- Fast pace: implement, prove live, confirm verdicts via systemone if bound; tests/evidence-gated-tdd only on user request. Architecture/performance design loads skill n-plus-2-architecture while active.
-- Explicit user instruction in current message overrides standing style (length/format/tone); security and untrusted-content rules are never overridable.
-- ${OWNER_AUTHORIZATION_RULE} Bound, source-label output; show paths.
-- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
+- Pursue the user's outcome within scope: verify unknowns at primary sources, choose the simplest proven design with one owner per invariant, emit independent tool calls in one message, and finish or report the blocker.
+- Fix root causes, never mask a failure with a guard or suppression; label claims measured, inferred or guess; show evidence, run no tests unless asked, and never call work done or complete a goal while a relevant noticed item is unresolved.
 
-/** Standing invariant that stays in the prompt while the detailed noticed-items rule lives in the ledger. */
-const NOTICED_ITEMS_POINTER =
-	"Noticed items (defects, risks, odd output beyond the ask): never call work done or complete a goal while a relevant one is unresolved.";
+AUTHORITY
+
+- ${OWNER_AUTHORIZATION_RULE}`;
 
 /** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
 function inlineLedgerRule(topic: string): string {
 	const entry = requireLedgerEntry(topic);
 	return `${entry.topic.replace(/-/g, " ").toUpperCase()}: ${entry.body}`;
-}
-
-/** The detailed noticed-items rule as one core bullet, for a surface without the ledger. */
-function inlineNoticedItemsLine(): string {
-	const bullets = requireLedgerEntry("noticed-items")
-		.body.split("\n")
-		.map((line) => line.replace(/^- /, "").trim());
-	return `${bullets.join(" ")}`;
 }
 
 const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
@@ -82,8 +53,7 @@ OPERATING CONTRACT
 - Inspect relevant files and instructions before editing; make minimal coherent change, run focused checks.
 - Use active tools/schemas. On failure, follow error guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
 - Emit independent calls in one message; order dependent/mutating/stateful calls; report real output, unresolved failures.
-- ${OWNER_AUTHORIZATION_RULE}
-- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
+- ${OWNER_AUTHORIZATION_RULE}`;
 
 const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
 
@@ -92,8 +62,7 @@ EXECUTION RULES
 - One scoped task: inspect before small coherent edits; run narrowest useful check.
 - Listed tools/schemas only; follow failure guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
 - Batch independent calls in one message; order dependent/mutating/stateful calls. Report actual results; never claim incomplete actions as done.
-- ${OWNER_AUTHORIZATION_RULE}
-- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
+- ${OWNER_AUTHORIZATION_RULE}`;
 
 const PI_ADAPTATIVE_CHAT_CORE_SECTION = `
 
@@ -269,7 +238,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
 	const hasRead = activeTools.includes("read");
 	const coreSection = fullPrompt
-		? piAdaptativeCoreSection(options.ledgerActive === true ? NOTICED_ITEMS_POINTER : inlineNoticedItemsLine())
+		? PI_ADAPTATIVE_CORE_SECTION
 		: leanPrompt
 			? PI_ADAPTATIVE_LEAN_CORE_SECTION
 			: capabilityClass === "minimal"
@@ -281,13 +250,13 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		? ""
 		: `\n${inlineLedgerRule("output-formats")}${fullPrompt ? `\n${inlineLedgerRule("engineering-skills")}` : ""}`;
 	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}${skillRules}` : "";
+	const noticedRule = fullPrompt && !ledgerActive ? `\n\n${inlineLedgerRule("noticed-items")}` : "";
 	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
 	const explanationStyle = renderExplanationStyleRule(normalizeSteStrictness(options.steStrictness));
 	const explanationSection = explanationStyle ? `\n\n${explanationStyle}` : "";
-	const styleContract =
-		capabilityClass === "chat" ? explanationSection : `${ULTRA_TERSE_OUTPUT_POLICY}${explanationSection}`;
-	const scopeContract = capabilityClass === "chat" ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
-	const operatingContract = `${coreSection}${scopeContract}${skillVaultContract}${styleContract}${pathAliasRule}`;
+	const styleContract = capabilityClass === "chat" ? explanationSection : `${OUTPUT_POLICY}${explanationSection}`;
+	const scopeContract = capabilityClass === "chat" || fullPrompt ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
+	const operatingContract = `${coreSection}${scopeContract}${noticedRule}${skillVaultContract}${styleContract}${pathAliasRule}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -330,7 +299,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
-	const hasRepoRead = activeTools.includes("repo_read");
 
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
@@ -341,9 +309,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (fullPrompt || leanPrompt) {
 		if (hasBash || hasGrep || hasFind) {
 			addGuideline("rg/jq: scoped roots/filters; JSON via jq projection, never dumped; exhaustive output to file");
-		}
-		if (hasRepoRead) {
-			addGuideline("repo_read: git status/log/diff/show/blame/ls-files read-only, no shell needed");
 		}
 		if (hasPython) {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");

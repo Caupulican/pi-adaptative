@@ -2,7 +2,7 @@ import { Type } from "typebox";
 
 export const ListPeersParameters = Type.Object(
 	{
-		includeSelf: Type.Optional(Type.Boolean({ description: "Include the current Pi agent in the peer list." })),
+		includeSelf: Type.Optional(Type.Boolean({ description: "Include this agent." })),
 	},
 	{ additionalProperties: false },
 );

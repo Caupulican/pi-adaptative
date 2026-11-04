@@ -2,9 +2,9 @@ import { type Static, Type } from "typebox";
 import type { TruncationResult } from "../../../kernel/utils/truncate.ts";
 
 export const lsSchema = Type.Object({
-	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
-	metadata: Type.Optional(Type.Boolean({ description: "Include file size and permission metadata (default: false)" })),
+	path: Type.Optional(Type.String({ description: "Directory (default: current directory)" })),
+	limit: Type.Optional(Type.Number()),
+	metadata: Type.Optional(Type.Boolean({ description: "Include file size and permissions" })),
 });
 
 export type LsToolInput = Static<typeof lsSchema>;

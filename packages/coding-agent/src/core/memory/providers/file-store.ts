@@ -103,32 +103,27 @@ export function supersedeNearDuplicateLine(existing: string, content: string): s
 }
 
 const memoryFields = Type.Object({
-	action: Type.Enum([...ROOT_MEMORY_WRITE_ACTIONS, ...ROOT_MEMORY_READ_ACTIONS], {
-		description:
-			"Action to perform: add new content, replace existing content, remove content, list current memory, or read-only history recall (history_search finds past conversation evidence, history_source opens one cited source exactly, history_expand opens one summary node into its children or covered sources)",
-	}),
+	action: Type.Enum([...ROOT_MEMORY_WRITE_ACTIONS, ...ROOT_MEMORY_READ_ACTIONS]),
 	target: Type.Optional(
 		Type.Union([Type.Literal("memory"), Type.Literal("project"), Type.Literal("user"), Type.Literal("okf")], {
 			description:
-				"Target: 'project' (default) for this project's MEMORY.md, 'memory' for the general MEMORY.md (facts true in any task), 'user' for USER.md preferences, or 'okf' for structured project records",
+				"'project' (default): this project's MEMORY.md (paths, tickets, branches, build steps); 'memory': general MEMORY.md (facts true in any repo or task); 'user': USER.md preferences; 'okf': structured project records",
 		}),
 	),
 	content: Type.Optional(
 		Type.String({
 			maxLength: OKF_MEMORY_LIMITS.bodyChars,
-			description: "Content to write (required for add/replace)",
+			description: "Content to write",
 		}),
 	),
 	title: Type.Optional(
 		Type.String({
 			minLength: 1,
 			maxLength: OKF_MEMORY_LIMITS.titleChars,
-			description: "Structured OKF title (required when target is 'okf')",
+			description: "okf only",
 		}),
 	),
-	oldContent: Type.Optional(
-		Type.String({ description: "Exact substring to replace or remove (required for 'replace' or 'remove')" }),
-	),
+	oldContent: Type.Optional(Type.String({ description: "Exact substring to replace or remove" })),
 	type: Type.Optional(
 		Type.Union(
 			PI_OKF_TYPES.map((value) => Type.Literal(value)) as [
@@ -136,7 +131,7 @@ const memoryFields = Type.Object({
 				...ReturnType<typeof Type.Literal>[],
 			],
 			{
-				description: "Structured OKF type (required when target is 'okf')",
+				description: "okf only",
 			},
 		),
 	),
@@ -144,19 +139,18 @@ const memoryFields = Type.Object({
 		Type.String({
 			minLength: 1,
 			maxLength: OKF_MEMORY_LIMITS.descriptionChars,
-			description: "Structured OKF summary (required when target is 'okf')",
+			description: "okf only: summary",
 		}),
 	),
 	scope: Type.Optional(
 		Type.Union([Type.Literal("project"), Type.Literal("global")], {
 			description:
-				"Structured OKF records are project-scoped. For target 'user': 'global' (default) applies everywhere, 'project' only inside this repository",
+				"okf records are project-scoped. user: 'global' (default) applies everywhere, 'project' only in this repository",
 		}),
 	),
 	basis: Type.Optional(
 		Type.Union([Type.Literal("explicit"), Type.Literal("inferred")], {
-			description:
-				"Target 'user' only: 'explicit' when the owner's own cited words ask for the preference, otherwise 'inferred'",
+			description: "user only: 'explicit' when the owner's own cited words ask for the preference, else 'inferred'",
 		}),
 	),
 	evidence: Type.Optional(
@@ -169,17 +163,17 @@ const memoryFields = Type.Object({
 				}),
 				quote: Type.Optional(Type.String({ minLength: 1, maxLength: 400, description: "Verbatim owner words" })),
 			}),
-			{ maxItems: 16, description: "Target 'user' only: owner sources supporting the preference" },
+			{ maxItems: 16, description: "user only: owner sources supporting the preference" },
 		),
 	),
 	expectedRevision: Type.Optional(
-		Type.Integer({ minimum: 1, description: "Target 'user' replace/remove: the revision the write is based on" }),
+		Type.Integer({ minimum: 1, description: "user replace/remove: the revision the write is based on" }),
 	),
 	tags: Type.Optional(
 		Type.Array(Type.String({ minLength: 1, maxLength: OKF_MEMORY_LIMITS.tagChars }), {
 			maxItems: OKF_MEMORY_LIMITS.tagCount,
 			uniqueItems: true,
-			description: "Structured OKF tags",
+			description: "okf only",
 		}),
 	),
 	evidenceRefs: Type.Optional(
@@ -187,11 +181,11 @@ const memoryFields = Type.Object({
 			minItems: 1,
 			maxItems: OKF_MEMORY_LIMITS.evidenceRefCount,
 			uniqueItems: true,
-			description: "Evidence references for structured OKF",
+			description: "okf only",
 		}),
 	),
 	expectedDigest: Type.Optional(
-		Type.String({ pattern: "^[a-f0-9]{64}$", description: "Optional conflict guard for structured removal" }),
+		Type.String({ pattern: "^[a-f0-9]{64}$", description: "okf remove only: optional conflict guard" }),
 	),
 	...HISTORY_TOOL_PROPERTIES,
 });
@@ -326,7 +320,7 @@ interface HotMemoryRemovalResult {
 export const MEMORY_OMITTED_FACTS_NOTE = "not shown within this model's approximate token budget";
 
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
-	"[System Note: Below is a snapshot of persistent memory. Record verified reusable facts with the 'memory' tool by scope: target 'memory' = general facts true in any repo or task; target 'project' (the default) = facts true only for this project (paths, tickets, branches, build steps); target 'user' = preferences; target 'okf' = durable structured records (decisions, architecture, findings). A memory write that names a path, ticket key or branch belongs in 'project'. Never store transient noise.]";
+	"[System Note: Snapshot of persistent memory; the 'memory' tool records verified reusable facts.]";
 /** Generous UTF-8 byte safety ceiling for stored memory files; rejects only resource-overflow writes. */
 const MEMORY_DRIFT_RECOVERY =
 	"The file was edited outside the managed write protocol. Repeating a mutation cannot reconcile drift and managed-state metadata must not be edited. The operator resolves it: /memory drift lists the managed files, /memory accept <memory|project|user> adopts the on-disk content as the managed revision, /memory restore <target> brings the last managed content back (the drifted file is kept as a backup). Tell the operator which one the edit deserves; do not retry.";
@@ -1873,12 +1867,10 @@ export class FileStoreProvider implements MemoryProvider {
 			{
 				name: ROOT_MEMORY_TOOL_NAME,
 				label: "Persistent Memory Manager",
-				description: `Add, replace, or remove durable facts and preferences. Use target 'okf' with structured metadata for durable project decisions, architecture, rules, debugging findings, and references; USER.md overflow is migrated into indexed OKF shards. ${HISTORY_TOOL_DESCRIPTION}`,
-				promptSnippet: "Persist verified facts; route durable project knowledge to structured OKF records.",
+				description: `Add, replace, remove or list durable facts and preferences. Use target 'okf' for durable project decisions, architecture, rules, debugging findings and references. ${HISTORY_TOOL_DESCRIPTION}`,
+				promptSnippet: "Write durable memory; recall past conversations",
 				promptGuidelines: [
-					"OKF=project decisions/rules/findings with type,title,summary,body,evidenceRefs; MEMORY=hot facts; USER=preferences.",
-					"USER writes carry scope (global|project), basis (explicit only for the owner's own cited words, else inferred) and evidence [{source, quote}] from the owner evidence ids in the reflection cue; a one-off task instruction is not a preference.",
-					"Workers gather evidence read-only; only the parent or its reflection writes memory. Repeatable procedures become skills via skillify.",
+					"A one-off task instruction is not a preference, and a repeatable procedure is not a fact: draft it as a skill with skillify.",
 					HISTORY_TOOL_GUIDELINE,
 				],
 				parameters: memorySchema,

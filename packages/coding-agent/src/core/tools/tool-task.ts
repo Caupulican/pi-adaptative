@@ -12,23 +12,22 @@ const schema = Type.Object(
 	{
 		action: Type.String({
 			enum: ["list", "wait", "image", "cancel"],
-			description: "List once, wait once for a dependency, view a retained image, or cancel. Never poll.",
 		}),
 		taskId: Type.Optional(
 			Type.String({
 				maxLength: MAX_TASK_ID_CHARS,
-				description: "Task id; required for wait/cancel.",
+				description: "Task id; required for every action except list.",
 			}),
 		),
 		timeoutMs: Type.Optional(
 			Type.Integer({
 				minimum: 1000,
 				maximum: MAX_WAIT_TIMEOUT_MS,
-				description: "How long wait may block, in ms; default 300000.",
+				description: "wait only: maximum block in ms (default 300000).",
 			}),
 		),
 		imageIndex: Type.Optional(
-			Type.Integer({ minimum: 1, description: "For image: one-based image number (default 1)." }),
+			Type.Integer({ minimum: 1, description: "image only: 1-based image number (default 1)." }),
 		),
 	},
 	{ additionalProperties: false },
@@ -111,13 +110,10 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		name: "tool_task",
 		label: "tool_task",
 		description:
-			"List, wait for, view retained images from, or cancel this session's background tool calls. list shows status only; wait blocks until the task ends or timeoutMs (default 300000), never poll. image retrieves one stored image by taskId and imageIndex, resizing large images for display. Cite a completed taskId as goal evidence or task_steps evidence.",
-		promptSnippet: "Event-driven background tool control; wait once, never poll.",
+			"List, wait for, cancel, or view retained images from this session's background tool calls. list shows status only; wait blocks until the task ends or timeoutMs; image returns one stored image by taskId and imageIndex, resized for display.",
+		promptSnippet: "Background tool calls: list, wait, image, cancel",
 		promptGuidelines: [
-			"A completion wake-up carries the result; wait once with taskId only for a task it marks output omitted.",
-			"list reports status only and never consumes a pending completion; the wake-up still carries the output afterwards.",
-			"When a result names retained images, use action=image and its taskId with imageIndex (1-based) to view each image.",
-			"Cite the taskId on the matching task_steps step and as goal add_evidence kind=tool uri.",
+			"The completion wake-up carries the result; wait once, only for a dependency or a task marked output omitted. Never poll.",
 		],
 		parameters: schema,
 		foregroundWait: (input) => input.action === "wait",

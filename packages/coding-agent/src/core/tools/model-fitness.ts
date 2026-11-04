@@ -6,8 +6,7 @@ import { formatModelFitnessReport } from "../research/model-fitness.ts";
 const modelFitnessSchema = Type.Object(
 	{
 		model: Type.String({
-			description:
-				'Model pattern to probe, e.g. "ollama/qwen3:0.6b" or any registered provider/model pattern. The model must be registered and authenticated.',
+			description: 'Registered, authenticated provider/model pattern, e.g. "ollama/qwen3:0.6b".',
 		}),
 		trials: Type.Optional(
 			Type.Number({
@@ -47,10 +46,9 @@ export function createModelFitnessToolDefinition(deps: ModelFitnessToolDependenc
 		name: "model_fitness",
 		label: "model_fitness",
 		description:
-			"Probe whether a candidate model can drive the harness's subagent contracts: runs the real research-lane, delegated-worker, and routing-judge runners against the model and reports parse/success rates, judge discrimination, latency, and probe cost. Use it to evaluate small/local models (e.g. Ollama) before configuring them as lane or judge models.",
-		promptSnippet: "Benchmark model against research/worker/judge contracts.",
+			"Probe whether a candidate model can drive the harness's subagent contracts: runs the real research-lane, delegated-worker and routing-judge runners against it and reports parse/success rates, judge discrimination, latency and probe cost. Use it on small or local models (e.g. Ollama) before pinning one in a worker profile, researchLane.model or as a judge.",
+		promptSnippet: "Benchmark a model against research/worker/judge contracts.",
 		promptGuidelines: [
-			"Use before pinning model in worker profile, researchLane.model.",
 			"Lane: high research/worker success. Judge: trivial cheap, planning elevated.",
 			"Probes spend real tokens; prefer local/free models or few trials.",
 		],

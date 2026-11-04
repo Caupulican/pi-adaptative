@@ -38,15 +38,13 @@ const pipelineSchema = Type.Object(
 				Type.Literal("increment"),
 				Type.Literal("abandon"),
 			],
-			{ description: "list definitions; start a run; status from output/; increment current; abandon." },
+			{ description: "start needs name; status reads the output/ files." },
 		),
-		name: Type.Optional(Type.String({ minLength: 1, maxLength: 64, description: "Definition name for start." })),
+		name: Type.Optional(Type.String({ minLength: 1, maxLength: 64, description: "Definition to start." })),
 		runId: Type.Optional(
 			Type.String({ minLength: 1, maxLength: 128, description: "Run id. Defaults to the active run." }),
 		),
-		goalId: Type.Optional(
-			Type.String({ minLength: 1, maxLength: 128, description: "Optional goal to join on start." }),
-		),
+		goalId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Goal to join on start." })),
 	},
 	{ additionalProperties: false },
 );
@@ -159,14 +157,8 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 		name: "pipeline",
 		label: "Pipeline",
 		description:
-			"Run an ICM folder pipeline: numbered stages, load only the current contract, increment when output/ has files.",
-		promptSnippet: "Walk a folder pipeline one stage at a time.",
-		promptGuidelines: [
-			"Use for repeating sequential workflows with stage folders. Status is output/ files, not chat memory.",
-			"increment completes the current stage then starts the next. Write outputs first. No Review-now latch.",
-			"Pipeline task_steps require active pipelineRunId+pipelineStageId; clearPipelineLink removes both; unlinked steps do not gate increment.",
-			"Use task_steps advance for checklists, goal increment for requirements, delegate for concurrent work.",
-		],
+			"Run an ICM folder pipeline for repeating sequential workflows: numbered stages, only the current stage contract loaded. increment completes the current stage once its output/ has files and starts the next.",
+		promptSnippet: "Folder pipelines: list, start, status, increment, abandon.",
 		parameters: pipelineSchema,
 		executionMode: "sequential",
 		renderShell: "self",

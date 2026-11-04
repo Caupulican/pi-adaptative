@@ -93,8 +93,8 @@ export function createLsToolDefinition(
 		name: "ls",
 		label: "ls",
 		readOnly: true,
-		description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${DEFAULT_LIMIT} entries or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Batchable: emit alongside other independent calls in one message; never spend a turn per read.`,
-		promptSnippet: "List directory contents",
+		description: `List a directory: entries sorted alphabetically, '/' suffix for directories, dotfiles included. Output is truncated to ${DEFAULT_LIMIT} entries (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+		promptSnippet: "List a directory",
 		parameters: lsSchema,
 		failureRecovery: {
 			actions: failureRecoveryAuthority

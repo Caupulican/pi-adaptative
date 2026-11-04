@@ -49,17 +49,10 @@ lines are committed history, not missing messages. Open the pending lines needed
 for the user's request with zoom; do not wait for the compactor or assume that
 an unsummarized line contains nothing relevant.
 
-Tools:
-- zoom(id, n) opens line id+n into the two lines it was made from;
-- zoom(id, 1) gives message id whole, with its images
-- zoom("Name") gives a current-session agent's chat
-- zoom("worker-ref:...") opens the exact transcript named in a work report,
-  even across sessions or worktrees. Copy the whole reference exactly.
-- date(id) gives the date and time of message id
-
-Agent names repeat across sessions. For historical work, use its worker-ref
-reference, never a name alone. Older reports may have no reference; their names
-do not identify a historical transcript reliably.
+Agent names repeat across sessions. For historical work, copy the whole
+worker-ref reference of a work report exactly, never a name alone. Older reports
+may have no reference; their names do not identify a historical transcript
+reliably.
 
 # Turns
 
@@ -147,26 +140,33 @@ export interface ContinuousChatToolDefinition {
 	parameters: ContinuousChatToolSchemaNode;
 }
 
+/** What every `zoom` reads: the chat view's lines and messages. */
+export const CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION =
+	"Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole, with its images. n is a power of 2, and id a multiple of n. A long message comes in pages.";
+
+/** What only the root's `zoom` also reads: an agent's chat log. */
+export const CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION =
+	'zoom("Name") reads a current-session agent; zoom("worker-ref:...") reads the exact transcript named in a work report, even across sessions or worktrees.';
+
 /** The two tools in fixed order: zoom, then date. */
 export const CONTINUOUS_CHAT_TOOL_DEFINITIONS: readonly ContinuousChatToolDefinition[] = [
 	{
 		name: "zoom",
-		description:
-			'Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. n is a power of 2, and id a multiple of n. A long message comes in pages. zoom("Name") reads a current-session agent; zoom("worker-ref:...") reads the exact historical transcript named in a work report.',
+		description: `${CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION} ${CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION}`,
 		parameters: {
 			type: "object",
 			additionalProperties: false,
 			required: ["id"],
 			properties: {
 				id: {
-					description: "Message id (with n), current-session agent name, or exact worker-ref transcript reference",
+					description: "Message id (with n), agent name, or worker-ref reference",
 					anyOf: [
 						{ type: "integer", minimum: 0 },
 						{ type: "string", minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS },
 					],
 				},
-				n: { type: "integer", minimum: 1, description: "Messages covered by the line; a power of 2" },
-				page: { type: "integer", minimum: 0, description: "Page of a long message or agent chat, from 0" },
+				n: { type: "integer", minimum: 1, description: "Messages covered by the line" },
+				page: { type: "integer", minimum: 0, description: "Page of a long text, from 0" },
 			},
 		},
 	},

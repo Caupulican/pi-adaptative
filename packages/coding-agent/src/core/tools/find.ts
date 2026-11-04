@@ -329,9 +329,8 @@ export function createFindToolDefinition(
 		name: "find",
 		label: "find",
 		readOnly: true,
-		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Batchable: emit alongside other independent calls in one message; never spend a turn per read.`,
-		promptSnippet: "Find paths by glob; respects .gitignore",
-		promptGuidelines: ["Use narrowest root/glob. Never recursively scan repo/home/filesystem without concrete need."],
+		description: `Search for files by glob pattern; returns paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+		promptSnippet: "Find files by glob",
 		parameters: findSchema,
 		async execute(
 			toolCallId,

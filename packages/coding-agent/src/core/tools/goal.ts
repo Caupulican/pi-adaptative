@@ -58,7 +58,7 @@ const requirementCheckSchema = Type.Object(
 		command: Type.String({
 			minLength: 1,
 			description:
-				"Read-only shell command that observes the outcome (test, command -v, ss, systemctl is-active, jq, grep, curl GET, a test runner run). It must not change anything.",
+				"Read-only shell command that observes the outcome (test, command -v, systemctl is-active, jq, grep, curl GET, a test runner run).",
 		}),
 		expectExitCode: Type.Optional(
 			Type.Integer({ description: "Exit code that means the requirement holds. Default 0." }),
@@ -69,95 +69,81 @@ const requirementCheckSchema = Type.Object(
 	{
 		additionalProperties: false,
 		description:
-			"add_requirement / set_requirement_check: how the harness proves this requirement. At completion it reruns the command and a failed check refuses completion; the agent's own account never substitutes for it. Omit on set_requirement_check to remove the check.",
+			"How the harness proves a requirement: it reruns the command at completion and a failed check refuses completion. Give one whenever a command can observe the outcome. Omit on set_requirement_check to remove it.",
 	},
 );
 
 const goalSchema = Type.Object(
 	{
-		action: Type.Union(
-			[
-				Type.Literal("get"),
-				Type.Literal("start"),
-				Type.Literal("add_requirement"),
-				Type.Literal("set_requirement_check"),
-				Type.Literal("satisfy_requirement"),
-				Type.Literal("block_requirement"),
-				Type.Literal("reopen_requirement"),
-				Type.Literal("dispatch_worker"),
-				Type.Literal("add_evidence"),
-				Type.Literal("progress"),
-				Type.Literal("no_progress"),
-				Type.Literal("complete"),
-				Type.Literal("increment"),
-				Type.Literal("block_goal"),
-				Type.Literal("grant_edge"),
-				Type.Literal("amend_goal"),
-			],
-			{ description: "Goal record action." },
-		),
-		edgeClass: Type.Optional(
-			Type.Union(
-				EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)),
-				{ description: "grant_edge: authorized operation class." },
-			),
-		),
+		action: Type.Union([
+			Type.Literal("get"),
+			Type.Literal("start"),
+			Type.Literal("add_requirement"),
+			Type.Literal("set_requirement_check"),
+			Type.Literal("satisfy_requirement"),
+			Type.Literal("block_requirement"),
+			Type.Literal("reopen_requirement"),
+			Type.Literal("dispatch_worker"),
+			Type.Literal("add_evidence"),
+			Type.Literal("progress"),
+			Type.Literal("no_progress"),
+			Type.Literal("complete"),
+			Type.Literal("increment"),
+			Type.Literal("block_goal"),
+			Type.Literal("grant_edge"),
+			Type.Literal("amend_goal"),
+		]),
+		edgeClass: Type.Optional(Type.Union(EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)))),
 		toolkitScript: Type.Optional(
 			Type.String({
 				description:
-					"grant_edge: exact registered canonical script name or unambiguous alias when the operator authorized one concrete toolkit script. Omit for broad class grant.",
+					"grant_edge: the one toolkit script the operator authorized (registered name or unambiguous alias). Omit for a class grant.",
 			}),
 		),
 		toolkitArgs: Type.Optional(
 			Type.Array(Type.String(), {
-				description:
-					"grant_edge: exact argv passed to the authorized toolkit script (default []). Requires toolkitScript.",
+				description: "grant_edge: exact argv of the authorized script (default []); requires toolkitScript.",
 			}),
 		),
 		quote: Type.Optional(
 			Type.String({
 				description:
-					"grant_edge / amend_goal: the owner's complete message, verbatim (a paraphrase or part of a message grants and amends nothing).",
+					"grant_edge / amend_goal: the owner's complete message, verbatim; a paraphrase or part of a message grants and amends nothing.",
 			}),
 		),
-		goalId: Type.Optional(Type.String({ description: "Stable goal id. Required for action 'start'." })),
+		goalId: Type.Optional(Type.String({ description: "Required for start." })),
 		userGoal: Type.Optional(
 			Type.String({
 				description:
-					"Required for start/amend_goal. An amendment preserves the current objective text and appends only same-objective changes.",
+					"Required for start/amend_goal. An amendment keeps the current objective text and appends only same-objective changes.",
 			}),
 		),
 		tokenBudget: Type.Optional(
-			Type.Integer({ minimum: 1, description: "Optional positive token budget for action 'start'." }),
+			Type.Integer({ minimum: 1, description: "Owner-requested only; the host ignores other values." }),
 		),
 		requirementId: Type.Optional(
 			Type.String({
 				description:
-					"Requirement id for requirement actions. Omit on add_requirement for a stable host id. On add_evidence, the requirement this evidence satisfies once it verifies.",
+					"Omit on add_requirement for a host id. On add_evidence, the requirement the evidence satisfies once verified.",
 			}),
 		),
 		requirementIds: Type.Optional(
 			Type.Array(Type.String(), {
 				description:
-					"On add_evidence, every requirement this evidence satisfies once it verifies. On satisfy_requirement, every requirement the cited evidence satisfies (all or none).",
+					"add_evidence: every requirement the evidence satisfies once verified. satisfy_requirement: every requirement the cited evidence satisfies (all or none).",
 			}),
 		),
-		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
+		text: Type.Optional(Type.String({ description: "Required for add_requirement." })),
 		dependencies: Type.Optional(
 			Type.Array(Type.String(), {
-				description:
-					"Optional IDs of requirements that must be satisfied before this one. Valid for add_requirement.",
+				description: "add_requirement: ids of requirements that must be satisfied first.",
 			}),
 		),
 		check: Type.Optional(requirementCheckSchema),
-		instructions: Type.Optional(Type.String({ description: "Worker instructions. Required for dispatch_worker." })),
-		evidenceId: Type.Optional(
-			Type.String({ description: "Evidence id. Omit on add_evidence for a stable host id." }),
-		),
+		instructions: Type.Optional(Type.String({ description: "Required for dispatch_worker." })),
+		evidenceId: Type.Optional(Type.String({ description: "Omit on add_evidence for a host id." })),
 		evidenceIds: Type.Optional(
-			Type.Array(Type.String(), {
-				description: "Existing evidence ids for satisfy_requirement.",
-			}),
+			Type.Array(Type.String(), { description: "satisfy_requirement: existing evidence ids." }),
 		),
 		kind: Type.Optional(
 			Type.Union(
@@ -169,17 +155,17 @@ const goalSchema = Type.Object(
 					Type.Literal("finding"),
 					Type.Literal("worker"),
 				],
-				{ description: "Evidence kind. Required for add_evidence." },
+				{ description: "Required for add_evidence." },
 			),
 		),
-		summary: Type.Optional(Type.String({ description: "Evidence summary. Required for add_evidence." })),
+		summary: Type.Optional(Type.String({ description: "Required for add_evidence." })),
 		uri: Type.Optional(
 			Type.String({
 				description:
 					"Evidence locator: file path; tool/test toolCallId or exact command; worker laneId; user message entry id (summary quotes its full text). Only host-verified evidence satisfies a requirement; finding never does.",
 			}),
 		),
-		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
+		reason: Type.Optional(Type.String({ description: "Required for block_requirement and block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("collaboration")], {
 				description: "Native by default; collaboration for a persistent interactive session.",
@@ -192,7 +178,7 @@ const goalSchema = Type.Object(
 
 const createGoalSchema = Type.Object(
 	{
-		objective: Type.String({ description: "Required. The concrete objective to start pursuing." }),
+		objective: Type.String({ description: "The concrete objective." }),
 		requirements: Type.Optional(
 			Type.Array(
 				Type.Union([
@@ -205,13 +191,12 @@ const createGoalSchema = Type.Object(
 				{
 					minItems: 1,
 					maxItems: 20,
-					description:
-						"Every requirement the goal must satisfy, recorded in this same call with stable host ids. A requirement whose outcome a command can observe should carry `check`: the harness reruns it at completion and a failed check refuses completion.",
+					description: "Every requirement the goal must satisfy, recorded in this call.",
 				},
 			),
 		),
 		token_budget: Type.Optional(
-			Type.Integer({ minimum: 1, description: "Positive token budget. Omit unless explicitly requested." }),
+			Type.Integer({ minimum: 1, description: "Owner-requested only; the host ignores other values." }),
 		),
 	},
 	{ additionalProperties: false },
@@ -221,16 +206,13 @@ const getGoalSchema = Type.Object({}, { additionalProperties: false });
 
 const updateGoalSchema = Type.Object(
 	{
-		status: Type.Union(
-			[Type.Literal("active"), Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("paused")],
-			{
-				description:
-					"active records progress only; it does not change lifecycle or resume a stopped goal. complete requires an evidence audit; blocked requires the same blocker for three turns; paused requires an explicit owner request to stop or pause this goal.",
-			},
-		),
-		reason: Type.Optional(
-			Type.String({ minLength: 1, description: "Required for blocked: the recurring external blocker." }),
-		),
+		status: Type.Union([
+			Type.Literal("active"),
+			Type.Literal("complete"),
+			Type.Literal("blocked"),
+			Type.Literal("paused"),
+		]),
+		reason: Type.Optional(Type.String({ minLength: 1, description: "Required for blocked." })),
 		account: Type.Optional(completionAccountInputSchema),
 	},
 	{ additionalProperties: false },
@@ -852,19 +834,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		name: LEGACY_GOAL_TOOL_NAME,
 		label: "goal",
 		description:
-			"Read or update the durable goal for work that benefits from persistent autonomous continuation. The agent may start one at its discretion or on explicit user/system request; only the owner or system may set a token budget.",
-		promptSnippet: "Read or update the durable goal.",
+			"Durable goal record: requirements and their checks, evidence, worker dispatch, progress, completion, owner grants and amendments. create_goal, get_goal and update_goal cover start, get and status changes.",
+		promptSnippet: "Manage the durable goal record.",
 		promptGuidelines: [
-			"Start when persistent continuation materially benefits current work or the user/system requests it. Skip routine one-turn tasks; get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
-			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
-			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
+			"Record the delivery contract (work-lifecycle rule) in the goal requirements.",
+			"Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
-			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
-			"amend_goal extends this objective only: quote the owner's full message, keep the current objective text in userGoal, then append its change and requirements. For unrelated work, leave this goal and its workers unchanged.",
-			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
+			"amend_goal extends this objective only; handle unrelated work separately and leave this goal and its workers unchanged.",
+			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once.",
 			COMPLETION_ACCOUNT_GUIDANCE,
-			"Before complete, rank every defect, risk or misleading result you noticed by relevance to this goal: a relevant one is part of the goal and must be fixed and proven first; list the rest in your closing answer. complete with a relevant noticed item unresolved is refused work.",
-			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
+			"Failed or canceled tool_task results are terminal but never become verified evidence automatically. block_requirement only when the same verified owner/approval boundary or capability impossibility persists despite distinct recovery approaches; otherwise keep working.",
 		],
 		parameters: goalSchema,
 		failureRecovery: {
@@ -1344,8 +1323,8 @@ export function createGoalLifecycleToolDefinitions(
 		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		description:
-			"Create a durable goal when persistent autonomous continuation materially benefits the current work, or when the user/system explicitly requests one. Use agent discretion; skip routine short tasks. Pass every known requirement in `requirements` so the goal is fully set up in this one call, then record task steps with one task_steps set. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
-		promptSnippet: "Start durable goal.",
+			"Start a durable goal when persistent autonomous continuation materially benefits the work, or when the user/system explicitly asks; skip routine short tasks. Pass every known requirement in `requirements` so the goal is set up in one call, then record the plan with one task_steps set.",
+		promptSnippet: "Start the durable goal.",
 		parameters: createGoalSchema,
 		async execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
 			// All or nothing: a check the goal could never run refuses the whole call before the goal
@@ -1394,9 +1373,8 @@ export function createGoalLifecycleToolDefinitions(
 	const getGoal: ToolDefinition = {
 		name: GOAL_LIFECYCLE_TOOL_NAMES[1],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[1],
-		description:
-			"Get the current goal for this session, including status, budget, token and elapsed-time usage, requirements, evidence, and progress.",
-		promptSnippet: "Inspect durable goal.",
+		description: "Read the current goal: status, budget, requirements, evidence, progress.",
+		promptSnippet: "Read the durable goal.",
 		parameters: getGoalSchema,
 		execute(toolCallId, _input, signal, onUpdate, context) {
 			return goalTool.execute(toolCallId, { action: "get" }, signal, onUpdate, context);
@@ -1407,8 +1385,8 @@ export function createGoalLifecycleToolDefinitions(
 		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
-			"Update the existing goal. active records progress only after concrete, verifiable progress in the current turn; it never changes lifecycle or resumes a stopped goal. paused is allowed only when the owner explicitly asks to stop or pause this goal; report the paused status and stop goal work. Only the owner can resume it with /goal resume. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
-		promptSnippet: "Update goal; complete/block only with evidence.",
+			"Update the goal's status. active records progress after verifiable progress in the current turn; it never resumes a stopped goal. complete needs current evidence that proves the full objective, with no required work remaining. blocked needs the same verified owner/approval boundary or capability impossibility for three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress possible without owner input or external change; put the evidence and attempted approaches in reason; never use it because work is hard, slow, uncertain or would benefit from clarification. paused only when the owner explicitly asks to stop or pause this goal; then stop goal work (only the owner resumes it, with /goal resume).",
+		promptSnippet: "Update goal status; complete or block only with evidence.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
 			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;

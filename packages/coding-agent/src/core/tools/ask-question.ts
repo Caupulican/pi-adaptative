@@ -56,7 +56,7 @@ import {
 
 const optionSchema = Type.Object(
 	{
-		label: Type.String({ minLength: 1, maxLength: 120, description: "Concise option label." }),
+		label: Type.String({ minLength: 1, maxLength: 120 }),
 		description: Type.String({
 			minLength: 1,
 			maxLength: 500,
@@ -68,19 +68,15 @@ const optionSchema = Type.Object(
 
 const questionSchema = Type.Object(
 	{
-		id: Type.String({ minLength: 1, maxLength: 80, description: "Stable unique answer identifier." }),
-		header: Type.String({
-			minLength: 1,
-			maxLength: 32,
-			description: "Short topic label used in question navigation.",
-		}),
-		question: Type.String({ minLength: 1, maxLength: 1_000, description: "The specific user-facing question." }),
+		id: Type.String({ minLength: 1, maxLength: 80 }),
+		header: Type.String({ minLength: 1, maxLength: 32, description: "Short topic label." }),
+		question: Type.String({ minLength: 1, maxLength: 1_000 }),
 		options: Type.Array(optionSchema, {
 			minItems: 2,
 			maxItems: 4,
-			description: "Two to four genuine choices. Other and Skip are supplied by the harness.",
+			description: "Genuine choices only; the harness adds Other and Skip.",
 		}),
-		multiSelect: Type.Optional(Type.Boolean({ description: "Allow more than one listed option to be selected." })),
+		multiSelect: Type.Optional(Type.Boolean({ description: "Allow several options." })),
 	},
 	{ additionalProperties: false },
 );
@@ -90,7 +86,7 @@ const askQuestionSchema = Type.Object(
 		questions: Type.Array(questionSchema, {
 			minItems: 1,
 			maxItems: 4,
-			description: "One to four independent questions presented in one interaction.",
+			description: "Independent questions shown together.",
 		}),
 		category: Type.Optional(
 			Type.Union(
@@ -99,10 +95,7 @@ const askQuestionSchema = Type.Object(
 					Type.Literal("ambiguous_requirement"),
 					Type.Literal("blocked_by_user_decision"),
 				],
-				{
-					description:
-						"What is being asked for. Information is the default; clarification never grants authority.",
-				},
+				{ description: "Default information; clarification never grants authority." },
 			),
 		),
 	},
@@ -915,15 +908,12 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		name,
 		label: options.label ?? "Ask Question",
 		description:
-			"Ask the human owner one to four concise questions when a missing choice materially changes the work. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user is above AGENTS.md once they choose. The harness supplies Other and Skip choices, supports single- and multi-select answers, and returns a typed answer set. Emit alone: never combine with other tool calls in the same message.",
-		promptSnippet: "Ask owner for consequential missing choice through native UI.",
+			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user outranks AGENTS.md once they choose.",
+		promptSnippet: "Ask the owner a multiple-choice question.",
 		promptGuidelines: [
-			"Use only when owner choice changes result/authority/risk/acceptance; else proceed with stated safe assumption.",
-			"Batch independent questions: max 4 questions, 2-4 genuine options each.",
-			"Concise labels, concrete consequence/tradeoff. Never add Other/Skip/None/filler; harness adds Other/Skip.",
+			"Batch independent questions into one call; keep labels concise with a concrete consequence or tradeoff; no None or filler options.",
 			"multiSelect only for independent choices. Never delegate decisions fixed by owner profile/policy.",
 			"Skipped/cancelled is owner intent. Never repeat immediately; proceed safely or report unresolved boundary.",
-			"No answer by the question deadline means the owner is unavailable, not cancelled or approving. Leave dependent work pending and do not re-prompt this turn.",
 		],
 		parameters: askQuestionSchema,
 		executionMode: "sequential",

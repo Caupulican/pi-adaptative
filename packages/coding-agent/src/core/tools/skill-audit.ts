@@ -221,9 +221,9 @@ export function runSkillAudit(
 }
 
 const skillAuditSchema = Type.Object({
-	draftName: Type.Optional(Type.String({ description: "Name of the draft skill to audit" })),
-	draftDescription: Type.Optional(Type.String({ description: "Description of the draft skill" })),
-	draftBody: Type.Optional(Type.String({ description: "Body/content of the draft skill" })),
+	draftName: Type.Optional(Type.String()),
+	draftDescription: Type.Optional(Type.String()),
+	draftBody: Type.Optional(Type.String({ description: "compared only together with draftName or draftDescription" })),
 });
 
 export type SkillAuditInput = Static<typeof skillAuditSchema>;
@@ -253,12 +253,8 @@ export function createSkillAuditToolDefinition(
 		label: "Skill Audit",
 		readOnly: true,
 		description:
-			"Check a draft/new skill for overlap with existing skills before creating it; flags near-duplicate triggers/descriptions via local Jaccard similarity. Read-only: does not write files.",
-		promptSnippet: "Audit skill for overlaps",
-		promptGuidelines: [
-			"Use skill_audit to check draft skills for conflicts before creating them.",
-			"Similarity >= 55% indicates potential dedup or compartmentalization work.",
-		],
+			"Report skills whose names or descriptions overlap (keyword similarity of 55% or more) and name collisions, across installed skills and, when draftName or draftDescription is given, a draft. Read-only.",
+		promptSnippet: "Find overlapping or colliding skills",
 		parameters: skillAuditSchema,
 		async execute(
 			_toolCallId,

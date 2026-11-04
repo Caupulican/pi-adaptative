@@ -36,43 +36,38 @@ const MAX_PATHSPEC_CHARS = 1_024;
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
 const repoReadSchema = Type.Object({
-	action: Type.Union(
-		[
-			Type.Literal("status"),
-			Type.Literal("log"),
-			Type.Literal("diff"),
-			Type.Literal("show"),
-			Type.Literal("blame"),
-			Type.Literal("ls-files"),
-			Type.Literal("rev-parse"),
-		],
-		{ description: "git subcommand; every action is read-only." },
-	),
+	action: Type.Union([
+		Type.Literal("status"),
+		Type.Literal("log"),
+		Type.Literal("diff"),
+		Type.Literal("show"),
+		Type.Literal("blame"),
+		Type.Literal("ls-files"),
+		Type.Literal("rev-parse"),
+	]),
 	options: Type.Optional(
 		Type.Array(Type.String({ maxLength: MAX_TOKEN_CHARS }), {
 			maxItems: 24,
 			description:
-				"Subcommand options, one flag per entry with its value joined or as the next entry (`--oneline`, `-n`, `5`, `--stat`, `-p`, `-L10,20`, `--since=2.weeks`). Only output-shaping options are accepted; anything that writes, runs a program or reads outside the repository is refused with the reason.",
+				"Output-shaping flags, one per entry, value joined or as the next entry (`--stat`, `-n`, `5`, `-L10,20`, `--since=2.weeks`).",
 		}),
 	),
 	revisions: Type.Optional(
 		Type.Array(Type.String({ maxLength: MAX_TOKEN_CHARS }), {
 			maxItems: 8,
-			description:
-				"Revisions or ranges (`HEAD~3..HEAD`, `main...feature`, `abc123`; `HEAD:src/a.ts` for show). Never start with `-`.",
+			description: "Revisions or ranges (`HEAD~3..HEAD`, `main...feature`; `HEAD:src/a.ts` for show).",
 		}),
 	),
 	paths: Type.Optional(
 		Type.Array(Type.String({ maxLength: MAX_PATHSPEC_CHARS }), {
 			maxItems: 32,
-			description: "Pathspecs placed after `--`, relative to `path` and kept inside it (globs allowed).",
+			description: "Pathspecs relative to `path` (globs allowed).",
 		}),
 	),
 	path: Type.Optional(
 		Type.String({
 			maxLength: 4_096,
-			description:
-				"Directory to run in: the repository or one of its subdirectories. Default: the current directory.",
+			description: "Repository directory or subdirectory to run in (default: current directory).",
 		}),
 	),
 	limit: Type.Optional(
@@ -502,8 +497,8 @@ export function createRepoReadToolDefinition(
 		label: "repo_read",
 		readOnly: true,
 		description:
-			"Bounded read-only git: status, log, diff, show, blame, ls-files, rev-parse. Runs git directly with a limited option set and no hooks, pagers or diff drivers. Use bash for Git options or commands this tool does not support. Batchable with other independent reads.",
-		promptSnippet: "Read git status, history, diffs and blame (read-only)",
+			"Read-only git (status, log, diff, show, blame, ls-files, rev-parse) with a limited, output-shaping option set; other options are refused. Use bash for anything else.",
+		promptSnippet: "Read-only git inspection",
 		parameters: repoReadSchema,
 		async execute(_toolCallId, input: RepoReadToolInput, signal?: AbortSignal) {
 			if (signal?.aborted) throw new Error("Operation aborted");

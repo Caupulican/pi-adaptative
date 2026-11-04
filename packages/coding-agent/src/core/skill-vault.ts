@@ -238,8 +238,8 @@ function activeSkillContext(skill: Skill, body: string): string {
 	return [
 		`ACTIVE SKILL ${skill.name}`,
 		`BASE ${skill.baseDir}`,
-		// One short precedence line per loaded body; the full conflict rule lives once in the autonomy
-		// block and the skill tool description (provider-prompt-contracts.ts).
+		// One short precedence line per loaded body; the full conflict rule lives once in the skill
+		// tool description (tools/skill.ts).
 		`${OWNER_PRECEDENCE_POLICY.replace(/\.$/, "")}: on conflict, skill exclude (exact name, reason).`,
 		body,
 	].join("\n");

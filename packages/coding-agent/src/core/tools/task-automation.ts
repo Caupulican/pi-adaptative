@@ -10,31 +10,24 @@ import type { AgentToolUpdateCallback, ExtensionContext, ToolDefinition } from "
 
 export const taskAutomationSchema = Type.Object(
 	{
-		action: Type.Union(
-			[
-				Type.Literal("status"),
-				Type.Literal("spec"),
-				Type.Literal("validate"),
-				Type.Literal("run"),
-				Type.Literal("bind"),
-			],
-			{ description: "Automation lifecycle action: status | spec | validate | run | bind" },
-		),
-		name: Type.Optional(Type.String({ description: "Script/automation identifier (kebab-case)" })),
-		stepId: Type.Optional(Type.String({ description: "Explicit task step id to bind (e.g. 'step-1')" })),
-		operationIdentity: Type.Optional(Type.String({ description: "Optional stable operation identity" })),
-		description: Type.Optional(Type.String({ description: "Clear summary of deterministic operation" })),
-		runner: Type.Optional(
-			Type.Union([Type.Literal("bash"), Type.Literal("powershell"), Type.Literal("uv")], {
-				description: "Fixed execution runner",
-			}),
-		),
-		path: Type.Optional(Type.String({ description: "Relative script path in workspace" })),
+		action: Type.Union([
+			Type.Literal("status"),
+			Type.Literal("spec"),
+			Type.Literal("validate"),
+			Type.Literal("run"),
+			Type.Literal("bind"),
+		]),
+		name: Type.Optional(Type.String({ description: "Kebab-case automation name" })),
+		stepId: Type.Optional(Type.String({ description: "Task step id to bind, e.g. 'step-1'" })),
+		operationIdentity: Type.Optional(Type.String()),
+		description: Type.Optional(Type.String({ description: "Summary of the deterministic operation" })),
+		runner: Type.Optional(Type.Union([Type.Literal("bash"), Type.Literal("powershell"), Type.Literal("uv")])),
+		path: Type.Optional(Type.String({ description: "Workspace-relative script path" })),
 		contract: Type.Optional(TaskAutomationOperationContractSchema),
 		args: Type.Optional(TaskAutomationBindingSchema.properties.expectedArgs),
-		danger: Type.Optional(Type.Boolean({ description: "Flag dangerous operations requiring edge authorization" })),
+		danger: Type.Optional(Type.Boolean({ description: "Operation needs edge authorization" })),
 		background: Type.Optional(
-			Type.Boolean({ description: "Run execution or validation in the background as a managed tool_task" }),
+			Type.Boolean({ description: "Run or validate in the background as a managed tool_task" }),
 		),
 	},
 	{ additionalProperties: false },
@@ -47,14 +40,11 @@ export function createTaskAutomationToolDefinition(controller: TaskAutomationCon
 		name: "task_automation",
 		label: "task_automation",
 		description:
-			"Lifecycle controller for deterministic task-local automations. Decision hierarchy: (1) existing adequate tool first (native tools sufficient path is cheap), (2) else existing validated script, (3) else build script for deterministic operation, (4) else model judgment. Actions: status (inspect automations & evidence), spec (author contract & preconditions/effects/verifier), validate (execute verifier & negative controls to admit script), run (execute admitted script with hash verification), bind (bind step to automation).",
-		promptSnippet: "Task-local deterministic automation: author/validate/run scripts with negative controls.",
+			"Lifecycle controller for deterministic task-local automations. status inspects automations and evidence; spec authors the contract (preconditions, effects, verifier); validate runs the verifier and negative controls to admit the script; run executes an admitted script after hash verification; bind ties a task step to an automation.",
+		promptSnippet: "Task-local deterministic scripts: spec, validate, run, bind.",
 		promptGuidelines: [
-			"Hierarchy: Native tools sufficient first (cheap); else existing validated script; else author deterministic script; else model judgment.",
-			"Generic shell/Python executor is not an existing implementation of newly generated deterministic procedure; persist such procedure as task-local script, validate then run. Keep adequate existing commands cheap.",
-			"Validation requires positive tests AND negative controls; model assertion alone or mere exit zero never admits a script.",
-			"Modifying a script on disk invalidates its verification evidence; re-validation is required before next run.",
-			"Script readiness is not task success; steps bound to automation require successful execution verification.",
+			"Hierarchy: an existing adequate tool first (native tools are cheap); else an existing validated script; else author a deterministic script; else model judgment.",
+			"A generic shell/Python executor is not an existing implementation of a new deterministic procedure: persist it as a task-local script, validate, then run.",
 		],
 		parameters: taskAutomationSchema,
 		async execute(

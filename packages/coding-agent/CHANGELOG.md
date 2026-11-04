@@ -8,6 +8,8 @@
 
 ### Changed
 
+- The system prompt core is rewritten: two principle lines, an authority section that states only YOLO with proactive pursuit of the request, and a one-line output policy that shows complex content as an HTML page. Rules the tools already state (precedence over skills, secret_store authorization, skill conflicts, ownership of plan and workers) are no longer repeated in the prompt.
+- Every tool's description, snippet, guidelines and parameter descriptions are rewritten to remove redundancy and contradiction; guidelines that the 140-character provider limit used to cut mid-sentence now fit or moved into descriptions. The `bash` description no longer claims broad scans are rejected, and `tool_task` documents that `image` needs a `taskId`.
 - The root system prompt no longer carries the full delegation, work-lifecycle, output-format, engineering-skill and noticed-item rules; they are read through the ledger when their trigger applies.
 - The terminal editor accepts an `exactText` option that keeps tabs and does not trim on submit.
 

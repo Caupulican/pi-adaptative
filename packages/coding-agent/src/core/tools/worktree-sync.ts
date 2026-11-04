@@ -47,29 +47,24 @@ function createWorktreeSyncSchema() {
 				],
 				{
 					description:
-						"status: the deterministic full picture (epoch, hub, lock, per-lane freshness/staleness, advice). git_status/git_diff: read the bound lane with fixed argv. git_add: stage only explicitly validated paths inside the lane. git_commit: commit with a literal message. check: run only the owner-configured trusted check command. create_lane: new worktree+branch off main. sync: rebase current main into a lane (conflicts return a worklist and leave the rebase in progress). continue: verify resolved conflicts (zero markers, mechanically checked), stage, drive on. abort_sync: abort the in-progress rebase. land: the ONLY door to main -- serialized, freshness-checked, gate-command-verified, ff-only. release_lane: remove a fully-landed lane (discarding unlanded work needs confirm). reconcile: re-sync the registry with git reality.",
+						"status: full state (epoch, hub, lock, per-lane freshness, advice). git_status/git_diff: read the bound lane. git_add: stage validated paths inside the lane. git_commit: commit with a literal message. check: run the owner-configured check command. create_lane: new worktree+branch off main. sync: rebase main into a lane. continue: verify resolved conflicts (zero markers), stage, resume the rebase. abort_sync: abort the rebase. land: serialized, freshness-checked, gate-verified, ff-only. release_lane: remove a landed lane. reconcile: re-sync the registry with git.",
 				},
 			),
 			laneKey: Type.Optional(
 				Type.String({
-					description:
-						"Target lane. Defaults to this session's bound lane (PI_WORKTREE_LANE) for sync/continue/abort_sync/land.",
+					description: "Target lane; default: this session's bound lane (PI_WORKTREE_LANE).",
 				}),
 			),
-			goalId: Type.Optional(
-				Type.String({ description: "create_lane: goal to scope the auto-allocated lane key by." }),
-			),
+			goalId: Type.Optional(Type.String({ description: "create_lane: goal that scopes the lane key." })),
 			requirementId: Type.Optional(Type.String({ description: "create_lane: requirement this lane will work." })),
 			paths: Type.Optional(
-				Type.Array(Type.String(), {
-					description: "git_diff/git_add: explicit relative paths inside the bound lane.",
-				}),
+				Type.Array(Type.String(), { description: "git_diff/git_add: relative paths inside the lane." }),
 			),
-			message: Type.Optional(Type.String({ description: "git_commit: literal commit message." })),
+			message: Type.Optional(Type.String()),
 			confirm: Type.Optional(
 				Type.String({
 					description:
-						'release_lane: pass exactly "yes-discard-lane" to release a lane that still has unlanded commits or dirty files (G11: never silent).',
+						'release_lane: pass exactly "yes-discard-lane" to discard a lane that still has unlanded commits or dirty files.',
 				}),
 			),
 		},
@@ -144,11 +139,10 @@ function formatStatus(status: SyncStatus): string[] {
 }
 
 const WORKTREE_SYNC_PROMPT_GUIDELINES = [
-	"Work ONLY in lane worktree/branch; never hub/main. main moves only through land.",
-	"Commit lane, then land. stale lane: sync, resolve conflicts locally, land.",
-	"sync conflict: edit listed files, call continue; staging/marker checks/rebase are mechanical.",
-	"After another land, mutations fail until sync; git add/commit may save WIP first.",
-	"status is authoritative sync state; never infer from raw git.",
+	"Work only in your lane worktree/branch, never hub/main; main moves only through land.",
+	"Commit the lane, then land; if stale, sync first. On a sync conflict edit the listed files, then call continue.",
+	"After another land, mutations fail until sync; git_add/git_commit may still save WIP.",
+	"status is the authoritative sync state; never infer it from raw git.",
 ];
 
 export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): ToolDefinition {
@@ -156,8 +150,8 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 		name: "worktree_sync",
 		label: "worktree_sync",
 		description:
-			"Hard-gated worktree-per-lane parallel work: each agent works in its own git worktree/branch; integration is always rebase-onto-main + ff-only land, serialized under one integration lock with the gate command verified at the exact landing tip. status/create_lane/sync/continue/abort_sync/land/release_lane/reconcile. Every outcome is a tagged code with the exact recovery step; landing while stale is structurally impossible.",
-		promptSnippet: "Coordinate lane worktrees, rebase-to-main sync, gated serialized land.",
+			"Parallel work in git worktree lanes: each agent has its own worktree/branch, integrated by rebase onto main and a serialized ff-only land that runs the gate command at the landing tip. Landing while stale is refused; every refusal names the exact recovery step.",
+		promptSnippet: "Lane worktrees: sync to main, gated land",
 		promptGuidelines: WORKTREE_SYNC_PROMPT_GUIDELINES,
 		parameters: worktreeSyncSchema,
 		executionMode: "sequential",

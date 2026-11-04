@@ -13,19 +13,17 @@ export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 		gates: ["delegate"],
 		body: `- Orientation stays local unless a team is requested. Otherwise you must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test or review task. Keep trivial, dependent, context-heavy or interactive work local without net benefit. Long work alone never mandates a team.
 - Start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence and write ownership; do not duplicate running or queued work.
-- Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.
 - Worker memory access is read-only: through the memory_read broker (root memory owns mutation and lifecycle) or, in ICM mode, through the worker memory broker (zoom and date by message id; private worker logs stay root-only; ICM catalog files follow the worker's ordinary file grants).
 - Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
-- Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
 - Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
-- Treat worker output as evidence, reconcile conflicts, and finish only after success criteria.
+- Reconcile conflicts and finish only after success criteria.
 - Per-worker token, cost, wall-clock and tool ceilings come only from host settings or an owner-authored profileId.`,
 	},
 	{
 		topic: "engineering-skills",
 		when: "before engineering work that matches a named skill situation",
 		requires: "skill",
-		body: `load before the work: failing check or defect: root-cause-debugging; new type, module or API: design-before-code; .ts files: typescript-discipline; risky change or done claim: prove-it-and-blast-radius; parallel workers or second opinion: fan-out-and-review; how/why/recall question: explain-and-recall; docs, commit or PR text: technical-writing; unattended or metric run: long-run-discipline; project verify script: verification-skill.`,
+		body: `load before the work: architecture or performance design: n-plus-2-architecture (keep it loaded while the design is active); failing check or defect: root-cause-debugging; new type, module or API: design-before-code; .ts files: typescript-discipline; risky change or done claim: prove-it-and-blast-radius; parallel workers or second opinion: fan-out-and-review; how/why/recall question: explain-and-recall; docs, commit or PR text: technical-writing; unattended or metric run: long-run-discipline; project verify script: verification-skill.`,
 	},
 	{
 		topic: "noticed-items",
@@ -38,9 +36,9 @@ export const LEDGER_RULES: readonly LedgerRuleSource[] = [
 	},
 	{
 		topic: "output-formats",
-		when: "when the owner demands a diagram, HTML page or explainer video",
+		when: "when showing complex content or when the owner demands a diagram, HTML page or explainer video",
 		requires: "skill",
-		body: `owner demands a diagram, HTML page or explainer video: load skill explain-diagram, explain-html or explain-video first; unclear or several fit: systemone choice over those names. Artifacts are local discardable files.`,
+		body: `complex content to show, or the owner demands a diagram, HTML page or explainer video: load skill explain-diagram, explain-html or explain-video first; unclear or several fit: systemone choice over those names. Artifacts are local discardable files.`,
 	},
 	{
 		topic: "work-lifecycle",

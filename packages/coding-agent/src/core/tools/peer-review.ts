@@ -19,7 +19,11 @@ const resolutionSchema = Type.Object(
 			{ minItems: 1, maxItems: 16 },
 		),
 	},
-	{ additionalProperties: false },
+	{
+		additionalProperties: false,
+		description:
+			"Closes a mandatory finding after you reproduced it: rejected needs reproduction evidence; repaired needs ordered reproduction, repair and recheck receipt ids. The host checks same-lane receipts against the current candidate; prose or an executor return cannot resolve a finding. A peer_review_evidence obligation is a missing-proof gap, not a defect: reject it with one fresh current-candidate reproduction receipt of the missing source/check evidence, or evidence of a justified narrower delivery claim that retains the limitation; no test is needed unless the owner asked. Ordinary defect findings still need the normal refutation or causal-repair proof.",
+	},
 );
 
 const schema = Type.Object(
@@ -67,18 +71,14 @@ export function createPeerReviewToolDefinition(
 		label: "Peer review",
 		readOnly: true,
 		description:
-			"Plan or delivery review by a distinct host-admitted peer. The owner's /settings > Peer selection is authoritative; omit peer and thinkingLevel to use configured values. With no configured model, use options to choose a peer. Ordinary review works without System One; stronger selection requires its task-strength judgment. Obligations lists pending findings and host receipts; resolve submits receiving-lane proof without another peer. Unavailable or incomplete review grants no validation.",
-		promptSnippet:
-			"Root-only peer: review plans with material uncertainty and the final delivery; workers report to their parent. Independent review works without System One.",
+			"Plan or delivery review by a distinct host-admitted peer; the owner's /settings > Peer selection is authoritative, so omit peer and thinkingLevel to use it. Without a configured model, pick a peer from options (equal effort is allowed); selection stronger needs a listed strongerThinkingLevel. Review works without System One; stronger selection needs its task-strength judgment. status shows durable receipts, including a retainedReview whose paid result could not be saved; after fixing storage, recover_result {reviewKey, reason} saves it in its owning branch without another model call, even with the peer disabled. dispose_attempt {reviewKey, reason} releases a non-running pending or unavailable receipt after you inspect its failure (never reviewed findings, never counts as a review). With System One off, findings are advice: record your evidence and decision with acknowledge {reviewKey, evidence} (root_decision_only, not validation). With it on, obligations lists mandatory findings and host receipt ids, and resolve closes them without another peer. Unavailable or incomplete review grants no validation.",
+		promptSnippet: "Peer review of uncertain plans and the final delivery (root only).",
 		promptGuidelines: [
-			"If a paid review could not be saved, its retainedReview is visible in status while this session remains alive. After fixing storage, use recover_result with attempt {reviewKey, reason}; it saves that report in its owning branch without another model call, even when the peer is disabled or its quota is exhausted.",
-			"Use dispose_attempt with attempt {reviewKey, reason} to release a non-running pending/unavailable receipt after inspecting its failure. This works with System One on or off, never disposes reviewed findings and never counts as a successful review. Active requests cannot be disposed.",
-			"The peer serves the root only. Workers report findings and questions to their parent; never create recursive peer chains. Use status to inspect durable review receipts. Identical requests reuse their result; recover true is only for explicit recovery after an unavailable review's cause was addressed, never reroll a completed review.",
-			"When System One is off, findings remain advice for the root. Record your evidence and decision with acknowledge and its reviewKey; this is root_decision_only, never System One validation. With System One on, use obligations and resolve. Completion requiring a reviewer consumes a current delivery review; missing, stale, incomplete, or unresolved reviews cannot satisfy that stage.",
-			"A peer_review_evidence obligation is a missing-proof gap, not a confirmed defect. Resolve it with disposition rejected and one fresh current-candidate reproduction receipt containing the missing source/check evidence, or evidence of a justified narrower delivery claim that explicitly retains the limitation. No test is required unless the owner requested it. Ordinary peer_review defect findings still require the normal refutation or causal-repair proof.",
-			"For ordinary independent review, use the owner's configured peer from peer options; omit peer and thinkingLevel to use it. If no model is configured, choose an exact peer from options and any listed supported thinkingLevel; equal effort is allowed. To request a stronger peer, set selection to stronger and use a listed strongerThinkingLevel. Supply the complete relevant plan/change, source evidence, checks and known limitations; do not hide adverse findings. The reviewer cannot read files: paste the source, diff or check output it must quote, because a file:line pointer alone leaves its findings unverifiable and they are dropped.",
-			"Keep executing as the lead. Reproduce every candidate in your own lane, fix confirmed failures, and recheck the revised result before affected work continues. Report rejected candidates with evidence. Peer no_findings is not a completion or approval gate. Outages and insufficient evidence remain unresolved; never reroll an unchanged request for a favorable review.",
-			"Use peer obligations to inspect mandatory findings and host-recorded tool receipt IDs. After reproducing a candidate, use peer resolve with disposition rejected and reproduction evidence, or repaired with ordered reproduction, repair and recheck receipt IDs. The host checks actual same-lane evidence against the current candidate; your prose or a successful executor return cannot resolve a finding. This action uses System One and never dispatches another peer.",
+			"The peer serves the root only; workers report findings to their parent. Never chain peers.",
+			"Identical requests reuse their stored result.",
+			"Keep executing: reproduce every candidate in your own lane, fix confirmed failures, recheck, report rejected ones with evidence.",
+			"no_findings is not an approval gate; outages and insufficient evidence stay unresolved. Never reroll an unchanged request.",
+			"Completion requiring a reviewer consumes a current delivery review; a missing, stale, incomplete or unresolved one cannot satisfy it.",
 		],
 		parameters: schema,
 		async execute(_toolCallId, input: Static<typeof schema>, signal, _onUpdate, context) {

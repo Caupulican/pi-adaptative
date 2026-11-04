@@ -10,49 +10,48 @@ export const pythonSchema = Type.Object(
 	{
 		code: Type.Optional(
 			Type.String({
-				description: "Python code to execute on stdin. Provide exactly one of code or scriptPath.",
+				description: "Python source run on stdin; exactly one of code or scriptPath.",
 				maxLength: 200_000,
 			}),
 		),
 		scriptPath: Type.Optional(
 			Type.String({
-				description:
-					"Python script path relative to cwd. Native CLI input ignores one leading @; custom backends retain literal names.",
+				description: "Script path relative to cwd (a leading @ is ignored in local execution).",
 				maxLength: 32_768,
 			}),
 		),
 		args: Type.Optional(
 			Type.Array(Type.String({ maxLength: 16_384 }), {
-				description: "Arguments passed directly to Python after '-' or scriptPath; no shell interpolation.",
+				description: "Arguments passed as argv; no shell interpolation.",
 				maxItems: 256,
 			}),
 		),
 		cwd: Type.Optional(
 			Type.String({
-				description: "Working directory. Defaults to Pi's cwd; relative paths resolve from Pi's cwd.",
+				description: "Working directory (default: Pi's cwd).",
 				maxLength: 32_768,
 			}),
 		),
 		timeoutSeconds: Type.Optional(
 			Type.Number({
-				description: `Wall-clock timeout. Defaults to ${DEFAULT_PYTHON_TIMEOUT_SECONDS} seconds (${MAX_PYTHON_TIMEOUT_SECONDS} for a background run) and is capped at ${MAX_PYTHON_TIMEOUT_SECONDS}.`,
+				description: `Wall-clock timeout in seconds. Default ${DEFAULT_PYTHON_TIMEOUT_SECONDS} (${MAX_PYTHON_TIMEOUT_SECONDS} for a background run), capped at ${MAX_PYTHON_TIMEOUT_SECONDS}; raise only for bounded work.`,
 			}),
 		),
 		background: Type.Optional(
 			Type.Boolean({
 				description:
-					"Run as a session task at once and return its task id instead of waiting. It runs in its own process (its working directory and environment changes do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Its result arrives in the completion wake-up; tool_task wait is only for an omitted output (needs the tool_task tool; without it the code runs in the foreground). Omit to wait for the code (default, bounded by the timeout).",
+					"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own process (working directory and environment changes do not persist) and waits only for file writes emitted earlier in this message. Use only when other work can proceed meanwhile, never followed by an immediate tool_task wait; without the tool_task tool it runs in the foreground.",
 			}),
 		),
 		fullOutput: Type.Optional(
 			Type.Boolean({
 				description:
-					"Return the complete raw stdout for this call: no output filters (generic cleaning, rules). The persisted full output named in a filtered notice is usually enough.",
+					"Return complete raw stdout with no output filters; the persisted file named in a filtered notice is usually enough.",
 			}),
 		),
 		maxOutputBytes: Type.Optional(
 			Type.Number({
-				description: `Maximum returned bytes per stream before full output spills to a work artifact. Maximum ${MAX_PYTHON_OUTPUT_BYTES}.`,
+				description: `Maximum returned bytes per stream before output spills to a work artifact (limit ${MAX_PYTHON_OUTPUT_BYTES}).`,
 			}),
 		),
 	},

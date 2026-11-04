@@ -267,13 +267,8 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Create a new file without overwriting. Send path and exactly one of content or contentRef. After a path-only collision, use the returned payloadRef with only a corrected path. The harness owns preflight, bounded payload retention, and atomic rechecks.",
-		promptSnippet: "Preflight new paths; never overwrite",
-		promptGuidelines: [
-			"Call once per file: path plus exactly one of content/contentRef; writes to different files may be emitted together in one message. Harness owns preparation/collision checks.",
-			"Collision with payloadRef: choose new path, reuse reference; never regenerate content.",
-			"write is create-only; edit existing files. Reuse contentRef for exact copies.",
-		],
+			"Create a new file; it never overwrites, so use edit for existing files. Pass content, or contentRef to copy bytes already written or edited in this session.",
+		promptSnippet: "Create new files",
 		parameters: writeSchema,
 		mutationTarget: resolveMutationPathTarget,
 		failureRecovery: {

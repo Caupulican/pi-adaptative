@@ -8,23 +8,11 @@
 export const OWNER_PRECEDENCE_POLICY = "Owner instructions override conflicting skill/memory approval rules.";
 
 /**
- * Skill conflict resolution, stated once per surface: the autonomy block carries it for the root
- * model, the skill tool description for the tool, and the read-only worker skill tool tells workers
- * to report instead. Loaded skill bodies do not repeat it (see skill-vault.ts).
+ * The single owner of standing owner authorization in every root prompt. The core sections
+ * (system-prompt.ts) render it once per capability class; tool text states only each tool's own limits.
  */
-export const SKILL_CONFLICT_RESOLUTION_RULE =
-	"Skill conflicting with owner instructions: skill exclude (exact name, reason) at once, keep working; repair only if settings allow. Workers without exclude report the conflict to the parent instead of pausing.";
-
-/** Constrained profiles never delegate, so the worker clause is dropped inside their prompt budget. */
-export const SKILL_CONFLICT_RESOLUTION_RULE_COMPACT =
-	"Skill conflicting with owner instructions: skill exclude (exact name, reason), keep working; repair only if settings allow.";
-
-/**
- * The single owner of standing owner authorization in every root prompt. The core operating
- * contract (system-prompt.ts) renders it once per capability class; no other block repeats its
- * sentences (pinned by system-prompt-builder-tool-selection.test.ts).
- */
-export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Owner and settings grants are standing owner authorization: execute in scope without confirmation; ask only for missing authority.`;
+export const OWNER_AUTHORIZATION_RULE =
+	"YOLO within the handed-off task: pursue the user's request proactively, taking every step the objective needs without waiting to be asked.";
 
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
@@ -150,7 +138,7 @@ export function renderExplanationStyleRule(strictness: number): string | undefin
 }
 
 export const SKILL_VAULT_SYSTEM_RULE =
-	"SKILL VAULT, NON-NEGOTIABLE: iff specialist help useful, needed ACTIVE SKILL absent: search, load exact name pre-work. ACTIVE SKILL transient; absent=unloaded. Host owns idle expiry; unload optional.";
+	"SKILL VAULT: when specialist help is useful and the needed skill is not active, search and load it by exact name before the work. Active skills are transient; the host unloads idle ones.";
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
 /**

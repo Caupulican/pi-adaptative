@@ -744,29 +744,22 @@ function createShellToolDefinition(
 		}
 	}
 	const contractDescription = options?.forceCwd
-		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
+		? "Run a command in a persistent shell with a host-pinned working directory: each invocation starts in the pinned directory, and cd inside a command still works. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
 		: routesWindowsContract
-			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls; a failed command reports its effective cwd on a final `cwd:` line). On Windows, every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present, so Linux command habits work unchanged; named unsupported constructs (job control, process substitution, and similar) fail closed instead of being guessed. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
-			: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly.";
+			? "Run Pi's Bash-like command contract in a persistent per-agent shell session that starts at the project working directory. Every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present; unsupported constructs (job control, process substitution, and similar) fail closed by name. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
+			: "Run a Bash command in a persistent per-agent shell session that starts at the project working directory; a timed-out or aborted command resets the session. Commands issued together run concurrently on a pool of shells; the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly.";
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr. Output is truncated to a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Search, compiler and large JSON output is reduced the same way (raw output persisted, one notice naming it); for JSON prefer a jq projection up front (e.g. | jq -c '.items[] | {id,status}') and query a persisted document with jq instead of reading it whole. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default (a background run defaults to the ${MAX_COMMAND_TIMEOUT_SECONDS}-second ceiling), including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
-		promptSnippet: routesWindowsContract
-			? "Run Bash-like commands; Pi routes Windows."
-			: "Execute Bash commands (ls, grep, find, etc.)",
+		description: `${contractDescription} Returns stdout and stderr as a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; the full output is saved to a managed file named in the notice. Recognized test runners and large search, compiler and JSON output are reduced to a bounded projection the same way. Broad rg/grep/find/fd scans run with their output routed to a managed file instead of model context.`,
+		promptSnippet: routesWindowsContract ? "Run Bash commands (bundled Windows engine)" : "Run Bash commands",
 		promptGuidelines: routesWindowsContract
 			? [
-					"On Windows, write ordinary Linux bash (GNU ls/find/grep/sed/awk flags, loops, functions, pipes); never write PowerShell or ask the owner to choose a shell.",
-					"Unhandled syntax fails closed by name; cd/export/unset state persists across bash calls.",
+					"On Windows, write ordinary Linux bash (GNU flags, loops, functions, pipes); never PowerShell, and never ask the owner to choose a shell.",
 					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
-					`Bash timeout values are seconds; omit to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
-					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
+					"When grep, find or ls tools are active, prefer them over shell search.",
 				]
-			: [
-					`Bash timeout values are seconds, not milliseconds; omit timeout to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
-					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
-				],
+			: ["When grep, find or ls tools are active, prefer them over shell search."],
 		parameters: bashSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {

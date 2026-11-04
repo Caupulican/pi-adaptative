@@ -34,11 +34,7 @@ import {
 } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
 import { buildProjectInstructionIsolationPrompt } from "./project-instruction-isolation.ts";
-import {
-	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
-	SKILL_CONFLICT_RESOLUTION_RULE,
-	SKILL_CONFLICT_RESOLUTION_RULE_COMPACT,
-} from "./provider-prompt-contracts.ts";
+import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
@@ -373,12 +369,12 @@ export class SystemPromptBuilder {
 				? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
 				: "Root reflection is disabled.";
 		if (profile.class !== "full") {
-			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. ${SKILL_CONFLICT_RESOLUTION_RULE_COMPACT}`;
+			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. ${SKILL_CONFLICT_RESOLUTION_RULE} Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[], ledgerActive: boolean): string | undefined {

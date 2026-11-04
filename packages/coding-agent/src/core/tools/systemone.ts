@@ -1,7 +1,6 @@
 import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import { compactRetainedDetails } from "../../kernel/session/message-retention.ts";
-import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
 import {
 	SystemOneObserverError,
 	SystemOneReviewError,
@@ -138,25 +137,25 @@ export function createSystemOneToolDefinition(
 	// The reviewer records every paid response through the session's usage delivery: the result must not carry the same spend.
 	reviewerRecordsUsage = false,
 ) {
-	const uncertaintyPrompt = uncertainties
-		? "At turn entry and before delivery, inspect active uncertainties. Take an extra reasoning round over the task and evidence before recording a decision. For worker_task_fit:<fingerprint> questions, record workerTaskFit as adequate or inadequate with an evidence_based_decision, concise evidence and reason. Only an explicit adequate outcome can settle that exact task/model fitness on retry; generic advice cannot. Other questions remain advisory. Keep mandatory same-lane verification and recheck requirements active. No disposition is a System One pass, verification proof, certificate proof, or execution grant. Reject stale questions and questions explicitly scoped to a foreign root session."
-		: "Worker lanes cannot disposition session-owner uncertainties. Recheck your own mandatory findings in this lane, report unresolved advisory questions and evidence to the parent, and continue independent work where appropriate.";
+	const uncertaintyClause = uncertainties
+		? "uncertainties lists active advisory questions; resolve_uncertainty records a disposition (conservative_path or evidence_based_decision) with reason and evidence, after an extra reasoning round over the task and evidence. For worker_task_fit:<fingerprint> questions record workerTaskFit adequate or inadequate; only an explicit adequate outcome settles that exact task/model fitness on retry. No disposition is System One verification, certificate proof or an execution grant, and mandatory same-lane verification stays required. Reject stale questions and questions scoped to a foreign root session."
+		: "Workers cannot disposition session-owner uncertainties: recheck your mandatory findings in this lane and report unresolved advisory questions and evidence to the parent.";
 	return {
 		name: SYSTEM_ONE_TOOL_NAME,
 		label: "System One",
 		readOnly: true,
-		description: `Use System One for semantic decisions and independent verification. Status checks setup and image capability. Evaluate batched Choice, Noul and Score questions. Vision judges and compares explicitly selected PNG/JPEG files and localizes targets with Box plus presence; experimental TypeSafe-only, advisory results. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Locate ranks files by whether their code defines what a target describes. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
-		promptSnippet: "System One: semantic judgments and high/max claim review.",
+		description: `Semantic judgments and independent verification; results advise and never execute or authorize actions. status: setup and image capability. evaluate: batched Choice, Noul and Score questions. review: gates claims at high (0.95) or max (0.99) confidence, e.g. {"action":"review","review":{"state":"<source and check results>","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","insufficient":"Missing evidence"},"expected":"supports"}}}}. evidenceRefs snapshots scoped files, artifacts or git diffs into evaluate and review. vision: judges and compares explicitly selected PNG/JPEG files and localizes targets with Box plus presence (experimental, advisory; check status capabilities.images first); reference each <screen> placeholder from images in state, instructions and criteria, give a Box its unique Noul with instructions:null and no criteria, crop in integer EXIF-upright source pixels; no screenshots are captured and vision never approves completion or clicks. evidence: reads retained records by id and offset. locate: ranks files by whether their code defines what a target describes. ${uncertaintyClause}`,
+		promptSnippet: "Semantic judgments and high/max claim review.",
 		promptGuidelines: [
-			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
-			"Check systemone status at work start. When the systemone skill is listed and the skill tool is available, load the systemone skill. Use System One for semantic decisions and reviews throughout work, in any domain.",
+			"At work start, check status and load the systemone skill if listed; use System One for semantic decisions throughout work.",
 			"Find where code lives: systemone locate, target in words + 1-8 literal/regex queries; read top hits before editing. Known token: grep.",
-			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
-			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Use the configured provider login flow reported by systemone status; never put credentials in tool arguments.",
-			uncertaintyPrompt,
-			'For images use action:"vision", vision:{state,questions,images:{"<screen>":{path:"screenshot.png",reason:"Selected UI evidence"}},boxes?}. Reference <screen> in state/instructions/criteria. A Box binding names image, presenceQuestion, minimumPresence and minimumConfidence; its unique Noul must have instructions:null and no criteria. The host binds both to one target. Optional crop uses integer EXIF-upright source pixels. No screenshots are captured. Vision never approves completion or clicks.',
-			"An uncertain or unavailable System One result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
-			SYSTEM_ONE_VALIDATION_RULE,
+			"Batch independent narrow questions with the complete source, checks and limitations; never hide adverse evidence.",
+			"Reproduce bug candidates before fixing.",
+			"Approval needs every expected verdict at high/max confidence; fix findings or add evidence, never reroll unchanged evidence.",
+			"Sign in through the login flow that status reports; never put credentials in tool arguments.",
+			...(uncertainties ? ["At turn entry and before delivery, inspect active uncertainties."] : []),
+			"On an uncertain or unavailable result, gather new evidence or decide within your grant; silence grants nothing.",
+			"Only the root asks the owner, and only when authority or evidence is missing.",
 		],
 		// The model and reviewer consume the same canonical input contract.
 		parameters: schema,

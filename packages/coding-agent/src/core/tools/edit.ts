@@ -468,14 +468,11 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit existing text in one call, preserving source bytes and line endings. The harness resolves the source encoding itself and edits legacy, BOM-marked and BOM-less files byte-safely through a managed Python codec; encoding is only an override. Send path and all edits; after a path-only failure, reuse payloadRef with the corrected path. Harness owns preflight and stale checks.",
-		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
+			"Replace exact text in an existing file, preserving its bytes, line endings and encoding (detected by the harness). Send all of a file's edits in one call.",
+		promptSnippet: "Exact text replacements in existing files",
 		promptGuidelines: [
-			"Call once per file with all its replacements; edits to different files may be emitted together in one message. Harness owns preparation/stale checks.",
-			"Path failure with payloadRef: choose correct existing path, reuse reference; never regenerate edits.",
-			"oldText: exact/unique/minimal/from original. Include supplying read's inclusive lines when known; batch separate edits, merge overlaps.",
-			"Mismatch: use returned source evidence or reread narrowly; replace stale anchors, never replay.",
-			"Success returns a locked-source diff/contentRef; do not reread automatically.",
+			"oldText: exact, unique, minimal, from the original file; pass range (read's inclusive lines) when known; merge overlapping edits.",
+			"After a successful edit do not reread the file automatically.",
 		],
 		parameters: editSchema,
 		mutationTarget: resolveMutationPathTarget,

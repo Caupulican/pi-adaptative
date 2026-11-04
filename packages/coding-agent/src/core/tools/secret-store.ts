@@ -52,18 +52,13 @@ const migrationSourceSchema = Type.Union([
 
 const secretStoreSchema = Type.Object(
 	{
-		action: Type.Union(
-			[
-				Type.Literal("status"),
-				Type.Literal("list"),
-				Type.Literal("discover"),
-				Type.Literal("activate"),
-				Type.Literal("migrate"),
-			],
-			{
-				description: "Inspect, discover, activate, or migrate model-blind credential sources.",
-			},
-		),
+		action: Type.Union([
+			Type.Literal("status"),
+			Type.Literal("list"),
+			Type.Literal("discover"),
+			Type.Literal("activate"),
+			Type.Literal("migrate"),
+		]),
 		profile: Type.Optional(
 			Type.String({
 				minLength: 1,
@@ -282,21 +277,20 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		name: "secret_store",
 		label: "Secret Store",
 		description:
-			"Discover, migrate, and activate Bitwarden credential profiles for the current project without exposing values.",
-		promptSnippet: "Manage credentials; never expose values.",
+			"Check status, list, discover sources for, migrate and activate Bitwarden credential profiles for the current project, model-blind: values are never exposed.",
+		promptSnippet: "Manage Bitwarden credential profiles model-blind.",
 		promptGuidelines: [
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
-			"Use existing credential consumers directly when the current task genuinely requires credentials. Bitwarden activation or migration is not a prerequisite. Never probe or activate for an optional integration.",
-			"Use discover for unknown sources (path targets another directory); never ask the owner for source paths or environment-variable names. A truncated or empty discovery is not proof that credentials are absent; follow owner-provided locations with targeted inspection and host-side consumption.",
-			"Discovery returns names/paths only. Migrate when a stored profile is needed; never expose values.",
+			"Use existing credential consumers directly; Bitwarden activation is no prerequisite. Never probe or activate for an optional integration.",
+			"Use discover for unknown sources; never ask the owner for source paths or environment-variable names.",
+			"A truncated or empty discovery does not prove credentials are absent; follow owner-given locations with targeted host-side inspection.",
+			"Discovery returns names/paths only; migrate when a stored profile is needed. Migration keeps its sources.",
 			"Bitwarden uses machine BWS_ACCESS_TOKEN, BW_SESSION, or supported bootstrap/session files. Pi never prompts for a session key.",
 			"activate loads a stored profile; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
 			"Never request credentials in chat/tool arguments.",
 			"After activation, run consumer normally; never print/inspect/grep/echo credential environment values.",
-			"migrate accepts environment names, dotenv paths, key-file paths; never credential values.",
-			"Migration keeps sources. overwrite only for intentional Bitwarden profile replacement.",
-			"owner_setup_required applies only to Bitwarden profile operations; continue through existing credential consumers. Never request setup or retry unchanged.",
+			"owner_setup_required affects only Bitwarden profile operations; continue via existing consumers, never request setup or retry unchanged.",
 		],
 		parameters: secretStoreSchema,
 		executionMode: "sequential",

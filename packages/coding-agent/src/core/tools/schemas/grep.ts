@@ -2,17 +2,13 @@ import { type Static, Type } from "typebox";
 import type { TruncationResult } from "../../../kernel/utils/truncate.ts";
 
 export const grepSchema = Type.Object({
-	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
-	path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
-	glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" })),
-	ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)" })),
-	literal: Type.Optional(
-		Type.Boolean({ description: "Treat pattern as literal string instead of regex (default: false)" }),
-	),
-	context: Type.Optional(
-		Type.Number({ description: "Number of lines to show before and after each match (default: 0)" }),
-	),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)" })),
+	pattern: Type.String(),
+	path: Type.Optional(Type.String({ description: "Directory or file (default: current directory)" })),
+	glob: Type.Optional(Type.String({ description: "File glob filter, e.g. '*.ts'" })),
+	ignoreCase: Type.Optional(Type.Boolean()),
+	literal: Type.Optional(Type.Boolean({ description: "Match pattern literally, not as a regex" })),
+	context: Type.Optional(Type.Number({ description: "Lines before and after each match" })),
+	limit: Type.Optional(Type.Number()),
 });
 
 export type GrepToolInput = Static<typeof grepSchema>;

@@ -105,18 +105,12 @@ const PROCESS_LANE_TOOL_NAME = "run_process" as const;
 const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
 const MAX_LANE_MEMORY_REF_CHARS = 600;
 const laneMemoryFields = Type.Object({
-	query: Type.Optional(
-		Type.String({
-			maxLength: MAX_LANE_MEMORY_QUERY_CHARS,
-			description: "What prior conversation evidence or memory to retrieve",
-		}),
-	),
+	query: Type.Optional(Type.String({ maxLength: MAX_LANE_MEMORY_QUERY_CHARS })),
 	ref: Type.Optional(
 		Type.String({
 			minLength: 1,
 			maxLength: MAX_LANE_MEMORY_REF_CHARS,
-			description:
-				"A transcript source handle (tx:...) or history summary handle (txn:...) cited by an earlier memory_read result in this task; opens its exact text or expands the summary instead of searching",
+			description: "A tx:... source or txn:... summary handle cited by an earlier memory_read result in this task",
 		}),
 	),
 	cursor: Type.Optional(
@@ -302,7 +296,7 @@ function createLaneTools(
 			label: "Read Memory",
 			readOnly: true,
 			description:
-				"Retrieve bounded, source-labeled memory relevant to this delegated task (query): past-conversation evidence and, where the session keeps it, standing memory. Results may cite transcript source handles (tx:...) and history summary handles (txn:...); pass one back as ref (with an optional cursor for tx:) to read that source's exact text or to expand that summary one level. Read-only: no memory writes or lifecycle actions are available.",
+				"Read-only, bounded, source-labeled memory for this delegated task: past-conversation evidence and, where the session keeps it, standing memory. A query searches; a cited tx:... handle as ref opens that source's exact text (cursor pages it), a txn:... handle expands that summary one level.",
 			parameters: laneMemorySchema,
 			execute: async (_toolCallId, params) => {
 				const { query: rawQuery, ref, cursor } = params as LaneMemoryParams;

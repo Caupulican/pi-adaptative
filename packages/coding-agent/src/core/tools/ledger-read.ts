@@ -11,7 +11,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 export { LEDGER_READ_TOOL_NAME };
 
 const ledgerReadSchema = Type.Object(
-	{ topic: Type.String({ description: "ledger topic from the prompt index, without the @hash" }) },
+	{ topic: Type.String({ description: "Topic from the prompt index, without the @hash." }) },
 	{ additionalProperties: false },
 );
 
@@ -25,8 +25,8 @@ export function createLedgerReadToolDefinition(): ToolDefinition<typeof ledgerRe
 		label: "Ledger",
 		readOnly: true,
 		description:
-			"Read one complete standing rule from the ledger index in the system prompt. Always returns the whole rule and its LEDGER-ID; cite that id in the action the rule governs.",
-		promptSnippet: "Read a whole ledger rule by topic; cite its id.",
+			"Read one standing rule from the system prompt's ledger index. Always returns the whole rule and its LEDGER-ID.",
+		promptSnippet: "Read a whole ledger rule by topic.",
 		parameters: ledgerReadSchema,
 		async execute(_toolCallId, input) {
 			const topic = input.topic.trim().replace(/@[0-9a-f]{8}$/, "");

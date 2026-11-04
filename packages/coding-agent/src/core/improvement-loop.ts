@@ -1030,9 +1030,9 @@ const LoopToolParams = Type.Object(
 			},
 		),
 		loopId: Type.Optional(Type.String({ description: "Loop id within the current workspace. Default: default." })),
-		objective: Type.Optional(Type.String({ description: "Loop objective. Required for action=init." })),
-		metricName: Type.Optional(Type.String({ description: "Primary metric name. Required for action=init." })),
-		metricUnit: Type.Optional(Type.String({ description: "Display unit for the primary metric." })),
+		objective: Type.Optional(Type.String({ description: "Required for init." })),
+		metricName: Type.Optional(Type.String({ description: "Primary metric name; required for init." })),
+		metricUnit: Type.Optional(Type.String({ description: "Display unit." })),
 		direction: Type.Optional(
 			StringEnum(["lower", "higher"] as const, {
 				description: "Whether lower or higher metric values are better. Default lower.",
@@ -1062,24 +1062,15 @@ const LoopToolParams = Type.Object(
 				description: "Decision when confidence evidence is missing or low. Default retry.",
 			}),
 		),
-		currentMetric: Type.Optional(Type.Number({ description: "Measured primary metric for action=record." })),
-		checksPass: Type.Optional(
-			Type.Boolean({ description: "Correctness check result for action=record. false forces discard." }),
-		),
+		currentMetric: Type.Optional(Type.Number({ description: "record: measured primary metric." })),
+		checksPass: Type.Optional(Type.Boolean({ description: "record: correctness result; false forces discard." })),
 		hypothesis: Type.Optional(Type.String({ description: "What this run tried." })),
 		secondaryMetrics: Type.Optional(
-			Type.Object(
-				{},
-				{ additionalProperties: Type.Number(), description: "Secondary metric map for action=record." },
-			),
+			Type.Object({}, { additionalProperties: Type.Number(), description: "record: secondary metrics." }),
 		),
 		changedFiles: Type.Optional(Type.Array(Type.String(), { description: "Files changed by this candidate run." })),
-		evidenceRef: Type.Optional(
-			Type.String({ description: "Path, command, or artifact reference proving the measurement/check result." }),
-		),
-		nextHint: Type.Optional(
-			Type.String({ description: "Useful next-step hint for later runs, especially after discard/retry/blocked." }),
-		),
+		evidenceRef: Type.Optional(Type.String({ description: "Reference proving the result." })),
+		nextHint: Type.Optional(Type.String({ description: "Hint for later runs." })),
 		command: Type.Optional(
 			Type.String({
 				description:
@@ -1157,17 +1148,12 @@ export function createImprovementLoopTool(
 		name: "improvement_loop",
 		label: "Improvement Loop",
 		description:
-			"Persist and evaluate a deterministic improvement loop in user-level state: init objective/metric policy, measure bounded commands, record measured runs, manage disposable git worktree sandboxes, and status current baseline/best/decision log. Does not commit/apply/revert real-repo files.",
-		promptSnippet: "Track deterministic improvement state, measurements, decisions.",
+			"Persist and evaluate a deterministic improvement loop in user-level state, never in the target repo. Code derives keep/discard/retry/blocked from metrics and checks; a decision is only a record, and the tool never commits, applies or reverts real-repo files.",
+		promptSnippet: "Metric-gated improvement loop: runs, sandboxes, decisions.",
 		promptGuidelines: [
 			"init before iterative metric-gated optimization.",
-			"measure runs bounded measurement/optional checks, records deterministic decision.",
-			"sandbox_create before risky self-modification; edit disposable worktree, never real repo.",
-			"For keep, sandbox_export captures diff as user-level patch before cleanup.",
-			"sandbox_cleanup after discard/export/approval; removes disposable worktree record, never real repo.",
-			"record when measured elsewhere; code derives keep/discard/retry/blocked from metrics/gates.",
-			"Never commit/apply/revert real-repo files; keep/discard stays a record until approved executor applies it.",
-			"State lives under user-level agent directory, never target repo.",
+			"sandbox_create before risky self-modification; edit the disposable worktree, never the real repo.",
+			"To keep a candidate, sandbox_export its diff as a user-level patch before sandbox_cleanup; cleanup removes only the sandbox record and worktree.",
 		],
 		parameters: LoopToolParams,
 		executionMode: "sequential",

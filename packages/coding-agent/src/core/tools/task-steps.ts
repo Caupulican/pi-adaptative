@@ -55,22 +55,24 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 			Type.String({
 				minLength: 1,
 				maxLength: MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH,
-				description: "Active pipeline run id this step advances. Supply together with pipelineStageId.",
+				description: "Active pipeline run this step advances; while open it blocks increment of its stage.",
 			}),
 		),
 		pipelineStageId: Type.Optional(
 			Type.String({
 				minLength: 1,
 				maxLength: MAX_PIPELINE_STAGE_ID_LENGTH,
-				description: "Stage id in pipelineRunId this step advances. Supply both ids together.",
+				description: "Stage in pipelineRunId this step advances. Supply both ids together.",
 			}),
 		),
 		clearPipelineLink: Type.Optional(
 			Type.Boolean({
-				description: "Remove both pipeline ids. Cannot be combined with pipelineRunId/pipelineStageId.",
+				description: "Remove both pipeline ids; not with pipelineRunId/pipelineStageId.",
 			}),
 		),
-		note: Type.Optional(Type.String({ maxLength: 4_000, description: "One short line." })),
+		note: Type.Optional(
+			Type.String({ maxLength: 4_000, description: "One short line; put long evidence in goal add_evidence." }),
+		),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
 	};
 }
@@ -128,7 +130,7 @@ const taskStepsSchema = Type.Union([
 					minLength: 1,
 					pattern: "\\S",
 					description:
-						"Exact step id, unique id prefix, unique content selector, or 'current'/'active'. Omit to target the active (in_progress) step -- the harness resolves it, no lookup needed.",
+						"Step id, unique id prefix, unique content, or 'current'/'active'. Omit to target the active (in_progress) step.",
 				}),
 			),
 			content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
@@ -138,7 +140,7 @@ const taskStepsSchema = Type.Union([
 				Type.Array(batchUpdateItemSchema, {
 					minItems: 1,
 					maxItems: MAX_TASK_STEPS,
-					description: "Several steps in one call; each item names its step. Omit the top-level id and fields.",
+					description: "Batched transitions, each naming its step. Omit the top-level id and fields.",
 				}),
 			),
 		},
@@ -445,19 +447,15 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 	return {
 		name: "task_steps",
 		label: "Task Steps",
-		description:
-			"Track the session's ordered multi-step checklist with status, notes, and evidence. Use goal for durable outcomes and delegate for workers.",
-		promptSnippet: "Track multi-step session work.",
+		description: "Track the session's ordered multi-step checklist with status, notes, and evidence.",
+		promptSnippet: "Session checklist: set, update, advance steps.",
 		promptGuidelines: [
-			"Use for multi-step work; keep one in_progress step while runnable work remains. Leave blocked steps blocked until their condition changes.",
-			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
-			'Finish several steps in one call with update + updates: [{id: "3", status, note}, …] (id is the step number), never one call per step; work the first pending step; record blockers; skip unchanged narration.',
-			"Notes are one short line; long evidence belongs in goal add_evidence cited by toolCallId.",
-			"intake keeps every item; link goal requirementIds.",
-			"update's id is optional: omit it to target the active step. Completing the active step auto-starts the next pending one.",
-			"advance completes current, then starts next pending.",
-			"Attach completed tool_task IDs as evidence; goal completion rejects every open step.",
-			"Before final, resolve or defer open work. goal owns outcomes; delegate owns workers.",
+			"Use for multi-step work; keep one in_progress step while runnable work remains, and leave blocked steps blocked until their condition changes.",
+			"Link steps to goal requirements with requirementIds.",
+			'Finish several steps in one call: update with updates: [{id: "3", status, note}, …]; never one call per step.',
+			"Completing the active step auto-starts the next pending one; advance does the same.",
+			"Attach completed tool_task ids as step evidence.",
+			"Before the final answer, resolve or defer open steps.",
 		],
 		parameters: taskStepsSchema,
 		// INVESTIGATED, not assumed (turn-economics remediation, TASK 6): this tool previously

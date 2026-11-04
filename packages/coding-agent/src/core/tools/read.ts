@@ -495,9 +495,9 @@ export function createReadToolDefinition(
 		name: "read",
 		label: "read",
 		readOnly: true,
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. For a file over ~300 lines start with mode="outline" (declarations with line numbers, a fraction of the size) and then read only the ranges you need. Batchable: emit alongside other independent calls in one message; never spend a turn per read.`,
-		promptSnippet: "Read file contents",
-		promptGuidelines: ["Use read to examine files instead of cat or sed."],
+		description: `Read a text file or an image (jpg, png, gif, webp; sent as an attachment). Text output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; the notice gives the offset to continue. For a file over ~300 lines start with mode="outline", then read only the ranges you need.`,
+		promptSnippet: "Read a file or image",
+		promptGuidelines: ["Use read, not cat or sed, to examine files."],
 		parameters: readSchema,
 		failureRecovery: {
 			getFailureEvidence: (params, failure) =>

@@ -637,11 +637,8 @@ export function createSelfCompactToolDefinition(
 	return {
 		name: SELF_COMPACT_TOOL_NAME,
 		label: "Self Compact",
-		description: `Without note_to_self: your context usage and self-compaction lines as JSON. With note_to_self (1-${SELF_COMPACTION_NOTE_MAX_CHARS.toLocaleString("en-US")} chars: goal, done work with exact paths, in-progress state, decisions, verified results, exact NEXT ACTION last): saves the note, ends this turn, compacts the context, and returns the note verbatim as the next message; then continue its NEXT ACTION. Call it alone in its batch.`,
-		parameters: Type.Object(
-			{ note_to_self: Type.Optional(Type.String({ description: "Handoff note; omit to read usage" })) },
-			{ additionalProperties: false },
-		),
+		description: `Without note_to_self returns your context usage and self-compaction lines as JSON. With note_to_self (1-${SELF_COMPACTION_NOTE_MAX_CHARS.toLocaleString("en-US")} chars: goal, done work with exact paths, in-progress state, decisions, verified results, exact NEXT ACTION last) saves the note, ends this turn, compacts the context, and returns the note verbatim as the next message; then continue its NEXT ACTION.`,
+		parameters: Type.Object({ note_to_self: Type.Optional(Type.String()) }, { additionalProperties: false }),
 		async execute(_toolCallId, params: { note_to_self?: unknown }) {
 			const controller = getController();
 			if (!controller) {

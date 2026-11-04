@@ -23,19 +23,15 @@ export const CONTEXT_ID_PREFIX = "context:";
 
 const artifactRetrieveSchema = Type.Object({
 	artifactId: Type.String({
-		description:
-			"Id from a prior result: 'tool-output:<id>' from a 'Full output: artifact' reference (prefix optional), or 'context:<key>' from a context-GC packed stub.",
+		description: "'tool-output:<id>' (prefix optional) or 'context:<key>', as named in the result or stub.",
 	}),
 	mode: Type.Optional(
 		Type.Union([Type.Literal("metadata"), Type.Literal("head"), Type.Literal("tail"), Type.Literal("offset")], {
-			description:
-				"'metadata' for tool/path/size info only (no content); 'head' (default) for the first lines; 'tail' for the last lines; 'offset' for the lines starting at `offset`.",
+			description: "'metadata' returns tool/path/size only; 'head' is the default; 'offset' starts at `offset`.",
 		}),
 	),
-	maxLines: Type.Optional(
-		Type.Number({ description: `Maximum lines to return for a slice (default: ${DEFAULT_RETRIEVAL_MAX_LINES})` }),
-	),
-	offset: Type.Optional(Type.Number({ description: "For mode 'offset': the 1-based line the slice starts at." })),
+	maxLines: Type.Optional(Type.Number({ description: `Default ${DEFAULT_RETRIEVAL_MAX_LINES}` })),
+	offset: Type.Optional(Type.Number({ description: "1-based start line for mode 'offset'." })),
 });
 
 export type ArtifactRetrieveToolInput = Static<typeof artifactRetrieveSchema>;
@@ -127,8 +123,8 @@ export function createArtifactRetrieveToolDefinition(
 		label: "artifact_retrieve",
 		readOnly: true,
 		description:
-			"Retrieve a bounded slice of a stored original by id: a packed tool-output artifact ('Full output: artifact tool-output:<id>') or a context-GC packed result ('artifact_retrieve context:<key>'). Returns metadata, or a bounded head/tail/offset slice -- never the full raw payload in one call.",
-		promptSnippet: "Retrieve a bounded slice of a packed tool-output artifact",
+			"Read a bounded slice of a stored original by id: a packed tool output ('Full output: artifact tool-output:<id>') or a context-GC packed result ('artifact_retrieve context:<key>'). Never returns the full payload in one call.",
+		promptSnippet: "Read a slice of a packed output by id",
 		parameters: artifactRetrieveSchema,
 		async execute(
 			_toolCallId,

@@ -22,12 +22,12 @@ const runProcessSchema = Type.Object(
 	{
 		executable: Type.String({
 			maxLength: MAX_RUN_PROCESS_EXECUTABLE_CHARS,
-			description: "Exact owner-allowed executable name or path.",
+			description: "Exact name or path from the allowed list.",
 		}),
 		args: Type.Optional(
 			Type.Array(Type.String({ maxLength: MAX_RUN_PROCESS_ARGUMENT_CHARS }), {
 				maxItems: MAX_RUN_PROCESS_ARGUMENTS,
-				description: "Direct argv entries. No shell parsing occurs.",
+				description: "Literal argv entries; no shell operators or interpolation.",
 			}),
 		),
 	},
@@ -178,13 +178,9 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 	return {
 		name: "run_process",
 		label: "Run Process",
-		description: `Run one owner-allowed executable using direct argv without a shell. Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
-		promptSnippet: "Run owner-allowed executable via constrained direct argv; not OS isolation.",
-		promptGuidelines: [
-			"Executable must be profile-listed. Arguments literal; no shell operators/interpolation.",
-			"Project credentials inject only when execution profile also allows variable names.",
-			"Nonzero exit/timeout/abort/output-limit means failure.",
-		],
+		description: `Run one owner-allowed executable with direct argv and no shell (not an OS sandbox). Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
+		promptSnippet: "Run an allowlisted executable",
+		promptGuidelines: ["Project credentials inject only when execution profile also allows variable names."],
 		parameters: runProcessSchema,
 		async execute(_toolCallId, input: RunProcessInput, signal) {
 			const args = validateProcessInput(input);

@@ -25,7 +25,7 @@ export const editEncodingSchema = Type.Optional(
 		minLength: 1,
 		maxLength: 80,
 		description:
-			"Override for the source codec, e.g. cp1252 or utf-16-le. The harness resolves the encoding itself (project declarations, BOM, UTF-8, then a managed Python codec that detects legacy and BOM-less text) and preserves it, so pass this only when you know that resolution is wrong.",
+			"Source codec override (e.g. cp1252); the harness detects it, so pass only when that detection is wrong.",
 	}),
 );
 
