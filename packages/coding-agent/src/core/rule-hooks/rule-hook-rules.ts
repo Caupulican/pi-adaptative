@@ -1,5 +1,5 @@
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
-import type { RuleHookCall, RuleHookSource } from "./rule-hook-catalog.ts";
+import type { RuleHookCall, RuleHookSource, RuleHookTrigger } from "./rule-hook-catalog.ts";
 
 /** The `action` of a tool call's arguments, when it names one. */
 function callAction(args: unknown): unknown {
@@ -15,41 +15,59 @@ function callTouchesPackageRoot(call: RuleHookCall): boolean {
 }
 
 /**
+ * The root's work triggers, shared by the rules that arrive with the first piece of planned work. create_goal:
+ * core/tools/goal.ts (createGoalSchema). goal: `action` start (goalSchema).
+ * task_steps: every action of taskStepsSchema (core/tools/task-steps.ts). delegate: `action` is an optional string
+ * that defaults to start (core/tools/delegate.ts); only dispatching or steering a worker is routing, so start,
+ * follow_up and an absent action trigger. Each rule is delivered once per context under its own id.
+ */
+const ROOT_WORK_TRIGGER: RuleHookTrigger = {
+	kind: "tool-call",
+	tools: ["create_goal", "goal", "task_steps", "delegate"],
+	matches: (call) => {
+		if (call.toolName === "goal") return callAction(call.args) === "start";
+		if (call.toolName === "delegate") {
+			const action = callAction(call.args);
+			return action === undefined || action === "start" || action === "follow_up";
+		}
+		return true;
+	},
+};
+
+/**
  * The standing rules the host delivers when a trigger tool call succeeds. A trigger is the tool names plus an
  * optional predicate over the call arguments; the schemas it reads are cited per rule.
  */
 export const RULE_HOOKS: readonly RuleHookSource[] = [
 	{
 		topic: "work-lifecycle",
-		// create_goal and update_goal: core/tools/goal.ts (createGoalSchema, updateGoalSchema). goal: `action` start
-		// (goalSchema). task_steps: every action of taskStepsSchema (core/tools/task-steps.ts). delegate: `action` is
-		// an optional string that defaults to start (core/tools/delegate.ts); only dispatching or steering a worker
-		// is routing, so start, follow_up and an absent action trigger.
-		trigger: {
-			kind: "tool-call",
-			tools: ["create_goal", "goal", "task_steps", "delegate"],
-			matches: (call) => {
-				if (call.toolName === "goal") return callAction(call.args) === "start";
-				if (call.toolName === "delegate") {
-					const action = callAction(call.args);
-					return action === undefined || action === "start" || action === "follow_up";
-				}
-				return true;
-			},
-		},
+		trigger: ROOT_WORK_TRIGGER,
 		rootOnly: true,
 		body: `- Phases: Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale them to the outcome.
 - Owners: goal outcome/contract, task_steps plan, delegate workers, evidence acceptance; no parallel workflow state.
 - Survey: bounded and read-only first.
 - Contract: project-relative. POC/MVP proves the requested capability; complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration and cleanup.
 - Plan before mutation. Scale solo/team routing, independent review and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost and cognitive load; loop until accepted.
-- Deliver: a local commit follows green checks; publish under active owner grants and release conditions.
-Delegation routing:
-- Delegate when the speed or verification benefit outweighs coordination and context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Orientation stays local unless a team is requested.
-- Worker memory access is read-only: through the memory_read broker (root memory owns mutation and lifecycle) or, in ICM mode, through the worker memory broker (zoom and date by message id; private worker logs stay root-only; ICM catalog files follow the worker's ordinary file grants).
-- Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker; on an admission failure use the reported reason to choose safe local progress or report a genuine blocker.
-- Context-heavy or interactive work stays local. The parent writes unless authority explicitly grants worker writes.
-- Per-worker token, cost, wall-clock and tool ceilings come only from host settings or an owner-authored profileId.`,
+- Deliver: a local commit follows green checks; publish under active owner grants and release conditions.`,
+	},
+	{
+		topic: "delegation",
+		trigger: ROOT_WORK_TRIGGER,
+		rootOnly: true,
+		// One owner per rule: the root prompt's director role holds the identity and the decision to delegate, the delegate
+		// tool text holds the mechanics (reuse, event-driven handoffs, never poll, forkTurns default none, parallelWork,
+		// slices, race, interrupt/cancel/retire), and this holds the policy for how to delegate well.
+		body: `- Delegate when the work is independent, bounded and parallelizable, a read- or context-heavy exploration, a disjoint write scope, or a separate review. The benefit must exceed coordination plus context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Also local: interactive work, a couple of tool calls.
+- Split by independence and write ownership: no two workers write the same files (overlapping write scopes wait for each other); slice so each result verifies alone; fan out only as wide as the work is independent. Workers cannot delegate: never chain.
+- Reuse: one specialist per role; retire a worker when its line of work is done.
+- Right-size each worker: readOnly unless it must write; only the tools and paths it needs; the cheapest model and thinkingLevel that can do the task (exploration cheap, design and review strong). Token, cost and wall-clock ceilings come only from host settings or an owner-authored profileId.
+- Brief once, completely: objective, scope and paths, constraints, output shape, evidence required, stop condition. Pass references (paths, ids, requirement ids), not pasted content; no drip of clarifications.
+- Start independent workers in the same turn; maxConcurrent (default 5) queues the rest.
+- Review in proportion: spot-check cheap claims against files, diffs and check commands; verify risky ones with an independent verifier (a fresh readOnly worker). Send back the specific delta; never redo the work yourself.
+- Steer early: follow_up with a targeted message at the first drift, interrupt when off track, cancel when obsolete. A blocked report is your decision: decide, follow up once, never re-dispatch the identical task.
+- Cost: do not spawn for work smaller than its coordination; batch related questions to one worker. Respect explicit user restrictions and granted authority. On an admission failure use the reported reason and continue locally or report the blocker; never change settings to force a worker.
+- Worker memory is read-only (memory_read broker; root memory owns mutation).
+- Integrate: merge results, resolve overlaps, run the final checks, then deliver.`,
 	},
 	{
 		topic: "noticed-items",

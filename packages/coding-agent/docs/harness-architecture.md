@@ -73,11 +73,13 @@ workers` section (`ROOT_DIRECTOR_ROLE_PROMPT` in `src/core/provider-prompt-contr
 identity for the full class of a root session whose `delegate` tool is active with worker delegation enabled
 (`SystemPromptBuilder` sets `directorRole`; a root that works alone, and every child session, gets none). Delegation
 applies at every reasoning level and across providers whenever it is enabled and the tool is active; it is not an
-Ultra-only switch. User restrictions remain binding. The rule hook `work-lifecycle`
-(`src/core/rule-hooks/rule-hook-rules.ts`) owns the remaining decision detail (cost-benefit test, worker memory
-access, admission, ceilings). The host appends it to the result of the first successful `create_goal`, `goal`
-(`start`), `task_steps` or `delegate` (`start`, `follow_up`) call of the context (see `RuleHookDelivery`), so it holds for
-custom and routed prompts alike; bundled commands defer to that policy. Child sessions never receive this root policy.
+Ultra-only switch. User restrictions remain binding. The rule hook `delegation`
+(`src/core/rule-hooks/rule-hook-rules.ts`) owns the playbook for how to delegate (when, split by write ownership,
+reuse, right-sizing, briefing, parallel start, proportional review, steering, cost, integration); `work-lifecycle`
+keeps the phases and state owners. The host appends each, under its own id, to the result of the first successful
+`create_goal`, `goal` (`start`), `task_steps` or `delegate` (`start`, `follow_up`) call of the context (see
+`RuleHookDelivery`), so they hold for custom and routed prompts alike; bundled commands defer to that policy. Child
+sessions never receive this root policy.
 Workers open with `ROLE: worker, an executor with one assignment from the root` (`SUBAGENT_CORE_SYSTEM_PROMPT`); the
 one-shot lane prompts and the verifier carry their own role line.
 

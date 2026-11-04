@@ -262,11 +262,11 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				},
 			},
 		);
-		// The delegate start is this root's first successful work-lifecycle trigger, so its receipt (message 6) carries the 2,323-byte
-		// `RULE work-lifecycle@...` block as a second text block, which the chat logs after the receipt joined by a newline. The leaf
-		// no longer fits the 512-byte node target and is built by the model; the pair it forms with message 7 then joins well under the
-		// target (94 bytes), so no merge needs the model. Nothing else in the turn nears the target (the largest join, lines 0+8, is
-		// 447 bytes on Linux and 453 on Windows).
+		// The delegate start is this root's first successful work trigger, so its receipt (message 6) carries the `work-lifecycle` (829
+		// bytes) and `delegation` (2,186 bytes) rule blocks as two further text blocks, which the chat logs after the receipt, each
+		// joined by a newline. The leaf (about 3,530 bytes) is far over the 512-byte node target and is built by the model; the pair it
+		// forms with message 7 then joins well under the target (80 bytes), so no merge needs the model. Nothing else in the turn nears
+		// the target (the largest join, lines 0+8, is 433 bytes on Linux and 439 on Windows).
 		world.provider.enqueue("worker-c", {
 			name: "w-receipt-leaf-6",
 			check: (request) => {
@@ -275,7 +275,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				}
 			},
 			reply: {
-				content: [{ type: "text", text: "echo: delegate started worker-1; work-lifecycle rule delivered." }],
+				content: [{ type: "text", text: "echo: delegate started worker-1; rules delivered." }],
 			},
 		});
 		world.systemOne.enterPhase("w-icm-start", {
