@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- `/sysprompt` opens the session system prompt in an editor panel: edit the active prompt, start from the generated one with `/sysprompt default`, or return to it with `/sysprompt reset`. The override belongs to the session branch, survives `/resume`, and is applied to the next request as a sanctioned prompt-cache break.
+- A rule ledger: standing rules for delegation, work lifecycle, output formats, engineering skills and noticed items are bundled files read whole, on demand, through the new `ledger_read` tool. The system prompt carries only an index of ids and triggers; each id is derived from the rule's content. Without the tool, the same rules render inline.
+
+### Changed
+
+- The root system prompt no longer carries the full delegation, work-lifecycle, output-format, engineering-skill and noticed-item rules; they are read through the ledger when their trigger applies.
+- The terminal editor accepts an `exactText` option that keeps tabs and does not trim on submit.
+
 ## [0.104.28] - 2026-11-03
 
 ### Added

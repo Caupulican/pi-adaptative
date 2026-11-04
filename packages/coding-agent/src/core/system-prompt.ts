@@ -7,12 +7,11 @@ import { getReadmePath } from "../config.ts";
 import { TOOL_FAILURE_RETRY_MODEL_RULE } from "../kernel/index.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
+import { findLedgerEntry, type LedgerEntry } from "./ledger/ledger-catalog.ts";
 import { enforceModelCapabilitySystemPromptBudget } from "./model-capability.ts";
 import {
-	ENGINEERING_SKILL_ROUTING_RULE,
 	normalizeSteStrictness,
 	ORIENTATION_SURVEY_RULE,
-	OUTPUT_FORMAT_ROUTING_RULE,
 	OWNER_AUTHORIZATION_RULE,
 	renderExplanationStyleRule,
 	SKILL_VAULT_SYSTEM_RULE,
@@ -40,7 +39,7 @@ const PATH_ALIAS_PROMPT_RULE = `
 PATH ALIASES
 P paths use harness-assigned unique suffix p/grep.ts. Tool args accept p/… or a literal path. Never invent p/ tokens.`;
 
-const PI_ADAPTATIVE_CORE_SECTION = `
+const piAdaptativeCoreSection = (noticedLine: string): string => `
 
 OPERATING CONTRACT
 
@@ -51,11 +50,35 @@ OPERATING CONTRACT
 - Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
 - Emit independent tool calls in one message; serialize only dependent, same-file, or stateful calls.
 - Facts: memory; specialization: skills; behavior: source. Discard noise.
-- Noticed items (defects, risks, odd or noisy output beyond the ask): relevant when they affect the delivery, surfaced in your own proof runs, or sit in what you touched; when in doubt, relevant. Fix relevant ones' root causes unasked and prove them; disclose only the unrelated, with the reason. Before declaring done, re-read your proof output for warnings you skipped. Never call work done or complete a goal while a relevant one is unresolved.
+- ${noticedLine}
 - Fast pace: implement, prove live, confirm verdicts via systemone if bound; tests/evidence-gated-tdd only on user request. Architecture/performance design loads skill n-plus-2-architecture while active.
 - Explicit user instruction in current message overrides standing style (length/format/tone); security and untrusted-content rules are never overridable.
 - ${OWNER_AUTHORIZATION_RULE} Bound, source-label output; show paths.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
+
+/** Standing invariant that stays in the prompt while the detailed noticed-items rule lives in the ledger. */
+const NOTICED_ITEMS_POINTER =
+	"Noticed items (defects, risks, odd output beyond the ask): never call work done or complete a goal while a relevant one is unresolved.";
+
+function requireLedgerEntry(topic: string): LedgerEntry {
+	const entry = findLedgerEntry(topic);
+	if (!entry) throw new Error(`Ledger topic ${topic} is missing from the bundled ledger.`);
+	return entry;
+}
+
+/** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
+function inlineLedgerRule(topic: string): string {
+	const entry = requireLedgerEntry(topic);
+	return `${entry.topic.replace(/-/g, " ").toUpperCase()}: ${entry.body}`;
+}
+
+/** The detailed noticed-items rule as one core bullet, for a surface without the ledger. */
+function inlineNoticedItemsLine(): string {
+	const bullets = requireLedgerEntry("noticed-items")
+		.body.split("\n")
+		.map((line) => line.replace(/^- /, "").trim());
+	return `${bullets.join(" ")}`;
+}
 
 const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
 
@@ -252,15 +275,18 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
 	const hasRead = activeTools.includes("read");
 	const coreSection = fullPrompt
-		? PI_ADAPTATIVE_CORE_SECTION
+		? piAdaptativeCoreSection(options.ledgerActive === true ? NOTICED_ITEMS_POINTER : inlineNoticedItemsLine())
 		: leanPrompt
 			? PI_ADAPTATIVE_LEAN_CORE_SECTION
 			: capabilityClass === "minimal"
 				? PI_ADAPTATIVE_MINIMAL_CORE_SECTION
 				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
-	const skillVaultContract = activeTools.includes("skill")
-		? `\n\n${SKILL_VAULT_SYSTEM_RULE}\n${OUTPUT_FORMAT_ROUTING_RULE}${fullPrompt ? `\n${ENGINEERING_SKILL_ROUTING_RULE}` : ""}`
-		: "";
+	// Only the builder sets `ledgerActive`, and only for the full class with ledger_read in its tools.
+	const ledgerActive = fullPrompt && options.ledgerActive === true;
+	const skillRules = ledgerActive
+		? ""
+		: `\n${inlineLedgerRule("output-formats")}${fullPrompt ? `\n${inlineLedgerRule("engineering-skills")}` : ""}`;
+	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}${skillRules}` : "";
 	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
 	const explanationStyle = renderExplanationStyleRule(normalizeSteStrictness(options.steStrictness));
 	const explanationSection = explanationStyle ? `\n\n${explanationStyle}` : "";

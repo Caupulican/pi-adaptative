@@ -299,6 +299,7 @@ import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-sett
 import { createSessionShutdownTracker, settleClosingSessionMemory } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
+import { SessionSystemPromptController } from "./session-system-prompt-controller.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import { SessionUnsettledLadderController } from "./session-unsettled-ladder-controller.ts";
 import { deriveSessionWorkState, type SessionWorkState } from "./session-work-state.ts";
@@ -453,6 +454,8 @@ export class AgentSession {
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
+	/** The owner's session-scoped system prompt override (`/sysprompt`). */
+	readonly ownerSystemPrompt: SessionSystemPromptController;
 	/** Autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
 	 * the latest gate outcome and the bounded gate-outcome history. */
 	private readonly _autonomyTelemetry: AutonomyTelemetry;
@@ -945,6 +948,20 @@ export class AgentSession {
 			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
 			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
+			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
+		});
+		this.ownerSystemPrompt = new SessionSystemPromptController({
+			builder: this._systemPromptBuilder,
+			getSessionManager: () => this.sessionManager,
+			isStreaming: () => this.isStreaming,
+			getActiveToolNames: () => this.getActiveToolNames(),
+			getModel: () => this.model,
+			getCustody: () => this._cache.custody,
+			getPrompts: () => ({ base: this._baseSystemPrompt, live: this.agent.state.systemPrompt }),
+			installPrompt: (prompt) => {
+				this._baseSystemPrompt = prompt;
+				this.agent.state.systemPrompt = prompt;
+			},
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -1691,7 +1708,8 @@ export class AgentSession {
 				this._foregroundRecovery.runAgentPrompt(messages, this._promptSubmission.foregroundPromptLease, signal),
 			runAgentContinuation: (signal) =>
 				this._foregroundRecovery.runAgentContinuation(this._promptSubmission.foregroundPromptLease, signal),
-			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
+			buildSystemPromptForToolNames: (toolNames) =>
+				this._systemPromptBuilder.buildSystemPromptForToolNames(toolNames),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -1889,8 +1907,8 @@ export class AgentSession {
 			restoreProfileFilterReloadSnapshot: (snapshot) => this._profileFilter.restoreReloadSnapshot(snapshot),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			setActiveToolsByName: (toolNames, assertCurrent) => this._setActiveToolsByName(toolNames, assertCurrent),
-			normalizePromptSnippet: (text) => this._normalizePromptSnippet(text),
-			normalizePromptGuidelines: (guidelines) => this._normalizePromptGuidelines(guidelines),
+			normalizePromptSnippet: (text) => this._systemPromptBuilder.normalizePromptSnippet(text),
+			normalizePromptGuidelines: (guidelines) => this._systemPromptBuilder.normalizePromptGuidelines(guidelines),
 			bindExtensionCore: (runner) => this._extensionBinding.bindExtensionCore(runner),
 			applyExtensionBindings: (runner) => this._extensionBinding.applyExtensionBindings(runner),
 			extendResourcesFromExtensions: (reason) => this._extensionBinding.extendResourcesFromExtensions(reason),
@@ -2001,7 +2019,7 @@ export class AgentSession {
 			getAllTools: () => this.getAllTools(),
 			setActiveToolsByName: (toolNames, assertCurrent) => this._setActiveToolsByName(toolNames, assertCurrent),
 			refreshToolRegistry: () => this._refreshToolRegistry(),
-			rebuildSystemPrompt: (toolNames) => this._rebuildSystemPrompt(toolNames),
+			rebuildSystemPrompt: (toolNames) => this._systemPromptBuilder.rebuildSystemPrompt(toolNames),
 			setBaseSystemPrompt: (prompt) => {
 				this._baseSystemPrompt = prompt;
 			},
@@ -2123,6 +2141,7 @@ export class AgentSession {
 				this._emitQueueUpdate();
 				this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
 				this._selfCompaction.resetBranchState();
+				this.ownerSystemPrompt.apply("session branch changed");
 				this._selfCompaction.schedule();
 			},
 		});
@@ -4239,7 +4258,7 @@ export class AgentSession {
 				);
 
 				// Rebuild base system prompt with new tool set
-				this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+				this._baseSystemPrompt = this._systemPromptBuilder.rebuildSystemPrompt(validToolNames);
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 				this._backgroundLanes.reconcileGoalContinuationToolAvailability(
 					() => this._goals.resumeGoalToolAvailable() !== undefined,
@@ -4395,32 +4414,12 @@ export class AgentSession {
 	// System-prompt construction lives in SystemPromptBuilder (see system-prompt-builder.ts). These
 	// stubs keep the god file's internal call surface stable while the assembly logic — situational
 	// soul, self-modification/autonomy guardrails, per-tool snippet/guideline options — lives there.
-	private _normalizePromptSnippet(text: string | undefined): string | undefined {
-		return this._systemPromptBuilder.normalizePromptSnippet(text);
-	}
-
-	private _normalizePromptGuidelines(guidelines: string[] | undefined): string[] {
-		return this._systemPromptBuilder.normalizePromptGuidelines(guidelines);
-	}
-
-	private _rebuildSystemPrompt(toolNames: string[]): string {
-		return this._systemPromptBuilder.rebuildSystemPrompt(toolNames);
-	}
-
 	private _refreshBaseSystemPrompt(): void {
 		const previousBaseSystemPrompt = this._baseSystemPrompt;
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this._baseSystemPrompt = this._systemPromptBuilder.rebuildSystemPrompt(this.getActiveToolNames());
 		if (this.agent.state.systemPrompt === previousBaseSystemPrompt) {
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 		}
-	}
-
-	/**
-	 * Build a system prompt for a specific tool surface WITHOUT touching the session's base prompt
-	 * state (used by the router's model swap; see {@link SystemPromptBuilder.buildSystemPromptForToolNames}).
-	 */
-	private _buildSystemPromptForToolNames(toolNames: string[]): string {
-		return this._systemPromptBuilder.buildSystemPromptForToolNames(toolNames);
 	}
 
 	// =========================================================================

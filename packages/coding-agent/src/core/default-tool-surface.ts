@@ -23,6 +23,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		TOOL_SCHEMA_SEARCH_NAME,
 		"webfetch",
 		"decision_ledger_read",
+		"ledger_read",
 		"image_generate",
 		"skill",
 		"skillify",

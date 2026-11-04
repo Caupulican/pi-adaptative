@@ -194,7 +194,7 @@ const VIDEO_NOUN = "(?:videos?|screencasts?)";
 
 /**
  * The output formats an owner can demand and the bundled skill that produces each. The prompt line
- * (`OUTPUT_FORMAT_ROUTING_RULE`) tells the model to load these skills; this table is what lets the search
+ * (the `output-formats` ledger rule) tells the model to load these skills; this table is what lets the search
  * itself answer a format query with that skill first, whatever other skills mention the same words.
  * A demand is an output verb or phrase ("make a diagram", "explain it in HTML", "explainer video", "draw
  * the flow"), never the bare format word: "html parsing bug" asks for no page.

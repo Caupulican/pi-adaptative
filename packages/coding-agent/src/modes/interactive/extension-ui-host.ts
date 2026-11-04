@@ -58,7 +58,7 @@ import {
 } from "../../presentation/theme/theme.ts";
 import { getEditorTheme, Theme, theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
-import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+import { ExtensionEditorComponent, type ExtensionEditorOptions } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import type { FooterComponent } from "./components/footer.ts";
@@ -684,7 +684,7 @@ export class ExtensionUiHost {
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
-	showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+	showExtensionEditor(title: string, prefill?: string, options?: ExtensionEditorOptions): Promise<string | undefined> {
 		this.activeExtensionDialogCancel?.();
 		return new Promise((resolve) => {
 			let settled = false;
@@ -707,6 +707,7 @@ export class ExtensionUiHost {
 				prefill,
 				(value) => finish(value),
 				cancel,
+				options,
 			);
 			this.extensionEditor = editor;
 			this.activeExtensionDialogCancel = cancel;

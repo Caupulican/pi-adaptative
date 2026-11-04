@@ -274,6 +274,12 @@ export interface EditorOptions {
 	 * the kill ring. Large pastes stay expanded and submit preserves surrounding whitespace.
 	 */
 	privateContent?: boolean;
+	/**
+	 * Return the text exactly as edited: tabs are kept and submit does not trim. Unlike
+	 * `privateContent`, undo, history and autocomplete behave normally. For text whose bytes matter,
+	 * such as a system prompt.
+	 */
+	exactText?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -370,6 +376,7 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 	private readonly privateContent: boolean;
+	private readonly exactText: boolean;
 	private readonly placeholder?: string;
 
 	// Highlighted spans of fenced code blocks, keyed by exact text (render-time only).
@@ -386,6 +393,7 @@ export class Editor implements Component, Focusable {
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
 		this.privateContent = options.privateContent ?? false;
+		this.exactText = options.exactText ?? false;
 		this.placeholder = options.placeholder;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
@@ -1135,7 +1143,7 @@ export class Editor implements Component, Focusable {
 	 */
 	private normalizeText(text: string): string {
 		const normalizedLines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-		return this.privateContent ? normalizedLines : normalizedLines.replace(/\t/g, "    ");
+		return this.privateContent || this.exactText ? normalizedLines : normalizedLines.replace(/\t/g, "    ");
 	}
 
 	/**
@@ -1283,9 +1291,10 @@ export class Editor implements Component, Focusable {
 		const cleanText = this.normalizeText(decodedText);
 
 		// Filter out non-printable characters except newlines
-		let filteredText = this.privateContent
-			? cleanText.replace(/[\x00-\x08\x0b-\x1f]/g, "")
-			: cleanText.replace(/[\x00-\x09\x0b-\x1f]/g, "");
+		let filteredText =
+			this.privateContent || this.exactText
+				? cleanText.replace(/[\x00-\x08\x0b-\x1f]/g, "")
+				: cleanText.replace(/[\x00-\x09\x0b-\x1f]/g, "");
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
 		// the cursor is a word character, prepend a space for better readability
@@ -1364,7 +1373,7 @@ export class Editor implements Component, Focusable {
 	private submitValue(): void {
 		this.cancelAutocomplete();
 		const expanded = this.expandPasteMarkers(this.state.lines.join("\n"));
-		const result = this.privateContent ? expanded : expanded.trim();
+		const result = this.privateContent || this.exactText ? expanded : expanded.trim();
 		this.resetState(true);
 		if (this.onSubmit) this.onSubmit(result);
 	}

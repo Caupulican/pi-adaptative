@@ -19,6 +19,12 @@ import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
+import {
+	LEDGER_READ_TOOL_NAME,
+	type LedgerEntry,
+	loadLedgerCatalog,
+	renderLedgerIndex,
+} from "./ledger/ledger-catalog.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
 import {
@@ -30,10 +36,8 @@ import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
 import { buildProjectInstructionIsolationPrompt } from "./project-instruction-isolation.ts";
 import {
 	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
-	DELEGATION_DECISION_RULE,
 	SKILL_CONFLICT_RESOLUTION_RULE,
 	SKILL_CONFLICT_RESOLUTION_RULE_COMPACT,
-	WORK_LIFECYCLE_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -91,6 +95,11 @@ export interface SystemPromptBuilderDeps {
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** Child/worker sessions never receive root autonomy or reflection instructions. */
 	isChildSession(): boolean;
+	/**
+	 * The owner's replacement for the whole generated prompt, scoped to this session. Read fresh on
+	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
+	 */
+	getSystemPromptOverride?(): string | undefined;
 }
 
 export function collectSelfModificationSourceCandidates(settings: {
@@ -372,7 +381,7 @@ export class SystemPromptBuilder {
 		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
 
-	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {
+	private _buildWorkLifecyclePrompt(toolNames: readonly string[], ledgerActive: boolean): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
@@ -390,33 +399,53 @@ export class SystemPromptBuilder {
 		const ownerRule = hasWorkPlanningTool
 			? `\n- One owner per invariant: goal owns outcome/contract, task_steps owns plan,${workersOwner} evidence owns acceptance. Never create parallel workflow state.`
 			: "";
+		// The detailed phase rule is a ledger entry; the phase names and owners stay resident.
+		const phases = ledgerActive
+			? "- Survey → Contract → Plan/Route → Execute → Prove/Deliver. Scale phases to the outcome."
+			: this._requireLedgerEntry("work-lifecycle").body;
 		return `PI WORK LIFECYCLE
-- ${WORK_LIFECYCLE_SYSTEM_RULE}${ownerRule}`;
+${phases}${ownerRule}`;
 	}
 
-	private _buildDelegationPrompt(delegateActive: boolean): string | undefined {
-		if (
-			this.deps.isChildSession() ||
-			!delegateActive ||
-			!this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
-		) {
-			return undefined;
-		}
-		return `PI DELEGATION
-- ${DELEGATION_DECISION_RULE}
-- For useful delegation, start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence, and write ownership; do not duplicate running or queued work.
-- Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.
-- ${this.isIcmMode() ? "Worker memory access is read-only via the worker memory broker (zoom and date by message id; private worker logs stay root-only); ICM catalog files follow the worker's ordinary file grants." : "Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle."}
-- Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
-- Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
-- Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
-- Treat worker output as evidence, reconcile conflicts, and finish only after success criteria.
-- Per-worker token, cost, wall-clock, and tool ceilings come only from host settings or an owner-authored profileId.`;
+	/** Delegation guidance applies to a root that holds the delegate tool with worker delegation enabled. */
+	private _delegationApplies(delegateActive: boolean): boolean {
+		return (
+			!this.deps.isChildSession() &&
+			delegateActive &&
+			this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
+		);
+	}
+
+	private _requireLedgerEntry(topic: string): LedgerEntry {
+		const entry = loadLedgerCatalog().find((candidate) => candidate.topic === topic);
+		if (!entry) throw new Error(`Ledger topic ${topic} is missing from the bundled ledger.`);
+		return entry;
+	}
+
+	/** The delegation rule rendered inline, for a surface where `ledger_read` does not carry it. */
+	private _buildInlineDelegationPrompt(delegateActive: boolean, ledgerActive: boolean): string | undefined {
+		if (ledgerActive || !this._delegationApplies(delegateActive)) return undefined;
+		return `PI DELEGATION\n${this._requireLedgerEntry("delegation").body}`;
+	}
+
+	/** The index of ledger rules whose gates pass, or undefined when the ledger is not active. */
+	private _buildLedgerIndex(validToolNames: readonly string[], ledgerActive: boolean): string | undefined {
+		if (!ledgerActive) return undefined;
+		const delegationApplies = this._delegationApplies(validToolNames.includes("delegate"));
+		const entries = loadLedgerCatalog().filter((entry) => {
+			if (entry.requires && !validToolNames.includes(entry.requires)) return false;
+			if (entry.topic === "delegation") return delegationApplies;
+			if (entry.topic === "work-lifecycle") return !this.deps.isChildSession();
+			return true;
+		});
+		return renderLedgerIndex(entries);
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
 		const modelCapability = this.deps.getModelCapabilityProfile();
 		const validToolNames = toolNames.filter((name) => this.deps.hasTool(name));
+		// Standing rules are read on demand only where the full prompt and the ledger tool both exist.
+		const ledgerActive = modelCapability.class === "full" && validToolNames.includes(LEDGER_READ_TOOL_NAME);
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelineGroups: string[][] = [];
 		for (const name of validToolNames) {
@@ -454,8 +483,9 @@ export class SystemPromptBuilder {
 			this._buildHarnessSelfHealingPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
-			this._buildWorkLifecyclePrompt(validToolNames),
-			this._buildDelegationPrompt(validToolNames.includes("delegate")),
+			this._buildWorkLifecyclePrompt(validToolNames, ledgerActive),
+			this._buildInlineDelegationPrompt(validToolNames.includes("delegate"), ledgerActive),
+			this._buildLedgerIndex(validToolNames, ledgerActive),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(validToolNames),
 			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
@@ -479,6 +509,7 @@ export class SystemPromptBuilder {
 			date: this._promptDate,
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
+			ledgerActive,
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its
@@ -495,8 +526,17 @@ export class SystemPromptBuilder {
 	}
 
 	rebuildSystemPrompt(toolNames: string[]): string {
+		// The options stay current for extension hooks even while an owner override replaces the text.
 		this._baseSystemPromptOptions = this._buildSystemPromptOptionsForToolNames(toolNames);
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+		return this.deps.getSystemPromptOverride?.() ?? buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	/**
+	 * The generated prompt for a tool surface, ignoring any owner override and leaving the session's base
+	 * prompt state untouched. This is what an owner edits from when starting a session override over.
+	 */
+	renderGeneratedSystemPrompt(toolNames: string[]): string {
+		return buildSystemPrompt(this._buildSystemPromptOptionsForToolNames(toolNames));
 	}
 
 	/**
@@ -507,6 +547,6 @@ export class SystemPromptBuilder {
 	 * later turns and extension events read).
 	 */
 	buildSystemPromptForToolNames(toolNames: string[]): string {
-		return buildSystemPrompt(this._buildSystemPromptOptionsForToolNames(toolNames));
+		return this.deps.getSystemPromptOverride?.() ?? this.renderGeneratedSystemPrompt(toolNames);
 	}
 }

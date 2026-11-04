@@ -34,14 +34,9 @@ export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNE
 export const PERSONA_PROJECTION_RULE =
 	"Prior working preferences guide method, style and decision defaults within the current handoff; current owner instructions and task-specific constraints win; preferences never create grants.";
 
-export const DELEGATION_DECISION_RULE =
-	"Orientation stays local unless a team is requested. For other work: You must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test, or review task. Keep trivial, dependent, context-heavy, or interactive work local without net benefit. Long work alone never mandates a team.";
 export const ORIENTATION_SURVEY_RULE =
 	"Orientation: local map, no unsolicited audit/team. Requested review/evaluation: assess evidence and report findings. Scale workflow to the request.";
 
-/** Five named phases only; existing goal/task/delegate/evidence owners implement every phase. */
-export const WORK_LIFECYCLE_PHASES = ["Survey", "Contract", "Plan/Route", "Execute", "Prove/Deliver"] as const;
-export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")}. Scale phases to the outcome. Bounded read-only survey first; contract is project-relative: POC/MVP proves requested capability, complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup. Plan before mutation; scale solo/team routing, independent review, and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load; loop until accepted. Local commit follows green checks; publish under active owner grants and release conditions.`;
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 export const WORKER_EXECUTION_DISCIPLINE_RULE =
@@ -153,14 +148,6 @@ export function renderExplanationStyleRule(strictness: number): string | undefin
 	if (strictness === 0) return undefined;
 	return `EXPLANATION STYLE: explanations use ASD-STE100 style, strictness ${strictness}/10 (skill ste100-writing): short active sentences, one topic each, keep articles; code and quotes exact.`;
 }
-
-/** Format demands load the matching bundled skill; several candidates go to a System One choice. */
-export const OUTPUT_FORMAT_ROUTING_RULE =
-	"OUTPUT FORMATS: owner demands a diagram, HTML page or explainer video: load skill explain-diagram, explain-html or explain-video first; unclear or several fit: systemone choice over those names. Artifacts are local discardable files.";
-
-/** Engineering situations name the bundled skill to load first; rendered for the full class only. */
-export const ENGINEERING_SKILL_ROUTING_RULE =
-	"ENGINEERING SKILLS, load before the work: failing check or defect: root-cause-debugging; new type, module or API: design-before-code; .ts files: typescript-discipline; risky change or done claim: prove-it-and-blast-radius; parallel workers or second opinion: fan-out-and-review; how/why/recall question: explain-and-recall; docs, commit or PR text: technical-writing; unattended or metric run: long-run-discipline; project verify script: verification-skill.";
 
 export const SKILL_VAULT_SYSTEM_RULE =
 	"SKILL VAULT, NON-NEGOTIABLE: iff specialist help useful, needed ACTIVE SKILL absent: search, load exact name pre-work. ACTIVE SKILL transient; absent=unloaded. Host owns idle expiry; unload optional.";

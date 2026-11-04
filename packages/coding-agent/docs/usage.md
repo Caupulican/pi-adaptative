@@ -113,6 +113,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
+| `/sysprompt [default\|reset]` | Edit this session's system prompt in a panel; the override is session-only |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
 | `/goal [status\|resume\|complete\|close\|reopen <requirement-id>\|override <text>]` | Inspect or control the durable session goal |

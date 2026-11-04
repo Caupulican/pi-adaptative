@@ -256,6 +256,13 @@ export function getBundledPromptsDir(): string {
 }
 
 /**
+ * Get path to the bundled rule ledger: one markdown file per rule the model reads on demand.
+ */
+export function getLedgerDir(): string {
+	return join(getBundledResourcesDir(), "ledger");
+}
+
+/**
  * Get path to bundled extensions directory.
  */
 export function getBundledExtensionsDir(): string {

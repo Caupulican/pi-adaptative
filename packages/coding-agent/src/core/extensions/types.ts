@@ -1862,6 +1862,12 @@ export interface BuildSystemPromptOptions {
 	omitDate?: boolean;
 	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
 	steStrictness?: number;
+	/**
+	 * Standing rules are read on demand through `ledger_read` instead of living in this prompt. Set by the
+	 * session's prompt builder for the full class when that tool is active; when absent, the rules the
+	 * ledger owns are rendered inline so no rule is lost.
+	 */
+	ledgerActive?: boolean;
 }
 
 export interface MemoryProvider {

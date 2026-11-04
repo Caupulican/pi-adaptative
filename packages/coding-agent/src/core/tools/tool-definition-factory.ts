@@ -8,6 +8,7 @@ import {
 } from "./extensionify-runtime.ts";
 import { createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
+import { createLedgerReadToolDefinition } from "./ledger-read.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPythonToolDefinition, type PythonToolOptions } from "./python.ts";
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
@@ -36,6 +37,7 @@ export type ToolName =
 	| "extensionify"
 	| "artifact_retrieve"
 	| "decision_ledger_read"
+	| "ledger_read"
 	| "tool_search"
 	| "webfetch";
 
@@ -54,6 +56,7 @@ export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"extensionify",
 	"artifact_retrieve",
 	"decision_ledger_read",
+	"ledger_read",
 	"tool_search",
 	"webfetch",
 ]);
@@ -110,6 +113,8 @@ export function createToolDefinitionWithRuntime(
 			return createArtifactRetrieveToolDefinition(cwd, options.artifact_retrieve);
 		case "decision_ledger_read":
 			return createDecisionLedgerReadToolDefinition(cwd, options.decision_ledger_read);
+		case "ledger_read":
+			return createLedgerReadToolDefinition();
 		case "tool_search":
 			return createToolSchemaSearchDefinition();
 		case "webfetch":

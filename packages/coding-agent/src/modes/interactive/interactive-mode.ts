@@ -143,6 +143,7 @@ import { handleNonFatalSessionReplacementError } from "./session-replacement-err
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
+import { handleSystemPromptCommand } from "./system-prompt-command.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
 import * as usageCommands from "./usage-commands.ts";
 import { handleVerificationCommand } from "./verification-commands.ts";
@@ -1774,6 +1775,11 @@ export class InteractiveMode {
 			if (text === "/context") {
 				this.showStatus(this.session.formatContextCompositionDashboard());
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/sysprompt" || text.startsWith("/sysprompt ")) {
+				this.editor.setText("");
+				await this.handleSystemPromptCommand(text);
 				return;
 			}
 			if (text === "/toolhealth") {
@@ -4045,6 +4051,19 @@ export class InteractiveMode {
 		);
 		this.refreshActivityLane?.();
 		if (statusMessage) this.activityLane?.announce(statusMessage, "neutral");
+	}
+
+	private async handleSystemPromptCommand(text: string): Promise<void> {
+		await handleSystemPromptCommand(
+			{
+				prompt: this.session.ownerSystemPrompt,
+				promptForEdit: (title, prefill) =>
+					this.extensionUiHost.showExtensionEditor(title, prefill, { exactText: true }),
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			text,
+		);
 	}
 
 	private handleTaskCommand(text: string): void {
