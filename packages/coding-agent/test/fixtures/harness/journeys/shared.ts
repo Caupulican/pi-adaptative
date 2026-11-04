@@ -527,19 +527,37 @@ export function delegateResultTexts(session: AgentSession): string[] {
 	});
 }
 
-/** The stable agent id production assigned to the worker that runs on `track` (its effective model). */
-export function agentIdForTrack(request: ScriptedRequest, track: string): string {
+/**
+ * The stable agent ids of the workers that START receipts in `request` assign to `track` (their effective model), in
+ * transcript order. A receipt is read from its structured details (a start result carries `agentId` and `modelRef` and no
+ * `action`), not from its text: context GC rewrites a stale tool result of at least 1,200 characters (a receipt that lists
+ * idle specialists is that long) into a stub on a grid of absolute message positions, which drops the text but keeps the
+ * details. The text is read only for a receipt whose details are absent.
+ */
+function startedAgentIdsForTrack(request: ScriptedRequest, track: string): string[] {
+	const modelRef = `${HARNESS_PROVIDER}/${track}`;
+	const textPattern = new RegExp(`stable agentId (\\S+?),[^\\n]*effective model ${modelRef}\\b`, "g");
+	const ids: string[] = [];
 	for (const message of request.context.messages) {
 		if (message.role !== "toolResult" || message.toolName !== "delegate") continue;
+		const details: unknown = message.details;
+		if (isRecordObject(details) && details.started === true && details.action === undefined) {
+			if (typeof details.agentId === "string" && details.modelRef === modelRef) ids.push(details.agentId);
+			continue;
+		}
 		for (const block of message.content) {
 			if (block.type !== "text") continue;
-			const match = new RegExp(`stable agentId (\\S+?),[^\\n]*effective model harness-script/${track}\\b`).exec(
-				block.text,
-			);
-			if (match?.[1]) return match[1];
+			for (const match of block.text.matchAll(textPattern)) if (match[1]) ids.push(match[1]);
 		}
 	}
-	throw new Error(`No started agent is running on track ${track} in the projected request`);
+	return ids;
+}
+
+/** The stable agent id production assigned to the worker that runs on `track` (its effective model). */
+export function agentIdForTrack(request: ScriptedRequest, track: string): string {
+	const id = startedAgentIdsForTrack(request, track)[0];
+	if (id === undefined) throw new Error(`No started agent is running on track ${track} in the projected request`);
+	return id;
 }
 
 /** The raw source mailbox's reply acknowledgements, narrowed from the unknown record (no cast, no any). */
@@ -576,17 +594,9 @@ export function rawReplyReceiptOf(mailbox: unknown, requestMessageId: string): u
 
 /** The most recent stable agent id production assigned to a worker on `track` (the one a later start created). */
 export function latestAgentIdForTrack(request: ScriptedRequest, track: string): string {
-	let found: string | undefined;
-	for (const message of request.context.messages) {
-		if (message.role !== "toolResult" || message.toolName !== "delegate") continue;
-		for (const block of message.content) {
-			if (block.type !== "text") continue;
-			const pattern = new RegExp(`stable agentId (\\S+?),[^\\n]*effective model harness-script/${track}\\b`, "g");
-			for (const match of block.text.matchAll(pattern)) found = match[1];
-		}
-	}
-	if (found === undefined) throw new Error(`No started agent is running on track ${track} in the projected request`);
-	return found;
+	const id = startedAgentIdsForTrack(request, track).at(-1);
+	if (id === undefined) throw new Error(`No started agent is running on track ${track} in the projected request`);
+	return id;
 }
 
 /**
