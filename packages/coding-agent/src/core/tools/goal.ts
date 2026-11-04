@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Static, Type } from "typebox";
+import { RULE_IDS_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { EDGE_CLASSES, type EdgeClass, isEdgeClass } from "../autonomy/edge-policy.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -36,6 +37,7 @@ import { type RequirementCheckResult, requirementCheckViolation } from "../goals
 import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
+import type { RuleHookRefusal } from "../rule-hooks/rule-hook-delivery.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	COMPLETION_ACCOUNT_GUIDANCE,
@@ -259,6 +261,8 @@ export interface GoalToolDetails {
 	 * A receipt key, so it survives the retention stub that replaces the (large) goal state.
 	 */
 	piReceipts?: { requirementChecks: GoalCheckRuns };
+	/** Set on a completion refused with the noticed-items rule: the ids of the rules the refusal text delivers. */
+	[RULE_IDS_DETAIL_KEY]?: readonly string[];
 }
 
 export interface GoalCheckRuns {
@@ -369,11 +373,12 @@ export interface GoalToolDependencies {
 	 */
 	getActiveVerificationIds?: () => readonly string[];
 	/**
-	 * Completion preflight: the text a model-driven completion refuses with while the host's noticed-items rule is not
-	 * in the context (it starts with the rule's `RULE <id>` line), or undefined when the completion may proceed.
+	 * Completion preflight: the refusal a model-driven completion gets while the host's noticed-items rule is not in
+	 * the context (the text starts with the rule's `RULE <id>` line; the refused result lists the id in its details),
+	 * or undefined when the completion may proceed.
 	 * Called once the deterministic completion checks have passed, before the System One judgments.
 	 */
-	getCompletionRuleRefusal?: (toolCallId: string) => string | undefined;
+	getCompletionRuleRefusal?: (toolCallId: string) => RuleHookRefusal | undefined;
 	/**
 	 * grant_edge: record that the operator's instructions cover an edge class. Only called after the
 	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
@@ -1172,7 +1177,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 							content: [
 								{
 									type: "text" as const,
-									text: `${ruleRefusal}\n\nReview your proof output for relevant noticed items; resolve them, then call complete again.`,
+									text: `${ruleRefusal.text}\n\nReview your proof output for relevant noticed items; resolve them, then call complete again.`,
 								},
 							],
 							details: {
@@ -1180,6 +1185,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								applied: false,
 								error: "Completion is held until the noticed-items rule is in context.",
 								state: current,
+								[RULE_IDS_DETAIL_KEY]: ruleRefusal.ruleIds,
 							},
 							isError: true as const,
 							errorKind: "operation_outcome" as const,

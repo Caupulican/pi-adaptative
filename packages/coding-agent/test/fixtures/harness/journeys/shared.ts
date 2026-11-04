@@ -13,6 +13,7 @@ import type { ExecutionState } from "../../../../src/core/system-one/types.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../../src/core/tool-applicability-gate.ts";
 import { localFileMutationIntentOperations } from "../../../../src/core/tools/file-mutation-intent.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
+import { RULE_IDS_DETAIL_KEY } from "../../../../src/kernel/session/message-retention.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import { HARNESS_PROVIDER } from "../scripted-provider.ts";
@@ -1169,9 +1170,51 @@ export function assertCompletionRuleRefusal(
 	if (!isRecordObject(details) || details.applied !== false) {
 		throw new Error(`${label}: the refusal reports an applied completion: ${JSON.stringify(details)}`);
 	}
+	// The delivered-once check reads the rule ids from the result's details (they outlive its text), so the refusal lists its own.
+	const delivered: unknown = details[RULE_IDS_DETAIL_KEY];
+	if (!Array.isArray(delivered) || delivered.length !== 1 || delivered[0] !== hook.id) {
+		const listed = JSON.stringify(delivered);
+		throw new Error(`${label}: the refusal lists ${listed} as its delivered rules, not [${hook.id}]`);
+	}
 	const status = session.getGoalStateSnapshot()?.status;
 	if (status === "completed" || goalCompletionFacts(session) !== factsBefore) {
 		throw new Error(`${label}: the refused completion changed the goal (status ${status})`);
+	}
+}
+
+/**
+ * The first successful work trigger of a root's context (`create_goal`, `goal` start, `task_steps`, `delegate` start) delivers the
+ * `work-lifecycle` and `delegation` rules, in catalog order, as the last two text blocks of its result, and lists their ids in the
+ * result's `details.piRuleIds`. Read from the durable branch by tool call id.
+ */
+export function assertWorkRulesDelivered(sessionManager: SessionManager, toolCallId: string, label: string): void {
+	const hooks = loadRuleHooks().filter((hook) => hook.topic === "work-lifecycle" || hook.topic === "delegation");
+	if (hooks.length !== 2) throw new Error(`${label}: the catalog holds ${hooks.length} work rules, not two`);
+	const entry = sessionManager
+		.getBranch()
+		.find(
+			(candidate) =>
+				candidate.type === "message" &&
+				candidate.message.role === "toolResult" &&
+				candidate.message.toolCallId === toolCallId,
+		);
+	if (entry?.type !== "message" || entry.message.role !== "toolResult") {
+		throw new Error(`${label}: no durable result for ${toolCallId}`);
+	}
+	const details: unknown = entry.message.details;
+	const ids: unknown = isRecordObject(details) ? details[RULE_IDS_DETAIL_KEY] : undefined;
+	const wantedIds = hooks.map((hook) => hook.id);
+	if (JSON.stringify(ids) !== JSON.stringify(wantedIds)) {
+		const listed = JSON.stringify(ids);
+		throw new Error(`${label}: the result lists ${listed} as delivered rules, not ${JSON.stringify(wantedIds)}`);
+	}
+	const markerLines = entry.message.content
+		.flatMap((block) => (block.type === "text" ? [block.text.split("\n", 1)[0]] : []))
+		.slice(-2);
+	const wantedLines = hooks.map((hook) => `RULE ${hook.id}`);
+	if (JSON.stringify(markerLines) !== JSON.stringify(wantedLines)) {
+		const seen = JSON.stringify(markerLines);
+		throw new Error(`${label}: the result ends with ${seen}, not ${JSON.stringify(wantedLines)}`);
 	}
 }
 

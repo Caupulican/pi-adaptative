@@ -28,6 +28,7 @@ import {
 	type WorkerAgentBroadcastTargetResult,
 	type WorkerAgentControlPort,
 	type WorkerAgentView,
+	WorkerControlIdentityConflictError,
 	type WorkerGrantSummary,
 } from "../delegation/worker-agent-control.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
@@ -2993,12 +2994,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				};
 			} catch (error) {
 				const reason = (error instanceof Error ? error.message : String(error)).slice(0, MAX_DELEGATE_ERROR_CHARS);
-				return invalid(`delegate ${action} failed: ${reason}`.slice(0, 2_048), {
-					started: false,
-					action,
-					...(input.agentId?.trim() ? { agentId: input.agentId.trim() } : {}),
-					skipReason: "worker_agent_control_error",
-				});
+				// A replayed identity whose fields differ from what it first carried is a duplicate that disagrees: fail closed.
+				const conflict = error instanceof WorkerControlIdentityConflictError;
+				return invalid(
+					`delegate ${action} failed: ${reason}`.slice(0, 2_048),
+					{
+						started: false,
+						action,
+						...(input.agentId?.trim() ? { agentId: input.agentId.trim() } : {}),
+						skipReason: conflict ? "worker_control_identity_conflict" : "worker_agent_control_error",
+					},
+					conflict ? { c: "E_DUP" } : undefined,
+				);
 			}
 		}),
 	};

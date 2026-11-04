@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../kernel/types.ts";
+import { workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { spawnProcess } from "../utils/child-process.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
@@ -39,10 +40,10 @@ import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
 	type BotTeamChange,
+	botChatOperatorText,
 	botReplyText,
 	normalizeBotOrTeamId,
 	normalizeBotSoul,
-	operatorTextOf,
 	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
 	PersistentBotTeamStore,
@@ -1742,11 +1743,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 						shown.push(msg);
 						continue;
 					}
-					const text = operatorTextOf(
-						typeof msg.content === "string"
-							? msg.content
-							: msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"),
-					);
+					const text = botChatOperatorText(msg, workerControlOf(msg));
 					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
 					const previous = shown.at(-1);
 					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {

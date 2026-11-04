@@ -27,71 +27,79 @@ export const ORIENTATION_SURVEY_RULE =
 
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
+/** The glossary line a state code belongs to; the root prompt renders one line per class. */
+const COMMS_STATE_CLASS_LEAD = {
+	pending: "Pending (never poll, interrupt, cancel or retry)",
+	settled: "Settled",
+	ended: "Ended",
+	review: "Review",
+} as const;
+
+type CommsStateClass = keyof typeof COMMS_STATE_CLASS_LEAD;
+
 /**
  * Host facts the root reads in `delegate` results and worker handoffs, stated once as codes. A result or
- * handoff names a state as `h CODE[,CODE]` and a refused call as `err c=<code> f=<field> h=<hint>`; this table
- * is the only place the meaning is spelled out, so the result text carries the code and not the prose.
+ * handoff names a state as `h CODE[,CODE]` and a refused call as `err c=<code> f=<field> h=<hint> x=<value>`.
+ * Each state code carries its class and only the meaning its name does not; the hint codes are self-describing
+ * and carry none. A text holds no semicolon: the prompt joins the codes of a line with one.
  */
 export const COMMS_STATE_GLOSSARY = {
-	QUEUED:
-		"admitted, nonterminal; the host starts it when dependencies, capacity or reservations clear (`waiting:` says which). Not a stall: never poll, interrupt or cancel it.",
-	HELD: "starts when this turn ends (shared local model); do not wait on it.",
-	SUSPENDED: "nonterminal; the host resumes a transient retry. Do not resume, cancel or retry it.",
-	IDLE: "task terminal, worker reusable; idle is activity, not outcome. The claim is in the handoff and delegate status.",
-	WAIT_ELAPSED: "deadline passed; nonterminal, not a stall. Idle: read the report. Active: continue or wait again.",
-	DELIVERED: "the handoff proves persisted state and delivery; never report missed completion or lost state.",
-	BLOCKED:
-		"worker_blocked is a delivered claim with blockers, not harness failure; answer it with follow_up on the same agentId.",
-	BUDGET:
-		"an admitted limit ended the work; the lane reasonCode is authoritative; replan within the remaining authority.",
-	FAILED:
-		"completion_error is a failed worker run; read reasonDetail. Provider or network failures are not a harness defect; never stop healthy siblings for it.",
-	ACCEPTED:
-		"the message is durably in the mailbox; idle or an older report does not prove it completed. Completion arrives through wait, wait_many or the handoff, never inbox_wait.",
-	READ_REPORT:
-		"every required id has passing evidence in the host's receipts: the report is the evidence; read a transcript range (cursor) only for a claim you doubt.",
-	READ_ALL: "verdict not accepted or review pending: read every transcript page (nextCursor) before judging.",
-} as const;
+	QUEUED: ["pending", "dependencies, capacity or reservations not clear yet"],
+	HELD: ["pending", "starts after this turn"],
+	SUSPENDED: ["pending", "the host resumes a transient retry"],
+	WAIT_ELAPSED: ["pending", "deadline passed (idle: read the report, else continue or wait again)"],
+	IDLE: ["settled", "ended, worker reusable"],
+	DELIVERED: ["settled", "the handoff proves persisted state"],
+	ACCEPTED: ["settled", "in the mailbox, completion comes via wait, wait_many or the handoff"],
+	BLOCKED: ["ended", "worker blockers, your call"],
+	BUDGET: ["ended", "a limit ended it, replan"],
+	FAILED: ["ended", "the run failed, read reasonDetail, not a harness defect"],
+	READ_REPORT: ["review", "receipts cover every required id, read a transcript range only for a doubted claim"],
+	READ_ALL: ["review", "not accepted or review pending, read every page (nextCursor)"],
+} as const satisfies Record<string, readonly [CommsStateClass, string]>;
 
 export type CommsStateCode = keyof typeof COMMS_STATE_GLOSSARY;
 
-/** What a refused call asks of the root next. The hint is the retry guidance; `x` carries any value it needs. */
-export const COMMS_HINT_GLOSSARY = {
-	DROP_FIELD: "remove f and retry once",
-	MOVE_FIELD: "move f's value into the field named in x and retry once",
-	USE_ID: "use an id delegate returned, never an invented one",
-	RETRY_OMIT: "retry once without f so the host inherits or routes",
-	REUSE: "reuse an idle worker (list) or tell the owner",
-	NARROW: "fit the bound in m",
-	WAIT: "the target's state refuses it now, do not retry unchanged",
-	ASK_OWNER: "report the cause to the owner, do not retry or substitute",
-} as const;
+/** What a refused call asks of the root next; `x` carries the value it needs (MOVE_FIELD: the field to move to). */
+export const COMMS_HINT_CODES = [
+	"DROP_FIELD",
+	"MOVE_FIELD",
+	"USE_ID",
+	"RETRY_OMIT",
+	"REUSE",
+	"NARROW",
+	"WAIT",
+	"ASK_OWNER",
+] as const;
 
-export type CommsHintCode = keyof typeof COMMS_HINT_GLOSSARY;
+export type CommsHintCode = (typeof COMMS_HINT_CODES)[number];
 
 /** Error classes of a refused call (`err c=...`); the field `f` and the message `m` say which input and why. */
 export const COMMS_ERR_GLOSSARY = {
-	E_FIELD: "bad or missing value",
-	E_REF: "unknown or unavailable id",
+	E_FIELD: "bad value",
+	E_REF: "unknown id",
 	E_LIMIT: "over a bound",
-	E_AUTH: "not the model's to set (the host compiles grants and budgets)",
-	E_STATE: "target state or caller role refuses",
-	E_DUP: "same work already running",
+	E_AUTH: "host-owned",
+	E_STATE: "state or role refuses",
+	E_DUP: "already running",
 } as const;
 
 export type CommsErrCode = keyof typeof COMMS_ERR_GLOSSARY;
 
-const glossaryLine = (label: string, table: Readonly<Record<string, string>>): string =>
-	`${label} ${Object.entries(table)
-		.map(([code, text]) => `${code} ${text}`)
-		.join("; ")}.`;
+/** One prompt line per state class, in the order the classes are declared. */
+const COMMS_STATE_LINES = (Object.keys(COMMS_STATE_CLASS_LEAD) as CommsStateClass[]).map((stateClass) => {
+	const entries = Object.entries(COMMS_STATE_GLOSSARY).filter(([, [codeClass]]) => codeClass === stateClass);
+	return `- ${COMMS_STATE_CLASS_LEAD[stateClass]}: ${entries.map(([code, [, text]]) => `${code} ${text}`).join("; ")}.`;
+});
 
 /** The one glossary the root prompt carries; rule hooks cannot reach handoff wake messages, so it lives in the prefix. */
 export const COMMS_GLOSSARY_PROMPT = [
-	"COMMS: delegate results and worker handoffs state host facts as codes. `h CODE,...` names states; a refused call returns `err c=<class> f=<field> h=<hint> x=<value>` plus `m <reason>`, and then nothing ran or was queued. A state code is never a failure unless it says so.",
-	...Object.entries(COMMS_STATE_GLOSSARY).map(([code, text]) => `- ${code}: ${text}`),
-	glossaryLine("Err classes:", COMMS_ERR_GLOSSARY),
-	glossaryLine("Hints:", COMMS_HINT_GLOSSARY),
+	"COMMS: results and handoffs state host facts as codes: `h CODE,...` states, and a refused call is `err c=<class> f=<field> h=<hint> x=<value>` plus `m <reason>` (nothing ran).",
+	...COMMS_STATE_LINES,
+	`- Err classes: ${Object.entries(COMMS_ERR_GLOSSARY)
+		.map(([code, text]) => `${code} ${text}`)
+		.join("; ")}.`,
+	`- Hints: ${COMMS_HINT_CODES.join(", ")}.`,
 ].join("\n");
 
 /**

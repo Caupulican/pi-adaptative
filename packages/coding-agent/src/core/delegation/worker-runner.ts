@@ -1,3 +1,4 @@
+import type { WorkerControlBody } from "../../kernel/worker-control-stamp.ts";
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type {
 	EvidenceBundle,
@@ -91,7 +92,13 @@ export interface WorkerRunnerOptions {
 	 * enforce the cost-visibility invariant (a completed claim without a usage report is blocked).
 	 */
 	usageReportId: string;
-	complete: (args: { systemPrompt: string; userPrompt: string; signal: AbortSignal }) => Promise<WorkerCompletion>;
+	complete: (args: {
+		systemPrompt: string;
+		userPrompt: string;
+		/** Where the task text sits inside `userPrompt`; the transcript records it with the prompt. */
+		userPromptBody?: WorkerControlBody;
+		signal: AbortSignal;
+	}) => Promise<WorkerCompletion>;
 	/**
 	 * Seal the live mutation producer after bounded execution returns, then return its terminal snapshot.
 	 * The callback is synchronous so late non-cooperative completion callbacks cannot race the claim.
@@ -143,24 +150,38 @@ export interface WorkerRunOutcome {
 export const EARLIER_SESSION_NOTE =
 	"Earlier turns in this conversation ran in a previous session: files and tool results above may have changed since. Read again what this task relies on before reporting it.";
 
+/** The task prompt and the range inside it that holds the task text, so a reader slices the task instead of parsing the frame. */
+export function buildWorkerUserPromptParts(
+	request: WorkerRequest,
+	options: { earlierSession?: boolean; reportTool?: boolean } = {},
+): { prompt: string; body: WorkerControlBody } {
+	const lead = [...(options.earlierSession ? [EARLIER_SESSION_NOTE] : []), "TASK"].join("\n");
+	const from = lead.length + 1;
+	return {
+		prompt: [
+			lead,
+			request.instructions,
+			"END TASK",
+			options.reportTool
+				? "Finish by calling submit_report."
+				: 'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
+		].join("\n"),
+		body: { from, to: from + request.instructions.length },
+	};
+}
+
 export function buildWorkerUserPrompt(
 	request: WorkerRequest,
 	options: { earlierSession?: boolean; reportTool?: boolean } = {},
 ): string {
-	return [
-		...(options.earlierSession ? [EARLIER_SESSION_NOTE] : []),
-		"TASK",
-		request.instructions,
-		"END TASK",
-		options.reportTool
-			? "Finish by calling submit_report."
-			: 'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
-	].join("\n");
+	return buildWorkerUserPromptParts(request, options).prompt;
 }
 
 /** Whether a user message is the task prompt {@link buildWorkerUserPrompt} opened an attempt with. */
 export function isWorkerTaskPrompt(text: string): boolean {
+	// comms-legacy-decoder: a worker task reaches its transcript as rendered text, so the attempt's task message is recognized by its TASK frame until a typed record replaces it.
 	const body = text.startsWith(`${EARLIER_SESSION_NOTE}\n`) ? text.slice(EARLIER_SESSION_NOTE.length + 1) : text;
+	// comms-legacy-decoder: same TASK frame as above.
 	return body.startsWith("TASK\n") && body.includes("\nEND TASK\n");
 }
 
@@ -450,6 +471,10 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const writeCapable =
 		options.request.envelope.capabilities.includes("filesystem.write") && options.applyActions !== undefined;
 
+	const promptParts = buildWorkerUserPromptParts(options.request, {
+		earlierSession: options.earlierSession === true,
+		reportTool: options.reportTool === true,
+	});
 	const bounded = await runBoundedCompletion({
 		maxWallClockMs: options.maxWallClockMs,
 		signal: options.signal,
@@ -467,10 +492,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 							systemOne: options.systemOneCapable === true,
 							report: options.reportTool === true,
 						}),
-				userPrompt: buildWorkerUserPrompt(options.request, {
-					earlierSession: options.earlierSession === true,
-					reportTool: options.reportTool === true,
-				}),
+				userPrompt: promptParts.prompt,
+				userPromptBody: promptParts.body,
 				signal,
 			}),
 	});

@@ -63,6 +63,12 @@ export const MAX_TUI_RETAINED_DETAILS_BYTES = 512 * 1024;
 /** Tool-result `details` key marking a history read result: recalled evidence, never captured again as history. */
 export const RECALLED_HISTORY_DETAIL_KEY = "transcriptRecall";
 
+/**
+ * Tool-result `details` key listing the rule hooks whose text the result delivered (`string[]` of rule ids). The
+ * host writes it where it appends the rule block, and the delivered-once check reads it before any text.
+ */
+export const RULE_IDS_DETAIL_KEY = "piRuleIds";
+
 /** Whether a tool's own details carry the recalled-history marker; read before any rebuild replaces them. */
 export function hasRecalledHistoryMarker(details: unknown): boolean {
 	if (!details || typeof details !== "object") return false;
@@ -75,8 +81,14 @@ export function hasRecalledHistoryMarker(details: unknown): boolean {
  * the checks a goal completion reran) that consumers read after the result is retained, such as the
  * end-of-turn claim check. The stub keeps them; dropping one turns a proven claim into an unproven one.
  * The recalled-history marker is one too: dropping it would let history capture index its own recall.
+ * So are the delivered rule ids: dropping them would deliver the same rule again into a context that holds it.
  */
-export const RETAINED_RECEIPT_DETAIL_KEYS = ["piVerification", "piReceipts", RECALLED_HISTORY_DETAIL_KEY] as const;
+export const RETAINED_RECEIPT_DETAIL_KEYS = [
+	"piVerification",
+	"piReceipts",
+	RECALLED_HISTORY_DETAIL_KEY,
+	RULE_IDS_DETAIL_KEY,
+] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
 
 /** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */

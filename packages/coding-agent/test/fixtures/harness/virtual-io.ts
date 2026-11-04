@@ -745,6 +745,20 @@ export class VirtualFileSystem {
 		throw this.failure("mkdtemp", "EEXIST", start, "mkdtemp");
 	}
 
+	/**
+	 * `fs.statSync` and `fs.lstatSync` with Node's `throwIfNoEntry: false`: a path that names nothing yields undefined instead of
+	 * ENOENT, and records no failed operation. A descriptor always names something or fails with EBADF, so it is never absent.
+	 */
+	private statUnlessAbsent(value: unknown, options: unknown, lstat: boolean) {
+		const quiet =
+			typeof value !== "number" && (options as { throwIfNoEntry?: unknown } | undefined)?.throwIfNoEntry === false;
+		if (quiet) {
+			const absent = lstat ? !this.nodes.has(this.path(value)) : this.resolveExisting(value) === undefined;
+			if (absent) return undefined;
+		}
+		return this.statSync(value, lstat ? { ...(options as object | undefined), lstat: true } : options);
+	}
+
 	statSync(value: unknown, options?: unknown) {
 		const descriptor = typeof value === "number" ? this.descriptors.get(value) : undefined;
 		if (typeof value === "number" && !descriptor) throw this.failure("stat", "EBADF", String(value), "fstat");
@@ -1134,10 +1148,9 @@ export class VirtualFileSystem {
 			mkdtempSync: (prefix: unknown) => this.mkdtempSync(prefix),
 			readdirSync: (path: unknown, options?: unknown) => this.readdirSync(path, options),
 			opendirSync: (path: unknown) => this.opendirSync(path),
-			statSync: (path: unknown, options?: unknown) => this.statSync(path, options),
+			statSync: (path: unknown, options?: unknown) => this.statUnlessAbsent(path, options, false),
 			fstatSync: (fd: unknown, options?: unknown) => this.statSync(fd, options),
-			lstatSync: (path: unknown, options?: unknown) =>
-				this.statSync(path, { ...(options as { bigint?: boolean } | undefined), lstat: true }),
+			lstatSync: (path: unknown, options?: unknown) => this.statUnlessAbsent(path, options, true),
 			realpathSync: Object.assign((path: unknown) => this.realpathSync(path), {
 				native: (path: unknown) => this.realpathSync(path),
 			}),

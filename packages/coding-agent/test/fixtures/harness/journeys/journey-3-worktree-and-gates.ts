@@ -34,6 +34,7 @@ import {
 	assertBatchOk,
 	assertCompletionRuleRefusal,
 	assertRefused,
+	assertWorkRulesDelivered,
 	bindE0Completion,
 	bindE0Request,
 	COMPLETION_REQUIREMENT_TEXT,
@@ -547,6 +548,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		{ toolCallId: "status-1", isError: false, failureRecord: false },
 		{ toolCallId: "mixed-read-fail-j3", isError: true, failureRecord: true },
 	]);
+	// The root's first work trigger is its goal start: it delivered both work rules, listed in its details.
+	assertWorkRulesDelivered(created.sessionManager, "goal-1", "the goal start");
 	// The durable receipt link: the status lane for the retries key reports the checkout that the persisted create result named.
 	const createText = (j3Batch[0]?.content ?? []).map((block) => (block.type === "text" ? block.text : "")).join("");
 	const retriesLane = lanesOf(j3Batch[1]?.details).find((lane) => lane.laneKey === "retries");

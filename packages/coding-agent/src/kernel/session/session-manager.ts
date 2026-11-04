@@ -58,6 +58,7 @@ import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
 import type { UsageComponent } from "../usage-components.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { uuidv7 } from "../uuid.ts";
+import { parseWorkerControlRecord, stampWorkerControl, workerControlOf } from "../worker-control-stamp.ts";
 import {
 	encodeSessionEntry,
 	type ForegroundToolStartInput,
@@ -914,7 +915,19 @@ export interface SessionContextItem {
 }
 
 function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") return entry.message;
+	if (entry.type === "message") {
+		// A context rebuilt from persisted entries carries the identity the entry names, as a live message does.
+		if (
+			entry.workerControl !== undefined &&
+			entry.message.role === "user" &&
+			Object.isExtensible(entry.message) &&
+			workerControlOf(entry.message) === undefined
+		) {
+			const record = parseWorkerControlRecord(entry.workerControl);
+			if (record) stampWorkerControl(entry.message, record);
+		}
+		return entry.message;
+	}
 	if (entry.type === "custom_message") {
 		return retainSynthesizedSessionContextMessage(
 			createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
@@ -927,6 +940,12 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 		);
 	}
 	return undefined;
+}
+
+/** The typed worker-message identity a persisted user message carries, to be written before it on its entry. */
+function deliveredWorkerControl(message: AgentMessage): { workerControl?: ReturnType<typeof workerControlOf> } {
+	const record = message.role === "user" ? workerControlOf(message) : undefined;
+	return record === undefined ? {} : { workerControl: record };
 }
 
 /** The owner input a persisted user message delivers, as its entry names it; nothing for any other message. */
@@ -2739,6 +2758,7 @@ export class SessionManager {
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
+			...deliveredWorkerControl(message),
 			message,
 			...(origin === undefined ? {} : { origin }),
 			...deliveredOwnerInput(message),
@@ -2784,6 +2804,7 @@ export class SessionManager {
 					id,
 					parentId,
 					timestamp: new Date().toISOString(),
+					...deliveredWorkerControl(message),
 					message,
 					...(item.origin === undefined ? {} : { origin: item.origin }),
 					...deliveredOwnerInput(message),

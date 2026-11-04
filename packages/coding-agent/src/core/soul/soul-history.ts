@@ -9,6 +9,11 @@ export const SOUL_HISTORY_LIMIT = 20;
 
 export type SoulAuthor = "owner" | "agent";
 export type SoulReviewer = "allow" | "block" | "unreviewed";
+/**
+ * Typed entries for a change the harness reverted: `reverted` (an ungated write that failed the screen or the review
+ * was undone) and `removed` (the file was deleted outside the gate and put back). Both carry the restored text.
+ */
+export type SoulHistoryEvent = "reverted" | "removed";
 
 /**
  * One write to `soul.md`. `sha256` and `bytes` identify the exact text the write put (or tried to put) in the file;
@@ -22,6 +27,12 @@ export interface SoulHistoryEntry {
 	readonly author: SoulAuthor;
 	readonly reviewer: SoulReviewer;
 	readonly bytes: number;
+	readonly event?: SoulHistoryEvent;
+}
+
+/** Whether the entry's text is kept in `versions/`: every entry but a blocked attempt, which is only a record. */
+export function entryKeepsText(entry: SoulHistoryEntry): boolean {
+	return entry.reviewer !== "block" || entry.event !== undefined;
 }
 
 export function soulSha256(text: string): string {
@@ -37,7 +48,8 @@ function isEntry(value: unknown): value is SoulHistoryEntry {
 		/^[0-9a-f]{64}$/.test(entry.sha256) &&
 		(entry.author === "owner" || entry.author === "agent") &&
 		(entry.reviewer === "allow" || entry.reviewer === "block" || entry.reviewer === "unreviewed") &&
-		typeof entry.bytes === "number"
+		typeof entry.bytes === "number" &&
+		(entry.event === undefined || entry.event === "reverted" || entry.event === "removed")
 	);
 }
 
@@ -87,6 +99,7 @@ export class SoulHistory {
 		standing: string | undefined;
 		author: SoulAuthor;
 		reviewer: SoulReviewer;
+		event?: SoulHistoryEvent;
 		now?: Date;
 	}): void {
 		const now = input.now ?? new Date();
@@ -94,14 +107,14 @@ export class SoulHistory {
 		if (input.standing !== undefined && !this.holdsVersion(entries, soulSha256(input.standing))) {
 			entries.push(this.entry(input.standing, "owner", "unreviewed", now, true));
 		}
-		entries.push(this.entry(input.text, input.author, input.reviewer, now, input.keepText));
+		entries.push(this.entry(input.text, input.author, input.reviewer, now, input.keepText, input.event));
 		const kept = entries.slice(-SOUL_HISTORY_LIMIT);
 		writeFileAtomicSync(this.historyFile, `${kept.map((item) => JSON.stringify(item)).join("\n")}\n`);
 		this.removeUnreferencedVersions(kept);
 	}
 
 	private holdsVersion(entries: readonly SoulHistoryEntry[], sha256: string): boolean {
-		return entries.some((entry) => entry.sha256 === sha256 && entry.reviewer !== "block");
+		return entries.some((entry) => entry.sha256 === sha256 && entryKeepsText(entry));
 	}
 
 	private entry(
@@ -110,13 +123,21 @@ export class SoulHistory {
 		reviewer: SoulReviewer,
 		at: Date,
 		keepText: boolean,
+		event?: SoulHistoryEvent,
 	): SoulHistoryEntry {
 		const sha256 = soulSha256(text);
 		if (keepText) {
 			const file = join(this.versionsDir, `${sha256}.md`);
 			if (!existsSync(file)) writeFileAtomicSync(file, text);
 		}
-		return { at: at.toISOString(), sha256, author, reviewer, bytes: Buffer.byteLength(text, "utf8") };
+		return {
+			at: at.toISOString(),
+			sha256,
+			author,
+			reviewer,
+			bytes: Buffer.byteLength(text, "utf8"),
+			...(event ? { event } : {}),
+		};
 	}
 
 	private removeUnreferencedVersions(kept: readonly SoulHistoryEntry[]): void {

@@ -53,6 +53,7 @@ const DELEGATE_REJECTION_SHAPES: Readonly<Record<string, RejectionShape>> = {
 	missing_message: { c: "E_FIELD", f: "message" },
 	missing_agent_id: { c: "E_FIELD", f: "agentId" },
 	missing_instructions: { c: "E_FIELD", f: "instructions" },
+	worker_control_identity_conflict: { c: "E_DUP" },
 	goal_instructions_conflict: { c: "E_FIELD", f: "instructions", h: "DROP_FIELD" },
 	brief_requires_goal: { c: "E_FIELD", h: "DROP_FIELD" },
 	goal_invalid: { c: "E_FIELD", f: "goal" },

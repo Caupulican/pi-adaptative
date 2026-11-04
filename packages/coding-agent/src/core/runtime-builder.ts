@@ -143,6 +143,7 @@ import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
+import type { RuleHookRefusal } from "./rule-hooks/rule-hook-delivery.ts";
 import {
 	type RuntimeCandidateAttempt,
 	RuntimeGenerationAdmissionError,
@@ -482,8 +483,8 @@ export interface RuntimeBuilderDeps {
 	goalClock?: TimerPort;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
-	/** The goal tool's completion preflight: the refusal text while the noticed-items rule is not in context. */
-	getCompletionRuleRefusal?(toolCallId: string): string | undefined;
+	/** The goal tool's completion preflight: the refusal while the noticed-items rule is not in context. */
+	getCompletionRuleRefusal?(toolCallId: string): RuleHookRefusal | undefined;
 	/** Queue items the owner must decide (the session's owner items message). */
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */

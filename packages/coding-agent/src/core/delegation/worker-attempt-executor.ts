@@ -1024,7 +1024,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						if (availableTokens !== undefined && availableTokens <= 0) {
 							throw new Error("Worker token budget exhausted before provider completion.");
 						}
-						options.conversation.ensureAttemptUserPrompt(options.durableHandle.attemptId, userPrompt);
+						options.conversation.ensureAttemptUserPrompt(
+							options.durableHandle.attemptId,
+							userPrompt,
+							input.userPromptBody,
+						);
 						let history: Message[] = [];
 						let completion: IsolatedCompletionResult;
 						const attemptProviderCompletion = async (): Promise<IsolatedCompletionResult> => {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import type { AgentToolCall, BeforeToolCallResult } from "../../kernel/index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { checkSoulText, DEFAULT_AGENT_NAME, SOUL_FILE_NAME } from "../agent-identity.ts";
@@ -12,8 +12,16 @@ import {
 	planEditsToNormalizedContent,
 } from "../tools/edit-diff.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { type SoulAuthor, SoulHistory, type SoulHistoryEntry, type SoulReviewer, soulSha256 } from "./soul-history.ts";
+import {
+	entryKeepsText,
+	type SoulAuthor,
+	SoulHistory,
+	type SoulHistoryEntry,
+	type SoulReviewer,
+	soulSha256,
+} from "./soul-history.ts";
 import { reviewSoulText, type SoulReviewOutcome } from "./soul-review.ts";
+import { SoulWatch } from "./soul-watch.ts";
 
 export interface SoulControllerDeps {
 	readonly agentDir: string;
@@ -40,6 +48,11 @@ export type SoulReviewReport =
 export type SoulSaveResult =
 	| { readonly ok: true; readonly bytes: number }
 	| { readonly ok: false; readonly reason: string };
+
+/** The same text, allowing for the line endings the tool preserved. */
+function sameText(left: string, right: string): boolean {
+	return left === right || normalizeToLF(left) === normalizeToLF(right);
+}
 
 function block(reason: string): BeforeToolCallResult {
 	return { block: true, reason: reason.slice(0, MAX_BLOCK_REASON_CHARS) };
@@ -89,9 +102,16 @@ export class SoulController {
 		{ reviewedText: string; before: string | undefined; reviewer: SoulReviewer }
 	>();
 
+	private readonly watch: SoulWatch;
+	/** When each tool call began, to tell a change it caused from one made between calls. */
+	private readonly started = new WeakMap<AgentToolCall, number>();
+	/** Settling is one at a time: two calls ending together must not judge the same change twice. */
+	private settling: Promise<undefined> = Promise.resolve(undefined);
+
 	constructor(deps: SoulControllerDeps) {
 		this.deps = deps;
 		this.historyStore = new SoulHistory(deps.agentDir);
+		this.watch = new SoulWatch(this.path, this.read());
 	}
 
 	get path(): string {
@@ -122,11 +142,8 @@ export class SoulController {
 	restore(n: number): SoulSaveResult {
 		const entry = this.history()[n - 1];
 		if (!entry) return { ok: false, reason: `no history entry ${n}` };
-		if (entry.reviewer === "block") {
-			return {
-				ok: false,
-				reason: `entry ${n} records a blocked write; its text was not kept`,
-			};
+		if (!entryKeepsText(entry)) {
+			return { ok: false, reason: `entry ${n} records a blocked write; its text was not kept` };
 		}
 		const text = this.historyStore.readVersion(entry.sha256);
 		if (text === undefined) return { ok: false, reason: `the text of entry ${n} was not kept` };
@@ -158,8 +175,10 @@ export class SoulController {
 		cwd: string,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined> {
+		if (!this.deps.isRootSession()) return undefined;
+		this.started.set(call, Date.now());
 		const toolName = call.name;
-		if ((toolName !== "write" && toolName !== "edit") || !this.deps.isRootSession()) return undefined;
+		if (toolName !== "write" && toolName !== "edit") return undefined;
 		if (typeof args !== "object" || args === null) return undefined;
 		const input = args as Record<string, unknown>;
 		if (typeof input.path !== "string" || !this.isSoulFile(input.path, cwd)) return undefined;
@@ -226,19 +245,39 @@ export class SoulController {
 	}
 
 	/**
-	 * The history boundary of an allowed write: called once its tool call has finished. A failed call recorded nothing
-	 * restorable; a successful one is recorded from the text actually on disk. When that differs from the reviewed
-	 * text (another writer got in between the review and the write; this is detected after the fact, not prevented),
-	 * the write is recorded `unreviewed`, the on-disk text goes through the deterministic screen, and the owner is told.
+	 * The check after every tool call of the root agent, which makes the gate complete: whatever wrote `soul.md`, the file
+	 * is compared with the last state the harness accounted for (one `stat`; the text is read only on a change). A change
+	 * inside this call's run that no owner write accounts for is judged like a gated write, after the fact:
+	 * - an allowed gated write is recorded from the text on disk once its call succeeded;
+	 * - any other change (a shell, a script, another tool, a second writer between review and write) goes through the
+	 *   deterministic screen and, while System One is available, the soul review; if it fails either, the previous
+	 *   accounted-for text (for a gated write whose text another writer replaced: the reviewed text) is written back,
+	 *   a typed `reverted` entry is recorded and the owner is told;
+	 * - a deletion is put back the same way, as a `removed` entry;
+	 * - a change outside every call's run (the owner editing by hand) is adopted as the owner's.
+	 * Returns the notice for the tool result when something was reverted. The write has happened before it is
+	 * reverted: the file holds the offending text between the write and the end of this call.
 	 */
-	settleWrite(call: AgentToolCall, succeeded: boolean): void {
+	settleWrite(call: AgentToolCall, succeeded: boolean): Promise<string | undefined> {
+		const run = this.settling.then(() => this.settle(call, succeeded));
+		this.settling = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
+	private async settle(call: AgentToolCall, succeeded: boolean): Promise<string | undefined> {
+		if (!this.deps.isRootSession()) return undefined;
 		const pending = this.pending.get(call);
-		if (!pending) return;
 		this.pending.delete(call);
+		const startedAt = this.started.get(call) ?? Date.now();
+		this.started.delete(call);
+		const observation = this.watch.observe(startedAt);
+		if (observation.kind === "unchanged") return undefined;
 		const onDisk = this.read();
-		if (!succeeded || onDisk === undefined) return;
-		const reviewed = onDisk === pending.reviewedText || normalizeToLF(onDisk) === normalizeToLF(pending.reviewedText);
-		if (reviewed) {
+		if (!observation.inWindow) return this.adoptOutsideChange(onDisk);
+		if (pending && succeeded && onDisk !== undefined && sameText(onDisk, pending.reviewedText)) {
 			this.historyStore.record({
 				text: onDisk,
 				keepText: true,
@@ -246,21 +285,111 @@ export class SoulController {
 				author: "agent",
 				reviewer: pending.reviewer,
 			});
-			return;
+			this.watch.adopt(onDisk);
+			return undefined;
 		}
-		const screened = checkSoulText(onDisk);
-		this.deps.emitWarning(
-			screened.ok
-				? "soul.md on disk differs from the text that was reviewed (another writer changed it); recorded as unreviewed."
-				: `soul.md on disk differs from the text that was reviewed and ${screened.reason}; it is not loaded. Review ${this.path}.`,
-		);
+		return this.judgeChange(onDisk, pending && succeeded ? pending.reviewedText : undefined);
+	}
+
+	/** A change no tool call caused (the owner's hand edit, another process): accounted for, not judged. */
+	private adoptOutsideChange(onDisk: string | undefined): undefined {
+		if (onDisk !== undefined) {
+			this.historyStore.record({
+				text: onDisk,
+				keepText: checkSoulText(onDisk).ok,
+				standing: this.watch.known,
+				author: "owner",
+				reviewer: "unreviewed",
+			});
+		}
+		this.watch.adopt(onDisk);
+		return undefined;
+	}
+
+	/** An ungated change inside a call: judged after the fact; `reviewedText` is what a gated write was reviewed as. */
+	private async judgeChange(
+		onDisk: string | undefined,
+		reviewedText: string | undefined,
+	): Promise<string | undefined> {
+		const known = this.watch.known;
+		const restoreTo = reviewedText ?? known;
+		if (onDisk === undefined) {
+			if (restoreTo === undefined) {
+				this.watch.adopt(undefined);
+				return undefined;
+			}
+			return this.revert(restoreTo, "removed", "soul.md was deleted outside the soul gate and was put back");
+		}
+		const verdict = await this.verdict(onDisk, known);
+		if (!verdict.accept) {
+			return this.revert(
+				restoreTo,
+				"reverted",
+				`soul.md was changed outside the soul gate (${verdict.reason}) and was reverted`,
+			);
+		}
+		if (verdict.warning) this.deps.emitWarning(verdict.warning);
 		this.historyStore.record({
 			text: onDisk,
-			keepText: screened.ok,
-			standing: pending.before,
+			keepText: true,
+			standing: known,
 			author: "agent",
-			reviewer: "unreviewed",
+			reviewer: verdict.reviewer,
 		});
+		this.watch.adopt(onDisk);
+		return undefined;
+	}
+
+	/** The deterministic screen, then the soul review while System One is available, on a document already on disk. */
+	private async verdict(
+		text: string,
+		current: string | undefined,
+	): Promise<{ accept: true; reviewer: SoulReviewer; warning?: string } | { accept: false; reason: string }> {
+		const screened = checkSoulText(text);
+		if (!screened.ok) return { accept: false, reason: screened.reason };
+		const engine = this.deps.getEngine();
+		if (!engine || screened.soul === undefined) return { accept: true, reviewer: "unreviewed" };
+		const outcome = await reviewSoulText(engine, { proposedText: text, currentSoul: current ?? "" });
+		switch (outcome.kind) {
+			case "allow":
+				return { accept: true, reviewer: "allow" };
+			case "adverse":
+				return {
+					accept: false,
+					reason: `System One: ${outcome.findings
+						.filter((finding) => finding.answer === "adverse")
+						.map((finding) => finding.id)
+						.join(", ")}`,
+				};
+			case "unsettled":
+				return { accept: false, reason: "System One could not settle the text" };
+			case "failed":
+				return {
+					accept: true,
+					reviewer: "unreviewed",
+					warning: `soul written without Jev review: ${outcome.error}`,
+				};
+		}
+	}
+
+	/** Puts the accounted-for text back (or removes a file that did not exist), records it as `event`, and tells the owner. */
+	private revert(restoreTo: string | undefined, event: "reverted" | "removed", message: string): string {
+		if (restoreTo === undefined) {
+			if (existsSync(this.path)) unlinkSync(this.path);
+		} else {
+			writeFileAtomicSync(this.path, restoreTo);
+		}
+		this.historyStore.record({
+			text: restoreTo ?? "",
+			keepText: restoreTo !== undefined,
+			standing: undefined,
+			author: "agent",
+			reviewer: "block",
+			event,
+		});
+		this.watch.adopt(restoreTo);
+		this.deps.emitWarning(`${message}. ${this.path}`);
+		return `${message}. Change soul.md with the edit tool instead.`.slice(0, MAX_BLOCK_REASON_CHARS);
 	}
 
 	/** An agent write of `text`: kept whole unless the gate blocked it. */
@@ -285,6 +414,7 @@ export class SoulController {
 		// Recorded after the write succeeded, from what the file now holds.
 		const written = this.read() ?? content;
 		this.historyStore.record({ text: written, keepText: true, standing, author, reviewer });
+		this.watch.adopt(written);
 		return { ok: true, bytes: Buffer.byteLength(written, "utf8") };
 	}
 

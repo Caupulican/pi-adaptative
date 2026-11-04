@@ -26,7 +26,7 @@ import type {
 	RepositoryMutationObserver,
 	RepositoryObservationToken,
 } from "./objective-execution/repository-mutation-observer.ts";
-import type { RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
+import { detailsWithRuleIds, type RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
@@ -109,7 +109,7 @@ export interface ToolGateControllerDeps {
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
 	/** The allowed soul write's call has finished: its history entry is recorded from the file as it now is. */
-	settleSoulWrite?(call: AgentToolCall, succeeded: boolean): void;
+	settleSoulWrite?(call: AgentToolCall, succeeded: boolean): Promise<string | undefined>;
 	/**
 	 * System One's operation gate: an operation the deterministic gates cannot decide is judged, then
 	 * runs, asks the operator, or is refused (see system-one/operation-gate.ts).
@@ -549,7 +549,7 @@ export class ToolGateController {
 		const selection = invocation?.selection;
 		let finishSucceeded = !isError;
 		try {
-			this.deps.settleSoulWrite?.(toolCall, !isError);
+			const soulNotice = await this.deps.settleSoulWrite?.(toolCall, !isError);
 			const runner = this.deps.getExtensionRunner();
 			let content = result.content;
 			let details = result.details;
@@ -667,9 +667,17 @@ export class ToolGateController {
 						cwd: executionContext?.cwd ?? this.deps.getCwd(),
 						assistantMessage,
 					}) ?? [];
-				if (ruleBlocks.length > 0)
-					content = [...content, ...ruleBlocks.map((text) => ({ type: "text" as const, text }))];
+				if (ruleBlocks.length > 0) {
+					content = [...content, ...ruleBlocks.map(({ text }) => ({ type: "text" as const, text }))];
+					// The delivered-once check reads the ids from details: they outlive the text, which context packing replaces.
+					details = detailsWithRuleIds(
+						details,
+						ruleBlocks.map(({ id }) => id),
+					);
+				}
 			}
+			// A reverted soul.md change is told to the model in the result of the call that made it.
+			if (soulNotice) content = [...content, { type: "text", text: soulNotice }];
 			finishSucceeded = !resolvedIsError;
 
 			if (

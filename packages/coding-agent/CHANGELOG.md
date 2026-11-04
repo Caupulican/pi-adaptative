@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- A write to `soul.md` by anything but the gated tools (a shell command, a script, another process during a call) is judged after the fact: the file is compared with its last accounted-for state after every tool call of the root agent, and a change that fails the threat scan or the System One review is reverted, recorded as a `reverted` (or, for a deletion, `removed`) history entry, reported to the owner and told to the model in the call's result. A gated write that another writer replaced between review and write is judged and reverted the same way.
+- `check:comms-text-parsing` also scans the worker mailbox coordinator, the worker conversation store, the context-fork sanitizer, the worker runner and the persistent-bot store. The five places that still recover a message's identity from its rendered text are named in the source with `comms-legacy-decoder:`, so a new text reader in those files fails the check.
+- A result that delivers a rule hook now lists the rule ids in `details.piRuleIds`, and the once-per-context check reads them there instead of scanning result text for a `RULE <id>` line. A result recorded before this change is still read by its marker line. The completion refusal of the noticed-items rule lists its id the same way.
+- The comms glossary in the root prompt is about 290 tokens, down from about 630: state codes are grouped one line per class, hint codes are listed by name without a gloss, and error classes take one line.
+- Worker control messages and attempt task prompts carry a typed identity in the transcript (`workerControl` on the session entry, a stamp on the live message). The mailbox acknowledgement, transcript reconciliation, the context-fork sanitizer, a lane's last words and the `/bot` chat read it instead of parsing the rendered header or TASK frame; older entries are still read by the marked legacy decoders, and the rendered text the model sees is unchanged. A lane's last words are bounded by its newest attempt boundary.
+- Mailbox messages carry a version header (`env`) and their replay receipts the digest version (`digestVersion: 2`). A key first accepted by an older build still replays under the older digest; a replay whose fields differ fails closed as a duplicate conflict (`E_DUP`). A build older than this field cannot read a mailbox that holds a version 2 receipt.
+
 ## [0.104.30] - 2026-11-04
 
 ### Added

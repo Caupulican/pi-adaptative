@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest } from "../../kernel/index.ts";
+import { stampWorkerControl, workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -59,6 +60,7 @@ import {
 	type WorkerAgentView,
 	type WorkerAgentWaitMode,
 	WorkerControlDeadLetteredError,
+	WorkerControlIdentityConflictError,
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
@@ -745,7 +747,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const correlatedAttempt = this.controlMessageAttemptById(agent.agentId, messageId);
 		if (correlatedAttempt) {
 			if (correlatedAttempt.dispatch.instructions !== message.trim()) {
-				throw new Error("Worker control idempotency identity conflicts with its durable dispatch.");
+				throw new WorkerControlIdentityConflictError(
+					"Worker control idempotency identity conflicts with its durable dispatch.",
+				);
 			}
 			this.assertAttemptDependencyIdentity(correlatedAttempt, dependsOnTaskIds);
 			// A replay that re-files the same instructions under a different goal -- or that changes its
@@ -973,7 +977,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			durableDependencies.length !== dependsOnTaskIds.length ||
 			durableDependencies.some((dependencyId, index) => dependencyId !== dependsOnTaskIds[index])
 		) {
-			throw new Error("Worker control idempotency identity conflicts with its durable task dependencies.");
+			throw new WorkerControlIdentityConflictError(
+				"Worker control idempotency identity conflicts with its durable task dependencies.",
+			);
 		}
 	}
 
@@ -1614,21 +1620,24 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// An older lane's words are not this lane's: only the agent's latest task is read.
 		if (attempt?.taskId !== laneId) return undefined;
 		const agent = this.requireControllableAgent(agentId, scope);
-		const messages = this.conversations
-			.open({
-				agentDir: this.options.agentDir,
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-			})
-			.getRawTranscript();
+		const conversation = this.conversations.open({
+			agentDir: this.options.agentDir,
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+		});
+		// The attempt's own boundary bounds the search: nothing before it belongs to this lane.
+		const latest = conversation.latestAttemptAssistantText();
+		if (latest.versioned) return latest.text;
+		const messages = conversation.getRawTranscript();
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index]!;
 			if (message.role === "user") {
-				// The attempt's own task prompt bounds the search: nothing before it belongs to this lane.
+				// A conversation without attempt boundaries bounds the search by the attempt's task prompt.
 				const text =
 					typeof message.content === "string"
 						? message.content
 						: message.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
+				// comms-legacy-decoder: a conversation written before attempt boundaries existed marks its attempt only by the task prompt's TASK frame.
 				if (isWorkerTaskPrompt(text)) return undefined;
 				continue;
 			}
@@ -1980,7 +1989,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	/** Acknowledge only after the exact child transcript message has been durably appended. */
 	acknowledgeMailboxMessage(agentId: string, message: { role: string; content: unknown }): void {
-		if (message.role !== "user" || typeof message.content !== "string") return;
+		if (message.role !== "user") return;
+		const control = workerControlOf(message);
+		if (control !== undefined) {
+			if (control.k !== "task") this.acknowledgeDeliveredMailboxMessage(agentId, control.id);
+			return;
+		}
+		if (typeof message.content !== "string") return;
+		// comms-legacy-decoder: a message appended without its typed identity (a transcript written before the identity existed) names its mailbox message only in the rendered header.
 		const messageId = /^\[Worker control (worker-message-[^\]\s]+)(?: [^\]]+)?\]\n/.exec(message.content)?.[1];
 		if (messageId) this.acknowledgeDeliveredMailboxMessage(agentId, messageId);
 	}
@@ -2902,10 +2918,23 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			message.replyToMessageId ? `replyTo=${message.replyToMessageId}` : undefined,
 			message.expectReply ? "replyExpected=true" : undefined,
 		].filter((value): value is string => value !== undefined);
-		return {
+		const header = `[Worker control ${message.messageId}${metadata.length > 0 ? ` ${metadata.join(" ")}` : ""}]\n`;
+		const projected: UserMessage = {
 			role: "user",
-			content: `[Worker control ${message.messageId}${metadata.length > 0 ? ` ${metadata.join(" ")}` : ""}]\n${message.content}`,
+			content: `${header}${message.content}`,
 			timestamp: Date.now(),
 		};
+		// The rendered text is for the model; everything that must recognize this message reads its typed identity.
+		stampWorkerControl(projected, {
+			v: 1,
+			k: message.kind,
+			id: message.messageId,
+			...(message.senderAgentId ? { from: message.senderAgentId } : {}),
+			...(message.threadId ? { th: message.threadId } : {}),
+			...(message.replyToMessageId ? { to: message.replyToMessageId } : {}),
+			...(message.expectReply ? { reply: true as const } : {}),
+			body: { from: header.length, to: header.length + message.content.length },
+		});
+		return projected;
 	}
 }

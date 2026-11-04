@@ -1,6 +1,7 @@
 import type { ImageContent, TextContent, Usage } from "@caupulican/pi-ai/types";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import type { UsageComponent } from "../usage-components.ts";
+import type { WorkerControlRecord } from "../worker-control-stamp.ts";
 
 export interface SessionEntryBase {
 	type: string;
@@ -19,6 +20,12 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	 * reads: an input named here was delivered on this entry's branch, so a restart never restores it again.
 	 */
 	ownerInputId?: string;
+	/**
+	 * The typed identity of a host-written worker message (a mailbox control message or the attempt's task prompt),
+	 * written from the stamp the message carried (`workerControlOf`). It is serialized before `message` so a bounded
+	 * prefix read of an oversized entry still reaches it.
+	 */
+	workerControl?: WorkerControlRecord;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

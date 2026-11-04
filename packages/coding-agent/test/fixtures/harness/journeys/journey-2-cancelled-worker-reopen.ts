@@ -576,6 +576,19 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 	expect(durableBFrames.filter((content) => typeof content !== "string" || !isWorkerTaskPrompt(content))).toEqual([
 		`[Worker control ${bMessageId}]\n${bWords}`,
 	]);
+	// The rendered frames above are for the model; each host-written entry also names itself in its typed `workerControl` record: the
+	// attempt's task prompt as a task, the mailbox message by its id.
+	const durableBEntries = transcript.flatMap((entry) =>
+		entry.type === "message" &&
+		entry.message.role === "user" &&
+		JSON.stringify(entry.message.content).includes(bWords)
+			? [entry]
+			: [],
+	);
+	expect(
+		durableBEntries.map((entry) => (entry.workerControl?.k === "task" ? "task" : entry.workerControl?.id)).sort(),
+		"the task prompt and the control message each carry their typed identity",
+	).toEqual(["task", bMessageId].sort());
 	expect(JSON.stringify(transcript)).not.toContain(pendingWords);
 	expect(oldTerminalPostsAfterCleanup).toBeLessThanOrEqual(1);
 	expect({

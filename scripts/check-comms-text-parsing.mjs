@@ -27,8 +27,14 @@ const COMMS_FILES = [
 	`${SOURCE}/core/delegation/worker-terminal-handoff-coordinator.ts`,
 	`${SOURCE}/core/delegation/worker-report.ts`,
 	`${SOURCE}/core/delegation/worker-claim.ts`,
+	`${SOURCE}/core/delegation/worker-agent-control-coordinator.ts`,
+	`${SOURCE}/core/delegation/worker-conversation-store.ts`,
+	`${SOURCE}/core/delegation/worker-runner.ts`,
+	`${SOURCE}/core/delegation/sanitized-context-fork.ts`,
+	`${SOURCE}/core/delegation/persistent-bot-team-store.ts`,
 	`${SOURCE}/core/delegation/worker-disposition.ts`,
 	`${SOURCE}/core/autonomy/host-findings.ts`,
+	`${SOURCE}/core/rule-hooks/rule-hook-delivery.ts`,
 	`${SOURCE}/modes/interactive/components/custom-message.ts`,
 ];
 

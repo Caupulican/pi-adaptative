@@ -1,5 +1,6 @@
 import type { AssistantMessage, TextContent, UserMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { isAssistantCommentary } from "../message-phase.ts";
 import {
 	MAX_WORKER_CONTEXT_FORK_BYTES,
@@ -57,7 +58,11 @@ function sanitizedTextBlocks(
 }
 
 function isWorkerControlUserMessage(message: UserMessage): boolean {
+	// A message carrying its typed identity is a worker control message (or the attempt's task prompt) by that record.
+	const control = workerControlOf(message);
+	if (control !== undefined) return control.k !== "task";
 	if (typeof message.content === "string") {
+		// comms-legacy-decoder: a message that lost its typed identity (a copy, or an entry persisted before entries carried it) is recognized only by its rendered `[Worker control ...]` header.
 		const newline = message.content.indexOf("\n", 0);
 		const prefixEnd = newline >= 0 ? newline + 1 : MAX_WORKER_CONTROL_PREFIX_CHARS;
 		return WORKER_CONTROL_PREFIX.test(message.content.slice(0, Math.min(prefixEnd, MAX_WORKER_CONTROL_PREFIX_CHARS)));
@@ -67,6 +72,7 @@ function isWorkerControlUserMessage(message: UserMessage): boolean {
 		if (block.type !== "text") continue;
 		const remaining = MAX_WORKER_CONTROL_PREFIX_CHARS - prefix.length;
 		if (remaining <= 0) return false;
+		// comms-legacy-decoder: a message that lost its typed identity (a copy, or an entry persisted before entries carried it) is recognized only by its rendered `[Worker control ...]` header.
 		const newline = block.text.indexOf("\n");
 		const blockPrefixEnd = newline >= 0 ? newline + 1 : block.text.length;
 		prefix += block.text.slice(0, Math.min(blockPrefixEnd, remaining));

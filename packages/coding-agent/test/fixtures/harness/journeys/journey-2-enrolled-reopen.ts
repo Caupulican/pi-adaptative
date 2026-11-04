@@ -205,6 +205,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 					{
 						messageId: pendingMessageId,
 						kind: "steer",
+						env: { v: 1, k: "steer" },
 						content: pendingWords,
 						task: { kind: "agent_turn" },
 					},
@@ -584,6 +585,16 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 				`${label}: admitted pending words persist once in the same worker transcript`,
 			).toHaveLength(1);
 			expect(JSON.stringify(pendingEntries[0])).toContain(`[Worker control ${pendingMessageId}`);
+			// The entry names the control message in its typed record, not only in the rendered header.
+			const pendingEntry = pendingEntries[0];
+			if (pendingEntry?.type !== "message") throw new Error(`${label}: the pending control entry is not a message`);
+			expect(
+				pendingEntry.workerControl,
+				`${label}: the persisted control message carries its typed identity`,
+			).toMatchObject({ v: 1, id: pendingMessageId });
+			expect(["steer", "follow_up"], `${label}: the typed identity names a mailbox delivery mode`).toContain(
+				pendingEntry.workerControl?.k,
+			);
 			expect(JSON.stringify(pendingEntries[0]).split(pendingWords)).toHaveLength(2);
 		}
 		expect(terminalRequests).toBe(1);

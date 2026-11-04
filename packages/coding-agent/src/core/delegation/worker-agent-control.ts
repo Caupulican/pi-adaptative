@@ -74,6 +74,7 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 		JSON.stringify({
 			messageId: `worker-message-${"f".repeat(64)}`,
 			kind: "follow_up",
+			env: { v: 1, k: "follow_up" },
 			content: `c${"\0".repeat(MAX_TASK_BEARING_MESSAGE_CHARS - 1)}`,
 			senderAgentId: `s${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 			threadId: `t${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
@@ -123,6 +124,18 @@ const assertWorkerAgentMailboxBounds = createReplaySafeMailboxBounder(
 export type WorkerAgentMessageKind = "steer" | "follow_up";
 
 /**
+ * The version header of a mailbox message written by a build that knows envelopes: `v` selects the intent digest
+ * its replay receipt carries (version 2, over the message id and the canonical fields), and `k` is the delivery
+ * mode at first acceptance. Addressing (`senderAgentId`, `threadId`, `replyToMessageId`, `expectReply`) stays in the
+ * message's own typed fields, so nothing is stored twice. A message without `env` was written earlier and is
+ * legacy: its receipt carries the version 1 digest, and every reader handles both.
+ */
+export interface WorkerAgentMessageEnvelope {
+	readonly v: 1;
+	readonly k: WorkerAgentMessageKind;
+}
+
+/**
  * Correlation of a genuinely NEW task queued onto an existing specialist. Present means the caller
  * owns this turn's work correlation: whatever it omits is empty, never inherited from the task the
  * specialist happened to run before. Ids only -- the goal's own durable objective is admitted
@@ -147,6 +160,8 @@ export interface WorkerAgentMessage {
 	receiptOrigin?: WorkerReceiptOrigin;
 	messageId: string;
 	kind: WorkerAgentMessageKind;
+	/** Present on a message written by a build that knows envelopes; absent on a legacy message. */
+	env?: WorkerAgentMessageEnvelope;
 	content: string;
 	senderAgentId?: string;
 	threadId?: string;
@@ -221,13 +236,26 @@ export interface WorkerReplyAcknowledgement {
 
 type WorkerReplyAcknowledgementIdentity = Pick<WorkerReplyAcknowledgement, "messageId" | "acknowledgementId">;
 
+/** Which digest an intent receipt carries: 1 over the legacy fields, 2 over the message id and the canonical fields. */
+type ControlDigestVersion = 1 | 2;
+
 interface WorkerControlReplayReceipt {
 	kind: "control";
 	messageId: string;
 	intentDigest: string;
+	/** Absent means version 1: the receipt was written before envelopes existed. */
+	digestVersion?: 2;
 	deliveredAt?: string;
 	/** The message was dead-lettered before delivery: a replay of its key reports the failure, never an acceptance. */
 	failed?: true;
+}
+
+/** A replayed control identity whose fields differ from what that identity first carried: refused, never adopted. */
+export class WorkerControlIdentityConflictError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "WorkerControlIdentityConflictError";
+	}
 }
 
 /** A replayed control message that was dead-lettered or expired before it was ever delivered. */
@@ -596,14 +624,17 @@ function contentDigest(domain: string, content: string): string {
 	return createHash("sha256").update(domain).update("\0").update(content).digest("hex");
 }
 
-function controlIntentDigest(input: {
+interface ControlIntent {
 	content: string;
 	senderAgentId?: string;
 	threadId?: string;
 	replyToMessageId?: string;
 	expectReply?: boolean;
 	task?: WorkerAgentTaskMetadata;
-}): string {
+}
+
+/** Version 1: the legacy digest over the intent fields. Frozen: receipts written before envelopes carry it. */
+function controlIntentDigest(input: ControlIntent): string {
 	return contentDigest(
 		"pi-worker-agent-control-intent-v1",
 		JSON.stringify([
@@ -617,6 +648,35 @@ function controlIntentDigest(input: {
 	);
 }
 
+/**
+ * Version 2: the digest over the canonical envelope (its version and the message id) and the same intent fields. The
+ * delivery mode `k` is left out for the reason `kind` is left out of version 1: a retry may observe another live
+ * activity state and must still be the same intent.
+ */
+function controlIntentDigestV2(messageId: string, input: ControlIntent): string {
+	return contentDigest(
+		"pi-worker-agent-control-intent-v2",
+		JSON.stringify([
+			{ v: 1, id: messageId },
+			input.content,
+			input.senderAgentId ?? null,
+			input.threadId ?? null,
+			input.replyToMessageId ?? null,
+			input.expectReply === true,
+			input.task ?? null,
+		]),
+	);
+}
+
+function controlDigestFor(version: ControlDigestVersion, messageId: string, input: ControlIntent): string {
+	return version === 2 ? controlIntentDigestV2(messageId, input) : controlIntentDigest(input);
+}
+
+/** Does this receipt record exactly this intent, under the digest version the receipt itself carries? */
+function receiptRecordsIntent(receipt: WorkerControlReplayReceipt, messageId: string, intent: ControlIntent): boolean {
+	return receipt.intentDigest === controlDigestFor(receipt.digestVersion ?? 1, messageId, intent);
+}
+
 function replyIntentDigest(content: string): string {
 	return contentDigest("pi-worker-reply-content-v1", content);
 }
@@ -626,11 +686,13 @@ function controlReplayReceipt(
 	intentDigest: string,
 	deliveredAt?: string,
 	failed?: true,
+	digestVersion?: 2,
 ): WorkerControlReplayReceipt {
 	return {
 		kind: "control",
 		messageId,
 		intentDigest,
+		...(digestVersion === 2 ? { digestVersion } : {}),
 		...(deliveredAt ? { deliveredAt } : {}),
 		...(failed ? { failed } : {}),
 	};
@@ -648,7 +710,7 @@ function failUndeliveredControlReceipts(
 	if (failedUndeliveredIds.size === 0) return [...receipts];
 	return receipts.map((receipt) =>
 		receipt.kind === "control" && failedUndeliveredIds.has(receipt.messageId) && receipt.deliveredAt === undefined
-			? controlReplayReceipt(receipt.messageId, receipt.intentDigest, undefined, true)
+			? controlReplayReceipt(receipt.messageId, receipt.intentDigest, undefined, true, receipt.digestVersion)
 			: receipt,
 	);
 }
@@ -819,6 +881,21 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		) {
 			throw new Error("Worker agent mailbox contains an invalid message.");
 		}
+		let env: WorkerAgentMessageEnvelope | undefined;
+		if (message.env !== undefined) {
+			const candidate = message.env as unknown as Record<string, unknown> | null;
+			if (
+				typeof candidate !== "object" ||
+				candidate === null ||
+				Array.isArray(candidate) ||
+				!Object.keys(candidate).every((field) => field === "v" || field === "k") ||
+				candidate.v !== 1 ||
+				candidate.k !== message.kind
+			) {
+				throw new Error("Worker agent mailbox contains an invalid message envelope.");
+			}
+			env = { v: 1, k: message.kind };
+		}
 		const receiptOrigin =
 			message.receiptOrigin === undefined ? undefined : workerReceiptOriginFromValue(message.receiptOrigin);
 		const createdAt = requiredMailboxTimestamp(message.createdAt, "creation timestamp");
@@ -860,6 +937,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		}
 		return {
 			...message,
+			...(env ? { env } : {}),
 			...(receiptOrigin ? { receiptOrigin } : {}),
 			createdAt,
 			...(deliveredAt ? { deliveredAt } : {}),
@@ -963,9 +1041,11 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 						field === "kind" ||
 						field === "messageId" ||
 						field === "intentDigest" ||
+						field === "digestVersion" ||
 						field === "deliveredAt" ||
 						field === "failed",
 				) ||
+				(receipt.digestVersion !== undefined && receipt.digestVersion !== 2) ||
 				(receipt.failed !== undefined && (receipt.failed !== true || receipt.deliveredAt !== undefined))
 			) {
 				throw new Error("Worker agent mailbox contains invalid control replay receipt state.");
@@ -979,6 +1059,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 				receipt.intentDigest,
 				deliveredAt,
 				receipt.failed === true ? true : undefined,
+				receipt.digestVersion === 2 ? 2 : undefined,
 			);
 		}
 		if (
@@ -1506,6 +1587,7 @@ export class WorkerAgentMailbox {
 				? workerAgentMessageId(this.parentSessionId, idempotencyKey)
 				: `worker-message-${randomUUID()}`,
 			kind: input.kind,
+			env: { v: 1, k: input.kind },
 			content,
 			...(senderAgentId ? { senderAgentId } : {}),
 			...(threadId ? { threadId } : {}),
@@ -1515,7 +1597,9 @@ export class WorkerAgentMailbox {
 			...(input.receiptOrigin ? { receiptOrigin: workerReceiptOriginFromValue(input.receiptOrigin) } : {}),
 			createdAt: new Date().toISOString(),
 		};
-		const intentDigest = idempotencyKey ? controlIntentDigest(message) : undefined;
+		// A keyed message written now carries version 2; a replay of an older identity is judged under the version its
+		// stored message or receipt carries, so an old key replayed from this build still replays.
+		const replayKeyed = idempotencyKey !== undefined;
 		const externallyReplayOwned = hasExternalReplayAuthority(message);
 		let queued = message;
 		let created = false;
@@ -1524,8 +1608,7 @@ export class WorkerAgentMailbox {
 			(state) => {
 				const existing = state.messages.find((candidate) => candidate.messageId === message.messageId);
 				const replayReceipt = controlReplayReceiptFor(state.replayReceipts, message.messageId);
-				const addsControlReceipt =
-					intentDigest !== undefined && !externallyReplayOwned && replayReceipt === undefined;
+				const addsControlReceipt = replayKeyed && !externallyReplayOwned && replayReceipt === undefined;
 				if (
 					addsControlReceipt &&
 					state.replayReceipts.filter((receipt) => receipt.kind === "control").length >= MAX_REPLAY_EVIDENCE_SLOTS
@@ -1545,29 +1628,44 @@ export class WorkerAgentMailbox {
 						existing.replyToMessageId === message.replyToMessageId &&
 						existing.expectReply === message.expectReply &&
 						sameTaskMetadata(existing.task, message.task);
-					if (!sameIntent)
-						throw new Error("Worker control idempotency identity conflicts with an existing message.");
-					if (intentDigest && replayReceipt && replayReceipt.intentDigest !== intentDigest) {
-						throw new Error("Worker control idempotency identity conflicts with its durable replay receipt.");
+					if (!sameIntent) {
+						throw new WorkerControlIdentityConflictError(
+							"Worker control idempotency identity conflicts with an existing message.",
+						);
+					}
+					if (replayKeyed && replayReceipt && !receiptRecordsIntent(replayReceipt, message.messageId, message)) {
+						throw new WorkerControlIdentityConflictError(
+							"Worker control idempotency identity conflicts with its durable replay receipt.",
+						);
 					}
 					// A receipt-owned message that failed before delivery is reported as failed, never as accepted.
 					if (!externallyReplayOwned && existing.failedAt !== undefined && existing.deliveredAt === undefined) {
 						throw new WorkerControlDeadLetteredError(existing.messageId, existing.failureReason);
 					}
 					queued = existing;
-					return intentDigest && !externallyReplayOwned && !replayReceipt
+					// The receipt a stored message lacks is written under the version the stored message selects.
+					const existingDigestVersion: ControlDigestVersion = existing.env ? 2 : 1;
+					return replayKeyed && !externallyReplayOwned && !replayReceipt
 						? {
 								...state,
 								replayReceipts: [
 									...state.replayReceipts,
-									controlReplayReceipt(message.messageId, intentDigest, existing.deliveredAt),
+									controlReplayReceipt(
+										message.messageId,
+										controlDigestFor(existingDigestVersion, message.messageId, message),
+										existing.deliveredAt,
+										undefined,
+										existingDigestVersion === 2 ? 2 : undefined,
+									),
 								],
 							}
 						: state;
 				}
 				if (replayReceipt) {
-					if (!intentDigest || replayReceipt.intentDigest !== intentDigest) {
-						throw new Error("Worker control idempotency identity conflicts with its durable replay receipt.");
+					if (!replayKeyed || !receiptRecordsIntent(replayReceipt, message.messageId, message)) {
+						throw new WorkerControlIdentityConflictError(
+							"Worker control idempotency identity conflicts with its durable replay receipt.",
+						);
 					}
 					if (replayReceipt.failed) throw new WorkerControlDeadLetteredError(message.messageId);
 					completedReplay = true;
@@ -1590,11 +1688,17 @@ export class WorkerAgentMailbox {
 				return {
 					...state,
 					messages: [...state.messages, message],
-					...(intentDigest && !externallyReplayOwned
+					...(replayKeyed && !externallyReplayOwned
 						? {
 								replayReceipts: [
 									...state.replayReceipts,
-									controlReplayReceipt(message.messageId, intentDigest),
+									controlReplayReceipt(
+										message.messageId,
+										controlIntentDigestV2(message.messageId, message),
+										undefined,
+										undefined,
+										2,
+									),
 								],
 							}
 						: {}),
@@ -1689,9 +1793,13 @@ export class WorkerAgentMailbox {
 			...(normalizeTaskMetadata(intent.task) ? { task: normalizeTaskMetadata(intent.task) } : {}),
 		};
 		const message = state.messages.find((entry) => entry.messageId === normalized);
-		if (message) return controlIntentDigest(message) === controlIntentDigest(candidate);
+		if (message) {
+			// The stored message selects the digest version, and both sides are digested under it.
+			const version: ControlDigestVersion = message.env ? 2 : 1;
+			return controlDigestFor(version, normalized, message) === controlDigestFor(version, normalized, candidate);
+		}
 		const receipt = controlReplayReceiptFor(state.replayReceipts, normalized);
-		return receipt ? receipt.intentDigest === controlIntentDigest(candidate) : undefined;
+		return receipt ? receiptRecordsIntent(receipt, normalized, candidate) : undefined;
 	}
 
 	hasControlReplayReceipt(messageId: string): boolean {

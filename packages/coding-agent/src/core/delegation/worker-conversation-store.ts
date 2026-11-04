@@ -58,6 +58,13 @@ import {
 import { createToolFailureContextMemory } from "../../kernel/tool-failure-memory.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
+import {
+	parseWorkerControlRecord,
+	stampWorkerControl,
+	type WorkerControlBody,
+	type WorkerControlRecord,
+	workerControlOf,
+} from "../../kernel/worker-control-stamp.ts";
 import { workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import {
@@ -379,13 +386,45 @@ function assertWorkerSessionHeadContent(
 	}
 }
 
-function workerControlMessageId(content: string): string | undefined {
+/**
+ * The mailbox message id a transcript user message carries: the typed record its entry names, else, for an entry
+ * persisted before entries named it, the id in the rendered `[Worker control ...]` header.
+ */
+function workerControlMessageId(entry: Readonly<{ workerControl?: unknown }>, content: string): string | undefined {
+	const record = parseWorkerControlRecord(entry.workerControl);
+	if (record) return record.k === "task" ? undefined : record.id;
+	// comms-legacy-decoder: an entry persisted before entries carried `workerControl` names its mailbox message only in the rendered header.
 	return /^\[Worker control (worker-message-[^\]\s]+)(?: [^\]]+)?\]\n/.exec(content)?.[1];
 }
 
+/**
+ * Whether an oversized entry (read by its raw JSON prefix, never loaded) is the transcript copy of mailbox message
+ * `messageId`: its typed record sits first on the serialized entry, ahead of the message content.
+ */
 function coldWorkerControlPrefixContains(sessionManager: SessionManager, entryId: string, messageId: string): boolean {
 	const rawPrefix = sessionManager.readEntryJsonPrefix(entryId, MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES);
-	return rawPrefix?.includes(`"role":"user","content":"[Worker control ${messageId}`) ?? false;
+	if (rawPrefix === undefined) return false;
+	const typed = `"timestamp":"`;
+	const at = rawPrefix.indexOf(typed);
+	if (at >= 0) {
+		const afterTimestamp = rawPrefix.indexOf('",', at + typed.length);
+		if (
+			afterTimestamp >= 0 &&
+			["steer", "follow_up"].some((kind) =>
+				rawPrefix.startsWith(`"workerControl":{"v":1,"k":"${kind}","id":"${messageId}"`, afterTimestamp + 2),
+			)
+		) {
+			return true;
+		}
+	}
+	// comms-legacy-decoder: an oversized entry persisted before entries carried `workerControl` starts its content with the header.
+	return rawPrefix.includes(`"role":"user","content":"[Worker control ${messageId}`);
+}
+
+/** Carries a message's typed worker-control identity onto its persisted copy, which a clone would otherwise drop. */
+function carryWorkerControl<T extends AgentMessage>(persisted: T, control: WorkerControlRecord | undefined): T {
+	if (control !== undefined && persisted.role === "user") stampWorkerControl(persisted, control);
+	return persisted;
 }
 
 /** Conservative JSON byte measurement that stops before an oversized message is cloned. */
@@ -787,7 +826,7 @@ function scanWorkerControlTranscript(
 	const expectedById = new Map<string, string>();
 	for (const expectation of expectations) {
 		const messageId = expectation.messageId.trim();
-		if (!messageId || workerControlMessageId(expectation.content) !== messageId) {
+		if (!messageId || !expectation.content) {
 			throw new TypeError("Worker control transcript expectation is invalid.");
 		}
 		const existing = expectedById.get(messageId);
@@ -809,7 +848,7 @@ function scanWorkerControlTranscript(
 		}
 		const content = exactUserText(entry.message);
 		if (content === undefined) return;
-		const messageId = workerControlMessageId(content);
+		const messageId = workerControlMessageId(entry, content);
 		if (!messageId || !expectedById.has(messageId)) return;
 		if (expectedById.get(messageId) !== content) {
 			throw new Error("Worker control transcript identity conflicts with existing content.");
@@ -1246,7 +1285,7 @@ export class WorkerConversation {
 	 * queued mailbox controls may already exist, while a crash after append must not duplicate the
 	 * prompt on resume.
 	 */
-	ensureAttemptUserPrompt(attemptId: string, prompt: string): void {
+	ensureAttemptUserPrompt(attemptId: string, prompt: string, body?: WorkerControlBody): void {
 		const normalizedAttemptId = assertAttemptUsageId(attemptId);
 		if (!prompt.trim()) throw new TypeError("Worker attempt prompt is required.");
 		this.beginAttemptUsage(normalizedAttemptId);
@@ -1262,9 +1301,36 @@ export class WorkerConversation {
 		});
 		if (matches > 1) throw new Error("Worker attempt prompt appears more than once in its durable boundary.");
 		if (matches === 1) return;
-		this.appendSessionEntry((sessionManager) =>
-			sessionManager.appendMessage({ role: "user", content: prompt, timestamp: Date.now() }),
-		);
+		const task: Message = { role: "user", content: prompt, timestamp: Date.now() };
+		stampWorkerControl(task, { v: 1, k: "task", id: normalizedAttemptId, ...(body ? { body } : {}) });
+		this.appendSessionEntry((sessionManager) => sessionManager.appendMessage(task));
+	}
+
+	/**
+	 * What the latest attempt's own messages last said: the last assistant text after the newest attempt boundary.
+	 * `versioned` is false for a conversation that has no attempt boundaries (written before they existed), whose
+	 * caller must bound the attempt another way.
+	 */
+	latestAttemptAssistantText(): { versioned: boolean; text?: string } {
+		if (!this.usesAttemptUsageBoundaries()) return { versioned: false };
+		const entryCount = this.sessionManager.getEntryCount();
+		let boundary = -1;
+		for (let next = attemptUsageBoundaryIndex(this.sessionManager, undefined, 0); next >= 0; ) {
+			boundary = next;
+			next = attemptUsageBoundaryIndex(this.sessionManager, undefined, next + 1);
+		}
+		if (boundary < 0) return { versioned: false };
+		let text: string | undefined;
+		visitWorkerSessionEntries(this.sessionManager, boundary + 1, entryCount, (entry) => {
+			const message = rawWorkerTranscriptMessage(entry);
+			if (!message || !isWireNativeWorkerTranscriptMessage(message) || message.role !== "assistant") return;
+			const said = message.content
+				.flatMap((block) => (block.type === "text" ? [block.text] : []))
+				.join("")
+				.trim();
+			if (said) text = said;
+		});
+		return { versioned: true, ...(text !== undefined ? { text } : {}) };
 	}
 
 	/** Whether missing attempt markers have versioned, fail-closed accounting semantics. */
@@ -1378,8 +1444,9 @@ export class WorkerConversation {
 			(sessionManager) => {
 				const delivered = scanWorkerControlTranscript(sessionManager, [expectation]).has(expectation.messageId);
 				if (delivered || !appendIfMissing) return { delivered, appended: false };
+				const control = workerControlOf(message);
 				this.appendSessionEntryLocked(sessionManager, (owner) =>
-					owner.appendMessage(structuredClone(workerMessageForPersistence(message))),
+					owner.appendMessage(carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control)),
 				);
 				return { delivered: true, appended: true };
 			},
@@ -1483,8 +1550,12 @@ export class WorkerConversation {
 
 	/** Append one already-authorized worker message to the canonical transcript. */
 	appendMessage(message: WorkerTranscriptMessage, origin?: AgentMessageOrigin): string {
+		const control = workerControlOf(message);
 		return this.appendSessionEntry((sessionManager) =>
-			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)), origin),
+			sessionManager.appendMessage(
+				carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control),
+				origin,
+			),
 		);
 	}
 
@@ -1783,8 +1854,9 @@ export class WorkerConversation {
 				);
 			}
 			for (let index = persistedMessages; index < normalizedSuffix.length; index += 1) {
+				const control = workerControlOf(suffix[index]!);
 				this.appendSessionEntryLocked(sessionManager, (owner) =>
-					owner.appendMessage(structuredClone(normalizedSuffix[index]!)),
+					owner.appendMessage(carryWorkerControl(structuredClone(normalizedSuffix[index]!), control)),
 				);
 			}
 			state.status = "committed";
