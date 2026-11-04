@@ -3259,6 +3259,7 @@ export class WorkerDelegationController {
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,
+					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
 					...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),

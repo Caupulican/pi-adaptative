@@ -76,3 +76,109 @@ export function renderCommsErrView(err: CommsErrRecord): string {
 export function renderCommsStateLine(codes: readonly CommsStateCode[]): string | undefined {
 	return codes.length > 0 ? `h ${[...new Set(codes)].join(",")}` : undefined;
 }
+
+/** Evidence a task asks the worker to bring back, with the phrase the worker's task view uses for it. */
+export const TASK_EVIDENCE_KINDS = {
+	cite: "cite file:line",
+	cmd: "command output",
+	diff: "diff",
+	none: "none",
+} as const;
+
+export type TaskEvidenceKind = keyof typeof TASK_EVIDENCE_KINDS;
+
+/** The shape of the answer a task asks for, with the phrase the worker's task view uses for it. */
+export const TASK_OUTPUT_KINDS = {
+	find: "findings",
+	edit: "edit",
+	ans: "answer",
+	rev: "verdict",
+} as const;
+
+export type TaskOutputKind = keyof typeof TASK_OUTPUT_KINDS;
+
+/** Budgets of the structured task fields; they are also the memory-leaf budgets of a typical start call. */
+export const MAX_TASK_GOAL_CHARS = 400;
+export const MAX_TASK_NOTE_CHARS = 1_500;
+export const MAX_TASK_REFS = 16;
+export const MAX_TASK_REF_CHARS = 256;
+
+/** Version of the renderer that turns a brief into the worker's task text; the stored text never changes with it. */
+export const TASK_BRIEF_RENDER_VERSION = 1 as const;
+
+/**
+ * A task as the root stated it, in fields. The worker's `TASK` text is rendered from this record at admission and
+ * stored as the dispatch `instructions`; the record is stored beside it. A dispatch without a brief is a free-text
+ * task and stays legacy.
+ */
+export interface TaskBrief {
+	readonly v: CommsRecordVersion;
+	/** The task statement, one sentence. */
+	readonly goal: string;
+	/** Constraints and a stop condition that no id expresses. */
+	readonly note?: string;
+	readonly evid?: TaskEvidenceKind;
+	readonly out?: TaskOutputKind;
+	/** Paths and ids to read; references, never pasted content. */
+	readonly refs?: readonly string[];
+}
+
+/**
+ * The worker's task text for a brief: a pure function of the record. The goal opens the text (it is the task's
+ * label); the other fields follow as plain words a worker needs no glossary to read.
+ */
+export function renderTaskBrief(brief: TaskBrief): string {
+	return [
+		brief.goal,
+		...(brief.note ? [`Note: ${brief.note}`] : []),
+		...(brief.refs && brief.refs.length > 0 ? [`Refs: ${brief.refs.join(", ")}`] : []),
+		...(brief.evid || brief.out
+			? [
+					[
+						brief.evid ? `Evidence: ${TASK_EVIDENCE_KINDS[brief.evid]}.` : undefined,
+						brief.out ? `Output: ${TASK_OUTPUT_KINDS[brief.out]}.` : undefined,
+					]
+						.filter((part): part is string => part !== undefined)
+						.join(" "),
+				]
+			: []),
+	].join("\n");
+}
+
+/** Reads a stored brief back, rejecting anything outside the record's shape and budgets. */
+export function parseTaskBrief(value: unknown): TaskBrief {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("brief must be an object.");
+	const record = value as Record<string, unknown>;
+	const unknownField = Object.keys(record).find((key) => !["v", "goal", "note", "evid", "out", "refs"].includes(key));
+	if (unknownField) throw new Error(`brief.${unknownField} is unsupported.`);
+	if (record.v !== COMMS_RECORD_VERSION) throw new Error("brief.v is unsupported.");
+	const { goal, note, evid, out, refs } = record;
+	if (typeof goal !== "string" || !goal.trim() || goal.length > MAX_TASK_GOAL_CHARS) {
+		throw new Error("brief.goal must be a non-empty string within its budget.");
+	}
+	if (note !== undefined && (typeof note !== "string" || !note.trim() || note.length > MAX_TASK_NOTE_CHARS)) {
+		throw new Error("brief.note must be a non-empty string within its budget.");
+	}
+	if (evid !== undefined && (typeof evid !== "string" || !Object.hasOwn(TASK_EVIDENCE_KINDS, evid))) {
+		throw new Error("brief.evid is invalid.");
+	}
+	if (out !== undefined && (typeof out !== "string" || !Object.hasOwn(TASK_OUTPUT_KINDS, out))) {
+		throw new Error("brief.out is invalid.");
+	}
+	if (
+		refs !== undefined &&
+		(!Array.isArray(refs) ||
+			refs.length > MAX_TASK_REFS ||
+			refs.some((ref) => typeof ref !== "string" || !ref.trim() || ref.length > MAX_TASK_REF_CHARS))
+	) {
+		throw new Error("brief.refs must be a bounded list of non-empty strings.");
+	}
+	return {
+		v: COMMS_RECORD_VERSION,
+		goal,
+		...(note !== undefined ? { note: note as string } : {}),
+		...(evid !== undefined ? { evid: evid as TaskEvidenceKind } : {}),
+		...(out !== undefined ? { out: out as TaskOutputKind } : {}),
+		...(refs !== undefined ? { refs: [...(refs as string[])] } : {}),
+	};
+}

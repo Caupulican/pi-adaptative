@@ -120,6 +120,8 @@ report and sample the transcript on demand (`READ_REPORT`); any other verdict ke
 (`READ_ALL`). A claim carries what the host itself observed in typed `hostFindings` and its wait for
 an independent verifier in `pending`.
 
+A `delegate start` may state its task as fields (`goal`, `note`, `refs`, `evid`, `out`) instead of free text. The host renders the worker's task text from them and persists the record as the dispatch `brief` beside the rendered `instructions`; requirement ids, dependencies and the grant stay separate, host-validated fields.
+
 The model-facing `delegate tasks` action is a bounded read model over that same durable DAG, not a
 second task list. It exposes task dependencies, status, latest attempt/agent dispatch, terminal
 reason, verifier state, and durable retry metadata. `delegate start` may attach existing

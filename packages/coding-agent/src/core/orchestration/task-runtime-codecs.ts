@@ -1,4 +1,5 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
@@ -322,6 +323,7 @@ const DISPATCH_FIELDS = new Set([
 	"taskId",
 	"profileId",
 	"instructions",
+	"brief",
 	"resourcePointerIds",
 	"parentAgentId",
 	"requirementIds",
@@ -380,7 +382,9 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	}
 	let executionContract: WorkerExecutionContract | undefined;
 	let birthContextForkReference: OrchestrationDispatchRequest["birthContextForkReference"];
+	let brief: TaskBrief | undefined;
 	try {
+		brief = dispatch.brief === undefined ? undefined : parseTaskBrief(dispatch.brief);
 		executionContract =
 			dispatch.executionContract === undefined
 				? undefined
@@ -401,6 +405,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
 		instructions: dispatchInstructions(dispatch.instructions, `${label}.instructions`),
+		...(brief ? { brief } : {}),
 		resourcePointerIds: dispatchIdentifierArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
 		...(dispatch.receiptOrigin === undefined
 			? {}

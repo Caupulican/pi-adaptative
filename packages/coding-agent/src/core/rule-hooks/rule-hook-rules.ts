@@ -61,7 +61,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 - Split by independence and write ownership: no two workers write the same files (overlapping write scopes wait for each other); slice so each result verifies alone; fan out only as wide as the work is independent. Workers cannot delegate: never chain.
 - Reuse: one specialist per role; retire a worker when its line of work is done.
 - Right-size each worker: readOnly unless it must write; only the tools and paths it needs; the cheapest model and thinkingLevel that can do the task (exploration cheap, design and review strong). Token, cost and wall-clock ceilings come only from host settings or an owner-authored profileId.
-- Brief once, completely: objective, scope and paths, constraints, output shape, evidence required, stop condition. Pass references (paths, ids, requirement ids), not pasted content; no drip of clarifications.
+- Brief once, completely, in start fields: goal (objective), refs (paths, ids; never pasted content), note (constraints, stop condition), out (find, edit, ans, rev), evid (cite, cmd, diff, none), requirementIds; instructions is the free-text alternative to goal. No drip of clarifications.
 - Start independent workers in the same turn; maxConcurrent (default 5) queues the rest.
 - Review in proportion: spot-check cheap claims against files, diffs and check commands; verify risky ones with an independent verifier (a fresh readOnly worker). Send back the specific delta; never redo the work yourself.
 - Steer early: follow_up with a targeted message at the first drift, interrupt when off track, cancel when obsolete. A blocked report is your decision: decide, follow up once, never re-dispatch the identical task.

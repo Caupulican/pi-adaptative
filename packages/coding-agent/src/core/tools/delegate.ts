@@ -6,8 +6,18 @@ import {
 	COMMS_RECORD_VERSION,
 	type CommsErrRecord,
 	type CommsResultEnvelope,
+	MAX_TASK_GOAL_CHARS,
+	MAX_TASK_NOTE_CHARS,
+	MAX_TASK_REF_CHARS,
+	MAX_TASK_REFS,
 	renderCommsErrView,
 	renderCommsStateLine,
+	renderTaskBrief,
+	TASK_EVIDENCE_KINDS,
+	TASK_OUTPUT_KINDS,
+	type TaskBrief,
+	type TaskEvidenceKind,
+	type TaskOutputKind,
 } from "../comms/comms-records.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
@@ -206,8 +216,36 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 					description:
-						"Self-contained leaf-worker task. Workers run no tests, test files or test runs unless the task says the owner asked.",
+						"Free-text leaf-worker task, the alternative to goal (send exactly one). Workers run no tests, test files or test runs unless the task says the owner asked.",
 				}),
+			),
+			goal: Type.Optional(
+				Type.String({
+					description: `start only: the task in one sentence (at most ${MAX_TASK_GOAL_CHARS} characters); the host renders the worker's task text from goal, note, refs, evid and out.`,
+				}),
+			),
+			note: Type.Optional(
+				Type.String({
+					description: `With goal: constraints and the stop condition no other field expresses (at most ${MAX_TASK_NOTE_CHARS} characters).`,
+				}),
+			),
+			refs: Type.Optional(
+				Type.Array(Type.String({ minLength: 1 }), {
+					maxItems: MAX_TASK_REFS,
+					description: `With goal: paths and ids to read, never pasted content (each at most ${MAX_TASK_REF_CHARS} characters).`,
+				}),
+			),
+			evid: Type.Optional(
+				Type.Union(
+					(Object.keys(TASK_EVIDENCE_KINDS) as TaskEvidenceKind[]).map((kind) => Type.Literal(kind)),
+					{ description: "With goal: the evidence to bring back (cite file:line, cmd output, diff, none)." },
+				),
+			),
+			out: Type.Optional(
+				Type.Union(
+					(Object.keys(TASK_OUTPUT_KINDS) as TaskOutputKind[]).map((kind) => Type.Literal(kind)),
+					{ description: "With goal: the answer shape (find findings, edit, ans answer, rev verdict)." },
+				),
 			),
 			agentId: Type.Optional(
 				Type.String({
@@ -410,8 +448,8 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 		...schema,
 		anyOf: actions.flatMap((action) => {
 			// Preserve the executor's intentional plural wait and task-only start spellings.
-			const alternate = action === "wait" ? ["agentIds"] : action === "start" ? ["task"] : undefined;
-			const alternatives = [requiredFields[action], ...(alternate ? [alternate] : [])];
+			const alternates = action === "wait" ? [["agentIds"]] : action === "start" ? [["task"], ["goal"]] : [];
+			const alternatives = [requiredFields[action], ...alternates];
 			return alternatives.map((fields) => ({
 				properties: { action: { const: action } },
 				required: [...(action === "start" ? [] : ["action"]), ...fields],
@@ -449,6 +487,11 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 		"toolNames",
 		"readOnly",
 		"instructions",
+		"goal",
+		"note",
+		"refs",
+		"evid",
+		"out",
 		"agentId",
 		"parallelWork",
 		"slices",
@@ -548,6 +591,66 @@ function correctExactActionInput(input: DelegateToolInput, action: DelegateActio
 		};
 	}
 	return undefined;
+}
+
+/**
+ * A `start` that states its task in fields: exactly one of `goal` or `instructions`, the other fields only with
+ * `goal`, each inside its budget. The worker's task text is rendered from the record and replaces `instructions`
+ * for every reader after this point; the record travels beside it as the dispatch `brief`.
+ */
+function resolveTaskBrief(
+	input: DelegateToolInput,
+	action: DelegateAction,
+): { input: DelegateToolInput; brief?: TaskBrief; violation?: ActionViolation } {
+	if (action !== "start") return { input };
+	const companion = (["note", "refs", "evid", "out"] as const).find((field) => input[field] !== undefined);
+	if (input.goal === undefined) {
+		if (companion === undefined) return { input };
+		return {
+			input,
+			violation: {
+				message: `delegate start field ${companion} belongs with goal; send goal, or drop ${companion} and put the text in instructions.`,
+				skipReason: "brief_requires_goal",
+				overrides: { f: companion },
+			},
+		};
+	}
+	if (input.instructions !== undefined) {
+		return {
+			input,
+			violation: {
+				message: "delegate start takes exactly one of goal or instructions, not both.",
+				skipReason: "goal_instructions_conflict",
+			},
+		};
+	}
+	const goal = input.goal.trim();
+	if (!goal) {
+		return { input, violation: { message: "delegate start goal is empty.", skipReason: "goal_empty" } };
+	}
+	const note = input.note?.trim();
+	const refs = input.refs?.map((ref) => ref.trim()).filter(Boolean);
+	const limit = (
+		skipReason: string,
+		what: string,
+		max: number,
+	): { input: DelegateToolInput; violation: ActionViolation } => ({
+		input,
+		violation: { message: `delegate start ${what} may not exceed ${max} characters.`, skipReason },
+	});
+	if (goal.length > MAX_TASK_GOAL_CHARS) return limit("goal_too_long", "goal", MAX_TASK_GOAL_CHARS);
+	if (note && note.length > MAX_TASK_NOTE_CHARS) return limit("note_too_long", "note", MAX_TASK_NOTE_CHARS);
+	if (refs?.some((ref) => ref.length > MAX_TASK_REF_CHARS))
+		return limit("refs_too_long", "each ref", MAX_TASK_REF_CHARS);
+	const brief: TaskBrief = {
+		v: COMMS_RECORD_VERSION,
+		goal,
+		...(note ? { note } : {}),
+		...(input.evid ? { evid: input.evid } : {}),
+		...(input.out ? { out: input.out } : {}),
+		...(refs && refs.length > 0 ? { refs } : {}),
+	};
+	return { input: { ...input, instructions: renderTaskBrief(brief) }, brief };
 }
 
 function sanitizeExactActionInput(
@@ -1296,6 +1399,8 @@ function workerTaskSessionJson(
  */
 function buildDelegateStartRequest(input: {
 	instructions: string;
+	/** The structured task `instructions` was rendered from; stored beside it on the dispatch. */
+	brief?: TaskBrief;
 	toolInput: DelegateToolInput;
 	requirementIds: readonly string[];
 	dependsOnTaskIds?: readonly string[];
@@ -1325,6 +1430,7 @@ function buildDelegateStartRequest(input: {
 		tool.readOnly !== undefined;
 	return {
 		instructions: input.instructions,
+		...(input.brief ? { brief: input.brief } : {}),
 		...(input.messageReplayKey ? { messageReplayKey: input.messageReplayKey } : {}),
 		...(input.reuseAgentId ? { reuseAgentId: input.reuseAgentId } : {}),
 		...(profileId ? { profileId } : {}),
@@ -1581,7 +1687,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			const action: DelegateAction = pluralWait ? "wait_many" : requestedAction;
 			const normalizedInput =
 				pluralWait && originalInput.mode === undefined ? { ...originalInput, mode: "all" as const } : originalInput;
-			const { input, violation } = sanitizeExactActionInput(normalizedInput, action);
+			const sanitized = sanitizeExactActionInput(normalizedInput, action);
+			const resolved = sanitized.violation ? undefined : resolveTaskBrief(sanitized.input, action);
+			const violation = sanitized.violation ?? resolved?.violation;
 			if (violation) {
 				return invalid(
 					violation.message,
@@ -1589,6 +1697,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					violation.overrides,
 				);
 			}
+			// A structured start carries its rendered task text as `instructions`; every reader below sees one task text.
+			const input = resolved?.input ?? sanitized.input;
+			const brief = resolved?.brief;
 			let agentIds: string[] | undefined;
 			if (input.parallelWork !== undefined) {
 				try {
@@ -2527,7 +2638,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						});
 					const reuseInstructions = input.instructions?.trim() ? input.instructions : undefined;
 					if (!reuseInstructions)
-						return invalid("delegate start requires instructions", {
+						return invalid("delegate start requires goal or instructions", {
 							started: false,
 							action,
 							agentId: reuseAgentId,
@@ -2568,6 +2679,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					if (validatedReuse) {
 						const validatedRequest = buildDelegateStartRequest({
 							instructions: reuseInstructions,
+							...(brief ? { brief } : {}),
 							toolInput: input,
 							requirementIds: reuseRequirementIds,
 							reuseAgentId,
@@ -2704,7 +2816,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				// Validated on the trimmed view, forwarded verbatim: the brief is the worker's task text.
 				const instructions = input.instructions?.trim() ? input.instructions : undefined;
 				if (!instructions)
-					return invalid("delegate start requires instructions", {
+					return invalid("delegate start requires goal or instructions", {
 						started: false,
 						action,
 						skipReason: "missing_instructions",
@@ -2741,6 +2853,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				const anonymousReplayScope = deps.resolveMessageReplayScope?.();
 				const request = buildDelegateStartRequest({
 					instructions,
+					...(brief ? { brief } : {}),
 					toolInput: input,
 					requirementIds,
 					// Host-owned replay identity for this exact tool call: a replay of the same call must

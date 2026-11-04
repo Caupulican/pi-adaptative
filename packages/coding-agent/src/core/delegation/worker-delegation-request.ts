@@ -1,4 +1,5 @@
 import type { ExecutionContext } from "../../kernel/index.ts";
+import type { TaskBrief } from "../comms/comms-records.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type HarnessCapability,
@@ -205,6 +206,8 @@ export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWor
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
 	instructions: string;
+	/** The structured task `instructions` was rendered from; stored beside it on the dispatch. */
+	brief?: TaskBrief;
 	/** Host-captured parent lineage. Never exposed in the model-facing schema. */
 	receiptOrigin?: WorkerReceiptOrigin;
 	/** Process-local command fence, omitted from durable requests. */

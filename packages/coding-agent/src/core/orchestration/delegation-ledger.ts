@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { TaskBrief } from "../comms/comms-records.ts";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
@@ -42,6 +43,8 @@ export interface PrepareDelegationInput {
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	laneId: string;
 	instructions: string;
+	/** The structured task `instructions` was rendered from, when the root used fields. */
+	brief?: TaskBrief;
 	/** Durable identity of the caller turn that admitted this dispatch; replays resolve back to it. */
 	controlMessageId?: string;
 	controlForkMode?: string;
@@ -192,6 +195,7 @@ export class DelegationOrchestrationLedger {
 				logicalLaneId: input.laneId,
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
 				...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
+				...(input.brief ? { brief: input.brief } : {}),
 				...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
 				...(input.modelRouteSource ? { modelRouteSource: input.modelRouteSource } : {}),
 				...(input.modelPinSource ? { modelPinSource: input.modelPinSource } : {}),
@@ -392,6 +396,7 @@ export class DelegationOrchestrationLedger {
 			| "dispatchSequence"
 			| "controlMessageId"
 			| "controlForkMode"
+			| "brief"
 			| "provider"
 			| "authorizationId"
 			| "worktreeLaneKey"

@@ -16,6 +16,7 @@ import type { ExecutionContext } from "../../kernel/utils/paths.ts";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
+import type { TaskBrief } from "../comms/comms-records.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { WorkerContextForkReference } from "./worker-context-fork-reference.ts";
 
@@ -322,6 +323,11 @@ export interface OrchestrationDispatchRequest {
 	receiptOrigin?: WorkerReceiptOrigin;
 	profileId: string;
 	instructions: string;
+	/**
+	 * The structured task the root stated, when it used fields; `instructions` then holds the text rendered from it
+	 * at admission. Absent on free-text and legacy dispatches.
+	 */
+	brief?: TaskBrief;
 	resourcePointerIds: readonly string[];
 	/** Legacy logical-agent creator retained only to recover previously persisted nested work. */
 	parentAgentId?: string;
