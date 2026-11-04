@@ -41,7 +41,6 @@ import {
 	failureText,
 	ICM_INTAKE_JUDGMENTS,
 	latestBatchResults,
-	readDelegationRule,
 	requestTexts,
 } from "./shared.ts";
 
@@ -69,21 +68,16 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			instructions,
 		},
 	});
-	world.provider.enqueue(
-		"root",
-		readDelegationRule("e13-rule"),
-		calls("e13-start-first", [e13Start("E13-WRITER holds its scope.")]),
-		{
-			name: "e13-first-reply",
-			check: (request) => {
-				const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
-				if (started?.isError || !started?.text.includes("delegate started (running)")) {
-					throw new Error(`the first writer did not start: ${started?.text ?? "no result"}`);
-				}
-			},
-			reply: { content: [{ type: "text", text: "The first writer is started." }] },
+	world.provider.enqueue("root", calls("e13-start-first", [e13Start("E13-WRITER holds its scope.")]), {
+		name: "e13-first-reply",
+		check: (request) => {
+			const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+			if (started?.isError || !started?.text.includes("delegate started (running)")) {
+				throw new Error(`the first writer did not start: ${started?.text ?? "no result"}`);
+			}
 		},
-	);
+		reply: { content: [{ type: "text", text: "The first writer is started." }] },
+	});
 	world.provider.enqueue("worker-a", {
 		name: "e13-writer-hold",
 		check: () => e13Admitted.release(),
@@ -205,7 +199,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	let e13SecondTaskId: string | undefined;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13-rule-second"),
 		calls("e13-start-second", [e13Start("E13-WRITER-2 takes the scope.")]),
 		{
 			name: "e13-second-reply",
@@ -344,7 +337,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const e13aSession = e13aCreated.session;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13a-rule"),
 		calls("e13a-start-first", [
 			{
 				id: "e13a-start-1",
@@ -488,7 +480,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const e13jSession = e13jCreated.session;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13j-rule"),
 		calls("e13j-start-first", [
 			{
 				id: "e13j-start-1",
@@ -664,7 +655,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const e13wSession = e13wCreated.session;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13w-rule"),
 		calls("e13w-start-first", [
 			{
 				id: "e13w-start-1",
@@ -901,7 +891,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const e13rHeldLeases = () => e13rSession.getResourceSnapshot().workers?.reservations.heldLeases ?? [];
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13r-rule"),
 		calls("e13r-start-first", [e13rStart("e13r-start-1", "E13R-WRITER holds its scope.")]),
 		{
 			name: "e13r-first-reply",
@@ -1276,7 +1265,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		});
 		world.provider.enqueue(
 			"root",
-			readDelegationRule(`e13q-${tag}-rule`),
 			calls(`e13q-${tag}-start`, [
 				{
 					id: `e13q-${tag}-start-1`,
@@ -1610,7 +1598,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const e13hRuntime = () => e13hOwner.backgroundLanes.getTaskRuntimeSnapshot();
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13h-rule"),
 		calls("e13h-start-first", [e13hStart("e13h-start-1", "E13H-WRITER holds its scope.")]),
 		{
 			name: "e13h-first-reply",
@@ -2055,7 +2042,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e13b-rule"),
 		calls("e13b-start-first", [
 			{
 				id: "e13b-start-1",
@@ -2289,7 +2275,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const vuOwner = vuOwnerCreated.session;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("vu-rule"),
 		calls("vu-start", [
 			{
 				id: "vu-start-1",

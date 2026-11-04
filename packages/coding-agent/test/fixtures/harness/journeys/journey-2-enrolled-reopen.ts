@@ -5,7 +5,7 @@ import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core
 import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { assertBatchOk, LIMITS_PATH, lastToolResultDetails, readDelegationRule, requestTexts } from "./shared.ts";
+import { assertBatchOk, LIMITS_PATH, lastToolResultDetails, requestTexts } from "./shared.ts";
 
 /** Clean shutdown/reopen of enrolled, previously running work; E7's unsafe crash control stays separate. */
 export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendingFollowUp = false): Promise<void> {
@@ -117,7 +117,6 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 	);
 	world.provider.enqueue(
 		"root",
-		readDelegationRule(`${label}-rule`),
 		calls(`${label}-start`, [
 			{
 				id: `${label}-start`,
@@ -312,7 +311,6 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			);
 			world.provider.enqueue(
 				"root",
-				readDelegationRule(`${label}-foreign-rule`),
 				calls(`${label}-foreign-start`, [
 					{
 						id: `${label}-foreign-start`,

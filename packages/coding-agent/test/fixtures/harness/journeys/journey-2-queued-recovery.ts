@@ -39,7 +39,6 @@ import {
 	latestBatchResults,
 	rawReplyAcknowledgements,
 	rawReplyReceiptOf,
-	readDelegationRule,
 } from "./shared.ts";
 
 /** Whether the request's current tail, the only message that may answer a wake, is the worker handoff naming `laneId` with `status`. */
@@ -88,7 +87,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	);
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e7-rule"),
 		calls("e7-start-a", [
 			{
 				id: "e7-start-a-1",
@@ -1132,7 +1130,6 @@ async function workerHandoffAcrossRestart(world: HarnessWorld): Promise<void> {
 	});
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("r34-rule"),
 		calls("r34-start", [
 			{
 				id: "r34-start-1",

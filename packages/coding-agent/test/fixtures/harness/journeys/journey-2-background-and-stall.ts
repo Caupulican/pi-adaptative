@@ -28,7 +28,6 @@ import {
 	dynamicCalls,
 	handoffFor,
 	lastToolResultDetails,
-	readDelegationRule,
 	requestTexts,
 } from "./shared.ts";
 
@@ -896,7 +895,6 @@ async function verifyWorkerLeaseRenewalFailure(world: HarnessWorld): Promise<voi
 	const started: { agentId?: string; laneId?: string } = {};
 	world.provider.enqueue(
 		"root",
-		readDelegationRule(`${label}-rule`),
 		calls(`${label}-start`, [
 			{
 				id: `${label}-start-1`,

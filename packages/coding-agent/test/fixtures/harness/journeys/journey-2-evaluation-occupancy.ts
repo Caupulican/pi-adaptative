@@ -5,7 +5,7 @@ import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { AgentBusyError } from "../../../../src/kernel/agent.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { assertBatchOk, lastToolResultDetails, readDelegationRule, requestTexts } from "./shared.ts";
+import { assertBatchOk, lastToolResultDetails, requestTexts } from "./shared.ts";
 
 /** Journey 2's live worker and owner-input boundary: advisory evaluation owns no root submission. */
 export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<void> {
@@ -92,7 +92,6 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 			check: (request: Parameters<typeof requestTexts>[0]) =>
 				expect(requestTexts(request).some((value) => value.includes(warmInputs[index]))).toBe(true),
 		})),
-		readDelegationRule(`${label}-rule`),
 		calls(`${label}-dispatch`, [
 			{
 				id: `${label}-start`,

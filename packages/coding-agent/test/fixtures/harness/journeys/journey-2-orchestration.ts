@@ -39,12 +39,14 @@ import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } fro
 import {
 	agentIdForTrack,
 	assertBatchOk,
+	assertCompletionRuleRefusal,
 	backgroundTaskIdOf,
 	CAPTURED_ACCESS,
 	CHECKPOINT_SUMMARY,
 	delegateResultTexts,
 	dynamicCalls,
 	expectOwnerWords,
+	goalCompletionFacts,
 	handoffFor,
 	LIMITS_PATH,
 	lanesOf,
@@ -54,7 +56,6 @@ import {
 	mailboxMessagesOf,
 	matchedSubmitReceiptIn,
 	persistedGenerationText,
-	readDelegationRule,
 	receiptsOf,
 	requestTexts,
 	settlementFacts,
@@ -88,7 +89,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		calls("goal-requirement", [
 			{ id: "goal-2", name: "goal", arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" } },
 		]),
-		readDelegationRule("dispatch-rule"),
 		calls("dispatch-three", [
 			{
 				id: "dispatch-a",
@@ -1523,6 +1523,37 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	// Scripted before the reopen, in the order the root reaches them: the explicit refusal turn, then the goal's own idle
 	// continuation, which repairs the limit, rechecks it, and completes the goal (the natural stop of the loop).
+	let completeFinalFactsBefore: string | undefined;
+	const completeFinalCall = (callId: string) => {
+		const requirement = goalRequirementId();
+		const goal = session.getGoalStateSnapshot();
+		const evidence = goal?.evidence.find((item) => item.uri === "verify-pass-2");
+		const linkedRequirement = goal?.requirements.find((item) => item.id === requirement);
+		if (evidence?.verified !== true || !linkedRequirement?.evidenceIds.includes(evidence.id)) {
+			throw new Error("the completion account has no verified current recheck linked to its requirement");
+		}
+		return [
+			{
+				id: callId,
+				name: "goal",
+				arguments: {
+					action: "complete",
+					account: {
+						changes: [
+							{
+								path: "src/limits.ts",
+								reason: "Raises MAX_RETRIES from 3 to 5.",
+								evidenceIds: [evidence.id],
+								serves: [requirement],
+							},
+						],
+						assumptions: [],
+						regressions: [{ path: "MAX_RETRIES equals 5", evidenceIds: [evidence.id] }],
+					},
+				},
+			},
+		];
+	};
 	world.provider.enqueue(
 		"root",
 		calls("read-after-reopen", [{ id: "read-after-reopen-1", name: "read", arguments: { path: LIMITS_PATH } }]),
@@ -1601,39 +1632,21 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			],
 			(request) => assertBatchOk(request, "get-rechecked-goal"),
 		),
+		// The reopened root's context holds no noticed-items rule (the checkpoint compacted the session, and the earlier refusals were for
+		// other reasons, before the rule's preflight), so the first completion that passes every deterministic check is refused with the
+		// rule and the goal untouched; the identical call, under a new id, is accepted.
 		dynamicCalls(
-			"complete-final",
+			"complete-final-rule",
 			() => {
-				const requirement = goalRequirementId();
-				const goal = session.getGoalStateSnapshot();
-				const evidence = goal?.evidence.find((item) => item.uri === "verify-pass-2");
-				const linkedRequirement = goal?.requirements.find((item) => item.id === requirement);
-				if (evidence?.verified !== true || !linkedRequirement?.evidenceIds.includes(evidence.id)) {
-					throw new Error("the completion account has no verified current recheck linked to its requirement");
-				}
-				return [
-					{
-						id: "complete-2",
-						name: "goal",
-						arguments: {
-							action: "complete",
-							account: {
-								changes: [
-									{
-										path: "src/limits.ts",
-										reason: "Raises MAX_RETRIES from 3 to 5.",
-										evidenceIds: [evidence.id],
-										serves: [requirement],
-									},
-								],
-								assumptions: [],
-								regressions: [{ path: "MAX_RETRIES equals 5", evidenceIds: [evidence.id] }],
-							},
-						},
-					},
-				];
+				completeFinalFactsBefore = goalCompletionFacts(session);
+				return completeFinalCall("complete-2-rule");
 			},
 			(request) => assertBatchOk(request, "record-recheck-evidence"),
+		),
+		dynamicCalls(
+			"complete-final",
+			() => completeFinalCall("complete-2"),
+			(request) => assertCompletionRuleRefusal(request, "complete-final-rule", session, completeFinalFactsBefore),
 		),
 		{
 			name: "completed",
@@ -2052,7 +2065,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		);
 		world.provider.enqueue(
 			"root",
-			readDelegationRule("e11-rule"),
 			calls("e11-start", [
 				{
 					id: "e11-start-1",

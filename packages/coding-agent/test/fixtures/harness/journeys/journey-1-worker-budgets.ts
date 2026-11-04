@@ -19,7 +19,7 @@ import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-gener
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults, readDelegationRule } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
 const e4Judgments = ICM_INTAKE_JUDGMENTS;
 
@@ -67,7 +67,6 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	});
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e8-rule"),
 		calls("e8-start", [
 			{
 				id: "e8-start-1",
@@ -190,7 +189,6 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	});
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e8t-rule"),
 		calls("e8t-start", [
 			{
 				id: "e8t-start-1",
@@ -323,7 +321,6 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	});
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e8o-rule"),
 		calls("e8o-start", [
 			{
 				id: "e8o-start-1",
@@ -403,7 +400,6 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	const E8_OPAQUE_ERROR = `scripted opaque failure xyz ${E8_OPAQUE_KEY} ${"x".repeat(260)}`;
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e8u-rule"),
 		calls("e8u-start", [
 			{
 				id: "e8u-start-1",
@@ -511,7 +507,6 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	const e8cWake = createBarrier();
 	world.provider.enqueue(
 		"root",
-		readDelegationRule("e8c-rule"),
 		calls("e8c-start", [
 			{
 				id: "e8c-start-1",

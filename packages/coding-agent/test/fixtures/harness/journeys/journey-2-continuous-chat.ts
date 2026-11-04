@@ -10,7 +10,7 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { createSessionWorkEvidenceJournal } from "../../../../src/core/system-one/session-work-diff.ts";
 import { encodeWorkerTranscriptReference } from "../../../../src/kernel/session/worker-transcript-reference.ts";
-import { calls, createBarrier, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
+import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -27,7 +27,6 @@ import {
 	icmReadContinuousRecords,
 	icmWaitForChatIdle,
 	latestBatchResults,
-	readDelegationRule,
 } from "./shared.ts";
 
 export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promise<void> {
@@ -118,7 +117,6 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		const workerNavResults: Record<string, { isError: boolean; text: string }> = {};
 		world.provider.enqueue(
 			"root",
-			readDelegationRule("w-rule"),
 			calls("w-start", [
 				{
 					id: "w-start-1",
@@ -264,35 +262,22 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				},
 			},
 		);
-		// Turn 2 reads the delegation rule before it starts the worker, so its chat records are: 4 the owner's words, 5 the ledger_read
-		// call, 6 the rule (1,541 bytes: over the 512-byte node target, so a model-built leaf), 7 the delegate call, 8 its start receipt
-		// (a leaf that fits alone), 9 the reply. The receipt and the reply still join over the target, so that merge needs the model
-		// too, now as lines 8+1 and 9+1. The leaf of message 6 and the merge of 8 and 9 are independent work items of the compaction
-		// queue, so the track serves whichever request arrives first: each step answers the task its own request carries, and each
-		// task must be served exactly once. Every other join of the turn fits the target (the largest, lines 0+8, is 427 bytes).
-		const wTurnTwoSummaries = [
-			{ task: "Compaction: compress message 6 ", line: "echo: delegation rule read." },
-			{
-				task: "Compaction: merge lines 8+1 and 9+1,",
-				line: "echo: delegate started worker-1; pi: The ICM reader is started.",
-			},
-		];
-		const wTurnTwoServed = new Set<string>();
-		const wTurnTwoSummaryOf = (request: ScriptedRequest) => {
-			const messages = JSON.stringify(request.context.messages);
-			return wTurnTwoSummaries.find((summary) => messages.includes(summary.task));
-		};
-		const wTurnTwoStep = (name: string): ScriptStep => ({
-			name,
+		// The delegate start is this root's first successful work-lifecycle trigger, so its receipt (message 6) carries the 2,323-byte
+		// `RULE work-lifecycle@...` block as a second text block, which the chat logs after the receipt joined by a newline. The leaf
+		// no longer fits the 512-byte node target and is built by the model; the pair it forms with message 7 then joins well under the
+		// target (94 bytes), so no merge needs the model. Nothing else in the turn nears the target (the largest join, lines 0+8, is
+		// 447 bytes on Linux and 453 on Windows).
+		world.provider.enqueue("worker-c", {
+			name: "w-receipt-leaf-6",
 			check: (request) => {
-				const summary = wTurnTwoSummaryOf(request);
-				if (summary === undefined) throw new Error("worker-c received an unexpected compaction task");
-				if (wTurnTwoServed.has(summary.task)) throw new Error(`worker-c received the task twice: ${summary.task}`);
-				wTurnTwoServed.add(summary.task);
+				if (!JSON.stringify(request.context.messages).includes("Compaction: compress message 6 into one line")) {
+					throw new Error("worker-c did not receive the message 6 leaf task");
+				}
 			},
-			reply: (request) => ({ content: [{ type: "text", text: wTurnTwoSummaryOf(request)?.line ?? "" }] }),
+			reply: {
+				content: [{ type: "text", text: "echo: delegate started worker-1; work-lifecycle rule delivered." }],
+			},
 		});
-		world.provider.enqueue("worker-c", wTurnTwoStep("w-turn-two-summary-1"), wTurnTwoStep("w-turn-two-summary-2"));
 		world.systemOne.enterPhase("w-icm-start", {
 			...ICM_INTAKE_JUDGMENTS,
 		});
@@ -300,39 +285,15 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		await withDeadline(trace, "w-icm worker reported", wWorkerDone.promise);
 		await withDeadline(trace, "w-icm handoff woke the root", wWake.promise, 60_000);
 		await withDeadline(trace, "w-icm root idle", wRoot.session.waitForForegroundIdle());
-		// Twelve records: turn 1's four, turn 2's owner words, ledger_read call and rule, delegate call and receipt and reply, the
-		// worker's report and the wake reply.
-		await icmWaitForChatIdle(world, wAgentDir, 12, (records) => records.some((record) => record.kind === "work"));
+		await icmWaitForChatIdle(world, wAgentDir, 10, (records) => records.some((record) => record.kind === "work"));
 
 		// Root zooms the worker's transcript via zoom({ id: "worker-1", page: 0 }).
 		// Because worker-1's transcript contains the 4 KiB zoom echo, root's zoom("worker-1") result is > 512 B,
 		// so worker-c compacts its echo leaf.
-		// The turn's records 12 to 15 complete the sixteen-message tree: the zoom result (14) is a model-built leaf, and its
-		// ancestors up to lines 8+8 fit the target, but the root of the tree (lines 0+8 and 8+8, 796 bytes joined) does not, so
-		// the model merges it once the leaf is built.
-		world.provider.enqueue(
-			"worker-c",
-			{
-				name: "w-root-zoom-worker-echo-leaf",
-				reply: { content: [{ type: "text", text: "echo: worker-1 transcript page 1." }] },
-			},
-			{
-				name: "w-root-merge-0-8",
-				check: (request) => {
-					if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 0+8 and 8+8,")) {
-						throw new Error("worker-c did not receive the 0+8 and 8+8 parent merge task");
-					}
-				},
-				reply: {
-					content: [
-						{
-							type: "text",
-							text: "echo: seed payload noted; delegation rule read; ICM reader started and reported; zoomed.",
-						},
-					],
-				},
-			},
-		);
+		world.provider.enqueue("worker-c", {
+			name: "w-root-zoom-worker-echo-leaf",
+			reply: { content: [{ type: "text", text: "echo: worker-1 transcript page 1." }] },
+		});
 		let rootWorkerLogText = "";
 		world.provider.enqueue(
 			"root",
@@ -358,7 +319,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		world.systemOne.enterPhase("w-icm-root-zoom-worker", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "w-icm root zoom worker", wRoot.session.prompt("Zoom worker-1."));
-		await icmWaitForChatIdle(world, wAgentDir, 16);
+		await icmWaitForChatIdle(world, wAgentDir, 14);
 
 		const wRecords = icmReadContinuousRecords(world, wStore);
 		const wWorkRecords = wRecords.filter((record) => record.kind === "work");

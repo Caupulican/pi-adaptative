@@ -6,6 +6,7 @@ import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
 import { stateFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
 import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/settings-rules.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
 import type { ExecutionState } from "../../../../src/core/system-one/types.ts";
@@ -14,7 +15,7 @@ import { localFileMutationIntentOperations } from "../../../../src/core/tools/fi
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
-import { calls, HARNESS_PROVIDER } from "../scripted-provider.ts";
+import { HARNESS_PROVIDER } from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessRestartChecks,
@@ -1137,16 +1138,41 @@ export function isGateCommandRefusal(details: unknown): boolean {
 	return typeof details === "object" && details !== null && "code" in details && details.code === "gate_command_unset";
 }
 
+/** What a refused completion must leave alone: the goal's status, requirements and evidence (its usage counters move with every turn). */
+export function goalCompletionFacts(session: AgentSession): string {
+	const goal = session.getGoalStateSnapshot();
+	return JSON.stringify({ status: goal?.status, requirements: goal?.requirements, evidence: goal?.evidence });
+}
+
 /**
- * The model reading the delegation rule before its first `delegate` call. The ledger gate admits a `delegate` call only
- * while the active branch holds a successful `ledger_read` result for that rule, so a scripted root, owner or auxiliary
- * session enqueues this step ahead of its first `delegate` step (and again after anything that drops the earlier result
- * from its branch: a compaction, a fresh session, a navigation to a branch that predates the read). The read is its own
- * request, so its result is in the session's messages before the following `delegate` call reaches the gate. `name` must
- * be unique in the session's track; it also derives the tool call id.
+ * The first model-driven completion of a context that passed every deterministic completion check is refused once, before the
+ * completion is judged, with the host's noticed-items rule: an error result whose whole text is the rule block that production
+ * formats (`RULE <id>`, then the body) and the instruction to complete again. The goal is untouched, so the identical call that
+ * follows is accepted. `factsBefore` is `goalCompletionFacts` taken when the refused call was planned.
  */
-export function readDelegationRule(name: string): ScriptStep {
-	return calls(name, [{ id: `${name}-call`, name: "ledger_read", arguments: { topic: "delegation" } }]);
+export function assertCompletionRuleRefusal(
+	request: ScriptedRequest,
+	label: string,
+	session: AgentSession,
+	factsBefore: string | undefined,
+): void {
+	const hook = loadRuleHooks().find((candidate) => candidate.topic === "noticed-items");
+	if (hook === undefined) throw new Error(`${label}: the noticed-items rule does not exist`);
+	const instruction = "Review your proof output for relevant noticed items; resolve them, then call complete again.";
+	const expected = `${formatRuleHook(hook, { packageRoot: "" })}\n\n${instruction}`;
+	const refused = latestBatchResults(request).find((result) => result.toolName === "goal");
+	if (refused?.isError !== true || refused.text !== expected) {
+		const seen = refused?.text.slice(0, 400) ?? "no goal result";
+		throw new Error(`${label}: the first completion was not refused with the rule: ${seen}`);
+	}
+	const details = lastToolResultDetails(session, "goal");
+	if (!isRecordObject(details) || details.applied !== false) {
+		throw new Error(`${label}: the refusal reports an applied completion: ${JSON.stringify(details)}`);
+	}
+	const status = session.getGoalStateSnapshot()?.status;
+	if (status === "completed" || goalCompletionFacts(session) !== factsBefore) {
+		throw new Error(`${label}: the refused completion changed the goal (status ${status})`);
+	}
 }
 
 /** A step whose tool calls depend on what production reported earlier. */

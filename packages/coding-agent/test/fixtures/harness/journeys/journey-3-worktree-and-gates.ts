@@ -32,6 +32,7 @@ import { HARNESS_PROJECT_CWD, type HarnessWorld, harnessPath, projectPath, withD
 import {
 	agentIdForTrack,
 	assertBatchOk,
+	assertCompletionRuleRefusal,
 	assertRefused,
 	bindE0Completion,
 	bindE0Request,
@@ -48,6 +49,7 @@ import {
 	evidenceIdsOf,
 	evidenceKeyOf,
 	expectOwnerWords,
+	goalCompletionFacts,
 	isGateCommandRefusal,
 	isStaleRefusal,
 	LIMITS_PATH,
@@ -59,7 +61,6 @@ import {
 	legendPath,
 	matchedSubmitReceipt,
 	OWNER_DRAFT_DIRTY,
-	readDelegationRule,
 	requirementIdOf,
 	toolOutcomes,
 	utf8Text,
@@ -138,7 +139,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				},
 			},
 		]),
-		readDelegationRule("delegation-rule"),
 		calls("create-rootwork-lane", [
 			{
 				id: "lane-rootwork",
@@ -2553,6 +2553,99 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			},
 		},
 	);
+	let completeGoalFactsBefore: string | undefined;
+	const completeGoalCall = (request: ScriptedRequest, callId: string) => {
+		const ids = evidenceIdsOf(request);
+		const requirement = requirementIdOf(request);
+		const integrationEvidence = session
+			.getGoalStateSnapshot()
+			?.evidence.find((item) => item.uri === "verify-integration-1");
+		if (integrationEvidence === undefined)
+			throw new Error("the native goal state holds no integration evidence for the account");
+		return [
+			{
+				id: callId,
+				name: "goal",
+				arguments: {
+					action: "complete",
+					account: {
+						changes: [
+							{
+								path: projectPath("src", "limits.ts"),
+								reason: "Raises MAX_RETRIES to 5 for the retries lane.",
+								evidenceIds: [integrationEvidence.id],
+								serves: [requirement],
+							},
+							{
+								path: "src/late.ts",
+								reason: "Exports the LATE flag from the late module.",
+								evidenceIds: [integrationEvidence.id],
+								serves: [requirement],
+							},
+							{
+								path: `${legendPath(request, "p/rootwork")}/src/limits.ts`,
+								reason: "Resolves the rootwork retry conflict to MAX_RETRIES = 5 before landing.",
+								serves: [requirement],
+							},
+							{
+								path: `${legendPath(request, "p/e12")}/src/e12.ts`,
+								reason: "Adds the E12 module in the checkout that executes its landing gate.",
+								serves: [requirement],
+							},
+							{
+								path: `${legendPath(request, "p/e12")}/src/e12-persist.ts`,
+								reason: "Adds the persistence module in the checkout retained for epoch recovery.",
+								serves: [requirement],
+							},
+							{
+								path: "e10/shared/a.txt",
+								reason: "Writes the shared file A: the held writer of the overlap proof.",
+								serves: [requirement],
+							},
+							{
+								path: "e10/shared/nested/b.txt",
+								reason: "Writes the nested file B: the queued writer admitted after A's release.",
+								serves: [requirement],
+							},
+							{
+								path: "e10/other/c/c.txt",
+								reason: "Writes the disjoint file C: the writer that completed beside the held scope.",
+								serves: [requirement],
+							},
+							{
+								path: projectPath("src", "e12.ts"),
+								reason: "Adds the E12 module, landed through the executed gate at its tested tip.",
+								serves: [requirement],
+							},
+							{
+								path: "src/e12-late.ts",
+								reason:
+									"Adds the module an external writer committed while the gate ran; the moved tip was refused, and this file landed with the unchanged tip.",
+								serves: [requirement],
+							},
+							{
+								path: projectPath("src", "e12-persist.ts"),
+								reason:
+									"Adds the persistence module: its landing's epoch record failed and reconcile rolled it forward once.",
+								serves: [requirement],
+							},
+							{
+								path: [projectPath("src", "e12-ambig.ts"), `${legendPath(request, "p/e12")}/src/e12-ambig.ts`],
+								reason:
+									"Adds the ambiguity module: its landing was reconciled only after main was repaired to the tested tip.",
+								serves: [requirement],
+							},
+						],
+						assumptions: [{ claim: "the limits test checks the retry count", evidenceIds: [ids[0]] }],
+						regressions: [
+							{ path: "src/limits.ts", evidenceIds: [ids[0]] },
+							{ path: "src/late.ts", evidenceIds: [ids[0]] },
+						],
+					},
+				},
+			},
+		];
+	};
 	world.provider.enqueue(
 		"root",
 		dynamicCalls("retire-workers", (request) => [
@@ -2614,101 +2707,17 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			],
 			(request) => assertBatchOk(request, "vitest-integration"),
 		),
-		dynamicCalls("complete-goal", (request) => {
-			const ids = evidenceIdsOf(request);
-			const requirement = requirementIdOf(request);
-			const integrationEvidence = session
-				.getGoalStateSnapshot()
-				?.evidence.find((item) => item.uri === "verify-integration-1");
-			if (integrationEvidence === undefined)
-				throw new Error("the native goal state holds no integration evidence for the account");
-			return [
-				{
-					id: "complete-goal-1",
-					name: "goal",
-					arguments: {
-						action: "complete",
-						account: {
-							changes: [
-								{
-									path: projectPath("src", "limits.ts"),
-									reason: "Raises MAX_RETRIES to 5 for the retries lane.",
-									evidenceIds: [integrationEvidence.id],
-									serves: [requirement],
-								},
-								{
-									path: "src/late.ts",
-									reason: "Exports the LATE flag from the late module.",
-									evidenceIds: [integrationEvidence.id],
-									serves: [requirement],
-								},
-								{
-									path: `${legendPath(request, "p/rootwork")}/src/limits.ts`,
-									reason: "Resolves the rootwork retry conflict to MAX_RETRIES = 5 before landing.",
-									serves: [requirement],
-								},
-								{
-									path: `${legendPath(request, "p/e12")}/src/e12.ts`,
-									reason: "Adds the E12 module in the checkout that executes its landing gate.",
-									serves: [requirement],
-								},
-								{
-									path: `${legendPath(request, "p/e12")}/src/e12-persist.ts`,
-									reason: "Adds the persistence module in the checkout retained for epoch recovery.",
-									serves: [requirement],
-								},
-								{
-									path: "e10/shared/a.txt",
-									reason: "Writes the shared file A: the held writer of the overlap proof.",
-									serves: [requirement],
-								},
-								{
-									path: "e10/shared/nested/b.txt",
-									reason: "Writes the nested file B: the queued writer admitted after A's release.",
-									serves: [requirement],
-								},
-								{
-									path: "e10/other/c/c.txt",
-									reason: "Writes the disjoint file C: the writer that completed beside the held scope.",
-									serves: [requirement],
-								},
-								{
-									path: projectPath("src", "e12.ts"),
-									reason: "Adds the E12 module, landed through the executed gate at its tested tip.",
-									serves: [requirement],
-								},
-								{
-									path: "src/e12-late.ts",
-									reason:
-										"Adds the module an external writer committed while the gate ran; the moved tip was refused, and this file landed with the unchanged tip.",
-									serves: [requirement],
-								},
-								{
-									path: projectPath("src", "e12-persist.ts"),
-									reason:
-										"Adds the persistence module: its landing's epoch record failed and reconcile rolled it forward once.",
-									serves: [requirement],
-								},
-								{
-									path: [
-										projectPath("src", "e12-ambig.ts"),
-										`${legendPath(request, "p/e12")}/src/e12-ambig.ts`,
-									],
-									reason:
-										"Adds the ambiguity module: its landing was reconciled only after main was repaired to the tested tip.",
-									serves: [requirement],
-								},
-							],
-							assumptions: [{ claim: "the limits test checks the retry count", evidenceIds: [ids[0]] }],
-							regressions: [
-								{ path: "src/limits.ts", evidenceIds: [ids[0]] },
-								{ path: "src/late.ts", evidenceIds: [ids[0]] },
-							],
-						},
-					},
-				},
-			];
+		// The root's context holds no noticed-items rule, so the first completion that passes every deterministic check is refused with
+		// the rule and the goal untouched; the identical call, under its own id, is accepted.
+		dynamicCalls("complete-goal-rule", (request) => {
+			completeGoalFactsBefore = goalCompletionFacts(session);
+			return completeGoalCall(request, "complete-goal-rule-1");
 		}),
+		dynamicCalls(
+			"complete-goal",
+			(request) => completeGoalCall(request, "complete-goal-1"),
+			(request) => assertCompletionRuleRefusal(request, "complete-goal-rule", session, completeGoalFactsBefore),
+		),
 		{
 			name: "goal-completed",
 			check: (request) => {
