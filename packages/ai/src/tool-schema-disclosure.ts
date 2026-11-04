@@ -7,7 +7,9 @@ export const TOOL_SCHEMA_DISCLOSURE_BETA = "tool-search-tool-2025-10-19";
 export const MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS = 10;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCHABLE_SCHEMA_CHARS = 32_768;
-const EAGER_TOOL_PRIORITY = ["read", "bash", "edit", "write", "grep", "find", "delegate"] as const;
+/** Resident schemas, the search tool included. ledger_read stays resident so a rule read costs no search round trip. */
+const EAGER_TOOL_COUNT = 6;
+const EAGER_TOOL_PRIORITY = ["ledger_read", "read", "bash", "edit", "write", "grep", "find", "delegate"] as const;
 
 export interface ToolSchemaSearchDetails {
 	kind: typeof TOOL_SCHEMA_SEARCH_DETAILS_KIND;
@@ -112,7 +114,7 @@ export function supportsToolSchemaDisclosure(model: ToolSchemaDisclosureModel): 
 	);
 }
 
-/** Stable eager/deferred split. The search tool plus four frequent tools remain resident. */
+/** Stable eager/deferred split. The search tool plus the frequent tools in `EAGER_TOOL_PRIORITY` remain resident. */
 export function planToolSchemaDisclosure(
 	model: ToolSchemaDisclosureModel,
 	tools: readonly Tool[],
@@ -137,11 +139,11 @@ export function planToolSchemaDisclosure(
 
 	const eagerToolNames = new Set<string>([TOOL_SCHEMA_SEARCH_NAME]);
 	for (const name of EAGER_TOOL_PRIORITY) {
-		if (eagerToolNames.size >= 5) break;
+		if (eagerToolNames.size >= EAGER_TOOL_COUNT) break;
 		if (searchableTools.some((tool) => tool.name === name)) eagerToolNames.add(name);
 	}
 	for (const tool of searchableTools) {
-		if (eagerToolNames.size >= 5) break;
+		if (eagerToolNames.size >= EAGER_TOOL_COUNT) break;
 		eagerToolNames.add(tool.name);
 	}
 	const deferredToolNames = new Set(

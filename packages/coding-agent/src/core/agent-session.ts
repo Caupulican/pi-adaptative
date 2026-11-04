@@ -2141,7 +2141,7 @@ export class AgentSession {
 				this._emitQueueUpdate();
 				this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
 				this._selfCompaction.resetBranchState();
-				this.ownerSystemPrompt.apply("session branch changed");
+				this.ownerSystemPrompt.branchChanged();
 				this._selfCompaction.schedule();
 			},
 		});

@@ -31,9 +31,12 @@ export interface SessionSystemPromptControllerDeps {
  */
 export class SessionSystemPromptController {
 	private readonly deps: SessionSystemPromptControllerDeps;
+	/** The override the live prompt currently reflects; a branch change matters only when it moves this. */
+	private applied: string | undefined;
 
 	constructor(deps: SessionSystemPromptControllerDeps) {
 		this.deps = deps;
+		this.applied = this.get();
 	}
 
 	/** The active branch's override, or undefined when the generated prompt is in force. */
@@ -60,8 +63,14 @@ export class SessionSystemPromptController {
 		);
 	}
 
+	/** The active branch changed: re-apply only when it carries a different override than the live prompt reflects. */
+	branchChanged(): void {
+		if (this.get() !== this.applied) this.apply("session branch changed");
+	}
+
 	/** Makes the branch's override (or its absence) the live prompt. A rebuild equal to the live prompt does nothing. */
-	apply(reason: string): void {
+	private apply(reason: string): void {
+		this.applied = this.get();
 		const rebuilt = this.deps.builder.rebuildSystemPrompt(this.deps.getActiveToolNames());
 		const { base, live } = this.deps.getPrompts();
 		if (rebuilt === base && rebuilt === live) return;
