@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- The ICM compaction reasoning effort (`contextPolicy.memory.history.compactionThinkingLevel`) defaults to `medium` instead of `low`. Its reasoning tokens are billed as output on every reply, corrections included: `low` wrote about 125 output tokens a reply, and `xhigh` runs spent thousands. An explicit setting still wins. The level is part of the summary configuration, so the first start after a change retries once the nodes parked after five over-length replies or an empty reply.
+
 ### Fixed
 
 - A continuous-chat compaction request no longer grows with the backlog. Its causal view was only merged where parents were already built, so pending and failed nodes held it far above its 32,000-byte mark (320 KB and requests of up to 49,000 tokens in one recorded session, about a third of that session's summary spend). It is now collapsed when read, the oldest sibling pairs first, down to its 16,000-byte mark, the same way the turn view and a worker's birth view already were.

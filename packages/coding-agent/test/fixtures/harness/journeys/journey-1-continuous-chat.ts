@@ -146,7 +146,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					memory: { history: { summaryModel: "harness-script/worker-b", allowExternalSummaryEgress: true } },
 				},
 			},
-			'The ICM chat\'s summary model harness-script/worker-b does not support low thinking, which its compactions request: set contextPolicy.memory.history.compactionThinkingLevel to a level it supports, or contextPolicy.memory.history.summaryModel to another model, for example "<provider>/<model>".',
+			'The ICM chat\'s summary model harness-script/worker-b does not support medium thinking, which its compactions request: set contextPolicy.memory.history.compactionThinkingLevel to a level it supports, or contextPolicy.memory.history.summaryModel to another model, for example "<provider>/<model>".',
 		);
 		trace.mark("root", "icm.summary-refusal");
 	}

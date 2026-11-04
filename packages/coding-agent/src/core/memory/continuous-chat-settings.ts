@@ -22,7 +22,7 @@ export interface ContinuousChatSettings {
 	/** The summary tree is part of ICM, not an opt-in: `history.hierarchy` is never read for the chat. */
 	readonly summaryTree: "intrinsic";
 	readonly summaryModel: string | undefined;
-	/** The reasoning effort of every compaction: a line of at most 512 bytes does not need more than a little. */
+	/** The reasoning effort of every compaction. Its reasoning tokens are billed as output on every reply, corrections included. */
 	readonly thinkingLevel: ContinuousChatThinkingLevel;
 	readonly allowExternalSummaryEgress: boolean;
 	readonly maxConcurrentCompactions: number;
@@ -47,7 +47,7 @@ export const CONTINUOUS_CHAT_CAUSAL_VIEW_BUDGET: ContinuousChatViewBudget = { lo
 export type ContinuousChatThinkingLevel = Extract<ThinkingLevel, "minimal" | "low" | "medium" | "high" | "xhigh">;
 
 /** The compaction reasoning effort when `contextPolicy.memory.history.compactionThinkingLevel` is unset. */
-export const DEFAULT_CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL: ContinuousChatThinkingLevel = "low";
+export const DEFAULT_CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL: ContinuousChatThinkingLevel = "medium";
 
 export function readContinuousChatSettings(source: ContinuousChatSettingsSource): ContinuousChatSettings {
 	const history = source.getMemoryHistorySettings();
