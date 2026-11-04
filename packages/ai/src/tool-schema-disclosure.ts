@@ -7,9 +7,9 @@ export const TOOL_SCHEMA_DISCLOSURE_BETA = "tool-search-tool-2025-10-19";
 export const MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS = 10;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCHABLE_SCHEMA_CHARS = 32_768;
-/** Resident schemas, the search tool included. ledger_read stays resident so a rule read costs no search round trip. */
-const EAGER_TOOL_COUNT = 6;
-const EAGER_TOOL_PRIORITY = ["ledger_read", "read", "bash", "edit", "write", "grep", "find", "delegate"] as const;
+/** Resident schemas, the search tool included. */
+const EAGER_TOOL_COUNT = 5;
+const EAGER_TOOL_PRIORITY = ["read", "bash", "edit", "write", "grep", "find", "delegate"] as const;
 
 export interface ToolSchemaSearchDetails {
 	kind: typeof TOOL_SCHEMA_SEARCH_DETAILS_KIND;

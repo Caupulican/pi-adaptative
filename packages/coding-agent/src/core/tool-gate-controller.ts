@@ -26,6 +26,7 @@ import type {
 	RepositoryMutationObserver,
 	RepositoryObservationToken,
 } from "./objective-execution/repository-mutation-observer.ts";
+import type { RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
@@ -43,7 +44,6 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"delegate",
 	"tool_task",
 	"ask_question",
-	"ledger_read",
 ]);
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
@@ -81,8 +81,11 @@ export interface ToolGateControllerDeps {
 	getExtensionRunner(): ExtensionRunner;
 	/** Host-owned relevance gate for optional extension and credential tools. */
 	checkToolApplicability?(toolName: string, args: unknown): BeforeToolCallResult | undefined;
-	/** Guidance gate (not a permission check): a short reason while the ledger rule governing the tool is not in context. */
-	checkLedgerRule?(toolName: string): string | undefined;
+	/**
+	 * Rule hooks: the standing rules a successful trigger call delivers once per context, appended to that
+	 * call's result (see rule-hooks/rule-hook-delivery.ts).
+	 */
+	ruleHooks?: RuleHookDelivery;
 	/** Observe an execution only after all pre-execution gates and extension hooks allow it. */
 	getToolSelectionController?(): ToolSelectionController | undefined;
 	/**
@@ -295,8 +298,6 @@ export class ToolGateController {
 		if (selfCompactionBlock) return selfCompactionBlock;
 		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);
 		if (applicabilityBlock) return applicabilityBlock;
-		const ledgerReason = this.deps.checkLedgerRule?.(toolCall.name);
-		if (ledgerReason) return { block: true, reason: ledgerReason };
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
@@ -516,7 +517,14 @@ export class ToolGateController {
 		}
 	};
 
-	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError, executionContext }) => {
+	readonly afterToolCall: AfterToolCall = async ({
+		toolCall,
+		args,
+		result,
+		isError,
+		executionContext,
+		assistantMessage,
+	}) => {
 		// Execution terminal for the emission-order announcement the reservation made: this call can no
 		// longer start a file mutation, so a sibling exclusive run emitted after it must stop waiting.
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
@@ -634,6 +642,18 @@ export class ToolGateController {
 					});
 					if (duplicateNote) content = [...content, { type: "text", text: duplicateNote }];
 				}
+				// Last, after every step that can still turn the result into an error: only a result that
+				// stands carries a rule, and a rule is never fenced as untrusted output.
+				const ruleBlocks =
+					this.deps.ruleHooks?.collect({
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						args,
+						cwd: executionContext?.cwd ?? this.deps.getCwd(),
+						assistantMessage,
+					}) ?? [];
+				if (ruleBlocks.length > 0)
+					content = [...content, ...ruleBlocks.map((text) => ({ type: "text" as const, text }))];
 			}
 			finishSucceeded = !resolvedIsError;
 

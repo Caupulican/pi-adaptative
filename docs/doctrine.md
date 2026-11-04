@@ -519,8 +519,8 @@ changes. New operations and changed results reset the counter. Existing recovery
 call fuses remain authoritative.
 
 **Protocols are mechanisms, prose points at them.** The readmission gate and the ledger resolution
-enforce the failure protocol; the protocol text lives once in the stable system prompt and an
-active record carries one pointer line (the constrained tier keeps the full text).
+enforce the failure protocol; the system prompt holds no copy of it and an active record
+carries the one-sentence rule itself (the constrained tier keeps the full text).
 
 **A degenerate output loop ends before the cap.** The stream guard ends a response whose trailing
 window repeats the tier's number of times, classified as a runaway, never retried unchanged. The

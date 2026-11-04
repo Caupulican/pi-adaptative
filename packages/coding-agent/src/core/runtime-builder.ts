@@ -482,6 +482,8 @@ export interface RuntimeBuilderDeps {
 	goalClock?: TimerPort;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
+	/** The goal tool's completion preflight: the refusal text while the noticed-items rule is not in context. */
+	getCompletionRuleRefusal?(toolCallId: string): string | undefined;
 	/** Queue items the owner must decide (the session's owner items message). */
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
@@ -1777,6 +1779,12 @@ export class RuntimeBuilder {
 							.map((item) => item.id) ?? []),
 					],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
+					...(this.deps.getCompletionRuleRefusal
+						? {
+								getCompletionRuleRefusal: (toolCallId: string) =>
+									this.deps.getCompletionRuleRefusal?.(toolCallId),
+							}
+						: {}),
 					getCwd: () => this._taskDirectories.cwd,
 					runRequirementCheck: (check, signal) =>
 						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),

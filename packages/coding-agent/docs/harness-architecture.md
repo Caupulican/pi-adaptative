@@ -68,13 +68,18 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
-The root's `delegation` rule requires delegation when a concrete independent task offers more
-speed or verification benefit than coordination and context-transfer cost. It applies at every
-reasoning level and across providers whenever delegation is enabled and the tool is active;
-it is not an Ultra-only switch. User restrictions remain binding. The ledger rule
-`delegation` (`src/core/ledger/ledger-rules.ts`) owns the decision rule. The root reads it on
-demand through `ledger_read`; `SystemPromptBuilder` renders it inline when that tool is not active, including
-with custom and routed prompts; bundled commands defer to that policy. Child sessions never receive this root policy.
+The root is the director of its workers. Its system prompt carries a `ROLE: root, the director of a team of
+workers` section (`ROOT_DIRECTOR_ROLE_PROMPT` in `src/core/provider-prompt-contracts.ts`), rendered after the
+identity for the full class of a root session whose `delegate` tool is active with worker delegation enabled
+(`SystemPromptBuilder` sets `directorRole`; a root that works alone, and every child session, gets none). Delegation
+applies at every reasoning level and across providers whenever it is enabled and the tool is active; it is not an
+Ultra-only switch. User restrictions remain binding. The rule hook `work-lifecycle`
+(`src/core/rule-hooks/rule-hook-rules.ts`) owns the remaining decision detail (cost-benefit test, worker memory
+access, admission, ceilings). The host appends it to the result of the first successful `create_goal`, `goal`
+(`start`), `task_steps` or `delegate` (`start`, `follow_up`) call of the context (see `RuleHookDelivery`), so it holds for
+custom and routed prompts alike; bundled commands defer to that policy. Child sessions never receive this root policy.
+Workers open with `ROLE: worker, an executor with one assignment from the root` (`SUBAGENT_CORE_SYSTEM_PROMPT`); the
+one-shot lane prompts and the verifier carry their own role line.
 
 Usefulness remains a model judgment. The host does not infer independence from step counts,
 elapsed time, or keywords, nor issue a separate judging request on every turn. The policy directs

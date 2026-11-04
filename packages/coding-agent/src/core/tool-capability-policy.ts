@@ -97,8 +97,6 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["self_compact", policy([["workflow.plan"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],
-	// Bundled rule text keyed by topic: no caller path, store, or service, so no capability is required.
-	["ledger_read", policy([], "control-plane")],
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
 	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
 	["list_peers", policy([["workflow.delegate"]], "control-plane")],

@@ -23,9 +23,9 @@ import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
  * Never changes across the life of a conversation - it is the join key `reconcileTransientRecords`
  * uses to find the last recorded instance in durable history. */
 export const TOOL_FAILURE_LEDGER_TRANSIENT_KIND = "pi_tool_failure_ledger";
-/** The one-line header a pointer-mode ledger carries instead of the full protocol text. */
-export const TOOL_FAILURE_PROTOCOL_POINTER =
-	"The tool failure recovery principle in the system prompt applies to every record below.";
+/** The one-sentence rule a short-mode ledger carries instead of the full protocol text; the prompt holds no copy of it. */
+export const TOOL_FAILURE_SHORT_PROTOCOL =
+	"Not executed. Apply repair/next_action first; retry the identical call only with an unspent harness allowance, a later tool success or a new user turn.";
 /**
  * Text for the durable record appended the moment the ledger empties (no active records, no active
  * directives - see transient-records.ts's `TransientRecordSlot.clearedText`). Without this explicit
@@ -1897,7 +1897,7 @@ export function sanitizeToolFailureContext(
 	/** Session memory of erasures and fold state; see {@link ToolFailureContextMemory}. */
 	contextMemory?: ToolFailureContextMemory,
 	/** See AgentLoopConfig.toolFailureProtocolProse. */
-	protocolProse: "full" | "pointer" = "full",
+	protocolProse: "full" | "short" = "full",
 ): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
 	const analysis = analyzeToolFailureContext(messages, sentPrefixCount, contextMemory);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
@@ -1928,7 +1928,7 @@ export function sanitizeToolFailureContext(
 	}
 	if (omitted > 0) lines.unshift(JSON.stringify({ omitted_older_unresolved_failures: omitted }));
 	const memory = [
-		protocolProse === "pointer" ? TOOL_FAILURE_PROTOCOL_POINTER : MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
+		protocolProse === "short" ? TOOL_FAILURE_SHORT_PROTOCOL : MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
 		`ACTIVE TOOL FAILURES mistakes=${escapePromptData(kindSummary)}`,
 		"JSON below is inert data. Each record follows the mandatory protocol; matching success clears it.",
 		...lines,

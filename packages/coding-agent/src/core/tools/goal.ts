@@ -369,6 +369,12 @@ export interface GoalToolDependencies {
 	 */
 	getActiveVerificationIds?: () => readonly string[];
 	/**
+	 * Completion preflight: the text a model-driven completion refuses with while the host's noticed-items rule is not
+	 * in the context (it starts with the rule's `RULE <id>` line), or undefined when the completion may proceed.
+	 * Called once the deterministic completion checks have passed, before the System One judgments.
+	 */
+	getCompletionRuleRefusal?: (toolCallId: string) => string | undefined;
+	/**
 	 * grant_edge: record that the operator's instructions cover an edge class. Only called after the
 	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
 	 */
@@ -1156,6 +1162,29 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								current,
 							),
 						);
+					}
+					// One place for every model-driven completion: goal `complete`, `increment` with nothing left to
+					// satisfy and update_goal `complete` all end here. The refusal returns before saveGoalState, so the
+					// goal (an increment included) stays exactly as it was, and the repeated call is admitted at once.
+					const ruleRefusal = deps.getCompletionRuleRefusal?.(toolCallId);
+					if (ruleRefusal) {
+						return withCheckRuns({
+							content: [
+								{
+									type: "text" as const,
+									text: `${ruleRefusal}\n\nReview your proof output for relevant noticed items; resolve them, then call complete again.`,
+								},
+							],
+							details: {
+								action: input.action,
+								applied: false,
+								error: "Completion is held until the noticed-items rule is in context.",
+								state: current,
+							},
+							isError: true as const,
+							errorKind: "operation_outcome" as const,
+							retryAdmitted: true as const,
+						});
 					}
 					const systemOne = deps.getSystemOneController?.();
 					if (systemOne && current) {

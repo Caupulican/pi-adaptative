@@ -18,12 +18,6 @@ import type { AgentIdentity } from "./agent-identity.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
-import {
-	LEDGER_READ_TOOL_NAME,
-	loadLedgerCatalog,
-	renderLedgerIndex,
-	requireLedgerEntry,
-} from "./ledger/ledger-catalog.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
 import {
@@ -304,41 +298,13 @@ export class SystemPromptBuilder {
 		});
 	}
 
-	private _buildWorkLifecyclePrompt(ledgerActive: boolean): string | undefined {
+	private _buildWorkLifecyclePrompt(): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
 		if (capabilityClass === "minimal") return `WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
-		// The full class reads the lifecycle from the ledger; without the ledger tool the same rule is inline.
-		return ledgerActive ? undefined : `WORK LIFECYCLE\n${requireLedgerEntry("work-lifecycle").body}`;
-	}
-
-	/** Delegation guidance applies to a root that holds the delegate tool with worker delegation enabled. */
-	private _delegationApplies(delegateActive: boolean): boolean {
-		return (
-			!this.deps.isChildSession() &&
-			delegateActive &&
-			this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
-		);
-	}
-
-	/** The delegation rule rendered inline, for a surface where `ledger_read` does not carry it. */
-	private _buildInlineDelegationPrompt(delegateActive: boolean, ledgerActive: boolean): string | undefined {
-		if (ledgerActive || !this._delegationApplies(delegateActive)) return undefined;
-		return `DELEGATION\n${requireLedgerEntry("delegation").body}`;
-	}
-
-	/** The index of ledger rules whose gates pass, or undefined when the ledger is not active. */
-	private _buildLedgerIndex(validToolNames: readonly string[], ledgerActive: boolean): string | undefined {
-		if (!ledgerActive) return undefined;
-		const delegationApplies = this._delegationApplies(validToolNames.includes("delegate"));
-		const entries = loadLedgerCatalog().filter((entry) => {
-			if (entry.requires && !validToolNames.includes(entry.requires)) return false;
-			if (entry.topic === "delegation") return delegationApplies;
-			if (entry.topic === "work-lifecycle") return !this.deps.isChildSession();
-			return true;
-		});
-		return renderLedgerIndex(entries);
+		// The full class receives the lifecycle and delegation rule from its rule hook (core/rule-hooks).
+		return undefined;
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
@@ -346,8 +312,6 @@ export class SystemPromptBuilder {
 		const identity = this._agentIdentity;
 		const modelCapability = this.deps.getModelCapabilityProfile();
 		const validToolNames = toolNames.filter((name) => this.deps.hasTool(name));
-		// Standing rules are read on demand only where the full prompt and the ledger tool both exist.
-		const ledgerActive = modelCapability.class === "full" && validToolNames.includes(LEDGER_READ_TOOL_NAME);
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelineGroups: string[][] = [];
 		for (const name of validToolNames) {
@@ -375,9 +339,7 @@ export class SystemPromptBuilder {
 			this._buildSituationSoulPrompt(),
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
 			modelCapability.class === "full" ? undefined : this._buildSelfModificationPrompt(modelCapability),
-			this._buildWorkLifecyclePrompt(ledgerActive),
-			this._buildInlineDelegationPrompt(validToolNames.includes("delegate"), ledgerActive),
-			this._buildLedgerIndex(validToolNames, ledgerActive),
+			this._buildWorkLifecyclePrompt(),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(validToolNames),
 		].filter((part): part is string => Boolean(part));
@@ -400,7 +362,11 @@ export class SystemPromptBuilder {
 			date: this._promptDate,
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
-			ledgerActive,
+			directorRole:
+				modelCapability.class === "full" &&
+				!this.deps.isChildSession() &&
+				validToolNames.includes("delegate") &&
+				this.deps.getSettingsManager().getWorkerDelegationSettings().enabled,
 			agentName: identity?.name,
 			principles:
 				modelCapability.class === "full"

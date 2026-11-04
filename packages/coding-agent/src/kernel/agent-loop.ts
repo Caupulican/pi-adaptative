@@ -2763,19 +2763,22 @@ async function finalizeExecutedToolCall(
 			// this identical operation cannot say anything new until something else changes.
 			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
 			result = { ...result, errorKind: "operation_outcome", usage };
-			executionGateEffect = {
-				kind: "unproductive",
-				tool: prepared.tool,
-				...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
-				record: describeOperationOutcome(
-					prepared.toolCall.name,
-					prepared.args,
-					effectiveFailureCode,
-					assessment.diagnostic,
-					prepared.binding?.executionScope,
-				),
-				args: prepared.args,
-			};
+			// A refusal that changed what the identical call will be answered with is not a dead end to repeat.
+			if (executed.result.retryAdmitted !== true) {
+				executionGateEffect = {
+					kind: "unproductive",
+					tool: prepared.tool,
+					...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
+					record: describeOperationOutcome(
+						prepared.toolCall.name,
+						prepared.args,
+						effectiveFailureCode,
+						assessment.diagnostic,
+						prepared.binding?.executionScope,
+					),
+					args: prepared.args,
+				};
+			}
 		} else {
 			const recoveryPlan = toolFailureRecoveryGate.planFailure(
 				prepared.tool,

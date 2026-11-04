@@ -2,17 +2,15 @@
  * System prompt construction and project context loading
  */
 
-import { dirname } from "node:path";
-import { getReadmePath } from "../config.ts";
 import { TOOL_FAILURE_RETRY_MODEL_RULE } from "../kernel/index.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
-import { requireLedgerEntry } from "./ledger/ledger-catalog.ts";
 import { enforceModelCapabilitySystemPromptBudget } from "./model-capability.ts";
 import {
 	normalizeSteStrictness,
 	ORIENTATION_SURVEY_RULE,
 	OWNER_AUTHORIZATION_RULE,
+	ROOT_DIRECTOR_ROLE_PROMPT,
 	renderExplanationStyleRule,
 } from "./provider-prompt-contracts.ts";
 
@@ -22,29 +20,30 @@ const OUTPUT_POLICY = `
 
 OUTPUT
 - Terse, in the user's language: fragments, each fact once.
-- No filler, self-reference, tool narration, emoji or log dumps.
+- No filler, self-reference, tool narration or emoji.
 - Keep not/never/no/only/except and exact identifiers, numbers, commands, errors.
 - Full grammar for security, irreversible actions, ambiguous order.
-- Bound and source-label output; show paths.
 - Never answer with harness protocol or failure JSON.
 - Analysis, review, evaluation: complete and structured (D decisions, O options, F findings, R risks, Q questions, A actions).
-- Complex content (diagrams, comparisons, tables): an HTML page.
-- An explicit instruction in the current message overrides this style; security rules never yield.`;
+- Complex content (diagrams, comparisons, tables): an HTML page (skill explain-html).
+- An explicit instruction in the current message overrides this style.`;
 
 const piAdaptativeCoreSection = (extraPrinciples: readonly string[]): string => `
 
 PRINCIPLES
-- Pursue the request with creativity, up to its root.
+- Pursue the request with creativity, up to its root:
+  - Interrogate yourself before acting: do I know enough to deliver a truly valuable result? If not, find out by reading, searching, measuring.
+  - Work out what the request is for, trace it to the cause, and finish the outcome, not the literal words.
+  - When the obvious route is blocked, find another route to the same goal.
+  - Failing check. Expected: find and fix the cause. Bad: loosen or skip the check.
+  - "Make it faster". Expected: measure, find the hot spot, fix it. Bad: add a cache that hides it.
+  - A defect in one place. Expected: fix it and the same defect elsewhere. Bad: patch only the reported line.
+  - A tool or path refused. Expected: reach the goal another way. Bad: stop and report it cannot be done.
+- Apply judgement: scale the effort to the certainty and the risk.
+  - Cause known (a missing comma). Expected: fix it and run the quick check. Bad: build tooling, tests or a new app to prove it breaks.
+  - Cause unknown or change risky. Expected: reproduce or inspect first. Bad: ship a guess.
 - ${OWNER_AUTHORIZATION_RULE}
-- State only what you verified; label the rest inferred or guess.
-- Run no tests unless asked.
-- Blocked or rejected means not executed: apply repair/next_action first. ${TOOL_FAILURE_RETRY_MODEL_RULE}${extraPrinciples.map((principle) => `\n- ${principle}`).join("")}`;
-
-/** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
-function inlineLedgerRule(topic: string): string {
-	const entry = requireLedgerEntry(topic);
-	return `${entry.topic.replace(/-/g, " ").toUpperCase()}: ${entry.body}`;
-}
+- State only what you verified; label the rest inferred or guess.${extraPrinciples.map((principle) => `\n- ${principle}`).join("")}`;
 
 const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
 
@@ -245,13 +244,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: capabilityClass === "minimal"
 				? PI_ADAPTATIVE_MINIMAL_CORE_SECTION
 				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
-	// Only the builder sets `ledgerActive`, and only for the full class with ledger_read in its tools.
-	const ledgerActive = fullPrompt && options.ledgerActive === true;
-	const skillRules = ledgerActive
-		? ""
-		: `${inlineLedgerRule("output-formats")}${fullPrompt ? `\n${inlineLedgerRule("engineering-skills")}` : ""}`;
-	const skillVaultContract = activeTools.includes("skill") && skillRules ? `\n\n${skillRules}` : "";
-	const noticedRule = fullPrompt && !ledgerActive ? `\n\n${inlineLedgerRule("noticed-items")}` : "";
 	const explanationStyle = renderExplanationStyleRule(normalizeSteStrictness(options.steStrictness));
 	const styleContract =
 		capabilityClass === "chat"
@@ -260,7 +252,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 				: ""
 			: `${OUTPUT_POLICY}${explanationStyle ? `\n- ${explanationStyle}` : ""}`;
 	const scopeContract = capabilityClass === "chat" || fullPrompt ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
-	const operatingContract = `${coreSection}${scopeContract}${noticedRule}${skillVaultContract}${styleContract}`;
+	const operatingContract = `${coreSection}${scopeContract}${styleContract}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -279,8 +271,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			modelCapability: options.modelCapability,
 		});
 	}
-
-	const packageRoot = dirname(getReadmePath());
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
@@ -322,24 +312,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: capabilityClass === "minimal"
 				? "Pi-Adaptative focused coding executor. Complete one scoped task; report verified results."
 				: "Pi-Adaptative concise chat assistant. No execution tools active.";
+	const directorRole = fullPrompt && options.directorRole === true ? `\n\n${ROOT_DIRECTOR_ROLE_PROMPT}` : "";
 	// The host rejects calls to tools that are not active, so only the constrained classes are told.
 	const toolSurfaceRule = fullPrompt
 		? ""
 		: leanPrompt
 			? "Use active tool surface only; unlisted capabilities may exist."
 			: "Use only the active tool surface.";
-	let prompt = `${introduction}
+	const prompt = `${introduction}${directorRole}
 
 Available tools:
 ${toolsList}${toolSurfaceRule ? `\n\n${toolSurfaceRule}` : ""}${operatingContract}${toolGuidelinesSection}`;
-
-	if (fullPrompt) {
-		prompt += `
-
-DOCS
-- Root: ${packageRoot}.
-- For work on this harness, read the needed README.md, \`docs/\` and \`examples/\` files fully; follow links.`;
-	}
 
 	return appendPromptResources(prompt, {
 		appendSection,

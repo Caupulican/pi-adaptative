@@ -290,6 +290,12 @@ export interface AgentToolResult<T> {
 	 * ran the operation to completion and `isError` only reports the operation's own negative status.
 	 */
 	errorKind?: AgentToolErrorKind;
+	/**
+	 * On an `operation_outcome` error: repeating the identical call is expected to answer differently, because
+	 * this refusal itself changed what the host will accept (a rule delivered once, then the call passes). The
+	 * repetition governor then does not count the call as unproductive, so the retry is admitted at once.
+	 */
+	retryAdmitted?: boolean;
 	/** Provider usage spent inside this tool, for durable budget and cost accounting. */
 	usage?: Usage;
 	/**

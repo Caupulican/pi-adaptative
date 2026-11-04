@@ -172,7 +172,6 @@ import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
-import { ledgerGateReason } from "./ledger/ledger-gate.ts";
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import { ActiveBranchProbe } from "./memory/active-branch-probe.ts";
@@ -282,6 +281,7 @@ import {
 } from "./research/session-evidence-bundle.ts";
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { RuntimeBuilder, type RuntimeReloadOptions } from "./runtime-builder.ts";
 import {
 	type RuntimeMutationHandoff,
@@ -422,6 +422,10 @@ export class AgentSession {
 	private readonly _bash: BashExecutionController;
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
+	private readonly _ruleHooks = new RuleHookDelivery({
+		getMessages: () => this.agent.state.messages,
+		isRootSession: () => !this._isChildSession,
+	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
 	private readonly _repositoryObserver = new RepositoryMutationObserver(this._mutationLedger);
 	private readonly _deployAdapters = new TrustedDeployAdapterRegistry();
@@ -1940,6 +1944,7 @@ export class AgentSession {
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			goalClock: config.timers.port("goal-continuation"),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			getCompletionRuleRefusal: (toolCallId) => this._ruleHooks.refusalFor("noticed-items", toolCallId),
 			deliverToOwner: (items) => {
 				this._deliverToOwner(items);
 			},
@@ -2242,8 +2247,7 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
-			checkLedgerRule: (toolName) =>
-				ledgerGateReason(toolName, this.getActiveToolNames(), this.agent.state.messages),
+			ruleHooks: this._ruleHooks,
 			checkToolApplicability: (toolName, args) => {
 				const source = this._runtimeBuilder.getToolSourceInfo(toolName);
 				const aliases = optionalToolRequestAliases(toolName, source, () => {

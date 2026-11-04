@@ -90,11 +90,6 @@ export {
 	type GrepToolOptions,
 } from "./grep.ts";
 export {
-	createLedgerReadTool,
-	createLedgerReadToolDefinition,
-	LEDGER_READ_TOOL_NAME,
-} from "./ledger-read.ts";
-export {
 	createLsTool,
 	createLsToolDefinition,
 	type LsToolOptions,
@@ -220,7 +215,6 @@ import {
 import { FileMutationIntentController } from "./file-mutation-intent.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
-import { createLedgerReadTool, createLedgerReadToolDefinition } from "./ledger-read.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPythonTool, createPythonToolDefinition, type PythonToolOptions } from "./python.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
@@ -318,8 +312,6 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createArtifactRetrieveTool(cwd, options?.artifact_retrieve);
 		case "decision_ledger_read":
 			return createDecisionLedgerReadTool(cwd, options?.decision_ledger_read);
-		case "ledger_read":
-			return createLedgerReadTool();
 		case "tool_search":
 			return wrapToolDefinition(createToolSchemaSearchDefinition());
 		case "webfetch":
@@ -377,7 +369,6 @@ export function createAllToolDefinitions(
 		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve),
 		decision_ledger_read: createDecisionLedgerReadToolDefinition(cwd, options?.decision_ledger_read),
-		ledger_read: createLedgerReadToolDefinition(),
 		tool_search: createToolSchemaSearchDefinition(),
 		webfetch: createWebFetchToolDefinition(cwd, options?.webfetch),
 	};
@@ -431,7 +422,6 @@ export function createAllTools(
 		extensionify: createExtensionifyTool(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveTool(cwd, options?.artifact_retrieve),
 		decision_ledger_read: createDecisionLedgerReadTool(cwd, options?.decision_ledger_read),
-		ledger_read: createLedgerReadTool(),
 		tool_search: wrapToolDefinition(createToolSchemaSearchDefinition()),
 		webfetch: createWebFetchTool(cwd, options?.webfetch),
 	};

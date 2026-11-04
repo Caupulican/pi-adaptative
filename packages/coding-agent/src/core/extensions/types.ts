@@ -1863,11 +1863,11 @@ export interface BuildSystemPromptOptions {
 	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
 	steStrictness?: number;
 	/**
-	 * Standing rules are read on demand through `ledger_read` instead of living in this prompt. Set by the
-	 * session's prompt builder for the full class when that tool is active; when absent, the rules the
-	 * ledger owns are rendered inline so no rule is lost.
+	 * Render the root's director role after the identity. Set by the session's prompt builder only for the full class
+	 * of a root session whose `delegate` tool is active with worker delegation enabled; a root that works alone
+	 * has no team to direct.
 	 */
-	ledgerActive?: boolean;
+	directorRole?: boolean;
 	/** The agent's name, read from the agent directory's soul.md; the full prompt opens by stating it. */
 	agentName?: string;
 	/** Extra principle bullets the session adds to PRINCIPLES (for example self-modification when it applies). */

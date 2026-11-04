@@ -52,8 +52,8 @@ export interface CapabilityTierPolicy {
 	repetitionGuardRepeats: number;
 	/** Upper bound for the active skill bodies the vault keeps in context. */
 	skillBodyMaxBytes: number;
-	/** How much of the failure protocol rides each request: a pointer, or the full text. */
-	protocolProse: "pointer" | "full";
+	/** How much of the failure protocol rides each request: one sentence, or the full text. */
+	protocolProse: "short" | "full";
 	/** How hard tool-output reducers cut (see tools/output-reduction.ts): lower caps on the constrained tier. */
 	outputReduction: "standard" | "compact";
 }
@@ -64,7 +64,7 @@ const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier
 		maxOutputTokens: 32_768,
 		repetitionGuardRepeats: 6,
 		skillBodyMaxBytes: 64 * 1024,
-		protocolProse: "pointer",
+		protocolProse: "short",
 		outputReduction: "standard",
 	},
 	strong: {
@@ -72,7 +72,7 @@ const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier
 		maxOutputTokens: 16_384,
 		repetitionGuardRepeats: 4,
 		skillBodyMaxBytes: 32 * 1024,
-		protocolProse: "pointer",
+		protocolProse: "short",
 		outputReduction: "standard",
 	},
 	constrained: {

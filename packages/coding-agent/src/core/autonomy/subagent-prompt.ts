@@ -10,7 +10,7 @@ export { SUBAGENT_CORE_SYSTEM_PROMPT };
  * replaceable layer: settings, a lane profile, or the calling model (delegate tool) can erase and
  * replace it entirely. This keeps shipped subagents maximally efficient on small open models (a
  * caller can hand a tiny model a purpose-built minimal prompt) while the kernel remains the sole
- * authority and budget owner. Keep the core UNDER 300 tokens; it is deliberately terse.
+ * authority and budget owner. Keep the core terse (about 350 tokens): it opens with the worker's role.
  */
 export interface SubagentPromptParts {
 	/** Situational identity from the shipped profile (replaceable layer). */

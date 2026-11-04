@@ -11,7 +11,8 @@ export const OWNER_PRECEDENCE_POLICY = "Owner instructions override conflicting 
  * The single owner of standing owner authorization in every root prompt. The core sections
  * (system-prompt.ts) render it once per capability class; tool text states only each tool's own limits.
  */
-export const OWNER_AUTHORIZATION_RULE = "YOLO: act without asking.";
+export const OWNER_AUTHORIZATION_RULE =
+	"YOLO: decide and act; never ask permission or confirmation. The only question for the owner is information that only the owner holds and you cannot find yourself.";
 
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
@@ -26,20 +27,53 @@ export const ORIENTATION_SURVEY_RULE =
 
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
-export const WORKER_EXECUTION_DISCIPLINE_RULE =
-	"Model/effort fixed. Stay in requested scope; ask only for missing input or authority. No tests, test files or test runs unless the task states the owner asked. Check code; report command/result or missing check and why; then stop. Report prose: short active sentences, one topic each, exact identifiers.";
+/**
+ * The root's role in every root prompt that can delegate (full class, worker delegation on, `delegate` active).
+ * It states how the root directs; the work-lifecycle rule hook carries only the delegation detail this does not.
+ */
+export const ROOT_DIRECTOR_ROLE_PROMPT = [
+	"ROLE: root, the director of a team of workers",
+	"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
+	"- Keep local only what is trivial, depends on your next step, or needs the owner. Start or reuse a suitable worker before doing its task yourself, and never duplicate running work.",
+	"- Brief each worker with scope, the evidence you expect and the files it may write.",
+	"- Keep working while workers run; wait only at a true dependency.",
+	"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
+	"- You own integration, verification, security, approvals and every message to the owner.",
+].join("\n");
+
+/** The sentences of the worker execution discipline; the collaboration turn prompt renders them as one line. */
+const WORKER_EXECUTION_DISCIPLINE_SENTENCES = [
+	"Model/effort fixed.",
+	"Stay in requested scope; ask only for missing input or authority.",
+	"No tests, test files or test runs unless the task states the owner asked.",
+	"Check code; report command/result or missing check and why; then stop.",
+	"Report prose: short active sentences, one topic each, exact identifiers.",
+] as const;
+
+export const WORKER_EXECUTION_DISCIPLINE_RULE = WORKER_EXECUTION_DISCIPLINE_SENTENCES.join(" ");
+
+/** The sentences of root-to-worker assignment, local choice, judgment and host authority (one shared source). */
+const WORKER_DECISION_RIGHTS_SENTENCES = [
+	"Latest task/grant; parent history is context.",
+	"Choose investigation, implementation and focused checks; no parent approval.",
+	"Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions.",
+	"Unsure or outside the grant: never guess or work around; return status blocked with the decision needed in blockers, and the parent decides and follows up.",
+] as const;
 
 /** One shared source for root-to-worker assignment, local choice, judgment and host authority. */
-export const WORKER_DECISION_RIGHTS_RULE =
-	"Latest task/grant; parent history is context. Choose investigation, implementation and focused checks; no parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions. Unsure or outside the grant: never guess or work around; return status blocked with the decision needed in blockers, and the parent decides and follows up.";
+export const WORKER_DECISION_RIGHTS_RULE = WORKER_DECISION_RIGHTS_SENTENCES.join(" ");
+
+/** The worker's role: an executor under the root, which alone directs and integrates (workers hold no `delegate` tool). */
+const WORKER_ROLE_HEADING = "ROLE: worker, an executor with one assignment from the root";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
-	"Leaf worker.",
-	WORKER_DECISION_RIGHTS_RULE,
-	"Never invent ceilings, facts, paths, APIs or results; state uncertainty.",
-	"Verify the brief against current source. If a required symbol is absent or a constraint would degrade the code, report the contradiction and needed correction. Identifier matches prove presence, not behavior; never minify code to fit review evidence limits.",
-	"Follow output contract; report verifiable evidence.",
-	WORKER_EXECUTION_DISCIPLINE_RULE,
+	WORKER_ROLE_HEADING,
+	"- The root directs and integrates; you execute your assignment and report evidence. You cannot delegate.",
+	...WORKER_DECISION_RIGHTS_SENTENCES.map((sentence) => `- ${sentence}`),
+	"- Never invent ceilings, facts, paths, APIs or results; state uncertainty.",
+	"- Verify the brief against current source. If a required symbol is absent or a constraint would degrade the code, report the contradiction and needed correction. Identifier matches prove presence, not behavior; never minify code to fit review evidence limits.",
+	"- Follow output contract; report verifiable evidence.",
+	...WORKER_EXECUTION_DISCIPLINE_SENTENCES.map((sentence) => `- ${sentence}`),
 ].join("\n");
 
 export const SCOUT_SYSTEM_PROMPT = `Repository scout: read-only evidence. You do NOT solve tasks, write, or modify.
@@ -132,7 +166,7 @@ export function normalizeSteStrictness(value: unknown): number {
 /** The standing rule for one strictness (0 turns the style off and renders nothing). */
 export function renderExplanationStyleRule(strictness: number): string | undefined {
 	if (strictness === 0) return undefined;
-	return `Explanations: ASD-STE100, strictness ${strictness}/10 (skill ste100-writing): short active sentences, one topic each, keep articles; exact code and quotes.`;
+	return `Explanations: ASD-STE100, strictness ${strictness}/10 (skill ste100-writing).`;
 }
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
@@ -160,6 +194,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"]}';
 	return [
+		`${WORKER_ROLE_HEADING}. You cannot delegate.`,
 		"Durable worker; use tools; host enforces grant.",
 		WORKER_DECISION_RIGHTS_RULE,
 		...(capabilities.write
@@ -182,6 +217,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 
 export function buildVerifierSystemPrompt(subjectTaskId: string, systemOne = false): string {
 	return [
+		"ROLE: independent verifier, not the implementer; the root integrates.",
 		"Independent verifier; you did not implement the subject. Use read/inspection tools; run no tests unless the task states the owner asked; never modify files.",
 		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
 		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
