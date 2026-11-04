@@ -1870,6 +1870,8 @@ export interface BuildSystemPromptOptions {
 	ledgerActive?: boolean;
 	/** The agent's name, read from the agent directory's soul.md; the full prompt opens by stating it. */
 	agentName?: string;
+	/** Extra principle bullets the session adds to PRINCIPLES (for example self-modification when it applies). */
+	principles?: readonly string[];
 	/** Set while soul.md does not exist: the path the agent may create it at from its memory and sessions. */
 	missingSoulPath?: string;
 	/** The agent's soul text (soul.md body, screened and bounded); the full prompt states it under its first line. */

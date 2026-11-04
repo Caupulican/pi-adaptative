@@ -13,13 +13,11 @@
  */
 
 import { existsSync } from "node:fs";
-import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../kernel/index.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
-import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
 	LEDGER_READ_TOOL_NAME,
 	loadLedgerCatalog,
@@ -38,20 +36,13 @@ import { buildProjectInstructionIsolationPrompt } from "./project-instruction-is
 import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import type {
-	AutoLearnSettings,
-	AutonomySettings,
-	MemorySystem,
-	ResolvedWorkerDelegationSettings,
-} from "./settings/settings-schema.ts";
+import type { MemorySystem, ResolvedWorkerDelegationSettings } from "./settings/settings-schema.ts";
 import { buildSystemPrompt, promptDate } from "./system-prompt.ts";
 import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SystemPromptBuilderSettingsSource {
 	getActiveProfileSoul(): string | undefined;
-	getAutoLearnSettings(): AutoLearnSettings;
-	getAutonomySettings(): Required<AutonomySettings>;
 	getMemorySystem(): MemorySystem;
 	getProjectContextFiles(): "on-demand" | "off";
 	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] };
@@ -218,7 +209,7 @@ export class SystemPromptBuilder {
 		}
 
 		if (rawCandidates.length === 0) {
-			return "SELF-MODIFICATION: enabled but sourcePaths/sourcePath is missing. Do not modify core/runtime output; ask for the pi-adaptative source checkout path.";
+			return "Self-modification: enabled but sourcePaths/sourcePath is missing. Do not modify core/runtime output; ask for the source checkout path.";
 		}
 
 		const resolvedCandidates = rawCandidates.map((candidate) =>
@@ -238,7 +229,7 @@ export class SystemPromptBuilder {
 		if (profile.class !== "full") {
 			return `SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
 		}
-		return `SELF-MODIFICATION\n- Source: ${sourceStatus}; edit core/harness only there, never installed or generated output.\n- Restate scope, inspect source and docs, preserve concurrent changes.\n- Make the smallest auditable edit; run focused, then proportionate checks.\n- runtime_update only after saved evidence.`;
+		return `Self-modification: source ${sourceStatus}; edit core/harness only there, never installed or generated output; runtime_update only after saved evidence.`;
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
@@ -301,30 +292,6 @@ export class SystemPromptBuilder {
 		return formatToolSelectionHints(this._sessionToolSelectionHints().filter((hint) => available.has(hint.tool)));
 	}
 
-	private _buildToolApplicabilityPrompt(
-		validToolNames: readonly string[],
-		activeExtensions: ReadonlyArray<Extension>,
-		profile: ModelCapabilityProfile,
-	): string | undefined {
-		const activeNames = new Set(validToolNames);
-		if (!activeNames.has("secret_store")) {
-			let hasActiveExtensionTool = false;
-			for (const extension of activeExtensions) {
-				for (const name of extension.tools.keys()) {
-					if (!activeNames.has(name)) continue;
-					hasActiveExtensionTool = true;
-					break;
-				}
-				if (hasActiveExtensionTool) break;
-			}
-			if (!hasActiveExtensionTool) return undefined;
-		}
-		if (profile.class !== "full") {
-			return "TOOL APPLICABILITY: availability is not a mandate. Missing optional credentials never block unrelated work or require secret_store.";
-		}
-		return "TOOL APPLICABILITY\n- Active means available, not required.\n- Missing optional credentials never block unrelated work or justify speculative secret_store use.";
-	}
-
 	/** True when the configured memory system is Intentional Context Management (ICM). */
 	private isIcmMode(): boolean {
 		return this.deps.getSettingsManager().getMemorySystem() === "icm";
@@ -337,61 +304,13 @@ export class SystemPromptBuilder {
 		});
 	}
 
-	/**
-	 * Autonomy guardrail block.
-	 *
-	 * Emitted for interactive root sessions when autonomy mode is not "off" or auto-learn is enabled.
-	 * Reflects the session's standing autonomy grant and the single reflection-turn contract. Child
-	 * sessions inherit their parent's scope and never reflect independently, so they omit this block.
-	 */
-	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
-		if (this.deps.isChildSession()) return undefined;
-		const settingsManager = this.deps.getSettingsManager();
-		const autonomy = settingsManager.getAutonomySettings();
-		const autoLearn = resolveAutoLearnSettings(autonomy.mode, settingsManager.getAutoLearnSettings());
-		if (!autoLearn.enabled && autonomy.mode !== "full") {
-			return undefined;
-		}
-
-		// Standing owner authorization (precedence, limits, grant reuse, ask-only-if-missing) is
-		// rendered once by the core operating contract (OWNER_AUTHORIZATION_RULE in system-prompt.ts)
-		// for every capability class; this block adds only the autonomy grant, the reflection
-		// contract and the skill-conflict rule.
-		// ICM leaves legacy automatic reflection offline, including its scheduling guidance.
-		const reflectionContract =
-			!this.isIcmMode() && isCurrentSessionReflectionEnabled(autoLearn)
-				? "ROOT REFLECTION: the host schedules one reflection turn after completed work; apply warranted durable learning only there."
-				: "Root reflection is disabled.";
-		if (profile.class !== "full") {
-			return `AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary.`;
-		}
-		if (autonomy.mode === "full") {
-			return `AUTONOMY full\n- ${reflectionContract}\n- Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; each with validation and rollback evidence.\n- Current-turn evidence is a cue, not proof.`;
-		}
-		return `AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
-	}
-
-	private _buildWorkLifecyclePrompt(toolNames: readonly string[], ledgerActive: boolean): string | undefined {
+	private _buildWorkLifecyclePrompt(ledgerActive: boolean): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
 		if (capabilityClass === "minimal") return `WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
-		const hasWorkPlanningTool = toolNames.some(
-			(name) =>
-				name === "goal" ||
-				name === "create_goal" ||
-				name === "get_goal" ||
-				name === "update_goal" ||
-				name === "task_steps",
-		);
-		// Only a model that holds the delegate tool is told about workers.
-		const workersOwner = toolNames.includes("delegate") ? " delegate workers," : "";
-		const ownerRule = hasWorkPlanningTool
-			? `\n- Owners: goal outcome/contract, task_steps plan,${workersOwner} evidence acceptance; no parallel workflow state.`
-			: "";
-		// The phase detail is a ledger entry; the phase names and owners stay resident.
-		const detail = ledgerActive ? "" : `\n${requireLedgerEntry("work-lifecycle").body}`;
-		return `WORK LIFECYCLE\n- Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale phases to the outcome.${ownerRule}${detail}`;
+		// The full class reads the lifecycle from the ledger; without the ledger tool the same rule is inline.
+		return ledgerActive ? undefined : `WORK LIFECYCLE\n${requireLedgerEntry("work-lifecycle").body}`;
 	}
 
 	/** Delegation guidance applies to a root that holds the delegate tool with worker delegation enabled. */
@@ -454,21 +373,13 @@ export class SystemPromptBuilder {
 			// R6: situational soul — the active profile's identity prefix, switched atomically with the
 			// profile's capabilities/model. Most prominent, so it comes first.
 			this._buildSituationSoulPrompt(),
-			// The tool-failure protocol lives here once, stable for the whole session, for the full
-			// capability class: each active ledger record then carries one pointer line instead of
-			// repeating the protocol text (pi-agent-core's toolFailureProtocolProse, set from the
-			// capability tier). Constrained classes keep the text in the record instead, so their
-			// bounded stable-prompt envelope is not spent on it.
-			modelCapability.class === "full" ? MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT : undefined,
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
-			this._buildSelfModificationPrompt(modelCapability),
-			this._buildAutonomyPrompt(modelCapability),
-			this._buildWorkLifecyclePrompt(validToolNames, ledgerActive),
+			modelCapability.class === "full" ? undefined : this._buildSelfModificationPrompt(modelCapability),
+			this._buildWorkLifecyclePrompt(ledgerActive),
 			this._buildInlineDelegationPrompt(validToolNames.includes("delegate"), ledgerActive),
 			this._buildLedgerIndex(validToolNames, ledgerActive),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(validToolNames),
-			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
 		].filter((part): part is string => Boolean(part));
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
@@ -491,6 +402,10 @@ export class SystemPromptBuilder {
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 			ledgerActive,
 			agentName: identity?.name,
+			principles:
+				modelCapability.class === "full"
+					? [this._buildSelfModificationPrompt(modelCapability)].filter((text): text is string => Boolean(text))
+					: undefined,
 			missingSoulPath: identity?.missingSoulPath,
 			soul: identity?.soul,
 		};

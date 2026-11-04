@@ -31,13 +31,14 @@ OUTPUT
 - Complex content (diagrams, comparisons, tables): an HTML page.
 - An explicit instruction in the current message overrides this style; security rules never yield.`;
 
-const PI_ADAPTATIVE_CORE_SECTION = `
+const piAdaptativeCoreSection = (extraPrinciples: readonly string[]): string => `
 
 PRINCIPLES
 - Pursue the request with creativity, up to its root.
 - ${OWNER_AUTHORIZATION_RULE}
 - State only what you verified; label the rest inferred or guess.
-- Run no tests unless asked.`;
+- Run no tests unless asked.
+- Blocked or rejected means not executed: apply repair/next_action first. ${TOOL_FAILURE_RETRY_MODEL_RULE}${extraPrinciples.map((principle) => `\n- ${principle}`).join("")}`;
 
 /** A one-line ledger rule rendered as `LABEL: rule` when `ledger_read` is not active to carry it. */
 function inlineLedgerRule(topic: string): string {
@@ -238,7 +239,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
 	const hasRead = activeTools.includes("read");
 	const coreSection = fullPrompt
-		? PI_ADAPTATIVE_CORE_SECTION
+		? piAdaptativeCoreSection(options.principles ?? [])
 		: leanPrompt
 			? PI_ADAPTATIVE_LEAN_CORE_SECTION
 			: capabilityClass === "minimal"
