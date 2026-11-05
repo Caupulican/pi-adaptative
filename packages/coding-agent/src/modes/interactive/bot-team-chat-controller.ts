@@ -98,6 +98,8 @@ function routineScheduleLabel(routine: RoutineDefinitionView): string {
 			return `once at ${new Date(routine.schedule.at).toISOString()}`;
 		case "calendar":
 			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
+		case "event":
+			return `on CI ${routine.schedule.conclusions.join("/")}${routine.schedule.workflowPath === undefined ? "" : ` of ${routine.schedule.workflowPath}`}`;
 	}
 }
 
@@ -934,7 +936,13 @@ export class BotTeamChatController {
 				const next = nextRoutineAt(r.schedule, r.cursor);
 				const outcome = r.lastSummary ? `: ${r.lastSummary.replace(/\r?\n+/g, " ").slice(0, 100)}` : "";
 				const status = r.lastStatus ? ` · last=${r.lastStatus}${outcome}` : "";
-				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${next === undefined ? "complete" : new Date(next).toISOString()}${status} · "${r.prompt}"`;
+				const nextLabel =
+					next !== undefined
+						? new Date(next).toISOString()
+						: r.schedule.kind === "event"
+							? "on event"
+							: "complete";
+				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${nextLabel}${status} · "${r.prompt}"`;
 			})
 			.join("\n");
 	}

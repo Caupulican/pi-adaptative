@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { type Static, Type } from "typebox";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { parseWorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
+import {
+	CI_TERMINAL_CONCLUSIONS,
+	type CiAttemptTerminalEvent,
+	type CiTerminalConclusion,
+	parseCiAttemptTerminalEvent,
+} from "../events/host-event-contract.ts";
 import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -20,7 +27,11 @@ export const MAX_ROUTINE_ID_CHARS = 128;
 export const MAX_ROUTINE_COMMAND_ID_CHARS = 64;
 export const MAX_ROUTINE_PROMPT_CHARS = 8_000;
 export const MAX_ROUTINE_OCCURRENCES = 256;
-export const MAX_ROUTINE_MANUAL_TOMBSTONES = 2_048;
+/** Consumed manual and event occurrence ids kept after their journal entry is pruned, so neither replays. */
+export const MAX_ROUTINE_REPLAY_TOMBSTONES = 2_048;
+/** Bound on superseded or coalesced CI attempts one event run reports as missed. */
+export const MAX_ROUTINE_EVENT_MISSED_COUNT = 100_000;
+const MAX_ROUTINE_WORKFLOW_PATH_CHARS = 2_048;
 export const MAX_ROUTINE_SUMMARY_CHARS = 1_000;
 export const MAX_ROUTINE_INSTANT_MS = 8_640_000_000_000_000;
 export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
@@ -80,8 +91,34 @@ const calendarSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const eventSchema = Type.Object(
+	{
+		kind: Type.Literal("event"),
+		source: Type.Literal("ci", {
+			description:
+				"Terminal CI attempts of the revision this session has checked out, as the CI source reports them.",
+		}),
+		conclusions: Type.Optional(
+			Type.Array(StringEnum(CI_TERMINAL_CONCLUSIONS), {
+				minItems: 1,
+				maxItems: CI_TERMINAL_CONCLUSIONS.length,
+				uniqueItems: true,
+				description: 'Attempt conclusions that start a run. Default ["failure"].',
+			}),
+		),
+		workflowPath: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_ROUTINE_WORKFLOW_PATH_CHARS,
+				description: "Only attempts of this workflow file, for example .github/workflows/ci.yml.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 /** Only schedules the host can execute are accepted; calendar rules are validated by the calendar owner. */
-export const routineScheduleInputSchema = Type.Union([intervalSchema, onceSchema, calendarSchema]);
+export const routineScheduleInputSchema = Type.Union([intervalSchema, onceSchema, calendarSchema, eventSchema]);
 
 /** Model-facing authoring input. Recipient and compiled authority are host-owned and absent from this schema. */
 export const routineAuthoringSchema = Type.Object(
@@ -102,7 +139,19 @@ export type RoutineCursor =
 	 * Next slot computed when the previous one was claimed; null once no slot is representable.
 	 * `skipped` counts slots passed over for lateness since the last run, carried into its missed count.
 	 */
-	| { readonly kind: "calendar"; readonly nextAt: number | null; readonly skipped?: number };
+	| { readonly kind: "calendar"; readonly nextAt: number | null; readonly skipped?: number }
+	/**
+	 * Host events up to `throughOrdinal` are decided. `replayGaps` is the digest of the sources' last replay gaps
+	 * when last decided; `skipped` counts matching attempts superseded before a decision and `historyGap` records a
+	 * new replay gap, both carried into the next run.
+	 */
+	| {
+			readonly kind: "event";
+			readonly throughOrdinal: number;
+			readonly replayGaps: string;
+			readonly skipped?: number;
+			readonly historyGap?: true;
+	  };
 
 export type PersistentRoutineTarget =
 	| { readonly kind: "bot"; readonly agentId: string }
@@ -129,7 +178,40 @@ export type RoutineSchedule =
 			readonly timeZone: string;
 			readonly anchorAt: number;
 			readonly maxLatenessMs?: number;
+	  }
+	/** Root-applicable CI attempts accepted into the session ledger after `anchorOrdinal`. */
+	| {
+			readonly kind: "event";
+			readonly source: "ci";
+			readonly conclusions: readonly CiTerminalConclusion[];
+			readonly workflowPath?: string;
+			readonly anchorOrdinal: number;
+			readonly anchorReplayGaps: string;
 	  };
+
+/** Host-owned ledger position an event routine is authored at: later events only. */
+export interface RoutineEventAnchor {
+	readonly ordinal: number;
+	readonly replayGaps: string;
+}
+
+/** One retained host event as the owning session decides it; never a copy of ledger custody. */
+export interface RoutineHostEventFact {
+	readonly acceptedOrdinal: number;
+	readonly sourceSequence: number;
+	readonly event: CiAttemptTerminalEvent;
+	/** This live session has sealed the event's source frontier. */
+	readonly ready: boolean;
+	/** The event is the completed observation of its subject in the source's current seal. */
+	readonly current: boolean;
+	/** The event's subject is one of the source's current root subjects: the checked-out revision. */
+	readonly rootApplicable: boolean;
+}
+
+export interface RoutineHostEventFeed {
+	readonly events: readonly RoutineHostEventFact[];
+	readonly replayGaps: string;
+}
 
 export interface PersistentRoutineDefinition {
 	readonly routineId: string;
@@ -155,12 +237,23 @@ export interface UpsertPersistentRoutineInput {
 	readonly expectedRevision?: number;
 	readonly createOnly?: boolean;
 	readonly nowMs?: number;
+	/** Required when an event schedule is created or its rule changes; ignored otherwise. */
+	readonly eventAnchor?: RoutineEventAnchor;
 }
 
 export type RoutineOccurrencePhase = "pending" | "claimed" | "dispatching" | "running" | "uncertain" | "terminal";
 export type RoutineOccurrenceTrigger =
 	| { readonly kind: "schedule"; readonly scheduledAt: number; readonly missedCount: number }
-	| { readonly kind: "manual"; readonly commandId: string; readonly requestedAt: number };
+	| { readonly kind: "manual"; readonly commandId: string; readonly requestedAt: number }
+	/** A bounded copy of the deciding event, so instructions never depend on ledger retention. */
+	| {
+			readonly kind: "event";
+			readonly triggeredAt: number;
+			readonly acceptedOrdinal: number;
+			readonly missedCount: number;
+			readonly historyGap?: true;
+			readonly event: CiAttemptTerminalEvent;
+	  };
 export type RoutineTerminalOutcome = "succeeded" | "failed" | "cancelled" | "uncertain";
 
 export interface RoutineResult {
@@ -212,9 +305,21 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 
 export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled", "uncertain"] as const;
 
-/** The instant a claim is attributed to: its scheduled slot, or the manual request time. */
+/** The instant a claim is attributed to: its scheduled slot, the manual request time or the event claim time. */
 export function routineTriggerAt(trigger: RoutineOccurrenceTrigger): number {
-	return trigger.kind === "schedule" ? trigger.scheduledAt : trigger.requestedAt;
+	if (trigger.kind === "schedule") return trigger.scheduledAt;
+	return trigger.kind === "manual" ? trigger.requestedAt : trigger.triggeredAt;
+}
+
+/** Whether a CI attempt satisfies an event schedule's filter. Root applicability is decided by the caller. */
+export function routineEventMatches(
+	schedule: Extract<RoutineSchedule, { kind: "event" }>,
+	event: CiAttemptTerminalEvent,
+): boolean {
+	return (
+		schedule.conclusions.includes(event.conclusion) &&
+		(schedule.workflowPath === undefined || schedule.workflowPath === event.workflowPath)
+	);
 }
 
 export interface RoutineOccurrenceClaimInput {
@@ -227,6 +332,69 @@ export interface RoutineOccurrenceClaimInput {
 	readonly eligibleRoutineIds?: readonly string[];
 	readonly eligibleOccurrenceIds?: readonly string[];
 	readonly routineId?: string;
+	/** Retained host events of the claiming session; event routines are decided only when present. */
+	readonly hostEvents?: RoutineHostEventFeed;
+}
+
+export interface RoutineEventDecision {
+	/**
+	 * The routine's cursor once these events are decided, before any occurrence is recorded: `skipped` adds the
+	 * matching attempts a later observation superseded, `historyGap` a replay gap recorded since the last decision.
+	 */
+	readonly cursor: Extract<RoutineCursor, { kind: "event" }>;
+	/** Current matching attempts, oldest first; the caller drops those already journaled or tombstoned. */
+	readonly candidates: readonly RoutineHostEventFact[];
+}
+
+/**
+ * Decides an event routine against the retained host events, with the root note's gate: the event's source has
+ * sealed in this live session, the event is its subject's current completed observation, and the subject is a
+ * current root subject. The cursor never passes a matching event whose source has not sealed.
+ */
+export function decideRoutineEvents(
+	schedule: Extract<RoutineSchedule, { kind: "event" }>,
+	cursor: Extract<RoutineCursor, { kind: "event" }>,
+	feed: RoutineHostEventFeed,
+): RoutineEventDecision {
+	const relevant = feed.events
+		.filter(
+			(fact) =>
+				fact.acceptedOrdinal > cursor.throughOrdinal &&
+				fact.rootApplicable &&
+				routineEventMatches(schedule, fact.event),
+		)
+		.sort(compareRoutineHostEvents);
+	let throughOrdinal = cursor.throughOrdinal;
+	for (const fact of feed.events) throughOrdinal = Math.max(throughOrdinal, fact.acceptedOrdinal);
+	const blocked = relevant.find((fact) => !fact.ready);
+	if (blocked) throughOrdinal = Math.max(cursor.throughOrdinal, Math.min(throughOrdinal, blocked.acceptedOrdinal - 1));
+	const candidates: RoutineHostEventFact[] = [];
+	let superseded = 0;
+	for (const fact of relevant) {
+		if (!fact.ready) continue;
+		if (fact.current) candidates.push(fact);
+		else if (fact.acceptedOrdinal <= throughOrdinal) superseded++;
+	}
+	const skipped = Math.min(MAX_ROUTINE_EVENT_MISSED_COUNT, (cursor.skipped ?? 0) + superseded);
+	return {
+		cursor: {
+			kind: "event",
+			throughOrdinal,
+			replayGaps: feed.replayGaps,
+			...(skipped > 0 ? { skipped } : {}),
+			...(cursor.historyGap || feed.replayGaps !== cursor.replayGaps ? { historyGap: true as const } : {}),
+		},
+		candidates,
+	};
+}
+
+/** Ledger order; snapshots of one seal share an ordinal and are ordered by source position, then identity. */
+export function compareRoutineHostEvents(left: RoutineHostEventFact, right: RoutineHostEventFact): number {
+	return (
+		left.acceptedOrdinal - right.acceptedOrdinal ||
+		left.sourceSequence - right.sourceSequence ||
+		(left.event.eventId < right.event.eventId ? -1 : left.event.eventId > right.event.eventId ? 1 : 0)
+	);
 }
 
 export interface RoutineOccurrenceListFilter {
@@ -285,7 +453,35 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
 		};
 	}
-	throw new TypeError("Routine schedule must be an executable interval, one-time UTC instant or calendar rule.");
+	if (
+		value.kind === "event" &&
+		value.source === "ci" &&
+		hasOnlyKeys(value, ["kind", "source", "conclusions", "workflowPath"])
+	)
+		return {
+			kind: "event",
+			source: "ci",
+			conclusions: canonicalRoutineConclusions(value.conclusions),
+			...(value.workflowPath === undefined
+				? {}
+				: { workflowPath: boundedString(value.workflowPath, MAX_ROUTINE_WORKFLOW_PATH_CHARS, "workflow path") }),
+		};
+	throw new TypeError(
+		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule or CI event filter.",
+	);
+}
+
+/** Unique conclusions in contract order; an omitted filter means failed attempts only. */
+function canonicalRoutineConclusions(value: unknown): CiTerminalConclusion[] {
+	if (value === undefined) return ["failure"];
+	if (
+		!Array.isArray(value) ||
+		value.length === 0 ||
+		new Set(value).size !== value.length ||
+		value.some((entry) => !(CI_TERMINAL_CONCLUSIONS as readonly unknown[]).includes(entry))
+	)
+		throw new TypeError("Routine CI conclusions must be a non-empty list of distinct terminal conclusions.");
+	return CI_TERMINAL_CONCLUSIONS.filter((conclusion) => value.includes(conclusion));
 }
 
 /** Authored form of a stored schedule, without host-owned anchors. */
@@ -306,6 +502,13 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				timeZone: schedule.timeZone,
 				...(schedule.maxLatenessMs === undefined ? {} : { maxLatenessMs: schedule.maxLatenessMs }),
 			};
+		case "event":
+			return {
+				kind: "event",
+				source: schedule.source,
+				conclusions: [...schedule.conclusions],
+				...(schedule.workflowPath === undefined ? {} : { workflowPath: schedule.workflowPath }),
+			};
 	}
 }
 
@@ -321,6 +524,14 @@ export function routineSlotRule(schedule: RoutineScheduleInput): RoutineSchedule
 				kind: "calendar",
 				cron: schedule.cron,
 				...(schedule.timeZone === undefined ? {} : { timeZone: schedule.timeZone }),
+			};
+		case "event":
+			// The whole filter decides which events run it: any change re-anchors at the ledger's current position.
+			return {
+				kind: "event",
+				source: schedule.source,
+				conclusions: canonicalRoutineConclusions(schedule.conclusions),
+				...(schedule.workflowPath === undefined ? {} : { workflowPath: schedule.workflowPath }),
 			};
 	}
 }
@@ -342,6 +553,8 @@ export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 			return { kind: "once", consumed: false };
 		case "calendar":
 			return { kind: "calendar", nextAt: nextCalendarSlotAfter(schedule, schedule.anchorAt) ?? null };
+		case "event":
+			return { kind: "event", throughOrdinal: schedule.anchorOrdinal, replayGaps: schedule.anchorReplayGaps };
 	}
 }
 
@@ -443,6 +656,12 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			cursor.nextAt <= definition.schedule.anchorAt
 		)
 			return undefined;
+		if (
+			definition.schedule.kind === "event" &&
+			cursor.kind === "event" &&
+			cursor.throughOrdinal < definition.schedule.anchorOrdinal
+		)
+			return undefined;
 		const nextRunAt = nextRoutineAt(definition.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
 		if (
 			rawNextRunAt !== nextRunAt ||
@@ -537,6 +756,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 				scheduledAt: value.trigger.scheduledAt,
 				missedCount: value.trigger.missedCount as number,
 			};
+			if (definition.schedule.kind === "event") return undefined;
 			if (definition.schedule.kind === "once") {
 				if (trigger.scheduledAt !== definition.schedule.at || trigger.missedCount !== 0) return undefined;
 			} else if (definition.schedule.kind === "calendar") {
@@ -558,7 +778,32 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 				commandId: boundedString(value.trigger.commandId, MAX_ROUTINE_COMMAND_ID_CHARS, "command id"),
 				requestedAt: value.trigger.requestedAt,
 			};
+		} else if (
+			isPlainRecord(value.trigger) &&
+			value.trigger.kind === "event" &&
+			definition.schedule.kind === "event" &&
+			hasOnlyKeys(value.trigger, ["kind", "triggeredAt", "acceptedOrdinal", "missedCount", "historyGap", "event"]) &&
+			validInstant(value.trigger.triggeredAt) &&
+			value.trigger.triggeredAt === value.createdAt &&
+			Number.isSafeInteger(value.trigger.acceptedOrdinal) &&
+			(value.trigger.acceptedOrdinal as number) > definition.schedule.anchorOrdinal &&
+			Number.isSafeInteger(value.trigger.missedCount) &&
+			(value.trigger.missedCount as number) >= 0 &&
+			(value.trigger.missedCount as number) <= MAX_ROUTINE_EVENT_MISSED_COUNT &&
+			(value.trigger.historyGap === undefined || value.trigger.historyGap === true)
+		) {
+			const event = parseCiAttemptTerminalEvent(value.trigger.event);
+			if (!routineEventMatches(definition.schedule, event)) return undefined;
+			trigger = {
+				kind: "event",
+				triggeredAt: value.trigger.triggeredAt,
+				acceptedOrdinal: value.trigger.acceptedOrdinal as number,
+				missedCount: value.trigger.missedCount as number,
+				...(value.trigger.historyGap ? { historyGap: true as const } : {}),
+				event,
+			};
 		} else return undefined;
+		if (target.kind !== "session" && trigger.kind === "event") return undefined;
 		if (value.occurrenceId !== routineOccurrenceId(definition, trigger)) return undefined;
 		const parentOrigin = workerReceiptOriginFromValue(value.parentOrigin);
 		if (
@@ -746,6 +991,31 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 			};
 		throw new TypeError("Persisted calendar schedule requires a canonical rule, a supported zone and an anchor.");
 	}
+	if (value.kind === "event") {
+		if (
+			hasOnlyKeys(value, ["kind", "source", "conclusions", "workflowPath", "anchorOrdinal", "anchorReplayGaps"]) &&
+			Number.isSafeInteger(value.anchorOrdinal) &&
+			(value.anchorOrdinal as number) >= 0 &&
+			isRoutineDigest(value.anchorReplayGaps)
+		) {
+			const authored = parseRoutineScheduleInput({
+				kind: value.kind,
+				source: value.source,
+				conclusions: value.conclusions,
+				...(value.workflowPath === undefined ? {} : { workflowPath: value.workflowPath }),
+			});
+			if (authored.kind === "event" && isDeepStrictEqual(authored.conclusions, value.conclusions))
+				return {
+					kind: "event",
+					source: authored.source,
+					conclusions: canonicalRoutineConclusions(authored.conclusions),
+					...(authored.workflowPath === undefined ? {} : { workflowPath: authored.workflowPath }),
+					anchorOrdinal: value.anchorOrdinal as number,
+					anchorReplayGaps: value.anchorReplayGaps,
+				};
+		}
+		throw new TypeError("Persisted event schedule requires a canonical filter and a ledger anchor.");
+	}
 	const authored = parseRoutineScheduleInput(
 		value.kind === "interval" ? { kind: "interval", intervalMs: value.intervalMs } : value,
 	);
@@ -800,7 +1070,30 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 			nextAt: value.nextAt,
 			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
 		};
+	if (
+		value.kind === "event" &&
+		hasOnlyKeys(value, ["kind", "throughOrdinal", "replayGaps", "skipped", "historyGap"]) &&
+		Number.isSafeInteger(value.throughOrdinal) &&
+		(value.throughOrdinal as number) >= 0 &&
+		isRoutineDigest(value.replayGaps) &&
+		(value.skipped === undefined ||
+			(Number.isSafeInteger(value.skipped) &&
+				(value.skipped as number) >= 1 &&
+				(value.skipped as number) <= MAX_ROUTINE_EVENT_MISSED_COUNT)) &&
+		(value.historyGap === undefined || value.historyGap === true)
+	)
+		return {
+			kind: "event",
+			throughOrdinal: value.throughOrdinal as number,
+			replayGaps: value.replayGaps,
+			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
+			...(value.historyGap ? { historyGap: true as const } : {}),
+		};
 	throw new TypeError("Routine cursor is invalid.");
+}
+
+function isRoutineDigest(value: unknown): value is string {
+	return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 }
 
 export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor): number | undefined {
@@ -811,6 +1104,11 @@ export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor):
 	if (schedule.kind === "calendar") {
 		if (cursor.kind !== "calendar") throw new TypeError("Routine cursor does not match its schedule.");
 		return cursor.nextAt ?? undefined;
+	}
+	if (schedule.kind === "event") {
+		if (cursor.kind !== "event") throw new TypeError("Routine cursor does not match its schedule.");
+		// Host events, not a clock, decide when an event routine runs.
+		return undefined;
 	}
 	if (cursor.kind !== "interval") throw new TypeError("Routine cursor does not match its schedule.");
 	const nextAt = schedule.anchorAt + schedule.intervalMs * cursor.nextIndex;
@@ -855,9 +1153,15 @@ export function routineOccurrenceId(
 	definition: Pick<PersistentRoutineDefinition, "incarnationId" | "revision">,
 	trigger: RoutineOccurrenceTrigger,
 ): string {
-	const suffix =
-		trigger.kind === "schedule"
-			? String(trigger.scheduledAt)
-			: `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
+	let suffix: string;
+	if (trigger.kind === "schedule") suffix = String(trigger.scheduledAt);
+	else if (trigger.kind === "manual")
+		suffix = `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
+	else {
+		// Keyed by the attempt, not the ledger position: a re-presented attempt is the same occurrence.
+		const identity = trigger.event.identity;
+		const key = [identity.provider, identity.host, identity.repositoryId, identity.runId, identity.runAttempt];
+		suffix = `event:${createHash("sha256").update(JSON.stringify(key)).digest("hex")}`;
+	}
 	return `${definition.incarnationId}:${definition.revision}:${suffix}`;
 }

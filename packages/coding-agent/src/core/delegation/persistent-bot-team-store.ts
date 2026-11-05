@@ -16,11 +16,13 @@ import {
 	nextCalendarSlotAfter,
 } from "../routines/calendar-schedule.ts";
 import {
+	decideRoutineEvents,
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
-	MAX_ROUTINE_MANUAL_TOMBSTONES,
+	MAX_ROUTINE_EVENT_MISSED_COUNT,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
+	MAX_ROUTINE_REPLAY_TOMBSTONES,
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
 	type PersistentRoutineDefinition,
@@ -34,6 +36,8 @@ import {
 	type RoutineCursor,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
+	type RoutineHostEventFact,
+	type RoutineHostEventFeed,
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
@@ -638,7 +642,7 @@ export class PersistentBotTeamStore {
 	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
 	private readonly routines = new Map<string, RoutineDefinitionView>();
 	private readonly routineOccurrences = new Map<string, RoutineOccurrence>();
-	private readonly routineManualTombstones = new Set<string>();
+	private readonly routineReplayTombstones = new Set<string>();
 	private routineRevisionCounter = 0;
 	private readonly listeners = new Set<() => void>();
 	private mutationChanged = false;
@@ -756,6 +760,7 @@ export class PersistentBotTeamStore {
 		firstDueAt: number,
 		nowMs: number,
 	): Extract<RoutineOccurrence["trigger"], { kind: "schedule" }> {
+		if (routine.schedule.kind === "event") throw new Error("Event routines have no clock slot.");
 		if (routine.schedule.kind === "once") return { kind: "schedule", scheduledAt: firstDueAt, missedCount: 0 };
 		if (routine.schedule.kind === "calendar") {
 			const scheduledAt = latestCalendarSlotAtOrBefore(routine.schedule, nowMs, firstDueAt);
@@ -897,9 +902,10 @@ export class PersistentBotTeamStore {
 		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
 			const item = removable.shift();
 			if (!item) continue;
-			if (item.trigger.kind === "manual") {
-				if (this.routineManualTombstones.size >= MAX_ROUTINE_MANUAL_TOMBSTONES) continue;
-				this.routineManualTombstones.add(item.occurrenceId);
+			// Slot occurrences cannot recur behind their cursor; manual commands and CI attempts can be re-presented.
+			if (item.trigger.kind !== "schedule") {
+				if (this.routineReplayTombstones.size >= MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
+				this.routineReplayTombstones.add(item.occurrenceId);
 			}
 			this.routineOccurrences.delete(item.occurrenceId);
 		}
@@ -938,7 +944,7 @@ export class PersistentBotTeamStore {
 			throw new Error("Routine definition registry exceeds its bounded capacity.");
 		if (
 			this.routineOccurrences.size > MAX_ROUTINE_OCCURRENCES ||
-			this.routineManualTombstones.size > MAX_ROUTINE_MANUAL_TOMBSTONES
+			this.routineReplayTombstones.size > MAX_ROUTINE_REPLAY_TOMBSTONES
 		)
 			throw new Error("Routine occurrence custody exceeds its bounded capacity.");
 		for (const routine of this.routines.values()) {
@@ -961,8 +967,8 @@ export class PersistentBotTeamStore {
 			...(this.routineOccurrences.size > 0
 				? { routineOccurrences: Array.from(this.routineOccurrences.values()) }
 				: {}),
-			...(this.routineManualTombstones.size > 0
-				? { routineManualTombstones: Array.from(this.routineManualTombstones) }
+			...(this.routineReplayTombstones.size > 0
+				? { routineManualTombstones: Array.from(this.routineReplayTombstones) }
 				: {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
@@ -1026,7 +1032,7 @@ export class PersistentBotTeamStore {
 			teamMessages: new Map(this.teamMessages),
 			routines: new Map(this.routines),
 			occurrences: new Map(this.routineOccurrences),
-			manualTombstones: new Set(this.routineManualTombstones),
+			replayTombstones: new Set(this.routineReplayTombstones),
 			revisionCounter: this.routineRevisionCounter,
 			loadedDigest: this.loadedDigest,
 			legacyRoutinesExposed: this.legacyRoutinesExposed,
@@ -1038,7 +1044,7 @@ export class PersistentBotTeamStore {
 		this.teamMessages.clear();
 		this.routines.clear();
 		this.routineOccurrences.clear();
-		this.routineManualTombstones.clear();
+		this.routineReplayTombstones.clear();
 		this.routineRevisionCounter = 0;
 		this.loadedDigest = digest;
 		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
@@ -1116,19 +1122,19 @@ export class PersistentBotTeamStore {
 			if (parsed.routineManualTombstones !== undefined) {
 				if (
 					!Array.isArray(parsed.routineManualTombstones) ||
-					parsed.routineManualTombstones.length > MAX_ROUTINE_MANUAL_TOMBSTONES ||
+					parsed.routineManualTombstones.length > MAX_ROUTINE_REPLAY_TOMBSTONES ||
 					parsed.routineManualTombstones.some(
 						(id) =>
 							typeof id !== "string" ||
 							id.length > 256 ||
-							!/^[A-Za-z0-9-]+:[0-9]+:manual:[a-f0-9]{64}$/u.test(id),
+							!/^[A-Za-z0-9-]+:[0-9]+:(?:manual|event):[a-f0-9]{64}$/u.test(id),
 					)
 				)
-					throw new Error("Routine manual replay journal has an invalid shape.");
+					throw new Error("Routine replay journal has an invalid shape.");
 				for (const id of parsed.routineManualTombstones as string[]) {
-					if (this.routineManualTombstones.has(id))
-						throw new Error("Routine manual replay journal contains duplicate entries.");
-					this.routineManualTombstones.add(id);
+					if (this.routineReplayTombstones.has(id))
+						throw new Error("Routine replay journal contains duplicate entries.");
+					this.routineReplayTombstones.add(id);
 				}
 			}
 			const highestRoutineRevision = this.highestRoutineRevision();
@@ -1153,8 +1159,8 @@ export class PersistentBotTeamStore {
 			for (const [id, value] of previousState.routines) this.routines.set(id, value);
 			this.routineOccurrences.clear();
 			for (const [id, value] of previousState.occurrences) this.routineOccurrences.set(id, value);
-			this.routineManualTombstones.clear();
-			for (const value of previousState.manualTombstones) this.routineManualTombstones.add(value);
+			this.routineReplayTombstones.clear();
+			for (const value of previousState.replayTombstones) this.routineReplayTombstones.add(value);
 			this.routineRevisionCounter = previousState.revisionCounter;
 			this.loadedDigest = previousState.loadedDigest;
 			this.legacyRoutinesExposed = previousState.legacyRoutinesExposed;
@@ -1462,7 +1468,23 @@ export class PersistentBotTeamStore {
 			if (scheduleInput.kind === "interval")
 				schedule = { kind: "interval", intervalMs: scheduleInput.intervalMs, anchorAt };
 			else if (scheduleInput.kind === "once") schedule = scheduleInput;
-			else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
+			else if (scheduleInput.kind === "event") {
+				// Host events are decided by the session that owns their ledger; a bot or team has none.
+				if (!session) throw new Error("Event routines run in their owning session only.");
+				const kept = !scheduleChanged && existing?.schedule.kind === "event" ? existing.schedule : undefined;
+				const anchor = kept
+					? { ordinal: kept.anchorOrdinal, replayGaps: kept.anchorReplayGaps }
+					: input.eventAnchor;
+				if (!anchor) throw new Error("Event routines require the session's host-event ledger position.");
+				schedule = {
+					kind: "event",
+					source: scheduleInput.source,
+					conclusions: scheduleInput.conclusions ?? ["failure"],
+					...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
+					anchorOrdinal: anchor.ordinal,
+					anchorReplayGaps: anchor.replayGaps,
+				};
+			} else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
 			else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
 			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
 			if (
@@ -1578,7 +1600,7 @@ export class PersistentBotTeamStore {
 				if (
 					!definition ||
 					definition.incarnationId !== occurrence.definition.incarnationId ||
-					(!definition.enabled && occurrence.trigger.kind === "schedule")
+					(!definition.enabled && occurrence.trigger.kind !== "manual")
 				)
 					continue;
 				if (occurrence.dispatchKey || occurrence.executionRef || occurrence.result)
@@ -1614,6 +1636,11 @@ export class PersistentBotTeamStore {
 				if (!routine.enabled || (input.routineId && input.routineId !== id)) continue;
 				if (eligible && !eligible.has(id)) continue;
 				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
+				if (routine.schedule.kind === "event") {
+					if (input.hostEvents && this.decideEventRoutine(routine, input, input.hostEvents, output))
+						changed = true;
+					continue;
+				}
 				const dueAt = nextRoutineAt(routine.schedule, routine.cursor);
 				if (dueAt === undefined || dueAt > input.nowMs) continue;
 				const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
@@ -1683,6 +1710,76 @@ export class PersistentBotTeamStore {
 		});
 	}
 
+	/**
+	 * Decides one event routine against its session's retained host events. At most one undispatched run exists per
+	 * routine: the latest new attempt runs, older new attempts and superseded ones become its missed count. Returns
+	 * whether the cursor or the journal changed; a new occurrence is appended to `output`.
+	 */
+	private decideEventRoutine(
+		routine: RoutineDefinitionView,
+		input: RoutineOccurrenceClaimInput,
+		feed: RoutineHostEventFeed,
+		output: RoutineOccurrence[],
+	): boolean {
+		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return false;
+		for (const occurrence of this.routineOccurrences.values())
+			if (
+				occurrence.routineId === routine.routineId &&
+				(occurrence.phase === "pending" || occurrence.phase === "claimed")
+			)
+				return false;
+		const decision = decideRoutineEvents(routine.schedule, routine.cursor, feed);
+		const eventTrigger = (fact: RoutineHostEventFact, missedCount: number): RoutineOccurrence["trigger"] => ({
+			kind: "event",
+			triggeredAt: input.nowMs,
+			acceptedOrdinal: fact.acceptedOrdinal,
+			missedCount,
+			...(decision.cursor.historyGap ? { historyGap: true as const } : {}),
+			event: fact.event,
+		});
+		// The same attempt is the same occurrence: journaled or tombstoned attempts never run again.
+		const fresh = decision.candidates.filter((fact) => {
+			const id = routineOccurrenceId(routine, eventTrigger(fact, 0));
+			return !this.routineOccurrences.has(id) && !this.routineReplayTombstones.has(id);
+		});
+		const latest = fresh.at(-1);
+		if (latest) {
+			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
+			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) return false;
+			// Return successful reclaims even when fresh admission has no journal space; the attempt stays undecided.
+			if (output.length > 0 && this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES) return false;
+			const coalesced = fresh
+				.slice(0, -1)
+				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;
+			const trigger = eventTrigger(
+				latest,
+				Math.min(MAX_ROUTINE_EVENT_MISSED_COUNT, (decision.cursor.skipped ?? 0) + coalesced),
+			);
+			const occurrenceId = routineOccurrenceId(routine, trigger);
+			const occurrence = this.createClaimedOccurrence(
+				routine,
+				occurrenceId,
+				trigger,
+				input.owner,
+				input.leaseMs,
+				input.nowMs,
+				parentOrigin,
+			);
+			this.routineOccurrences.set(occurrenceId, occurrence);
+			const cursor: RoutineCursor = {
+				kind: "event",
+				throughOrdinal: decision.cursor.throughOrdinal,
+				replayGaps: decision.cursor.replayGaps,
+			};
+			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
+			output.push(occurrence);
+			return true;
+		}
+		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return false;
+		this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
+		return true;
+	}
+
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
 		expectedRevision?: number;
@@ -1725,7 +1822,7 @@ export class PersistentBotTeamStore {
 			const id = routineOccurrenceId(routine, trigger);
 			const existing = this.routineOccurrences.get(id);
 			if (existing) return structuredClone(existing);
-			if (this.routineManualTombstones.has(id))
+			if (this.routineReplayTombstones.has(id))
 				throw new Error(
 					"This manual request was already consumed and has expired from the bounded replay journal.",
 				);
