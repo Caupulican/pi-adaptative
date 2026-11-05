@@ -40,6 +40,14 @@ export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
 /** Shortest start window: timer and claim latency must never close a window by themselves. */
 export const MIN_ROUTINE_START_WINDOW_MS = 60_000;
 export const MAX_ROUTINE_LATENESS_MS = 366 * 86_400_000;
+/** Consumed owner-intake origins kept after their routine is deleted, so a replay never recreates it. */
+export const MAX_ROUTINE_INTAKE_ORIGINS = 2_048;
+/** Routines the harness creates from one session's owner turns within {@link ROUTINE_INTAKE_CAP_WINDOW_MS}. */
+export const ROUTINE_INTAKE_WINDOW_CAP = 3;
+export const ROUTINE_INTAKE_CAP_WINDOW_MS = 86_400_000;
+/** Live harness-created routines one session may hold at once. */
+export const ROUTINE_INTAKE_LIVE_CAP = 10;
+const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
 
 const intervalSchema = Type.Object(
 	{
@@ -215,6 +223,40 @@ export interface RoutineHostEventFeed {
 	readonly replayGaps: string;
 }
 
+/** How a routine came to exist when the host, not a tool call, created it. Fixed at creation. */
+export interface RoutineOrigin {
+	readonly kind: "owner-intake";
+	/** The owner-evidence source whose words asked for the routine. */
+	readonly sourceId: string;
+}
+
+/** The identity of one owner request the host turned into a routine: consumed once, never recreated. */
+export interface RoutineIntakeOrigin {
+	/** Canonical digest of the session, source, source digest and request position. */
+	readonly key: string;
+	readonly sourceId: string;
+}
+
+/** One consumed intake origin, kept for replay refusal and the per-session window cap. */
+export interface RoutineIntakeConsumption {
+	readonly key: string;
+	readonly parentSessionId: string;
+	readonly at: number;
+}
+
+/** Why the store refused a host intake creation; anything else thrown is not a refusal and may be retried. */
+export type RoutineIntakeRefusalReason = "consumed" | "window_cap" | "live_cap";
+
+export class RoutineIntakeRefusal extends Error {
+	readonly reason: RoutineIntakeRefusalReason;
+
+	constructor(reason: RoutineIntakeRefusalReason, message: string) {
+		super(message);
+		this.name = "RoutineIntakeRefusal";
+		this.reason = reason;
+	}
+}
+
 export interface PersistentRoutineDefinition {
 	readonly routineId: string;
 	readonly incarnationId: string;
@@ -224,6 +266,7 @@ export interface PersistentRoutineDefinition {
 	readonly schedule: RoutineSchedule;
 	readonly enabled: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
+	readonly origin?: RoutineOrigin;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
@@ -241,6 +284,11 @@ export interface UpsertPersistentRoutineInput {
 	readonly nowMs?: number;
 	/** Required when an event schedule is created or its rule changes; ignored otherwise. */
 	readonly eventAnchor?: RoutineEventAnchor;
+	/**
+	 * A host intake creation: create-only, session-targeted, refused with {@link RoutineIntakeRefusal} when the
+	 * origin is already consumed or the session's caps are reached, and consumed in the same write as the routine.
+	 */
+	readonly intakeOrigin?: RoutineIntakeOrigin;
 }
 
 export type RoutineOccurrencePhase = "pending" | "claimed" | "dispatching" | "running" | "uncertain" | "terminal";
@@ -658,6 +706,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"schedule",
 			"enabled",
 			"executionSnapshot",
+			"origin",
 			"createdAt",
 			"updatedAt",
 		])
@@ -688,6 +737,9 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			value.executionSnapshot === undefined ? undefined : parseRoutineExecutionSnapshot(value.executionSnapshot);
 		if ((target.kind === "session") !== (executionSnapshot !== undefined)) return undefined;
 		if (target.kind === "session" && executionSnapshot?.parentSessionId !== target.parentSessionId) return undefined;
+		const origin = value.origin === undefined ? undefined : parseRoutineOrigin(value.origin);
+		// Only the session that owns the source's ledger can have created a routine from it.
+		if (origin && target.kind !== "session") return undefined;
 		return {
 			routineId: value.routineId,
 			incarnationId: value.incarnationId,
@@ -697,6 +749,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			schedule,
 			enabled: value.enabled,
 			...(executionSnapshot ? { executionSnapshot } : {}),
+			...(origin ? { origin } : {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 		};
@@ -1166,6 +1219,42 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 
 function isRoutineDigest(value: unknown): value is string {
 	return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function parseRoutineOrigin(value: unknown): RoutineOrigin {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["kind", "sourceId"]) || value.kind !== "owner-intake")
+		throw new TypeError("Routine origin is invalid.");
+	return { kind: "owner-intake", sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id") };
+}
+
+/** The host's intake identity for one creation; a malformed one is a programming error, not a refusal. */
+export function parseRoutineIntakeOrigin(value: unknown): RoutineIntakeOrigin {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["key", "sourceId"]) || !isRoutineDigest(value.key))
+		throw new TypeError("Routine intake origin is invalid.");
+	return { key: value.key, sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id") };
+}
+
+/** The persisted consumed-origin journal, oldest first; one malformed or repeated entry rejects the whole journal. */
+export function parseRoutineIntakeConsumptions(value: unknown): RoutineIntakeConsumption[] {
+	if (!Array.isArray(value) || value.length > MAX_ROUTINE_INTAKE_ORIGINS)
+		throw new TypeError("Routine intake journal has an invalid size.");
+	const keys = new Set<string>();
+	return value.map((entry: unknown) => {
+		if (
+			!isPlainRecord(entry) ||
+			!hasOnlyKeys(entry, ["key", "parentSessionId", "at"]) ||
+			!isRoutineDigest(entry.key) ||
+			keys.has(entry.key) ||
+			!validInstant(entry.at)
+		)
+			throw new TypeError("Routine intake journal contains an invalid or repeated entry.");
+		keys.add(entry.key);
+		return {
+			key: entry.key,
+			parentSessionId: boundedString(entry.parentSessionId, 200, "parent session id"),
+			at: entry.at,
+		};
+	});
 }
 
 export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor): number | undefined {

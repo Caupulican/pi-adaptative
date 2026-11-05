@@ -19,6 +19,7 @@ import {
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
+	MAX_ROUTINE_INTAKE_ORIGINS,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
@@ -29,15 +30,22 @@ import {
 	parseLegacyRoutineDefinition,
 	parseRoutineDefinitionView,
 	parseRoutineExecutionSnapshot,
+	parseRoutineIntakeConsumptions,
+	parseRoutineIntakeOrigin,
 	parseRoutineOccurrence,
 	parseRoutineScheduleInput,
 	parseRoutineTarget,
+	ROUTINE_INTAKE_CAP_WINDOW_MS,
+	ROUTINE_INTAKE_LIVE_CAP,
+	ROUTINE_INTAKE_WINDOW_CAP,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
 	type RoutineHostEventFact,
 	type RoutineHostEventFeed,
+	type RoutineIntakeConsumption,
+	RoutineIntakeRefusal,
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
@@ -647,6 +655,8 @@ export class PersistentBotTeamStore {
 	private readonly routines = new Map<string, RoutineDefinitionView>();
 	private readonly routineOccurrences = new Map<string, RoutineOccurrence>();
 	private readonly routineReplayTombstones = new Set<string>();
+	/** Consumed owner-intake origins by key, oldest first; deleting a routine never removes its origin. */
+	private readonly routineIntakeOrigins = new Map<string, RoutineIntakeConsumption>();
 	private routineRevisionCounter = 0;
 	private readonly listeners = new Set<() => void>();
 	private mutationChanged = false;
@@ -804,6 +814,7 @@ export class PersistentBotTeamStore {
 			schedule: definition.schedule,
 			enabled: definition.enabled,
 			...(definition.executionSnapshot ? { executionSnapshot: definition.executionSnapshot } : {}),
+			...(definition.origin ? { origin: definition.origin } : {}),
 			createdAt: definition.createdAt,
 			updatedAt: definition.updatedAt,
 		};
@@ -949,7 +960,8 @@ export class PersistentBotTeamStore {
 			throw new Error("Routine definition registry exceeds its bounded capacity.");
 		if (
 			this.routineOccurrences.size > MAX_ROUTINE_OCCURRENCES ||
-			this.routineReplayTombstones.size > MAX_ROUTINE_REPLAY_TOMBSTONES
+			this.routineReplayTombstones.size > MAX_ROUTINE_REPLAY_TOMBSTONES ||
+			this.routineIntakeOrigins.size > MAX_ROUTINE_INTAKE_ORIGINS
 		)
 			throw new Error("Routine occurrence custody exceeds its bounded capacity.");
 		for (const routine of this.routines.values()) {
@@ -974,6 +986,9 @@ export class PersistentBotTeamStore {
 				: {}),
 			...(this.routineReplayTombstones.size > 0
 				? { routineManualTombstones: Array.from(this.routineReplayTombstones) }
+				: {}),
+			...(this.routineIntakeOrigins.size > 0
+				? { routineIntakeOrigins: Array.from(this.routineIntakeOrigins.values()) }
 				: {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
@@ -1038,6 +1053,7 @@ export class PersistentBotTeamStore {
 			routines: new Map(this.routines),
 			occurrences: new Map(this.routineOccurrences),
 			replayTombstones: new Set(this.routineReplayTombstones),
+			intakeOrigins: new Map(this.routineIntakeOrigins),
 			revisionCounter: this.routineRevisionCounter,
 			loadedDigest: this.loadedDigest,
 			legacyRoutinesExposed: this.legacyRoutinesExposed,
@@ -1050,6 +1066,7 @@ export class PersistentBotTeamStore {
 		this.routines.clear();
 		this.routineOccurrences.clear();
 		this.routineReplayTombstones.clear();
+		this.routineIntakeOrigins.clear();
 		this.routineRevisionCounter = 0;
 		this.loadedDigest = digest;
 		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
@@ -1142,6 +1159,10 @@ export class PersistentBotTeamStore {
 					this.routineReplayTombstones.add(id);
 				}
 			}
+			if (parsed.routineIntakeOrigins !== undefined) {
+				for (const consumption of parseRoutineIntakeConsumptions(parsed.routineIntakeOrigins))
+					this.routineIntakeOrigins.set(consumption.key, consumption);
+			}
 			const highestRoutineRevision = this.highestRoutineRevision();
 			const storedRevisionCounter = parsed.routineRevisionCounter;
 			if (storeVersion === 3 && storedRevisionCounter === undefined)
@@ -1166,6 +1187,8 @@ export class PersistentBotTeamStore {
 			for (const [id, value] of previousState.occurrences) this.routineOccurrences.set(id, value);
 			this.routineReplayTombstones.clear();
 			for (const value of previousState.replayTombstones) this.routineReplayTombstones.add(value);
+			this.routineIntakeOrigins.clear();
+			for (const [key, value] of previousState.intakeOrigins) this.routineIntakeOrigins.set(key, value);
 			this.routineRevisionCounter = previousState.revisionCounter;
 			this.loadedDigest = previousState.loadedDigest;
 			this.legacyRoutinesExposed = previousState.legacyRoutinesExposed;
@@ -1453,6 +1476,8 @@ export class PersistentBotTeamStore {
 			const existing = this.routines.get(normalizedId);
 			if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision)
 				throw new Error("Routine revision changed; read current state before retrying.");
+			// Checked before `createOnly`: a replay of a consumed origin meets its own deterministic routine id.
+			const intake = input.intakeOrigin ? this.admitRoutineIntake(input) : undefined;
 			if (input.createOnly && existing) throw new Error("Routine already exists.");
 			const stored = existing ? routineScheduleInputOf(existing.schedule) : undefined;
 			// The stored schedule resubmitted unchanged (a pause, resume or prompt edit) is kept as saved, so a routine whose
@@ -1523,6 +1548,12 @@ export class PersistentBotTeamStore {
 				...(input.executionSnapshot
 					? { executionSnapshot: parseRoutineExecutionSnapshot(input.executionSnapshot) }
 					: {}),
+				// Fixed at creation: an update, enable or disable never adds, changes or drops it.
+				...(existing?.origin
+					? { origin: existing.origin }
+					: intake
+						? { origin: { kind: "owner-intake" as const, sourceId: intake.sourceId } }
+						: {}),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
 			};
@@ -1550,10 +1581,55 @@ export class PersistentBotTeamStore {
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
+			if (intake) this.consumeRoutineIntake(intake.key, intake.parentSessionId, input.nowMs ?? Date.now());
 			if (!view.enabled) this.cancelUndispatchedRoutineOccurrences(normalizedId, input.nowMs ?? Date.now());
 			this.save();
 			return structuredClone(view);
 		});
+	}
+
+	/**
+	 * Admits one host intake creation under the store lock: create-only and session-targeted, refused when its
+	 * origin is consumed, when the session created {@link ROUTINE_INTAKE_WINDOW_CAP} routines within the cap
+	 * window, or when it holds {@link ROUTINE_INTAKE_LIVE_CAP} live intake routines.
+	 */
+	private admitRoutineIntake(input: UpsertPersistentRoutineInput): {
+		key: string;
+		sourceId: string;
+		parentSessionId: string;
+	} {
+		const origin = parseRoutineIntakeOrigin(input.intakeOrigin);
+		if (input.target.kind !== "session" || !input.createOnly || input.expectedRevision !== undefined)
+			throw new Error("A routine intake creation is a create-only session routine.");
+		const parentSessionId = input.target.parentSessionId;
+		if (this.routineIntakeOrigins.has(origin.key))
+			throw new RoutineIntakeRefusal("consumed", "This owner request was already turned into a routine.");
+		const nowMs = input.nowMs ?? Date.now();
+		let recent = 0;
+		for (const consumption of this.routineIntakeOrigins.values())
+			if (consumption.parentSessionId === parentSessionId && consumption.at > nowMs - ROUTINE_INTAKE_CAP_WINDOW_MS)
+				recent++;
+		if (recent >= ROUTINE_INTAKE_WINDOW_CAP)
+			throw new RoutineIntakeRefusal(
+				"window_cap",
+				"The daily limit of automatic routines for this session is reached.",
+			);
+		let live = 0;
+		for (const routine of this.routines.values())
+			if (routine.origin && routine.target.kind === "session" && routine.target.parentSessionId === parentSessionId)
+				live++;
+		if (live >= ROUTINE_INTAKE_LIVE_CAP)
+			throw new RoutineIntakeRefusal("live_cap", "This session already holds its limit of automatic routines.");
+		return { ...origin, parentSessionId };
+	}
+
+	/** Records a consumed origin in the creating write; the oldest entry leaves first once the journal is full. */
+	private consumeRoutineIntake(key: string, parentSessionId: string, at: number): void {
+		this.routineIntakeOrigins.set(key, { key, parentSessionId, at });
+		for (const oldest of this.routineIntakeOrigins.keys()) {
+			if (this.routineIntakeOrigins.size <= MAX_ROUTINE_INTAKE_ORIGINS) break;
+			this.routineIntakeOrigins.delete(oldest);
+		}
 	}
 
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs = Date.now()): boolean {
