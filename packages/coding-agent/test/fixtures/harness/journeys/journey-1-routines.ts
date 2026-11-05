@@ -858,19 +858,31 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			expect(stoppedStatus.lastEnd?.reason, "its end is recorded").toBe("signal");
 			expect(spendReports(stoppedStatus), "its reports outlive it").toHaveLength(1);
 
-			// Room again, and the daemon comes back by itself: another session's start revives it while a routine is
-			// enabled, and that session closing leaves it running the due slot away.
-			seedAwaySettings(1);
-			world.provider.enqueue("worker-a", workerReply("away-routine", awayPrompt));
+			// Room for one run again, and the daemon comes back by itself: another session's start revives it while a
+			// routine is enabled, and it runs this parent's due slot away. That other session saves its own routine and
+			// closes; when its slot comes due while this parent's run still holds the day's room, it is refused and claims
+			// nothing, and it runs once the first run's settled spend leaves room.
+			seedAwaySettings(0.25);
+			const firstRunRelease = createBarrier();
+			const contenderId = "away-contender";
+			const contenderPrompt = "Inspect the contending review task and report its status.";
+			world.provider.enqueue(
+				"worker-a",
+				workerReply("away-routine", awayPrompt, firstRunRelease.promise),
+				workerReply("away-contender", contenderPrompt),
+			);
+			const claimedAway = createBarrier();
+			const contenderRefused = createBarrier();
 			const ranAway = createBarrier();
+			const ran = (routineId: string) =>
+				awayStore.listRoutineOccurrences({ routineId }).some((occurrence) => occurrence.phase === "terminal");
 			const stopObservingRun = awayStore.subscribe(() => {
-				if (
-					awayStore
-						.listRoutineOccurrences({ routineId: awayRoutineId })
-						.some((occurrence) => occurrence.phase === "terminal")
-				)
-					ranAway.release();
+				if (awayStore.listRoutineOccurrences({ routineId: awayRoutineId }).length > 0) claimedAway.release();
+				if (awayStore.getRoutine(contenderId)?.awayRefusal?.reason === ROUTINE_AWAY_SPEND_REFUSAL)
+					contenderRefused.release();
+				if (ran(awayRoutineId) && ran(contenderId)) ranAway.release();
 			});
+			let contenderAt = 0;
 			try {
 				const launchesBeforeStart = daemonLaunches();
 				const startedDaemon = world.processes.runNextBotDaemon();
@@ -880,21 +892,82 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					settings,
 				});
 				expect(daemonLaunches() - launchesBeforeStart, "the session start launched exactly one daemon").toBe(1);
+				await withDeadline(world.trace, "the revived daemon claims the due run away", claimedAway.promise);
+				expect(
+					awayStore.listRoutineOccurrences({ routineId: awayRoutineId }).map((occurrence) => occurrence.executor),
+					"a single parent with room runs its due slot away",
+				).toEqual(["away"]);
+				world.faultMatrix.witness("R56", { control: true });
+				contenderAt = world.timers.port("routines").now() + 10_000;
+				world.systemOne.enterPhase("routine-away-contender-create", ICM_INTAKE_JUDGMENTS);
+				world.provider.enqueue(
+					"root",
+					calls("routine-away-contender-create-call", [
+						{
+							id: "routine-away-contender-create",
+							name: "routine",
+							arguments: {
+								action: "create",
+								routineId: contenderId,
+								prompt: contenderPrompt,
+								schedule: { kind: "once", at: contenderAt },
+								profileId: profile.profileId,
+							},
+						},
+					]),
+					{
+						...text("routine-away-contender-create-done", "The routine command is recorded."),
+						check: (request) => {
+							const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
+							expect(result?.isError, result?.text).toBe(false);
+						},
+					},
+				);
+				await withDeadline(
+					world.trace,
+					"routine-away-contender-create",
+					other.session.prompt("Apply the routine-away-contender-create routine command."),
+				);
 				expect(await world.disposeSessionInBody(other.session)).toBeUndefined();
 				const revivedDaemon = await startedDaemon;
-				await withDeadline(world.trace, "the revived daemon runs the due routine away", ranAway.promise);
+				// The other parent's slot comes due on the daemon's next renewal while the first run still holds its room.
+				world.timers.advance("routines", 10_000);
+				await withDeadline(world.trace, "the spend gate refuses the contending run away", contenderRefused.promise);
+				expect(
+					awayStore.listRoutineOccurrences({ routineId: contenderId }),
+					"the refused parent claims nothing",
+				).toEqual([]);
+				expect(awayStore.getRoutine(contenderId)?.nextRunAt, "its refused slot stays due").toBe(contenderAt);
+				expect(ran(awayRoutineId), "the first run still holds the day's room").toBe(false);
+				firstRunRelease.release();
+				await withDeadline(world.trace, "the revived daemon runs both due routines away", ranAway.promise);
 				expect(await revivedDaemon.stop()).toBe(0);
 			} finally {
+				firstRunRelease.release();
 				stopObservingRun();
 			}
-			expect(spendReports(daemonStatus()), "the revived daemon reports no refusal").toEqual([]);
+			expect(
+				spendReports(daemonStatus()),
+				"the revived daemon reports the contending run's refusal once and the first run's none",
+			).toHaveLength(1);
 			expect(storeDiagnostics, "the observing store read every write").toEqual([]);
+			const contenderRuns = awayStore.listRoutineOccurrences({ routineId: contenderId });
+			expect(
+				contenderRuns.map((occurrence) => [
+					occurrence.executor,
+					occurrence.result?.outcome,
+					occurrence.result?.delivery,
+				]),
+				"the refused run runs away once the first run's settled spend leaves room, its result left for its parent",
+			).toEqual([["away", "succeeded", "pending"]]);
+			expect(awayStore.getRoutine(contenderId)?.awayRefusal, "its admission cleared the refusal").toBeUndefined();
+			world.faultMatrix.witness("R56", { control: false });
 			const ranOccurrences = awayStore.listRoutineOccurrences({ routineId: awayRoutineId });
 			expect(ranOccurrences).toHaveLength(1);
 			expect(ranOccurrences[0]?.executor).toBe("away");
 			// The run's settled spend is saved on the run (zero on the scripted zero-price track), so a store read after
 			// the daemon stopped, with nothing left in its memory, charges the run what it spent instead of the run bound:
-			// four more runs fit the $1 day bound again and a fifth does not.
+			// four more runs fit a $1 day bound again and a fifth does not.
 			expect(ranOccurrences[0]?.awaySettlement?.costUsd, "the run's settled spend is saved on the run").toBe(0);
 			const roomAfterStop = routineAwaySpendRoom(
 				awayStore.listRoutineOccurrences({ routineId: awayRoutineId }),
@@ -910,7 +983,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				awayStore.getRoutine(awayRoutineId)?.awayRefusal,
 				"the admitted run cleared the refusal",
 			).toBeUndefined();
-			expect(workerRequests(), "the run away made exactly one worker request").toBe(workerRequestsBeforeAway + 1);
+			expect(workerRequests(), "each run away made exactly one worker request").toBe(workerRequestsBeforeAway + 2);
 			expect(world.io.peekFile(file), "nothing wrote the parent transcript while it was closed").toBe(fileWhileAway);
 			const awayRunAttempt = ranOccurrences[0]!.executionRef!;
 
@@ -1199,6 +1272,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
  * passed over unread while earlier words nothing answered are still read; a request the owner navigates away from
  * while it is judged creates nothing; a stale pass restored after the owner removed its routine creates nothing; and the
  * routine the model saved with an end is removed, and told once, after the owner returns to the conversation that saved it.
+ * A request meant only until something happens ends when its run reports that end met: removed after the result is
+ * delivered, told once, and no later slot runs.
  */
 async function runJourney1RoutineIntake(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
 	const agentDir = `${world.agentDir}-routine-intake`;
@@ -1237,7 +1312,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 				},
 			);
 		}
-	const parentSessionId = root.sessionManager.getSessionId();
+	// The session whose intake is read; the conditional request at the end is stated in a fresh session.
+	let parentSessionId = root.sessionManager.getSessionId();
 	const store = () => root.session.backgroundLanes.getBotTeamStore();
 	const intakeState = () => store().getRoutineIntakeSession(parentSessionId);
 	const notices = () =>
@@ -1831,6 +1907,180 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 				.map((occurrence) => occurrence.trigger.kind),
 			"the routine ended without a run",
 		).toEqual(["expiry"]);
+
+		// A request meant only until something happens, stated in a fresh session of the same store whose workers run on a
+		// pinned track: its run reports the stated end met, so once that result is delivered the host removes the routine,
+		// tells the owner once with the next turn, and starts no later slot.
+		open = false;
+		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		root = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
+			settings: {
+				...settings,
+				workerDelegation: {
+					modelPins: { default: { provider: HARNESS_PROVIDER, modelId: "worker-a", thinkingLevel: "off" } },
+				},
+			},
+		});
+		open = true;
+		parentSessionId = root.sessionManager.getSessionId();
+		const untilOwner = "Check the release tag every hour until the release ships.";
+		const untilInstruction = "Check the release tag";
+		world.systemOne.enterPhase("routine-intake-until-owner", {});
+		world.provider.enqueue("root", text("routine-intake-until-owner-reply", "Noted."));
+		await withDeadline(world.trace, "routine intake conditional request", root.session.prompt(untilOwner));
+		expect(latestSource().text).toBe(untilOwner);
+		world.systemOne.enterPhase("routine-intake-until-pass", {
+			requests_automation: { kind: "noul", probability: 0.98 },
+			explicit: { kind: "noul", probability: 0.98 },
+			faithful: { kind: "noul", probability: 0.98 },
+		});
+		world.provider.enqueue(
+			"root",
+			{
+				name: "routine-intake-until-extraction",
+				reply: {
+					content: [
+						{
+							type: "toolCall",
+							id: "routine-intake-until-extraction",
+							name: ROUTINE_INTAKE_SUBMISSION_TOOL_NAME,
+							arguments: {
+								messages: [
+									{
+										id: "m1",
+										requests: [
+											{
+												instruction: untilInstruction,
+												when: "every hour until the release ships",
+												timing: { kind: "interval", every: 1, unit: "hour" },
+												lasts: "until_condition",
+											},
+										],
+									},
+								],
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+			},
+			...(world.systemOne.enabled
+				? []
+				: [
+						knowledgeJudgment(
+							"routine-intake-until-judgment",
+							"routine.intake",
+							[
+								{ id: "explicit", value: true, confidence: 0.98 },
+								{ id: "faithful", value: true, confidence: 0.98 },
+							],
+							() => untilInstruction,
+						),
+					]),
+		);
+		const untilCreated = passEnded(1);
+		expect(
+			await withDeadline(world.trace, "conditional intake idle delay", world.timers.whenArmed("routine-intake")),
+		).toBe(2_000);
+		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
+		await withDeadline(world.trace, "conditional intake pass created its routine", untilCreated);
+		const conditional = store()
+			.listRoutines()
+			.find((entry) => entry.origin?.endCondition !== undefined);
+		expect(conditional, "the conditional request becomes a routine").toBeDefined();
+		const conditionalId = conditional!.routineId;
+		const endCondition = conditional!.origin!.endCondition!;
+		expect(endCondition, "the host keeps the end the owner stated, from their own words").toBe(
+			"until the release ships",
+		);
+		expect(contentOf(notices()[0]), "the creation notice states the bound").toContain("for at most 14 days");
+		expect(contentOf(notices()[0]), "and how a run ends it").toContain(
+			"the routine ends once a run reports it reached",
+		);
+		const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
+		const conditionMetSummary = "The release tag exists and the release shipped.";
+		world.systemOne.enterPhase("routine-intake-condition-run", {});
+		world.provider.enqueue("worker-a", {
+			...calls("routine-condition-report", [
+				{
+					id: "routine-condition-report",
+					name: "submit_report",
+					arguments: { status: "completed", summary: conditionMetSummary, conditionMet: true },
+				},
+			]),
+			check: (request) => {
+				const wire = JSON.stringify(request.context.messages);
+				expect(wire, "the run carries the owner's words").toContain(untilInstruction);
+				expect(wire, "the brief asks for the stated end truthfully").toContain("Report conditionMet truthfully");
+			},
+		});
+		world.provider.enqueue("root", {
+			...text("routine-condition-parent", "The release shipped."),
+			check: (request) =>
+				expect(JSON.stringify(request.context.messages), "the run's result wakes the parent").toContain(
+					conditionMetSummary,
+				),
+		});
+		const conditionNotices = () =>
+			completions().filter((entry) => contentOf(entry).includes(" was reported met by "));
+		const resultDelivered = new Promise<void>((resolve) => {
+			const check = () => {
+				// The creation notice still waits for the owner's next turn; only the woken turn must have taken the result.
+				if (completions().length === 0 || root.sessionManager.getPendingParentInputs("turn").length !== 0) return;
+				stop();
+				resolve();
+			};
+			const stop = root.sessionManager.onEntriesPersisted(check);
+		});
+		const workerRequestsBeforeRun = workerRequests();
+		world.timers.advance("routines", 3_600_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		await withDeadline(world.trace, "the conditional routine's result is delivered", resultDelivered);
+		await withDeadline(world.trace, "the woken parent turn ends", root.session.agent.waitForIdle());
+		const conditionNoticed = new Promise<void>((resolve) => {
+			const check = () => {
+				if (conditionNotices().length === 0) return;
+				stop();
+				resolve();
+			};
+			const stop = root.sessionManager.onEntriesPersisted(check);
+			queueMicrotask(check);
+		});
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		await withDeadline(world.trace, "the reported end is noticed", conditionNoticed);
+		expect(workerRequests(), "one run reported the end").toBe(workerRequestsBeforeRun + 1);
+		expect(
+			store().getRoutine(conditionalId),
+			"a routine whose run reported its stated end is removed",
+		).toBeUndefined();
+		expect(conditionNotices(), "the end is told once").toHaveLength(1);
+		const conditionNotice = conditionNotices()[0]!;
+		expect(contentOf(conditionNotice)).toContain(
+			`Routine ${conditionalId} ended: ${JSON.stringify(endCondition)} was reported met by its run `,
+		);
+		expect(parentInputOf(conditionNotice)?.metadata.mode, "the end waits for the owner's next turn").toBe(
+			"next-owner-turn",
+		);
+		expect(root.sessionManager.getPendingParentInputs("turn"), "the end wakes no turn").toHaveLength(0);
+		const conditionOccurrences = () => store().listRoutineOccurrences({ routineId: conditionalId });
+		expect(
+			conditionOccurrences()
+				.map((occurrence) => occurrence.trigger.kind)
+				.sort(),
+			"one run and one end notice",
+		).toEqual(["condition", "schedule"]);
+		expect(
+			conditionOccurrences().find((occurrence) => occurrence.trigger.kind === "schedule")?.result,
+			"the delivered result keeps the reported end",
+		).toMatchObject({ outcome: "succeeded", conditionMet: true, delivery: "acknowledged" });
+		// The next slot passes: nothing runs and nothing more is told.
+		world.timers.advance("routines", 3_600_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(workerRequests(), "no run starts after the end was reported").toBe(workerRequestsBeforeRun + 1);
+		expect(conditionOccurrences(), "no slot is taken after the end").toHaveLength(2);
+		expect(conditionNotices(), "the end is not told again").toHaveLength(1);
 		world.trace.mark("root", "routine.owner-intake");
 	} finally {
 		if (open) {

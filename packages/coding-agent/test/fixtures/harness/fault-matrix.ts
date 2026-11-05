@@ -1104,7 +1104,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"a store subscriber that takes the parent's session lease at the occurrence's dispatching write, before the away worker starts; needs new leg design in the away block",
+					"opening a session is asynchronous, so a store subscriber cannot order it between the dispatching write and the worker start; the cut needs a synchronous seam: the subscriber takes the parent's session lease through the session-lease registry at the dispatching write (as another process opening it would), the guard then refuses, and the parent opens after the lease is released; needs new leg design in the away block",
 			},
 		],
 	},
@@ -1115,17 +1115,11 @@ const rows: readonly FaultMatrixRow[] = [
 		phase: "routines away admission",
 		fault: "two closed parents have due runs away while the day bound has room for one",
 		witness:
-			"one parent's run is claimed; the other records the spend refusal, claims nothing and leaves no away host open, and runs once the first run's settled charge leaves room",
-		control: "a single parent with room runs its due slot away (R52)",
+			"while one parent's run holds the day's room, the other's due slot records the spend refusal, claims nothing and stays due, is reported once, and runs away once the first run's settled charge leaves room, its result left pending for its parent",
+		control: "a single parent with room runs its due slot away",
 		estSeconds: 3,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"a second closed parent session with its own due routine and a day bound of one run; needs new leg design",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R57",
@@ -1142,7 +1136,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"an interval routine run away followed by timer advances past several intervals before reopen; it adds a routine result to the parent's delivered inputs, so the leg's input counts need redesign",
+					"an interval routine run away followed by timer advances past several intervals before reopen; it adds a routine result to the parent's delivered inputs, so it fits as an appended segment after the held-result witness (the last place the leg counts parent inputs), with its own close, daemon run and reopen; needs new leg design",
 			},
 		],
 	},
