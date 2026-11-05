@@ -300,8 +300,19 @@ export interface ProactivitySettings {
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model">> &
 	Pick<ProactivitySettings, "model">;
 
+/** Routines of a session nobody has open, run by the background daemon (away). */
+export interface RoutineAwaySettings {
+	enabled?: boolean; // default: true — a due routine of a session that is not open runs away; false leaves it for the session's next open
+	maxUsdPerRun?: number; // default: 0.25 — spend bound of one run away
+	maxUsdPerDay?: number; // default: 1.00 — spend of runs away over any rolling 24 h across the agent dir; a due run past it waits for its session
+	maxParentHosts?: number; // default: 4 — sessions the daemon runs routines for at once
+}
+
+export type ResolvedRoutineAwaySettings = Required<RoutineAwaySettings>;
+
 export interface RoutinesSettings {
 	automaticIntake?: boolean; // default: true — after an owner turn settles, explicit recurring, scheduled or conditional requests in the owner's own words become read-only routines; false leaves routine creation to the routine tool
+	away?: RoutineAwaySettings; // Routines of sessions that are not open, run away by the daemon (on by default)
 }
 
 export interface ResearchLaneSettings {
@@ -730,7 +741,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
-	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words (on by default)
+	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words, and routines run away (both on by default)
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default

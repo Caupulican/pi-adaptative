@@ -273,6 +273,22 @@ export const MAX_PROACTIVITY_MAX_NOTES = 5;
 /** The owner's standing preferences travel in every review prompt, so they are bounded. */
 export const MAX_PROACTIVITY_PREFERENCES_CHARS = 2_000;
 
+export const DEFAULT_ROUTINE_AWAY_ENABLED = true;
+
+export const DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN = 0.25;
+
+/** Four runs away at the full per-run bound in any rolling 24 h. */
+export const DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY = 1;
+
+/** Each hosted session holds its parent context and worker runtime in the daemon's memory. */
+export const DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS = 4;
+
+export const MAX_ROUTINE_AWAY_MAX_USD_PER_RUN = 5;
+
+export const MAX_ROUTINE_AWAY_MAX_USD_PER_DAY = 50;
+
+export const MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS = 16;
+
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;

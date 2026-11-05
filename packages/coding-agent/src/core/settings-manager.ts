@@ -79,6 +79,10 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_SOURCES,
 	DEFAULT_RESEARCH_LANE_MAX_USD,
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+	DEFAULT_ROUTINE_AWAY_ENABLED,
+	DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
+	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
+	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
 	DEFAULT_TOOL_EXECUTION_CONCURRENCY,
 	DEFAULT_WORKBENCH_SETTINGS,
 	DEFAULT_WORKER_DELEGATION_ACCOUNT,
@@ -126,6 +130,9 @@ import {
 	MAX_RESEARCH_LANE_MAX_SOURCES,
 	MAX_RESEARCH_LANE_MAX_USD,
 	MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+	MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
+	MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
+	MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
 	MAX_TOOL_EXECUTION_CONCURRENCY,
 	MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
 	MAX_WORKER_DELEGATION_MAX_CONCURRENT,
@@ -188,6 +195,7 @@ import type {
 	ResolvedProcessMatrixSettings,
 	ResolvedProviderAdmissionSettings,
 	ResolvedResearchLaneSettings,
+	ResolvedRoutineAwaySettings,
 	ResolvedToolExecutionSettings,
 	ResolvedToolOutputSettings,
 	ResolvedWindowsShellSettings,
@@ -3583,9 +3591,35 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRoutinesSettings(): Required<RoutinesSettings> {
+	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake">> {
 		const configured = this.settings.routines ?? {};
 		return { automaticIntake: typeof configured.automaticIntake === "boolean" ? configured.automaticIntake : true };
+	}
+
+	/** Bounds of routines run away; the daemon reads them for the whole agent dir. */
+	getRoutineAwaySettings(): ResolvedRoutineAwaySettings {
+		const configured = this.settings.routines?.away ?? {};
+		return {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_ROUTINE_AWAY_ENABLED,
+			maxUsdPerRun: sanitizeNumberSetting(
+				configured.maxUsdPerRun,
+				DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
+				0,
+				MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
+			),
+			maxUsdPerDay: sanitizeNumberSetting(
+				configured.maxUsdPerDay,
+				DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
+				0,
+				MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
+			),
+			maxParentHosts: sanitizeIntegerSetting(
+				configured.maxParentHosts,
+				DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
+				1,
+				MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
+			),
+		};
 	}
 
 	getResearchLaneSettings(): ResolvedResearchLaneSettings {

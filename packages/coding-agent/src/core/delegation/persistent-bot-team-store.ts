@@ -38,9 +38,11 @@ import {
 	parseRoutineOccurrence,
 	parseRoutineScheduleInput,
 	parseRoutineTarget,
+	ROUTINE_AWAY_SPEND_WINDOW_MS,
 	ROUTINE_INTAKE_CAP_WINDOW_MS,
 	ROUTINE_INTAKE_LIVE_CAP,
 	ROUTINE_INTAKE_WINDOW_CAP,
+	type RoutineAwayClaimGate,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
@@ -640,12 +642,16 @@ function appendBoundedFile(filePath: string, line: string, maxLines = 80): void 
 	);
 }
 
+const ROUTINE_AWAY_SPEND_REFUSAL =
+	"The away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
+
 /**
  * The routine's run-state cache for one claimed occurrence: running until its result, then that result's outcome and
  * summary. Only run state changes; the definition, revision and updatedAt stay the admitted revision's.
  */
 function withRoutineRunState(routine: RoutineDefinitionView, occurrence: RoutineOccurrence): RoutineDefinitionView {
-	const { lastSummary: _previousSummary, ...rest } = routine;
+	// A claim admits the routine again, so an earlier away refusal no longer describes it.
+	const { lastSummary: _previousSummary, awayRefusal: _refusal, ...rest } = routine;
 	const result = occurrence.result;
 	return {
 		...rest,
@@ -814,7 +820,7 @@ export class PersistentBotTeamStore {
 		nowMs: number,
 		parentOrigin: WorkerReceiptOrigin,
 	): RoutineOccurrence {
-		if (!this.routineJournalHasRoom())
+		if (!this.routineJournalHasRoom(nowMs))
 			throw new Error("Routine occurrence journal is full of active, uncertain or undelivered entries.");
 		const definitionSnapshot: PersistentRoutineDefinition = {
 			routineId: definition.routineId,
@@ -916,15 +922,19 @@ export class PersistentBotTeamStore {
 		return finished;
 	}
 
-	/** Prunes delivered history when the journal is at capacity; whether one more occurrence then fits. */
-	private routineJournalHasRoom(): boolean {
+	/**
+	 * Prunes delivered history when the journal is at capacity; whether one more occurrence then fits. A run away inside
+	 * the away spend window is kept: the spend bound charges it until the window passes.
+	 */
+	private routineJournalHasRoom(nowMs: number): boolean {
 		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return true;
 		const removable = Array.from(this.routineOccurrences.values())
 			.filter(
 				(item) =>
 					item.phase === "terminal" &&
 					item.result?.delivery === "acknowledged" &&
-					(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged"),
+					(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged") &&
+					!(item.executor === "away" && item.createdAt > nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS),
 			)
 			.sort((a, b) => a.updatedAt - b.updatedAt);
 		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
@@ -939,6 +949,29 @@ export class PersistentBotTeamStore {
 			this.routineOccurrences.delete(item.occurrenceId);
 		}
 		return this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES;
+	}
+
+	/**
+	 * What runs away inside the spend window are charged against the away spend bound: a run that may still spend holds
+	 * its full per-run bound, a finished run its settled usage (the per-run bound when unread), a run that never started
+	 * nothing.
+	 */
+	private awaySpendCharged(gate: RoutineAwayClaimGate, nowMs: number): number {
+		let charged = 0;
+		for (const item of this.routineOccurrences.values()) {
+			if (item.executor !== "away" || item.createdAt <= nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS) continue;
+			if (item.phase !== "terminal") charged += gate.maxUsdPerRun;
+			else if (item.dispatchKey) charged += gate.settledUsd.get(item.occurrenceId) ?? gate.maxUsdPerRun;
+		}
+		return charged;
+	}
+
+	/** Records why a due routine was not run away; the same reason is recorded once, and any claim clears it. */
+	private recordAwayRefusal(routineId: string, reason: string, nowMs: number): boolean {
+		const routine = this.routines.get(routineId);
+		if (!routine || routine.awayRefusal?.reason === reason) return false;
+		this.routines.set(routineId, { ...routine, awayRefusal: { reason, at: nowMs } });
+		return true;
 	}
 
 	private cancelUndispatchedRoutineOccurrences(routineId: string, nowMs: number): void {
@@ -1832,6 +1865,21 @@ export class PersistentBotTeamStore {
 			const limit = Math.min(input.limit, MAX_ROUTINE_OCCURRENCES);
 			const eligible = input.eligibleRoutineIds ? new Set(input.eligibleRoutineIds) : undefined;
 			const eligibleOccurrences = input.eligibleOccurrenceIds ? new Set(input.eligibleOccurrenceIds) : undefined;
+			// An away claim admits a run only while its full per-run bound still fits the rolling day's bound; a refused
+			// run claims nothing and stays due for its parent.
+			const away = input.away;
+			let awayCharged = away ? this.awaySpendCharged(away, input.nowMs) : 0;
+			const awayRefused: string[] = [];
+			const admitAway = (): boolean => {
+				if (!away) return true;
+				if (awayCharged + away.maxUsdPerRun > away.maxUsdPerDay) return false;
+				awayCharged += away.maxUsdPerRun;
+				return true;
+			};
+			const refuseAway = (routineId: string): void => {
+				if (!awayRefused.includes(routineId)) awayRefused.push(routineId);
+				if (this.recordAwayRefusal(routineId, ROUTINE_AWAY_SPEND_REFUSAL, input.nowMs)) changed = true;
+			};
 			// Accepted work owns its original definition independently of the schedule cursor.
 			// Recover it first, including consumed one-offs and manual occurrences.
 			for (const [occurrenceId, occurrence] of this.routineOccurrences) {
@@ -1875,8 +1923,17 @@ export class PersistentBotTeamStore {
 					changed = true;
 					continue;
 				}
+				// An away run reclaimed inside the window is already charged; any other one is admitted under the bound.
+				const charged =
+					occurrence.executor === "away" && occurrence.createdAt > input.nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS;
+				if (!charged && !admitAway()) {
+					refuseAway(occurrence.routineId);
+					continue;
+				}
+				const { executor: _executor, ...undispatched } = occurrence;
 				const reclaimed: RoutineOccurrence = {
-					...occurrence,
+					...undispatched,
+					...(away ? { executor: "away" as const } : {}),
 					phase: "claimed",
 					updatedAt: input.nowMs,
 					claim: { token: randomUUID(), owner: input.owner, leaseUntil: input.nowMs + input.leaseMs },
@@ -1905,29 +1962,32 @@ export class PersistentBotTeamStore {
 				}
 				// One routine whose slots cannot be computed here is skipped and reported; the others are still claimed.
 				try {
-					const admitted = this.admitClockRoutine(id, stored, input, output);
+					const admitted = this.admitClockRoutine(id, stored, input, output, admitAway);
 					if (admitted.changed) changed = true;
 					if (admitted.journalFull) journalFull = true;
+					if (admitted.refused) refuseAway(id);
 				} catch (error) {
 					unschedulable.push({ routineId: id, reason: error instanceof Error ? error.message : String(error) });
 				}
 			}
 			if (output.length || changed) this.save();
-			return { claimed: output.map((item) => structuredClone(item)), journalFull, unschedulable };
+			return { claimed: output.map((item) => structuredClone(item)), journalFull, unschedulable, awayRefused };
 		});
 	}
 
 	/**
 	 * Admits the due slot of one clock routine: the slot's occurrence is claimed and appended to `output`, or, when the
 	 * slot was not run, recorded as a cancelled notice; the cursor moves past it. `journalFull`: the due slot stays due
-	 * because the journal has no room for its occurrence or notice.
+	 * because the journal has no room for its occurrence or notice. `refused`: the due slot stays due because `admitRun`
+	 * (the away spend bound) did not admit its run; slots that are only reported are not charged.
 	 */
 	private admitClockRoutine(
 		id: string,
 		stored: RoutineDefinitionView,
 		input: RoutineOccurrenceClaimInput,
 		output: RoutineOccurrence[],
-	): { readonly changed: boolean; readonly journalFull: boolean } {
+		admitRun: () => boolean,
+	): { readonly changed: boolean; readonly journalFull: boolean; readonly refused?: true } {
 		const schedule = stored.schedule;
 		const unchanged = { changed: false, journalFull: false };
 		if (schedule.kind === "event") return unchanged;
@@ -1945,7 +2005,7 @@ export class PersistentBotTeamStore {
 			const trigger = { kind: "schedule" as const, scheduledAt: slot, missedCount: 0 };
 			const occurrenceId = routineOccurrenceId(stored, trigger);
 			if (this.routineOccurrences.has(occurrenceId)) return unchanged;
-			if (!this.routineJournalHasRoom()) return { changed: false, journalFull: true };
+			if (!this.routineJournalHasRoom(input.nowMs)) return { changed: false, journalFull: true };
 			this.recordRoutineNotice(
 				stored,
 				occurrenceId,
@@ -1999,7 +2059,7 @@ export class PersistentBotTeamStore {
 				skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
 			};
 			if (routine.cursor.skipped !== undefined) return advance(routine, cursor);
-			if (!this.routineJournalHasRoom()) return { changed, journalFull: true };
+			if (!this.routineJournalHasRoom(input.nowMs)) return { changed, journalFull: true };
 			const earlier = trigger.missedCount;
 			const covered =
 				earlier > 0
@@ -2016,7 +2076,7 @@ export class PersistentBotTeamStore {
 			return advance(this.routines.get(id) ?? routine, cursor);
 		}
 		// Nothing is consumed without its occurrence: a full journal leaves the slot due until results are delivered.
-		if (!this.routineJournalHasRoom()) return { changed, journalFull: true };
+		if (!this.routineJournalHasRoom(input.nowMs)) return { changed, journalFull: true };
 		if (late) {
 			// A one-off whose start window closed is reported once instead of run late.
 			this.recordRoutineNotice(
@@ -2029,7 +2089,8 @@ export class PersistentBotTeamStore {
 			);
 			return advance(this.routines.get(id) ?? routine, cursorAfter);
 		}
-		const claimed = this.createClaimedOccurrence(
+		if (!admitRun()) return { changed, journalFull: false, refused: true };
+		const created = this.createClaimedOccurrence(
 			routine,
 			occurrenceId,
 			trigger,
@@ -2038,6 +2099,7 @@ export class PersistentBotTeamStore {
 			input.nowMs,
 			parentOrigin,
 		);
+		const claimed: RoutineOccurrence = input.away ? { ...created, executor: "away" } : created;
 		this.routineOccurrences.set(occurrenceId, claimed);
 		output.push(claimed);
 		return advance(withRoutineRunState(routine, claimed), cursorAfter);
@@ -2110,7 +2172,7 @@ export class PersistentBotTeamStore {
 			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
 				return "unchanged";
 			// Without journal room the attempt stays undecided until delivered results make room.
-			if (!this.routineJournalHasRoom()) return "journal-full";
+			if (!this.routineJournalHasRoom(input.nowMs)) return "journal-full";
 			const coalesced = fresh
 				.slice(0, -1)
 				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;

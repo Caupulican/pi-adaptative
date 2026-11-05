@@ -428,6 +428,25 @@ export interface RoutineOccurrence {
 	/** Preserve the original uncertain result and its independent delivery receipt after exact resolution. */
 	readonly priorUncertaintyResult?: RoutineResult;
 	readonly uncertainty?: string;
+	/**
+	 * Claimed by a host running the routine away (its session not open). Set by each claim before dispatch and fixed
+	 * from dispatch on; the away spend bound charges these occurrences.
+	 */
+	readonly executor?: "away";
+}
+
+/** The rolling window of the away spend bound. */
+export const ROUTINE_AWAY_SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
+export interface RoutineAwayClaimGate {
+	readonly maxUsdPerRun: number;
+	readonly maxUsdPerDay: number;
+	/**
+	 * Final spend of terminal away occurrences, read from their executions' ledger usage. A run without an entry (still
+	 * running, unpriced, or unread) is charged its full per-run bound, so a stale map only over-reserves.
+	 */
+	readonly settledUsd: ReadonlyMap<string, number>;
 }
 
 export interface RoutineDelivery {
@@ -442,6 +461,11 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	/** The most recently claimed occurrence's state: running until its result, then that result's outcome. */
 	readonly lastStatus?: (typeof ROUTINE_LAST_STATUSES)[number];
 	readonly lastSummary?: string;
+	/**
+	 * Why the last due run could not run away, until a claim admits the routine again. The slot stays due for the
+	 * session's next open; the session reports this once, and the daemon status lists it.
+	 */
+	readonly awayRefusal?: { readonly reason: string; readonly at: number };
 }
 
 export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled", "uncertain"] as const;
@@ -509,6 +533,8 @@ export interface RoutineOccurrenceClaimInput {
 	readonly routineId?: string;
 	/** Retained host events of the claiming session; event routines are decided only when present. */
 	readonly hostEvents?: RoutineHostEventFeed;
+	/** Present only for a host running routines away: every claim it makes is admitted under this bound. */
+	readonly away?: RoutineAwayClaimGate;
 }
 
 /** The ended routines one session asks the store to remove; the store rechecks each under its lock. */
@@ -531,6 +557,8 @@ export interface RoutineClaimResult {
 	readonly journalFull: boolean;
 	/** Clock routines whose slots this runtime could not compute; each was skipped and the others still claimed. */
 	readonly unschedulable: readonly { readonly routineId: string; readonly reason: string }[];
+	/** Due routines an away claim left due because the away spend bound has no room for another run. */
+	readonly awayRefused: readonly string[];
 }
 
 export interface RoutineEventDecision {
@@ -912,7 +940,15 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 
 export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionView | undefined {
 	if (!isPlainRecord(value)) return undefined;
-	const { cursor: rawCursor, nextRunAt: rawNextRunAt, lastRunAt, lastStatus, lastSummary, ...rawDefinition } = value;
+	const {
+		cursor: rawCursor,
+		nextRunAt: rawNextRunAt,
+		lastRunAt,
+		lastStatus,
+		lastSummary,
+		awayRefusal: rawAwayRefusal,
+		...rawDefinition
+	} = value;
 	const definition = parseRoutineDefinition(rawDefinition);
 	if (!definition) return undefined;
 	try {
@@ -947,6 +983,19 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 				(typeof lastSummary !== "string" || lastSummary.length > MAX_ROUTINE_SUMMARY_CHARS))
 		)
 			return undefined;
+		let awayRefusal: RoutineDefinitionView["awayRefusal"];
+		if (rawAwayRefusal !== undefined) {
+			if (
+				!isPlainRecord(rawAwayRefusal) ||
+				!hasOnlyKeys(rawAwayRefusal, ["reason", "at"]) ||
+				!validInstant(rawAwayRefusal.at)
+			)
+				return undefined;
+			awayRefusal = {
+				reason: boundedString(rawAwayRefusal.reason, MAX_ROUTINE_SUMMARY_CHARS, "away refusal"),
+				at: rawAwayRefusal.at,
+			};
+		}
 		return {
 			...definition,
 			cursor,
@@ -954,6 +1003,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			...(lastRunAt === undefined ? {} : { lastRunAt }),
 			...(lastStatus === undefined ? {} : { lastStatus: lastStatus as RoutineDefinitionView["lastStatus"] }),
 			...(lastSummary === undefined ? {} : { lastSummary }),
+			...(awayRefusal ? { awayRefusal } : {}),
 		};
 	} catch {
 		return undefined;
@@ -980,7 +1030,9 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			"result",
 			"priorUncertaintyResult",
 			"uncertainty",
-		])
+			"executor",
+		]) ||
+		(value.executor !== undefined && value.executor !== "away")
 	)
 		return undefined;
 	try {
@@ -1180,6 +1232,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			...(result ? { result } : {}),
 			...(priorUncertaintyResult ? { priorUncertaintyResult } : {}),
 			...(uncertainty === undefined ? {} : { uncertainty }),
+			...(value.executor === "away" ? { executor: "away" as const } : {}),
 		};
 	} catch {
 		return undefined;
