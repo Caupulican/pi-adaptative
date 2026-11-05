@@ -5,6 +5,9 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage-delivery.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
+import { parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
+import { formatProactivityStatus } from "../../../../src/modes/interactive/proactivity-commands.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1ProactivityDurability } from "./journey-1-proactivity-durability.ts";
@@ -480,6 +483,8 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(world.provider.requests.length, "unknown pricing never reaches the review transport").toBe(beforeUnknown);
 	expect(await world.disposeSessionInBody(unknown.session)).toBeUndefined();
 
+	await runRollingDayBounds(world);
+
 	// The owner can turn it off: no timer, no review request.
 	const offDir = `${world.agentDir}-proactivity-off`;
 	const off = await world.createRootSession("root", {
@@ -601,4 +606,199 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	await runJourney1ProactivityInvestigation(world);
 	await runJourney1ProactivityMemory(world);
 	await runJourney1ProactivityDurability(world);
+}
+
+/**
+ * The rolling-day bounds hold across the sessions stored together. Within both bounds an accepted note wakes its parent
+ * turn (the normal order). Once the day's wakes reach their bound, the next accepted note starts no parent turn and rides
+ * the owner's next turn. A new session of the same store, with a fresh per-session count, starts no review once the
+ * day's review spend reaches its bound; raising that bound admits a review whose note the first session's wake holds.
+ */
+async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-proactivity-daily`;
+	// An exact binary fraction: two paid reviews reach the spend bound exactly, the second spending exactly its remainder.
+	const reviewUsd = 0.03125;
+	const settings = {
+		memorySystem: "okf" as const,
+		autoLearn: { enabled: false },
+		proactivity: { enabled: true, minOwnerTurnsBetweenRuns: 1, maxUsdPerDay: 2 * reviewUsd, maxTurnWakesPerDay: 1 },
+	};
+	const wokenNote = "The release note promised for Friday is still unwritten.";
+	const heldNote = "The migration rollback plan was promised and is still missing.";
+	const crossNote = "The next task still has no acceptance check.";
+	type Root = Awaited<ReturnType<HarnessWorld["createRootSession"]>>;
+	const ownerTurn = async (root: Root, label: string, prompt: string, carries?: string): Promise<void> => {
+		world.provider.enqueue("root", {
+			...text(label, "Understood."),
+			check: (request) => {
+				const messages = JSON.stringify(request.context.messages);
+				expect(messages, `${label}: the owner's words reach the request`).toContain(prompt);
+				if (carries !== undefined)
+					expect(messages, `${label}: the held note rides this owner turn`).toContain(carries);
+			},
+		});
+		await withDeadline(trace, label, root.session.prompt(prompt));
+		root.session.backgroundLanes.clearResearchLaneTimer();
+	};
+	const raise = (label: string, note: string, usd: number): ScriptStep => {
+		const usage = { ...createEmptyUsage(), input: 16, output: 8, totalTokens: 24 };
+		usage.cost.total = usd;
+		return {
+			name: label,
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: label,
+						name: "raise_note",
+						arguments: { kind: "reminder", text: note, why: "The owner asked for it." },
+					},
+				],
+				stopReason: "toolUse",
+				usage,
+			},
+		};
+	};
+	const isNote = (entry: ReturnType<SessionManager["getEntries"]>[number], note: string) =>
+		entry.type === "custom_message" &&
+		entry.customType === "proactive-note" &&
+		typeof entry.content === "string" &&
+		entry.content.includes(note);
+	const acceptedMode = (root: Root, note: string) => {
+		const entry = root.sessionManager.getEntries().find((candidate) => isNote(candidate, note));
+		return entry === undefined ? undefined : parentInputOf(entry)?.metadata.mode;
+	};
+	const recordedReviewUsd = (root: Root) =>
+		root.sessionManager.getEntries().reduce((sum, entry) => {
+			const receipt = resolveSemanticUsageEntry(entry);
+			return receipt?.report.route === "proactivity" ? sum + receipt.cost.total : sum;
+		}, 0);
+	const status = (root: Root) =>
+		formatProactivityStatus({ settingsManager: root.settingsManager, session: root.session });
+
+	const first = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings,
+	});
+	const lanes = first.session.backgroundLanes;
+
+	// Normal order: within both bounds, the accepted note wakes its parent turn.
+	await ownerTurn(first, "daily-owner-1", "Write the release note before Friday.");
+	const wakeSettled = createBarrier();
+	const stopWake = first.sessionManager.onEntriesPersisted(() => {
+		const accepted = first.sessionManager.getEntries().some((entry) => isNote(entry, wokenNote));
+		if (accepted && first.sessionManager.getPendingParentInputs().length === 0) wakeSettled.release();
+	});
+	world.provider.enqueue(
+		"root",
+		raise("daily-review-1-note", wokenNote, reviewUsd),
+		text("daily-review-1-done", "none"),
+		{
+			...text("daily-review-1-wake", "Noted."),
+			check: (request) =>
+				expect(JSON.stringify(request.context.messages), "the woken parent turn carries the note").toContain(
+					wokenNote,
+				),
+		},
+	);
+	const control = await withDeadline(trace, "daily bounds: review within both bounds", lanes.runProactiveReviewOnce());
+	expect(control.delivered.map((note) => note.text)).toEqual([wokenNote]);
+	expect(control.deliveryHold, "nothing holds a delivery within both bounds").toBeUndefined();
+	await withDeadline(trace, "daily bounds: the woken parent turn settles", wakeSettled.promise);
+	stopWake();
+	expect(acceptedMode(first, wokenNote), "the note was accepted as a parent wake").toBe("turn");
+	expect(lanes.getProactivityDailyState()).toMatchObject({
+		measured: { reviewUsd: 0, turnWakes: 0 },
+		lastDelivery: { mode: "turn" },
+	});
+
+	// Wake bound reached: the review still runs, and its note starts no parent turn but rides the owner's next turn.
+	await ownerTurn(first, "daily-owner-2", "Plan the database migration.");
+	world.provider.enqueue(
+		"root",
+		raise("daily-review-2-note", heldNote, reviewUsd),
+		text("daily-review-2-done", "none"),
+	);
+	const beforeHeld = world.provider.requests.length;
+	const held = await withDeadline(trace, "daily bounds: review past the wake bound", lanes.runProactiveReviewOnce());
+	expect(
+		held.delivered.map((note) => note.text),
+		"the accepted note is delivered, never dropped",
+	).toEqual([heldNote]);
+	expect(held.deliveryHold, "the reached wake bound names itself").toBe("max_turn_wakes_per_day_reached");
+	expect(world.provider.requests.length - beforeHeld, "only the review's own two requests reach the provider").toBe(2);
+	expect(acceptedMode(first, heldNote), "the note is accepted for the owner's next turn").toBe("next-owner-turn");
+	expect(first.sessionManager.getPendingParentInputs("turn"), "no parent wake is pending").toEqual([]);
+	expect(first.sessionManager.getPendingParentInputs("next-owner-turn"), "the held note waits").toHaveLength(1);
+	expect(lanes.getProactivityDailyState()).toMatchObject({
+		measured: { reviewUsd, turnWakes: 1 },
+		lastDelivery: { mode: "next-owner-turn", hold: "max_turn_wakes_per_day_reached" },
+	});
+	expect(status(first), "status shows why the note waits").toContain(
+		"Last note delivery: waits for the owner's next turn (max_turn_wakes_per_day_reached)",
+	);
+	const beforeOwner = world.provider.requests.length;
+	await ownerTurn(first, "daily-owner-3", "What is still open?", heldNote);
+	expect(world.provider.requests.length - beforeOwner, "the owner's turn is the only request").toBe(1);
+	expect(first.sessionManager.getPendingParentInputs(), "the owner's turn consumed the held note").toEqual([]);
+
+	// Both reviews' spend is in the first session's file before it closes, where the next session reads it.
+	const spendRecorded = createBarrier();
+	const stopSpend = first.sessionManager.onEntriesPersisted(() => {
+		if (recordedReviewUsd(first) >= 2 * reviewUsd) spendRecorded.release();
+	});
+	if (recordedReviewUsd(first) >= 2 * reviewUsd) spendRecorded.release();
+	await withDeadline(trace, "daily bounds: review spend is recorded", spendRecorded.promise);
+	stopSpend();
+	expect(await world.disposeSessionInBody(first.session)).toBeUndefined();
+
+	// A new session of the same store has a fresh per-session count, but the day's review spend is reached.
+	const second = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings,
+	});
+	const secondLanes = second.session.backgroundLanes;
+	await ownerTurn(second, "daily-owner-4", "Start the next task.");
+	const beforeRefused = world.provider.requests.length;
+	const refused = await withDeadline(
+		trace,
+		"daily bounds: review past the spend bound",
+		secondLanes.runProactiveReviewOnce(),
+	);
+	expect(refused, "no review starts past the day's spend").toEqual({
+		started: false,
+		skipReason: "max_usd_per_day_reached",
+		delivered: [],
+	});
+	expect(world.provider.requests.length - beforeRefused, "a refused review sends no request").toBe(0);
+	expect(secondLanes.getLastProactivitySkipReason()).toBe("max_usd_per_day_reached");
+	expect(secondLanes.getProactivityDailyState().measured, "the first session's spend and wake").toMatchObject({
+		reviewUsd: 2 * reviewUsd,
+		turnWakes: 1,
+	});
+	expect(status(second), "status names the spend bound").toContain("Last gate: max_usd_per_day_reached");
+
+	// Raising the spend bound admits a review; the first session's wake still holds this session's note.
+	second.settingsManager.setProactivitySettings({
+		...second.settingsManager.getProactivitySettings(),
+		maxUsdPerDay: 4 * reviewUsd,
+	});
+	world.provider.enqueue("root", raise("daily-review-3-note", crossNote, 0), text("daily-review-3-done", "none"));
+	const beforeCross = world.provider.requests.length;
+	const cross = await withDeadline(
+		trace,
+		"daily bounds: review under a raised bound",
+		secondLanes.runProactiveReviewOnce(),
+	);
+	expect(cross.delivered.map((note) => note.text)).toEqual([crossNote]);
+	expect(cross.deliveryHold, "another session's wake counts toward the bound").toBe("max_turn_wakes_per_day_reached");
+	expect(world.provider.requests.length - beforeCross).toBe(2);
+	expect(second.sessionManager.getPendingParentInputs("turn"), "no parent wake is pending").toEqual([]);
+	await ownerTurn(second, "daily-owner-5", "Continue.", crossNote);
+	expect(await world.disposeSessionInBody(second.session)).toBeUndefined();
 }
