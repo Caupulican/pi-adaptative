@@ -12,7 +12,14 @@ import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kerne
 import { createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1LongCollection } from "./journey-1-long-collection.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmWaitForChatIdle, knowledgeJudgment } from "./shared.ts";
+import {
+	ICM_INTAKE_JUDGMENTS,
+	icmContinuousSettings,
+	icmContinuousStore,
+	icmReadContinuousRecords,
+	icmWaitForChatIdle,
+	knowledgeJudgment,
+} from "./shared.ts";
 
 /** The session model's answers with System One off: a stated fact that was not a request to remember it. */
 const JUDGED_STATED = [
@@ -27,8 +34,13 @@ const JUDGED_INFERRED = [
 ] as const;
 /** A new attribute of the owner is not the live home-city fact. */
 const JUDGED_DISTINCT_SLOT = [{ id: "same_0", value: false, confidence: 0.98 }] as const;
-/** Owner, pasted, yielded and busy turns: two records each. */
-const COLLECTION_RECORDS = 8;
+/** Every owner turn logs its words and the reply. */
+const TURN_RECORDS = 2;
+/** A consumed harness notice is logged once, as harness work, by the owner turn that carried it. */
+const CARRIED_NOTICE_RECORDS = 1;
+/** Owner and pasted turns, then the yielded turn that carries the capped pass's notice, then the busy turn. */
+const YIELD_TURN_RECORDS = 3 * TURN_RECORDS + CARRIED_NOTICE_RECORDS;
+const COLLECTION_RECORDS = YIELD_TURN_RECORDS + TURN_RECORDS;
 
 /**
  * Journey 1 follows automatic collection through the real root, idle lane, admission and restart. With System One
@@ -331,11 +343,31 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 
 		// Owner input while an extraction is in flight yields the pass: the paid request is not aborted, its result is
 		// retained, and the next pass admits it without buying the extraction again.
+		// The owner's next turn carries the capped pass's notice; once consumed it is logged as harness work, never as the
+		// owner's words.
+		const [cappedNotice] = notices();
+		if (cappedNotice?.type !== "custom_message" || typeof cappedNotice.content !== "string")
+			throw new Error("The capped collection's notice is not a saved text message.");
+		const cappedNoticeText = cappedNotice.content;
+		const cappedNoticeDelivery = parentInputOf(cappedNotice)?.metadata.deliveryId;
 		const ownerTurn = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
 		world.systemOne.enterPhase("collection-yield-owner", ownerTurn);
-		world.provider.enqueue("root", text("collection-yield-reply", "Understood."));
+		world.provider.enqueue("root", {
+			...text("collection-yield-reply", "Understood."),
+			check: (request) =>
+				expect(JSON.stringify(request.context.messages), "the owner's next turn carries the notice").toContain(
+					JSON.stringify(cappedNoticeText).slice(1, -1),
+				),
+		});
 		await withDeadline(world.trace, "collection yield input", root.session.prompt("I work in Lisbon."));
-		await icmWaitForChatIdle(world, agentDir, 6, (records) => records.length === 6);
+		expect(root.sessionManager.getPendingParentInputs(), "the owner's turn consumed the notice").toEqual([]);
+		await icmWaitForChatIdle(world, agentDir, YIELD_TURN_RECORDS, (records) => records.length === YIELD_TURN_RECORDS);
+		const carried = icmReadContinuousRecords(world, icmContinuousStore(agentDir)).filter(
+			(record) => record.kind === "work",
+		);
+		expect(carried, "the consumed notice is logged once, as harness work").toHaveLength(CARRIED_NOTICE_RECORDS);
+		expect(carried[0]?.text).toContain(`[Harness background delivery ${cappedNoticeDelivery};`);
+		expect(carried[0]?.text).toContain(cappedNoticeText);
 		const lisbon = getOwnerEvidenceSnapshots(
 			root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE]),
 		).at(-1)!;
@@ -481,6 +513,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 				.map((record) => record.text)
 				.sort(),
 		).toEqual(["Lives in Recife.", "Works in Lisbon."]);
+		expect(notices(), "a yielded or resumed pass is no state the owner is told about").toHaveLength(1);
 
 		const file = root.sessionManager.getSessionFile()!;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
