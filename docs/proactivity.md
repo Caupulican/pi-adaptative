@@ -96,7 +96,9 @@ Stopping a session parks its consumer instead of removing it: CI results that fi
 closed stay retained and are delivered when the session resumes. A consumer parked for seven days,
 or the oldest parked consumer when the source reaches capacity, is retired; it later resumes through
 an explicit replay gap. A source journal that cannot be read is moved aside and a new source epoch
-starts.
+starts. Registering the new source ends the replaced one in that session: the results it had not
+delivered are settled and released, and the session is told once, also when it was closed during the
+replacement (at its next open).
 
 A failure becomes actionable only after the source has reconciled the current attempt. An older
 failed attempt followed by a running or successful rerun remains available as historical evidence
@@ -118,7 +120,8 @@ filter. The routine's cursor is a position in the session's task ledger; it star
 position when the routine is saved and never passes a matching attempt that its source has not
 reconciled. A run is keyed by the attempt (provider, host, repository, run, attempt), so a replayed
 or re-sealed attempt never runs twice, and consumed attempt keys outlive journal pruning. Superseded
-and coalesced attempts are counted in the next run, and a new source replay gap is stated in it.
+and coalesced attempts are counted in the next run, and a new source replay gap or a replaced source
+journal is stated in it.
 While the routine journal shared by the sessions of one agent directory has no room for another
 run, or the routine already holds its share of that journal, a new attempt stays undecided instead
 of being skipped; the session is warned once, and the attempt runs when settled results free room.

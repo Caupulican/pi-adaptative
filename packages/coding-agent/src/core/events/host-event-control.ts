@@ -13,7 +13,7 @@ import {
 	hostEventString,
 } from "./host-event-contract.ts";
 import { hostEventIsCurrent, hostEventSealDigest } from "./host-event-reducer.ts";
-import type { HostEventSubscription } from "./host-event-state.ts";
+import type { HostEventSourceState, HostEventSubscription } from "./host-event-state.ts";
 
 export const MAX_HOST_EVENT_PAGE_BYTES = 12 * 1024;
 export const MAX_HOST_EVENT_PAGE_ITEMS = 32;
@@ -35,6 +35,8 @@ export interface HostEventSourceView {
 	readonly replayFloor: number;
 	readonly lastReplayGap?: HostEventReplayGap;
 	readonly current?: CiCurrentObservation;
+	/** Set once a successor journal replaced this source: it never reconciles again. */
+	readonly ended?: HostEventSourceState["ended"];
 }
 
 export interface HostEventEvidenceView {
@@ -142,6 +144,7 @@ export function readHostEventPage(
 						subject,
 						replayFloor: source.replayFloor,
 						...(source.lastReplayGap ? { lastReplayGap: source.lastReplayGap } : {}),
+						...(source.ended ? { ended: source.ended } : {}),
 						reconciled: isSourceReady(source.registration.sourceId) && hostEventSealDigest(source) !== undefined,
 						current: source.seal?.observations.find(
 							(observation) => ciSubjectKey(observation.subject) === ciSubjectKey(subject),

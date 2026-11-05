@@ -89,10 +89,18 @@ export function routineInstructions(occurrence: RoutineOccurrence): string {
 	].join("\n");
 }
 
+/**
+ * Changes on a new replay gap and when a successor source replaces its store's earlier source. An ended source counts
+ * through its successor, so removing its record later changes nothing.
+ */
 function routineReplayGapDigest(state: TaskRuntimeProjection): string {
 	const gaps = Object.values(state.eventSources)
-		.filter((source) => source.lastReplayGap !== undefined)
-		.map((source) => [source.registration.sourceId, source.lastReplayGap])
+		.filter((source) => !source.ended && (source.lastReplayGap !== undefined || source.replaced))
+		.map((source) =>
+			source.replaced
+				? [source.registration.sourceId, source.lastReplayGap ?? null, "replaced"]
+				: [source.registration.sourceId, source.lastReplayGap],
+		)
 		.sort(([left], [right]) => String(left).localeCompare(String(right)));
 	return hostEventHash("pi-routine-replay-gaps-v1", gaps);
 }

@@ -78,6 +78,11 @@ export interface HostEventSourceRegistration {
 	readonly rootSubjects: readonly CiSubject[];
 	/** First sequence this durable consumer is entitled to replay. */
 	readonly startingSequence: number;
+	/**
+	 * Stable identity of the journal store behind the source (its location, not its content). A later source of the
+	 * same store replaces this one: registering it ends every earlier source with the same identity.
+	 */
+	readonly storeIdentity?: string;
 }
 
 export interface HostEventCatchUp {
@@ -238,13 +243,21 @@ export interface HostEventReplayHorizon {
 	readonly throughSequence: number;
 }
 
+/** Why a source ended for every consumer: its journal was unreadable or another release started a new one. */
+export const HOST_EVENT_SOURCE_END_REASONS = ["journal_replaced"] as const;
+export type HostEventSourceEndReason = (typeof HOST_EVENT_SOURCE_END_REASONS)[number];
+
+/** A source no later registration may extend: its unreceived history is gone, not paused. */
+export interface HostEventSourceEnd {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly reason: HostEventSourceEndReason;
+}
+
 /**
  * Why a consumer's replay entitlement ended: parked past its retention, removed to make room for live custody, or
  * absent from the source for a cause it did not record (a session checkpoint older than its own custody).
  */
-/** Why a source ended for every consumer: its journal was unreadable or another release started a new one. */
-export type HostEventSourceEndReason = "journal_replaced";
-
 export const HOST_EVENT_REPLAY_GAP_REASONS = ["consumer_inactive", "consumer_expired", "consumer_evicted"] as const;
 export type HostEventReplayGapReason = (typeof HOST_EVENT_REPLAY_GAP_REASONS)[number];
 
@@ -297,10 +310,10 @@ export interface HostEventSink {
 	seal(seal: HostEventCatchUpSeal, signal: AbortSignal): Promise<void>;
 	retireThrough(horizon: HostEventReplayHorizon, signal: AbortSignal): Promise<void>;
 	/**
-	 * Revocation remains available after source cancellation. `ended` names why the source itself ended (a replaced
-	 * journal), so its unreceived history is gone rather than paused.
+	 * Revocation remains available after source cancellation. A replaced source is ended durably by the registration
+	 * of its successor from the same store, not here.
 	 */
-	deactivate(sourceId: string, ended?: HostEventSourceEndReason): Promise<void>;
+	deactivate(sourceId: string): Promise<void>;
 	subscribeWritable(listener: () => void): () => void;
 	/** Each change of the named source's connection state; never throws into the source. */
 	reportConnection(source: string, connection: HostEventSourceConnection | undefined): void;
@@ -539,7 +552,7 @@ export function parseHostEventEnvelope(value: unknown): HostEventEnvelope {
 export function parseHostEventSourceRegistration(value: unknown): HostEventSourceRegistration {
 	const entry = hostEventRecord(
 		value,
-		["sourceId", "sourceEpoch", "scopeVersion", "subjects", "rootSubjects", "startingSequence"],
+		["sourceId", "sourceEpoch", "scopeVersion", "subjects", "rootSubjects", "startingSequence", "storeIdentity"],
 		"host event source registration",
 	);
 	const subjects = hostEventArray(entry.subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "source subjects");
@@ -559,7 +572,38 @@ export function parseHostEventSourceRegistration(value: unknown): HostEventSourc
 		subjects,
 		rootSubjects,
 		startingSequence: hostEventInteger(entry.startingSequence, "startingSequence"),
+		// Registrations saved before stores named themselves carry none; such a source is ended by any successor
+		// registration of the same repository (`hostEventSourceReplaces`).
+		...(entry.storeIdentity === undefined
+			? {}
+			: { storeIdentity: hostEventDigest(entry.storeIdentity, "storeIdentity") }),
 	};
+}
+
+export function parseHostEventSourceEnd(value: unknown): HostEventSourceEnd {
+	const entry = hostEventRecord(value, ["sourceId", "sourceEpoch", "reason"], "host event source end");
+	if (!HOST_EVENT_SOURCE_END_REASONS.some((reason) => reason === entry.reason))
+		throw new HostEventError("invalid", "Unknown host event source end reason.");
+	return {
+		sourceId: sourceIdentifier(entry.sourceId),
+		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
+		reason: entry.reason as HostEventSourceEndReason,
+	};
+}
+
+/**
+ * Registering `next` ends `prior`: both come from one store under different source ids. A prior registration that names
+ * no store predates store identities; every store now names itself, so it can only be a replaced journal of the
+ * same repository.
+ */
+export function hostEventSourceReplaces(
+	next: HostEventSourceRegistration,
+	prior: HostEventSourceRegistration,
+): boolean {
+	if (next.storeIdentity === undefined || prior.sourceId === next.sourceId) return false;
+	if (prior.storeIdentity !== undefined) return prior.storeIdentity === next.storeIdentity;
+	const repositories = new Set(next.subjects.map((subject) => JSON.stringify([subject.host, subject.repositoryId])));
+	return prior.subjects.some((subject) => repositories.has(JSON.stringify([subject.host, subject.repositoryId])));
 }
 
 export function parseHostEventCatchUp(value: unknown): HostEventCatchUp {

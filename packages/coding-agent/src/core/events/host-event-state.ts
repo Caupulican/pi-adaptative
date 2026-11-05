@@ -6,6 +6,7 @@ import type {
 	HostEventReplayGap,
 	HostEventSealedFrontier,
 	HostEventSequenceRange,
+	HostEventSourceEndReason,
 	HostEventSourceRegistration,
 	HostEventSubscriptionInput,
 	HostEventTranscriptReceipt,
@@ -24,6 +25,13 @@ export interface HostEventSourceState {
 	 * and inside replay gaps, minus accepted snapshots. Every other retired position is its own history.
 	 */
 	readonly unaccepted: readonly HostEventSequenceRange[];
+	/**
+	 * A later source of the same store replaced this one. It accepts, seals and registers nothing more; its open
+	 * deliveries settle as `source_ended`, and the record leaves the ledger once its last event is pruned.
+	 */
+	readonly ended?: { readonly reason: HostEventSourceEndReason; readonly at: string };
+	/** This source ended an earlier source of its store when it registered: history between them is gone. */
+	readonly replaced?: true;
 }
 
 export interface HostEventSubscription extends HostEventSubscriptionInput {

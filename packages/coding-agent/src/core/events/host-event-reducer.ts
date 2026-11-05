@@ -23,6 +23,7 @@ import {
 	hostEventSealedFrontier,
 	hostEventSequenceRetired,
 	hostEventSequenceUnaccepted,
+	hostEventSourceReplaces,
 	hostEventString,
 	hostEventSubscriptionId,
 	hostEventUnacceptedWith,
@@ -38,6 +39,7 @@ import {
 	parseHostEventEnvelope,
 	parseHostEventReplayGap,
 	parseHostEventReplayHorizon,
+	parseHostEventSourceEnd,
 	parseHostEventSourceRegistration,
 	parseHostEventSubscriptionInput,
 	parseHostEventTranscriptReceipt,
@@ -448,8 +450,20 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				throw new HostEventError("invalid", "Source aggregate mismatch.");
 			const prior = sources[registration.sourceId];
 			if (prior) {
+				if (prior.ended) throw new HostEventError("source_ended", "An ended source is never registered again.");
 				if (isDeepStrictEqual(prior.registration, registration)) break;
+				// A source saved before stores named themselves adopts its store identity unchanged otherwise.
+				const { storeIdentity, ...named } = registration;
 				if (
+					prior.registration.storeIdentity === undefined &&
+					storeIdentity !== undefined &&
+					isDeepStrictEqual(prior.registration, named)
+				) {
+					sources[registration.sourceId] = { ...prior, registration };
+					break;
+				}
+				if (
+					prior.registration.storeIdentity !== registration.storeIdentity ||
 					prior.registration.sourceEpoch !== registration.sourceEpoch ||
 					prior.registration.startingSequence !== registration.startingSequence ||
 					registration.scopeVersion !== prior.registration.scopeVersion + 1
@@ -496,6 +510,12 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 					// The fixed stream floor: earlier positions reach this consumer only as snapshots.
 					unaccepted:
 						registration.startingSequence > 1 ? [{ from: 1, through: registration.startingSequence - 1 }] : [],
+					// The sources it replaced ended in the same admission, just before.
+					...(Object.values(sources).some(
+						(source) => source.ended && hostEventSourceReplaces(registration, source.registration),
+					)
+						? { replaced: true as const }
+						: {}),
 				};
 			break;
 		}
@@ -504,6 +524,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			const source = sources[catchUp.sourceId];
 			if (
 				!source ||
+				source.ended ||
 				event.aggregateId !== catchUp.sourceId ||
 				catchUp.sourceEpoch !== source.registration.sourceEpoch ||
 				catchUp.scopeVersion !== source.registration.scopeVersion ||
@@ -518,6 +539,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			const source = sources[gap.sourceId];
 			if (
 				!source ||
+				source.ended ||
 				event.aggregateId !== gap.sourceId ||
 				gap.sourceEpoch !== source.registration.sourceEpoch ||
 				gap.scopeVersion !== source.registration.scopeVersion ||
@@ -545,6 +567,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			const source = sources[seal.sourceId];
 			if (
 				!source ||
+				source.ended ||
 				event.aggregateId !== seal.sourceId ||
 				seal.sourceEpoch !== source.registration.sourceEpoch ||
 				seal.scopeVersion !== source.registration.scopeVersion ||
@@ -684,11 +707,48 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			}
 			break;
 		}
+		case "host_source.ended": {
+			const end = parseHostEventSourceEnd(payload.end);
+			const source = sources[end.sourceId];
+			if (
+				!source ||
+				source.ended ||
+				event.aggregateId !== end.sourceId ||
+				end.sourceEpoch !== source.registration.sourceEpoch
+			)
+				throw new HostEventError("source_conflict", "Only a registered, unended source epoch can end.");
+			// Nothing of this source is current again: its open deliveries settle, a bound copy once its physical
+			// mailbox is reconciled (the session drain does that), and its history becomes prunable.
+			for (const accepted of Object.values(events)) {
+				if (accepted.envelope.sourceId !== end.sourceId) continue;
+				for (const id of accepted.deliveryIds) {
+					const delivery = deliveries[id];
+					if (
+						(delivery.status === "pending" || delivery.status === "reserved") &&
+						(!delivery.binding || delivery.mailboxSettled)
+					)
+						deliveries[id] = {
+							...delivery,
+							status: "settled",
+							reason: "source_ended",
+							settledAt: event.occurredAt,
+						};
+				}
+			}
+			const { seal: _seal, ...unsealed } = source;
+			sources[end.sourceId] = {
+				...unsealed,
+				retiredThrough: source.acceptedThrough,
+				ended: { reason: end.reason, at: event.occurredAt },
+			};
+			break;
+		}
 		case "host_source.retired": {
 			const horizon = parseHostEventReplayHorizon(payload.horizon);
 			const source = sources[horizon.sourceId];
 			if (
 				!source ||
+				source.ended ||
 				event.aggregateId !== horizon.sourceId ||
 				horizon.sourceEpoch !== source.registration.sourceEpoch ||
 				horizon.throughSequence < source.retiredThrough ||
@@ -759,6 +819,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			const id = envelope.event.eventId;
 			if (
 				!source ||
+				source.ended ||
 				event.aggregateId !== id ||
 				envelope.sourceEpoch !== source.registration.sourceEpoch ||
 				source.catchUpGeneration === 0 ||
@@ -884,6 +945,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 					"root_scope_changed",
 					"handed_back",
 					"non_actionable",
+					"source_ended",
 				].includes(reason)
 			)
 				throw new HostEventError("invalid", "Unknown host event settlement reason.");
@@ -921,6 +983,13 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				for (const deliveryId of accepted.deliveryIds) delete deliveries[deliveryId];
 				delete events[id];
 			}
+			// An ended source leaves the ledger with its last event: it bounds nothing and can never deliver again.
+			for (const source of Object.values(sources))
+				if (
+					source.ended &&
+					!Object.values(events).some((accepted) => accepted.envelope.sourceId === source.registration.sourceId)
+				)
+					delete sources[source.registration.sourceId];
 			break;
 		}
 		default:

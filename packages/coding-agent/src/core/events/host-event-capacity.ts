@@ -24,6 +24,8 @@ const ESCAPED_IDENTIFIER_BYTES = 6 * MAX_ORCHESTRATION_IDENTIFIER_LENGTH;
 const SETTLEMENT_BYTES = 6 * 128 + 256;
 // A root acknowledgement adds one bounded parent receipt identity.
 const ROOT_SETTLEMENT_BYTES = ESCAPED_IDENTIFIER_BYTES + SETTLEMENT_BYTES;
+// The `ended` record of a replaced source.
+const SOURCE_END_BYTES = 128;
 // mailboxAccepted, mailboxSettled and bindingRetired flags of one physical copy.
 const TRANSPORT_FLAG_BYTES = 96;
 
@@ -80,6 +82,8 @@ export function hostEventCapacity(projection: HostEventProjection): { bytes: num
 			0,
 			sealCeiling - (source.seal ? Buffer.byteLength(JSON.stringify(source.seal), "utf8") : 0),
 		);
+		// A live source may still be ended by its successor: a closed reason and an ISO instant.
+		if (!source.ended) reservedBytes += SOURCE_END_BYTES;
 		const gapCeiling = 12 * MAX_ORCHESTRATION_IDENTIFIER_LENGTH + 1_024;
 		reservedBytes += Math.max(
 			0,

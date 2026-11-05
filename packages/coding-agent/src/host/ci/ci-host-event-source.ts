@@ -12,6 +12,7 @@ import {
 	type HostEventSink,
 	type HostEventSource,
 	type HostEventSourceConnection,
+	hostEventHash,
 	MAX_HOST_EVENT_SUBJECTS,
 } from "../../core/events/host-event-contract.ts";
 import { HOST_EVENT_KINDS } from "../../core/events/host-event-kinds.ts";
@@ -820,10 +821,11 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.claimed = undefined;
 		this.sourceId = undefined;
 		this.forced = true;
-		// A new source id means the journal itself was replaced: what this session had not received is gone.
+		// A new source id means the journal itself was replaced. Registering the successor ends it durably; until then
+		// it stops counting as ready here.
 		if (previous && previous !== snapshot.sourceId)
 			void this.sink
-				?.deactivate(previous, "journal_replaced")
+				?.deactivate(previous)
 				.catch((error: unknown) => this.report("custody", `CI source deactivation failed: ${errorText(error)}`));
 		return undefined;
 	}
@@ -837,7 +839,15 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	): Promise<void> {
 		for (let round = 0; ; round++) {
 			const start = this.store.begin(sink.consumerId, activationId, scope, roots);
-			await sink.register(start.registration, signal);
+			// The journal's location names its store: a successor journal there (a quarantine or a new format) ends this
+			// source in every session ledger that registers the successor.
+			await sink.register(
+				{
+					...start.registration,
+					storeIdentity: hostEventHash("pi-ci-source-store-v1", [this.paths.commonDir, this.paths.statusDir]),
+				},
+				signal,
+			);
 			await sink.beginCatchUp(start.catchUp, signal);
 			const gap = this.store.snapshot().consumers.find((consumer) => consumer.id === sink.consumerId)?.pendingGap;
 			if (gap) {

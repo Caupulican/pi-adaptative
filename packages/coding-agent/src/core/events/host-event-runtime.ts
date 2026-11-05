@@ -25,6 +25,7 @@ import {
 	hostEventHash,
 	hostEventInteger,
 	hostEventSealedFrontier,
+	hostEventSourceReplaces,
 	hostEventString,
 	MAX_HOST_EVENT_SOURCES,
 	parseHostEventCatchUp,
@@ -220,16 +221,41 @@ export class HostEventRuntime {
 					this.sourceReady(state.hostEvents[delivery.eventId].envelope.sourceId, state)),
 		);
 	}
+	/** The event's source was replaced: none of its deliveries can become current again. */
+	sourceEnded(eventId: string): boolean {
+		const state = this.port.read();
+		const event = state.hostEvents[eventId];
+		return Boolean(event && state.eventSources[event.envelope.sourceId]?.ended);
+	}
 	taskDisposition(taskId: string): ReturnType<typeof hostEventTaskDisposition> {
 		return hostEventTaskDisposition(this.port.read(), taskId);
 	}
 
+	/**
+	 * Registering a source ends every earlier source of the same store first (`hostEventSourceReplaces`): a closed
+	 * session learns at its next open that the history it had not received is gone, and that history can be pruned.
+	 */
 	registerSource(value: HostEventSourceRegistration, lifetime: HostEventSourceLifetime): void {
 		const registration = parseHostEventSourceRegistration(value);
 		this.assertSourceClaim(registration.sourceId, lifetime);
 		this.invalidateSource(registration.sourceId);
 		this.port.transact((tx) => {
 			this.assertSourceClaim(registration.sourceId, lifetime);
+			for (const prior of Object.values(tx.snapshot.eventSources)) {
+				if (prior.ended || !hostEventSourceReplaces(registration, prior.registration)) continue;
+				const ended = prior.registration.sourceId;
+				const owner = this.sourceOwners.get(ended);
+				if (owner) owner.active = false;
+				this.invalidateSource(ended);
+				tx.commit({
+					type: "host_source.ended",
+					aggregateId: ended,
+					actor: "runtime",
+					payload: toJsonObject({
+						end: { sourceId: ended, sourceEpoch: prior.registration.sourceEpoch, reason: "journal_replaced" },
+					}),
+				});
+			}
 			if (isDeepStrictEqual(tx.snapshot.eventSources[registration.sourceId]?.registration, registration)) return;
 			tx.commit({
 				type: "host_source.registered",
@@ -611,7 +637,11 @@ export class HostEventRuntime {
 				.slice(0, 64)
 				.map((event) => event.envelope.event.eventId);
 		}
-		if (eventIds.length)
+		// An ended source with no event left is removed by the same record.
+		const emptyEnded = Object.values(tx.snapshot.eventSources).some(
+			(source) => source.ended && !settled.some((event) => event.envelope.sourceId === source.registration.sourceId),
+		);
+		if (eventIds.length || emptyEnded)
 			tx.commit({
 				type: "host_event.pruned",
 				aggregateId: "host-events",

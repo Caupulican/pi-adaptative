@@ -164,7 +164,10 @@ export class HostEventSessionController {
 							}
 						: undefined;
 				}),
-			register: async (source, signal) => this.mutate(signal, () => events.registerSource(source, lifetime)),
+			register: async (source, signal) => {
+				this.mutate(signal, () => events.registerSource(source, lifetime));
+				this.observeSources();
+			},
 			beginCatchUp: async (input, signal) => this.mutate(signal, () => events.beginCatchUp(input, lifetime)),
 			resumeGap: async (gap, signal) => {
 				this.mutate(signal, () => events.resumeGap(gap, lifetime));
@@ -179,11 +182,7 @@ export class HostEventSessionController {
 					events.retireThrough(horizon, lifetime);
 					events.prune();
 				}),
-			deactivate: async (sourceId, ended) => {
-				events.deactivateSource(sourceId, lifetime);
-				if (ended && this.active() && Object.hasOwn(deps.runtime.getSnapshot().eventSources, sourceId))
-					deps.observeNotice("host-event-gap", () => endedSourceNotice(sourceId, ended));
-			},
+			deactivate: async (sourceId) => events.deactivateSource(sourceId, lifetime),
 			reportConnection: (source, connection) => {
 				if (!this.active()) return;
 				deps.observeNotice("host-event-source", () => ({
@@ -213,7 +212,8 @@ export class HostEventSessionController {
 			deps.subscribeSettings(() => this.schedule()),
 			runtimeGenerationAdmission(deps.agentDir).subscribeAvailability(() => this.schedule()),
 		);
-		// A gap committed before a crash is told at the next open; a told gap finds its saved notice.
+		// A gap or an end committed before a crash, or while this session was closed, is told at the next open; a
+		// told one finds its saved notice.
 		this.observeSources();
 		this.schedule();
 	}
@@ -222,6 +222,11 @@ export class HostEventSessionController {
 		for (const source of Object.values(this.deps.runtime.getSnapshot().eventSources)) {
 			const gap = source.lastReplayGap;
 			if (gap) this.deps.observeNotice("host-event-gap", () => replayGapNotice(gap));
+			const ended = source.ended;
+			if (ended)
+				this.deps.observeNotice("host-event-gap", () =>
+					endedSourceNotice(source.registration.sourceId, ended.reason),
+				);
 		}
 	}
 
@@ -284,6 +289,9 @@ export class HostEventSessionController {
 						this.settleTask(delivery.deliveryId, "unsubscribed");
 					} else if (events.taskDisposition(delivery.target.taskId) === "closed") {
 						this.settleTask(delivery.deliveryId, "task_closed");
+					} else if (events.sourceEnded(delivery.eventId)) {
+						// The ledger settled its unbound copies; a bound one is settled once its mailbox is reconciled.
+						this.settleTask(delivery.deliveryId, "source_ended");
 					} else if (events.eligible(delivery.deliveryId)) {
 						const outcome = await this.deps.deliverTask(delivery, this.signal);
 						this.assertCurrent();
@@ -339,7 +347,10 @@ export class HostEventSessionController {
 		}
 	}
 
-	private settleTask(deliveryId: string, reason: "unsubscribed" | "task_closed" | "handed_back"): void {
+	private settleTask(
+		deliveryId: string,
+		reason: "unsubscribed" | "task_closed" | "handed_back" | "source_ended",
+	): void {
 		const events = this.deps.runtime.hostEvents;
 		const current = events.getDelivery(deliveryId);
 		if (current?.status !== "pending") return;

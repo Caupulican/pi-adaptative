@@ -5,8 +5,10 @@ import {
 	assertHostEventReceiptMatchesBinding,
 	ciEventSubject,
 	ciSubjectKey,
+	HOST_EVENT_SOURCE_END_REASONS,
 	HostEventError,
 	type HostEventReceipt,
+	type HostEventSourceEndReason,
 	hostEventArray,
 	hostEventDate,
 	hostEventDigest,
@@ -64,6 +66,8 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 			"lastReplayGap",
 			"seal",
 			"unaccepted",
+			"ended",
+			"replaced",
 		],
 		"host event source",
 	);
@@ -76,7 +80,11 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 		...(record.lastReplayGap === undefined ? {} : { lastReplayGap: parseHostEventReplayGap(record.lastReplayGap) }),
 		...(record.seal === undefined ? {} : { seal: parseHostEventCatchUpSeal(record.seal) }),
 		unaccepted: parseHostEventSequenceRanges(record.unaccepted),
+		...(record.ended === undefined ? {} : { ended: sourceEndFromValue(record.ended) }),
+		...(record.replaced === undefined ? {} : { replaced: true as const }),
 	};
+	if (record.replaced !== undefined && record.replaced !== true)
+		throw new HostEventError("invalid", "replaced must be true when present.");
 	// Unaccepted positions lie below the replay floor; without a replay gap only before the stream floor.
 	const unacceptedThrough = source.unaccepted.at(-1)?.through ?? 0;
 	if (
@@ -106,7 +114,17 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 				source.seal.throughSequence > source.acceptedThrough))
 	)
 		throw new HostEventError("invalid", "Source frontier is inconsistent.");
+	// An ended source holds no seal and has released every position it accepted.
+	if (source.ended && (source.seal || source.retiredThrough !== source.acceptedThrough))
+		throw new HostEventError("invalid", "Ended source still holds a frontier.");
 	return source;
+}
+
+function sourceEndFromValue(value: unknown): NonNullable<HostEventSourceState["ended"]> {
+	const record = hostEventRecord(value, ["reason", "at"], "host event source end");
+	if (!HOST_EVENT_SOURCE_END_REASONS.some((reason) => reason === record.reason))
+		throw new HostEventError("invalid", "Unknown host event source end reason.");
+	return { reason: record.reason as HostEventSourceEndReason, at: hostEventDate(record.at, "ended at") };
 }
 
 function subscriptionFromValue(value: unknown): HostEventSubscription {

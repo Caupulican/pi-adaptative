@@ -550,6 +550,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"host_source.sealed",
 	"host_source.retired",
 	"host_source.replay_gap",
+	"host_source.ended",
 	"host_event.accepted",
 	"host_event.delivery_bound",
 	"host_event.binding_retired",
