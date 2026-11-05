@@ -9,6 +9,7 @@ import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { RecoveredWorkerTerminalCompletion } from "./worker-attempt-executor.ts";
 import type { WorkerConversation } from "./worker-conversation-store.ts";
@@ -548,6 +549,7 @@ export class WorkerRecoveryCoordinator {
 		const durableVerificationOfTaskId = verificationOfTaskId ?? task?.verificationOfTaskId;
 		return {
 			instructions: attempt.dispatch.instructions,
+			objectiveId: task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null,
 			...(attempt.dispatch.knowledgeReferences?.length ? { knowledge: attempt.dispatch.knowledgeReferences } : {}),
 			...(attempt.dispatch.receiptOrigin ? { receiptOrigin: attempt.dispatch.receiptOrigin } : {}),
 			profileId: attempt.dispatch.profileId,

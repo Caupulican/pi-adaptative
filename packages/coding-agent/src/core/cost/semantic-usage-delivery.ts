@@ -118,6 +118,7 @@ export interface SemanticUsageSnapshot {
 export interface MaintenanceUsageLease extends SystemOneUsageLease {
 	/** Transfers a reserved slot to a durable request identity before dispatch. */
 	beginRequest(request: UnresolvedUsageRequest): void;
+	cancelUndispatchedRequest(requestId: string): void;
 }
 
 /** One session's usage owner: the reviewer's sink, admission's confirmation, and the session's pending journal. */
@@ -392,6 +393,7 @@ function conflictWarning(cause: string): string {
 /** Leases hand their unused slots back through this, so the owner's reservation count stays exact. */
 interface LeaseOwner {
 	beginRequest(identity: SemanticUsageLedgerIdentity, request: UnresolvedUsageRequest): void;
+	cancelUndispatchedRequest(identity: SemanticUsageLedgerIdentity, requestId: string): void;
 	recordLease(identity: SemanticUsageLedgerIdentity, receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	returnSlots(count: number): void;
 }
@@ -404,6 +406,7 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 	private unused: number;
 	private released = false;
 	private readonly requests = new Set<string>();
+	private readonly cancelledRequests = new Set<string>();
 
 	constructor(
 		owner: LeaseOwner,
@@ -426,6 +429,15 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 		this.requests.add(request.requestId);
 		this.unused -= 1;
 		this.owner.returnSlots(1);
+	}
+
+	cancelUndispatchedRequest(requestId: string): void {
+		if (this.cancelledRequests.has(requestId)) return;
+		if (this.released || !this.requests.has(requestId))
+			throw new SystemOneUsageRefusal("This lease cannot retire another request's reservation");
+		this.owner.cancelUndispatchedRequest(this.identity, requestId);
+		this.requests.delete(requestId);
+		this.cancelledRequests.add(requestId);
 	}
 
 	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome {
@@ -469,6 +481,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private readonly boundSlot: JournalSlot | undefined;
 	private readonly held = new Map<string, HeldReceipt>();
 	private readonly unresolved = new Map<string, UnresolvedUsageRequest>();
+	/** Proven pre-dispatch refusals whose journal removal may need the existing storage retry. */
+	private readonly undispatchedRequests = new Set<string>();
 	private readonly warnedRequests = new Set<string>();
 	private readonly spendingListeners = new Set<() => void>();
 	/** Confirmed rows whose journal copy is still in the sidecar, keyed by identity with the payload that copy names. */
@@ -623,6 +637,55 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		// A corrupt file discovered under the write lock invalidates a prior spending projection.
 		if (this.baselineUncertain)
 			throw new SystemOneUsageRefusal("Request spending baseline became uncertain before dispatch");
+	}
+
+	cancelUndispatchedRequest(identity: SemanticUsageLedgerIdentity, requestId: string): void {
+		if (!sameIdentity(identity, this.bound) || !this.unresolved.has(requestId))
+			throw new SystemOneUsageRefusal("No matching request reservation can be retired");
+		this.undispatchedRequests.add(requestId);
+		this.retireUndispatchedRequest(requestId);
+	}
+
+	private retireUndispatchedRequest(requestId: string): void {
+		const request = this.unresolved.get(requestId);
+		if (!request || !this.undispatchedRequests.has(requestId)) return;
+		if (this.held.has(requestId) || this.ledger.findCanonical(requestId))
+			throw new SystemOneUsageRefusal("A received usage report cannot be retired as undispatched");
+		const slot = this.boundSlot;
+		if (slot) {
+			try {
+				this.writeJournal(
+					"remove",
+					slot,
+					(current) => {
+						if (!current) return undefined;
+						if (
+							current.records.some((record) => record.reportId === requestId) ||
+							current.conflicts.some((record) => record.reportId === requestId)
+						)
+							throw new SystemOneUsageRefusal("Received usage evidence prevents reservation retirement");
+						const standing = current.unresolved?.find((item) => item.requestId === requestId);
+						if (standing && !isDeepStrictEqual(standing, request))
+							throw new SystemOneUsageRefusal("Request reservation identity changed before retirement");
+						const unresolved = current.unresolved?.filter((item) => item.requestId !== requestId) ?? [];
+						if (
+							!current.records.length &&
+							!current.conflicts.length &&
+							!current.droppedConflicts &&
+							!unresolved.length
+						)
+							return undefined;
+						return { ...current, updatedAt: new Date().toISOString(), unresolved };
+					},
+					undefined,
+				);
+			} catch (error) {
+				this.failJournal("remove", error);
+				throw error;
+			}
+		}
+		this.undispatchedRequests.delete(requestId);
+		this.clearUnresolved(requestId);
 	}
 
 	reportUnresolvedRequest(requestId: string): void {
@@ -1254,6 +1317,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 
 	private clearUnresolved(reportId: string): void {
 		const changed = this.unresolved.delete(reportId);
+		this.undispatchedRequests.delete(reportId);
 		this.warnedRequests.delete(reportId);
 		if (changed) this.notifySpending();
 	}
@@ -1540,6 +1604,16 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (slot !== undefined) {
 			if (!this.loaded) this.load(slot);
 			if (this.loaded && !this.retainReady) this.probe(slot);
+		}
+		for (const requestId of this.undispatchedRequests) {
+			try {
+				this.retireUndispatchedRequest(requestId);
+			} catch (error) {
+				this.warnOnce(
+					"remove",
+					`An undispatched request reservation could not be retired (${causeOf(error)}); its removal will be retried.`,
+				);
+			}
 		}
 		for (const [reportId, entry] of [...this.held]) {
 			try {

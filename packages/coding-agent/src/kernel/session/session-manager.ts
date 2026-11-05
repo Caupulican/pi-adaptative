@@ -1,3 +1,20 @@
+import {
+	MAX_PARENT_WAKE_CHARS,
+	MAX_PARENT_WAKE_INPUTS,
+	MAX_PENDING_PARENT_INPUTS,
+	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+	PARENT_INPUT_WAKE_CUSTOM_TYPE,
+	PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
+	type ParentInputAppendReceipt,
+	ParentInputIndex,
+	type ParentInputOrigin,
+	type ParentInputWake,
+	type PersistedParentInput,
+	parentInputContextIds,
+	parentInputOf,
+	parentWakeContent,
+	parentWakeMarker,
+} from "./parent-input-ledger.ts";
 import { MAX_SESSION_ENTRY_VISIT_COUNT, MAX_SESSION_LINE_CHARS } from "./session-entry-limits.ts";
 import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
@@ -17,7 +34,7 @@ export {
 	MAX_SESSION_HEADER_BYTES,
 } from "./session-identity.ts";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	createReadStream,
@@ -753,6 +770,7 @@ function selectCompactedContext(
 	compaction: CompactionEntry,
 	compactionIdx: number,
 	end: number,
+	pendingInputIds: ReadonlySet<string>,
 ): CompactedContextSelection {
 	const scopeIdx = compactionScopeIndex(path, compaction, compactionIdx);
 	const scopedPath = scopeIdx === 0 && end === path.length ? path : path.slice(scopeIdx, end);
@@ -800,9 +818,19 @@ function selectCompactedContext(
 			carriedByKind.set(entry.customType, list);
 		} else carriedByKind.set(entry.customType, [entry]);
 	}
-	const carried = [...carriedByKind.values()].flat().sort((a, b) => path.indexOf(a) - path.indexOf(b));
-
 	const retained = compaction.retention ? restoredGaps : path.slice(firstKeptIdx, compactionIdx);
+	const carried = [...carriedByKind.values()].flat();
+	const preserved = new Set([...carried, ...retained, ...restoredGaps].map((entry) => entry.id));
+	if (originalUserEntry) preserved.add(originalUserEntry.id);
+	// Accepted input remains verbatim until its wake settles, even when a summary covers its position.
+	for (let i = scopeIdx; i < compactionIdx; i++) {
+		const entry = path[i];
+		if (pendingInputIds.has(entry.id) && !preserved.has(entry.id)) {
+			carried.push(entry);
+			preserved.add(entry.id);
+		}
+	}
+	carried.sort((a, b) => path.indexOf(a) - path.indexOf(b));
 	return { scopeIdx, compactionIdx, end, originalUserEntry, restoredGaps, carried, retained };
 }
 
@@ -818,6 +846,7 @@ type ContextSection =
  * unscoped checkpoint. Each step scans backward from the previous section's start, so the whole path is read once.
  */
 function compactedContextSections(path: readonly SessionEntry[]): ContextSection[] {
+	const pendingInputIds = parentInputContextIds(path);
 	const sections: ContextSection[] = [];
 	let end = path.length;
 	while (end > 0) {
@@ -833,7 +862,7 @@ function compactedContextSections(path: readonly SessionEntry[]): ContextSection
 			break;
 		}
 		const compaction = path[compactionIdx] as CompactionEntry;
-		const selection = selectCompactedContext(path, compaction, compactionIdx, end);
+		const selection = selectCompactedContext(path, compaction, compactionIdx, end, pendingInputIds);
 		sections.push({ kind: "compacted", compaction, selection });
 		end = selection.scopeIdx;
 	}
@@ -1688,6 +1717,13 @@ export class SessionManager {
 	private navigationRevision = 0;
 	private inheritedSessionIds = new Set<string>();
 	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
+	private parentInputCache:
+		| { byId: Map<string, SessionEntry>; leafId: string | null; index: ParentInputIndex }
+		| undefined;
+	private parentInputReceipts:
+		| { byId: Map<string, SessionEntry>; count: number; deliveries: Map<string, PersistedParentInput> }
+		| undefined;
+	private activeParentWake: { wakeId: string; assertCurrent: () => void } | undefined;
 
 	private constructor(
 		cwd: string,
@@ -2559,6 +2595,11 @@ export class SessionManager {
 				if (entry.type === "message" && this.messageEntryIndex?.byId === this.byId) {
 					this.messageEntryIndex.ids.set(entry.message, entry.id);
 				}
+				const parentCache = this.parentInputCache;
+				if (parentCache && parentCache.byId === this.byId && parentCache.leafId === entry.parentId) {
+					parentCache.index.apply(entry, (id) => this.byId.get(id));
+					parentCache.leafId = entry.id;
+				} else this.parentInputCache = undefined;
 				this._advanceLifecycleActiveCache(entry);
 				assertPublishedContext();
 				this._advanceSessionContextCache(entry);
@@ -3294,6 +3335,211 @@ export class SessionManager {
 	/** Plan deterministic lifecycle repair for one branch without mutating the session. */
 	planSessionLifecycleRepair(fromId?: string | null): SessionLifecycleRepairPlan {
 		return planSessionLifecycleRepair(this.entries, fromId === undefined ? this.leafId : fromId);
+	}
+
+	private _parentInputIndex(): ParentInputIndex {
+		if (this.parentInputCache?.byId === this.byId && this.parentInputCache.leafId === this.leafId)
+			return this.parentInputCache.index;
+		const index = new ParentInputIndex();
+		for (const entry of this.getBranch()) index.apply(entry, (id) => this.byId.get(id));
+		this.parentInputCache = { byId: this.byId, leafId: this.leafId, index };
+		return index;
+	}
+
+	getPendingParentInputs(): readonly PersistedParentInput[] {
+		return this._parentInputIndex().pendingInputs();
+	}
+	getParentInputWake(): ParentInputWake | undefined {
+		return this._parentInputIndex().openWake();
+	}
+
+	private _appendParentMessage(message: CustomMessage<unknown>): SessionAppendReceipt {
+		let receipt: SessionAppendReceipt | undefined;
+		try {
+			this.appendMessageBatch([{ kind: "custom", message }], (committed) => {
+				receipt = committed;
+			});
+		} catch (error) {
+			if (!(error instanceof SessionAppendCommittedError)) throw error;
+			receipt = error.receipt;
+		}
+		if (receipt?.durability !== "persisted" || !receipt.entries.every((entry) => this.isEntryPersisted(entry.id)))
+			throw new Error("Parent input did not reach physical session storage.");
+		return receipt;
+	}
+
+	private _parentInputReceipt(deliveryId: string): PersistedParentInput | undefined {
+		let cache = this.parentInputReceipts;
+		if (!cache || cache.byId !== this.byId || cache.count > this.entries.length) {
+			cache = { byId: this.byId, count: 0, deliveries: new Map() };
+			this.parentInputReceipts = cache;
+		}
+		for (; cache.count < this.entries.length; cache.count++) {
+			const input = parentInputOf(this.entries[cache.count]!);
+			if (!input) continue;
+			if (cache.deliveries.has(input.metadata.deliveryId))
+				throw new Error("Duplicate parent input delivery requires inspection.");
+			cache.deliveries.set(input.metadata.deliveryId, input);
+		}
+		return cache.deliveries.get(deliveryId);
+	}
+
+	/** The physical parent-input boundary; lookup and append share the canonical transcript lock. */
+	appendParentInput(message: CustomMessage<unknown>): ParentInputAppendReceipt {
+		const candidate = parentInputOf({
+			type: "custom_message",
+			id: "candidate",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+		});
+		if (!candidate) throw new Error("Parent input metadata is required.");
+		return this._withParentInputMutation(candidate.metadata.origin, () => {
+			const index = this._parentInputIndex();
+			const existing = this._parentInputReceipt(candidate.metadata.deliveryId);
+			if (existing) {
+				if (JSON.stringify(existing.metadata) !== JSON.stringify(candidate.metadata))
+					throw new Error("Parent input delivery ID conflicts with its saved payload.");
+				if (index.find(candidate.metadata.deliveryId)?.entryId !== existing.entryId)
+					throw new Error("Parent input belongs to another branch.");
+				const entry = this.byId.get(existing.entryId)!;
+				return {
+					...captureSessionAppendIdentity(this.sessionId, this.sessionFile, [entry]),
+					durability: "persisted",
+					created: false,
+				};
+			}
+			if (index.pendingInputs().length >= MAX_PENDING_PARENT_INPUTS)
+				throw new Error("Pending parent input capacity exceeded.");
+			return { ...this._appendParentMessage(message), created: true };
+		});
+	}
+
+	/** One durable detached batch, reused after restart until its exact provider answer settles it. */
+	beginParentInputWake(): ParentInputWake | undefined {
+		const index = this._parentInputIndex();
+		const existing = index.openWake();
+		if (existing) return existing;
+		const pending: PersistedParentInput[] = [];
+		let payloadChars = 0;
+		for (const input of index.pendingInputs()) {
+			const entry = this.getEntry(input.entryId);
+			if (entry?.type !== "custom_message" || typeof entry.content !== "string")
+				throw new Error("Parent input requires canonical text.");
+			if (pending.length >= MAX_PARENT_WAKE_INPUTS || payloadChars + entry.content.length > MAX_PARENT_WAKE_CHARS)
+				break;
+			payloadChars += entry.content.length;
+			pending.push(input);
+		}
+		if (!pending.length) return undefined;
+		return this._withParentInputMutation(pending[0]!.metadata.origin, () => {
+			const inputs = pending.map((input) => ({
+				entryId: input.entryId,
+				deliveryId: input.metadata.deliveryId,
+				payloadDigest: input.metadata.payloadDigest,
+			}));
+			const wakeId = createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
+			const content = parentWakeContent(wakeId, inputs);
+			this._appendParentMessage(
+				createCustomMessage(
+					PARENT_INPUT_WAKE_CUSTOM_TYPE,
+					content,
+					false,
+					{ version: 1, wakeId, inputs, detached: true },
+					new Date().toISOString(),
+				),
+			);
+			return this._parentInputIndex().openWake()!;
+		});
+	}
+
+	activateParentInputWake(wakeId: string): () => void {
+		if (this.activeParentWake || this._parentInputIndex().openWake()?.wakeId !== wakeId)
+			throw new Error("Parent wake is not available for execution.");
+		const active = { wakeId, assertCurrent: this.captureBranchContext() };
+		this.activeParentWake = active;
+		return () => {
+			if (this.activeParentWake === active) this.activeParentWake = undefined;
+		};
+	}
+
+	/** Called at the actual provider boundary, after request_snapshot and before transport. */
+	recordParentInputWakeRequest(requestId: string, messages: readonly { content: unknown }[]): void {
+		const active = this.activeParentWake;
+		if (!active) return;
+		active.assertCurrent();
+		const texts = messages.flatMap(({ content }) =>
+			typeof content === "string"
+				? [content]
+				: Array.isArray(content)
+					? content.flatMap((block) =>
+							block && typeof block === "object" && "text" in block && typeof block.text === "string"
+								? [block.text]
+								: [],
+						)
+					: [],
+		);
+		const visible = (text: string): boolean => texts.some((value) => value.includes(text));
+		const wake = this._parentInputIndex().openWake();
+		if (wake?.wakeId !== active.wakeId || !visible(parentWakeMarker(active.wakeId)))
+			throw new Error("Parent wake manifest is absent from the actual provider request.");
+		for (const input of wake.inputs) {
+			const entry = this.getEntry(input.entryId);
+			if (entry?.type !== "custom_message" || typeof entry.content !== "string" || !visible(entry.content))
+				throw new Error("An exact selected parent input is absent from the actual provider request.");
+		}
+		const id = this.appendCustomEntry(PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE, {
+			version: 1,
+			wakeId: active.wakeId,
+			requestId,
+		});
+		if (!this.isEntryPersisted(id)) throw new Error("Parent wake request binding was not persisted.");
+	}
+
+	settleParentInputWake(wakeId: string): void {
+		const index = this._parentInputIndex();
+		const wake = index.openWake();
+		if (wake?.wakeId !== wakeId || !wake.completed)
+			throw new Error("Parent wake has no matching terminal provider answer.");
+		const origin = index.find(wake.inputs[0]!.deliveryId)!.metadata.origin;
+		this._withParentInputMutation(origin, () => {
+			const current = this._parentInputIndex().openWake();
+			if (current?.wakeId !== wakeId || !current.completed)
+				throw new Error("Parent wake changed before settlement.");
+			const id = this.appendCustomEntry(PARENT_INPUT_SETTLED_CUSTOM_TYPE, {
+				version: 1,
+				wakeId,
+				...current.completed,
+			});
+			if (!this.isEntryPersisted(id)) throw new Error("Parent wake settlement was not persisted.");
+		});
+	}
+
+	private _withParentInputMutation<T>(origin: ParentInputOrigin, operation: () => T): T {
+		if (!this.hasDurableSessionFile() || !this.sessionFile || this.persistenceStateUncertain)
+			throw new Error("Parent input requires a healthy durable session file.");
+		return withSessionFileMutation(
+			this.agentDir,
+			this.sessionFile,
+			this.sessionId,
+			"append",
+			() => {
+				if (!this.storageRevision || !sameFileVersion(this.storageRevision, statSync(this.sessionFile!)))
+					throw new Error("Parent session changed on disk; reopen it before delivering input.");
+				if (
+					origin.sessionId !== this.sessionId ||
+					(origin.sessionFile !== undefined && origin.sessionFile !== this.sessionFile)
+				)
+					throw new Error("Parent input session identity changed.");
+				if (!this.getBranch().some((entry) => entry.id === origin.leafId) || !this.isEntryPersisted(origin.leafId))
+					throw new Error("Parent input origin is not on the current durable branch.");
+				return operation();
+			},
+			{ session: this, revision: this.storageRevision },
+		);
 	}
 
 	/**

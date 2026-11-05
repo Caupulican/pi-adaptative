@@ -25,9 +25,11 @@ import {
 	parseKnowledgeRecord,
 	parseKnowledgeSlot,
 } from "./knowledge-record.ts";
+import { KNOWLEDGE_WINDOW_SCHEMA } from "./knowledge-window-journal.ts";
+import { KNOWLEDGE_WORK_SCHEMA, KnowledgeWorkJournal } from "./knowledge-work-journal.ts";
 import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAX_QUERY_TERMS = 8;
 
 function terms(text: string): string[] {
@@ -62,11 +64,13 @@ function decode(row: Record<string, unknown>): KnowledgeRecord {
 export class KnowledgeStore implements KnowledgeStorePort {
 	private readonly db: SqliteDatabase;
 	readonly collection: KnowledgeCollectionJournal;
+	readonly work: KnowledgeWorkJournal;
 	private closed = false;
 
 	private constructor(db: SqliteDatabase, collectionTime?: Pick<TimerPort, "now">) {
 		this.db = db;
 		this.collection = new KnowledgeCollectionJournal(db, collectionTime);
+		this.work = new KnowledgeWorkJournal(db);
 	}
 
 	static open(agentDir: string, collectionTime?: Pick<TimerPort, "now">): KnowledgeStore {
@@ -77,13 +81,17 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION)
+			if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION)
 				throw new Error("Unsupported ICM knowledge schema");
 			const store = new KnowledgeStore(db, collectionTime);
 			if (version !== SCHEMA_VERSION)
 				store.transaction(() => {
 					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
 					if (lockedVersion === SCHEMA_VERSION) return;
+					if (lockedVersion === 3) {
+						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
+						return;
+					}
 					if (lockedVersion === 1) {
 						db.exec(`ALTER TABLE entries ADD COLUMN identity TEXT;
 						UPDATE entries SET identity=json_array(json_extract(body,'$.subject'),json_extract(body,'$.key')) WHERE body IS NOT NULL;
@@ -116,7 +124,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					db.exec(`CREATE TABLE operation_receipts (
 					 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('remember','forget')),
 					 entry_id TEXT NOT NULL REFERENCES entries(id), revision INTEGER NOT NULL CHECK(revision>0)
-						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
+						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
 				});
 			return store;
 		});

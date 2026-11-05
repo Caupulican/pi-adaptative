@@ -33,6 +33,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 	capabilities(): DecisionEngineCapabilities {
 		return {
 			requestBudget: this.adapter.requestBudget === true,
+			requestLifecycle: this.adapter.requestLifecycle === true,
 			boolean: true,
 			choice: true,
 			score: true,
@@ -109,6 +110,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				timeoutMs: options?.timeoutMs,
 				budget: options?.budget,
 				origin: options?.origin,
+				onRequestAdmitted: options?.onRequestAdmitted,
 			},
 		);
 		const latencyMs = Date.now() - startTime;

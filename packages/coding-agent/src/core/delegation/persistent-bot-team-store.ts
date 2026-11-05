@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
@@ -7,12 +7,37 @@ import type { WorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+import {
+	MAX_ROUTINE_COMMAND_ID_CHARS,
+	MAX_ROUTINE_MANUAL_TOMBSTONES,
+	MAX_ROUTINE_OCCURRENCES,
+	MAX_ROUTINE_PROMPT_CHARS,
+	MAX_ROUTINE_SUMMARY_CHARS,
+	nextRoutineAt,
+	type PersistentRoutineDefinition,
+	type PersistentRoutineTarget,
+	parseLegacyRoutineDefinition,
+	parseRoutineDefinitionView,
+	parseRoutineExecutionSnapshot,
+	parseRoutineOccurrence,
+	parseRoutineScheduleInput,
+	parseRoutineTarget,
+	type RoutineCursor,
+	type RoutineDefinitionView,
+	type RoutineDelivery,
+	type RoutineOccurrence,
+	type RoutineOccurrenceClaimInput,
+	type RoutineOccurrenceListFilter,
+	type RoutineTerminalOutcome,
+	routineOccurrenceId,
+	routineResultDigest,
+	type UpsertPersistentRoutineInput,
+} from "../routines/routine-contract.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
-	buildUpsertedRoutineRecord,
 	claimDaemonLeaseFile,
-	claimDueRoutinesInMap,
 	collectBotInboxEntries,
 	collectTeamInboxEntries,
 	type DaemonLeaseRelease,
@@ -20,16 +45,12 @@ import {
 	formatDurationIntervalMs,
 	type PersistentBotDaemonStatus,
 	type PersistentBotInboxEntry,
-	type PersistentRoutineScheduleRecord,
-	type PersistentRoutineTarget,
 	parseDurationIntervalMs,
-	parseRoutineRecord,
 	readDaemonLeaseStatus,
 	recordDaemonLaunchPidFile,
 	releaseDaemonLeaseFile,
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
-	type UpsertPersistentRoutineInput,
 } from "./bot-team-routine-helpers.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
@@ -37,9 +58,11 @@ export {
 	formatDurationIntervalMs,
 	type PersistentBotDaemonStatus,
 	type PersistentBotInboxEntry,
-	type PersistentRoutineScheduleRecord,
+	type PersistentRoutineDefinition,
 	type PersistentRoutineTarget,
 	parseDurationIntervalMs,
+	type RoutineDefinitionView,
+	type RoutineOccurrence,
 	type UpsertPersistentRoutineInput,
 };
 
@@ -585,7 +608,10 @@ export class PersistentBotTeamStore {
 	private readonly bots = new Map<string, PersistentBotRecord>();
 	private readonly teams = new Map<string, PersistentTeamRecord>();
 	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
-	private readonly routines = new Map<string, PersistentRoutineScheduleRecord>();
+	private readonly routines = new Map<string, RoutineDefinitionView>();
+	private readonly routineOccurrences = new Map<string, RoutineOccurrence>();
+	private readonly routineManualTombstones = new Set<string>();
+	private routineRevisionCounter = 0;
 	private readonly listeners = new Set<() => void>();
 	private mutationChanged = false;
 	private watcher: FSWatcher | undefined;
@@ -674,18 +700,220 @@ export class PersistentBotTeamStore {
 		}
 	}
 
+	private migrateLegacyRoutineView(value: unknown): RoutineDefinitionView | undefined {
+		const definition = parseLegacyRoutineDefinition(value);
+		if (definition?.schedule.kind !== "interval" || !isRecordObject(value)) return undefined;
+		const cursor: RoutineCursor = { kind: "interval", nextIndex: 1 };
+		const nextRunAt = nextRoutineAt(definition.schedule, cursor);
+		if (nextRunAt === undefined) return undefined;
+		const lastRunAt =
+			typeof value.lastRunAt === "number" && Number.isSafeInteger(value.lastRunAt) ? value.lastRunAt : undefined;
+		const lastStatus = ["queued", "running", "succeeded", "failed"].includes(String(value.lastStatus))
+			? (value.lastStatus as RoutineDefinitionView["lastStatus"])
+			: undefined;
+		const lastSummary =
+			typeof value.lastSummary === "string" ? value.lastSummary.slice(0, MAX_ROUTINE_SUMMARY_CHARS) : undefined;
+		return {
+			...definition,
+			cursor,
+			nextRunAt,
+			...(lastRunAt === undefined ? {} : { lastRunAt }),
+			...(lastStatus ? { lastStatus } : {}),
+			...(lastSummary ? { lastSummary } : {}),
+		};
+	}
+
+	private latestDueTrigger(
+		routine: RoutineDefinitionView,
+		firstDueAt: number,
+		nowMs: number,
+	): Extract<RoutineOccurrence["trigger"], { kind: "schedule" }> {
+		if (routine.schedule.kind === "once") return { kind: "schedule", scheduledAt: firstDueAt, missedCount: 0 };
+		const lastIndex = Math.floor((nowMs - routine.schedule.anchorAt) / routine.schedule.intervalMs);
+		const scheduledAt = routine.schedule.anchorAt + routine.schedule.intervalMs * lastIndex;
+		const firstIndex = routine.cursor.kind === "interval" ? routine.cursor.nextIndex : 1;
+		return { kind: "schedule", scheduledAt, missedCount: Math.max(0, lastIndex - firstIndex) };
+	}
+
+	private createClaimedOccurrence(
+		definition: RoutineDefinitionView,
+		occurrenceId: string,
+		trigger: RoutineOccurrence["trigger"],
+		owner: string,
+		leaseMs: number,
+		nowMs: number,
+		parentOrigin: WorkerReceiptOrigin,
+	): RoutineOccurrence {
+		this.pruneRoutineOccurrences();
+		const definitionSnapshot: PersistentRoutineDefinition = {
+			routineId: definition.routineId,
+			incarnationId: definition.incarnationId,
+			revision: definition.revision,
+			target: definition.target,
+			prompt: definition.prompt,
+			schedule: definition.schedule,
+			enabled: definition.enabled,
+			...(definition.executionSnapshot ? { executionSnapshot: definition.executionSnapshot } : {}),
+			createdAt: definition.createdAt,
+			updatedAt: definition.updatedAt,
+		};
+		return {
+			occurrenceId,
+			routineId: definition.routineId,
+			routineRevision: definition.revision,
+			definition: definitionSnapshot,
+			parentOrigin,
+			target: definition.target,
+			trigger,
+			phase: "claimed",
+			createdAt: nowMs,
+			updatedAt: nowMs,
+			claim: { token: randomUUID(), owner, leaseUntil: nowMs + leaseMs },
+		};
+	}
+
+	private updateClaimedOccurrence(
+		input: { occurrenceId: string; claimToken: string; nowMs: number },
+		update: (occurrence: RoutineOccurrence) => RoutineOccurrence,
+	): void {
+		this.mutate(() => {
+			const current = this.routineOccurrences.get(input.occurrenceId);
+			if (
+				!current?.claim ||
+				current.claim.token !== input.claimToken ||
+				current.phase === "terminal" ||
+				current.phase === "uncertain" ||
+				!Number.isSafeInteger(input.nowMs) ||
+				input.nowMs < current.updatedAt
+			)
+				throw new Error("Routine occurrence claim is stale.");
+			const next = update(structuredClone(current));
+			const transitionAllowed =
+				(current.phase === "claimed" && next.phase === "dispatching" && current.claim.leaseUntil > input.nowMs) ||
+				((current.phase === "dispatching" || current.phase === "running") &&
+					(next.phase === "running" || next.phase === "terminal" || next.phase === "uncertain"));
+			if (!transitionAllowed)
+				throw new Error("Routine occurrence transition is invalid or its dispatch lease expired.");
+			if (
+				next.occurrenceId !== current.occurrenceId ||
+				next.routineId !== current.routineId ||
+				next.routineRevision !== current.routineRevision ||
+				next.createdAt !== current.createdAt ||
+				next.updatedAt !== input.nowMs ||
+				JSON.stringify([next.definition, next.parentOrigin, next.target, next.trigger, next.claim]) !==
+					JSON.stringify([
+						current.definition,
+						current.parentOrigin,
+						current.target,
+						current.trigger,
+						current.claim,
+					]) ||
+				(current.dispatchKey !== undefined && next.dispatchKey !== current.dispatchKey) ||
+				(current.executionRef !== undefined && next.executionRef?.taskId !== current.executionRef.taskId) ||
+				!next.dispatchKey ||
+				next.dispatchKey.length > 512 ||
+				next.dispatchKey.includes("\0") ||
+				!parseRoutineOccurrence(next)
+			)
+				throw new Error("Routine transition cannot change its admitted identity or retain invalid state.");
+			this.routineOccurrences.set(current.occurrenceId, next);
+			this.save();
+		});
+	}
+
+	private withResult(
+		occurrence: RoutineOccurrence,
+		outcome: RoutineTerminalOutcome,
+		summaryRaw: string,
+		recipient: string,
+	): RoutineOccurrence {
+		const summary = summaryRaw.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+		if (recipient !== occurrence.parentOrigin.sessionId)
+			throw new Error("Routine result recipient does not match its admitted parent.");
+		const digest = routineResultDigest(outcome, summary, recipient);
+		return { ...occurrence, result: { outcome, summary, digest, delivery: "pending", recipient } };
+	}
+
+	private pruneRoutineOccurrences(): void {
+		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return;
+		const removable = Array.from(this.routineOccurrences.values())
+			.filter(
+				(item) =>
+					item.phase === "terminal" &&
+					item.result?.delivery === "acknowledged" &&
+					(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged"),
+			)
+			.sort((a, b) => a.updatedAt - b.updatedAt);
+		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
+			const item = removable.shift();
+			if (!item) continue;
+			if (item.trigger.kind === "manual") {
+				if (this.routineManualTombstones.size >= MAX_ROUTINE_MANUAL_TOMBSTONES) continue;
+				this.routineManualTombstones.add(item.occurrenceId);
+			}
+			this.routineOccurrences.delete(item.occurrenceId);
+		}
+		if (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES)
+			throw new Error("Routine occurrence journal is full of active or undelivered entries.");
+	}
+
+	private cancelUndispatchedRoutineOccurrences(routineId: string, nowMs: number): void {
+		for (const item of this.routineOccurrences.values()) {
+			if (item.routineId !== routineId || (item.phase !== "pending" && item.phase !== "claimed")) continue;
+			const cancelled = this.withResult(
+				{ ...item, phase: "terminal", updatedAt: nowMs },
+				"cancelled",
+				"Routine was paused or deleted before dispatch.",
+				item.parentOrigin.sessionId,
+			);
+			this.routineOccurrences.set(item.occurrenceId, cancelled);
+		}
+	}
+
+	private highestRoutineRevision(): number {
+		let highest = 0;
+		for (const routine of this.routines.values()) highest = Math.max(highest, routine.revision);
+		for (const occurrence of this.routineOccurrences.values())
+			highest = Math.max(highest, occurrence.routineRevision);
+		return highest;
+	}
+
 	/**
 	 * Writes the store. Routines are kept under `routineSchedules`, never the version-1 `routines` key: an inline-script
 	 * daemon of an earlier build rewrites the store, unlocked and non-atomically, only while its top level holds a
 	 * `routines` array, so every save also seals the store against that writer (see `bot-daemon-legacy.ts`).
 	 */
 	private save(): void {
+		if (this.routines.size > MAX_ROUTINE_OCCURRENCES)
+			throw new Error("Routine definition registry exceeds its bounded capacity.");
+		if (
+			this.routineOccurrences.size > MAX_ROUTINE_OCCURRENCES ||
+			this.routineManualTombstones.size > MAX_ROUTINE_MANUAL_TOMBSTONES
+		)
+			throw new Error("Routine occurrence custody exceeds its bounded capacity.");
+		for (const routine of this.routines.values()) {
+			if (!parseRoutineDefinitionView(routine))
+				throw new Error("Refusing to persist an invalid routine definition or cursor.");
+		}
+		for (const occurrence of this.routineOccurrences.values()) {
+			if (!parseRoutineOccurrence(occurrence)) throw new Error("Refusing to persist an invalid routine occurrence.");
+		}
+		const highestRoutineRevision = this.highestRoutineRevision();
+		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
+			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
-			version: 2,
+			version: 3,
+			routineRevisionCounter: this.routineRevisionCounter,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
 			teamMessages: Object.fromEntries(this.teamMessages),
 			...(this.routines.size > 0 ? { routineSchedules: Array.from(this.routines.values()) } : {}),
+			...(this.routineOccurrences.size > 0
+				? { routineOccurrences: Array.from(this.routineOccurrences.values()) }
+				: {}),
+			...(this.routineManualTombstones.size > 0
+				? { routineManualTombstones: Array.from(this.routineManualTombstones) }
+				: {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
@@ -727,34 +955,41 @@ export class PersistentBotTeamStore {
 		const digest = raw === undefined ? undefined : createHash("sha256").update(raw).digest("hex");
 		if (observeOnly && digest === this.loadedDigest) return false;
 		if (raw !== undefined) {
-			try {
-				parsed = JSON.parse(raw);
-			} catch (error) {
-				if (observeOnly) throw error;
-			}
+			parsed = JSON.parse(raw);
 		}
-		if (raw !== undefined && !isRecordObject(parsed)) {
-			if (observeOnly) throw new Error("Bot and team store is not an object.");
-			// The next save would replace an unreadable store with an empty one and destroy every bot and team:
-			// keep the unreadable file beside the store before continuing.
-			renameSync(this.filePath, join(dirname(this.filePath), `store.corrupt-${Date.now()}.json`));
-			parsed = undefined;
-		}
-		if (
-			observeOnly &&
-			raw !== undefined &&
-			(!isRecordObject(parsed) ||
-				(parsed.version !== 1 && parsed.version !== 2) ||
+		let storeVersion: number | undefined;
+		if (raw !== undefined) {
+			if (!isRecordObject(parsed)) throw new Error("Bot and team store is not an object.");
+			if (
+				typeof parsed.version !== "number" ||
+				![1, 2, 3].includes(parsed.version) ||
 				!Array.isArray(parsed.bots) ||
 				!Array.isArray(parsed.teams) ||
-				!isRecordObject(parsed.teamMessages))
-		)
-			throw new Error("Bot and team store has an invalid envelope.");
+				!isRecordObject(parsed.teamMessages)
+			)
+				throw new Error("Bot and team store has an invalid envelope.");
+			storeVersion = parsed.version;
+		}
+		const previousState = {
+			bots: new Map(this.bots),
+			teams: new Map(this.teams),
+			teamMessages: new Map(this.teamMessages),
+			routines: new Map(this.routines),
+			occurrences: new Map(this.routineOccurrences),
+			manualTombstones: new Set(this.routineManualTombstones),
+			revisionCounter: this.routineRevisionCounter,
+			loadedDigest: this.loadedDigest,
+			legacyRoutinesExposed: this.legacyRoutinesExposed,
+			cachedTeamList: this._cachedTeamList,
+		};
 		this._cachedTeamList = undefined;
 		this.bots.clear();
 		this.teams.clear();
 		this.teamMessages.clear();
 		this.routines.clear();
+		this.routineOccurrences.clear();
+		this.routineManualTombstones.clear();
+		this.routineRevisionCounter = 0;
 		this.loadedDigest = digest;
 		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
 		if (!isRecordObject(parsed)) return true;
@@ -796,13 +1031,85 @@ export class PersistentBotTeamStore {
 
 		// A version-1 store (or one an older build rewrote) keeps routines under `routines`.
 		const rawRoutines = Array.isArray(parsed.routineSchedules) ? parsed.routineSchedules : parsed.routines;
-		if (Array.isArray(rawRoutines)) {
-			for (const rawRoutine of rawRoutines) {
-				const routine = parseRoutineRecord(rawRoutine);
-				if (routine) {
+		try {
+			if (Array.isArray(rawRoutines)) {
+				for (const rawRoutine of rawRoutines) {
+					const routine =
+						parseRoutineDefinitionView(rawRoutine) ??
+						(storeVersion !== undefined && storeVersion < 3
+							? this.migrateLegacyRoutineView(rawRoutine)
+							: undefined);
+					if (!routine) {
+						if (storeVersion === 3)
+							throw new Error(
+								"Routine definition or cursor is malformed; refusing to drop durable schedule state.",
+							);
+						continue;
+					}
+					if (this.routines.has(routine.routineId))
+						throw new Error("Routine store contains duplicate routine identities.");
 					this.routines.set(routine.routineId, routine);
 				}
+			} else if (storeVersion === 3 && parsed.routineSchedules !== undefined) {
+				throw new Error("Routine schedule registry is malformed.");
 			}
+			if (parsed.routineOccurrences !== undefined) {
+				if (!Array.isArray(parsed.routineOccurrences) || parsed.routineOccurrences.length > MAX_ROUTINE_OCCURRENCES)
+					throw new Error("Routine occurrence journal has an invalid size.");
+				for (const raw of parsed.routineOccurrences) {
+					const occurrence = parseRoutineOccurrence(raw);
+					if (!occurrence || this.routineOccurrences.has(occurrence.occurrenceId))
+						throw new Error("Routine occurrence journal contains an invalid or duplicate entry.");
+					this.routineOccurrences.set(occurrence.occurrenceId, occurrence);
+				}
+			}
+			if (parsed.routineManualTombstones !== undefined) {
+				if (
+					!Array.isArray(parsed.routineManualTombstones) ||
+					parsed.routineManualTombstones.length > MAX_ROUTINE_MANUAL_TOMBSTONES ||
+					parsed.routineManualTombstones.some(
+						(id) =>
+							typeof id !== "string" ||
+							id.length > 256 ||
+							!/^[A-Za-z0-9-]+:[0-9]+:manual:[a-f0-9]{64}$/u.test(id),
+					)
+				)
+					throw new Error("Routine manual replay journal has an invalid shape.");
+				for (const id of parsed.routineManualTombstones as string[]) {
+					if (this.routineManualTombstones.has(id))
+						throw new Error("Routine manual replay journal contains duplicate entries.");
+					this.routineManualTombstones.add(id);
+				}
+			}
+			const highestRoutineRevision = this.highestRoutineRevision();
+			const storedRevisionCounter = parsed.routineRevisionCounter;
+			if (storeVersion === 3 && storedRevisionCounter === undefined)
+				throw new Error("Routine revision counter is required in the current store format.");
+			if (
+				storedRevisionCounter !== undefined &&
+				(!Number.isSafeInteger(storedRevisionCounter) || (storedRevisionCounter as number) < highestRoutineRevision)
+			)
+				throw new Error("Routine revision counter is malformed or behind persisted routine identity.");
+			this.routineRevisionCounter =
+				storedRevisionCounter === undefined ? highestRoutineRevision : (storedRevisionCounter as number);
+		} catch (error) {
+			this.bots.clear();
+			for (const [id, value] of previousState.bots) this.bots.set(id, value);
+			this.teams.clear();
+			for (const [id, value] of previousState.teams) this.teams.set(id, value);
+			this.teamMessages.clear();
+			for (const [id, value] of previousState.teamMessages) this.teamMessages.set(id, value);
+			this.routines.clear();
+			for (const [id, value] of previousState.routines) this.routines.set(id, value);
+			this.routineOccurrences.clear();
+			for (const [id, value] of previousState.occurrences) this.routineOccurrences.set(id, value);
+			this.routineManualTombstones.clear();
+			for (const value of previousState.manualTombstones) this.routineManualTombstones.add(value);
+			this.routineRevisionCounter = previousState.revisionCounter;
+			this.loadedDigest = previousState.loadedDigest;
+			this.legacyRoutinesExposed = previousState.legacyRoutinesExposed;
+			this._cachedTeamList = previousState.cachedTeamList;
+			throw error;
 		}
 		return true;
 	}
@@ -930,6 +1237,7 @@ export class PersistentBotTeamStore {
 
 			for (const [routineId, routine] of this.routines.entries()) {
 				if (routine.target.kind === "bot" && routine.target.agentId === normalizedId) {
+					this.cancelUndispatchedRoutineOccurrences(routineId, Date.now());
 					this.routines.delete(routineId);
 				}
 			}
@@ -1060,6 +1368,7 @@ export class PersistentBotTeamStore {
 			this.teamMessages.delete(normalizedId);
 			for (const [routineId, routine] of this.routines.entries()) {
 				if (routine.target.kind === "team" && routine.target.teamId === normalizedId) {
+					this.cancelUndispatchedRoutineOccurrences(routineId, Date.now());
 					this.routines.delete(routineId);
 				}
 			}
@@ -1068,60 +1377,501 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	listRoutines(): PersistentRoutineScheduleRecord[] {
+	listRoutines(): RoutineDefinitionView[] {
 		return Array.from(this.routines.values(), (r) => structuredClone(r)).sort((a, b) => a.nextRunAt - b.nextRunAt);
 	}
 
-	getRoutine(routineId: string): PersistentRoutineScheduleRecord | undefined {
+	getRoutine(routineId: string): RoutineDefinitionView | undefined {
 		const routine = this.routines.get(routineId.trim());
 		return routine ? structuredClone(routine) : undefined;
 	}
 
-	upsertRoutine(input: UpsertPersistentRoutineInput, nowMs = Date.now()): PersistentRoutineScheduleRecord {
+	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView {
 		return this.mutate(() => {
-			const record = buildUpsertedRoutineRecord(this.routines, input, nowMs);
-			this.routines.set(record.routineId, record);
+			const normalizedId = normalizeBotOrTeamId(input.routineId, "routineId");
+			const existing = this.routines.get(normalizedId);
+			if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision)
+				throw new Error("Routine revision changed; read current state before retrying.");
+			if (input.createOnly && existing) throw new Error("Routine already exists.");
+			const scheduleInput = parseRoutineScheduleInput(input.schedule);
+			const session = input.target.kind === "session";
+			if (session !== (input.executionSnapshot !== undefined))
+				throw new Error("Session routines require a host-admitted execution snapshot.");
+			const scheduleChanged =
+				!existing ||
+				JSON.stringify(
+					existing.schedule.kind === "interval"
+						? { kind: existing.schedule.kind, intervalMs: existing.schedule.intervalMs }
+						: existing.schedule,
+				) !== JSON.stringify(scheduleInput);
+			const schedule =
+				scheduleInput.kind === "interval"
+					? {
+							kind: "interval" as const,
+							intervalMs: scheduleInput.intervalMs,
+							anchorAt: scheduleChanged
+								? (input.nowMs ?? Date.now())
+								: (existing!.schedule as Extract<RoutineDefinitionView["schedule"], { kind: "interval" }>)
+										.anchorAt,
+						}
+					: { kind: "once" as const, at: scheduleInput.at };
+			const cursor: RoutineCursor =
+				scheduleChanged || !existing
+					? schedule.kind === "interval"
+						? { kind: "interval", nextIndex: 1 }
+						: { kind: "once", consumed: false }
+					: existing.cursor;
+			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
+			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
+				throw new Error("Routine revision counter is exhausted.");
+			const revision = this.routineRevisionCounter + 1;
+			this.routineRevisionCounter = revision;
+			const definition: PersistentRoutineDefinition = {
+				routineId: normalizedId,
+				incarnationId: existing?.incarnationId ?? randomUUID(),
+				revision,
+				target: parseRoutineTarget(input.target),
+				prompt: input.prompt.trim(),
+				schedule,
+				enabled: input.enabled ?? existing?.enabled ?? true,
+				...(input.executionSnapshot
+					? { executionSnapshot: parseRoutineExecutionSnapshot(input.executionSnapshot) }
+					: {}),
+				createdAt: existing?.createdAt ?? nowIso,
+				updatedAt: nowIso,
+			};
+			if (!definition.prompt || definition.prompt.length > MAX_ROUTINE_PROMPT_CHARS)
+				throw new Error("Routine prompt is invalid.");
+			if (
+				definition.executionSnapshot &&
+				(definition.target.kind !== "session" ||
+					definition.executionSnapshot.parentSessionId !== definition.target.parentSessionId)
+			)
+				throw new Error("Routine snapshot does not match its session target.");
+			const plannedRunAt = nextRoutineAt(schedule, cursor);
+			if (plannedRunAt === undefined && schedule.kind === "interval")
+				throw new Error("Routine interval has no representable future instant.");
+			const nextRunAt = plannedRunAt ?? Number.MAX_SAFE_INTEGER;
+			const view: RoutineDefinitionView = {
+				...definition,
+				cursor,
+				nextRunAt,
+				...(existing?.lastRunAt === undefined ? {} : { lastRunAt: existing.lastRunAt }),
+				...(existing?.lastStatus ? { lastStatus: existing.lastStatus } : {}),
+				...(existing?.lastSummary ? { lastSummary: existing.lastSummary } : {}),
+			};
+			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
+			this.routines.set(normalizedId, view);
+			if (!view.enabled) this.cancelUndispatchedRoutineOccurrences(normalizedId, input.nowMs ?? Date.now());
 			this.save();
-			return structuredClone(record);
+			return structuredClone(view);
 		});
 	}
 
-	deleteRoutine(routineId: string): boolean {
+	deleteRoutine(routineId: string, expectedRevision?: number, nowMs = Date.now()): boolean {
 		return this.mutate(() => {
 			const normalizedId = normalizeBotOrTeamId(routineId, "routineId");
-			if (!this.routines.has(normalizedId)) return false;
+			const existing = this.routines.get(normalizedId);
+			if (!existing) return false;
+			if (expectedRevision !== undefined && existing.revision !== expectedRevision)
+				throw new Error("Routine revision changed; read current state before retrying.");
+			this.cancelUndispatchedRoutineOccurrences(normalizedId, nowMs);
 			this.routines.delete(normalizedId);
 			this.save();
 			return true;
 		});
 	}
 
-	claimDueRoutines(nowMs = Date.now(), routineIdFilter?: string): PersistentRoutineScheduleRecord[] {
+	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineOccurrence[] {
 		return this.mutate(() => {
-			const claimed = claimDueRoutinesInMap(this.routines, nowMs, routineIdFilter);
-			if (claimed.length > 0) this.save();
-			return claimed;
+			if (
+				!Number.isSafeInteger(input.nowMs) ||
+				input.nowMs < 0 ||
+				!Number.isSafeInteger(input.leaseMs) ||
+				input.leaseMs <= 0 ||
+				!Number.isSafeInteger(input.nowMs + input.leaseMs) ||
+				!Number.isFinite(new Date(input.nowMs + input.leaseMs).getTime()) ||
+				!Number.isSafeInteger(input.limit) ||
+				input.limit < 1 ||
+				!input.owner ||
+				input.owner.trim() !== input.owner ||
+				input.owner.length > 256 ||
+				input.owner.includes("\0")
+			)
+				throw new Error("Routine claim requires a valid owner, bounded count and positive lease.");
+			const output: RoutineOccurrence[] = [];
+			const limit = Math.min(input.limit, MAX_ROUTINE_OCCURRENCES);
+			const eligible = input.eligibleRoutineIds ? new Set(input.eligibleRoutineIds) : undefined;
+			const eligibleOccurrences = input.eligibleOccurrenceIds ? new Set(input.eligibleOccurrenceIds) : undefined;
+			// Accepted work owns its original definition independently of the schedule cursor.
+			// Recover it first, including consumed one-offs and manual occurrences.
+			for (const [occurrenceId, occurrence] of this.routineOccurrences) {
+				if (output.length >= limit) break;
+				if (occurrence.phase !== "pending" && occurrence.phase !== "claimed") continue;
+				if (input.nowMs < occurrence.updatedAt) continue;
+				if (occurrence.claim && occurrence.claim.leaseUntil > input.nowMs) continue;
+				if (input.routineId && occurrence.routineId !== input.routineId) continue;
+				if (
+					eligibleOccurrences
+						? !eligibleOccurrences.has(occurrenceId)
+						: eligible && !eligible.has(occurrence.routineId)
+				)
+					continue;
+				if (occurrence.target.kind === "session" && occurrence.target.parentSessionId !== input.parentSessionId)
+					continue;
+				if (input.parentSessionId && occurrence.parentOrigin.sessionId !== input.parentSessionId) continue;
+				const definition = this.routines.get(occurrence.routineId);
+				if (
+					!definition ||
+					definition.incarnationId !== occurrence.definition.incarnationId ||
+					(!definition.enabled && occurrence.trigger.kind === "schedule")
+				)
+					continue;
+				if (occurrence.dispatchKey || occurrence.executionRef || occurrence.result)
+					throw new Error("An undispatched routine occurrence contains execution state.");
+				const reclaimed: RoutineOccurrence = {
+					...occurrence,
+					phase: "claimed",
+					updatedAt: input.nowMs,
+					claim: { token: randomUUID(), owner: input.owner, leaseUntil: input.nowMs + input.leaseMs },
+				};
+				this.routineOccurrences.set(occurrenceId, reclaimed);
+				output.push(reclaimed);
+			}
+			for (const [id, routine] of this.routines) {
+				if (output.length >= limit) break;
+				if (!routine.enabled || (input.routineId && input.routineId !== id)) continue;
+				if (eligible && !eligible.has(id)) continue;
+				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
+				const dueAt = nextRoutineAt(routine.schedule, routine.cursor);
+				if (dueAt === undefined || dueAt > input.nowMs) continue;
+				const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
+				const occurrenceId = routineOccurrenceId(routine, trigger);
+				if (this.routineOccurrences.has(occurrenceId)) continue;
+				const parentOrigin =
+					routine.target.kind === "session"
+						? routine.executionSnapshot?.savedIntent.receiptOrigin
+						: input.receiptOrigin;
+				if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) continue;
+				// Return successful reclaims even when fresh admission has no journal space.
+				if (output.length > 0 && this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES) break;
+				const occurrence = this.createClaimedOccurrence(
+					routine,
+					occurrenceId,
+					trigger,
+					input.owner,
+					input.leaseMs,
+					input.nowMs,
+					parentOrigin,
+				);
+				this.routineOccurrences.set(occurrenceId, occurrence);
+				const cursor: RoutineCursor =
+					routine.schedule.kind === "interval"
+						? {
+								kind: "interval",
+								nextIndex:
+									Math.floor((trigger.scheduledAt - routine.schedule.anchorAt) / routine.schedule.intervalMs) +
+									1,
+							}
+						: { kind: "once", consumed: true };
+				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+				this.routines.set(id, {
+					...routine,
+					cursor,
+					nextRunAt,
+					lastRunAt: trigger.scheduledAt,
+					lastStatus: "running",
+				});
+				output.push(occurrence);
+			}
+			if (output.length) this.save();
+			return output.map((item) => structuredClone(item));
 		});
 	}
 
-	completeRoutineRun(
-		routineId: string,
-		status: "queued" | "succeeded" | "failed",
-		summary?: string,
-		nowMs = Date.now(),
-	): PersistentRoutineScheduleRecord | undefined {
+	claimManualRoutineOccurrence(input: {
+		routineId: string;
+		expectedRevision?: number;
+		parentSessionId?: string;
+		receiptOrigin?: WorkerReceiptOrigin;
+		commandId: string;
+		nowMs: number;
+		owner: string;
+		leaseMs: number;
+	}): RoutineOccurrence {
 		return this.mutate(() => {
-			const existing = this.routines.get(routineId.trim());
-			if (!existing) return undefined;
-			const updated: PersistentRoutineScheduleRecord = {
-				...existing,
-				lastStatus: status,
-				lastSummary: summary?.trim().slice(0, 300) || existing.lastSummary,
-				updatedAt: new Date(nowMs).toISOString(),
-			};
-			this.routines.set(existing.routineId, updated);
+			if (
+				!Number.isSafeInteger(input.nowMs) ||
+				input.nowMs < 0 ||
+				input.nowMs > 8_640_000_000_000_000 ||
+				!Number.isSafeInteger(input.leaseMs) ||
+				input.leaseMs <= 0 ||
+				!Number.isSafeInteger(input.nowMs + input.leaseMs) ||
+				input.nowMs + input.leaseMs > 8_640_000_000_000_000 ||
+				!input.owner ||
+				input.owner.trim() !== input.owner ||
+				input.owner.length > 256 ||
+				input.owner.includes("\0")
+			)
+				throw new Error("Routine manual claim requires a valid owner, clock and lease.");
+			const routine = this.routines.get(input.routineId);
+			if (!routine) throw new Error("Routine does not exist.");
+			if (input.expectedRevision !== undefined && input.expectedRevision !== routine.revision)
+				throw new Error("Routine revision changed; read current state before retrying.");
+			if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId)
+				throw new Error("Routine belongs to another parent session.");
+			if (
+				!input.commandId ||
+				input.commandId.length > MAX_ROUTINE_COMMAND_ID_CHARS ||
+				input.commandId.trim() !== input.commandId ||
+				input.commandId.includes("\0")
+			)
+				throw new Error("Routine manual command identity is invalid.");
+			const trigger = { kind: "manual" as const, commandId: input.commandId, requestedAt: input.nowMs };
+			const id = routineOccurrenceId(routine, trigger);
+			const existing = this.routineOccurrences.get(id);
+			if (existing) return structuredClone(existing);
+			if (this.routineManualTombstones.has(id))
+				throw new Error(
+					"This manual request was already consumed and has expired from the bounded replay journal.",
+				);
+			const origin =
+				routine.target.kind === "session"
+					? routine.executionSnapshot?.savedIntent.receiptOrigin
+					: input.receiptOrigin;
+			if (!origin || (input.parentSessionId && origin.sessionId !== input.parentSessionId))
+				throw new Error("Routine parent receipt origin is unavailable.");
+			const occurrence = this.createClaimedOccurrence(
+				routine,
+				id,
+				trigger,
+				input.owner,
+				input.leaseMs,
+				input.nowMs,
+				origin,
+			);
+			this.routineOccurrences.set(id, occurrence);
 			this.save();
-			return structuredClone(updated);
+			return structuredClone(occurrence);
+		});
+	}
+
+	listRoutineOccurrences(filter: RoutineOccurrenceListFilter = {}): RoutineOccurrence[] {
+		return Array.from(this.routineOccurrences.values())
+			.filter(
+				(item) =>
+					(!filter.routineId || item.routineId === filter.routineId) &&
+					(!filter.parentSessionId || item.parentOrigin.sessionId === filter.parentSessionId) &&
+					(!filter.phases || filter.phases.includes(item.phase)),
+			)
+			.sort((a, b) => a.createdAt - b.createdAt)
+			.slice(-Math.max(1, Math.min(filter.limit ?? MAX_ROUTINE_OCCURRENCES, MAX_ROUTINE_OCCURRENCES)))
+			.map((item) => structuredClone(item));
+	}
+
+	markRoutineDispatching(input: {
+		occurrenceId: string;
+		claimToken: string;
+		dispatchKey: string;
+		nowMs: number;
+	}): void {
+		this.updateClaimedOccurrence(input, (item) => ({
+			...item,
+			phase: "dispatching",
+			dispatchKey: input.dispatchKey,
+			updatedAt: input.nowMs,
+		}));
+	}
+	markRoutineRunning(input: {
+		occurrenceId: string;
+		claimToken: string;
+		dispatchKey: string;
+		nowMs: number;
+		executionRef?: { taskId: string; attemptId: string };
+	}): void {
+		this.updateClaimedOccurrence(input, (item) => {
+			if ((item.phase !== "dispatching" && item.phase !== "running") || item.dispatchKey !== input.dispatchKey)
+				throw new Error("Routine dispatch transition is stale.");
+			return {
+				...item,
+				phase: "running",
+				...(input.executionRef ? { executionRef: input.executionRef } : {}),
+				updatedAt: input.nowMs,
+			};
+		});
+	}
+	markRoutineUncertain(input: {
+		occurrenceId: string;
+		claimToken: string;
+		reason: string;
+		recipient: string;
+		nowMs: number;
+	}): void {
+		const reason = input.reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS);
+		if (!reason) throw new Error("Routine uncertainty requires a bounded reason.");
+		this.updateClaimedOccurrence(input, (item) =>
+			this.withResult(
+				{ ...item, phase: "uncertain", uncertainty: reason, updatedAt: input.nowMs },
+				"uncertain",
+				reason,
+				input.recipient,
+			),
+		);
+	}
+	finishRoutineOccurrence(input: {
+		occurrenceId: string;
+		claimToken: string;
+		outcome: RoutineTerminalOutcome;
+		summary: string;
+		recipient: string;
+		nowMs: number;
+	}): void {
+		const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+		this.updateClaimedOccurrence(input, (item) =>
+			this.withResult(
+				{
+					...item,
+					phase: input.outcome === "uncertain" ? "uncertain" : "terminal",
+					...(input.outcome === "uncertain" ? { uncertainty: summary } : {}),
+					updatedAt: input.nowMs,
+				},
+				input.outcome,
+				summary,
+				input.recipient,
+			),
+		);
+	}
+
+	resolveUncertainRoutineOccurrence(input: {
+		occurrenceId: string;
+		claimToken: string;
+		dispatchKey: string;
+		executionRef: { taskId: string; attemptId: string };
+		outcome: Exclude<RoutineTerminalOutcome, "uncertain">;
+		summary: string;
+		recipient: string;
+		nowMs: number;
+	}): void {
+		this.mutate(() => {
+			const current = this.routineOccurrences.get(input.occurrenceId);
+			const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+			const resolutionDigest = routineResultDigest(input.outcome, summary, input.recipient);
+			if (
+				current?.phase === "terminal" &&
+				current.claim?.token === input.claimToken &&
+				current.dispatchKey === input.dispatchKey &&
+				current.result?.outcome === input.outcome &&
+				current.result.digest === resolutionDigest &&
+				current.result.summary === summary &&
+				current.result.recipient === input.recipient &&
+				current.executionRef?.taskId === input.executionRef.taskId &&
+				current.executionRef.attemptId === input.executionRef.attemptId
+			)
+				return;
+			if (
+				current?.phase !== "uncertain" ||
+				current.claim?.token !== input.claimToken ||
+				current.dispatchKey !== input.dispatchKey ||
+				current.result?.outcome !== "uncertain" ||
+				input.recipient !== current.parentOrigin.sessionId ||
+				!Number.isSafeInteger(input.nowMs) ||
+				input.nowMs < current.updatedAt ||
+				(current.executionRef && current.executionRef.taskId !== input.executionRef.taskId)
+			)
+				throw new Error("Routine uncertainty resolution is stale or does not match the admitted worker attempt.");
+			if (current.priorUncertaintyResult) throw new Error("Routine uncertainty already has a retained resolution.");
+			const resolution = {
+				outcome: input.outcome,
+				summary,
+				digest: resolutionDigest,
+				delivery: "pending" as const,
+				recipient: input.recipient,
+			};
+			const { uncertainty: _uncertainty, ...resolvedBase } = current;
+			const next: RoutineOccurrence = {
+				...resolvedBase,
+				phase: "terminal",
+				executionRef: input.executionRef,
+				priorUncertaintyResult: current.result,
+				result: resolution,
+				updatedAt: input.nowMs,
+			};
+			if (!parseRoutineOccurrence(next))
+				throw new Error("Routine uncertainty resolution would produce invalid durable state.");
+			this.routineOccurrences.set(next.occurrenceId, next);
+			this.save();
+		});
+	}
+
+	listPendingRoutineDeliveries(parentSessionId: string, limit: number): RoutineDelivery[] {
+		const deliveries: RoutineDelivery[] = [];
+		for (const occurrence of this.routineOccurrences.values()) {
+			if (
+				occurrence.priorUncertaintyResult?.delivery === "pending" &&
+				occurrence.priorUncertaintyResult.recipient === parentSessionId
+			)
+				deliveries.push({
+					occurrence: structuredClone(occurrence),
+					result: structuredClone(occurrence.priorUncertaintyResult),
+				});
+			if (occurrence.result?.delivery === "pending" && occurrence.result.recipient === parentSessionId)
+				deliveries.push({ occurrence: structuredClone(occurrence), result: structuredClone(occurrence.result) });
+		}
+		return deliveries
+			.sort((a, b) => a.occurrence.createdAt - b.occurrence.createdAt)
+			.slice(0, Math.max(1, Math.min(limit, MAX_ROUTINE_OCCURRENCES * 2)));
+	}
+	acknowledgeRoutineDelivery(input: {
+		occurrenceId: string;
+		recipient: string;
+		resultDigest: string;
+		deliveryMarker: string;
+		nowMs: number;
+	}): void {
+		this.mutate(() => {
+			const item = this.routineOccurrences.get(input.occurrenceId);
+			if (!item || item.parentOrigin.sessionId !== input.recipient)
+				throw new Error("Routine delivery acknowledgement is stale.");
+			if (
+				!input.deliveryMarker ||
+				input.deliveryMarker.trim() !== input.deliveryMarker ||
+				input.deliveryMarker.length > 256 ||
+				input.deliveryMarker.includes("\0")
+			)
+				throw new Error("Routine delivery marker is invalid.");
+			if (
+				(item.result?.delivery === "acknowledged" &&
+					item.result.digest === input.resultDigest &&
+					item.result.recipient === input.recipient &&
+					item.result.deliveryMarker === input.deliveryMarker) ||
+				(item.priorUncertaintyResult?.delivery === "acknowledged" &&
+					item.priorUncertaintyResult.digest === input.resultDigest &&
+					item.priorUncertaintyResult.recipient === input.recipient &&
+					item.priorUncertaintyResult.deliveryMarker === input.deliveryMarker)
+			)
+				return;
+			if (!Number.isSafeInteger(input.nowMs) || input.nowMs < item.updatedAt || input.nowMs > 8_640_000_000_000_000)
+				throw new Error("Routine delivery acknowledgement time is invalid.");
+			const acknowledge = (result: NonNullable<RoutineOccurrence["result"]>) =>
+				result.delivery === "pending" &&
+				result.recipient === input.recipient &&
+				result.digest === input.resultDigest
+					? { ...result, delivery: "acknowledged" as const, deliveryMarker: input.deliveryMarker }
+					: result;
+			const latest = item.result ? acknowledge(item.result) : undefined;
+			const prior = item.priorUncertaintyResult ? acknowledge(item.priorUncertaintyResult) : undefined;
+			if (latest === item.result && prior === item.priorUncertaintyResult)
+				throw new Error("Routine delivery acknowledgement is stale.");
+			const updated: RoutineOccurrence = {
+				...item,
+				...(latest ? { result: latest } : {}),
+				...(prior ? { priorUncertaintyResult: prior } : {}),
+				updatedAt: input.nowMs,
+			};
+			if (!parseRoutineOccurrence(updated))
+				throw new Error("Routine delivery acknowledgement would produce invalid durable state.");
+			this.routineOccurrences.set(item.occurrenceId, updated);
+			this.save();
 		});
 	}
 
@@ -1284,7 +2034,7 @@ export class PersistentBotTeamStore {
 					const bot = this.bots.get(routine.target.agentId);
 					if (bot)
 						this.bots.set(bot.agentId, { ...bot, lastMessageAt: nowMs, lastSummary: summary, updatedAt: nowIso });
-				} else {
+				} else if (routine.target.kind === "team") {
 					this.recordTeamMessage({
 						messageId: `daemon-${routine.routineId}-${nowMs}`,
 						teamId: routine.target.teamId,

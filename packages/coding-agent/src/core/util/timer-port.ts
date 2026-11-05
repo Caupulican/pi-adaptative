@@ -70,6 +70,7 @@ export type TimerOwner =
 	| "continuous-chat"
 	| "proactivity"
 	| "knowledge-collection"
+	| "routines"
 	| "tool-recovery-log";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */

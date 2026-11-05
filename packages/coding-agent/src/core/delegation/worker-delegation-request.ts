@@ -17,6 +17,7 @@ import {
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import type { WorkerSavedIntent } from "./worker-saved-intent.ts";
 
 /** Upper bound on extra write roots one delegation may name. */
 const MAX_WORKER_AUTHORITY_WRITE_PATHS = 16;
@@ -217,8 +218,10 @@ export interface WorkerDelegationRequest {
 	assertReceiptAdmission?: () => void;
 	/** Storage-free original command position, before task-directory admission awaits. */
 	receiptOriginAnchor?: WorkerReceiptAnchor;
-	/** Host-owned objective of an automatic route; checked again when fresh work becomes durable. */
-	objectiveId?: string;
+	/** Host-owned objective; null explicitly detaches recovered work from a later foreground goal. */
+	objectiveId?: string | null;
+	/** Host-only durable authorization for a scheduled task; never exposed in the delegate schema. */
+	savedIntent?: WorkerSavedIntent;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */
 	executionContext?: ExecutionContext;
 	/**

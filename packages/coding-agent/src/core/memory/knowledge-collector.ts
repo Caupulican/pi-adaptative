@@ -15,7 +15,7 @@ import type {
 } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
-import type { KnowledgeAdmissionPort } from "./knowledge-admission.ts";
+import { type KnowledgeAdmissionPort, type KnowledgeChange, parseKnowledgeChange } from "./knowledge-admission.ts";
 import { type KnowledgeCollectionClaim, knowledgeCollectionSourceIdentity } from "./knowledge-collection-journal.ts";
 import { extractKnowledgeCandidates, KnowledgeExtractionRefusal } from "./knowledge-extractor.ts";
 import type { KnowledgeScope } from "./knowledge-record.ts";
@@ -407,60 +407,149 @@ export class KnowledgeCollector {
 			if (remaining <= 0) throw new RequestSpendRefusal("Knowledge spending is held.");
 			const budget = new RequestSpendBudget(remaining);
 			const request = { budget, origin: { ...origin, operationId } };
-			let plan = journal.read(claim);
-			if (!plan) {
-				const original = this.deps.evidence.findSource(source.sourceId);
-				if (!original || !source.complete) {
-					hold("configuration:incomplete_source");
+			const original = this.deps.evidence.findSource(source.sourceId);
+			if (!original || !source.complete) {
+				hold("configuration:incomplete_source");
+				return false;
+			}
+			if (createHash("sha256").update(original.text, "utf8").digest("hex") !== source.digest)
+				throw new Error("Original knowledge source changed after discovery");
+			const heldWindows = new Set<string>();
+			let sourceHold: string | undefined;
+			for (;;) {
+				const window = journal.windows.next(claim, original);
+				if (window && heldWindows.has(window.id)) {
+					hold(sourceHold!);
 					return false;
 				}
-				if (createHash("sha256").update(original.text, "utf8").digest("hex") !== source.digest)
-					throw new Error("Original knowledge source changed after discovery");
-				const changes = await extractKnowledgeCandidates({
-					source: original,
-					model: config.model!,
-					maxTokens: Math.min(config.model!.maxTokens, 4_096),
-					budget,
-					origin: request.origin,
-					usageOwner: this.deps.usageOwner,
-					signal,
-					assertCurrent,
-					getKnowledge: this.deps.getKnowledge,
-					runIsolatedCompletion: this.deps.runIsolatedCompletion,
-				});
-				assertCurrent();
-				plan = journal.install(claim, changes);
-			}
-			let candidateHold: string | undefined;
-			for (const [index, candidate] of plan.candidates.entries()) {
-				if (candidate.outcome !== "pending") continue;
-				assertCurrent();
-				budget.assertHealthy();
-				const admission = this.deps.getAdmission(request);
-				if (!admission) {
+				if (!window) {
+					journal.windows.finish(claim, original.chars);
+					return false;
+				}
+				let plan = journal.read(claim);
+				if (!plan) {
+					const workId = canonicalDigest({
+						extractor: EXTRACTOR_VERSION,
+						window: window.id,
+						scope: claim.source.scope,
+						model: [config.model!.provider, config.model!.id],
+					});
+					const retained = this.deps.store.work.read(workId);
+					let changes: readonly KnowledgeChange[];
+					if (retained !== undefined) {
+						if (
+							!retained ||
+							typeof retained !== "object" ||
+							!("complete" in retained) ||
+							!("candidates" in retained) ||
+							typeof retained.complete !== "boolean" ||
+							!Array.isArray(retained.candidates)
+						)
+							throw new Error("Invalid retained extraction");
+						if (!retained.complete) {
+							journal.windows.split(claim, original, window);
+							continue;
+						}
+						changes = retained.candidates.map(parseKnowledgeChange);
+					} else {
+						let begun = false;
+						const unsubscribe = budget.subscribeAdmission((requestId) => {
+							if (!begun) {
+								this.deps.store.work.beginBatch(
+									[{ id: workId, owner: claim.id, window: window.id, kind: "extraction" }],
+									requestId,
+								);
+								begun = true;
+							}
+						});
+						try {
+							changes = await extractKnowledgeCandidates({
+								source: original,
+								window,
+								onSubmission: (submission) => {
+									const barrier = this.deps.store.work.barrier();
+									const retain =
+										barrier === null ||
+										(original.createdAt > barrier &&
+											submission.candidates.every((change) =>
+												change.evidence.every((citation) => citation.source === original.sourceId),
+											));
+									this.deps.store.work.complete(
+										workId,
+										retain ? submission : { discarded: true },
+										submission.complete ? "complete" : "subdivide",
+									);
+								},
+								model: config.model!,
+								maxTokens: Math.min(config.model!.maxTokens, 4_096),
+								budget,
+								origin: request.origin,
+								usageOwner: this.deps.usageOwner,
+								signal,
+								assertCurrent,
+								getKnowledge: this.deps.getKnowledge,
+								runIsolatedCompletion: this.deps.runIsolatedCompletion,
+							});
+						} catch (error) {
+							if (error instanceof KnowledgeExtractionRefusal && error.code === "source_capacity") {
+								journal.windows.split(claim, original, window);
+								continue;
+							}
+							throw error;
+						} finally {
+							unsubscribe();
+						}
+					}
+					assertCurrent();
+					plan = journal.install(claim, changes);
+				}
+				let candidateHold: string | undefined;
+				const batchAdmission = this.deps.getAdmission(request);
+				if (!batchAdmission) {
 					hold("configuration:admission_unavailable");
 					return false;
 				}
-				const operation = journal.operation(claim, plan, index);
-				const admitted = await admission.change(candidate.change!, signal, operation);
-				if (admitted.status === "applied") {
-					journal.acknowledge(claim, operation, "applied");
-					progress.applied++;
-					if (admitted.action === "forget") return true;
-				} else if (admitted.retry === "never") {
-					journal.acknowledge(claim, operation, "rejected");
-					progress.rejected++;
-				} else if (!candidateHold || admitted.retry === "context" || candidateHold.startsWith("configuration:")) {
-					candidateHold = `${admitted.retry}:${admitted.code}`;
+				await batchAdmission.prepare?.(
+					plan.candidates.flatMap((candidate) =>
+						candidate.outcome === "pending" && candidate.change ? [candidate.change] : [],
+					),
+					signal,
+				);
+				for (const [index, candidate] of plan.candidates.entries()) {
+					if (candidate.outcome !== "pending") continue;
+					assertCurrent();
+					budget.assertHealthy();
+					const admission = this.deps.getAdmission(request);
+					if (!admission) {
+						hold("configuration:admission_unavailable");
+						return false;
+					}
+					const operation = journal.operation(claim, plan, index);
+					const admitted = await admission.change(candidate.change!, signal, operation);
+					if (admitted.status === "applied") {
+						journal.acknowledge(claim, operation, "applied");
+						progress.applied++;
+						if (admitted.action === "forget") return true;
+					} else if (admitted.retry === "never") {
+						journal.acknowledge(claim, operation, "rejected");
+						progress.rejected++;
+					} else if (
+						!candidateHold ||
+						admitted.retry === "context" ||
+						candidateHold.startsWith("configuration:")
+					) {
+						candidateHold = `${admitted.retry}:${admitted.code}`;
+					}
 				}
+				if (candidateHold) {
+					heldWindows.add(window.id);
+					sourceHold ??= candidateHold;
+					journal.windows.suspend(claim, window);
+					continue;
+				}
+				assertCurrent();
+				journal.windows.complete(claim, window);
 			}
-			if (candidateHold) {
-				hold(candidateHold);
-				return false;
-			}
-			assertCurrent();
-			journal.finish(claim);
-			return false;
 		} catch (error) {
 			if (signal.aborted) {
 				if (signal.reason instanceof CollectionDeadline) {

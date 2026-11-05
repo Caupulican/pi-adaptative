@@ -121,6 +121,10 @@ export class ForegroundLifecycleAdapter {
 		return this.lifecycle.getPersistedMessageEntryId(message);
 	}
 
+	getStartedToolKey(callId: string, toolName: string): string {
+		return this.lifecycle.getStartedToolKey(callId, toolName);
+	}
+
 	appendMessage(message: Message, origin?: AgentMessageOrigin): string {
 		return this.appendMessageBatch([{ kind: "message", message, ...(origin === undefined ? {} : { origin }) }])[0]!;
 	}

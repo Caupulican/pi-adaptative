@@ -7,6 +7,7 @@
 
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { parentInputOf, parentWakeOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
@@ -143,6 +144,19 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
  * agent loop and the agent) contribute only bounded failure facts; their synthetic content remains excluded.
  */
 export function continuousChatEntryParts(entry: SessionEntry): ContinuousChatMessagePart[] {
+	if (entry.type === "custom_message") {
+		const input = parentInputOf(entry);
+		const wake = parentWakeOf(entry);
+		if (input || wake) {
+			const identity = input ? `delivery ${input.metadata.deliveryId}` : `wake ${wake!.wakeId}`;
+			return wholeMessagePart("work", entry.content).map((part) => ({
+				...part,
+				text: `[Harness background ${identity}; not owner-authored evidence] ${part.text}`,
+				sourceKey: `parent:${entry.id}:${part.part}`,
+			}));
+		}
+		return [];
+	}
 	if (entry.type === "message") {
 		if (entry.origin !== "local") return continuousChatMessageParts(entry.message);
 		return entry.message.role === "assistant" ? assistantFailureParts(entry.message) : [];

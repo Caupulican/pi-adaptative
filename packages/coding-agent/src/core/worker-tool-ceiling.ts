@@ -8,6 +8,7 @@ import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
@@ -41,6 +42,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	DECISION_LEDGER_READ_TOOL_NAME,
 	SELF_COMPACT_TOOL_NAME,
 	PROACTIVITY_TOOL_NAME,
+	ROUTINE_TOOL_NAME,
 ]);
 
 /**

@@ -16,9 +16,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import type { ExecutionContext } from "../../kernel/index.ts";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
+import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "../orchestration/contracts.ts";
+import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
@@ -116,6 +119,46 @@ export class WorkerLaneIsolation {
 	isLaneDirectory(directory: string): boolean {
 		const engine = this.deps.engineDeps(directory);
 		return engine !== undefined && isUnderLaneRoot(engine, directory);
+	}
+
+	/** Translate an admitted workspace into the lane the host created for it, preserving all other grants. */
+	relocateContract(contract: WorkerExecutionContract, context: ExecutionContext): WorkerExecutionContract {
+		const original = contract.worker.authority.cwd;
+		if (!original || !this.isLaneDirectory(context.cwd))
+			throw new Error("Worker lane relocation lacks a managed destination.");
+		const translate = (entry: string): string => {
+			const offset = relative(original, entry);
+			return offset === "" || (offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset))
+				? resolve(context.cwd, offset)
+				: entry;
+		};
+		const move = (profile: WorkerProfileExecutionContract): WorkerProfileExecutionContract => {
+			const cwd = profile.authority.cwd;
+			if (!cwd || translate(cwd) === cwd) return profile;
+			return {
+				...profile,
+				profile: {
+					...profile.profile,
+					workspacePath: translate(cwd),
+					...(profile.profile.writePaths ? { writePaths: profile.profile.writePaths.map(translate) } : {}),
+				},
+				authority: {
+					...profile.authority,
+					cwd: translate(cwd),
+					readPaths: profile.authority.readPaths.map(translate),
+					writePaths: profile.authority.writePaths.map(translate),
+					deniedPaths: [
+						...new Set([...profile.authority.deniedPaths, ...profile.authority.deniedPaths.map(translate)]),
+					],
+				},
+				executionContext: { ...context, cwd: translate(cwd) },
+			};
+		};
+		return parseWorkerExecutionContract({
+			...contract,
+			worker: move(contract.worker),
+			...(contract.verifier ? { verifier: move(contract.verifier) } : {}),
+		});
 	}
 
 	/** The repository `directory` belongs to, as a comparable key (undefined when it is not in one). */

@@ -9,11 +9,12 @@ import {
 import type { DecisionProgram } from "../program.ts";
 
 export interface LlmCompletionRunner {
+	readonly requestLifecycle?: true;
 	readonly requestBudget?: true;
 	complete(
 		prompt: string,
 		signal?: AbortSignal,
-		options?: Pick<DecisionOptions, "budget" | "origin">,
+		options?: Pick<DecisionOptions, "budget" | "origin" | "onRequestAdmitted">,
 	): Promise<string>;
 }
 
@@ -30,6 +31,7 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 	capabilities(): DecisionEngineCapabilities {
 		return {
 			requestBudget: this.runner?.requestBudget === true,
+			requestLifecycle: this.runner?.requestLifecycle === true,
 			boolean: true,
 			choice: true,
 			score: true,

@@ -235,6 +235,7 @@ export class ForegroundLifecycleController {
 			accountKey: context.providerAccountKey ?? provider,
 		};
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
+		this.deps.sessionManager.recordParentInputWakeRequest(requestId, context.context.messages);
 		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();
 		this.deps.observeProviderRequest?.(context);
@@ -432,6 +433,17 @@ export class ForegroundLifecycleController {
 		identity: Pick<StartedToolIdentity, "requestId" | "assistantMessageEntryId" | "callId" | "toolName">,
 	): string {
 		return [identity.requestId, identity.assistantMessageEntryId, identity.callId, identity.toolName].join("\u0000");
+	}
+
+	/** Exact currently reserved invocation; provider call IDs alone are reusable across requests. */
+	getStartedToolKey(callId: string, toolName: string): string {
+		const pending = this.pendingToolsByCall.get(this.callKey(callId, toolName));
+		if (pending?.size !== 1) throw new Error("Tool invocation has no unique current canonical reservation.");
+		const key = pending.values().next().value;
+		const identity = key === undefined ? undefined : this.startedTools.get(key);
+		if (!identity || identity.callId !== callId || identity.toolName !== toolName)
+			throw new Error("Tool invocation reservation is no longer current.");
+		return this.toolKey(identity);
 	}
 
 	private callKey(callId: string, toolName: string): string {

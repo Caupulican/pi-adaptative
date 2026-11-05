@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { MIN_ROUTINE_INTERVAL_MS, nextRoutineAt, type RoutineDefinitionView } from "../routines/routine-contract.ts";
 import {
 	isMissingFileError,
 	LOW_LATENCY_FILE_LOCK_OPTIONS,
@@ -10,39 +11,11 @@ import {
 } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
-	normalizeBotOrTeamId,
 	type PersistentBotRecord,
 	type PersistentTeamMessage,
 	type PersistentTeamRecord,
 	teamIncarnation,
 } from "./persistent-bot-team-store.ts";
-
-export type PersistentRoutineTarget =
-	| { readonly kind: "bot"; readonly agentId: string }
-	| { readonly kind: "team"; readonly teamId: string };
-
-export interface PersistentRoutineScheduleRecord {
-	readonly routineId: string;
-	readonly target: PersistentRoutineTarget;
-	readonly prompt: string;
-	readonly intervalMs: number;
-	readonly enabled: boolean;
-	readonly nextRunAt: number;
-	readonly lastRunAt?: number;
-	readonly lastStatus?: "queued" | "running" | "succeeded" | "failed";
-	readonly lastSummary?: string;
-	readonly createdAt: string;
-	readonly updatedAt: string;
-}
-
-export interface UpsertPersistentRoutineInput {
-	readonly routineId: string;
-	readonly target: PersistentRoutineTarget;
-	readonly prompt: string;
-	readonly intervalMs: number;
-	readonly enabled?: boolean;
-	readonly nextRunAt?: number;
-}
 
 export interface PersistentBotInboxEntry {
 	readonly id: string;
@@ -78,9 +51,7 @@ export interface PersistentBotDaemonStatus {
 	readonly legacy?: LegacyBotDaemonClaim;
 }
 
-export const MIN_ROUTINE_INTERVAL_MS = 10_000;
 const DAEMON_STALE_MS = 60_000;
-const BOT_OR_TEAM_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 export function parseDurationIntervalMs(raw: string): number {
 	const trimmed = raw.trim().toLowerCase();
@@ -93,7 +64,7 @@ export function parseDurationIntervalMs(raw: string): number {
 	const multiplier =
 		unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
 	const ms = Math.round(amount * multiplier);
-	if (!Number.isFinite(ms) || ms < MIN_ROUTINE_INTERVAL_MS) {
+	if (!Number.isSafeInteger(ms) || ms < MIN_ROUTINE_INTERVAL_MS) {
 		throw new Error(`Schedule interval must be at least ${MIN_ROUTINE_INTERVAL_MS / 1000}s.`);
 	}
 	return ms;
@@ -105,116 +76,6 @@ export function formatDurationIntervalMs(intervalMs: number): string {
 	if (intervalMs % 60_000 === 0) return `${intervalMs / 60_000}m`;
 	if (intervalMs % 1000 === 0) return `${intervalMs / 1000}s`;
 	return `${intervalMs}ms`;
-}
-
-export function parseRoutineRecord(value: unknown): PersistentRoutineScheduleRecord | undefined {
-	if (!isRecordObject(value)) return undefined;
-	const {
-		routineId,
-		target,
-		prompt,
-		intervalMs,
-		enabled,
-		nextRunAt,
-		lastRunAt,
-		lastStatus,
-		lastSummary,
-		createdAt,
-		updatedAt,
-	} = value;
-	if (
-		typeof routineId !== "string" ||
-		!BOT_OR_TEAM_ID_REGEX.test(routineId) ||
-		typeof prompt !== "string" ||
-		prompt.trim().length === 0 ||
-		typeof intervalMs !== "number" ||
-		!Number.isFinite(intervalMs) ||
-		intervalMs < MIN_ROUTINE_INTERVAL_MS ||
-		typeof nextRunAt !== "number" ||
-		!Number.isFinite(nextRunAt) ||
-		typeof createdAt !== "string" ||
-		typeof updatedAt !== "string" ||
-		!isRecordObject(target)
-	) {
-		return undefined;
-	}
-	let parsedTarget: PersistentRoutineTarget | undefined;
-	if (target.kind === "bot" && typeof target.agentId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.agentId)) {
-		parsedTarget = { kind: "bot", agentId: target.agentId };
-	} else if (target.kind === "team" && typeof target.teamId === "string" && BOT_OR_TEAM_ID_REGEX.test(target.teamId)) {
-		parsedTarget = { kind: "team", teamId: target.teamId };
-	}
-	if (!parsedTarget) return undefined;
-	const validStatus =
-		lastStatus === "queued" || lastStatus === "running" || lastStatus === "succeeded" || lastStatus === "failed"
-			? lastStatus
-			: undefined;
-	return {
-		routineId,
-		target: parsedTarget,
-		prompt: prompt.trim(),
-		intervalMs: Math.round(intervalMs),
-		enabled: typeof enabled === "boolean" ? enabled : true,
-		nextRunAt,
-		lastRunAt: typeof lastRunAt === "number" && Number.isFinite(lastRunAt) ? lastRunAt : undefined,
-		lastStatus: validStatus,
-		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
-		createdAt,
-		updatedAt,
-	};
-}
-
-export function buildUpsertedRoutineRecord(
-	routines: ReadonlyMap<string, PersistentRoutineScheduleRecord>,
-	input: UpsertPersistentRoutineInput,
-	nowMs = Date.now(),
-): PersistentRoutineScheduleRecord {
-	const routineId = normalizeBotOrTeamId(input.routineId, "routineId");
-	const prompt = input.prompt.trim();
-	if (!prompt) throw new Error("Routine prompt cannot be empty.");
-	const intervalMs = Math.max(MIN_ROUTINE_INTERVAL_MS, Math.round(input.intervalMs));
-	const target: PersistentRoutineTarget =
-		input.target.kind === "bot"
-			? { kind: "bot", agentId: normalizeBotOrTeamId(input.target.agentId, "agentId") }
-			: { kind: "team", teamId: normalizeBotOrTeamId(input.target.teamId, "teamId") };
-	const existing = routines.get(routineId);
-	const nowIso = new Date(nowMs).toISOString();
-	return {
-		routineId,
-		target,
-		prompt,
-		intervalMs,
-		enabled: input.enabled ?? existing?.enabled ?? true,
-		nextRunAt: input.nextRunAt ?? nowMs + intervalMs,
-		lastRunAt: existing?.lastRunAt,
-		lastStatus: existing?.lastStatus,
-		lastSummary: existing?.lastSummary,
-		createdAt: existing?.createdAt ?? nowIso,
-		updatedAt: nowIso,
-	};
-}
-
-export function claimDueRoutinesInMap(
-	routines: Map<string, PersistentRoutineScheduleRecord>,
-	nowMs = Date.now(),
-	routineIdFilter?: string,
-): PersistentRoutineScheduleRecord[] {
-	const claimed: PersistentRoutineScheduleRecord[] = [];
-	const nowIso = new Date(nowMs).toISOString();
-	for (const [id, routine] of routines.entries()) {
-		if (routineIdFilter && id !== routineIdFilter) continue;
-		if (!routineIdFilter && (!routine.enabled || routine.nextRunAt > nowMs)) continue;
-		const updated: PersistentRoutineScheduleRecord = {
-			...routine,
-			lastRunAt: nowMs,
-			nextRunAt: nowMs + routine.intervalMs,
-			lastStatus: "running",
-			updatedAt: nowIso,
-		};
-		routines.set(id, updated);
-		claimed.push(structuredClone(updated));
-	}
-	return claimed;
 }
 
 export function collectTeamInboxEntries(
@@ -414,15 +275,16 @@ function legacyDaemonClaimOf(
 
 export function readDaemonLeaseStatus(
 	storeFilePath: string,
-	routines: Iterable<PersistentRoutineScheduleRecord>,
+	routines: Iterable<RoutineDefinitionView>,
 	nowMs = Date.now(),
 ): PersistentBotDaemonStatus {
 	let activeRoutines = 0;
 	let dueRoutines = 0;
 	for (const r of routines) {
-		if (!r.enabled) continue;
+		const next = nextRoutineAt(r.schedule, r.cursor);
+		if (!r.enabled || next === undefined) continue;
 		activeRoutines++;
-		if (r.nextRunAt <= nowMs) dueRoutines++;
+		if (next <= nowMs) dueRoutines++;
 	}
 	const legacy = legacyDaemonClaimOf(readLeaseJson(legacyDaemonLeasePath(storeFilePath)), nowMs);
 	const lease = readDaemonLease(daemonLeasePath(storeFilePath));

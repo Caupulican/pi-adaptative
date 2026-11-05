@@ -1,6 +1,7 @@
 /** Durable owner knowledge, distinct from the conversation that supplied its evidence. */
 import { createHash } from "node:crypto";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import type { KnowledgeWorkCache } from "./knowledge-work-journal.ts";
 
 export const KNOWLEDGE_KINDS = ["profile", "behavior", "workstream", "world", "journal"] as const;
 export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
@@ -229,6 +230,7 @@ export function knowledgeAppliesTo(record: KnowledgeScope, scope: KnowledgeScope
 
 /** Mutation effects and evidence receipts commit together at this storage boundary. */
 export interface KnowledgeStorePort {
+	readonly work: KnowledgeWorkCache;
 	operationReceipt(operation: KnowledgeOperation): KnowledgeMutationReceipt | undefined;
 	revision(): number;
 	version(id: string): number;

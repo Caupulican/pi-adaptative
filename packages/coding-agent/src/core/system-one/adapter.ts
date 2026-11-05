@@ -37,6 +37,7 @@ export interface JevEvaluationResponse {
 }
 
 export interface JevAdapterEvaluateOptions {
+	onRequestAdmitted?: (requestId: string) => void;
 	budget?: RequestSpendBudget;
 	origin?: AccountingOrigin;
 	signal?: AbortSignal;
@@ -47,12 +48,14 @@ export interface JevAdapterEvaluateOptions {
 import type { ConfidenceProvenance } from "../decision/confidence.ts";
 
 export interface JevAdapter {
+	readonly requestLifecycle?: true;
 	readonly requestBudget?: true;
 	readonly provenance?: ConfidenceProvenance;
 	evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse>;
 }
 
 export interface SystemOneReviewerLike {
+	readonly requestLifecycle?: true;
 	readonly requestBudget?: true;
 	evaluate(
 		input: { model?: string; state: unknown; questions: Record<string, unknown> },
@@ -60,6 +63,7 @@ export interface SystemOneReviewerLike {
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
 		budget?: RequestSpendBudget,
+		onRequestAdmitted?: (requestId: string) => void,
 	): Promise<{
 		request: { model: string };
 		response: {
@@ -163,6 +167,9 @@ export interface SystemOneJevAdapterDeps {
  * R-067: Rate-limit retries MUST use bounded backoff.
  */
 export class SystemOneJevAdapter implements JevAdapter {
+	get requestLifecycle(): true | undefined {
+		return this.reviewer.requestLifecycle;
+	}
 	get requestBudget(): true | undefined {
 		return this.reviewer.requestBudget;
 	}
@@ -302,6 +309,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					undefined,
 					options?.origin,
 					options?.budget,
+					options?.onRequestAdmitted,
 				);
 
 				const returnedModel = result.response.model;

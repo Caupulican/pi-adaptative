@@ -12,6 +12,8 @@ export type SemanticEvaluationScope =
 export type SemanticEvaluationOccupancy = "foreground" | "background";
 
 export interface DecisionOptions {
+	/** Synchronous checkpoint immediately before each physical semantic request is dispatched. */
+	readonly onRequestAdmitted?: (requestId: string) => void;
 	/** Shared by serial extraction and admission requests; enforced before every transport attempt. */
 	readonly budget?: RequestSpendBudget;
 	readonly origin?: AccountingOrigin;

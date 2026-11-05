@@ -1301,6 +1301,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
 			await session.initializeMemory();
 			const extensionsResult = resourceLoader.getExtensions();
+			session.startBackgroundInputs();
 
 			return {
 				session,

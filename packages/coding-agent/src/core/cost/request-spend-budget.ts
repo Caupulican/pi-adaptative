@@ -22,10 +22,20 @@ export class RequestSpendBudget {
 	private readonly charges = new Map<string, number>();
 	private failure: RequestSpendRefusal | undefined;
 	private pending: string | undefined;
+	private readonly admissionListeners = new Set<(requestId: string) => void>();
 
 	constructor(maxUsd: number) {
 		if (!Number.isFinite(maxUsd) || maxUsd < 0) throw new Error("Request spending limit must be non-negative.");
 		this.maxUsd = maxUsd;
+	}
+
+	/** Bounded synchronous work checkpoints at the physical request boundary; not another spend counter. */
+	subscribeAdmission(listener: (requestId: string) => void): () => void {
+		if (this.admissionListeners.size >= 32) throw new Error("Request admission listener capacity exceeded");
+		this.admissionListeners.add(listener);
+		return () => {
+			this.admissionListeners.delete(listener);
+		};
 	}
 
 	/** Callers serialize requests sharing this budget; preflight never reserves or records a charge. */
@@ -43,6 +53,12 @@ export class RequestSpendBudget {
 	beginRequest(receiptId: string): void {
 		this.assertHealthy();
 		this.pending = receiptId;
+		try {
+			for (const listener of this.admissionListeners) listener(receiptId);
+		} catch {
+			this.fail("A request admission checkpoint failed; dispatch and further spending are suspended.");
+			this.assertHealthy();
+		}
 	}
 
 	endRequest(receiptId: string): void {

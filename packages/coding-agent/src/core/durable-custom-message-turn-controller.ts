@@ -1,21 +1,25 @@
 import { type CustomMessage, createCustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
+import {
+	type ParentInputDelivery,
+	ParentInputDeliveryController,
+	type ParentInputDeliveryDeps,
+	type ParentInputReceipt,
+} from "./parent-input-delivery.ts";
+import { CLOSING_RUN_SETTLE_MS, runSettlesWithin } from "./session-shutdown.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
 interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
+	parentInput?: ParentInputDeliveryDeps;
 	/** A turn's goal execution belongs to its submission and ends when that submission releases the foreground. */
 	goals: Pick<GoalSessionController, "beginExecution">;
 	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
 	/** Commit under the held foreground lease before provider preparation can wait. */
 	appendMessage(message: CustomMessage<unknown>, lease: ForegroundSubmissionLease): Promise<void>;
-	/**
-	 * Runs after the turn's model run and before its lease is released, with that lease and the turn's opening
-	 * message (the custom message the run sent first, by which the turn is found in the history): the claim check
-	 * that every answer gets, and the one correction turn a contradicted claim buys.
-	 */
-	afterTurn?(turnOpening: CustomMessage<unknown>, submissionLease: ForegroundSubmissionLease): Promise<void>;
+	claimCorrection(turnOpening: CustomMessage<unknown>): Promise<string | undefined>;
+	flushOwnerItems(submissionLease: ForegroundSubmissionLease): Promise<void>;
 }
 
 /**
@@ -25,10 +29,56 @@ interface DurableCustomMessageTurnControllerDeps {
  */
 export class DurableCustomMessageTurnController {
 	private readonly deps: DurableCustomMessageTurnControllerDeps;
+	private readonly parentInputs: ParentInputDeliveryController | undefined;
 	private readonly pending = new Map<CustomMessage<unknown>, { resolve(): void; reject(error: unknown): void }>();
 
 	constructor(deps: DurableCustomMessageTurnControllerDeps) {
 		this.deps = deps;
+		this.parentInputs = deps.parentInput
+			? new ParentInputDeliveryController(deps.parentInput, deps.foreground, deps.goals, (opening, lease) =>
+					this.finishTurn(opening, lease),
+				)
+			: undefined;
+	}
+
+	async deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt> {
+		if (!this.parentInputs) throw new Error("Durable parent input delivery is unavailable.");
+		return this.parentInputs.deliver(input);
+	}
+
+	startParentInputs(): void {
+		this.parentInputs?.start();
+	}
+	recoverParentInputs(): void {
+		this.parentInputs?.recover();
+	}
+	async settleParentInputs(): Promise<void> {
+		await this.parentInputs?.settled();
+	}
+
+	async closeParentInputsBefore(dispose: () => Promise<void>): Promise<void> {
+		this.parentInputs?.shutdown();
+		const settle = this.settleParentInputs();
+		if (await runSettlesWithin(settle, CLOSING_RUN_SETTLE_MS)) {
+			await dispose();
+			return;
+		}
+		const late = settle.then(dispose, dispose);
+		this.deps.parentInput!.holdLateWork(late);
+		this.deps.parentInput!.warn(
+			"Parent input shutdown is waiting for its physical work to settle; runtime dependencies remain held.",
+		);
+	}
+
+	private async finishTurn(opening: CustomMessage<unknown>, lease: ForegroundSubmissionLease): Promise<void> {
+		const correction = await this.deps.claimCorrection(opening);
+		if (lease.signal.aborted) return;
+		if (correction)
+			await this.deps.foreground.runAgentPrompt(
+				createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
+				lease,
+			);
+		await this.deps.flushOwnerItems(lease);
 	}
 
 	/** Accept only the exact custom-message object after SessionManager append succeeds. */
@@ -42,6 +92,7 @@ export class DurableCustomMessageTurnController {
 
 	/** Reject queued delivery receipts that can no longer reach persistence during session shutdown. */
 	shutdown(): void {
+		this.parentInputs?.shutdown();
 		const error = new Error("Session disposed before a custom message was persisted");
 		for (const acceptance of this.pending.values()) acceptance.reject(error);
 		this.pending.clear();
@@ -78,7 +129,7 @@ export class DurableCustomMessageTurnController {
 		this.deps.goals.beginExecution(goalId);
 		await this.deps.appendMessage(appMessage, submissionLease);
 		const completion = this.deps.foreground.runCommittedPrompt(appMessage, submissionLease).then(() => {
-			if (!submissionLease.signal.aborted) return this.deps.afterTurn?.(appMessage, submissionLease);
+			if (!submissionLease.signal.aborted) return this.finishTurn(appMessage, submissionLease);
 		});
 		return { completion };
 	}

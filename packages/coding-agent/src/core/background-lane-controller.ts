@@ -97,9 +97,11 @@ import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delega
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
+import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { SUBMIT_REPORT_TOOL_NAME, workerReportClaimText } from "./delegation/worker-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
+import type { ToolDefinition } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -119,6 +121,8 @@ import type {
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
+import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
+import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
 import { ProactivityController, type ProactivityControllerDeps } from "./proactivity/proactivity-controller.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
@@ -126,8 +130,12 @@ import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-m
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import { routineParentInput } from "./routines/routine-parent-input.ts";
+import { RoutineSchedulerController } from "./routines/routine-scheduler-controller.ts";
+import { RoutineSessionController } from "./routines/routine-session-controller.ts";
+import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
-import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
+import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
@@ -167,6 +175,9 @@ export interface BackgroundLaneControllerDeps
 	notifyWorktreeLane?(text: string): void;
 	/** Thinking level of the active session model. */
 	getThinkingLevel?(): OrchestrationThinkingLevel;
+	canRunRoutines?(): boolean;
+	getToolInvocationKey(callId: string, toolName: string): string;
+	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -200,8 +211,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
-	private _routineSchedulerTimer: ReturnType<typeof setInterval> | undefined;
-	private _routineTickInFlight = false;
+	private _routines: { scheduler: RoutineSchedulerController; session: RoutineSessionController } | undefined;
+	private routinesStarted = false;
 	private readonly botBindings: BotRuntimeBindings;
 	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
 	private readonly botDispatches = new Map<string, Promise<void>>();
@@ -386,6 +397,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				} catch {
 					// A partial integration must not crash the event-driven terminal outbox.
 				}
+			},
+			deliveryOwner: (record, notificationId) => {
+				const notification = this._getWorkerLifecycle().getTaskRuntimeSnapshot().notifications[notificationId];
+				if (!notification) throw new Error("Worker notification is absent from the durable outbox.");
+				if (notification.status === "delivered") return "acknowledged";
+				if (this.deps.canRunRoutines?.() === false) return "coordinator";
+				this.getBotTeamStore();
+				if (!this._routines) throw new Error("Routine notification owner is unavailable.");
+				return this._routines.scheduler.ownsNotification(record) ? "separate" : "coordinator";
 			},
 			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
 			warn: (message) => this._safeWarn(message),
@@ -628,12 +648,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
-		this._runTeardownStep("stop bot routine scheduler", () => {
-			if (this._routineSchedulerTimer) {
-				clearInterval(this._routineSchedulerTimer);
-				this._routineSchedulerTimer = undefined;
-			}
-		});
+		this._runTeardownStep("stop routine scheduler", () => this._routines?.scheduler.dispose());
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -1147,60 +1162,117 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _ensureRoutineScheduler(): void {
-		if (this._routineSchedulerTimer || this.deps.isDisposed()) return;
-		this._routineSchedulerTimer = setInterval(() => {
-			if (this.deps.isDisposed()) {
-				if (this._routineSchedulerTimer) {
-					clearInterval(this._routineSchedulerTimer);
-					this._routineSchedulerTimer = undefined;
+		if (this._routines || !this._botTeamStore || this.deps.isDisposed() || this.deps.canRunRoutines?.() === false)
+			return;
+		const store = this._botTeamStore;
+		const parentSessionId = this.deps.getSessionId();
+		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean => {
+			const manager = this.deps.getSessionManager();
+			return (
+				origin.sessionId === manager.getSessionId() &&
+				(origin.sessionFile === undefined || origin.sessionFile === manager.getSessionFile()) &&
+				isSessionAppendAnchorCurrent(manager, origin) &&
+				manager.isEntryPersisted(origin.leafId)
+			);
+		};
+		const worker = new RoutineWorkerExecutor({
+			getSnapshot: () => {
+				this._getWorkerController();
+				return this._getWorkerLifecycle().getTaskRuntimeSnapshot();
+			},
+			start: (input, signal) => this._getWorkerController().startSavedIntent(input, signal),
+		});
+		const scheduler = new RoutineSchedulerController({
+			store,
+			worker,
+			parentSessionId,
+			owner: randomUUID(),
+			timers: this.deps.getTimers().port("routines"),
+			isDisposed: () => this.deps.isDisposed(),
+			canDispatch: () => this.deps.isDelegateToolActive(),
+			getReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			canUseOrigin,
+			captureOriginGuard: (origin) => {
+				const manager = this.deps.getSessionManager();
+				const assertBranch = manager.captureBranchContext();
+				return () => {
+					assertBranch();
+					if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager || !canUseOrigin(origin))
+						throw new Error("Routine origin is not on the current durable parent branch.");
+				};
+			},
+			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
+			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
+			deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
+			acknowledgeWorkerNotification: (occurrence) => {
+				if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
+				const intent = occurrence.definition.executionSnapshot?.savedIntent;
+				if (!intent) return;
+				const attemptIds = worker.notificationAttemptIds({
+					intent,
+					instructions: occurrence.definition.prompt,
+					dispatchKey: occurrence.dispatchKey,
+				});
+				const lifecycle = this._getWorkerLifecycle();
+				const ids: string[] = [];
+				for (const attemptId of attemptIds) {
+					const notification = lifecycle.getAttemptTerminalNotification(attemptId);
+					if (!notification) throw new Error("Routine completion is waiting for its native terminal receipt.");
+					if (notification.status === "pending") ids.push(notification.notificationId);
 				}
-				return;
-			}
-			void this.tickPersistentRoutines();
-		}, 15_000);
-		this._routineSchedulerTimer.unref?.();
+				lifecycle.markNotificationsDelivered(ids);
+			},
+			dispatchMessage: async (occurrence) => {
+				if (occurrence.target.kind === "bot") {
+					const result = await this.sendOperatorMessageToBot(
+						occurrence.target.agentId,
+						occurrence.definition.prompt,
+					);
+					return `Prompt accepted by bot ${occurrence.target.agentId} (${result.mode}); worker completion is tracked separately.`;
+				}
+				if (occurrence.target.kind === "team") {
+					const result = await this.sendOperatorMessageToTeam(
+						occurrence.target.teamId,
+						occurrence.definition.prompt,
+					);
+					return `Prompt accepted for ${result.deliveries.length} team deliveries; worker completion is tracked separately.`;
+				}
+				throw new Error("Session routines require the native worker executor.");
+			},
+			warn: (message) => this._safeWarn(message),
+		});
+		this._routines = {
+			scheduler,
+			session: new RoutineSessionController({
+				store,
+				scheduler,
+				parentSessionId,
+				capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
+				invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
+				now: () => this.deps.getTimers().port("routines").now(),
+				isDisposed: () => this.deps.isDisposed(),
+			}),
+		};
+		if (this.routinesStarted) scheduler.start();
+	}
+
+	startPersistentRoutines(): void {
+		if (this.deps.isDisposed() || this.deps.canRunRoutines?.() === false) return;
+		this.routinesStarted = true;
+		this.getBotTeamStore();
+		this._routines?.scheduler.start();
+	}
+
+	createRoutineToolDefinition(): ToolDefinition | undefined {
+		this.getBotTeamStore();
+		return this._routines?.session.tool;
 	}
 
 	async tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {
-		if (this._routineTickInFlight || this.deps.isDisposed()) {
-			return { dispatched: [], failed: [] };
-		}
-		this._routineTickInFlight = true;
-		const dispatched: string[] = [];
-		const failed: string[] = [];
-		try {
-			const store = this.getBotTeamStore();
-			store.reload();
-			const due = store.claimDueRoutines(Date.now(), routineIdFilter);
-			for (const routine of due) {
-				const routinePrompt = `[Scheduled routine ${routine.routineId}]: ${routine.prompt}`;
-				try {
-					if (routine.target.kind === "bot") {
-						const res = await this.sendOperatorMessageToBot(routine.target.agentId, routinePrompt);
-						store.completeRoutineRun(
-							routine.routineId,
-							res.mode === "queued" ? "queued" : "succeeded",
-							`Dispatched to bot ${routine.target.agentId} (${res.mode}).`,
-						);
-					} else {
-						const res = await this.sendOperatorMessageToTeam(routine.target.teamId, routinePrompt);
-						store.completeRoutineRun(
-							routine.routineId,
-							"succeeded",
-							`Dispatched to team ${routine.target.teamId} (${res.deliveries.length} deliveries).`,
-						);
-					}
-					dispatched.push(routine.routineId);
-				} catch (error) {
-					const errMsg = error instanceof Error ? error.message : String(error);
-					store.completeRoutineRun(routine.routineId, "failed", errMsg);
-					failed.push(`${routine.routineId}: ${errMsg}`);
-				}
-			}
-			return { dispatched, failed };
-		} finally {
-			this._routineTickInFlight = false;
-		}
+		this.getBotTeamStore();
+		if (!this._routines) return { dispatched: [], failed: [] };
+		if (routineIdFilter) this._routines.scheduler.run(routineIdFilter, undefined, randomUUID());
+		return this._routines.scheduler.tick();
 	}
 
 	getPersistentBotDaemonStatus(): PersistentBotDaemonStatus {

@@ -12,6 +12,8 @@ import {
 	parseKnowledgeChange,
 } from "./knowledge-admission.ts";
 import { isKnowledgeScope, isKnowledgeTimestamp, type KnowledgeScope } from "./knowledge-record.ts";
+import { KnowledgeWindowJournal } from "./knowledge-window-journal.ts";
+import { eraseKnowledgeWorkValues } from "./knowledge-work-journal.ts";
 
 export const MAX_COLLECTION_CANDIDATES = 32;
 const MAX_MANIFEST_CHARS = 256_000;
@@ -97,11 +99,13 @@ export function knowledgeCollectionSourceIdentity(source: KnowledgeCollectionSou
 }
 
 export class KnowledgeCollectionJournal {
+	readonly windows: KnowledgeWindowJournal;
 	private readonly db: SqliteDatabase;
 	private readonly time: Pick<TimerPort, "now">;
 	constructor(db: SqliteDatabase, time: Pick<TimerPort, "now"> = SYSTEM_TIMER_PORT) {
 		this.db = db;
 		this.time = time;
+		this.windows = new KnowledgeWindowJournal(db, (claim) => this.assertCurrent(claim));
 	}
 
 	/** The active branch supplies the source; this journal never discovers another branch's inputs. */
@@ -389,6 +393,12 @@ export class KnowledgeCollectionJournal {
 		this.db
 			.prepare("UPDATE collection_meta SET forget_barrier=max(coalesce(forget_barrier,''),?) WHERE id=1")
 			.run(barrier);
+		eraseKnowledgeWorkValues(this.db);
+		this.db
+			.prepare(
+				"UPDATE collection_windows SET state=CASE WHEN state='split' THEN 'split' ELSE 'pending' END,manifest=NULL,manifest_digest=NULL WHERE source_id IN (SELECT id FROM collection_sources WHERE status<>'processed')",
+			)
+			.run();
 		this.db
 			.prepare(`UPDATE collection_candidates SET body=NULL,outcome=CASE
 			WHEN EXISTS(SELECT 1 FROM operation_receipts r WHERE r.operation_id=collection_candidates.operation_id AND r.digest=collection_candidates.digest) THEN 'applied'

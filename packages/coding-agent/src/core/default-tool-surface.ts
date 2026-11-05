@@ -15,6 +15,7 @@ import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
@@ -53,6 +54,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"runtime_update",
 		"self_compact",
 		PROACTIVITY_TOOL_NAME,
+		ROUTINE_TOOL_NAME,
 	];
 }
 

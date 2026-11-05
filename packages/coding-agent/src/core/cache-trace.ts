@@ -7,8 +7,9 @@ import type { Api, Context, Message, Model } from "@caupulican/pi-ai";
  * miss starts at the first segment (system prompt, tool, message) that differs from the previous
  * request. The system prompt and the tool list must not change between requests (OpenAI Codex tracks
  * the same invariant as `tools_changed` and tests that tools are identical across requests), and the
- * chat view may only grow. The monitor compares each request with the session's previous one and
- * names the first segment that changed, so a cache miss is reported when it happens.
+ * marked chat-view prefix remains stable across overlapping blocks. The monitor compares each request
+ * with the session's previous one and names the first changed segment. This detects prefix churn;
+ * provider usage is still needed to establish cache hits or their billed cost.
  *
  * It does not judge rewrites of already-sent messages. Those belong to the context shrinker, and the
  * cache custody guard classifies each one as a priced (sanctioned) rewrite or an unsanctioned break
@@ -42,6 +43,8 @@ interface RequestFingerprint {
 	systemText: string;
 	/** The ICM chat view the request opens with, kept only to compare it across turns; never written to the trace file. */
 	viewText: string | undefined;
+	/** Text blocks through the last explicit cache marker; their boundaries are part of the prefix. */
+	viewCacheBlocks: readonly string[] | undefined;
 	tools: SegmentFingerprint[];
 	messages: SegmentFingerprint[];
 }
@@ -52,11 +55,19 @@ const CHAT_VIEW_CLOSING = "</chat>";
 const CHAT_VIEW_TAIL_FRACTION = 0.1;
 
 /** The text of the ICM chat view when the request's first message is that view; undefined otherwise. */
-function chatViewText(messages: readonly Message[]): string | undefined {
+function chatView(messages: readonly Message[]): { text: string; cacheBlocks?: readonly string[] } | undefined {
 	const first = messages[0];
 	if (first?.role !== "user" || typeof first.content === "string") return undefined;
 	const text = first.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-	return text.startsWith(CHAT_VIEW_OPENING) ? text : undefined;
+	if (!text.startsWith(CHAT_VIEW_OPENING)) return undefined;
+	const marker = first.content.findLastIndex((block) => block.type === "text" && block.cacheBoundary === true);
+	const blocks = first.content.slice(0, marker + 1);
+	return {
+		text,
+		...(marker >= 0 && blocks.every((block) => block.type === "text")
+			? { cacheBlocks: blocks.map((block) => block.text) }
+			: {}),
+	};
 }
 
 /**
@@ -76,11 +87,13 @@ function chatViewChange(before: string, after: string): string | undefined {
 }
 
 function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
+	const view = chatView(context.messages);
 	return {
 		model: `${model.provider}/${model.id}`,
 		system: segment("system", context.systemPrompt ?? ""),
 		systemText: context.systemPrompt ?? "",
-		viewText: chatViewText(context.messages),
+		viewText: view?.text,
+		viewCacheBlocks: view?.cacheBlocks,
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
@@ -122,7 +135,18 @@ function prefixChange(previous: RequestFingerprint, current: RequestFingerprint)
 		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
 		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
 	}
-	// The chat view, within a turn and across turns, must keep the previous view as its prefix.
+	// A shorter causal view can reuse the overlapping marked blocks. Pending lines after the marker
+	// were never declared stable; replacing them does not rewrite that prefix.
+	if (previous.viewCacheBlocks && current.viewCacheBlocks) {
+		const count = Math.min(previous.viewCacheBlocks.length, current.viewCacheBlocks.length);
+		for (let index = 0; index < count; index++) {
+			const before = previous.viewCacheBlocks[index]!;
+			const after = current.viewCacheBlocks[index]!;
+			if (before !== after) return `chat view cache block ${index + 1} changed ${describeTextChange(before, after)}`;
+		}
+		return undefined;
+	}
+	// Requests without an explicit marker retain the heuristic for implicit prefix caching.
 	return previous.viewText !== undefined && current.viewText !== undefined
 		? chatViewChange(previous.viewText, current.viewText)
 		: undefined;
@@ -153,13 +177,18 @@ export class PromptPrefixMonitor {
 		this.reports.set(key, reported);
 		if (reported > MAX_REPORTS_PER_SESSION) return undefined;
 		const suffix = reported === MAX_REPORTS_PER_SESSION ? " Further changes in this session are not reported." : "";
-		return `Prompt cache prefix changed between requests: ${change}. The provider re-bills the prompt from that point at full price.${suffix}`;
+		return `Prompt cache prefix changed between requests: ${change}. Cache reuse may be reduced from that point.${suffix}`;
 	}
 
 	private writeTrace(sessionId: string | undefined, fingerprint: RequestFingerprint): void {
 		const path = process.env.PI_CACHE_TRACE;
 		if (!path) return;
-		const { systemText: _systemText, viewText: _viewText, ...traced } = fingerprint;
+		const {
+			systemText: _systemText,
+			viewText: _viewText,
+			viewCacheBlocks: _viewCacheBlocks,
+			...traced
+		} = fingerprint;
 		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced })}\n`);
 	}
 }

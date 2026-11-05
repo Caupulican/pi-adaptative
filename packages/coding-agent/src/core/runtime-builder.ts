@@ -144,6 +144,7 @@ import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
 import type { RuleHookRefusal } from "./rule-hooks/rule-hook-delivery.ts";
 import {
 	type RuntimeCandidateAttempt,
@@ -454,6 +455,7 @@ export interface RuntimeBuilderDeps {
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
+	getRoutineTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -1709,6 +1711,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows(PROACTIVITY_TOOL_NAME)) {
 				const definition = this.deps.getProactivityTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(ROUTINE_TOOL_NAME)) {
+				const definition = this.deps.getRoutineTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {

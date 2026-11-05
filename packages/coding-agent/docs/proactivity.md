@@ -20,6 +20,18 @@ The root agent also has a `proactivity` tool with `view`, `set_preferences`, `cl
 
 Preferences are a whole document, limited to 2000 characters. The agent reads the existing document before proposing a replacement. An example is: `Raise unfinished work I asked for; avoid repeated reminders.`
 
+## Scheduled work
+
+The root agent's `routine` tool saves work for its owning session. It supports `create`, `list`, `get`, `update`, `pause`, `resume`, `delete` and `run`. A schedule is either one absolute UTC instant in epoch milliseconds (`{ "kind": "once", "at": ... }`) or an elapsed interval of at least ten seconds (`{ "kind": "interval", "intervalMs": ... }`). Calendar schedules and condition triggers are not supported yet.
+
+Each routine retains its instructions, admitted worker profile and exact knowledge references. Later execution rechecks current authority and memory validity; saving a routine does not grant permanent access. It runs in an isolated worker and returns the result to the same parent session. Workers cannot create routines. Scheduled work does not acquire an unrelated goal that happens to be active later.
+
+Updates require the current revision from `get` or `list`. Deleting and recreating a name never makes an old revision valid again. An occurrence already admitted retains its original instructions. A manual `run` has its own occurrence and leaves the scheduled slot intact, including when the schedule is paused. A later pause or deletion cancels occurrences that have not reached dispatch; work already dispatched retains its original intent and reports its outcome.
+
+Occurrence claims and results are durable. Restart recovery reconciles the exact worker execution, and a dispatch whose outcome cannot be established is reported as uncertain instead of being repeated. If the exact worker later finishes, its confirmed outcome is delivered separately while the earlier uncertainty receipt is retained. A result is acknowledged only after the parent has durably accepted it. The parent's response is tracked separately, so a restart can resume an unhandled result without appending it twice.
+
+The owning session must currently be running for execution. The bot daemon records due work but does not advance the schedule or execute a parent session in the background. Headless execution remains a separate missing capability.
+
 ## Limits
 
 The defaults allow one review after two idle minutes, require three new owner turns between reviews, permit four reviews per running session and allow two notes per review. The review uses at most two provider requests. See the [settings reference](settings.md#proactivity) for all fields.

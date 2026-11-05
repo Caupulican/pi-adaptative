@@ -12,6 +12,7 @@ import {
 } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export interface ToolCapabilityPolicy {
@@ -99,6 +100,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["ask_question", policy([["workflow.plan", "memory.query"]], "control-plane")],
 	["self_compact", policy([["workflow.plan"]], "control-plane")],
 	[PROACTIVITY_TOOL_NAME, policy([["settings.read", "settings.write"]], "control-plane")],
+	[ROUTINE_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
@@ -220,6 +222,13 @@ export function toolCapabilityRequirementClauses(
 	args?: unknown,
 ): readonly (readonly HarnessCapability[])[] {
 	const name = toolName.toLowerCase();
+	if (name === ROUTINE_TOOL_NAME && args !== undefined) {
+		const action =
+			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
+		return action === "list" || action === "get" || action === "pause" || action === "delete"
+			? [["workflow.plan"]]
+			: [["workflow.plan"], ["workflow.delegate"]];
+	}
 	if (name === PROACTIVITY_TOOL_NAME && args !== undefined) {
 		const action =
 			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;

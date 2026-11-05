@@ -122,13 +122,18 @@ import {
 } from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { isCurrentVerificationSubject } from "../orchestration/verification-identity.ts";
+import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import {
 	createWorkerExecutionContract,
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
-import { assertWorkerReceiptAdmission, inheritWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
+import {
+	assertWorkerReceiptAdmission,
+	inheritWorkerReceiptAdmission,
+	retainWorkerReceiptAdmission,
+} from "../orchestration/worker-receipt-origin.ts";
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
@@ -286,6 +291,7 @@ import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
+import { captureWorkerSavedIntent, parseWorkerSavedIntent, type WorkerSavedIntent } from "./worker-saved-intent.ts";
 import {
 	describeWorkerSpecialization,
 	sameWorkerSpecialization,
@@ -642,6 +648,7 @@ type WorkerAdmission =
 			executionContract: WorkerExecutionContract;
 			executionPlan: WorkerExecutionPlan;
 			knowledgeGrant?: KnowledgeGrant;
+			knowledgeReferences: readonly KnowledgeGrantReference[];
 			/** Existing task identity, revalidated after asynchronous fitness admission. */
 			admittedAttemptId?: string;
 			/** Who chose the admitted model (never the router): recorded on the dispatch for the operator. */
@@ -2014,6 +2021,13 @@ export class WorkerDelegationController {
 		selectedBinding?: OrchestrationModelBinding,
 		admittedAttempt?: AttemptRuntimeState,
 	): WorkerAdmission {
+		pinnedContract ??= request.savedIntent?.executionContract;
+		if (
+			request.savedIntent &&
+			(request.savedIntent.receiptOrigin.sessionId !== this.deps.getSessionId() ||
+				!isDeepStrictEqual(request.savedIntent.knowledgeReferences, request.knowledge ?? []))
+		)
+			return { ok: false, skipReason: "worker_saved_intent_mismatch" };
 		if (this.deps.isDisposed() || this.workerAbort.signal.aborted)
 			return { ok: false, skipReason: "session_disposed" };
 		// Same rule as the durable ledger: emptiness is judged on the trimmed view, but the brief the
@@ -2219,7 +2233,7 @@ export class WorkerDelegationController {
 		}
 		const inheritedAuthority = pinnedContract?.worker.authority ?? parentContract?.worker.authority;
 		const executionPlan =
-			inheritedAuthority && this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
+			inheritedAuthority && (pinnedContract || this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo")
 				? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 				: currentExecutionPlan;
 		const retainedAttempt = admittedAttempt ?? this.replayedWorkerAttempt(request.messageReplayKey);
@@ -2245,7 +2259,7 @@ export class WorkerDelegationController {
 					return { ok: false, skipReason: "worker_knowledge_capability_required" };
 				// Retained tasks keep exact references; the broker projects unavailable records as cleared.
 				// Only fresh tasks re-admit current record content.
-				if (!retainedAttempt) {
+				if (!retainedAttempt && !request.savedIntent) {
 					knowledgeGrant = request.knowledge ? this.knowledgeGrants.get(request.knowledge) : undefined;
 					if (!knowledgeGrant) {
 						knowledgeGrant = this.deps.captureKnowledgeGrant?.(references);
@@ -2280,11 +2294,12 @@ export class WorkerDelegationController {
 			if (!withSoul.ok) return withSoul;
 			shipment = withSoul.shipment;
 		}
-		const inheritedVerifierAuthority = parentContract?.verifier?.authority ?? parentContract?.worker.authority;
+		const inheritedVerifierAuthority =
+			pinnedContract?.verifier?.authority ?? parentContract?.verifier?.authority ?? parentContract?.worker.authority;
 		const boundedVerifierExecutionPlan =
 			verifierExecutionPlan &&
 			inheritedVerifierAuthority &&
-			this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
+			(pinnedContract || this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo")
 				? narrowWorkerExecutionPlan(inheritedVerifierAuthority, verifierExecutionPlan)
 				: verifierExecutionPlan;
 		const executionContract =
@@ -2310,6 +2325,7 @@ export class WorkerDelegationController {
 			shipment,
 			...(verifierShipment ? { verifierShipment } : {}),
 			resourcePointerIds: selectedResources.pointers.map((pointer) => pointer.id),
+			knowledgeReferences: request.knowledge ?? [],
 			...(knowledgeGrant ? { knowledgeGrant } : {}),
 			...(retainedAttempt ? { admittedAttemptId: retainedAttempt.attemptId } : {}),
 			executionContract,
@@ -3033,7 +3049,7 @@ export class WorkerDelegationController {
 
 	private workerGoalDependencySkipReason(request: WorkerDelegationRequest): string | undefined {
 		if (request.verificationOfTaskId) return undefined;
-		const goal = this.deps.getGoalStateSnapshot();
+		const goal = this.goalForWorkerRequest(request);
 		if (!goal?.requirements || goal.requirements.length === 0) return undefined;
 
 		const reqIds = new Set<string>();
@@ -3336,7 +3352,7 @@ export class WorkerDelegationController {
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,
-					knowledgeReferences: admission.knowledgeGrant?.references ?? [],
+					knowledgeReferences: admission.knowledgeReferences,
 					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
@@ -3444,10 +3460,7 @@ export class WorkerDelegationController {
 					(attempt) =>
 						attempt !== undefined &&
 						attempt.dispatch.instructions === admission.instructions &&
-						isDeepStrictEqual(
-							attempt.dispatch.knowledgeReferences ?? [],
-							admission.knowledgeGrant?.references ?? [],
-						) &&
+						isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], admission.knowledgeReferences) &&
 						sameTaskBrief(attempt.dispatch.brief, request.brief) &&
 						attempt.dispatch.parentAgentId === request.parentAgentId &&
 						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
@@ -4081,6 +4094,7 @@ export class WorkerDelegationController {
 		agentId: string,
 		request: WorkerDelegationRequest,
 		contract: WorkerExecutionContract,
+		knowledgeReferences: readonly KnowledgeGrantReference[],
 		knowledgeGrant?: KnowledgeGrant,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const agent = this.lifecycle.getAgent(agentId);
@@ -4098,7 +4112,7 @@ export class WorkerDelegationController {
 					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
 					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 					newTask: {
-						knowledgeReferences: knowledgeGrant?.references ?? [],
+						knowledgeReferences,
 						controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
 						...(goal ? { goal } : {}),
 						...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
@@ -4125,6 +4139,11 @@ export class WorkerDelegationController {
 	/** Fresh route work keeps its original goal across awaited directory and specialist admission. */
 	private goalForWorkerRequest(request: WorkerDelegationRequest): GoalState | undefined {
 		const goal = this.deps.getGoalStateSnapshot();
+		if (request.objectiveId === null) return undefined;
+		if (request.savedIntent)
+			return request.savedIntent.objectiveId === null
+				? undefined
+				: assertCurrentGoalObjective(request.savedIntent.objectiveId, goal);
 		return request.objectiveId === undefined ? goal : assertCurrentGoalObjective(request.objectiveId, goal);
 	}
 
@@ -4426,6 +4445,14 @@ export class WorkerDelegationController {
 					...(signal ? [signal] : []),
 				]),
 			);
+			if (request.savedIntent)
+				request.savedIntent = {
+					...request.savedIntent,
+					executionContract: this.laneIsolation.relocateContract(
+						request.savedIntent.executionContract,
+						request.executionContext,
+					),
+				};
 		} catch {
 			// The lane directory no longer exists or cannot be validated; the caller's directory is kept.
 		}
@@ -4460,10 +4487,23 @@ export class WorkerDelegationController {
 				this.deps.getSessionId(),
 				boundedSignal,
 			);
-			const admitted = await this.admitWorkerDirectory({ ...request, executionContext }, signal, {
-				freshIdentity: false,
-				selectedBinding: shared.shipment.modelBinding,
-			});
+			const savedIntent = request.savedIntent
+				? {
+						...request.savedIntent,
+						executionContract: isolation.relocateContract(
+							request.savedIntent.executionContract,
+							executionContext,
+						),
+					}
+				: undefined;
+			const admitted = await this.admitWorkerDirectory(
+				{ ...request, executionContext, ...(savedIntent ? { savedIntent } : {}) },
+				signal,
+				{
+					freshIdentity: false,
+					selectedBinding: shared.shipment.modelBinding,
+				},
+			);
 			if (!admitted.ok) {
 				failure = admitted.skipReason;
 			} else if (
@@ -4480,6 +4520,7 @@ export class WorkerDelegationController {
 				failure = "the worker's workspace or granted write roots are outside the lane";
 			} else {
 				request.executionContext = executionContext;
+				if (savedIntent) request.savedIntent = savedIntent;
 				return {
 					...admitted,
 					modelRouteSource: shared.modelRouteSource,
@@ -4536,7 +4577,7 @@ export class WorkerDelegationController {
 		const routeJudge = this.deps.getRouteChoiceJudge?.();
 		let routeSelected = false;
 		let selectedModelSnapshot: Model<Api> | undefined;
-		if (reuse.outcome === "fresh") {
+		if (reuse.outcome === "fresh" && !request.savedIntent) {
 			let selected: WorkerAdmission;
 			try {
 				selected = await this.selectFreshWorkerRoute(request, shared, signal);
@@ -4571,6 +4612,7 @@ export class WorkerDelegationController {
 				reuse.agentId,
 				request,
 				shared.executionContract,
+				shared.knowledgeReferences,
 				shared.knowledgeGrant,
 			);
 			return accepted.started
@@ -4647,6 +4689,7 @@ export class WorkerDelegationController {
 			if (
 				capturedRequest.knowledge.length > 0 &&
 				!existing &&
+				!request.savedIntent &&
 				!this.replayedWorkerAttempt(request.messageReplayKey)
 			) {
 				const grant = this.deps.captureKnowledgeGrant?.(capturedRequest.knowledge);
@@ -4673,6 +4716,56 @@ export class WorkerDelegationController {
 			);
 		}
 		return capturedRequest;
+	}
+
+	/** Save authority now; the eventual occurrence still passes normal live execution admission. */
+	async captureSavedIntent(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<WorkerSavedIntent> {
+		const captured = this.captureWorkerRequest(request);
+		if (!captured.receiptOrigin) throw new Error("Saved intent requires an owning session.");
+		const sessionId = this.deps.getSessionId();
+		const bounded = AbortSignal.any([
+			this.workerAbort.signal,
+			AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+			...(signal ? [signal] : []),
+		]);
+		return captureWorkerSavedIntent({
+			resolve: () => {
+				const admission = this.resolveWorkerAdmission(captured);
+				if (!admission.ok) throw new Error(admission.skipReason);
+				return admission;
+			},
+			captureDirectory: (contract) => this.directories.capture(contract, sessionId, bounded),
+			objectiveId: () => {
+				const goal = this.goalForWorkerRequest(captured);
+				return goal ? goalObjectiveId(goal.goalId) : null;
+			},
+			receiptOrigin: captured.receiptOrigin,
+			assertCurrent: () => {
+				bounded.throwIfAborted();
+				if (this.deps.isDisposed() || sessionId !== this.deps.getSessionId())
+					throw new Error("Saved intent session changed.");
+			},
+		});
+	}
+
+	startSavedIntent(
+		input: { intent: WorkerSavedIntent; instructions: string; dispatchKey: string; assertAdmission?: () => void },
+		signal?: AbortSignal,
+	): Promise<QueuedWorkerAttemptOutcome> {
+		const intent = parseWorkerSavedIntent(input.intent);
+		if (input.assertAdmission) retainWorkerReceiptAdmission(intent.receiptOrigin, input.assertAdmission);
+		return this.start(
+			{
+				instructions: input.instructions,
+				savedIntent: intent,
+				knowledge: intent.knowledgeReferences,
+				receiptOrigin: intent.receiptOrigin,
+				profileId: intent.executionContract.worker.profile.profileId,
+				messageReplayKey: input.dispatchKey,
+				forkTurns: "none",
+			},
+			signal,
+		);
 	}
 
 	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
@@ -5859,7 +5952,7 @@ export class WorkerDelegationController {
 					workerSignal.throwIfAborted();
 				}
 				const observer = this.deps.repositoryObserver;
-				const objectiveId = this.deps.getObjectiveId?.();
+				const objectiveId = durableTask.task.objectiveId;
 				const sessionCwd = this.deps.getSessionCwd?.() ?? executionPlan.cwd;
 				const shared =
 					observer && objectiveId

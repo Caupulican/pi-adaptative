@@ -9,6 +9,7 @@ import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
+import type { OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { type KnowledgeChange, knowledgeChangeSchema, parseKnowledgeChange } from "./knowledge-admission.ts";
 import { MAX_COLLECTION_CANDIDATES } from "./knowledge-collection-journal.ts";
@@ -39,6 +40,8 @@ export class KnowledgeExtractionRefusal extends Error {
 
 export interface KnowledgeExtractionInput {
 	readonly source: OwnerEvidenceRecord;
+	readonly window?: OwnerEvidenceWindow;
+	onSubmission?(submission: KnowledgeExtractionSubmission): void;
 	readonly model: Model<Api>;
 	readonly maxTokens: number;
 	readonly budget: RequestSpendBudget;
@@ -52,10 +55,16 @@ export interface KnowledgeExtractionInput {
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
 
+export interface KnowledgeExtractionSubmission {
+	readonly complete: boolean;
+	readonly candidates: readonly KnowledgeChange[];
+}
+
 const submissionParameters = Type.Object(
 	{
-		complete: Type.Literal(true, {
-			description: "True only after considering the entire original source. Never submit a partial prefix.",
+		complete: Type.Boolean({
+			description:
+				"True after considering the entire supplied core. False with an empty list requests smaller cores when all candidates cannot fit. Never silently truncate.",
 		}),
 		candidates: Type.Array(knowledgeChangeSchema, {
 			maxItems: MAX_COLLECTION_CANDIDATES,
@@ -70,8 +79,8 @@ const SYSTEM_PROMPT = [
 	"Propose concise atomic facts: profile describes the owner; behavior describes standing preferences; workstream records durable project decisions and results; world describes relevant people, places and organizations; journal records dated events. Temporary task instructions and speculation are not durable facts.",
 	"Use the read-only knowledge tool to inspect accepted facts, their revisions and original evidence when needed. Current knowledge helps identify corrections and avoid duplicates; it is not new owner evidence. Inferred patterns require independent original owner observations. Never invent an observation, source id, quotation, fact or validity date.",
 	"Each proposed change must cite the supplied original source, using its exact source id and words. Additional independent original owner sources may be cited after reading them. Use an existing id and expectedRevision for a correction or explicit forgetting request; never infer a request to forget.",
-	`After considering the entire source, call ${KNOWLEDGE_SUBMISSION_TOOL_NAME} exactly once, as the only tool call in that message, with complete:true and the full candidate list. An empty candidates array is a successful complete review. A prose answer, a partial list, or omitting the call is not a submission.`,
-	`At most ${MAX_COLLECTION_CANDIDATES} candidates fit. If the complete source would require more, do not truncate the list or claim complete coverage.`,
+	`After considering the entire supplied source or core, call ${KNOWLEDGE_SUBMISSION_TOOL_NAME} exactly once, as the only tool call in that message, with complete:true and the full candidate list. An empty candidates array is a successful complete review. A prose answer, a partial list, or omitting the call is not a submission.`,
+	`At most ${MAX_COLLECTION_CANDIDATES} candidates fit. If more are needed, submit complete:false,candidates:[] to request subdivision. Do not truncate or claim complete coverage. A window preserves original source identity; overlap is context, never another observation. Propose only facts evidenced in its core; qualifications in the shown context apply.`,
 	"You only propose changes. The host independently validates meaning, evidence, identity, scope and permission before storing anything.",
 ].join("\n");
 
@@ -91,7 +100,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 			"incomplete_source",
 			"Extraction requires complete original owner evidence.",
 		);
-	if (source.text.length > MAX_KNOWLEDGE_EXTRACTION_SOURCE_CHARS)
+	if ((input.window?.text.length ?? source.text.length) > MAX_KNOWLEDGE_EXTRACTION_SOURCE_CHARS)
 		throw new KnowledgeExtractionRefusal(
 			"source_capacity",
 			"The complete original source exceeds extraction capacity.",
@@ -108,7 +117,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		input.origin,
 	);
 	let closed = false;
-	const capture: { candidates?: KnowledgeChange[] } = {};
+	const capture: { submission?: KnowledgeExtractionSubmission } = {};
 	const assertCurrent = (): void => {
 		input.signal.throwIfAborted();
 		input.assertCurrent();
@@ -122,17 +131,18 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		executionMode: "sequential",
 		execute: async (_id, params) => {
 			assertCurrent();
-			if (capture.candidates !== undefined)
+			if (capture.submission !== undefined)
 				throw new KnowledgeExtractionRefusal("invalid_submission", "Knowledge candidates were already submitted.");
-			if (params.complete !== true || params.candidates.length > MAX_COLLECTION_CANDIDATES)
+			if (params.candidates.length > MAX_COLLECTION_CANDIDATES || (!params.complete && params.candidates.length > 0))
 				throw new KnowledgeExtractionRefusal(
 					"invalid_submission",
 					"Only a complete bounded candidate list is accepted.",
 				);
-			capture.candidates = params.candidates.map(parseKnowledgeChange);
+			capture.submission = { complete: params.complete, candidates: params.candidates.map(parseKnowledgeChange) };
+			input.onSubmission?.(capture.submission);
 			return {
 				content: [{ type: "text", text: "Proposal received for independent admission. No knowledge was stored." }],
-				details: { complete: true, candidates: capture.candidates.length },
+				details: { complete: params.complete, candidates: capture.submission.candidates.length },
 				terminate: true,
 			};
 		},
@@ -156,7 +166,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 							text: JSON.stringify({
 								sourceId: source.sourceId,
 								evidencedAt: source.createdAt,
-								completeOriginal: source.text,
+								...(input.window ? { window: input.window } : { completeOriginal: source.text }),
 							}),
 						},
 					],
@@ -175,7 +185,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 			beforeToolCall: async (context) => {
 				assertCurrent();
 				usage.assertHealthy();
-				if (capture.candidates !== undefined)
+				if (capture.submission !== undefined)
 					throw new KnowledgeExtractionRefusal(
 						"invalid_submission",
 						"Knowledge candidates were already submitted.",
@@ -192,7 +202,8 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 			},
 			requestPreflight: (request) => {
 				assertCurrent();
-				return usage.preflight(request);
+				const decision = usage.preflight(request);
+				return decision;
 			},
 			requestGuard: () => {
 				assertCurrent();
@@ -204,12 +215,14 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		assertCurrent();
 		if (result.stopReason === "error" || result.stopReason === "aborted")
 			throw new Error(result.errorMessage ?? `Knowledge extraction ${result.stopReason}.`);
-		if (capture.candidates === undefined)
+		if (capture.submission === undefined)
 			throw new KnowledgeExtractionRefusal(
 				"missing_submission",
 				"Extraction ended without a complete candidate submission.",
 			);
-		return capture.candidates;
+		if (!capture.submission.complete)
+			throw new KnowledgeExtractionRefusal("source_capacity", "Source core requires subdivision");
+		return capture.submission.candidates;
 	} finally {
 		closed = true;
 		usage.release();

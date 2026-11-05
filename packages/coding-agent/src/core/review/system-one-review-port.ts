@@ -107,6 +107,8 @@ export type SystemOneUsageOutcome =
 export interface SystemOneUsageLease {
 	/** Persist request identity before dispatch. Required for requests sharing a spending budget. */
 	beginRequest?(request: UnresolvedUsageRequest): void;
+	/** Remove only this lease's reservation when its caller proves no transport was invoked. Never a usage receipt. */
+	cancelUndispatchedRequest?(requestId: string): void;
 	/** Records one paid response. Never throws: a failure is an `unretained` outcome. */
 	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome;
 	/** Returns the slots no response used. Idempotent. */
@@ -220,6 +222,7 @@ export interface SystemOneReviewPort {
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
 		budget?: RequestSpendBudget,
+		onRequestAdmitted?: (requestId: string) => void,
 	): Promise<SystemOneEvaluationRecord>;
 	review(
 		input: ReviewInput,

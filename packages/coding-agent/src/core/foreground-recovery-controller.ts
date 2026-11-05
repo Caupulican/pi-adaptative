@@ -440,7 +440,7 @@ export class ForegroundRecoveryController {
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
-	async acquireSubmission(): Promise<ForegroundSubmissionLease> {
+	async acquireSubmission(signal?: AbortSignal): Promise<ForegroundSubmissionLease> {
 		const watch = this.watchForegroundWait(
 			"foreground.acquire",
 			["agent.idle", "foreground.activity"],
@@ -450,48 +450,58 @@ export class ForegroundRecoveryController {
 		this.submissionWaiters++;
 		try {
 			while (true) {
+				signal?.throwIfAborted();
 				if (this.shutdownReason) throw this.shutdownReason;
 				const lease = this.tryAcquireSubmission();
 				if (lease) {
+					if (signal?.aborted) {
+						this.releaseSubmission(lease);
+						signal.throwIfAborted();
+					}
 					end = { kind: "satisfied", by: "foreground.activity" };
 					return lease;
 				}
 				watch.blocked();
-				// Streaming owns the Agent's native idle signal. Future continuation settlement does
-				// not own submission authority, so the remaining wait uses the admission predicate.
-				await this.deps.agent.waitForIdle();
-				await new Promise<void>((resolve) => {
-					const stop = (): void => {
-						unsubscribe();
-						this.idleWaiters.delete(stop);
-						resolve();
-					};
-					const unsubscribe = this.activityListeners.subscribe(stop);
-					this.idleWaiters.add(stop);
-					try {
-						// Register before rechecking. A newly started stream returns to the native idle
-						// wait above instead of depending on a host activity notification for its end.
-						if (
-							this.shutdownReason ||
-							(!this.hasForegroundOccupancy() && !this.deps.runtimeAdmission.isReplacing) ||
-							this.deps.agent.state.isStreaming
-						) {
-							stop();
-						}
-					} catch (error) {
-						unsubscribe();
-						this.idleWaiters.delete(stop);
-						throw error;
-					}
-				});
+				await this.waitForSubmissionChange(signal);
 			}
 		} catch (error) {
-			end = this.foregroundWaitFailure(error);
+			end = signal?.aborted ? { kind: "aborted", reason: signal.reason } : this.foregroundWaitFailure(error);
 			throw error;
 		} finally {
 			this.endSubmissionWait();
 			watch.end(end);
 		}
+	}
+
+	/** Cancellation removes the actual admission subscriptions; no abandoned waiter can later take a lease. */
+	private waitForSubmissionChange(signal?: AbortSignal, joinLiveConsumer = false): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const finish = (failure?: { error: unknown }): void => {
+				if (settled) return;
+				settled = true;
+				unsubscribeActivity();
+				this.idleWaiters.delete(stop);
+				signal?.removeEventListener("abort", stop);
+				if (failure) reject(failure.error);
+				else resolve();
+			};
+			const stop = (): void => finish();
+			const unsubscribeActivity = this.activityListeners.subscribe(stop);
+			// agent_end precedes finishRun. Observe the native idle promise itself; cancellation
+			// only detaches this observation and never leaves an admission capable of taking a lease.
+			if (this.deps.agent.state.isStreaming)
+				void this.deps.agent.waitForIdle().then(stop, (error: unknown) => finish({ error }));
+			this.idleWaiters.add(stop);
+			signal?.addEventListener("abort", stop, { once: true });
+			if (
+				signal?.aborted ||
+				this.shutdownReason ||
+				(!this.hasForegroundOccupancy() && !this.deps.runtimeAdmission.isReplacing) ||
+				(joinLiveConsumer && this.hasLiveConsumer)
+			)
+				stop();
+		});
 	}
 
 	/** A submission stopped waiting for the foreground: input waiting for the first run is delivered if no other waits. */
@@ -547,25 +557,7 @@ export class ForegroundRecoveryController {
 					return "live_consumer";
 				}
 				watch.blocked();
-				await new Promise<void>((resolve) => {
-					const stop = (): void => {
-						unsubscribe();
-						this.idleWaiters.delete(stop);
-						signal.removeEventListener("abort", stop);
-						resolve();
-					};
-					const unsubscribe = this.activityListeners.subscribe(stop);
-					this.idleWaiters.add(stop);
-					signal.addEventListener("abort", stop, { once: true });
-					// Register first, then recheck, so a change landing before the registration is not lost.
-					if (
-						signal.aborted ||
-						this.shutdownReason ||
-						(!this.isBusy && !this.deps.runtimeAdmission.isReplacing) ||
-						this.hasLiveConsumer
-					)
-						stop();
-				});
+				await this.waitForSubmissionChange(signal, true);
 			}
 			end = { kind: "aborted", reason: signal.reason };
 			return undefined;
@@ -797,10 +789,24 @@ export class ForegroundRecoveryController {
 	}
 
 	/** A host input was already committed: start a fresh logical prompt without appending or emitting it again. */
-	async runCommittedPrompt(message: AgentMessage, submissionLease: ForegroundSubmissionLease): Promise<void> {
+	async runCommittedPrompt(
+		message: AgentMessage,
+		submissionLease: ForegroundSubmissionLease,
+		signal?: AbortSignal,
+	): Promise<void> {
 		if (this.deps.agent.state.messages.at(-1) !== message)
 			throw new Error("A committed prompt must be the current transcript tail.");
-		await this.runAgentExecution("committed", message, submissionLease);
+		await this.runAgentExecution("committed", message, submissionLease, signal);
+	}
+
+	/** A durable manifest selects its original opening while the complete canonical history remains intact. */
+	async runCommittedHistory(
+		opening: AgentMessage,
+		lease: ForegroundSubmissionLease,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (!this.deps.agent.state.messages.includes(opening)) throw new Error("Committed history opening is absent.");
+		await this.runAgentExecution("committed", opening, lease, signal);
 	}
 
 	/**

@@ -8,7 +8,7 @@ import type { Agent } from "../kernel/agent.ts";
 import type { CompactionResult, CompactionSettings } from "../kernel/compaction/compaction.ts";
 import type { AgentContext } from "../kernel/index.ts";
 import { messageRevision } from "../kernel/message-revision.ts";
-import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
+import type { CustomMessage } from "../kernel/messages.ts";
 import { classifyFailure } from "../kernel/reliability/index.ts";
 import { compactToolResultDetailsForRetention } from "../kernel/session/message-retention.ts";
 import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
@@ -1131,6 +1131,9 @@ export class AgentSession {
 				}
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
+			canRunRoutines: () => !this._isChildSession,
+			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
+			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
@@ -1676,23 +1679,26 @@ export class AgentSession {
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
+			parentInput: {
+				getSessionManager: () => this.sessionManager,
+				getAgent: () => this.agent,
+				prepareHistory: () => this._foregroundLifecycle.repair(),
+				setRequestProjection: (projection) => this._providerRequestRuntime.setParentInputProjection(projection),
+				holdLateWork: (work) => this._runtimeAdmission.holdBundleUntil(work),
+				onAccepted: (message) => {
+					this._emit({ type: "message_start", message });
+					this._emit({ type: "message_end", message });
+				},
+				warn: (message) => this._emit({ type: "warning", message }),
+			},
 			enqueueSteeringMessage: (message) => this.agent.steer(message),
 			appendMessage: (message, lease) =>
 				this._foregroundLifecycle.commitCustomPrompt(message, this._handleAgentEvent, () => {
 					if (this._disposed || !this._foregroundRecovery.ownsSubmission(lease))
 						throw new Error("Custom-message persistence requires its live foreground submission.");
 				}),
-			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
-			afterTurn: async (turnOpening, lease) => {
-				const correction = await this._unsettledLadder.claimCorrection(turnOpening);
-				if (lease.signal.aborted) return;
-				if (correction)
-					await this._foregroundRecovery.runAgentPrompt(
-						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
-						lease,
-					);
-				await this._flushOwnerItems(lease);
-			},
+			claimCorrection: (opening) => this._unsettledLadder.claimCorrection(opening),
+			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
 		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
 			foreground: this._foregroundRecovery,
@@ -1907,6 +1913,7 @@ export class AgentSession {
 				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
 			getProactivityTool: () =>
 				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
+			getRoutineTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createRoutineToolDefinition()),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
@@ -3984,7 +3991,7 @@ export class AgentSession {
 			if (this._runtimeBuilder.hasPendingMutation) {
 				await this._runtimeBuilder.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock);
 			}
-			await this._disposeRuntimeDependencies();
+			await this._durableCustomMessageTurns.closeParentInputsBefore(() => this._disposeRuntimeDependencies());
 		});
 		void finish();
 	}
@@ -5197,6 +5204,12 @@ export class AgentSession {
 	/** SDK startup and extension rebinding activate the selected provider generation. */
 	async initializeMemory(): Promise<void> {
 		return this._runtimeAdmission.run("resource", "memory initialization", () => this._memory.initialize());
+	}
+
+	startBackgroundInputs(): void {
+		if (this._isChildSession) return;
+		this._durableCustomMessageTurns.startParentInputs();
+		this._backgroundLanes.startPersistentRoutines();
 	}
 
 	getMemorySystem(): MemorySystem {

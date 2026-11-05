@@ -151,6 +151,7 @@ interface ReviewerConnection {
 
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
 export class SystemOneReviewer {
+	readonly requestLifecycle = true;
 	readonly requestBudget = true;
 	private readonly deps: SystemOneReviewerDeps;
 	private readonly driver: SystemOneProviderDriver;
@@ -316,6 +317,7 @@ export class SystemOneReviewer {
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
 		budget?: RequestSpendBudget,
+		onRequestAdmitted?: (requestId: string) => void,
 	): Promise<SystemOneEvaluationRecord> {
 		const evaluationId = randomUUID();
 		const initiatingOrigin = origin ?? this.captureUsageOrigin();
@@ -415,7 +417,10 @@ export class SystemOneReviewer {
 		try {
 			// Before any provider call: a refused lease is a typed evaluation failure with nothing paid.
 			lease = this.deps.usage?.begin(undefined, capturedOrigin);
-			if (budget && (!lease?.beginRequest || !capturedOrigin))
+			if (
+				(budget || onRequestAdmitted) &&
+				(!lease?.beginRequest || !lease.cancelUndispatchedRequest || !capturedOrigin)
+			)
 				throw new SystemOneUsageRefusal("Budgeted semantic requests require durable request accounting");
 			raw = await retryProviderRequest(
 				async () => {
@@ -425,7 +430,7 @@ export class SystemOneReviewer {
 					if (unmeasuredAttempt) budget?.fail("A previous semantic attempt has no valid priced usage.");
 					budget?.assertAffordable(projectTypeSafeRequestCost(driver.id, request.model, body));
 					const receiptId = `${evaluationId}:${attempts + 1}`;
-					if (budget && lease?.beginRequest && capturedOrigin) {
+					if ((budget || onRequestAdmitted) && lease?.beginRequest && capturedOrigin) {
 						lease.beginRequest({
 							requestId: receiptId,
 							provider: driver.id,
@@ -434,7 +439,21 @@ export class SystemOneReviewer {
 							startedAt: new Date().toISOString(),
 						});
 						unresolvedRequestId = receiptId;
-						budget.beginRequest(receiptId);
+					}
+					try {
+						budget?.beginRequest(receiptId);
+						onRequestAdmitted?.(receiptId);
+					} catch {
+						// No fetch has been invoked: retire the reservation, never fabricate a zero-cost response.
+						try {
+							if (unresolvedRequestId === receiptId) {
+								lease!.cancelUndispatchedRequest!(receiptId);
+								unresolvedRequestId = undefined;
+							}
+						} finally {
+							budget?.endRequest(receiptId);
+						}
+						throw new SystemOneUsageRefusal("Semantic request checkpoint failed before dispatch");
 					}
 					attempts++;
 					unmeasuredAttempt = true;

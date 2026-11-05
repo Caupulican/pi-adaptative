@@ -4,6 +4,7 @@ import type { DecisionProgram } from "./program.ts";
 export interface DecisionEngineCapabilities {
 	/** Every paid attempt honors DecisionOptions.budget before transport. */
 	readonly requestBudget?: boolean;
+	readonly requestLifecycle?: boolean;
 	readonly boolean: boolean;
 	readonly choice: boolean;
 	readonly score: boolean;

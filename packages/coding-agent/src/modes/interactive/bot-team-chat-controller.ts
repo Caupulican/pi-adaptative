@@ -10,7 +10,6 @@ import {
 	type PersistentBotRecord,
 	type PersistentBotTeamStore,
 	type PersistentBotView,
-	type PersistentRoutineScheduleRecord,
 	type PersistentTeamRecord,
 	parseDirectChatAddress,
 	parseDurationIntervalMs,
@@ -20,6 +19,7 @@ import {
 } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
+import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
@@ -88,6 +88,19 @@ function parseIdList(raw: string): string[] {
 		.map((part) => part.trim())
 		.filter((part) => part.length > 0)
 		.map((part) => normalizeBotOrTeamId(part, "agentId"));
+}
+
+function routineScheduleLabel(routine: RoutineDefinitionView): string {
+	return routine.schedule.kind === "interval"
+		? `every ${formatDurationIntervalMs(routine.schedule.intervalMs)}`
+		: `once at ${new Date(routine.schedule.at).toISOString()}`;
+}
+
+function chatRoutine(store: PersistentBotTeamStore, routineId: string): RoutineDefinitionView | undefined {
+	const routine = store.getRoutine(routineId);
+	if (routine?.target.kind === "session")
+		throw new Error("Manage a main-session routine through its owner's routine tool.");
+	return routine;
 }
 
 function errorMessage(error: unknown): string {
@@ -491,7 +504,7 @@ export class BotTeamChatController {
 		const teams = bot && bot.teamIds.length > 0 ? `Teams: ${bot.teamIds.join(", ")}` : undefined;
 		const routineLabel =
 			routines.length > 0
-				? `Routines: ${routines.map((r) => `${r.routineId} (every ${formatDurationIntervalMs(r.intervalMs)})`).join(", ")}`
+				? `Routines: ${routines.map((r) => `${r.routineId} (${routineScheduleLabel(r)})`).join(", ")}`
 				: undefined;
 		const detail = [bot?.description, bot?.currentSummary].filter((part): part is string => !!part).join(" · ");
 
@@ -572,7 +585,7 @@ export class BotTeamChatController {
 		const memoryPath = team?.memoryFilePath ?? `~/.pi/agent/memory/teams/${teamId}.md`;
 		const routineLine =
 			routines.length > 0
-				? ` · Routines: ${routines.map((r) => `${r.routineId} (${formatDurationIntervalMs(r.intervalMs)})`).join(", ")}`
+				? ` · Routines: ${routines.map((r) => `${r.routineId} (${routineScheduleLabel(r)})`).join(", ")}`
 				: "";
 		const lines = [
 			theme.fg("accent", theme.bold(`◆ LIVE TEAM CHAT · ${team?.name ?? teamId}`)) +
@@ -901,15 +914,21 @@ export class BotTeamChatController {
 		this.host.showStatus(`Inbox for team ${targetTeamId}:\n${lines.join("\n")}`);
 	}
 
-	private formatRoutineList(routines: readonly PersistentRoutineScheduleRecord[]): string {
+	private formatRoutineList(routines: readonly RoutineDefinitionView[]): string {
 		if (routines.length === 0) {
 			return "No scheduled routines. Add one with /bot schedule add <routineId> <botId> <interval> <prompt...>.";
 		}
 		return routines
 			.map((r) => {
-				const targetLabel = r.target.kind === "bot" ? `bot:${r.target.agentId}` : `team:${r.target.teamId}`;
+				const targetLabel =
+					r.target.kind === "bot"
+						? `bot:${r.target.agentId}`
+						: r.target.kind === "team"
+							? `team:${r.target.teamId}`
+							: "main session";
+				const next = nextRoutineAt(r.schedule, r.cursor);
 				const status = r.lastStatus ? ` · last=${r.lastStatus}` : "";
-				return `${r.routineId} → ${targetLabel} · every ${formatDurationIntervalMs(r.intervalMs)} · next=${new Date(r.nextRunAt).toISOString()}${status} · "${r.prompt}"`;
+				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${next === undefined ? "complete" : new Date(next).toISOString()}${status} · "${r.prompt}"`;
 			})
 			.join("\n");
 	}
@@ -928,17 +947,20 @@ export class BotTeamChatController {
 			this.host.showWarning("Store is unavailable in this session.");
 			return;
 		}
+		store.reload();
 		const [sub, subRest] = splitHead(rest);
 		if (!sub || sub === "list") {
-			const routines =
-				kind === "team" ? store.listRoutines().filter((r) => r.target.kind === "team") : store.listRoutines();
+			const routines = store
+				.listRoutines()
+				.filter((r) => (kind === "team" ? r.target.kind === "team" : r.target.kind !== "session"));
 			this.host.showStatus(this.formatRoutineList(routines));
 			return;
 		}
 		if (sub === "rm" || sub === "delete") {
 			const [id] = splitHead(subRest);
 			const routineId = normalizeBotOrTeamId(id, "routineId");
-			if (store.deleteRoutine(routineId)) {
+			const routine = chatRoutine(store, routineId);
+			if (routine && store.deleteRoutine(routineId, routine.revision)) {
 				this.host.showStatus(`Deleted scheduled routine ${routineId}.`);
 				this.host.ui.requestRender();
 			} else {
@@ -948,6 +970,7 @@ export class BotTeamChatController {
 		}
 		if (kind === "bot" && (sub === "run" || sub === "tick")) {
 			const [id] = splitHead(subRest);
+			if (id) chatRoutine(store, normalizeBotOrTeamId(id, "routineId"));
 			const res = await port.tickPersistentRoutines?.(id ? normalizeBotOrTeamId(id, "routineId") : undefined);
 			this.host.showStatus(
 				res
@@ -965,17 +988,20 @@ export class BotTeamChatController {
 				return;
 			}
 			const intervalMs = parseDurationIntervalMs(rawInterval);
+			const existing = chatRoutine(store, normalizeBotOrTeamId(rawRoutineId, "routineId"));
+			const revision = existing ? { expectedRevision: existing.revision } : { createOnly: true };
 			if (kind === "bot") {
 				const agentId = normalizeBotOrTeamId(rawTargetId, "agentId");
 				this.ensureTeamMembersExist([agentId], port);
 				const routine = store.upsertRoutine({
+					...revision,
 					routineId: rawRoutineId,
 					target: { kind: "bot", agentId },
-					intervalMs,
+					schedule: { kind: "interval", intervalMs },
 					prompt,
 				});
 				this.host.showStatus(
-					`Scheduled routine ${routine.routineId} for bot ${agentId} every ${formatDurationIntervalMs(routine.intervalMs)}.`,
+					`Scheduled routine ${routine.routineId} for bot ${agentId} ${routineScheduleLabel(routine)}.`,
 				);
 			} else {
 				const teamId = normalizeBotOrTeamId(rawTargetId, "teamId");
@@ -984,13 +1010,14 @@ export class BotTeamChatController {
 					return;
 				}
 				const routine = store.upsertRoutine({
+					...revision,
 					routineId: rawRoutineId,
 					target: { kind: "team", teamId },
-					intervalMs,
+					schedule: { kind: "interval", intervalMs },
 					prompt,
 				});
 				this.host.showStatus(
-					`Scheduled routine ${routine.routineId} for team ${teamId} every ${formatDurationIntervalMs(routine.intervalMs)}.`,
+					`Scheduled routine ${routine.routineId} for team ${teamId} ${routineScheduleLabel(routine)}.`,
 				);
 			}
 			this.host.ui.requestRender();

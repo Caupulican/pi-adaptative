@@ -90,6 +90,11 @@ export interface WorkerNotificationCoordinatorOptions {
 	/** Bind a transient terminal to its durable notification before attempting delivery. */
 	ensureDurableNotification?(record: WorkerTerminalHandoffRecord): string | undefined;
 	emitStatus(status: WorkerNotificationStatus): void;
+	/** Resolve durable custody before enqueueing a parent handoff. Lookup failure retains the local notification. */
+	deliveryOwner?(
+		record: WorkerTerminalHandoffRecord,
+		notificationId: string,
+	): "coordinator" | "separate" | "acknowledged";
 	notify(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	warn(message: string): void;
 	markDurableDelivered(notificationIds: readonly string[]): void;
@@ -144,7 +149,7 @@ export class WorkerNotificationCoordinator {
 		this.options = options;
 	}
 
-	/** Every notification recorded but not yet confirmed delivered, for durable cross-restart replay. */
+	/** Pending notifications still owned here; separate owners retain their own durable outbox custody. */
 	getOutstandingRecords(): readonly WorkerTerminalHandoffRecord[] {
 		return [...this.pending.values(), ...this.inFlight.values()].map((notification) => notification.record);
 	}
@@ -332,7 +337,7 @@ export class WorkerNotificationCoordinator {
 	private flush(): void {
 		this.scheduled = false;
 		if (this.disposed) return;
-		const batch = [...this.pending.values()];
+		let batch = [...this.pending.values()];
 		this.pending.clear();
 		let workerRecords: readonly LaneRecord[] = [];
 		try {
@@ -346,7 +351,6 @@ export class WorkerNotificationCoordinator {
 		const queued = workerRecords.filter((record) => record.status === "queued").length;
 		const running = workerRecords.filter((record) => record.status === "running").length;
 		// Delivery retries the whole batch; the status event reports only terminals no earlier event counted.
-		const batchRecords = batch.map((notification) => notification.record);
 		const terminalSinceFlush = batch
 			.filter((notification) => !notification.reportedInStatus)
 			.map((notification) => notification.record);
@@ -383,7 +387,27 @@ export class WorkerNotificationCoordinator {
 		}
 		if (this.disposed) return;
 		for (const notification of batch) notification.reportedInStatus = true;
+		// A separately owned handoff must never occupy this serialized delivery tail.
+		// Its native outbox stays pending until that owner confirms physical parent acceptance.
+		if (this.options.deliveryOwner) {
+			batch = batch.filter((notification) => {
+				try {
+					if (!notification.durableNotificationId) throw new Error("Worker notification has no durable custody.");
+					return (
+						this.options.deliveryOwner!(notification.record, notification.durableNotificationId) === "coordinator"
+					);
+				} catch (error) {
+					this.pending.set(notification.key, notification);
+					this.warnBestEffort(
+						`Worker notification ownership is unresolved: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					this.scheduleRetry();
+					return false;
+				}
+			});
+		}
 		if (batch.length === 0) return;
+		const batchRecords = batch.map((notification) => notification.record);
 		// Moved into `inFlight`, not merely captured by the closure below: if notify() never
 		// settles, this batch stays durably visible via getOutstandingRecords() instead of being
 		// reachable ONLY through this one promise, which is exactly what previously starved every

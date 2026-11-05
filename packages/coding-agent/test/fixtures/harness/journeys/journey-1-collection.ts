@@ -9,6 +9,7 @@ import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/kno
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney1LongCollection } from "./journey-1-long-collection.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmWaitForChatIdle } from "./shared.ts";
 
 /** Journey 1 follows automatic collection through the real root, idle lane, admission and restart. */
@@ -201,6 +202,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			beforeReopen,
 		);
 		world.trace.mark("root", "knowledge.automatic-collection");
+		await runJourney1LongCollection(world);
 	} finally {
 		store.close();
 		if (!disposed) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();

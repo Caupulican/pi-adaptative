@@ -9,6 +9,9 @@
 			"@caupulican/pi-ai/tool-repair-registry": [
 				"./packages/ai/src/utils/tool-repair/registry.ts"
 			],
+			"@caupulican/pi-ai/text-tool-protocol": [
+				"./packages/ai/src/utils/tool-repair/text-protocol.ts"
+			],
 			"@caupulican/pi-ai/*": [
 				"./packages/ai/src/*.ts",
 				"./packages/ai/src/providers/*.ts",

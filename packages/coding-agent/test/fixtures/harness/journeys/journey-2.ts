@@ -30,10 +30,10 @@ export async function runJourney2(): Promise<void> {
 				/^Automatic knowledge collection requires a persisted session; no collection requests will start\.$/,
 				// The prompt-prefix monitor's intentional rewrite of an already-sent request, reported once per rewrite: a halted
 				// worker's closing turn adds its HALT CLOSING TURN section to the system prompt (and the next request drops it).
-				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. The provider re-bills the prompt from that point at full price\.$/,
+				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. Cache reuse may be reduced from that point\.$/,
 				// The continuous-chat phase turns memory retrieval off mid-read and back on, so the memory tool leaves and returns: the
 				// system prompt's tool list changes between requests at its memory/delegate entry, in either direction.
-				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: ".*\\n- (?:delegate|memory): .*" became ".*\\n- (?:delegate|memory): .*"\. The provider re-bills the prompt from that point at full price\.$/,
+				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: ".*\\n- (?:delegate|memory): .*" became ".*\\n- (?:delegate|memory): .*"\. Cache reuse may be reduced from that point\.$/,
 				/^Worker conversation setup failed: Worker queued context has no proof of never-started, dead-owner recovery\.$/,
 				/^Memory subsystem init failed: The ICM chat for this project is owned by pid \d+ on [^\n]+, session [^\n]+, started [^\n]+, still running\. Only one session per project may run the ICM chat; close that session first\.$/,
 				// R18/R19 (System One off): the refused idle-root wake-up reports its unknown write outcome, then the session-file fence that

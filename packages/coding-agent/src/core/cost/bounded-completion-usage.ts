@@ -81,7 +81,16 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 			origin: this.origin,
 			startedAt: new Date().toISOString(),
 		});
-		this.spending.beginRequest(receiptId);
+		try {
+			this.spending.beginRequest(receiptId);
+		} catch (error) {
+			try {
+				this.lease.cancelUndispatchedRequest(receiptId);
+			} finally {
+				this.spending.endRequest(receiptId);
+			}
+			throw error;
+		}
 		this.pending.add(receiptId);
 		this.responses++;
 		const failed = (error: unknown): void => {
