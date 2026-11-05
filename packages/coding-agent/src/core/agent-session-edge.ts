@@ -144,6 +144,7 @@ export function effectiveEdgeGrants(
 
 export function originLabel(origin: TurnOriginRecord): string {
 	if (origin.k === "peer-agent") return `a peer agent on ${origin.channel ?? "the chat mesh"}`;
+	if (origin.k === "host-event") return "an event written by someone else";
 	return origin.channel ? `the ${origin.channel} channel` : "a source whose origin could not be read";
 }
 

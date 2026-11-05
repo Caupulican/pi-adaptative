@@ -2,6 +2,7 @@ import type { ParentInputMode } from "../../kernel/session/parent-input-ledger.t
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { ciEventSubject, ciThreadKey, hostEventHash } from "./host-event-contract.ts";
+import { hostEventAuthorship } from "./host-event-kinds.ts";
 import type { AcceptedHostEvent, HostEventDelivery } from "./host-event-state.ts";
 
 /** The same bounded evidence text reaches a subscribed worker or its owning session. */
@@ -52,6 +53,11 @@ export function hostEventParentInput(
 				sourceEpoch: envelope.sourceEpoch,
 				sourceSequence: envelope.sourceSequence,
 				receiptId: accepted.receipt.canonicalReceiptId,
+				// The turn origin reads who wrote the content (`turnOriginOf`). Owner-controlled is the unmarked case, so an
+				// owner-controlled delivery keeps the payload digest it was accepted under.
+				...(hostEventAuthorship(envelope) === "third-party-authored"
+					? { authorship: "third-party-authored" as const }
+					: {}),
 			},
 		},
 	};

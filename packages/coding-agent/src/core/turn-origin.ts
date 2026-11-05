@@ -45,11 +45,19 @@ export function ownerWordsOrigin(pasted: readonly unknown[] | undefined): TurnOr
 	return { v: 1, k: pasted && pasted.length > 0 ? "owner-paste" : "owner-typed" };
 }
 
-/** The origin a custom message's type names. A type nobody registered here is the owner's installed code. */
-function customTurnOrigin(customType: string): TurnOriginRecord {
+/**
+ * The origin a custom message's type names. A type nobody registered here is the owner's installed code. A host event
+ * is the owner's own systems unless its delivery marks who wrote the content (`hostEventParentInput` marks only a
+ * third-party-authored kind); any mark counts as another's.
+ */
+function customTurnOrigin(customType: string, details: unknown): TurnOriginRecord {
 	switch (customType) {
-		case HOST_EVENT_CUSTOM_TYPE:
-			return { v: 1, k: "host-event" };
+		case HOST_EVENT_CUSTOM_TYPE: {
+			const hostEvent = details && typeof details === "object" ? Reflect.get(details, "hostEvent") : undefined;
+			const authorship =
+				hostEvent && typeof hostEvent === "object" ? Reflect.get(hostEvent, "authorship") : undefined;
+			return authorship === undefined ? { v: 1, k: "host-event" } : { v: 1, k: "host-event", thirdParty: true };
+		}
 		case HARNESS_NOTICE_CUSTOM_TYPE:
 			return { v: 1, k: "harness" };
 		case ROUTINE_COMPLETION_TYPE:
@@ -75,7 +83,7 @@ function customTurnOrigin(customType: string): TurnOriginRecord {
 export function turnOriginOf(message: AgentMessage): TurnOriginRecord | undefined {
 	const stamped = turnOriginStampOf(message);
 	if (stamped) return stamped;
-	if (message.role === "custom") return customTurnOrigin(message.customType);
+	if (message.role === "custom") return customTurnOrigin(message.customType, message.details);
 	if (message.role !== "user") return undefined;
 	const control = workerControlOf(message);
 	if (control) return { v: 1, k: control.k === "host_event" ? "host-event" : "harness" };

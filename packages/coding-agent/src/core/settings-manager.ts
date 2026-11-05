@@ -3868,8 +3868,16 @@ export class SettingsManager {
 		// consume these grants. Autonomy/learning presets never narrow execution authority.
 		const allow =
 			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
-		// The default grants every class to the owner's own runs; only a list the owner wrote covers a third party's.
-		const standingAllow = configured === undefined ? [] : [...new Set(allow)];
+		// The default grants every class to the owner's own runs; only a list the owner wrote covers a third party's. A
+		// repository's own settings file is not one: a project without a trust decision loads it trusted by default
+		// (`getProjectTrustDefault`), so only the global and directory-profile layers under the agent directory count,
+		// and only within what the effective list allows.
+		const ownerWritten = [this.directoryProfileSettings.edge, this.globalSettings.edge]
+			.map((layer) => (isPlainRecord(layer) ? layer.allow : undefined))
+			.find((list) => list !== undefined);
+		const standingAllow = Array.isArray(ownerWritten)
+			? [...new Set(allow)].filter((edgeClass) => ownerWritten.includes(edgeClass))
+			: [];
 		const configuredDeny = this.settings.edge?.deny;
 		// A deny list that cannot be read cannot be enforced, so YOLO waits until it is corrected. The
 		// standing grants do not depend on it and stay as configured.
