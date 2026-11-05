@@ -5,13 +5,16 @@ import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionRe
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-resolver.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedProactivitySettings } from "../settings/settings-schema.ts";
+import { canonicalDigest } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	buildReviewPrompt,
@@ -55,13 +58,8 @@ export interface ProactivityControllerDeps {
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	/** Appends the notes to the session as one visible message; `turn` also starts a turn on it. */
-	deliverNotes(
-		message: { customType: string; content: string; display: boolean; details: { notes: ProactiveNote[] } },
-		delivery: "note" | "turn",
-		runtimeLease: RuntimeWorkLease,
-		commitDelivery: () => void,
-	): Promise<void>;
+	/** Resolves after canonical acceptance; consumption is owned by the mode-aware parent ledger. */
+	deliverNotes(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** The `proactivity` port; defaults to the system timers. */
 	timers?: TimerPort;
 }
@@ -195,6 +193,7 @@ export class ProactivityController {
 		const capability = this.models.capabilityProfile(model);
 		const manager = this.deps.getSessionManager();
 		const branchGuard = manager.captureBranchContext();
+		const origin = captureWorkerReceiptOrigin(manager);
 		const entries = getActiveSessionBranchEntries(manager);
 		const goal = structuredClone(this.deps.getGoalStateSnapshot());
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
@@ -299,18 +298,29 @@ export class ProactivityController {
 				this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
 				return { started: true, delivered: [] };
 			}
+			const message = {
+				customType: PROACTIVE_NOTE_CUSTOM_TYPE,
+				content: renderNoteMessage(notes),
+				display: true,
+				details: { notes },
+			};
+			const mode = settings.delivery === "turn" ? "turn" : "next-owner-turn";
+			const payloadDigest = canonicalDigest({ message, mode });
 			await this.deps.deliverNotes(
 				{
-					customType: PROACTIVE_NOTE_CUSTOM_TYPE,
-					content: renderNoteMessage(notes),
-					display: true,
-					details: { notes },
+					deliveryId: `proactivity:${canonicalDigest({ origin, mode, payloadDigest })}`,
+					payloadDigest,
+					message,
+					origin,
+					mode,
 				},
-				settings.delivery,
-				runtimeLease,
-				() => {
-					assertCurrent();
-					stopObserving();
+				{
+					runtimeLease,
+					signal,
+					beforeOwnership: () => {
+						assertCurrent();
+						stopObserving();
+					},
 				},
 			);
 			this.deps.emit({ type: "proactive_review", outcome: "raised", noteCount: notes.length });

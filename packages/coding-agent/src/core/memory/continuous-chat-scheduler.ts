@@ -23,6 +23,7 @@ import {
 
 export interface ContinuousChatClaim extends ContinuousChatWorkItem {
 	claimId: number;
+	projectionRevision?: number;
 }
 
 interface SchedulerMeta {
@@ -241,6 +242,11 @@ export class ContinuousChatScheduler {
 	}
 	private row(item: ContinuousChatWorkItem): WorkRow | undefined {
 		return decodeWork(this.sql("SELECT * FROM work WHERE level=? AND ordinal=?").get(item.level, item.ordinal));
+	}
+	/** Publication cannot complete a replacement claim at the same coordinate. */
+	ownsClaim(claim: ContinuousChatClaim): boolean {
+		const row = this.row(claim);
+		return row?.status === "running" && row.claimId === claim.claimId;
 	}
 	private insert(item: ContinuousChatWorkItem, sequence: number): void {
 		this.sql(
@@ -516,6 +522,19 @@ export class ContinuousChatScheduler {
 			this.sql("DELETE FROM work WHERE level=? AND ordinal=?").run(item.level, item.ordinal);
 			this.sql("DELETE FROM recovery_only WHERE level=? AND ordinal=?").run(item.level, item.ordinal);
 			if (parent) this.insert(parent, ++meta.sequence);
+			meta.revision++;
+			this.save(meta);
+		});
+	}
+	/** Invalidate all work whose source or causal context may include the changed suffix. Claim counters never rewind. */
+	invalidateSuffix(cutoff: number): void {
+		if (!isNonNegativeSafeInteger(cutoff)) throw new RangeError("Invalid projection cutoff.");
+		this.transaction(() => {
+			const meta = this.meta();
+			this.sql("DELETE FROM recovery_only WHERE (ordinal+1)*(1<<level)>?").run(cutoff);
+			this.sql("DELETE FROM work WHERE (ordinal+1)*(1<<level)>?").run(cutoff);
+			meta.nextLeaf = Math.min(meta.nextLeaf, cutoff);
+			meta.generation++;
 			meta.revision++;
 			this.save(meta);
 		});

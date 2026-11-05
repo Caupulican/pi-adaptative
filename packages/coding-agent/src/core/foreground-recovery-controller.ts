@@ -23,6 +23,7 @@ import type {
 	RuntimeWorkLease,
 } from "./runtime-generation-admission.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
+import { runReleaseSteps } from "./util/resource-release.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import { createWaitStatus, type WaitEndReason, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
@@ -65,6 +66,12 @@ export interface ForegroundSubmissionLease {
 	/** Monotonic submission epoch assigned when this lease was acquired -- see
 	 * `ForegroundRecoveryController.getCurrentSubmissionEpoch`. */
 	readonly epoch: number;
+}
+
+/** Ephemeral authority for accepting input; borrowed runtime work remains the caller's responsibility. */
+export interface ForegroundSubmissionAdmission {
+	readonly runtimeLease?: RuntimeWorkLease;
+	readonly beforeOwnership?: () => void;
 }
 
 /** The message a chat turn starts from. `alreadyLogged`: the chat logged it before the turn, so it is never an arrival. */
@@ -262,23 +269,41 @@ export class ForegroundRecoveryController {
 	}
 
 	/** Atomically reserve the full foreground lifecycle, including asynchronous prompt preparation. */
-	tryAcquireSubmission(runtimeLease?: RuntimeWorkLease): ForegroundSubmissionLease | undefined {
+	tryAcquireSubmission(
+		runtimeLease?: RuntimeWorkLease,
+		beforeOwnership?: () => void,
+	): ForegroundSubmissionLease | undefined {
 		if (this.shutdownReason || this.hasForegroundOccupancy()) return undefined;
 		const reader =
 			runtimeLease ?? this.deps.runtimeAdmission.tryAdmitWork({ kind: "foreground", label: "continuation" });
 		if (!reader) return undefined;
-		this.deps.runtimeAdmission.assertOwnWorkCurrent(reader);
-		const cancellation = new AbortController();
-		const lease: ForegroundSubmissionLease = {
-			[foregroundSubmissionLeaseMarker]: true,
-			epoch: this.nextSubmissionEpoch++,
-			signal: cancellation.signal,
-		};
-		this.submissionAbort = cancellation;
-		this.submissionLease = lease;
-		this.runtimeLeases.set(lease, { lease: reader, owned: runtimeLease === undefined });
-		this.notifyActivity();
-		return lease;
+		let lease: ForegroundSubmissionLease | undefined;
+		try {
+			this.deps.runtimeAdmission.assertOwnWorkCurrent(reader);
+			beforeOwnership?.();
+			this.deps.runtimeAdmission.assertOwnWorkCurrent(reader);
+			if (this.shutdownReason || this.hasForegroundOccupancy())
+				throw new AgentBusyError("Foreground ownership changed during admission.");
+			const cancellation = new AbortController();
+			lease = {
+				[foregroundSubmissionLeaseMarker]: true,
+				epoch: this.nextSubmissionEpoch++,
+				signal: cancellation.signal,
+			};
+			this.submissionAbort = cancellation;
+			this.submissionLease = lease;
+			this.runtimeLeases.set(lease, { lease: reader, owned: runtimeLease === undefined });
+			this.notifyActivity();
+			return lease;
+		} catch (error) {
+			try {
+				if (lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
+				else if (!runtimeLease) reader.release();
+			} catch (releaseError) {
+				throw new AggregateError([error, releaseError], "Foreground admission and release failed.");
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -440,37 +465,71 @@ export class ForegroundRecoveryController {
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
-	async acquireSubmission(signal?: AbortSignal): Promise<ForegroundSubmissionLease> {
+	async acquireSubmission(
+		signal?: AbortSignal,
+		admission: ForegroundSubmissionAdmission = {},
+	): Promise<ForegroundSubmissionLease> {
 		const watch = this.watchForegroundWait(
 			"foreground.acquire",
 			["agent.idle", "foreground.activity"],
 			"the waiter is itself a submission: owner input queues to the run holding the foreground, which reads it",
 		);
 		let end: WaitEndReason = { kind: "disposed" };
+		let acquired: ForegroundSubmissionLease | undefined;
+		let acquisitionFailure: { readonly error: unknown } | undefined;
 		this.submissionWaiters++;
 		try {
 			while (true) {
 				signal?.throwIfAborted();
 				if (this.shutdownReason) throw this.shutdownReason;
-				const lease = this.tryAcquireSubmission();
+				const lease = this.tryAcquireSubmission(admission.runtimeLease, () => {
+					signal?.throwIfAborted();
+					admission.beforeOwnership?.();
+					signal?.throwIfAborted();
+				});
 				if (lease) {
 					if (signal?.aborted) {
 						this.releaseSubmission(lease);
 						signal.throwIfAborted();
 					}
 					end = { kind: "satisfied", by: "foreground.activity" };
-					return lease;
+					acquired = lease;
+					break;
 				}
 				watch.blocked();
 				await this.waitForSubmissionChange(signal);
 			}
 		} catch (error) {
+			acquisitionFailure = { error };
 			end = signal?.aborted ? { kind: "aborted", reason: signal.reason } : this.foregroundWaitFailure(error);
-			throw error;
 		} finally {
-			this.endSubmissionWait();
-			watch.end(end);
+			try {
+				runReleaseSteps(
+					[() => this.endSubmissionWait(), () => watch.end(end)],
+					"Foreground acquisition cleanup failed.",
+					acquisitionFailure,
+				);
+			} catch (error) {
+				acquisitionFailure = { error };
+				// A finally failure prevents the caller receiving a lease we would otherwise return.
+				// Release that unreturned ownership before surfacing the cleanup failure.
+				if (acquired && this.ownsSubmission(acquired)) {
+					try {
+						this.releaseSubmission(acquired);
+					} catch (releaseError) {
+						acquisitionFailure = {
+							error: new AggregateError(
+								[error, releaseError],
+								"Unreturned foreground lease could not release cleanly.",
+							),
+						};
+					}
+				}
+			}
 		}
+		if (acquisitionFailure) throw acquisitionFailure.error;
+		if (!acquired) throw new Error("Foreground acquisition ended without ownership.");
+		return acquired;
 	}
 
 	/** Cancellation removes the actual admission subscriptions; no abandoned waiter can later take a lease. */
@@ -730,6 +789,15 @@ export class ForegroundRecoveryController {
 		return lease !== undefined && lease === this.submissionLease;
 	}
 
+	/** Revalidate both logical ownership and its actual runtime generation before a physical effect. */
+	assertSubmissionCurrent(lease: ForegroundSubmissionLease): void {
+		if (!this.ownsSubmission(lease) || lease.signal.aborted)
+			throw new AgentBusyError("Foreground submission authority is no longer active.");
+		const runtime = this.runtimeLeases.get(lease);
+		if (!runtime) throw new AgentBusyError("Foreground submission has no runtime generation authority.");
+		this.deps.runtimeAdmission.assertOwnWorkCurrent(runtime.lease);
+	}
+
 	/** Cancel the held submission without releasing authority before its actual cleanup ends. */
 	abortSubmission(reason: string): void {
 		this.submissionAbort?.abort(reason);
@@ -761,11 +829,18 @@ export class ForegroundRecoveryController {
 			if (this.preparingTurn === lease) this.preparingTurn = undefined;
 			this.submissionLease = undefined;
 			this.submissionAbort = undefined;
-			if (runtime?.owned) runtime.lease.release();
-			this.notifyActivity();
-			if (this.activeRuns === 0) {
-				this.resolveIdleWaiters();
-			}
+			runReleaseSteps(
+				[
+					() => {
+						if (runtime?.owned) runtime.lease.release();
+					},
+					() => this.notifyActivity(),
+					() => {
+						if (this.activeRuns === 0) this.resolveIdleWaiters();
+					},
+				],
+				"Foreground submission release effects failed.",
+			);
 		}
 	}
 

@@ -4,7 +4,9 @@ import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compa
 import type { AgentContext, AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
 import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
 import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "../kernel/provider-request-planner.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { CompactionController } from "./compaction-controller.ts";
+import { projectParentInputs } from "./parent-input-projection.ts";
 import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 
 interface RequestEnvelopeSnapshot {
@@ -20,6 +22,8 @@ export interface ProviderRequestRuntimeControllerDeps {
 	agent: Agent;
 	compaction: Pick<CompactionController, "admitProviderRequest" | "measureLiveContextTokens">;
 	context: ProviderRequestContextController;
+	parentInputs: Pick<SessionManager, "captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds">;
+	getSubmissionEpoch(): number | undefined;
 	admitGoalRequest(): number | undefined;
 	/** Session-wide per-response output cap; see SettingsManager.getMaxOutputTokens. */
 	maxOutputTokens(): number;
@@ -49,7 +53,6 @@ export class ProviderRequestRuntimeController {
 	private pendingSentEnvelope: RequestEnvelopeSnapshot | undefined;
 	private usageEnvelopeAnchor: UsageEnvelopeAnchor | undefined;
 	private planProjection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined;
-	private parentInputProjection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined;
 
 	constructor(deps: ProviderRequestRuntimeControllerDeps) {
 		this.deps = deps;
@@ -188,7 +191,10 @@ export class ProviderRequestRuntimeController {
 		};
 		this.installedPlanContext = (request, signal) => {
 			const projected = this.planProjection ? this.planProjection(sessionPlanContext) : sessionPlanContext;
-			return (this.parentInputProjection ? this.parentInputProjection(projected) : projected)(request, signal);
+			return projectParentInputs(projected, this.deps.parentInputs, () => this.deps.getSubmissionEpoch())(
+				request,
+				signal,
+			);
 		};
 		// `transformContext` carries no `attempt`/`sentPrefixCount` of its own -- it is a strictly
 		// narrower legacy hook (messages in, messages out) that this controller keeps wired only so
@@ -278,11 +284,6 @@ export class ProviderRequestRuntimeController {
 	 * Projects the whole installed plan through a host's view of the conversation (the ICM turn projection). The
 	 * projection is read per request, so a host that starts after `install()` takes effect on its next request.
 	 */
-	/** One active detached parent batch narrows raw inputs before ICM and normal planning. */
-	setParentInputProjection(projection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined): void {
-		this.parentInputProjection = projection;
-	}
-
 	setPlanProjection(projection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined): void {
 		this.planProjection = projection;
 	}
@@ -300,7 +301,6 @@ export class ProviderRequestRuntimeController {
 			agent.shouldStopAfterTurn = this.previousShouldStopAfterTurn;
 		}
 		this.planProjection = undefined;
-		this.parentInputProjection = undefined;
 		this.installedTransformContext = undefined;
 		this.installedPlanContext = undefined;
 		this.installedAdmission = undefined;

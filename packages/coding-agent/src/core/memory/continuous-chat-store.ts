@@ -1,6 +1,7 @@
 /** Durable, append-only storage adapter for the project-wide ICM conversation. */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { safeErrorMessage } from "../../kernel/types.ts";
@@ -63,6 +64,8 @@ import {
 	readContinuousChatLease,
 	releaseContinuousChatLeaseSync,
 } from "./continuous-chat-lease.ts";
+import type { ParentProjectionDecision, ParentProjectionGroup } from "./continuous-chat-parent-projection-contract.ts";
+import { ContinuousChatRecordProjection } from "./continuous-chat-record-projection.ts";
 import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 import type {
 	ContinuousChatClaim,
@@ -136,7 +139,7 @@ export interface ContinuousChatCausalPrefix {
 }
 
 /** Reconciliation may prove publication even when the original append reported an error. */
-export type ContinuousChatWorkSettlement = "published" | "abandoned";
+export type ContinuousChatWorkSettlement = "published" | "abandoned" | "superseded";
 
 export interface ContinuousChatStoreOptions {
 	agentDir: string;
@@ -415,6 +418,8 @@ export class ContinuousChatStore {
 	readonly leaseFile: string;
 	private readonly nodeCache = new Map<string, ContinuousChatTreeNode>();
 	private scheduler: ContinuousChatScheduler | undefined;
+	private projection: ContinuousChatRecordProjection | undefined;
+	private projectionWritable = false;
 	/** No new claim reuses a coordinate until its prior disposition has been acknowledged by its caller. */
 	private readonly pendingAbandonments = new Map<string, PendingWorkAbandonment>();
 	/** The runtime lease this store holds. Undefined before acquisition, after release, and after a loss. */
@@ -508,6 +513,7 @@ export class ContinuousChatStore {
 		this.settled = undefined;
 		this.rendered = undefined;
 		this.renderedBirth = undefined;
+		this.nodeCache.clear();
 	}
 
 	/**
@@ -551,6 +557,10 @@ export class ContinuousChatStore {
 	private closeScheduler(): void {
 		this.scheduler?.close();
 		this.scheduler = undefined;
+		this.projection?.close();
+		this.projection = undefined;
+		this.projectionWritable = false;
+		this.nodeCache.clear();
 	}
 
 	/** Startup recovery under the writer lock: reconciles everything, then requeues work claimed by a dead process. */
@@ -575,7 +585,7 @@ export class ContinuousChatStore {
 	 * Appends up to `CONTINUOUS_CHAT_MAX_BULK_INPUTS` messages, each split into units, in one locked publication: one
 	 * write per day touched, one index write, one root publication, one view and queue persist. Units already logged
 	 * under their sourceKey are returned rather than appended again, so a retry after a partial write completes it. A
-	 * new record may not fall on an earlier day. The runtime's `append` is the one single-message path.
+	 * occurrence date may be earlier; physical segments remain monotone. The runtime owns single-message appends.
 	 */
 	async appendMany(inputs: readonly ContinuousChatAppendInput[]): Promise<ContinuousChatAppendResult[]> {
 		if (inputs.length > CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
@@ -586,8 +596,12 @@ export class ContinuousChatStore {
 		return this.withWriterLock(() => this.appendLocked(units));
 	}
 
-	async appendNode(node: ContinuousChatTreeNode): Promise<boolean> {
-		return this.withWriterLock(() => this.appendNodeLocked(node));
+	async appendNode(
+		node: ContinuousChatTreeNode,
+		projectionRevision = 0,
+		claim?: ContinuousChatClaim,
+	): Promise<boolean> {
+		return this.withWriterLock(() => this.appendNodeLocked({ ...node, projectionRevision }, claim));
 	}
 
 	/** The next background work item, or undefined when nothing is ready or the running limit is reached. */
@@ -597,7 +611,9 @@ export class ContinuousChatStore {
 			await this.reconcileLocked();
 			for (;;) {
 				const claim = this.requireScheduler().claim();
-				if (!claim || (await this.nodeAt(claim)) === undefined) return claim;
+				if (!claim) return undefined;
+				if ((await this.nodeAt(claim)) === undefined)
+					return { ...claim, projectionRevision: this.projection!.meta().revision };
 				await this.completePublishedWorkLocked(claim);
 			}
 		});
@@ -624,6 +640,7 @@ export class ContinuousChatStore {
 	): Promise<ContinuousChatWorkSettlement> {
 		return this.withWriterLock(async () => {
 			await this.reconcileLocked();
+			if (!this.isProjectionCurrent(item, item.projectionRevision ?? 0)) return "superseded";
 			const published = (await this.nodeAt(item)) !== undefined;
 			const key = continuousChatNodeKey(item);
 			const pending = this.pendingAbandonments.get(key);
@@ -656,6 +673,10 @@ export class ContinuousChatStore {
 	/** Replay before any later mutation, never after a newer queue revision has been admitted. */
 	private async confirmPendingAbandonmentsLocked(): Promise<void> {
 		for (const pending of this.pendingAbandonments.values()) {
+			if (!this.isProjectionCurrent(pending.claim, pending.claim.projectionRevision ?? 0)) {
+				this.pendingAbandonments.delete(continuousChatNodeKey(pending.claim));
+				continue;
+			}
 			if (pending.acknowledged) continue;
 			if ((await this.nodeAt(pending.claim)) === undefined)
 				this.requireScheduler().abandon(pending.claim, pending.abandonment);
@@ -668,6 +689,12 @@ export class ContinuousChatStore {
 	async completeWork(item: ContinuousChatWorkItem): Promise<void> {
 		await this.withWriterLock(async () => {
 			await this.reconcileLocked();
+			if (
+				"claimId" in item &&
+				typeof item.claimId === "number" &&
+				!this.requireScheduler().ownsClaim({ ...item, claimId: item.claimId })
+			)
+				return;
 			if ((await this.nodeAt(item)) === undefined) {
 				throw new RangeError("Continuous-chat work item has no published node to complete it with.");
 			}
@@ -714,6 +741,106 @@ export class ContinuousChatStore {
 	async rootRevision(): Promise<number> {
 		return (await loadRoot(this.rootFile)).revision;
 	}
+	async projectionRevision(): Promise<number> {
+		await this.readProjection();
+		return this.projection?.meta().revision ?? 0;
+	}
+
+	private async readProjection(): Promise<ContinuousChatRecordProjection | undefined> {
+		const root = await loadRoot(this.rootFile);
+		const path = join(this.rootDir, "projection.sqlite");
+		if (!this.projection && existsSync(path))
+			this.projection = new ContinuousChatRecordProjection(path, false, false);
+		if (root.projectionId !== undefined) {
+			const meta = this.projection?.meta();
+			if (!meta || meta.identity !== root.projectionId || meta.revision < (root.projectionRevision ?? 0))
+				throw new Error("Continuous-chat projection authority is missing or changed.");
+		}
+		return this.projection;
+	}
+
+	private isProjectionCurrent(coordinate: ContinuousChatNodeCoordinate, revision: number): boolean {
+		if (!this.projection) return revision === 0;
+		const current = this.projection.meta().revision;
+		const end = continuousChatNodeFirstMessage(coordinate) + continuousChatNodeMessageCount(coordinate.level);
+		return revision <= current && revision >= this.projection.requiredRevision(end);
+	}
+
+	/** Paged maintenance source groups; raw bodies never leave this explicit reconciliation API. */
+	async listParentProjectionGroups(
+		sessionId: string,
+		afterEntryId = "",
+		limit = 16,
+		signal?: AbortSignal,
+	): Promise<{ groups: readonly ParentProjectionGroup[]; nextEntryId?: string }> {
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16)
+			throw new RangeError("Projection group page is limited to 16.");
+		return this.withWriterLock(async () => {
+			await this.prepareProjectionMaintenance(signal);
+			const rows = this.projection!.groups(sessionId, afterEntryId, limit);
+			const groups = await Promise.all(
+				rows.map(async (row) => ({ ...row, firstRecord: await this.rawRecordAt(row.firstId) })),
+			);
+			return { groups, ...(rows.length === limit ? { nextEntryId: rows.at(-1)!.entryId } : {}) };
+		});
+	}
+	async listParentProjectionSessionIds(
+		after = "",
+		limit = 64,
+		signal?: AbortSignal,
+	): Promise<{ sessionIds: readonly string[]; nextSessionId?: string }> {
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64)
+			throw new RangeError("Projection session page is limited to 64.");
+		return this.withWriterLock(async () => {
+			await this.prepareProjectionMaintenance(signal);
+			const sessionIds = this.projection!.sessions(after, limit);
+			return { sessionIds, ...(sessionIds.length === limit ? { nextSessionId: sessionIds.at(-1)! } : {}) };
+		});
+	}
+	async applyParentProjectionDecisions(
+		decisions: readonly ParentProjectionDecision[],
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (decisions.length > 16) throw new RangeError("Projection decision batch is limited to 16.");
+		await this.withWriterLock(async () => {
+			signal?.throwIfAborted();
+			await this.prepareProjectionMaintenance(signal);
+			this.projection!.apply(decisions);
+		});
+	}
+	async parentProjectionSourceReplayed(sessionId: string): Promise<boolean> {
+		return this.withWriterLock(async () => {
+			await this.prepareProjectionMaintenance();
+			return this.projection!.replayed(sessionId);
+		});
+	}
+	async markParentProjectionSourceReplayed(sessionId: string, signal?: AbortSignal): Promise<void> {
+		await this.withWriterLock(async () => {
+			signal?.throwIfAborted();
+			await this.prepareProjectionMaintenance(signal);
+			this.projection!.markReplayed(sessionId);
+		});
+	}
+	async noteParentProjectionSourceUnavailable(sessionId: string, reason: string, signal?: AbortSignal): Promise<void> {
+		await this.withWriterLock(async () => {
+			signal?.throwIfAborted();
+			await this.prepareProjectionMaintenance(signal);
+			this.projection!.noteUnavailable(sessionId, reason);
+		});
+	}
+	private async prepareProjectionMaintenance(signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
+		if (!this.projectionWritable) await this.reconcileLocked(signal);
+		else await this.indexProjectionLocked(await loadRoot(this.rootFile), signal);
+	}
+	async finishParentProjectionPass(
+		signal?: AbortSignal,
+	): Promise<{ unresolvedGroups: number; unresolvedSources: number }> {
+		return this.withWriterLock(async () => {
+			await this.reconcileLocked(signal);
+			return { unresolvedGroups: this.projection!.unresolved(), unresolvedSources: this.projection!.unavailable() };
+		});
+	}
 
 	/** The published record stored under `sourceKey`. Global across days. */
 	async findBySourceKey(sourceKey: string): Promise<ContinuousChatRecord | undefined> {
@@ -754,6 +881,13 @@ export class ContinuousChatStore {
 	}
 
 	async readView(kind: ContinuousChatViewKind): Promise<ContinuousChatViewState> {
+		if (this.lease) await this.readQueue();
+		else {
+			const projection = await this.readProjection();
+			const meta = projection?.meta();
+			if (meta && meta.revision !== meta.derivedRevision)
+				throw new Error("Continuous-chat projection views require writer reconciliation.");
+		}
 		const root = await loadRoot(this.rootFile);
 		const view = await readViewFile(this.rootDir, kind);
 		if (view === undefined) {
@@ -874,8 +1008,21 @@ export class ContinuousChatStore {
 		let root = await loadRoot(this.rootFile);
 		if (this.indexedRevision !== root.revision) {
 			root = await this.indexLocked(root, signal);
+			root = await this.indexProjectionLocked(root, signal);
 			await this.reconcileNodeIndexesLocked(root.nextId, signal);
 			this.indexedRevision = root.revision;
+		}
+		root = await this.indexProjectionLocked(root, signal);
+		const cutoff = this.projection!.pendingCutoff();
+		if (cutoff !== undefined) {
+			await this.reconcileNodeIndexesLocked(root.nextId, signal);
+			await this.reconcileQueueLocked(root, signal);
+			this.requireScheduler().invalidateSuffix(cutoff);
+			this.nodeCache.clear();
+			this.settled = undefined;
+			this.rendered = undefined;
+			this.renderedBirth = undefined;
+			root = await this.writeRootLocked({ ...root, revision: root.revision + 1 });
 		}
 		await checkpointContinuousChatRecovery(signal);
 		let settled = this.settled;
@@ -884,7 +1031,42 @@ export class ContinuousChatStore {
 			this.settled = settled;
 		}
 		const queue = await this.reconcileQueueLocked(root, signal);
+		if (cutoff !== undefined) this.projection!.markDerived(this.projection!.meta().revision);
 		return { root, views: settled.views, queue, origin: queue.origin };
+	}
+
+	private async indexProjectionLocked(root: ContinuousChatRoot, signal?: AbortSignal): Promise<ContinuousChatRoot> {
+		const path = join(this.rootDir, "projection.sqlite");
+		if (root.projectionId !== undefined && !existsSync(path))
+			throw new Error("Continuous-chat projection authority is missing.");
+		if (!this.projectionWritable) {
+			this.projection?.close();
+			this.projection = new ContinuousChatRecordProjection(path, root.projectionId === undefined);
+			this.projectionWritable = true;
+		}
+		let meta = this.projection!.meta();
+		if (
+			root.projectionId !== undefined &&
+			(root.projectionId !== meta.identity || meta.revision < (root.projectionRevision ?? 0))
+		)
+			throw new Error("Continuous-chat projection authority changed.");
+		if (meta.indexedThrough > root.nextId)
+			throw new Error("Continuous-chat projection index is ahead of published records.");
+		for (let start = meta.indexedThrough; start < root.nextId; start += 256) {
+			await checkpointContinuousChatRecovery(signal, start);
+			const records: ContinuousChatRecord[] = [];
+			for (let id = start; id < Math.min(start + 256, root.nextId); id++) records.push(await this.rawRecordAt(id));
+			this.projection!.index(records);
+		}
+		meta = this.projection!.meta();
+		if (root.projectionId !== meta.identity || root.projectionRevision !== meta.revision)
+			return this.writeRootLocked({
+				...root,
+				projectionId: meta.identity,
+				projectionRevision: meta.revision,
+				revision: root.revision + 1,
+			});
+		return root;
 	}
 
 	/**
@@ -993,12 +1175,14 @@ export class ContinuousChatStore {
 					{
 						location: ContinuousChatSegmentLocation;
 						digest: string;
+						revision: number;
 						children?: readonly ContinuousChatNodeCoordinate[];
 					}
 				>;
 			}
 		>();
 		let visited = 0;
+		const seenRevisions = new Map<string, string>();
 		for (const file of await listSegments(this.treeDir)) {
 			await checkpointContinuousChatRecovery(signal);
 			const day = dayOfSegment(file);
@@ -1008,6 +1192,7 @@ export class ContinuousChatStore {
 				0,
 				(line) => {
 					const node = decodeLine(filePath, line, "continuous-chat tree", parseContinuousChatTreeNode);
+					if (!this.isProjectionCurrent(node, node.projectionRevision ?? 0)) return;
 					const coveredUntil = continuousChatNodeFirstMessage(node) + continuousChatNodeMessageCount(node.level);
 					if (!Number.isSafeInteger(coveredUntil) || coveredUntil > published) {
 						throw new ContinuousChatCorruptError(
@@ -1021,14 +1206,23 @@ export class ContinuousChatStore {
 						byLevel.set(node.level, level);
 					}
 					const digest = createHash("sha256").update(JSON.stringify(node)).digest("hex");
+					const revisionKey = `${continuousChatNodeKey(node)}@${node.projectionRevision ?? 0}`;
+					const seen = seenRevisions.get(revisionKey);
+					if (seen !== undefined && seen !== digest)
+						throw new ContinuousChatCorruptError(filePath, `Conflicting tree node ${revisionKey}`);
+					seenRevisions.set(revisionKey, digest);
 					const existing = level.entries.get(node.ordinal);
-					if (existing !== undefined && existing.digest !== digest) {
+					if (
+						existing !== undefined &&
+						existing.revision === (node.projectionRevision ?? 0) &&
+						existing.digest !== digest
+					) {
 						throw new ContinuousChatCorruptError(
 							filePath,
 							`Conflicting tree node ${continuousChatNodeKey(node)}`,
 						);
 					}
-					if (existing === undefined) {
+					if (existing === undefined || existing.revision < (node.projectionRevision ?? 0)) {
 						level.highest = Math.max(level.highest, node.ordinal);
 						level.entries.set(node.ordinal, {
 							location: {
@@ -1037,6 +1231,7 @@ export class ContinuousChatStore {
 								length: line.length,
 							},
 							digest,
+							revision: node.projectionRevision ?? 0,
 							children: node.children,
 						});
 					}
@@ -1183,6 +1378,10 @@ export class ContinuousChatStore {
 
 	/** Writes the root. Its index files are durable first, so the root never names an entry that is not on disk. */
 	private async writeRootLocked(root: ContinuousChatRoot): Promise<ContinuousChatRoot> {
+		if (this.projectionWritable) {
+			const meta = this.projection!.meta();
+			root = { ...root, projectionId: meta.identity, projectionRevision: meta.revision };
+		}
 		await writeDurableAtomic(this.rootFile, serializeRoot(root));
 		this.indexedRevision = root.revision;
 		return root;
@@ -1279,10 +1478,17 @@ export class ContinuousChatStore {
 		});
 	}
 
-	private async appendNodeLocked(node: ContinuousChatTreeNode): Promise<boolean> {
+	private async appendNodeLocked(node: ContinuousChatTreeNode, claim?: ContinuousChatClaim): Promise<boolean> {
 		const validated = parseContinuousChatTreeNode(node);
 		if (validated === undefined) throw new TypeError("Invalid continuous-chat tree node.");
 		const state = await this.reconcileLocked();
+		if (
+			claim &&
+			(claim.level !== node.level || claim.ordinal !== node.ordinal || !this.requireScheduler().ownsClaim(claim))
+		)
+			throw new Error("Continuous-chat work claim was superseded before publication.");
+		if (!this.isProjectionCurrent(validated, validated.projectionRevision ?? 0))
+			throw new Error("Continuous-chat compaction projection was superseded.");
 		const key = continuousChatNodeKey(validated);
 		const existing = await this.nodeAt(validated);
 		if (existing !== undefined) {
@@ -1324,14 +1530,20 @@ export class ContinuousChatStore {
 
 	/** One tree node by coordinate, through the bounded node cache. Undefined when the node was never written. */
 	private async nodeAt(coordinate: ContinuousChatNodeCoordinate): Promise<ContinuousChatTreeNode | undefined> {
+		await this.readProjection();
 		const key = continuousChatNodeKey(coordinate);
 		const cached = this.nodeCache.get(key);
 		if (cached !== undefined) {
+			if (!this.isProjectionCurrent(cached, cached.projectionRevision ?? 0)) {
+				this.nodeCache.delete(key);
+				return undefined;
+			}
 			this.nodeCache.delete(key);
 			this.nodeCache.set(key, cached);
 			return cached;
 		}
 		const node = await this.readNodeFromDisk(coordinate);
+		if (node !== undefined && !this.isProjectionCurrent(node, node.projectionRevision ?? 0)) return undefined;
 		if (node !== undefined) this.rememberNode(key, node);
 		return node;
 	}
@@ -1477,6 +1689,10 @@ export class ContinuousChatStore {
 
 	/** One indexed message, read by positioned reads. The caller guarantees `id` is below the published count. */
 	private async recordAt(id: number): Promise<ContinuousChatRecord> {
+		const projection = await this.readProjection();
+		return projection?.project(await this.rawRecordAt(id)) ?? this.rawRecordAt(id);
+	}
+	private async rawRecordAt(id: number): Promise<ContinuousChatRecord> {
 		const location = await this.readMessageLocation(id);
 		const filePath = segmentPath(this.mainDir, location.dayNo);
 		const line = await readLineAt(filePath, location.offset, location.length);

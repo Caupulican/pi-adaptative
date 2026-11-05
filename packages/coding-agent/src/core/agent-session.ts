@@ -1052,6 +1052,11 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			getPromptTemplates: () => this.promptTemplates,
 			noteOwnerAuthoredMessage: (message, originalText) => this._reflection.markOwnerInput(message, originalText),
+			authorizeParentNoteOwner: (inputId) => {
+				const epoch = this._foregroundRecovery.getCurrentSubmissionEpoch();
+				if (epoch === undefined) throw new Error("Parent note admission requires a foreground owner.");
+				this.sessionManager.authorizeParentNoteOwner(inputId, epoch);
+			},
 			getInputContext: () => ({
 				sessionId: this.sessionManager.getSessionId(),
 				sessionFile: this.sessionManager.getSessionFile(),
@@ -1146,13 +1151,7 @@ export class AgentSession {
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
-			deliverNotes: (message, delivery, lease, commit) =>
-				this._sendCustomMessageWithRuntimeLease(
-					message,
-					delivery === "turn" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
-					lease,
-					commit,
-				),
+			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			captureReviewContext: (maxChars) => this._memory.captureReviewContext(maxChars),
 			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
@@ -1307,6 +1306,7 @@ export class AgentSession {
 				resetCompactionPrefix: () => this._continuousChatPrefix.reset(),
 				resolveWorker: (name) => this._backgroundLanes.openWorkerTranscript(name),
 				readEntry: (entryId) => this.sessionManager.getEntry(entryId),
+				getParentInputConsumptionSource: () => this.sessionManager.getParentInputConsumptionSource(),
 				entryIds: () => this.sessionManager.getEntries().map((entry) => entry.id),
 				isEntryPersisted: (entryId) => this.sessionManager.isEntryPersisted(entryId),
 				timers: config.timers.port("continuous-chat"),
@@ -1550,6 +1550,8 @@ export class AgentSession {
 			agent: this.agent,
 			compaction: this._compaction,
 			context: providerRequestContext,
+			parentInputs: this.sessionManager,
+			getSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			admitGoalRequest: () => this._goals.admitProviderRequest(),
 			maxOutputTokens: () =>
 				Math.min(this.settingsManager.getMaxOutputTokens(), this.getCapabilityTierPolicy().maxOutputTokens),
@@ -1683,7 +1685,6 @@ export class AgentSession {
 				getSessionManager: () => this.sessionManager,
 				getAgent: () => this.agent,
 				prepareHistory: () => this._foregroundLifecycle.repair(),
-				setRequestProjection: (projection) => this._providerRequestRuntime.setParentInputProjection(projection),
 				holdLateWork: (work) => this._runtimeAdmission.holdBundleUntil(work),
 				onAccepted: (message) => {
 					this._emit({ type: "message_start", message });
@@ -1780,7 +1781,8 @@ export class AgentSession {
 			ownerInputPublications.persisted,
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
-			({ requestId, model, context, sourceContext }) => {
+			({ requestId, model, context, sourceContext }, deliveredNoteIds) => {
+				this._durableCustomMessageTurns.displayParentNotes(deliveredNoteIds);
 				this._cache.lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
 				this._continuousChatPrefix.record(context, model);
 				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.

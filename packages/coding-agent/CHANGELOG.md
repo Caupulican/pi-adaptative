@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Accepted proactive notes survive restart in both delivery modes. Automatic notes use the durable parent wake path; note-only delivery waits for the owner's input and a successful response to the exact request carrying it, including in continuous chat. Existing ICM stores preserve original records while replacing obsolete background projections, rebuilding affected summaries and recovering proven consumption without importing excluded sessions.
 - Session startup no longer fails when tool registries load the routine tool through a circular import.
 - Background knowledge requests refused before transport release their unused accounting reservations without inventing a provider response. Requests that may have reached the provider remain held until their actual accounting is known.
 - Cache diagnostics compare explicit view cache blocks rather than volatile text beyond the cache boundary. Shorter unchanged prefixes no longer report a broken cache; changed cached blocks still do.

@@ -6,7 +6,11 @@ The review has one tool, `raise_note`. It cannot run commands, inspect files, mo
 
 By default, an accepted note starts a parent turn without waiting for another owner message. The parent handles it under the session's existing authority and budgets. Set `proactivity.delivery` to `"note"` to carry it with the owner's next turn instead. An explicit delivery choice is preserved. Scheduled routines and goal continuation are separate features.
 
-A review retains the conversation branch, settings, goal and memory revision it started with. Foreground work, navigation, relevant settings changes or changed knowledge invalidate its result. Delivery checks those inputs again before entering the session. Each started review announces a raised, quiet or failed outcome; cancellation and provider errors never publish captured notes.
+Acceptance saves the note and its delivery mode in the session before reporting it as raised. Pending notes survive restart. Automatic delivery resumes through the parent-input ledger and does not inherit an unrelated active goal. Note-only delivery waits for an authenticated owner input; startup, internal turns and automatic work cannot consume it. A note is consumed only after its exact content reaches the selected request and that request receives a successful final provider response. Sending a request, a tool call or a failed response leaves it pending. This also applies to continuous chat.
+
+Continuous chat records consumed background inputs as work history. On opening an older store, it hides obsolete background projections, verifies their original session evidence and rebuilds affected summaries. Original records keep their IDs and timestamps. Missing source evidence leaves the affected background record unavailable and reported for retry; ordinary history remains usable. Only proven consumption is restored, and excluded or forgotten sessions are not imported again.
+
+A review retains the conversation branch, settings, goal and memory revision it started with. Foreground work, navigation, relevant settings changes or changed knowledge invalidate its result. Delivery checks those inputs again before entering the session. Each started review announces a raised, quiet or failed outcome. Cancellation or provider failure before acceptance discards captured notes; cancellation after a physical receipt does not undo that saved acceptance.
 
 ## Owner controls
 

@@ -7,7 +7,8 @@
 
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
-import { parentInputOf, parentWakeOf } from "../../kernel/session/parent-input-ledger.ts";
+import { resolveParentInputConsumption } from "../../kernel/session/parent-input-consumption.ts";
+import { type ParentInputConsumptionSource, parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
@@ -18,6 +19,7 @@ import type {
 	ContinuousChatImageInput,
 	ContinuousChatMessageKind,
 } from "./continuous-chat-contracts.ts";
+import type { ContinuousChatLegacyEntrySource } from "./continuous-chat-legacy-import.ts";
 import { parseContinuousChatNavigationCommand } from "./continuous-chat-navigation.ts";
 import type { ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
 import { CONTINUOUS_CHAT_MAX_BULK_INPUTS } from "./continuous-chat-store.ts";
@@ -30,6 +32,8 @@ export interface ContinuousChatMessagePart {
 	images?: ContinuousChatImageInput[];
 	/** Explicit idempotency identity for durable derived entries such as worker terminals. */
 	sourceKey?: string;
+	/** A derived work record retains the original canonical input as its source. */
+	sourceEntryId?: string;
 	/** Exact occurrence time when it differs from the containing session entry's persistence time. */
 	date?: string;
 }
@@ -145,16 +149,8 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
  */
 export function continuousChatEntryParts(entry: SessionEntry): ContinuousChatMessagePart[] {
 	if (entry.type === "custom_message") {
-		const input = parentInputOf(entry);
-		const wake = parentWakeOf(entry);
-		if (input || wake) {
-			const identity = input ? `delivery ${input.metadata.deliveryId}` : `wake ${wake!.wakeId}`;
-			return wholeMessagePart("work", entry.content).map((part) => ({
-				...part,
-				text: `[Harness background ${identity}; not owner-authored evidence] ${part.text}`,
-				sourceKey: `parent:${entry.id}:${part.part}`,
-			}));
-		}
+		// Validate reserved metadata, but defer every version's work history until proven consumption.
+		parentInputOf(entry);
 		return [];
 	}
 	if (entry.type === "message") {
@@ -182,6 +178,7 @@ export interface ContinuousChatIngestorDeps {
 	appender: Pick<ContinuousChatRuntime, "append" | "appendMany">;
 	/** The entry of an announced persistence; the ingestor never reads the session file itself. */
 	readEntry(entryId: string): SessionEntry | undefined;
+	getParentInputConsumptionSource(): ParentInputConsumptionSource;
 	warn(message: string): void;
 }
 
@@ -219,12 +216,12 @@ export class ContinuousChatIngestor {
 	/** The entries of one earlier session, streamed into bounded bulk appends in file order. */
 	async importLegacySession(
 		sessionId: string,
-		entries: AsyncIterable<SessionEntry>,
+		source: ContinuousChatLegacyEntrySource,
 		signal?: AbortSignal,
 	): Promise<void> {
 		// Refused, never skipped: a silent return would let the import mark itself complete without these entries.
 		if (this.closed) throw new Error("Continuous-chat ingestion is closed; the legacy import cannot run.");
-		await this.logSessionEntries(sessionId, entries, false, signal);
+		await this.logSessionEntries(sessionId, source, "legacy", signal);
 	}
 
 	/**
@@ -233,13 +230,25 @@ export class ContinuousChatIngestor {
 	 */
 	importCanonicalSession(
 		sessionId: string,
-		entries: AsyncIterable<SessionEntry>,
+		source: ContinuousChatLegacyEntrySource,
 		signal?: AbortSignal,
 	): Promise<void> {
 		if (this.closed) {
 			return Promise.reject(new Error("Continuous-chat ingestion is closed; cannot recover session entries."));
 		}
-		const run = this.tail.then(() => this.logSessionEntries(sessionId, entries, true, signal));
+		const run = this.tail.then(() => this.logSessionEntries(sessionId, source, "canonical", signal));
+		this.tail = run.catch(() => undefined);
+		return run;
+	}
+
+	/** Re-derive only proven parent work during projection upgrades; never replay ordinary owner history. */
+	importParentInputConsumptions(
+		sessionId: string,
+		source: ContinuousChatLegacyEntrySource,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (this.closed) return Promise.reject(new Error("Continuous-chat ingestion is closed."));
+		const run = this.tail.then(() => this.logSessionEntries(sessionId, source, "parent", signal));
 		this.tail = run.catch(() => undefined);
 		return run;
 	}
@@ -302,17 +311,37 @@ export class ContinuousChatIngestor {
 		return this.logEntry(task.sessionId, task.entryId);
 	}
 
+	private async entryParts(
+		entry: SessionEntry,
+		source: ParentInputConsumptionSource,
+		signal?: AbortSignal,
+	): Promise<ContinuousChatMessagePart[]> {
+		const consumed = await resolveParentInputConsumption(entry, source, signal);
+		return [
+			...continuousChatEntryParts(entry),
+			...consumed.map((input, part) => ({
+				part,
+				kind: "work" as const,
+				text: `[Harness background delivery ${input.deliveryId}; not owner-authored evidence] ${input.text}`,
+				sourceKey: `parent:${source.sessionId}:${input.entryId}:0`,
+				sourceEntryId: input.entryId,
+				date: input.timestamp,
+			})),
+		];
+	}
+
 	private async logEntry(sessionId: string, entryId: string): Promise<void> {
 		const entry = this.deps.readEntry(entryId);
 		if (entry === undefined) throw new Error(`Persisted session entry ${entryId} is not readable.`);
-		for (const piece of continuousChatEntryParts(entry)) {
+		const source = this.deps.getParentInputConsumptionSource();
+		for (const piece of await this.entryParts(entry, source)) {
 			await this.appendRecord({
 				kind: piece.kind,
 				timestamp: piece.date ?? entry.timestamp,
 				text: piece.text,
 				...(piece.images ? { images: piece.images } : {}),
 				sourceKey: piece.sourceKey ?? `${sessionId}:${entryId}:${piece.part}`,
-				source: { sessionId, entryId },
+				source: { sessionId, entryId: piece.sourceEntryId ?? entryId },
 			});
 		}
 	}
@@ -324,41 +353,51 @@ export class ContinuousChatIngestor {
 	 */
 	private async logSessionEntries(
 		sessionId: string,
-		entries: AsyncIterable<SessionEntry>,
-		canonical: boolean,
+		source: ContinuousChatLegacyEntrySource,
+		mode: "legacy" | "canonical" | "parent",
 		signal?: AbortSignal,
 	): Promise<void> {
 		signal?.throwIfAborted();
 		const maxLegacyParts = 32;
 		let batch: ContinuousChatAppendInput[] = [];
-		for await (const entry of entries) {
+		let derived: ContinuousChatAppendInput[] = [];
+		for await (const entry of source.entries) {
 			signal?.throwIfAborted();
-			for (const piece of continuousChatEntryParts(entry)) {
-				if (!canonical && piece.kind === "echo") continue;
-				batch.push({
-					kind: canonical ? piece.kind : "note",
-					date: canonical ? (piece.date ?? entry.timestamp) : entry.timestamp,
-					text: canonical ? piece.text : `${piece.kind}: ${piece.text}`,
+			for (const piece of await this.entryParts(entry, source, signal)) {
+				if (mode === "parent" && piece.sourceEntryId === undefined) continue;
+				if (mode === "legacy" && piece.kind === "echo") continue;
+				const canonicalPiece = mode !== "legacy" || piece.sourceEntryId !== undefined;
+				const target = mode === "legacy" && piece.sourceEntryId !== undefined ? derived : batch;
+				target.push({
+					kind: canonicalPiece ? piece.kind : "note",
+					date: canonicalPiece ? (piece.date ?? entry.timestamp) : entry.timestamp,
+					text: canonicalPiece ? piece.text : `${piece.kind}: ${piece.text}`,
 					...(piece.images ? { images: piece.images } : {}),
-					sourceKey: canonical
+					sourceKey: canonicalPiece
 						? (piece.sourceKey ?? `${sessionId}:${entry.id}:${piece.part}`)
 						: `${sessionId}:${entry.id}:${piece.part}`,
-					source: { sessionId, entryId: entry.id },
+					source: { sessionId, entryId: piece.sourceEntryId ?? entry.id },
 				});
-				if (canonical && batch.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
+				if (derived.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
+					await this.deps.appender.appendMany(derived);
+					signal?.throwIfAborted();
+					derived = [];
+				}
+				if (mode !== "legacy" && batch.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
 					await this.deps.appender.appendMany(batch);
 					signal?.throwIfAborted();
 					batch = [];
-				} else if (!canonical && batch.length > maxLegacyParts * 2) {
+				} else if (mode === "legacy" && batch.length > maxLegacyParts * 2) {
 					batch = batch.slice(-maxLegacyParts);
 				}
 			}
 		}
 		signal?.throwIfAborted();
-		if (!canonical && batch.length > maxLegacyParts) {
+		if (mode === "legacy" && batch.length > maxLegacyParts) {
 			batch = batch.slice(-maxLegacyParts);
 		}
 		if (batch.length > 0) await this.deps.appender.appendMany(batch);
+		if (derived.length > 0) await this.deps.appender.appendMany(derived);
 		signal?.throwIfAborted();
 	}
 

@@ -6,12 +6,17 @@
  */
 
 import { existsSync } from "node:fs";
+import type { ParentInputConsumptionSource } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./continuous-chat-compaction-adapter.ts";
 import { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
-import { type ContinuousChatLegacySource, importContinuousChatLegacyHistory } from "./continuous-chat-legacy-import.ts";
+import {
+	type ContinuousChatLegacyEntrySource,
+	type ContinuousChatLegacySource,
+	importContinuousChatLegacyHistory,
+} from "./continuous-chat-legacy-import.ts";
 import {
 	ContinuousChatMigrationBlockedError,
 	type ContinuousChatSessionLedger,
@@ -20,6 +25,11 @@ import {
 	createContinuousChatSessionLedger,
 	readContinuousChatLegacySessionFile,
 } from "./continuous-chat-migration.ts";
+import {
+	currentParentInputSource,
+	reconcileParentInputHistory,
+	stageParentInputReconciliation,
+} from "./continuous-chat-parent-reconciliation.ts";
 import { type ContinuousChatCompactionPrefixHead, ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
 import { ContinuousChatStore } from "./continuous-chat-store.ts";
 import type { ContinuousChatPort } from "./continuous-chat-tools.ts";
@@ -36,6 +46,7 @@ export interface ContinuousChatHostPorts {
 	resetCompactionPrefix(): void;
 	resolveWorker(name: string): ContinuousChatWorkerTranscript | undefined;
 	readEntry(entryId: string): SessionEntry | undefined;
+	getParentInputConsumptionSource(): ParentInputConsumptionSource;
 	/** The session's entry ids in order, and whether each one is durably written to the session file. */
 	entryIds(): readonly string[];
 	isEntryPersisted(entryId: string): boolean;
@@ -154,6 +165,7 @@ export class ContinuousChatHost {
 			const ingestor = new ContinuousChatIngestor({
 				appender: runtime,
 				readEntry: (entryId) => options.readEntry(entryId),
+				getParentInputConsumptionSource: () => options.getParentInputConsumptionSource(),
 				warn: options.warn,
 			});
 			const workerLogs = new ContinuousChatWorkerLog({ resolve: (name) => options.resolveWorker(name) });
@@ -200,6 +212,7 @@ export class ContinuousChatHost {
 			const markerBefore = await marker.read(signal);
 			const ledgerBefore = await this.sessionLedger.read(signal);
 			signal.throwIfAborted();
+			await stageParentInputReconciliation(this.runtime.store, signal);
 			const activeIds = new Set(ledgerBefore.active.map((entry) => entry.sessionId));
 			await importContinuousChatLegacyHistory({
 				source: this.options.legacy,
@@ -214,6 +227,26 @@ export class ContinuousChatHost {
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			await this.recoverPriorSessions(ledgerBefore, markerBefore === undefined);
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
+			await reconcileParentInputHistory(
+				{
+					projection: this.runtime.store,
+					legacy: this.options.legacy,
+					ingestor: this.ingestor,
+					currentSessionId: this.options.sessionId,
+					openCurrent: () =>
+						currentParentInputSource({
+							getSource: () => this.options.getParentInputConsumptionSource(),
+							entryIds: () => this.options.entryIds(),
+							isEntryPersisted: (id) => this.options.isEntryPersisted(id),
+							readEntry: (id) => this.options.readEntry(id),
+						}),
+					active: ledgerBefore.active,
+					settled: (await this.sessionLedger.read(signal)).settled,
+					legacyImport: await marker.read(signal),
+					warn: this.options.warn,
+				},
+				signal,
+			);
 			await this.sessionLedger.recordAttached(this.options.sessionId, this.options.sessionFile, signal);
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			// Subscribed before the replay, so no durable write falls between the two.
@@ -247,7 +280,7 @@ export class ContinuousChatHost {
 			await this.sessionLedger.markSettled(legacySessionIds, signal);
 		}
 
-		const toRecover = new Map<string, () => AsyncIterable<SessionEntry>>();
+		const toRecover = new Map<string, () => Promise<ContinuousChatLegacyEntrySource>>();
 
 		// An attached session holds live ICM entries that no legacy note replaces. Unlike the legacy import, which records
 		// a malformed source as a skip, recovery never drops such a session: a source that cannot be read now (blocked)
@@ -265,7 +298,7 @@ export class ContinuousChatHost {
 			}
 			const candidate = listing.sessions.find((s) => s.sessionId === activeEntry.sessionId);
 			if (candidate) {
-				toRecover.set(activeEntry.sessionId, () => candidate.entries(signal));
+				toRecover.set(activeEntry.sessionId, () => candidate.openEntries(signal));
 			} else if (activeEntry.sessionFile && existsSync(activeEntry.sessionFile)) {
 				const file = activeEntry.sessionFile;
 				// Listed failures are keyed by file name, so the recorded file is classified here by the same reader.
@@ -282,7 +315,7 @@ export class ContinuousChatHost {
 					);
 				}
 				const session = reading.session;
-				toRecover.set(activeEntry.sessionId, () => session.entries(signal));
+				toRecover.set(activeEntry.sessionId, () => session.openEntries(signal));
 			} else {
 				throw new ContinuousChatMigrationBlockedError(
 					`unsettled ICM session ${activeEntry.sessionId} is missing; restore its session source before recovery`,
@@ -306,14 +339,19 @@ export class ContinuousChatHost {
 				if (forgotten) continue;
 
 				if (!toRecover.has(session.sessionId)) {
-					toRecover.set(session.sessionId, () => session.entries(signal));
+					toRecover.set(session.sessionId, () => session.openEntries(signal));
 				}
 			}
 		}
 
-		for (const [sessionId, getEntries] of toRecover) {
+		for (const [sessionId, openEntries] of toRecover) {
 			signal.throwIfAborted();
-			await this.ingestor.importCanonicalSession(sessionId, getEntries(), signal);
+			const source = await openEntries();
+			try {
+				await this.ingestor.importCanonicalSession(sessionId, source, signal);
+			} finally {
+				await source.close();
+			}
 			await this.ingestor.settled();
 			signal.throwIfAborted();
 			await this.sessionLedger.markSettled([sessionId], signal);

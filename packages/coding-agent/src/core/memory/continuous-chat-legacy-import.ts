@@ -4,9 +4,16 @@
  * log. The marker records completion with every session that was not imported and the real reason.
  */
 
+import type { ParentInputConsumptionSource } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { continuousChatDay } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
+
+/** One pinned source revision; callers close it after iteration and all reference resolution. */
+export interface ContinuousChatLegacyEntrySource extends ParentInputConsumptionSource {
+	readonly entries: AsyncIterable<SessionEntry>;
+	close(): Promise<void>;
+}
 
 export interface ContinuousChatLegacySession {
 	sessionId: string;
@@ -21,6 +28,7 @@ export interface ContinuousChatLegacySession {
 	 * session entry throws `ContinuousChatLegacyContentError`; any other failure is an I/O failure.
 	 */
 	entries(signal?: AbortSignal): AsyncIterable<SessionEntry>;
+	openEntries(signal?: AbortSignal): Promise<ContinuousChatLegacyEntrySource>;
 }
 
 export interface ContinuousChatLegacySkip {
@@ -288,7 +296,12 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	let importedSessions = importedBefore;
 	for (const session of selected) {
 		signal?.throwIfAborted();
-		await options.ingestor.importLegacySession(session.sessionId, session.entries(signal), signal);
+		const source = await session.openEntries(signal);
+		try {
+			await options.ingestor.importLegacySession(session.sessionId, source, signal);
+		} finally {
+			await source.close();
+		}
 		signal?.throwIfAborted();
 		importedSessions++;
 	}

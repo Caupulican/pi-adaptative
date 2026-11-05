@@ -69,7 +69,7 @@ export class ForegroundLifecycleAdapter {
 		providerLimitStore?: ProviderLimitStore,
 		observeMessagePersisted?: (message: Message, entryId: string, publication: SessionAppendIdentity) => void,
 		liveWarningSink?: () => ((message: string) => void) | undefined,
-		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
+		observeProviderRequest?: (context: ProviderRequestSnapshotContext, deliveredNoteIds: readonly string[]) => void,
 		prewarmToolCalls?: (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void,
 		observeMessageUncertain?: (message: Message, entryId: string, publication: SessionAppendWriteIdentity) => void,
 	) {

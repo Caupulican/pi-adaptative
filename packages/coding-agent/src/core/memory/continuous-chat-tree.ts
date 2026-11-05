@@ -20,6 +20,8 @@ export interface ContinuousChatTreeNode extends ContinuousChatNodeCoordinate {
 	size: number;
 	date: string;
 	children?: [ContinuousChatNodeCoordinate, ContinuousChatNodeCoordinate];
+	/** Record projection used by this build; absent is the original generation zero. */
+	projectionRevision?: number;
 }
 
 export function continuousChatNodeMessageCount(level: number): number {
@@ -158,12 +160,14 @@ export function parseContinuousChatTreeNode(value: unknown): ContinuousChatTreeN
 	}
 	if (!isNonNegativeSafeInteger(value.size) || Buffer.byteLength(value.text, "utf8") !== value.size) return undefined;
 	if (value.size > CONTINUOUS_CHAT_NODE_MAX_BYTES) return undefined;
+	if (value.projectionRevision !== undefined && !isNonNegativeSafeInteger(value.projectionRevision)) return undefined;
 	const node: ContinuousChatTreeNode = {
 		schemaVersion: CONTINUOUS_CHAT_TREE_SCHEMA_VERSION,
 		...coordinate,
 		text: value.text,
 		size: value.size,
 		date: value.date,
+		...(value.projectionRevision === undefined ? {} : { projectionRevision: value.projectionRevision as number }),
 	};
 	if (value.children !== undefined) {
 		if (!Array.isArray(value.children) || value.children.length !== 2) return undefined;

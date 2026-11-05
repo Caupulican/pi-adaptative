@@ -5,6 +5,7 @@ import {
 	type ParentInputDelivery,
 	ParentInputDeliveryController,
 	type ParentInputDeliveryDeps,
+	type ParentInputDeliveryOptions,
 	type ParentInputReceipt,
 } from "./parent-input-delivery.ts";
 import { CLOSING_RUN_SETTLE_MS, runSettlesWithin } from "./session-shutdown.ts";
@@ -41,13 +42,19 @@ export class DurableCustomMessageTurnController {
 			: undefined;
 	}
 
-	async deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt> {
+	async deliverParentInput(
+		input: ParentInputDelivery,
+		options?: ParentInputDeliveryOptions,
+	): Promise<ParentInputReceipt> {
 		if (!this.parentInputs) throw new Error("Durable parent input delivery is unavailable.");
-		return this.parentInputs.deliver(input);
+		return this.parentInputs.deliver(input, options);
 	}
 
 	startParentInputs(): void {
 		this.parentInputs?.start();
+	}
+	displayParentNotes(deliveryIds: readonly string[]): void {
+		this.parentInputs?.displayAcceptedNotes(deliveryIds);
 	}
 	recoverParentInputs(): void {
 		this.parentInputs?.recover();

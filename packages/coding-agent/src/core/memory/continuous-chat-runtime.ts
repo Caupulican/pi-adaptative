@@ -78,7 +78,6 @@ interface CausalTarget {
 
 export class ContinuousChatRuntime {
 	readonly store: ContinuousChatStore;
-	private readonly coordinator: ContinuousChatCompactionCoordinator;
 	private readonly port: ContinuousChatCompactionPort;
 	private readonly prefixHead: () => ContinuousChatCompactionPrefixHead;
 	private readonly warn: (message: string) => void;
@@ -112,7 +111,6 @@ export class ContinuousChatRuntime {
 	private constructor(options: ContinuousChatRuntimeOptions) {
 		this.store = options.store;
 		this.port = options.port;
-		this.coordinator = new ContinuousChatCompactionCoordinator(options.port, options.store);
 		this.prefixHead = options.prefixHead;
 		this.warn = options.warn;
 		this.stopped = new Promise<void>((resolve) => {
@@ -503,17 +501,24 @@ export class ContinuousChatRuntime {
 				: await this.store.failWork(item, abandonment.reason, abandonment.recoveryOnly, abandonment.recoveryKey);
 		if (settlement === "published") {
 			this.emit({ type: "node", level: item.level, ordinal: item.ordinal });
-		} else if (abandonment.kind === "fail") {
+		} else if (settlement !== "superseded" && abandonment.kind === "fail") {
 			this.warn(`Continuous-chat compaction ${continuousChatNodeLabel(item)} failed: ${abandonment.reason}`);
 			this.emit({ type: "failed", item, reason: abandonment.reason });
 		}
 	}
 
-	private async compact(item: ContinuousChatWorkItem): Promise<ContinuousChatCompactionOutcome> {
+	private async compact(item: ContinuousChatClaim): Promise<ContinuousChatCompactionOutcome> {
+		const projectionRevision = await this.store.projectionRevision();
 		const { target, end } = await this.causalTarget(item);
 		const causal = await this.store.readCausalPrefix(end);
+		if (projectionRevision !== (await this.store.projectionRevision()))
+			throw new Error("Continuous-chat projection changed during compaction preparation.");
 		const head = this.prefixHead();
-		return this.coordinator.run({
+		const coordinator = new ContinuousChatCompactionCoordinator(this.port, {
+			readNode: (coordinate) => this.store.readNode(coordinate),
+			appendNode: (node) => this.store.appendNode(node, projectionRevision, item),
+		});
+		return coordinator.run({
 			target,
 			prefix: { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text },
 			signal: this.abort.signal,

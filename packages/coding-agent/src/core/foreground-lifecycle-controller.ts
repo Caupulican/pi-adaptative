@@ -74,7 +74,7 @@ interface ForegroundLifecycleControllerDeps {
 	sessionManager: SessionManager;
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
-	observeProviderRequest?(context: ProviderRequestSnapshotContext): void;
+	observeProviderRequest?(context: ProviderRequestSnapshotContext, deliveredNoteIds: readonly string[]): void;
 	/** Told of a wave of calls before any of them is reserved. Advisory: a throw is reported and the wave proceeds. */
 	prewarmToolCalls?(calls: readonly ToolCallStartContext[], signal?: AbortSignal): void;
 	/**
@@ -236,9 +236,14 @@ export class ForegroundLifecycleController {
 		};
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
 		this.deps.sessionManager.recordParentInputWakeRequest(requestId, context.context.messages);
+		const deliveredNoteIds = this.deps.sessionManager.recordParentNoteRequest(
+			requestId,
+			context.sourceContext.messages,
+			context.context.messages,
+		);
 		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();
-		this.deps.observeProviderRequest?.(context);
+		this.deps.observeProviderRequest?.(context, deliveredNoteIds);
 	}
 
 	private async onToolCallPreflightRejected(

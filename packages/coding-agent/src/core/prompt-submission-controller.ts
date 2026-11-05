@@ -93,7 +93,10 @@ interface SubmissionLifecycle {
 
 export interface PromptSubmissionControllerDeps {
 	readonly agent: Agent;
-	readonly sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getMessageEntryId">;
+	readonly sessionManager: Pick<
+		SessionManager,
+		"getLatestCustomEntryOnBranch" | "getMessageEntryId" | "authorizeParentNoteOwner"
+	>;
 	readonly pendingQueue: PendingInputQueueController;
 	/** Mints each accepted submission's owner-input identity, owns its state, and runs its effects at their commit point. */
 	readonly ownerInputs: Pick<
@@ -1232,6 +1235,8 @@ export class PromptSubmissionController {
 					)
 				: await executeSystemOnePreflight(undefined, this.deps.agent.state.messages.length);
 			if (preflight.proceed) {
+				if (lifecycle.input?.acceptedOrder !== undefined && submission.lease)
+					this.deps.sessionManager.authorizeParentNoteOwner(lifecycle.input.inputId, submission.lease.epoch);
 				// The run sends `messages[0]` first (it holds at least the prompt message); the claim check finds the turn
 				// by it, since a compaction inside the turn can rebuild the history so no length read here marks its start.
 				const turnOpening = messages[0];

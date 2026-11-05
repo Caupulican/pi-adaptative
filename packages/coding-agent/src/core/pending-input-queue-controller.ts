@@ -113,6 +113,8 @@ export interface PendingInputQueueDeps {
 	readonly goals: GoalSessionController;
 	/** Mints each queued input's identity at acceptance, owns its state, and tells this queue when an input is delivered. */
 	readonly ownerInputs: OwnerInputLedger;
+	/** Uses the current live consumer's foreground epoch; called only for owner-authored handoff. */
+	authorizeParentNoteOwner(inputId: OwnerInputId): void;
 	/** `_extensionRunner` is assigned after construction (definite-assignment field on AgentSession),
 	 * so it must be read through a thunk rather than captured by value. */
 	getExtensionRunner(): ExtensionRunner;
@@ -1138,6 +1140,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					admission.ownerOriginalText,
 				);
 				this.deps.ownerInputs.move(entry.inputId, "handed");
+				if (admission.ownerOriginalText !== undefined) this.deps.authorizeParentNoteOwner(entry.inputId);
 				enqueue(entry.message);
 			}
 		}

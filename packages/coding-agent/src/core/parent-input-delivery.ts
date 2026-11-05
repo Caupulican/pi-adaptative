@@ -1,12 +1,16 @@
-import type { Agent, AgentContextPlanFn, AgentMessage, CustomMessage } from "../kernel/index.ts";
-import { type PersistedParentInput, parentInputMessage } from "../kernel/session/parent-input-ledger.ts";
+import type { Agent, CustomMessage } from "../kernel/index.ts";
+import {
+	type ParentInputMode,
+	type PersistedParentInput,
+	parentInputMessage,
+} from "../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "./orchestration/worker-receipt-origin.ts";
+import type { RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
-import { isPlainRecord } from "./util/value-guards.ts";
 
 export interface ParentInputDelivery {
 	readonly deliveryId: string;
@@ -14,6 +18,14 @@ export interface ParentInputDelivery {
 	readonly message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">;
 	readonly origin: WorkerReceiptOrigin;
 	readonly goalId?: string;
+	readonly mode?: ParentInputMode;
+}
+
+/** Live acceptance authority is never serialized with the durable input. */
+export interface ParentInputDeliveryOptions {
+	readonly runtimeLease?: RuntimeWorkLease;
+	readonly beforeOwnership?: () => void;
+	readonly signal?: AbortSignal;
 }
 
 export interface ParentInputReceipt {
@@ -29,7 +41,6 @@ export interface ParentInputDeliveryDeps {
 	warn(message: string): void;
 	onAccepted?(message: CustomMessage<unknown>, receipt: ParentInputReceipt): void;
 	holdLateWork(work: Promise<void>): void;
-	setRequestProjection(projection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined): void;
 }
 
 /** One canonical input, followed by a recoverable wake; never a second append to retry inference. */
@@ -48,6 +59,10 @@ export class ParentInputDeliveryController {
 	private blocked = false;
 	private blockedEpoch: number | undefined;
 	private wake: Promise<void> | undefined;
+	private readonly deferredDisplays = new Map<
+		string,
+		{ message: CustomMessage<unknown>; receipt: ParentInputReceipt; assertCurrent: () => void }
+	>();
 
 	constructor(
 		deps: ParentInputDeliveryDeps,
@@ -66,8 +81,8 @@ export class ParentInputDeliveryController {
 		});
 	}
 
-	deliver(input: ParentInputDelivery): Promise<ParentInputReceipt> {
-		const delivery = this.accept(input);
+	deliver(input: ParentInputDelivery, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt> {
+		const delivery = this.accept(input, options);
 		this.deliveries.add(delivery);
 		void delivery.then(
 			() => this.deliveries.delete(delivery),
@@ -76,49 +91,150 @@ export class ParentInputDeliveryController {
 		return delivery;
 	}
 
-	private async accept(input: ParentInputDelivery): Promise<ParentInputReceipt> {
+	private async accept(
+		input: ParentInputDelivery,
+		options: ParentInputDeliveryOptions = {},
+	): Promise<ParentInputReceipt> {
 		if (this.closed) throw new Error("Parent input delivery is closed.");
+		const mode = input.mode ?? "turn";
+		const { runtimeLease, beforeOwnership } = options;
+		const signal = options.signal ? AbortSignal.any([this.abort.signal, options.signal]) : this.abort.signal;
+		signal.throwIfAborted();
 		const origin = workerReceiptOriginFromValue(input.origin);
 		const message = parentInputMessage(
 			{
 				deliveryId: input.deliveryId,
 				payloadDigest: input.payloadDigest,
 				origin,
+				mode,
 				...(input.goalId ? { goalId: input.goalId } : {}),
 			},
 			input.message,
 		);
 		const manager = this.deps.getSessionManager();
-		const lease = await this.foreground.acquireSubmission(this.abort.signal);
-		let receipt: ParentInputReceipt;
+		const assertBranch = manager.captureBranchContext();
+		const assertAcceptance = (): void => {
+			signal.throwIfAborted();
+			assertBranch();
+			if (
+				this.closed ||
+				this.deps.getSessionManager() !== manager ||
+				origin.sessionId !== manager.getSessionId() ||
+				(origin.sessionFile !== undefined && origin.sessionFile !== manager.getSessionFile()) ||
+				!isSessionAppendAnchorCurrent(manager, origin) ||
+				!manager.isEntryPersisted(origin.leafId)
+			)
+				throw new Error("Parent input session or branch changed before acceptance.");
+		};
+		const lease = await this.foreground.acquireSubmission(signal, {
+			runtimeLease,
+			beforeOwnership: () => {
+				assertAcceptance();
+				beforeOwnership?.();
+				assertAcceptance();
+			},
+		});
+		let receipt: ParentInputReceipt | undefined;
+		let failure: unknown;
 		try {
-			if (this.closed || lease.signal.aborted || this.deps.getSessionManager() !== manager)
-				throw new Error("Parent input session changed before acceptance.");
+			assertAcceptance();
+			this.foreground.assertSubmissionCurrent(lease);
 			const appended = manager.appendParentInput(message);
 			const entry = appended.entries[0];
 			if (appended.durability !== "persisted" || appended.entries.length !== 1 || !entry)
 				throw new Error("Parent input has no physical canonical receipt.");
-			const agent = this.deps.getAgent();
-			agent.state.messages = manager.buildSessionContext().messages;
-			agent.resetSanitizerPrefixHorizon();
 			receipt = { entryId: entry.id, sessionId: appended.sessionId };
-			if (appended.created) {
-				try {
-					this.deps.onAccepted?.(message, receipt);
-				} catch {
+			if (mode === "next-owner-turn" && appended.created) {
+				for (const [id, display] of this.deferredDisplays) {
 					try {
-						this.deps.warn("Parent input was saved, but its display notification failed.");
+						display.assertCurrent();
 					} catch {
-						/* Persistence stands. */
+						this.deferredDisplays.delete(id);
 					}
 				}
+				this.deferredDisplays.set(input.deliveryId, {
+					message,
+					receipt,
+					assertCurrent: () => {
+						assertBranch();
+						if (this.deps.getSessionManager() !== manager)
+							throw new Error("Parent note display session changed.");
+					},
+				});
 			}
+			// Receipt truth is established before any fallible projection or display effect.
+			// Pending note exposure is governed by the request projection; keep canonical
+			// history complete so a consumed note remains available to later turns.
+			try {
+				const agent = this.deps.getAgent();
+				agent.state.messages = manager.buildSessionContext().messages;
+				agent.resetSanitizerPrefixHorizon();
+			} catch (error) {
+				this.reportAcceptedFailure("context projection", error);
+			}
+			if (mode === "turn" && appended.created) {
+				try {
+					this.deps.onAccepted?.(message, receipt);
+				} catch (error) {
+					this.reportAcceptedFailure("display notification", error);
+				}
+			}
+		} catch (error) {
+			failure = error;
 		} finally {
-			this.foreground.releaseSubmission(lease);
+			try {
+				this.foreground.releaseSubmission(lease);
+			} catch (error) {
+				if (receipt) this.reportAcceptedFailure("foreground release", error);
+				else
+					failure =
+						failure === undefined
+							? error
+							: new AggregateError([failure, error], "Parent input acceptance and release failed.");
+			}
 		}
-		this.blocked = false;
-		this.schedule();
+		if (!receipt) throw failure ?? new Error("Parent input was not accepted.");
+		if (failure !== undefined) this.reportAcceptedFailure("post-acceptance processing", failure);
+		if (mode === "turn") {
+			this.blocked = false;
+			try {
+				this.schedule();
+			} catch (error) {
+				this.reportAcceptedFailure("wake scheduling", error);
+			}
+		}
 		return receipt;
+	}
+
+	/** Only notes created in this runtime need an event; restored history renders older notes. */
+	displayAcceptedNotes(deliveryIds: readonly string[]): void {
+		if (this.closed) return;
+		for (const id of deliveryIds) {
+			const display = this.deferredDisplays.get(id);
+			if (!display) continue;
+			this.deferredDisplays.delete(id);
+			try {
+				display.assertCurrent();
+			} catch {
+				continue;
+			}
+			try {
+				this.deps.onAccepted?.(display.message, display.receipt);
+			} catch (error) {
+				this.reportAcceptedFailure("deferred note display", error);
+			}
+		}
+	}
+
+	private reportAcceptedFailure(effect: string, error: unknown): void {
+		try {
+			const diagnostic = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
+			this.deps.warn(
+				`Parent input was saved, but ${effect} failed: ${diagnostic ?? "unavailable"}. It remains recoverable.`,
+			);
+		} catch {
+			/* Diagnostics cannot reject a physical acceptance receipt. */
+		}
 	}
 
 	start(): void {
@@ -139,6 +255,7 @@ export class ParentInputDeliveryController {
 
 	shutdown(): void {
 		this.closed = true;
+		this.deferredDisplays.clear();
 		this.abort.abort(new Error("Parent input delivery closed."));
 		this.unsubscribe();
 	}
@@ -146,7 +263,7 @@ export class ParentInputDeliveryController {
 	private schedule(): void {
 		if (!this.active || this.closed || this.blocked || this.wake) return;
 		try {
-			if (this.deps.getSessionManager().getPendingParentInputs().length === 0) return;
+			if (this.deps.getSessionManager().getPendingParentInputs("turn").length === 0) return;
 		} catch (error) {
 			this.fail(error);
 			return;
@@ -181,7 +298,7 @@ export class ParentInputDeliveryController {
 		try {
 			const wake = manager.beginParentInputWake();
 			if (!wake) return;
-			const pending = new Map(manager.getPendingParentInputs().map((input) => [input.entryId, input]));
+			const pending = new Map(manager.getPendingParentInputs("turn").map((input) => [input.entryId, input]));
 			const inputs = wake.inputs.map((item) => {
 				const input = pending.get(item.entryId);
 				if (
@@ -205,41 +322,6 @@ export class ParentInputDeliveryController {
 			);
 			if (opening?.role !== "custom") throw new Error("The first parent input is missing from canonical history.");
 			deactivate = manager.activateParentInputWake(wake.wakeId);
-			const selected = new Set(wake.inputs.map((input) => input.deliveryId));
-			const unselected = new Set(
-				manager
-					.getPendingParentInputs()
-					.filter((input) => !selected.has(input.metadata.deliveryId))
-					.map((input) => input.metadata.deliveryId),
-			);
-			const keep = (message: AgentMessage): boolean => {
-				if (
-					message.role !== "custom" ||
-					!isPlainRecord(message.details) ||
-					!isPlainRecord(message.details.parentInput)
-				)
-					return true;
-				return !unselected.has(String(message.details.parentInput.deliveryId));
-			};
-			this.deps.setRequestProjection((base) => async (request, signal) => {
-				for (const input of inputs) this.assertCurrent(manager, input, lease);
-				const messages = request.messages.filter(keep);
-				const sentPrefixCount = request.messages.slice(0, request.sentPrefixCount).filter(keep).length;
-				const plan = await base(
-					{
-						...request,
-						messages,
-						sentPrefixCount,
-						...(request.wire ? { wire: { ...request.wire, messages: request.wire.messages?.filter(keep) } } : {}),
-					},
-					signal,
-				);
-				return {
-					...plan,
-					messages: plan.messages.filter(keep),
-					...(plan.transientMessages ? { transientMessages: plan.transientMessages.filter(keep) } : {}),
-				};
-			});
 			if (!manager.getParentInputWake()?.completed)
 				await this.foreground.runCommittedHistory(opening, lease, this.abort.signal);
 			for (const input of inputs) this.assertCurrent(manager, input, lease);
@@ -253,7 +335,6 @@ export class ParentInputDeliveryController {
 			this.blocked = true;
 			throw error;
 		} finally {
-			this.deps.setRequestProjection(undefined);
 			deactivate?.();
 			this.foreground.releaseSubmission(lease);
 		}

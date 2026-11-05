@@ -1,20 +1,29 @@
 import {
+	assertParentInputVisible,
+	isParentNoteOwnerId,
 	MAX_PARENT_WAKE_CHARS,
 	MAX_PARENT_WAKE_INPUTS,
 	MAX_PENDING_PARENT_INPUTS,
+	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
+	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
 	type ParentInputAppendReceipt,
+	type ParentInputConsumptionSource,
 	ParentInputIndex,
+	type ParentInputMode,
 	type ParentInputOrigin,
 	type ParentInputWake,
+	type ParentNoteSelection,
 	type PersistedParentInput,
 	parentInputContextIds,
 	parentInputOf,
+	parentNoteMarker,
 	parentWakeContent,
 	parentWakeMarker,
 } from "./parent-input-ledger.ts";
+import { SessionEntryEvidenceIndex } from "./session-entry-evidence-index.ts";
 import { MAX_SESSION_ENTRY_VISIT_COUNT, MAX_SESSION_LINE_CHARS } from "./session-entry-limits.ts";
 import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
@@ -1724,6 +1733,17 @@ export class SessionManager {
 		| { byId: Map<string, SessionEntry>; count: number; deliveries: Map<string, PersistedParentInput> }
 		| undefined;
 	private activeParentWake: { wakeId: string; assertCurrent: () => void } | undefined;
+	private parentNoteAdmission:
+		| {
+				epoch: number;
+				assertCurrent: () => void;
+				owners: Map<string, { selection?: ParentNoteSelection; ownerEntryId?: string; used: boolean }>;
+		  }
+		| undefined;
+	private plannedParentNotes: ParentNoteSelection | undefined;
+	private parentEvidenceCache:
+		| { byId: Map<string, SessionEntry>; count: number; index: SessionEntryEvidenceIndex }
+		| undefined;
 
 	private constructor(
 		cwd: string,
@@ -3176,7 +3196,20 @@ export class SessionManager {
 			...(assistantMessageEntryId === undefined ? {} : { assistantMessageEntryId }),
 		};
 		this._validateProviderRequestTerminal(entry);
-		this._appendEntry(entry);
+		const consumption = this._parentInputIndex().consumption(entry, (id) => this.byId.get(id));
+		if (consumption?.mode === "next-owner-turn") {
+			const ids = pendingIdSpace(this.byId);
+			ids.add(entry.id);
+			const report: CustomEntry = {
+				type: "custom",
+				id: generateId(ids),
+				parentId: entry.id,
+				timestamp: entry.timestamp,
+				customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+				data: consumption,
+			};
+			this._appendEntries([entry, report]);
+		} else this._appendEntry(entry);
 		return entry.id;
 	}
 
@@ -3346,11 +3379,210 @@ export class SessionManager {
 		return index;
 	}
 
-	getPendingParentInputs(): readonly PersistedParentInput[] {
-		return this._parentInputIndex().pendingInputs();
+	getPendingParentInputs(mode?: ParentInputMode): readonly PersistedParentInput[] {
+		return this._parentInputIndex().pendingInputs(mode);
+	}
+
+	/** Indexed canonical source for both live ingestion and the same proof used by historical imports. */
+	getParentInputConsumptionSource(): ParentInputConsumptionSource {
+		let cache = this.parentEvidenceCache;
+		if (!cache || cache.byId !== this.byId || cache.count > this.entries.length) {
+			cache = { byId: this.byId, count: 0, index: new SessionEntryEvidenceIndex() };
+			this.parentEvidenceCache = cache;
+		}
+		for (; cache.count < this.entries.length; cache.count++) cache.index.add(this.entries[cache.count]!);
+		const byId = this.byId;
+		const sessionId = this.sessionId;
+		const index = cache.index;
+		const assertCurrent = (signal?: AbortSignal): void => {
+			signal?.throwIfAborted();
+			if (this.byId !== byId || this.sessionId !== sessionId)
+				throw new Error("Parent input source changed during ingestion.");
+		};
+		return {
+			sessionId,
+			readEntries: async (ids, signal) => {
+				assertCurrent(signal);
+				if (ids.length > 64) throw new Error("Parent input lookup exceeds its entry bound.");
+				return new Map(
+					ids.map((id) => {
+						const entry = byId.get(id);
+						if (!entry || entry.id !== id || !this.isEntryPersisted(id))
+							throw new Error("Parent input source entry is not durable.");
+						return [id, entry] as const;
+					}),
+				);
+			},
+			isAncestor: async (ancestor, descendant, signal) => {
+				assertCurrent(signal);
+				return index.isAncestor(ancestor, descendant);
+			},
+			findAncestors: async (descendant, query, signal) => {
+				assertCurrent(signal);
+				return index.findAncestors(descendant, query);
+			},
+		};
+	}
+
+	private _pendingParentBatch(mode: ParentInputMode): readonly PersistedParentInput[] {
+		const selected: PersistedParentInput[] = [];
+		let chars = 0;
+		for (const input of this.getPendingParentInputs(mode)) {
+			const entry = this.getEntry(input.entryId);
+			if (entry?.type !== "custom_message" || typeof entry.content !== "string")
+				throw new Error("Parent input requires canonical text.");
+			if (selected.length >= MAX_PARENT_WAKE_INPUTS || chars + entry.content.length > MAX_PARENT_WAKE_CHARS) break;
+			chars += entry.content.length;
+			selected.push(input);
+		}
+		return selected;
+	}
+
+	/** Only authenticated owner submission/handoff owners call this with their actual foreground epoch. */
+	authorizeParentNoteOwner(inputId: string, epoch: number): void {
+		if (!isParentNoteOwnerId(inputId) || !Number.isSafeInteger(epoch) || epoch < 1)
+			throw new Error("Parent notes require an authenticated owner input and foreground epoch.");
+		if (this.parentNoteAdmission?.epoch !== epoch)
+			this.parentNoteAdmission = { epoch, assertCurrent: this.captureBranchContext(), owners: new Map() };
+		const owners = this.parentNoteAdmission.owners;
+		if (owners.has(inputId)) return;
+		if (owners.size >= MAX_PENDING_PARENT_INPUTS) throw new Error("Parent note owner capacity exceeded.");
+		owners.set(inputId, { used: false });
+	}
+
+	/** A request projection borrows canonical note bodies; it never appends them a second time. */
+	captureParentNotes(messages: readonly AgentMessage[], epoch: number | undefined): ParentNoteSelection | undefined {
+		this.plannedParentNotes = undefined;
+		const admission = this.parentNoteAdmission;
+		if (!admission || admission.epoch !== epoch) {
+			this.parentNoteAdmission = undefined;
+			return undefined;
+		}
+		admission.assertCurrent();
+		for (const owner of admission.owners.values()) {
+			if (owner.ownerEntryId && owner.selection?.isCurrent()) {
+				this.plannedParentNotes = owner.selection;
+				return owner.selection;
+			}
+		}
+		for (const message of messages) {
+			const id = this._parentNoteOwnerId(message);
+			const owner = id && admission.owners.get(id);
+			if (!id || !owner) continue;
+			if (owner.selection) {
+				if (owner.selection.isCurrent()) {
+					this.plannedParentNotes = owner.selection;
+					return owner.selection;
+				}
+				continue;
+			}
+			if (owner.used) continue;
+			// Owner inputs coalesced in this request share one bounded batch, not one batch apiece.
+			for (const candidate of messages) {
+				const candidateId = this._parentNoteOwnerId(candidate);
+				const candidateOwner = candidateId && admission.owners.get(candidateId);
+				if (candidateOwner) candidateOwner.used = true;
+			}
+			const inputs: ParentNoteSelection["inputs"][number][] = [];
+			const notes: CustomMessage<unknown>[] = [];
+			for (const input of this._pendingParentBatch("next-owner-turn")) {
+				const entry = this.getEntry(input.entryId);
+				if (entry?.type !== "custom_message" || typeof entry.content !== "string")
+					throw new Error("Parent note requires canonical text.");
+				inputs.push({
+					entryId: input.entryId,
+					deliveryId: input.metadata.deliveryId,
+					payloadDigest: input.metadata.payloadDigest,
+				});
+				notes.push(
+					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				);
+			}
+			if (!inputs.length) return undefined;
+			const selectionId = createHash("sha256")
+				.update(JSON.stringify({ ownerInputId: id, inputs }))
+				.digest("hex");
+			const selection: ParentNoteSelection = {
+				ownerInputId: id,
+				inputs,
+				messages: notes,
+				selectionId,
+				isCurrent: () => {
+					admission.assertCurrent();
+					const pending = new Set(this.getPendingParentInputs("next-owner-turn").map((input) => input.entryId));
+					return this.parentNoteAdmission === admission && inputs.every((input) => pending.has(input.entryId));
+				},
+			};
+			owner.selection = selection;
+			this.plannedParentNotes = selection;
+			return selection;
+		}
+		return undefined;
+	}
+
+	private _parentNoteOwnerId(message: AgentMessage): string | undefined {
+		if (message.role !== "user") return undefined;
+		const stamped = ownerInputIdOf(message);
+		if (stamped) return stamped;
+		const id = this.getMessageEntryId(message);
+		const entry = id ? this.getEntry(id) : undefined;
+		return entry?.type === "message" ? entry.ownerInputId : undefined;
+	}
+
+	/** Exact owner and selected content proof, after canonical owner persistence and before transport. */
+	recordParentNoteRequest(
+		requestId: string,
+		source: readonly AgentMessage[],
+		messages: readonly { content: unknown }[],
+	): readonly string[] {
+		const selection = this.plannedParentNotes;
+		if (!selection) return [];
+		if (!selection.isCurrent()) throw new Error("Parent note selection changed before transport.");
+		const owner = this.parentNoteAdmission?.owners.get(selection.ownerInputId);
+		const ownerMessage = source.find((message) => this._parentNoteOwnerId(message) === selection.ownerInputId);
+		const ownerEntryId = (ownerMessage && this.getMessageEntryId(ownerMessage)) ?? owner?.ownerEntryId;
+		const ownerEntry = ownerEntryId && this.getEntry(ownerEntryId);
+		if (
+			!ownerEntryId ||
+			!ownerEntry ||
+			ownerEntry.type !== "message" ||
+			ownerEntry.ownerInputId !== selection.ownerInputId
+		)
+			throw new Error("Parent note owner input was not canonically persisted.");
+		assertParentInputVisible(
+			messages,
+			parentNoteMarker(selection.selectionId),
+			selection.messages.map((message) => {
+				if (typeof message.content !== "string") throw new Error("Parent note requires text.");
+				return message.content;
+			}),
+		);
+		const origin = this._parentInputIndex().find(selection.inputs[0]!.deliveryId)!.metadata.origin;
+		this._withParentInputMutation(origin, () => {
+			const entryId = this.appendCustomEntry(PARENT_NOTE_REQUEST_CUSTOM_TYPE, {
+				version: 1,
+				requestId,
+				ownerInputId: selection.ownerInputId,
+				ownerEntryId,
+				inputs: selection.inputs,
+			});
+			if (!this.isEntryPersisted(entryId)) throw new Error("Parent note binding was not physically persisted.");
+			if (owner) owner.ownerEntryId = ownerEntryId;
+		});
+		return selection.inputs.map((input) => input.deliveryId);
 	}
 	getParentInputWake(): ParentInputWake | undefined {
 		return this._parentInputIndex().openWake();
+	}
+
+	/** Only the exact currently admitted detached manifest may expose its pending inputs. */
+	getActiveParentInputIds(): ReadonlySet<string> {
+		const active = this.activeParentWake;
+		if (!active) return new Set();
+		active.assertCurrent();
+		const wake = this._parentInputIndex().openWake();
+		if (wake?.wakeId !== active.wakeId) throw new Error("Active parent wake no longer matches its manifest.");
+		return new Set(wake.inputs.map((input) => input.deliveryId));
 	}
 
 	private _appendParentMessage(message: CustomMessage<unknown>): SessionAppendReceipt {
@@ -3423,17 +3655,7 @@ export class SessionManager {
 		const index = this._parentInputIndex();
 		const existing = index.openWake();
 		if (existing) return existing;
-		const pending: PersistedParentInput[] = [];
-		let payloadChars = 0;
-		for (const input of index.pendingInputs()) {
-			const entry = this.getEntry(input.entryId);
-			if (entry?.type !== "custom_message" || typeof entry.content !== "string")
-				throw new Error("Parent input requires canonical text.");
-			if (pending.length >= MAX_PARENT_WAKE_INPUTS || payloadChars + entry.content.length > MAX_PARENT_WAKE_CHARS)
-				break;
-			payloadChars += entry.content.length;
-			pending.push(input);
-		}
+		const pending = this._pendingParentBatch("turn");
 		if (!pending.length) return undefined;
 		return this._withParentInputMutation(pending[0]!.metadata.origin, () => {
 			const inputs = pending.map((input) => ({
@@ -3471,26 +3693,16 @@ export class SessionManager {
 		const active = this.activeParentWake;
 		if (!active) return;
 		active.assertCurrent();
-		const texts = messages.flatMap(({ content }) =>
-			typeof content === "string"
-				? [content]
-				: Array.isArray(content)
-					? content.flatMap((block) =>
-							block && typeof block === "object" && "text" in block && typeof block.text === "string"
-								? [block.text]
-								: [],
-						)
-					: [],
-		);
-		const visible = (text: string): boolean => texts.some((value) => value.includes(text));
 		const wake = this._parentInputIndex().openWake();
-		if (wake?.wakeId !== active.wakeId || !visible(parentWakeMarker(active.wakeId)))
+		if (wake?.wakeId !== active.wakeId)
 			throw new Error("Parent wake manifest is absent from the actual provider request.");
-		for (const input of wake.inputs) {
+		const contents = wake.inputs.map((input) => {
 			const entry = this.getEntry(input.entryId);
-			if (entry?.type !== "custom_message" || typeof entry.content !== "string" || !visible(entry.content))
+			if (entry?.type !== "custom_message" || typeof entry.content !== "string")
 				throw new Error("An exact selected parent input is absent from the actual provider request.");
-		}
+			return entry.content;
+		});
+		assertParentInputVisible(messages, parentWakeMarker(active.wakeId), contents);
 		const id = this.appendCustomEntry(PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE, {
 			version: 1,
 			wakeId: active.wakeId,
@@ -3509,12 +3721,30 @@ export class SessionManager {
 			const current = this._parentInputIndex().openWake();
 			if (current?.wakeId !== wakeId || !current.completed)
 				throw new Error("Parent wake changed before settlement.");
-			const id = this.appendCustomEntry(PARENT_INPUT_SETTLED_CUSTOM_TYPE, {
-				version: 1,
-				wakeId,
-				...current.completed,
-			});
-			if (!this.isEntryPersisted(id)) throw new Error("Parent wake settlement was not persisted.");
+			const consumption = this._parentInputIndex().wakeConsumption(wakeId);
+			if (!consumption) throw new Error("Parent wake consumption proof is missing.");
+			const ids = pendingIdSpace(this.byId);
+			const id = generateId(ids);
+			ids.add(id);
+			const timestamp = new Date().toISOString();
+			const settlement: CustomEntry = {
+				type: "custom",
+				id,
+				parentId: this.leafId,
+				timestamp,
+				customType: PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+				data: { version: 1, wakeId, ...current.completed },
+			};
+			const report: CustomEntry = {
+				type: "custom",
+				id: generateId(ids),
+				parentId: id,
+				timestamp,
+				customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+				data: consumption,
+			};
+			this._appendEntries([settlement, report]);
+			if (!this.isEntryPersisted(report.id)) throw new Error("Parent wake settlement was not persisted.");
 		});
 	}
 

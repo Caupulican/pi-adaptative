@@ -84,6 +84,9 @@ export interface ContinuousChatRoot {
 	nextId: number;
 	lastSegment?: string;
 	lastSegmentBytes: number;
+	/** Identity/revision of the durable visible-record projection authority. */
+	projectionId?: string;
+	projectionRevision?: number;
 }
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -313,6 +316,14 @@ export function parseContinuousChatRoot(value: unknown): ContinuousChatRoot | un
 		return undefined;
 	}
 	if (!isNonNegativeSafeInteger(value.lastSegmentBytes)) return undefined;
+	if ((value.projectionId === undefined) !== (value.projectionRevision === undefined)) return undefined;
+	if (
+		value.projectionId !== undefined &&
+		(typeof value.projectionId !== "string" ||
+			!/^[a-f0-9-]{36}$/.test(value.projectionId) ||
+			!isNonNegativeSafeInteger(value.projectionRevision))
+	)
+		return undefined;
 	if (
 		value.lastSegment !== undefined &&
 		(typeof value.lastSegment !== "string" || !DAY_PATTERN.test(value.lastSegment))
@@ -325,5 +336,8 @@ export function parseContinuousChatRoot(value: unknown): ContinuousChatRoot | un
 		nextId: value.nextId,
 		lastSegment: value.lastSegment,
 		lastSegmentBytes: value.lastSegmentBytes,
+		...(value.projectionId === undefined
+			? {}
+			: { projectionId: value.projectionId as string, projectionRevision: value.projectionRevision as number }),
 	};
 }

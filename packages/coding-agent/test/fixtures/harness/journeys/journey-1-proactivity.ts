@@ -7,6 +7,7 @@ import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-recor
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney1ProactivityDurability } from "./journey-1-proactivity-durability.ts";
 
 const NOTE_TEXT = "The changelog entry you asked for is still not written.";
 const NOTE_MARKER = "[proactive note]";
@@ -59,6 +60,16 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	});
 	const session: AgentSession = created.session;
 	const lanes = session.backgroundLanes;
+	const displayedNotes: string[] = [];
+	const stopDisplay = session.subscribe((event) => {
+		if (
+			(event.type === "message_start" || event.type === "message_end") &&
+			event.message.role === "custom" &&
+			event.message.customType === "proactive-note" &&
+			String(event.message.content).includes(NOTE_TEXT)
+		)
+			displayedNotes.push(event.type);
+	});
 	expect(created.settingsManager.getProactivitySettings().delivery, "the owner's explicit note choice wins").toBe(
 		"note",
 	);
@@ -153,12 +164,14 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(seen[0]?.systemPrompt, "the review is told to stay quiet by default").toContain("Stay quiet by default");
 	expect(seen[0]?.messages, "the review reads the owner's standing preferences").toContain(preferences);
 	expect(seen[0]?.messages, "the review reads the conversation").toContain("Finish the migration");
+	expect(displayedNotes, "a deferred note does not interrupt before the owner's next turn").toEqual([]);
 
 	// The note reaches the owner's next turn, once.
 	await ownerTurn("proactivity-2", "Thanks.");
 	const second = ownerRequests.at(-1) ?? "";
 	expect(second, "the raised note is carried with the owner's next turn").toContain(NOTE_TEXT);
 	expect(noteCount(second), "the note is delivered once").toBe(1);
+	expect(displayedNotes, "the owner's turn displays the accepted note once").toEqual(["message_start", "message_end"]);
 
 	// Review 2 raises the same note again: it is a repeat, so nothing more is delivered.
 	const repeat = await review("proactivity-review-2", [
@@ -180,6 +193,11 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(nothing, "a review with nothing to raise is quiet").toBe("quiet");
 	await ownerTurn("proactivity-4", "Carry on.");
 	expect(noteCount(ownerRequests.at(-1) ?? ""), "a review with nothing to raise delivers nothing").toBe(1);
+	expect(displayedNotes, "later turns do not redisplay an already shown note").toEqual([
+		"message_start",
+		"message_end",
+	]);
+	stopDisplay();
 
 	// The per-session cap is spent: the next idle arms no review.
 	expect(world.timers.armedDelays("proactivity"), "no review is armed past the cap").toEqual([]);
@@ -320,6 +338,19 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	).toBe("turn");
 	lanes.clearResearchLaneTimer();
 	const currentNote = "The current review can wake its own parent turn.";
+	const parentSettled = createBarrier();
+	const stopParent = created.sessionManager.onEntriesPersisted(() => {
+		const accepted = created.sessionManager
+			.getEntries()
+			.some(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "proactive-note" &&
+					typeof entry.content === "string" &&
+					entry.content.includes(currentNote),
+			);
+		if (accepted && created.sessionManager.getPendingParentInputs().length === 0) parentSettled.release();
+	});
 	// This wake is a host-owned custom message, not another owner input to classify.
 	world.systemOne.enterPhase("proactivity-turn-delivery", {});
 	world.provider.enqueue(
@@ -346,6 +377,8 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		deliveredTurn.delivered.map((note) => note.text),
 		"own parent wake does not invalidate committed delivery",
 	).toEqual([currentNote]);
+	await withDeadline(trace, "default proactivity parent turn settles", parentSettled.promise);
+	stopParent();
 	expect(await world.disposeSessionInBody(session), "the proactivity session closes cleanly").toBeUndefined();
 
 	// The actual transport receives a reduced output cap; exhausting it prevents the second call and note delivery.
@@ -555,4 +588,5 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(confirmations, "every mutating call reached the expected owner boundary exactly once").toBe(7);
 	expect(await world.disposeSessionInBody(off.session), "the off session closes cleanly").toBeUndefined();
 	trace.mark("root", "proactivity.done");
+	await runJourney1ProactivityDurability(world);
 }

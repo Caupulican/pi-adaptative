@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
+import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { isOwnerSpokenInputId } from "../owner-input-ledger.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 /** The custom message type a raised note is delivered under. */
 export const PROACTIVE_NOTE_CUSTOM_TYPE = "proactive-note";
@@ -182,7 +184,9 @@ export function priorNotes(entries: readonly SessionEntry[]): { digests: Set<str
 	const texts: string[] = [];
 	for (const entry of entries) {
 		if (entry.type !== "custom_message" || entry.customType !== PROACTIVE_NOTE_CUSTOM_TYPE) continue;
-		const details = entry.details as { notes?: unknown } | undefined;
+		const original =
+			parentInputOf(entry) && isPlainRecord(entry.details) ? entry.details.originalDetails : entry.details;
+		const details = isPlainRecord(original) ? original : undefined;
 		if (!Array.isArray(details?.notes)) continue;
 		for (const note of details.notes) {
 			if (typeof note === "object" && note !== null && typeof (note as { text?: unknown }).text === "string") {
