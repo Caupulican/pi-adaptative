@@ -716,12 +716,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
-		this._runTeardownStep("stop routine scheduler", () => this._routines?.scheduler.dispose());
+		let routineShutdown = Promise.resolve();
+		this._runTeardownStep("stop routine scheduler", () => {
+			routineShutdown = this._routines?.scheduler.close() ?? Promise.resolve();
+		});
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
 		this._runTeardownStep("unsubscribe lane records", () => unsubscribeLaneRecordStore?.());
-		return workerShutdown;
+		// Disposal completes only after the routine pass and its deliveries joined, not merely after they were told to stop.
+		return Promise.all([workerShutdown, routineShutdown]).then(() => undefined);
 	}
 
 	private _runTeardownStep(label: string, step: () => void): void {

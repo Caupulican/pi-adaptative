@@ -2027,26 +2027,30 @@ export class PersistentBotTeamStore {
 	}
 
 	/**
-	 * The detached daemon's tick: every enabled due routine not yet marked queued is marked queued, its bot's summary
-	 * updated or its team handed the routine prompt as a brain message, all in one locked transaction over the shared
-	 * store. The daemon runs no model, so it never consumes a due routine: `nextRunAt` stays put and the next session's
-	 * scheduler claims it (`claimDueRoutinesInMap`), which dispatches it and moves `nextRunAt` forward. Advancing it here
-	 * made that claim skip the routine, so a routine queued by the daemon was never dispatched. A store an older build
-	 * rewrote in the version-1 shape is resealed in the same transaction.
+	 * The detached daemon's tick for bot and team routines: every enabled due one not yet marked queued is marked
+	 * queued, its bot's summary updated or its team handed the routine prompt as a brain message, all in one locked
+	 * transaction over the shared store. The daemon runs no model, so it never consumes a due routine: `nextRunAt` stays
+	 * put and the next session's scheduler claims it (`claimDueRoutinesInMap`), which dispatches it and moves `nextRunAt`
+	 * forward. Advancing it here made that claim skip the routine, so a routine queued by the daemon was never
+	 * dispatched. Session routines are never marked: their occurrence journal is their only run state, and the session
+	 * scheduler that owns them claims them through it. Only run state changes; the admitted definition (`updatedAt`
+	 * included) is the revision's and every occurrence copies it. A store an older build rewrote in the version-1 shape
+	 * is resealed in the same transaction.
 	 */
 	queueDueRoutinesForDaemon(nowMs = Date.now()): number {
 		return this.mutate(() => {
 			const nowIso = new Date(nowMs).toISOString();
 			let queued = 0;
 			for (const routine of [...this.routines.values()]) {
-				if (!routine.enabled || routine.nextRunAt > nowMs || routine.lastStatus === "queued") continue;
+				if (
+					routine.target.kind === "session" ||
+					!routine.enabled ||
+					routine.nextRunAt > nowMs ||
+					routine.lastStatus === "queued"
+				)
+					continue;
 				const summary = `[Daemon ${nowIso}] Routine queued across TUI session: ${routine.prompt.slice(0, 160)}`;
-				this.routines.set(routine.routineId, {
-					...routine,
-					lastStatus: "queued",
-					lastSummary: summary,
-					updatedAt: nowIso,
-				});
+				this.routines.set(routine.routineId, { ...routine, lastStatus: "queued", lastSummary: summary });
 				queued++;
 				if (routine.target.kind === "bot") {
 					const bot = this.bots.get(routine.target.agentId);

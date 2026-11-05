@@ -252,12 +252,18 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		});
 		const beforeDaemon = store().getRoutine(routineId)!;
 		world.timers.advance("routines", 60_000);
-		expect(store().queueDueRoutinesForDaemon(world.timers.port("routines").now())).toBe(1);
-		expect(store().getRoutine(routineId)?.nextRunAt, "the daemon leaves due-time ownership with the scheduler").toBe(
-			at,
+		expect(
+			store().queueDueRoutinesForDaemon(world.timers.port("routines").now()),
+			"the daemon never marks a session routine; its occurrence journal is its only run state",
+		).toBe(0);
+		const afterDaemon = store().getRoutine(routineId)!;
+		expect(afterDaemon.nextRunAt, "the daemon leaves due-time ownership with the scheduler").toBe(at);
+		expect(afterDaemon.revision, "a daemon observation does not edit saved intent").toBe(beforeDaemon.revision);
+		expect(afterDaemon.updatedAt, "a daemon observation does not rewrite the admitted definition").toBe(
+			beforeDaemon.updatedAt,
 		);
-		expect(store().getRoutine(routineId)?.revision, "a daemon observation does not edit saved intent").toBe(
-			beforeDaemon.revision,
+		expect(afterDaemon.lastStatus, "a daemon observation does not mark session run state").toBe(
+			beforeDaemon.lastStatus,
 		);
 		try {
 			await withDeadline(world.trace, "busy specialist leaves the scheduled occurrence pending", deferred.promise);

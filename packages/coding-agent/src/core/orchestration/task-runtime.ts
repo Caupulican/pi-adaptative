@@ -1010,18 +1010,25 @@ export class DurableTaskRuntime {
 	}
 
 	/**
-	 * Recover unbound in-process work after a process restart. A completion has no resumable model
-	 * transcript, so its old lease is fenced and the task becomes dispatchable for a fresh attempt.
-	 * Agent-bound attempts are intentionally excluded: those must wake the same logical agent.
+	 * Recover unbound in-process work whose owner is gone. A completion has no resumable model transcript, so its old
+	 * lease is fenced and the task becomes dispatchable for a fresh attempt. The attempt's owner is its lease holder:
+	 * the lease is fenced only when `isOwnerGone` proves that holder gone or the lease expired unrenewed, so another
+	 * live process sharing this ledger never loses a running completion. Agent-bound attempts are intentionally
+	 * excluded: those must wake the same logical agent.
 	 */
-	recoverInterruptedUnboundAttempts(shouldRecover: (attempt: AttemptRuntimeState) => boolean = () => true): string[] {
+	recoverInterruptedUnboundAttempts(
+		shouldRecover: (attempt: AttemptRuntimeState) => boolean,
+		isOwnerGone: (ownerId: string) => boolean,
+	): string[] {
 		this.refresh();
+		const now = this.now();
 		const recovered: string[] = [];
 		for (const attempt of Object.values(this.state.attempts)) {
 			if (
 				(attempt.status !== "leased" && attempt.status !== "running") ||
 				attempt.agentId ||
-				!shouldRecover(attempt)
+				!shouldRecover(attempt) ||
+				(attempt.lease && Date.parse(attempt.lease.expiresAt) > now && !isOwnerGone(attempt.lease.ownerId))
 			) {
 				continue;
 			}

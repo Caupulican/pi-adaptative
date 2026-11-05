@@ -149,6 +149,15 @@ export class RoutineSchedulerController {
 		}
 	}
 
+	/**
+	 * Disposes, then joins the in-flight pass and parent deliveries. A settled pass or delivery observed the disposal
+	 * before its next store write, so nothing this owner started writes after the join.
+	 */
+	async close(): Promise<void> {
+		this.dispose();
+		await Promise.allSettled([this.pass, ...this.deliveries.values()]);
+	}
+
 	private get active(): boolean {
 		return this.started && !this.disposed && !this.deps.isDisposed();
 	}

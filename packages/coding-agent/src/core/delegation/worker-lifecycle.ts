@@ -582,20 +582,22 @@ export class WorkerLifecycle {
 		attempt: AttemptRuntimeState;
 		verificationOfTaskId?: string;
 	}> {
-		return this.ledger.recoverQueuedDispatches().flatMap((attempt) => {
-			if (isManagedWorkerAttempt(attempt)) return [];
-			const record = this.getRecord(attempt.taskId);
-			const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId]?.task;
-			return record
-				? [
-						{
-							record,
-							attempt,
-							...(task?.verificationOfTaskId ? { verificationOfTaskId: task.verificationOfTaskId } : {}),
-						},
-					]
-				: [];
-		});
+		return this.ledger
+			.recoverQueuedDispatches((ownerId) => isLocalWorkerProcessOwnerProvenDead(ownerId, this.isProcessAlive))
+			.flatMap((attempt) => {
+				if (isManagedWorkerAttempt(attempt)) return [];
+				const record = this.getRecord(attempt.taskId);
+				const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId]?.task;
+				return record
+					? [
+							{
+								record,
+								attempt,
+								...(task?.verificationOfTaskId ? { verificationOfTaskId: task.verificationOfTaskId } : {}),
+							},
+						]
+					: [];
+			});
 	}
 
 	/** Close crash windows between implementation completion, verifier dispatch, and reconciliation. */

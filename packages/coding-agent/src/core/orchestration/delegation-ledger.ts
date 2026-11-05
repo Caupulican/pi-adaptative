@@ -656,9 +656,15 @@ export class DelegationOrchestrationLedger {
 		return projectAttemptUsage(attempt, snapshot.checkpoints);
 	}
 
-	/** Fence interrupted isolated completions and queue one replacement attempt per task. */
-	recoverQueuedDispatches(): AttemptRuntimeState[] {
-		this.runtime.recoverInterruptedUnboundAttempts((attempt) => attempt.dispatch.executionKind !== "managed-process");
+	/**
+	 * Fence interrupted isolated completions whose lease owner `isOwnerGone` proves gone, and queue one replacement
+	 * attempt per task.
+	 */
+	recoverQueuedDispatches(isOwnerGone: (ownerId: string) => boolean): AttemptRuntimeState[] {
+		this.runtime.recoverInterruptedUnboundAttempts(
+			(attempt) => attempt.dispatch.executionKind !== "managed-process",
+			isOwnerGone,
+		);
 		let snapshot = this.runtime.getSnapshot();
 		for (const task of Object.values(snapshot.tasks)) {
 			const attempts = task.attemptIds.map((attemptId) => snapshot.attempts[attemptId]).filter(Boolean);
