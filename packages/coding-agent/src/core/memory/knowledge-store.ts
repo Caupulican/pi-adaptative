@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { knowledgeDatabaseFile } from "../agent-paths.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { KNOWLEDGE_COLLECTION_SCHEMA, KnowledgeCollectionJournal } from "./knowledge-collection-journal.ts";
 import {
 	isKnowledgeCitation,
@@ -63,12 +64,12 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	readonly collection: KnowledgeCollectionJournal;
 	private closed = false;
 
-	private constructor(db: SqliteDatabase) {
+	private constructor(db: SqliteDatabase, collectionTime?: Pick<TimerPort, "now">) {
 		this.db = db;
-		this.collection = new KnowledgeCollectionJournal(db);
+		this.collection = new KnowledgeCollectionJournal(db, collectionTime);
 	}
 
-	static open(agentDir: string): KnowledgeStore {
+	static open(agentDir: string, collectionTime?: Pick<TimerPort, "now">): KnowledgeStore {
 		const databasePath = knowledgeDatabaseFile(agentDir);
 		mkdirSync(dirname(databasePath), { recursive: true });
 		return constructSqliteDatabase({ databasePath }, (db) => {
@@ -78,7 +79,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
 			if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION)
 				throw new Error("Unsupported ICM knowledge schema");
-			const store = new KnowledgeStore(db);
+			const store = new KnowledgeStore(db, collectionTime);
 			if (version !== SCHEMA_VERSION)
 				store.transaction(() => {
 					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;

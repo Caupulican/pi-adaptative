@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isSessionIdentity } from "../../kernel/session/session-manager.ts";
-import type { SystemOneUsageRoute, TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
+import type { TypeSafeUsageReceipt, UnresolvedUsageRequest } from "../review/system-one-review-port.ts";
 import {
 	isReceiptCount,
 	isReceiptText,
@@ -20,7 +20,6 @@ import {
 	writeFileAtomicSync,
 } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
-import type { AccountingOrigin } from "./accounting-evidence.ts";
 import type { SemanticUsageLedgerIdentity } from "./session-ledger-port.ts";
 
 /**
@@ -95,15 +94,7 @@ export interface JournalDocument {
 	readonly unresolved?: readonly UnresolvedUsageRequest[];
 }
 
-/** A dispatched request with no measured response yet. Never projected as zero-cost usage or replayed. */
-export interface UnresolvedUsageRequest {
-	readonly requestId: string;
-	readonly provider: string;
-	readonly model: string;
-	readonly route: SystemOneUsageRoute;
-	readonly origin: AccountingOrigin;
-	readonly startedAt: string;
-}
+export type { UnresolvedUsageRequest } from "../review/system-one-review-port.ts";
 
 export function parseUnresolvedUsageRequest(value: unknown): UnresolvedUsageRequest | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["requestId", "provider", "model", "route", "origin", "startedAt"]))
@@ -117,10 +108,10 @@ export function parseUnresolvedUsageRequest(value: unknown): UnresolvedUsageRequ
 		!origin ||
 		!isReceiptText(startedAt) ||
 		!Number.isFinite(Date.parse(startedAt)) ||
-		!isSystemOneUsageRoute(route)
+		(route !== undefined && !isSystemOneUsageRoute(route))
 	)
 		return undefined;
-	return { requestId, provider, model, route, origin, startedAt };
+	return { requestId, provider, model, ...(route !== undefined ? { route } : {}), origin, startedAt };
 }
 
 /** The sidecar one session identity owns, and the identity its content must carry. */

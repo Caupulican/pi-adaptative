@@ -39,6 +39,7 @@ import {
 	SEMANTIC_USAGE_JOURNAL_MAX_RECORDS,
 	SemanticUsageJournalError,
 	samePayload,
+	sessionJournalPaths,
 	type UnresolvedUsageRequest,
 	updateJournal,
 } from "./semantic-usage-journal.ts";
@@ -90,6 +91,14 @@ export interface SemanticUsageProjection {
 	readonly overflow?: { readonly usage: Usage; readonly reports: number };
 }
 
+/** Original-session spending for one durable family of operations and one exact operation. */
+export interface SemanticOperationSpending {
+	readonly totalUsd: number;
+	readonly operationUsd: number;
+	/** Unknown charges or an unreadable baseline prevent admission of more spending. */
+	readonly unresolved: boolean;
+}
+
 /** What a discard does with a candidate's own file: removed, kept as evidence, or none (the candidate owns no file). */
 export type DiscardDisposition = "removed" | "kept" | "none";
 
@@ -126,6 +135,10 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	pendingProjection(): SemanticUsageProjection;
+	/** Canonical and pending reports share receipt identity; retries never reset this baseline. */
+	spending(operationPrefix: string, operationId: string): SemanticOperationSpending;
+	/** Fires after spending evidence changes. Listeners may only schedule work and must not throw. */
+	subscribeSpending(listener: () => void): () => void;
 	/** Records a history summary model call's paid spend through the same retention and canonical row as a System One review. */
 	recordHistoryUsage(usage: Usage, call: HistoryUsageCall): void;
 	/** Retains an actual maintenance response before validation; throws if its paid usage has no durable owner. */
@@ -182,6 +195,7 @@ function usageSubject(route: SystemOneUsageRoute | undefined): string {
 	if (route === "compaction") return "A compaction usage report";
 	if (route === "branch_summary") return "A branch summary usage report";
 	if (route === "proactivity") return "A proactive review usage report";
+	if (route === "knowledge_collection") return "A knowledge collection usage report";
 	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
 }
 
@@ -456,6 +470,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private readonly held = new Map<string, HeldReceipt>();
 	private readonly unresolved = new Map<string, UnresolvedUsageRequest>();
 	private readonly warnedRequests = new Set<string>();
+	private readonly spendingListeners = new Set<() => void>();
 	/** Confirmed rows whose journal copy is still in the sidecar, keyed by identity with the payload that copy names. */
 	private readonly staleCopies = new Map<string, TypeSafeUsageReceipt>();
 	private reserved = 0;
@@ -464,6 +479,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private fenceCause: string | undefined;
 	/** Per operation, each recovers on its own: the sidecar was read, a retained record can be written, a removal can be written. */
 	private loaded = false;
+	/** Corrupt accounting evidence cannot establish a complete spending baseline. */
+	private baselineUncertain = false;
 	private retainReady = true;
 	private removeReady = true;
 	/** The journal refused a record for capacity: no further record is written until a removal frees space or a pass starts. */
@@ -490,8 +507,21 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		this.bound = ledger.identity();
 		this.capture = capture ?? (() => ({ sessionId: this.bound.sessionId }));
 		this.boundSlot = journalSlotOf(this.bound);
-		if (this.bound.persisted) this.unsubscribePersisted = ledger.onPersisted(() => this.scheduleReconcile());
+		if (this.bound.persisted)
+			this.unsubscribePersisted = ledger.onPersisted((semanticUsageChanged) => {
+				if (semanticUsageChanged) this.notifySpending();
+				this.scheduleReconcile();
+			});
 		if (this.boundSlot !== undefined) this.listUnmatched(this.boundSlot);
+		if (this.boundSlot !== undefined) {
+			try {
+				this.baselineUncertain = sessionJournalPaths(this.boundSlot.sessionFile).some((path) =>
+					path.startsWith(`${this.boundSlot!.path}.corrupt.`),
+				);
+			} catch {
+				this.baselineUncertain = true;
+			}
+		}
 		// Recovery runs before this owner can take any paid work. A persisted session with an unsafe id still gets the ledger
 		// step (its rows are confirmed); it only has no journal copy.
 		if (this.bound.persisted) this.runReconcile();
@@ -564,6 +594,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	beginRequest(identity: SemanticUsageLedgerIdentity, request: UnresolvedUsageRequest): void {
 		if (
 			this.isDisposed ||
+			this.baselineUncertain ||
 			!sameIdentity(identity, this.ledger.identity()) ||
 			!parseUnresolvedUsageRequest(request) ||
 			request.origin.sessionId !== identity.sessionId ||
@@ -588,6 +619,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				undefined,
 			);
 		this.unresolved.set(request.requestId, structuredClone(request));
+		this.notifySpending();
+		// A corrupt file discovered under the write lock invalidates a prior spending projection.
+		if (this.baselineUncertain)
+			throw new SystemOneUsageRefusal("Request spending baseline became uncertain before dispatch");
 	}
 
 	reportUnresolvedRequest(requestId: string): void {
@@ -718,6 +753,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (outcome.kind !== "unretained") {
 			this.clearUnresolved(receipt.receiptId);
 		}
+		this.notifySpending();
 		// A conflict is reported where it is detected (W3); it is not a second, generic "could not be retained" warning.
 		if (outcome.kind === "unretained" && outcome.reason === "conflict") return outcome;
 		// Buffering before the first reply is the normal state of a new session, not a write failure.
@@ -756,6 +792,79 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 					.map((entry) => entry.report)
 			: [];
 		return { revision: this.revision, reports, ...(matches && this.overflow ? { overflow: this.overflow } : {}) };
+	}
+
+	spending(operationPrefix: string, operationId: string): SemanticOperationSpending {
+		if (!operationPrefix || !operationId.startsWith(operationPrefix))
+			throw new SystemOneUsageRefusal("Spending projection requires an operation within its explicit prefix");
+		let unresolved =
+			this.isDisposed ||
+			!sameIdentity(this.ledger.identity(), this.bound) ||
+			(this.bound.persisted && (!this.boundSlot || !this.loaded)) ||
+			this.baselineUncertain ||
+			this.ledger.persistenceUncertain();
+		let totalUsd = 0;
+		let operationUsd = 0;
+		const seen = new Set<string>();
+		const include = (receipt: TypeSafeUsageReceipt): void => {
+			if (
+				receipt.origin?.sessionId !== this.bound.sessionId ||
+				!receipt.origin.operationId?.startsWith(operationPrefix)
+			)
+				return;
+			if (seen.has(receipt.receiptId)) return;
+			seen.add(receipt.receiptId);
+			if ((receipt.costStatus !== "catalog_priced" && !receipt.priceKnown) || receipt.usage.totalTokens < 1)
+				unresolved = true;
+			totalUsd += receipt.usage.cost.total;
+			if (receipt.origin.operationId === operationId) operationUsd += receipt.usage.cost.total;
+		};
+		for (const row of this.ledger.canonicalRows()) {
+			if (!isPlainRecord(row.data) || !isPlainRecord(row.data.origin)) continue;
+			const origin = row.data.origin;
+			if (
+				origin.sessionId !== this.bound.sessionId ||
+				typeof origin.operationId !== "string" ||
+				!origin.operationId.startsWith(operationPrefix)
+			)
+				continue;
+			const { reportId, ...data } = row.data;
+			const receipt = parseTypeSafeUsageReceipt({ ...data, receiptId: reportId });
+			if (receipt) include(receipt);
+			else unresolved = true;
+		}
+		for (const entry of this.held.values()) {
+			if (!entry.payload.origin?.operationId?.startsWith(operationPrefix)) continue;
+			const receipt = parseTypeSafeUsageReceipt(entry.payload);
+			if (!receipt) {
+				unresolved = true;
+				continue;
+			}
+			const canonical = this.ledger.findCanonical(receipt.receiptId);
+			if (canonical && !isDeepStrictEqual(normalizedReport(canonical.data), normalizedReport(entry.report)))
+				unresolved = true;
+			include(receipt);
+		}
+		for (const request of this.unresolved.values()) {
+			if (request.origin.operationId?.startsWith(operationPrefix)) unresolved = true;
+		}
+		if (!Number.isFinite(totalUsd) || !Number.isFinite(operationUsd)) unresolved = true;
+		return { totalUsd, operationUsd, unresolved };
+	}
+
+	subscribeSpending(listener: () => void): () => void {
+		this.spendingListeners.add(listener);
+		return () => this.spendingListeners.delete(listener);
+	}
+
+	private notifySpending(): void {
+		for (const listener of this.spendingListeners) {
+			try {
+				listener();
+			} catch {
+				// Notification cannot interrupt retention of a paid accounting obligation.
+			}
+		}
 	}
 
 	snapshot(): SemanticUsageSnapshot {
@@ -816,6 +925,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			this.unsubscribePersisted = undefined;
 			if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
 			this.retryTimer = undefined;
+			this.notifySpending();
+			this.spendingListeners.clear();
 		}
 		const snapshot = this.snapshot();
 		const total =
@@ -1142,8 +1253,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	}
 
 	private clearUnresolved(reportId: string): void {
-		this.unresolved.delete(reportId);
+		const changed = this.unresolved.delete(reportId);
 		this.warnedRequests.delete(reportId);
+		if (changed) this.notifySpending();
 	}
 
 	private removeCopy(slot: JournalSlot, reportId: string, payload: TypeSafeUsageReceipt): void {
@@ -1262,6 +1374,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 
 	/** The moved-aside copies went with the evidence: held records are retained again, and stale copies are simply gone. */
 	private evidenceMoved(keep: HeldReceipt | undefined): void {
+		this.baselineUncertain = true;
+		this.notifySpending();
 		for (const entry of this.held.values()) {
 			// A receipt that never had a journal copy has nothing in the moved file to lose.
 			if (entry === keep || !entry.journalable) continue;
@@ -1331,6 +1445,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		this.revision += 1;
 		this.reconcileUnresolved();
 		for (const id of this.unresolved.keys()) this.reportUnresolvedRequest(id);
+		this.notifySpending();
 		return true;
 	}
 

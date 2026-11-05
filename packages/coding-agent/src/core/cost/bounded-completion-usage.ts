@@ -30,10 +30,11 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 		route: MaintenanceUsageRoute,
 		budget: number | RequestSpendBudget,
 		maxResponses: number,
+		origin = owner.captureOrigin(),
 	) {
 		this.owner = owner;
 		this.spending = typeof budget === "number" ? new RequestSpendBudget(budget) : budget;
-		this.origin = owner.captureOrigin();
+		this.origin = Object.freeze({ ...origin });
 		this.lease = owner.beginMaintenance(route, maxResponses, this.origin);
 		this.route = route;
 		this.maxResponses = maxResponses;
@@ -105,6 +106,7 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 						this.spending.fail("A response does not match the model whose price admitted the request.");
 					const outcome = this.lease.record({
 						...priceCompletedUsage(message.provider, message.model, usage),
+						priceKnown: true,
 						receiptId,
 						responseTimestamp: new Date(message.timestamp).toISOString(),
 						provider: message.provider,

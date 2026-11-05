@@ -202,6 +202,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		const reached = createBarrier();
 		const release = createBarrier();
 		const beforeReceipts = receipts().length;
+		const warningStart = world.warnings.length;
 		const recorded = createBarrier();
 		const stopRecording = created.sessionManager.onEntriesPersisted(() => {
 			if (receipts().length === beforeReceipts + 2) recorded.release();
@@ -238,6 +239,16 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			await change();
 			if (immediate) {
 				await withDeadline(trace, `${label} cancels before the provider returns`, pending);
+				expect(
+					world.warnings
+						.slice(warningStart)
+						.filter((warning) =>
+							/^Provider request [0-9a-f-]{36} ended locally with usage still unknown; its original accounting identity is retained in the session journal\.$/.test(
+								warning,
+							),
+						),
+					"the cancellation discloses its one genuinely unsettled provider response",
+				).toHaveLength(1);
 				expect(receipts().length, "cancellation fabricates no provider receipt").toBe(beforeReceipts + 1);
 				expect(
 					sessionSemanticUsageOf(created.sessionManager).snapshot().unresolved,
@@ -295,7 +306,8 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	});
 	lanes.clearResearchLaneTimer();
 	const currentNote = "The current review can wake its own parent turn.";
-	world.systemOne.enterPhase("proactivity-turn-delivery", PREVIOUS_TURN_JUDGMENTS);
+	// This wake is a host-owned custom message, not another owner input to classify.
+	world.systemOne.enterPhase("proactivity-turn-delivery", {});
 	world.provider.enqueue(
 		"root",
 		calls("proactivity-turn-note", [

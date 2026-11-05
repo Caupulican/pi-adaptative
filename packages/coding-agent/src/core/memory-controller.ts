@@ -71,11 +71,10 @@ import {
 	TRANSCRIPT_MEMORY_PROVIDER_ID,
 	transcriptSummaryBody,
 } from "./context/transcript-memory-provider.ts";
-import type { SemanticDecisionEngine } from "./decision/engine.ts";
+import type { DecisionOptions } from "./decision/engine.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
-import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./memory/continuous-chat-compaction-adapter.ts";
 import { ContinuousChatHost, type ContinuousChatHostPorts } from "./memory/continuous-chat-host.ts";
@@ -99,6 +98,7 @@ import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { memoryFailure } from "./memory/history-tool.ts";
 import { KnowledgeAdmission, type KnowledgeAdmissionPort } from "./memory/knowledge-admission.ts";
+import type { KnowledgeCollectionHost, KnowledgeCollector } from "./memory/knowledge-collector.ts";
 import {
 	KNOWLEDGE_CONTEXT_CLEARED,
 	KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
@@ -526,11 +526,8 @@ export interface MemoryControllerDeps {
 	 */
 	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
 	getUserPreferenceLearning?(): UserPreferenceLearningPort;
-	knowledge?: {
-		evidence(): OwnerEvidenceLedger;
-		engine(): SemanticDecisionEngine | undefined;
-		captureGuard(): () => string | undefined;
-	};
+	/** Resolved after construction because the reflection owner is created after memory. */
+	knowledge?: () => KnowledgeCollectionHost;
 	/**
 	 * Durable-publication events of this session's entries, for incremental history ingestion. The
 	 * returned function unsubscribes. Absent in narrow hosts: recall then covers only what it indexed
@@ -618,6 +615,9 @@ export class MemoryController {
 	private _continuousChatWire: ContinuousChatWire | undefined;
 	private _knowledgeStore: KnowledgeStore | undefined;
 	private _knowledgeReader: KnowledgeProjectionReader | undefined;
+	private _knowledgeHost: KnowledgeCollectionHost | undefined;
+	private _knowledgeCollector: KnowledgeCollector | undefined;
+	private _knowledgeStop: Promise<void> | undefined;
 	private _knowledgeReadFailure: string | undefined;
 	/** Summary hierarchy host, attached to the root history backend in either memory system; absent in narrow hosts. */
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
@@ -972,6 +972,7 @@ export class MemoryController {
 			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
 			const hierarchyStopped = this._hierarchy?.detach();
 			const continuousChatStopped = this._releaseContinuousChat();
+			const knowledgeStopped = this._stopKnowledgeCollector();
 			this._unsubscribeSettingsChanges?.();
 			this._unsubscribeSettingsChanges = undefined;
 			this._unsubscribeSettingsRecovery?.();
@@ -980,7 +981,12 @@ export class MemoryController {
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
 			// Attach to all already-started stops immediately; one rejection must not leave another unobserved.
-			const draining = Promise.allSettled([hierarchyStopped, continuousChatStopped, this._lifecycleTail]);
+			const draining = Promise.allSettled([
+				hierarchyStopped,
+				continuousChatStopped,
+				knowledgeStopped,
+				this._lifecycleTail,
+			]);
 			await runAsyncReleaseSteps(
 				[
 					async () => {
@@ -1557,9 +1563,9 @@ export class MemoryController {
 	}
 
 	/** Shared mutation authority for the root tool and the original-owner collection coordinator. */
-	getKnowledgeAdmission(): KnowledgeAdmissionPort | undefined {
+	getKnowledgeAdmission(request?: Pick<DecisionOptions, "budget" | "origin">): KnowledgeAdmissionPort | undefined {
 		const store = this._knowledgeStore;
-		const host = this.deps.knowledge;
+		const host = this._knowledgeHost;
 		if (!store || !host || !this._currentKnowledgeReader()) return undefined;
 		const generation = this._memoryGeneration;
 		const guard = host.captureGuard();
@@ -1567,6 +1573,7 @@ export class MemoryController {
 		const learningPolicy = this.deps.getSettingsManager().getLearningPolicySettings();
 		const automaticEnabled = this.deps.getSettingsManager().getAutoLearnSettings().enabled !== false;
 		return new KnowledgeAdmission({
+			request,
 			store,
 			evidence: host.evidence(),
 			scope: this._knowledgeScope(),
@@ -1596,9 +1603,9 @@ export class MemoryController {
 			scope: this._knowledgeScope(),
 			retrievalEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 			admission: () => this.getKnowledgeAdmission(),
-			readEvidence: this.deps.knowledge
+			readEvidence: this._knowledgeHost
 				? (cursor) => {
-						const evidence = this.deps.knowledge!.evidence();
+						const evidence = this._knowledgeHost!.evidence();
 						const page = evidence.readPage(cursor);
 						if (!page) return undefined;
 						const original = evidence.findSource(page.source.sourceId);
@@ -1623,10 +1630,56 @@ export class MemoryController {
 	}
 
 	/** Keep a failed close owned so a later activation or shutdown can retry it. */
-	private _releaseKnowledge(): void {
+	private async _releaseKnowledge(): Promise<void> {
+		await this._stopKnowledgeCollector();
 		this._knowledgeStore?.close();
 		this._knowledgeStore = undefined;
 		this._knowledgeReader = undefined;
+		this._knowledgeHost = undefined;
+	}
+
+	/** Revoke immediately, then keep the exact collector owned until its asynchronous work has joined. */
+	private _stopKnowledgeCollector(): Promise<void> {
+		const collector = this._knowledgeCollector;
+		if (!collector) return Promise.resolve();
+		if (this._knowledgeStop) return this._knowledgeStop;
+		let stopping: Promise<void>;
+		try {
+			stopping = collector.stop();
+		} catch (error) {
+			return Promise.reject(error);
+		}
+		this._knowledgeStop = stopping
+			.then(() => {
+				if (this._knowledgeCollector === collector) this._knowledgeCollector = undefined;
+			})
+			.finally(() => {
+				this._knowledgeStop = undefined;
+			});
+		return this._knowledgeStop;
+	}
+
+	private _startKnowledgeCollector(generation: number): void {
+		const store = this._knowledgeStore;
+		const host = this._knowledgeHost;
+		if (!store || !host || !this._currentKnowledgeReader()) return;
+		if (this._knowledgeCollector) throw new Error("Prior knowledge collection has not stopped.");
+		const scope = this._knowledgeScope();
+		const collector = host.createCollector({
+			store,
+			scope,
+			isCurrent: () =>
+				generation === this._memoryGeneration &&
+				store === this._knowledgeStore &&
+				this._currentKnowledgeReader() !== undefined &&
+				this._shutdownPromise === undefined &&
+				isDeepStrictEqual(scope, this._knowledgeScope()),
+			getKnowledge: () => this._knowledgeToolSource(),
+			getAdmission: (request) => this.getKnowledgeAdmission(request),
+		});
+		if (!collector) return;
+		this._knowledgeCollector = collector;
+		collector.start();
 	}
 
 	/** Managed memory files against their managed revisions (operator recovery view). */
@@ -2388,6 +2441,7 @@ export class MemoryController {
 	 */
 	private async _continuousChatStoppedOnItsOwn(host: ContinuousChatHost): Promise<void> {
 		if (this._continuousChat !== host) return;
+		const knowledgeStopped = Promise.allSettled([this._stopKnowledgeCollector()]);
 		this._continuousChat = undefined;
 		this._setContinuousChatWire({
 			kind: "blocked",
@@ -2400,6 +2454,10 @@ export class MemoryController {
 		await host.dispose().catch((error: unknown) => {
 			this.deps.emitWarning(`The ICM project chat could not release its runtime: ${String(error)}`);
 		});
+		for (const result of await knowledgeStopped) {
+			if (result.status === "rejected")
+				this.deps.emitWarning(`Knowledge collection could not stop after the chat ended: ${String(result.reason)}`);
+		}
 	}
 
 	/**
@@ -2780,7 +2838,8 @@ export class MemoryController {
 		const keptChat = system === "icm" ? this._continuousChat : undefined;
 		const hierarchyStopped = this._hierarchy?.detach();
 		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat() : undefined;
-		const stopping = Promise.allSettled([hierarchyStopped, continuousChatStopped]);
+		const knowledgeStopped = this._stopKnowledgeCollector();
+		const stopping = Promise.allSettled([hierarchyStopped, continuousChatStopped, knowledgeStopped]);
 		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
 		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
 			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
@@ -2815,7 +2874,7 @@ export class MemoryController {
 					if (stopFailures.length)
 						throw new AggregateError(stopFailures, "Memory activation could not retire prior work");
 					await previous.shutdownAll();
-					this._releaseKnowledge();
+					await this._releaseKnowledge();
 					if (generation !== this._memoryGeneration) return;
 					let writer: FileStoreProvider | undefined;
 					// One history backend per generation in either system, for a root session only: OKF keeps its
@@ -2895,7 +2954,8 @@ export class MemoryController {
 					}
 					this._activeMemorySystem = system;
 					if (system === "icm" && !this.deps.isChildSession()) {
-						this._knowledgeStore = KnowledgeStore.open(this.deps.getAgentDir());
+						this._knowledgeHost = this.deps.knowledge?.();
+						this._knowledgeStore = KnowledgeStore.open(this.deps.getAgentDir(), this._knowledgeHost?.time);
 						this._knowledgeReader = new KnowledgeProjectionReader(this._knowledgeStore);
 					}
 					this._fileStoreWriter = writer;
@@ -2946,19 +3006,25 @@ export class MemoryController {
 						// The settings handler ignores changes while an activation runs, so the summary model is checked now.
 						const compaction = this.deps.continuousChat?.compaction;
 						if (compaction) this._reviewLiveChatSummary(compaction);
+						if (failure === undefined && system === "icm") this._startKnowledgeCollector(generation);
 					}
 					end(failure);
 				}
 			})
-			.catch((error) => {
+			.catch(async (error) => {
 				if (generation === this._memoryGeneration) {
-					this._activeMemorySystem = undefined;
-					this._initializationFailed = true;
-					if (system === "icm") {
-						this._setContinuousChatWire({
-							kind: "blocked",
-							reason: error instanceof Error ? error.message : String(error),
-						});
+					await this._stopKnowledgeCollector().catch((stopError: unknown) => {
+						this.deps.emitWarning(`Knowledge collection cleanup failed: ${String(stopError)}`);
+					});
+					if (generation === this._memoryGeneration) {
+						this._activeMemorySystem = undefined;
+						this._initializationFailed = true;
+						if (system === "icm") {
+							this._setContinuousChatWire({
+								kind: "blocked",
+								reason: error instanceof Error ? error.message : String(error),
+							});
+						}
 					}
 				}
 				// Same route as an init failure: a session warning, never a stderr write from construction.

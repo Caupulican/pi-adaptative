@@ -411,9 +411,12 @@ export class SystemOneReviewer {
 		let raw: unknown;
 		let lease: SystemOneUsageLease | undefined;
 		let unmeasuredAttempt = false;
+		let unresolvedRequestId: string | undefined;
 		try {
 			// Before any provider call: a refused lease is a typed evaluation failure with nothing paid.
 			lease = this.deps.usage?.begin(undefined, capturedOrigin);
+			if (budget && (!lease?.beginRequest || !capturedOrigin))
+				throw new SystemOneUsageRefusal("Budgeted semantic requests require durable request accounting");
 			raw = await retryProviderRequest(
 				async () => {
 					combined.signal?.throwIfAborted();
@@ -421,6 +424,18 @@ export class SystemOneReviewer {
 					// This callback runs for every retry, using all charges from earlier attempts.
 					if (unmeasuredAttempt) budget?.fail("A previous semantic attempt has no valid priced usage.");
 					budget?.assertAffordable(projectTypeSafeRequestCost(driver.id, request.model, body));
+					const receiptId = `${evaluationId}:${attempts + 1}`;
+					if (budget && lease?.beginRequest && capturedOrigin) {
+						lease.beginRequest({
+							requestId: receiptId,
+							provider: driver.id,
+							model: request.model,
+							origin: capturedOrigin,
+							startedAt: new Date().toISOString(),
+						});
+						unresolvedRequestId = receiptId;
+						budget.beginRequest(receiptId);
+					}
 					attempts++;
 					unmeasuredAttempt = true;
 					raw = undefined;
@@ -479,7 +494,6 @@ export class SystemOneReviewer {
 					const reportedUsage = getEvaluationUsage(raw);
 					if (reportedUsage) {
 						const priced = priceTypeSafeUsage(driver.id, request.model, reportedUsage);
-						const receiptId = `${evaluationId}:${attempts}`;
 						if (priced.costStatus === "catalog_priced") {
 							unmeasuredAttempt = false;
 							budget?.record(receiptId, priced.usage.cost.total, priced.usage.totalTokens);
@@ -498,6 +512,7 @@ export class SystemOneReviewer {
 						}
 					}
 					if (unmeasuredAttempt) budget?.fail("A semantic response has no valid priced usage.");
+					budget?.endRequest(receiptId);
 					try {
 						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
 					} catch (error) {
@@ -587,6 +602,10 @@ export class SystemOneReviewer {
 							: `${providerName} request failed`;
 			throw new SystemOneReviewError(redact(message), requestSha256, safeRequest, raw, transportAttempts, receipts);
 		} finally {
+			if (unresolvedRequestId) {
+				budget?.endRequest(unresolvedRequestId);
+				this.deps.usage?.reportUnresolvedRequest?.(unresolvedRequestId);
+			}
 			clearTimeout(timer);
 			combined.cleanup();
 			lease?.release();

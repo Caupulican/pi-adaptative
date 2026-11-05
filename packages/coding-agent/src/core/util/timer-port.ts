@@ -45,6 +45,7 @@ export {
  *   worker's acknowledgement.
  * - `proactivity`: the idle delay before a proactive review may start. The review is armed only for an idle foreground and
  *   every gate is checked again when the alarm fires.
+ * - `knowledge-collection`: the original-owner collector's idle delay and bounded pass deadline.
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  */
@@ -68,6 +69,7 @@ export type TimerOwner =
 	| "worktree-sync"
 	| "continuous-chat"
 	| "proactivity"
+	| "knowledge-collection"
 	| "tool-recovery-log";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */

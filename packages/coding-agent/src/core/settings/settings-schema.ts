@@ -207,6 +207,10 @@ export interface SelfModificationSettings {
 export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AutoLearnSettings {
+	knowledgeMaxUsd?: number; // default: 0.05 per original owner source per session, extraction and admission combined
+	knowledgeSessionMaxUsd?: number; // default: 0.50 cumulative collection spend per session, retained across restarts
+	knowledgeIdleDelayMs?: number; // default: 2000 before collecting original owner knowledge while idle
+	knowledgeMaxSourcesPerPass?: number; // default: 4 sources before yielding back to the session
 	enabled?: boolean; // effective default: true in every autonomy preset; explicit false is the kill switch
 	model?: string; // "active" or omitted uses the current session model; otherwise a pi --model pattern
 	thinkingLevel?: AutoLearnThinkingLevel; // default: low for background learner subprocesses

@@ -34,6 +34,7 @@ import type {
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
+import type { KnowledgeCollectionHandoff, KnowledgeCollectionOutcome } from "./memory/knowledge-collector.ts";
 import type { MemoryActivationEvent } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
@@ -79,6 +80,8 @@ export type AgentSessionEvent =
 	| { type: "usage_updated" }
 	/** One proactive review ended: `raised` delivered notes, `quiet` found nothing to raise, `failed` did not complete. */
 	| { type: "proactive_review"; outcome: "raised" | "quiet" | "failed"; noteCount: number }
+	/** Original-owner collection ended; retained state distinguishes a durable handoff from a pending one. */
+	| ({ type: "knowledge_collection"; handoff?: KnowledgeCollectionHandoff } & KnowledgeCollectionOutcome)
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	/** `severity: "info"` marks routine work flow that is announced but is not a problem (a request to the root). */
 	| { type: "warning"; message: string; severity?: "info" }

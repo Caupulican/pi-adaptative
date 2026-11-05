@@ -5,11 +5,7 @@ import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import type { Agent } from "../kernel/agent.ts";
-import {
-	type CompactionResult,
-	type CompactionSettings,
-	hardCompactionTriggerTokens,
-} from "../kernel/compaction/compaction.ts";
+import type { CompactionResult, CompactionSettings } from "../kernel/compaction/compaction.ts";
 import type { AgentContext } from "../kernel/index.ts";
 import { messageRevision } from "../kernel/message-revision.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
@@ -1264,11 +1260,16 @@ export class AgentSession {
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			onActivation: (event) => this._emit({ type: "memory_activation", ...event }),
 			getUserPreferenceLearning: () => this._reflection.userPreferenceLearning,
-			knowledge: {
-				evidence: () => this._reflection.ownerEvidence,
-				engine: () => this._semanticPlane.recordingSemanticEngine(),
-				captureGuard: () => this._reflection.captureLearningContext(),
-			},
+			knowledge: () =>
+				this._reflection.createKnowledgeHost({
+					engine: () => this._semanticPlane.recordingSemanticEngine(),
+					models: historyModels,
+					time: config.timers.port("knowledge-collection"),
+					isForegroundBusy: () => this._foregroundRecovery.isBusy,
+					subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
+					maxEstimatedUsd: () => this.capabilityEnvelope?.maxEstimatedUsd,
+					onTerminal: (outcome, handoff) => this._emit({ type: "knowledge_collection", ...outcome, handoff }),
+				}),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
 			providerRequest: {
@@ -1358,7 +1359,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
 			getModel: () => this.model,
-			getCompactionTriggerTokens: () => this._hardCompactionTriggerTokens(),
+			getCompactionTriggerTokens: () => this._compactionSupport.getHardTriggerTokens(),
 			estimateLineageRemainingRequests: () =>
 				this._cache.knowledge.lineage(this.sessionId, this._foregroundLineage(), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
@@ -1485,8 +1486,8 @@ export class AgentSession {
 			getSettings: () => this.settingsManager.getSelfCompactionSettings(),
 			getContextUsage: () => this.getContextUsage(),
 			getCachedTokens: () => latestCachedReadTokens(this.agent.state.messages),
-			getHardTriggerTokens: () => this._hardCompactionTriggerTokens(),
-			getEarlyTriggerTokens: () => this._earlyCompactionTriggerTokens(),
+			getHardTriggerTokens: () => this._compactionSupport.getHardTriggerTokens(),
+			getEarlyTriggerTokens: () => this._compactionSupport.getEarlyTriggerTokens(),
 			hasCompactableHistory: () => this._compaction.hasCompactableHistory(),
 			releasesAtTurnEnd: () => this._isContinuousChatRoot(),
 			turnReleaseFloorTokens: () => this._compaction.turnRequestFloorTokens(),
@@ -3234,21 +3235,6 @@ export class AgentSession {
 
 	private _hasPendingIdleContinuation(): boolean {
 		return this._backgroundLanes.hasPendingIdleContinuation() || this._selfCompaction.hasPendingContinuation();
-	}
-
-	private _hardCompactionTriggerTokens(): number | undefined {
-		const model = this.model;
-		const settings = this._getAdaptedCompactionSettings();
-		if (!model?.contextWindow || !settings.enabled) return undefined;
-		return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
-	}
-
-	private _earlyCompactionTriggerTokens(): number | undefined {
-		const model = this.model;
-		const settings = this._getAdaptedCompactionSettings();
-		const percent = settings.triggerPercent ?? 0;
-		if (!model?.contextWindow || !settings.enabled || !(percent > 0 && percent < 1)) return undefined;
-		return Math.floor(model.contextWindow * percent);
 	}
 
 	private _isForegroundPhaseBusy(): boolean {

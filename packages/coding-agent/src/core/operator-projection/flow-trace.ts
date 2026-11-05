@@ -263,6 +263,8 @@ export class FlowTrace {
 		session_info_changed: () => {},
 		usage_updated: () => {},
 		proactive_review: () => {},
+		// Collection handoffs are maintenance metadata; their judgments and warnings have their own flow events.
+		knowledge_collection: () => {},
 		thinking_level_changed: () => {},
 		// Memory activation is session state; a failed one reaches the trace as its warning.
 		memory_activation: () => {},

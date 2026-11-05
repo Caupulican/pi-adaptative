@@ -11,6 +11,7 @@ import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import {
 	type CompactionSettings,
+	hardCompactionTriggerTokens,
 	type StructuredCompactionRequest,
 	summarizerCanIngest,
 } from "../kernel/compaction/compaction.ts";
@@ -196,6 +197,22 @@ export class CompactionSupport {
 
 	getLastSelectionReason(): string | undefined {
 		return this.lastSelectionReason;
+	}
+
+	/** Both trigger readers use the same adapted policy as the compaction request. */
+	getHardTriggerTokens(): number | undefined {
+		const model = this.deps.getModel();
+		const settings = this.getAdaptedSettings();
+		if (!model?.contextWindow || !settings.enabled) return undefined;
+		return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
+	}
+
+	getEarlyTriggerTokens(): number | undefined {
+		const model = this.deps.getModel();
+		const settings = this.getAdaptedSettings();
+		const percent = settings.triggerPercent ?? 0;
+		if (!model?.contextWindow || !settings.enabled || !(percent > 0 && percent < 1)) return undefined;
+		return Math.floor(model.contextWindow * percent);
 	}
 
 	getAdaptedSettings(requestModel?: Model<Api>): CompactionSettings {

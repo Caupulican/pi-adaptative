@@ -4,6 +4,7 @@ import { Value } from "typebox/value";
 import { type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	type KnowledgeAdmissionOperation,
 	type KnowledgeChange,
@@ -91,20 +92,24 @@ function timestamp(value: unknown): number {
 }
 
 /** Shared by extraction versions, so revisiting a source cannot rebind an operation to another job. */
-function candidateSourceIdentity(source: KnowledgeCollectionSource): string {
+export function knowledgeCollectionSourceIdentity(source: KnowledgeCollectionSource): string {
 	return canonicalDigest({ source: source.sourceId, original: source.digest, scope: source.scope });
 }
 
 export class KnowledgeCollectionJournal {
 	private readonly db: SqliteDatabase;
-	constructor(db: SqliteDatabase) {
+	private readonly time: Pick<TimerPort, "now">;
+	constructor(db: SqliteDatabase, time: Pick<TimerPort, "now"> = SYSTEM_TIMER_PORT) {
 		this.db = db;
+		this.time = time;
 	}
 
 	/** The active branch supplies the source; this journal never discovers another branch's inputs. */
-	claim(source: KnowledgeCollectionSource, dependency: string): KnowledgeCollectionClaim | undefined {
+	claim(
+		source: KnowledgeCollectionSource,
+		dependency: (holdCode: string | undefined) => string,
+	): KnowledgeCollectionClaim | undefined {
 		const id = sourceIdentity(source);
-		requireDigest(dependency);
 		return withSqliteTransaction(
 			this.db,
 			() => {
@@ -113,17 +118,34 @@ export class KnowledgeCollectionJournal {
 				VALUES(?,?,?,?,?,'pending')`)
 					.run(id, source.sourceId, source.digest, JSON.stringify(source.scope), source.extractorVersion);
 				const row = this.db
-					.prepare("SELECT status,expires,dependency,retry_at FROM collection_sources WHERE id=?")
+					.prepare("SELECT status,expires,dependency,retry_at,hold_code FROM collection_sources WHERE id=?")
 					.get(id)!;
-				const now = Date.now();
+				const code = typeof row.hold_code === "string" ? row.hold_code : undefined;
+				const currentDependency = dependency(code);
+				requireDigest(currentDependency);
+				const now = this.time.now();
 				if (
 					row.status === "processed" ||
 					(row.status === "claimed" && timestamp(row.expires) > now) ||
 					(row.status === "held" &&
-						row.dependency === dependency &&
+						row.dependency === currentDependency &&
 						(row.retry_at === null || timestamp(row.retry_at) > now))
 				)
 					return undefined;
+				// Target/evidence changes require new proposals, not retrying stale revisions and citations.
+				// Applied receipts and rejected operation identities remain immutable replay evidence.
+				if (
+					row.status === "held" &&
+					row.dependency !== currentDependency &&
+					(code?.startsWith("evidence:") || code?.startsWith("context:"))
+				) {
+					this.db
+						.prepare(
+							"UPDATE collection_candidates SET body=NULL,outcome='invalidated' WHERE source_id=? AND outcome='pending' AND NOT EXISTS(SELECT 1 FROM operation_receipts r WHERE r.operation_id=collection_candidates.operation_id)",
+						)
+						.run(knowledgeCollectionSourceIdentity(source));
+					this.db.prepare("UPDATE collection_sources SET manifest=NULL,manifest_digest=NULL WHERE id=?").run(id);
+				}
 				const token = randomUUID();
 				this.db
 					.prepare(
@@ -140,14 +162,26 @@ export class KnowledgeCollectionJournal {
 	assertCurrent(claim: KnowledgeCollectionClaim): void {
 		if (claim.id !== sourceIdentity(claim.source)) throw new Error("Collection source identity changed");
 		const row = this.db.prepare("SELECT status,token,expires FROM collection_sources WHERE id=?").get(claim.id);
-		if (row?.status !== "claimed" || row.token !== claim.token || timestamp(row.expires) <= Date.now())
+		if (row?.status !== "claimed" || row.token !== claim.token || timestamp(row.expires) <= this.time.now())
 			throw new Error("Knowledge collection claim is no longer current");
 	}
 
 	renew(claim: KnowledgeCollectionClaim): void {
 		this.mutate(claim, () => {
-			this.db.prepare("UPDATE collection_sources SET expires=? WHERE id=?").run(Date.now() + CLAIM_MS, claim.id);
+			this.db
+				.prepare("UPDATE collection_sources SET expires=? WHERE id=?")
+				.run(this.time.now() + CLAIM_MS, claim.id);
 		});
+	}
+
+	/** A skipped live claim or timed hold must wake discovery without waiting for new owner input. */
+	nextEligibleAt(source: KnowledgeCollectionSource): number | undefined {
+		const row = this.db
+			.prepare("SELECT status,expires,retry_at FROM collection_sources WHERE id=?")
+			.get(sourceIdentity(source));
+		if (row?.status === "claimed") return timestamp(row.expires);
+		if (row?.status === "held" && row.retry_at !== null) return timestamp(row.retry_at);
+		return undefined;
 	}
 
 	/** Undefined means extraction is needed. After forgetting, old sources keep proposal bodies transient. */
@@ -170,7 +204,7 @@ export class KnowledgeCollectionJournal {
 		for (const id of ids) {
 			const candidate = this.db
 				.prepare("SELECT digest,body,outcome FROM collection_candidates WHERE source_id=? AND operation_id=?")
-				.get(candidateSourceIdentity(claim.source), id);
+				.get(knowledgeCollectionSourceIdentity(claim.source), id);
 			if (!candidate || typeof candidate.digest !== "string") throw new Error("Missing collection candidate");
 			requireDigest(candidate.digest);
 			const applied = this.hasReceipt(id, candidate.digest);
@@ -225,7 +259,7 @@ export class KnowledgeCollectionJournal {
 						change.evidence.every((citation) => citation.source === claim.source.sourceId));
 				const expectedDigest = canonicalDigest({ change, scope: claim.source.scope });
 				const operationId = canonicalDigest({
-					source: candidateSourceIdentity(claim.source),
+					source: knowledgeCollectionSourceIdentity(claim.source),
 					candidate: expectedDigest,
 				});
 				const previous = this.db
@@ -241,7 +275,7 @@ export class KnowledgeCollectionJournal {
 					source_id=excluded.source_id,body=excluded.body,outcome=excluded.outcome`)
 					.run(
 						operationId,
-						candidateSourceIdentity(claim.source),
+						knowledgeCollectionSourceIdentity(claim.source),
 						expectedDigest,
 						retainBody && outcome === "pending" ? JSON.stringify(change) : null,
 						outcome,
@@ -270,7 +304,7 @@ export class KnowledgeCollectionJournal {
 			const current = this.db.prepare("SELECT manifest_digest FROM collection_sources WHERE id=?").get(claim.id);
 			const stored = this.db
 				.prepare("SELECT digest FROM collection_candidates WHERE source_id=? AND operation_id=?")
-				.get(candidateSourceIdentity(claim.source), candidate.operationId);
+				.get(knowledgeCollectionSourceIdentity(claim.source), candidate.operationId);
 			if (
 				stored?.digest !== candidate.expectedDigest ||
 				current?.manifest_digest !== plan.digest ||
@@ -293,7 +327,7 @@ export class KnowledgeCollectionJournal {
 			() => {
 				const row = this.db
 					.prepare("SELECT digest FROM collection_candidates WHERE source_id=? AND operation_id=?")
-					.get(candidateSourceIdentity(claim.source), operation.operationId);
+					.get(knowledgeCollectionSourceIdentity(claim.source), operation.operationId);
 				if (row?.digest !== operation.expectedDigest)
 					throw new Error("Collection acknowledgement has no matching candidate");
 				if (outcome === "applied") {

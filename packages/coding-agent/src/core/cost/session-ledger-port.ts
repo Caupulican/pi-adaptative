@@ -23,12 +23,14 @@ export interface SemanticUsageLedgerPort {
 	identity(): SemanticUsageLedgerIdentity;
 	/** The first canonical row (in memory, buffered rows included) that carries this report identity. */
 	findCanonical(reportId: string): SemanticUsageCanonicalRow | undefined;
+	/** Iterate the same first-row index used by identity lookup, including buffered reports. */
+	canonicalRows(): Iterable<SemanticUsageCanonicalRow>;
 	/** Appends one report row. Throws when the ledger cannot be written; nothing is published then. */
 	append(report: SemanticUsageReport): string;
 	/** Whether the row is in the session file. A row buffered before the first reply is `pending`, never `persisted`. */
 	physicalState(entryId: string, report: SemanticUsageReport): "persisted" | "pending" | "conflict";
-	/** Fires after committed entries reach the file. Synchronous with the write: a listener must only schedule work. */
-	onPersisted(listener: () => void): () => void;
+	/** Fires after committed entries reach the file; flags a batch containing semantic usage. Listeners only schedule work. */
+	onPersisted(listener: (semanticUsageChanged: boolean) => void): () => void;
 	/** Whether a failed session write left the file's state unknown: the manager refuses appends until the file is reopened. */
 	persistenceUncertain(): boolean;
 }
@@ -85,6 +87,10 @@ export function createSessionManagerLedgerPort(manager: SessionManager): Semanti
 			indexAppended();
 			return canonical.get(reportId);
 		},
+		canonicalRows: () => {
+			indexAppended();
+			return canonical.values();
+		},
 		append: (report) => manager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report),
 		physicalState: (entryId, report) => {
 			const expected = normalizedReport(report);
@@ -92,7 +98,15 @@ export function createSessionManagerLedgerPort(manager: SessionManager): Semanti
 				isDeepStrictEqual(data, expected),
 			);
 		},
-		onPersisted: (listener) => manager.onEntriesPersisted(() => listener()),
+		onPersisted: (listener) =>
+			manager.onEntriesPersisted((event) =>
+				listener(
+					event.entryIds.some((id) => {
+						const entry = manager.getEntry(id);
+						return entry?.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE;
+					}),
+				),
+			),
 		persistenceUncertain: () => manager.isPersistenceStateUncertain(),
 	};
 }

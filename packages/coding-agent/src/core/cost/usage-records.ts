@@ -11,7 +11,12 @@ export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
 
 export function isMaintenanceUsageRoute(route: SystemOneUsageRoute | undefined): route is MaintenanceUsageRoute {
-	return route === "compaction" || route === "branch_summary" || route === "proactivity";
+	return (
+		route === "compaction" ||
+		route === "branch_summary" ||
+		route === "proactivity" ||
+		route === "knowledge_collection"
+	);
 }
 
 /** A recorded charge can be known while its model-specific API equivalent remains unattributable. */
@@ -108,6 +113,8 @@ export function resolveSpawnedUsageComponents(
 }
 
 export interface SemanticUsageReport {
+	/** Explicit model rates were known before dispatch, including configured models outside the catalog. */
+	readonly priceKnown?: true;
 	readonly responseTimestamp?: string;
 	readonly origin?: AccountingOrigin;
 	/** One provider response, including a retry response, priced against its exact catalog identity. */
@@ -153,6 +160,7 @@ export function resolveSemanticUsageEntry(entry: SessionEntry):
  * the retry of an unrecorded receipt write the identical entry (aggregation dedupes by `reportId`).
  */
 export function semanticUsageReportOf(receipt: {
+	priceKnown?: true;
 	responseTimestamp?: string;
 	origin?: AccountingOrigin;
 	receiptId: string;
@@ -164,6 +172,7 @@ export function semanticUsageReportOf(receipt: {
 	route?: SystemOneUsageRoute;
 }): SemanticUsageReport {
 	return {
+		...(receipt.priceKnown === true ? { priceKnown: true } : {}),
 		...(receipt.responseTimestamp ? { responseTimestamp: receipt.responseTimestamp } : {}),
 		...(receipt.origin ? { origin: { ...receipt.origin } } : {}),
 		reportId: receipt.receiptId,

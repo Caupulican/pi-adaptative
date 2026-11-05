@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { projectPath } from "../session-fixture.ts";
+import { runJourney1CollectionPhase } from "./journey-1-collection.ts";
 import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
@@ -27,6 +28,8 @@ export async function runJourney1(): Promise<void> {
 			// The long-path turn meets an unavailable evaluator on purpose: its owner intent stays unresolved, and only that
 			// classified-as-unavailable warning is allowed.
 			warningAllowances: [
+				// The immediate proactivity cancellation asserts exactly one unresolved physical response before releasing it.
+				/^Provider request [0-9a-f-]{36} ended locally with usage still unknown; its original accounting identity is retained in the session journal\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: Jev System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: the judgment was uncertain\.$/,
 				// The E13R and E13Q live owners' refused releases: the settled lane hands the record to its retry, and the backoff alarm reports
@@ -104,6 +107,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1IntentAndBranchingPhase(world);
 			await runJourney1ContinuousChatPhase(world);
 			await runJourney1KnowledgePhase(world);
+			await runJourney1CollectionPhase(world);
 			await runJourney1WorkerBudgetsPhase(world);
 			await runJourney1WriteReservationsPhase(world);
 			await runJourney1PiChatPhase(world);

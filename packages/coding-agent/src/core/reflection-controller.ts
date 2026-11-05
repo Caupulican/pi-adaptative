@@ -2,8 +2,9 @@
  * Root-session reflection cue + explicit learning-write controller.
  *
  * Automatic reflection is a hidden cue in the root orchestrator's ordinary provider turn. This
- * controller never schedules an automatic provider request. The isolated completion and structured
- * reflection pass remain explicit compatibility/application seams for owner-invoked callers. Every
+ * controller supplies the isolated runner and original evidence to memory-owned automatic knowledge
+ * collection. Legacy reflection scheduling remains separate. The structured reflection pass remains
+ * an explicit compatibility/application seam for owner-invoked callers. Every
  * durable effect goes through the bundled memory tool, the session log (via deps), or the skills dir.
  */
 
@@ -11,6 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import type {
 	Api,
@@ -36,6 +38,7 @@ import {
 } from "./agent-session-contracts.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
 	type DurableLearningClaimToken,
@@ -74,6 +77,12 @@ import {
 	EXPLICIT_DURABLE_SIGNAL,
 	type ReflectionTurnAnalysis,
 } from "./learning/reflection-turn-analysis.ts";
+import {
+	type KnowledgeCollectionHost,
+	type KnowledgeCollectionOutcome,
+	type KnowledgeCollectionRuntime,
+	KnowledgeCollector,
+} from "./memory/knowledge-collector.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { MemoryMutationOutcomeError } from "./memory/memory-mutation-outcome.ts";
 import type {
@@ -96,6 +105,7 @@ import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-a
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
+import { classifyCustomEntryPersisted } from "./session-entry-persistence.ts";
 import { checkSkillEvolutionEligibility } from "./session-skill-policy.ts";
 import type {
 	AutoLearnSettings,
@@ -106,8 +116,10 @@ import type {
 import { withSkillDefinitionLock } from "./skill-mutation.ts";
 import { computeSkillDigest } from "./skill-repair.ts";
 import { MAX_SKILL_NAME_LENGTH, type Skill } from "./skills.ts";
+import { boundedTextPreview } from "./text-preview.ts";
 import { DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS, runSkillAudit } from "./tools/skill-audit.ts";
 import { withFileLockSync } from "./util/atomic-file.ts";
+import { isPlainRecord } from "./util/value-guards.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ReflectionControllerSettingsSource {
@@ -211,6 +223,7 @@ export const CURRENT_TURN_REFLECTION_CUSTOM_TYPE = "reflection_cue";
 export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
 /** `internalContextType` of the one dedicated end-of-work reflection turn. */
 export const REFLECTION_TURN_TRIGGER_CUSTOM_TYPE = "reflection_turn_trigger";
+export const KNOWLEDGE_COLLECTION_CUSTOM_TYPE = "knowledge_collection";
 
 const MAX_CUE_EVIDENCE_SOURCES = 3;
 const MAX_CUE_EVIDENCE_EXCERPT_CHARS = 100;
@@ -500,6 +513,115 @@ export class ReflectionController {
 	captureLearningContext(): LearningApplicationGuard {
 		this.writes.recover();
 		return this.writes.capture();
+	}
+
+	/** The original-input and isolated-completion adapter shared by each root ICM generation. */
+	createKnowledgeHost(runtime: KnowledgeCollectionRuntime): KnowledgeCollectionHost {
+		return {
+			time: runtime.time,
+			evidence: () => this.ownerEvidence,
+			engine: () => runtime.engine(),
+			captureGuard: () => this.captureLearningContext(),
+			createCollector: (binding) => {
+				const manager = this.deps.getSessionManager();
+				if (this.deps.isChildSession()) return undefined;
+				if (!manager.isPersisted() || !manager.getSessionFile()) {
+					const settings = this.deps.getSettingsManager();
+					if (
+						resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings()).enabled
+					)
+						this.warnOnce(
+							"knowledge-ephemeral-session",
+							"Automatic knowledge collection requires a persisted session; no collection requests will start.",
+						);
+					return undefined;
+				}
+				const sessionId = manager.getSessionId();
+				let terminalAttempt:
+					| {
+							outcome: KnowledgeCollectionOutcome;
+							fromEntryCount: number;
+							appendAttempted: boolean;
+							entryId?: string;
+					  }
+					| undefined;
+				return new KnowledgeCollector({
+					...binding,
+					...runtime,
+					evidence: this.ownerEvidence,
+					settings: this.deps.getSettingsManager(),
+					usageOwner: sessionSemanticUsageOf(manager),
+					captureGuard: () => this.captureLearningContext(),
+					runIsolatedCompletion: (options) => this.runIsolatedCompletion(options),
+					warn: (message) => this.deps.warn?.(message),
+					onTerminal: (outcome) => {
+						let failure: unknown;
+						try {
+							if (manager.getSessionId() !== sessionId)
+								throw new Error("The original knowledge-collection session identity changed.");
+							terminalAttempt ??= {
+								outcome: structuredClone(outcome),
+								fromEntryCount: manager.getEntryCount(),
+								appendAttempted: false,
+							};
+							if (!isDeepStrictEqual(terminalAttempt.outcome, outcome))
+								throw new Error("Knowledge collection terminal identity conflicts with its retained outcome.");
+							const data = { version: 1, sessionId, outcome: terminalAttempt.outcome };
+							if (!terminalAttempt.entryId && terminalAttempt.appendAttempted) {
+								if (manager.getEntryCount() - terminalAttempt.fromEntryCount > 128)
+									throw new Error("Knowledge terminal append recovery exceeded its bounded suffix.");
+								terminalAttempt.entryId = manager
+									.getEntriesSince(terminalAttempt.fromEntryCount)
+									.find(
+										(entry) =>
+											entry.type === "custom" &&
+											entry.customType === KNOWLEDGE_COLLECTION_CUSTOM_TYPE &&
+											isPlainRecord(entry.data) &&
+											isPlainRecord(entry.data.outcome) &&
+											entry.data.outcome.id === outcome.id,
+									)?.id;
+							}
+							if (!terminalAttempt.entryId) {
+								terminalAttempt.appendAttempted = true;
+								terminalAttempt.entryId = manager.appendCustomEntry(KNOWLEDGE_COLLECTION_CUSTOM_TYPE, data);
+							}
+							const id = terminalAttempt.entryId;
+							const previous = manager.getEntry(id);
+							if (previous?.type !== "custom" || !isDeepStrictEqual(previous.data, data))
+								throw new Error("Knowledge collection terminal does not match its retained entry.");
+							if (
+								classifyCustomEntryPersisted(manager, id, KNOWLEDGE_COLLECTION_CUSTOM_TYPE, (value) =>
+									isDeepStrictEqual(value, data),
+								) !== "persisted"
+							)
+								throw new Error("Knowledge collection terminal is not yet physically retained.");
+						} catch (error) {
+							failure = error;
+						}
+						const handoff =
+							failure === undefined
+								? { retained: true }
+								: {
+										retained: false,
+										reason: boundedTextPreview(
+											failure instanceof Error ? failure.message : String(failure),
+											400,
+										),
+									};
+						try {
+							runtime.onTerminal(outcome, handoff);
+						} catch (error) {
+							failure =
+								failure === undefined
+									? error
+									: new AggregateError([failure, error], "Knowledge terminal delivery failed");
+						}
+						if (failure !== undefined) throw failure;
+						terminalAttempt = undefined;
+					},
+				});
+			},
+		};
 	}
 
 	private persistCurrentTurnCueState(state: CurrentTurnReflectionCueState): void {

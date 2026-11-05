@@ -2,6 +2,10 @@ import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schem
 
 /** The authoritative Auto Learn defaults used by runtime resolution and settings UI. */
 export const DEFAULT_AUTO_LEARN_SETTINGS = {
+	knowledgeMaxUsd: 0.05,
+	knowledgeSessionMaxUsd: 0.5,
+	knowledgeIdleDelayMs: 2_000,
+	knowledgeMaxSourcesPerPass: 4,
 	enabled: true,
 	model: "active",
 	thinkingLevel: "low",
@@ -49,6 +53,10 @@ export function resolveAutoLearnSettings(
 ): Required<AutoLearnSettings> {
 	const preset = getAutoLearnPreset(mode, settings);
 	return {
+		knowledgeMaxUsd: settings.knowledgeMaxUsd ?? preset.knowledgeMaxUsd,
+		knowledgeSessionMaxUsd: settings.knowledgeSessionMaxUsd ?? preset.knowledgeSessionMaxUsd,
+		knowledgeIdleDelayMs: settings.knowledgeIdleDelayMs ?? preset.knowledgeIdleDelayMs,
+		knowledgeMaxSourcesPerPass: settings.knowledgeMaxSourcesPerPass ?? preset.knowledgeMaxSourcesPerPass,
 		enabled: settings.enabled ?? preset.enabled,
 		model: settings.model?.trim() || preset.model,
 		thinkingLevel: settings.thinkingLevel ?? preset.thinkingLevel,

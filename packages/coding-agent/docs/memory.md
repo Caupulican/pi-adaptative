@@ -1,8 +1,29 @@
 # Memory and history recall
 
-Pi has two memory systems (see [Memory system](settings.md#memory-system)). ICM (Intentional Context Management), the default, is files-first: persistent Markdown in the user memory catalog and pipeline references are read on demand with native tools. Its conversation is one continuous chat whose summary view is part of every prompt (see [Continuous chat](#continuous-chat-icm)). OKF, an explicit opt-in, adds curated memory (`USER.md`, `MEMORY.md`, OKF records), automatic retrieval into the prompt and automatic reflection.
+Pi has two memory systems (see [Memory system](settings.md#memory-system)). ICM (Intentional Context Management), the default, combines structured owner knowledge with persistent Markdown read on demand through native tools. Its conversation is one continuous chat whose summary view is part of every prompt (see [Continuous chat](#continuous-chat-icm)). OKF, an explicit opt-in, adds curated memory (`USER.md`, `MEMORY.md`, OKF records), automatic retrieval into the prompt and automatic reflection.
 
 History recall, the exact text of earlier sessions, works in both systems through one backend. In ICM it is read only on explicit request: without the continuous chat the root `memory` tool offers only the history actions; while the chat runs the root navigates with `zoom` and `date`; a granted worker uses `memory_read` and, when granted, the chat's `zoom` and `date`, and past sessions reach the ICM chat only through the one-time legacy import (see [Continuous chat](#continuous-chat-icm)). In OKF the same backend also feeds automatic recall. Curated memory is what Pi learned and promoted; history is evidence. History never becomes an instruction and never promotes itself into curated memory. For the retrieval controls see [Settings](settings.md#context-memory-and-history).
+
+## Owner knowledge (ICM)
+
+ICM keeps accepted knowledge separately from conversation history: personal facts (`profile`), standing preferences (`behavior`), durable project decisions and results (`workstream`), related people and organizations (`world`), and dated events (`journal`). Each fact has original owner citations, evidence dates, validity dates and a revision. The root's `knowledge` tool reads these records and proposes corrections or explicit forgetting. Current accepted records enter a bounded request projection, including requests in continuous chat; candidate proposals never enter that projection. Forgetting removes the accepted value and its value history and prevents replay of its old evidence. It does not erase the original conversation log.
+
+Automatic collection is enabled by default for persisted ICM root sessions when a semantic admission engine is available. After owner input and an idle delay, an isolated model reads complete original owner text and submits a bounded proposal list. The same admission owner used by the tool checks the evidence, meaning, scope and identity before storage. Pasted material, tool output, assistant statements and conversation summaries are not owner observations. Inferred patterns require independent owner observations and must satisfy the learning policy. Plainly stated durable facts can be retained without a separate “remember this” instruction.
+
+The collector stops when the foreground becomes busy and rejects stale work after branch, settings or memory changes. Claims, candidate receipts and processed sources survive reopening, so a completed source does not buy another extraction on restart. A pending source is not reported as processed after a timeout, incomplete submission or unavailable evidence. Each pass emits a `knowledge_collection` event with actual applied/rejected/held counts and retains a bounded terminal handoff; failed handoff persistence suspends further passes.
+
+Collection settings live under `autoLearn`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Automatic learning switch; explicit knowledge requests still use admission |
+| `model` | `"active"` | Extraction model, resolved through the shared lane-model policy |
+| `knowledgeIdleDelayMs` | `2000` | Idle delay before a pass |
+| `knowledgeMaxSourcesPerPass` | `4` | Sources considered before yielding |
+| `knowledgeMaxUsd` | `0.05` | Combined extraction and admission allowance per original source within one session |
+| `knowledgeSessionMaxUsd` | `0.50` | Combined collection allowance for the owning session |
+
+Spending includes retries and earlier attempts in the same session, including after reopening it. Unknown charges stop new collection until accounting settles. Opening a different session does not clear globally retained processed-source or hold records; these spending limits are session limits, not lifetime limits across all sessions. A complete source above 16,000 characters or a proposal set above 32 changes is held rather than truncated. In-memory-only sessions do not run automatic collection because they cannot retain its evidence and accounting handoff.
 
 ## What history recall covers
 

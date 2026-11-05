@@ -19,6 +19,7 @@ const RECEIPT_PAYLOAD_KEYS = [
 	"route",
 	"origin",
 	"responseTimestamp",
+	"priceKnown",
 ] as const;
 const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
 const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total", "estimate"] as const;
@@ -41,7 +42,8 @@ export function isSystemOneUsageRoute(value: unknown): value is SystemOneUsageRo
 		value === "history_summary" ||
 		value === "compaction" ||
 		value === "branch_summary" ||
-		value === "proactivity"
+		value === "proactivity" ||
+		value === "knowledge_collection"
 	);
 }
 
@@ -54,6 +56,7 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECEIPT_PAYLOAD_KEYS)) return undefined;
 	const { receiptId, provider, model, attempt, usage, costStatus, costProvenance, route } = value;
 	const responseTimestamp = value.responseTimestamp;
+	if (value.priceKnown !== undefined && value.priceKnown !== true) return undefined;
 	if (
 		responseTimestamp !== undefined &&
 		(!isReceiptText(responseTimestamp) || !Number.isFinite(Date.parse(responseTimestamp)))
@@ -129,6 +132,7 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 		...(route !== undefined ? { route } : {}),
 		...(origin ? { origin } : {}),
 		...(responseTimestamp !== undefined ? { responseTimestamp } : {}),
+		...(value.priceKnown === true ? { priceKnown: true } : {}),
 	};
 }
 

@@ -39,8 +39,18 @@ export interface SystemOneStatus {
  * Where a paid response's usage is charged from. Absent is a System One review; `system_one_tool` is the root systemone tool's
  * review (counted in the session statistics); history and maintenance routes identify their actual summary responses.
  */
-export type MaintenanceUsageRoute = "compaction" | "branch_summary" | "proactivity";
+export type MaintenanceUsageRoute = "compaction" | "branch_summary" | "proactivity" | "knowledge_collection";
 export type SystemOneUsageRoute = "system_one_tool" | "history_summary" | MaintenanceUsageRoute;
+
+/** A dispatched request whose measured response has not yet reached the usage ledger. */
+export interface UnresolvedUsageRequest {
+	readonly requestId: string;
+	readonly provider: string;
+	readonly model: string;
+	readonly route?: SystemOneUsageRoute;
+	readonly origin: AccountingOrigin;
+	readonly startedAt: string;
+}
 
 export interface HistoryUsageCall {
 	readonly reportId: string;
@@ -52,6 +62,8 @@ export interface HistoryUsageCall {
 
 /** The priced usage record handed to the usage sink. `receiptId` is the persistence identity of one response. */
 export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
+	/** Dispatch was admitted against explicit model rates, including configured models outside the catalog. */
+	readonly priceKnown?: true;
 	/** Actual provider response time, preserved across deferred delivery. */
 	readonly responseTimestamp?: string;
 	readonly receiptId: string;
@@ -93,6 +105,8 @@ export type SystemOneUsageOutcome =
 
 /** The usage slots of one evaluation: each paid response is recorded through it, and unused slots are released. */
 export interface SystemOneUsageLease {
+	/** Persist request identity before dispatch. Required for requests sharing a spending budget. */
+	beginRequest?(request: UnresolvedUsageRequest): void;
 	/** Records one paid response. Never throws: a failure is an `unretained` outcome. */
 	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome;
 	/** Returns the slots no response used. Idempotent. */
@@ -101,6 +115,8 @@ export interface SystemOneUsageLease {
 
 /** The session's usage sink: an evaluation begins a lease before any provider call is paid. */
 export interface SystemOneUsageSink {
+	/** Disclose an ended request whose measured response is still unknown. Never throws. */
+	reportUnresolvedRequest?(requestId: string): void;
 	/** Snapshot the initiating work before asynchronous preparation can change the live session. */
 	captureOrigin?(): AccountingOrigin;
 	/**

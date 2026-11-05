@@ -195,6 +195,7 @@ interface OwnerEvidenceLedgerDeps {
 
 /** One branch-bound ledger; only the host's original-input persistence path can append evidence. */
 export class OwnerEvidenceLedger {
+	private readonly listeners = new Set<(change: "source" | "branch") => void>();
 	private readonly deps: OwnerEvidenceLedgerDeps;
 	private ownerEvidence: OwnerEvidenceEntry[] | undefined;
 	/** Identity index follows the canonical branch; only the text projection is limited to 64 records. */
@@ -208,12 +209,21 @@ export class OwnerEvidenceLedger {
 		this.deps = deps;
 	}
 
+	/** Listeners only schedule work; they must not throw or mutate the ledger. */
+	subscribe(listener: (change: "source" | "branch") => void): () => void {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+
 	invalidate(): void {
 		this.ownerEvidence = undefined;
 		this.sourceEntries = undefined;
 		this.records = [];
 		this.byRecord.clear();
 		this.bySource.clear();
+		for (const listener of this.listeners) listener("branch");
 	}
 
 	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
@@ -273,6 +283,7 @@ export class OwnerEvidenceLedger {
 		this.indexRecord(recordId, record);
 		ledger.push({ sessionId, sourceId, entryId, text: text.slice(0, OWNER_EVIDENCE_PAGE_CHARS), createdAt });
 		if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
+		for (const listener of this.listeners) listener("source");
 		return true;
 	}
 
