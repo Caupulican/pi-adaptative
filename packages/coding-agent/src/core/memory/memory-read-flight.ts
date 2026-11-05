@@ -25,7 +25,7 @@ export class MemoryReadFlights {
 
 	read<T>(
 		key: string,
-		work: (signal: AbortSignal, deadlineAt: number) => Promise<T>,
+		work: (signal: AbortSignal, deadlineAt: number, onPhysicalRead: (settled: Promise<void>) => void) => Promise<T>,
 		signal?: AbortSignal,
 		deadlineAt?: number,
 		onPhysicalStart?: (flight: { done: Promise<T>; signal: AbortSignal; deadlineAt: number }) => void,
@@ -43,24 +43,34 @@ export class MemoryReadFlights {
 				() => abort.abort(new Error("Memory source operation timed out.")),
 				this.timeoutMs,
 			);
+			const physicalReads = new Set<Promise<void>>();
+			const onPhysicalRead = (settled: Promise<void>): void => {
+				physicalReads.add(settled);
+				void settled.finally(() => physicalReads.delete(settled)).catch(() => {});
+			};
 			const promise = Promise.resolve().then(() => {
 				abort.signal.throwIfAborted();
-				return work(abort.signal, fixedDeadline);
+				return work(abort.signal, fixedDeadline, onPhysicalRead);
+			});
+			// A source may settle its consumer before dispatched native work ends. Keep capacity
+			// and shutdown ownership until both have ended; result delivery still uses `promise`.
+			const physicallySettled = promise.finally(async () => {
+				await Promise.allSettled([...physicalReads]);
 			});
 			flight = { abort, promise, consumers: 0, settled: false };
 			const owned = flight;
 			this.flights.set(key, owned);
-			this.settling.add(promise);
-			void promise
+			this.settling.add(physicallySettled);
+			void physicallySettled
 				.finally(() => {
 					owned.settled = true;
 					this.timers.clearTimeout(timer);
-					this.settling.delete(promise);
+					this.settling.delete(physicallySettled);
 					if (this.flights.get(key) === owned) this.flights.delete(key);
 				})
 				.catch(() => {});
 			try {
-				onPhysicalStart?.({ done: promise, signal: abort.signal, deadlineAt: fixedDeadline });
+				onPhysicalStart?.({ done: physicallySettled, signal: abort.signal, deadlineAt: fixedDeadline });
 			} catch (error) {
 				abort.abort(error);
 				if (this.flights.get(key) === owned) this.flights.delete(key);

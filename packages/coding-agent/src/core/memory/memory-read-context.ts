@@ -9,10 +9,16 @@ export interface MemoryReadEvidence {
 	revalidate(context: MemoryReadContext): Promise<boolean>;
 }
 
-/** Host-owned lifetime for native source I/O; never forwarded to an opaque extension provider. */
-export interface MemoryReadContext {
+/** Consumer cancellation and separate ownership of native work already dispatched. */
+export interface MemoryReadLifetime {
 	readonly signal?: AbortSignal;
 	readonly deadlineAt?: number;
+	/** Called before dispatch; completion means the physical read ended, not merely that its caller detached. */
+	readonly onPhysicalRead?: (settled: Promise<void>) => void;
+}
+
+/** Host-owned lifetime for native source I/O; never forwarded to an opaque extension provider. */
+export interface MemoryReadContext extends MemoryReadLifetime {
 	readonly observe?: (evidence: MemoryReadEvidence) => void;
 }
 

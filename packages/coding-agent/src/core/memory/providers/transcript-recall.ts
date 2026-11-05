@@ -16,6 +16,7 @@ import type { SessionEntriesPersistedEvent } from "../../../kernel/node.ts";
 import type { MemoryProvider } from "../../extensions/types.ts";
 import { getDirectoryResourceProfileInfo } from "../../settings/settings-rules.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext } from "../memory-provider.ts";
+import type { MemoryReadLifetime } from "../memory-read-context.ts";
 import {
 	TRANSCRIPT_FOREGROUND_READ_MS,
 	TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS,
@@ -78,6 +79,7 @@ interface PendingRequest {
 	generation: number;
 	expect: PendingKind;
 	resolve: (outcome: PendingResponse | TranscriptReadUnavailable) => void;
+	finishPhysical: () => void;
 	timeout: NodeJS.Timeout;
 	control: TranscriptRecallReadControl;
 	cancelled?: TranscriptReadUnavailable;
@@ -102,7 +104,7 @@ interface StartRequest {
  * sooner of the read's own bound (`timeoutMs` from its start) and the caller's operation deadline (`deadlineAt`);
  * `operation` records that the operation deadline is the binding one, so its expiry is reported as that timeout.
  */
-interface ReadBudget {
+interface ReadBudget extends MemoryReadLifetime {
 	generation: number;
 	timeoutMs: number;
 	deadline: number;
@@ -361,7 +363,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	async search(request: TranscriptSearchRequest): Promise<TranscriptSearchResult> {
 		const query = request.query.trim().slice(0, TRANSCRIPT_RECALL_MAX_QUERY_CHARS);
 		const maxResults = clampInteger(request.maxResults, 1, TRANSCRIPT_RECALL_MAX_HITS, TRANSCRIPT_RECALL_MAX_HITS);
-		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt, request.signal);
+		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request);
 		if ("status" in budget) return budget;
 
 		const outcome = await this.request("result", budget, (generation, requestId, control) => ({
@@ -382,7 +384,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		if (this.projectId !== undefined && request.ref.projectId !== this.projectId) {
 			return { status: "forbidden", reason: "The source handle belongs to another project." };
 		}
-		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt, request.signal);
+		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request);
 		if ("status" in budget) return budget;
 
 		const maxBytes = clampInteger(
@@ -423,8 +425,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		// An explicit history read waits on this page in the foreground; summary construction does not.
 		const budget = await this.admit(
 			request.priority === "foreground" ? TRANSCRIPT_FOREGROUND_READ_MS : BACKGROUND_READ_TIMEOUT_MS,
-			request.deadlineAt,
-			request.signal,
+			request,
 		);
 		if ("status" in budget) return budget;
 		const fromIndex = clampInteger(request.fromIndex, 0, Number.MAX_SAFE_INTEGER, 0);
@@ -465,8 +466,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		}
 		const budget = await this.admit(
 			request.priority === "foreground" ? TRANSCRIPT_FOREGROUND_READ_MS : BACKGROUND_READ_TIMEOUT_MS,
-			request.deadlineAt,
-			request.signal,
+			request,
 		);
 		if ("status" in budget) return budget;
 		const checks = request.checks.map(({ sessionId, fromIndex, count, digest }) => ({
@@ -597,9 +597,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	 */
 	private async admit(
 		timeoutMs: number,
-		deadlineAt?: number,
-		signal?: AbortSignal,
+		lifetime: MemoryReadLifetime = {},
 	): Promise<ReadBudget | TranscriptReadUnavailable> {
+		const { deadlineAt, signal, onPhysicalRead } = lifetime;
 		const now = Date.now();
 		const operation = deadlineAt !== undefined && Number.isFinite(deadlineAt) && deadlineAt < now + timeoutMs;
 		const budget: ReadBudget = {
@@ -608,6 +608,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			deadline: operation ? deadlineAt : now + timeoutMs,
 			operation,
 			signal,
+			onPhysicalRead,
 		};
 		if (signal?.aborted) return { status: "unavailable", reason: CANCELLED_REASON };
 		if (budget.deadline <= now) return { status: "unavailable", reason: OPERATION_TIMEOUT_REASON };
@@ -693,6 +694,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const generation = budget.generation;
 		const requestId = this.requestId++;
 		return new Promise((resolve) => {
+			const physical = Promise.withResolvers<void>();
 			const control: TranscriptRecallReadControl = {
 				deadlineAt: budget.deadline,
 				cancelled: new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)),
@@ -724,20 +726,34 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 				generation,
 				expect,
 				resolve: settle,
+				finishPhysical: physical.resolve,
 				timeout,
 				control,
 				removeAbortListener: () => budget.signal?.removeEventListener("abort", abort),
 			});
 			budget.signal?.addEventListener("abort", abort, { once: true });
-			if (budget.signal?.aborted) {
+			try {
+				budget.onPhysicalRead?.(physical.promise);
+			} catch (error) {
+				this.finishRequest(requestId, {
+					status: "unavailable",
+					reason: `Transcript read ownership was refused: ${describeError(error)}`,
+				});
+				return;
+			}
+			if (budget.signal?.aborted || this.pending.get(requestId)?.cancelled) {
 				this.finishRequest(requestId, { status: "unavailable", reason: CANCELLED_REASON });
+				return;
+			}
+			if (this.worker !== worker || this.generation !== generation) {
+				this.finishRequest(requestId, { status: "unavailable", reason: SHUT_DOWN_REASON });
 				return;
 			}
 			this.post(worker, generation, build(generation, requestId, control));
 		});
 	}
 
-	/** Stop physical work now; its terminal response owns settlement of the dispatched read. */
+	/** Detach the caller now; retain physical ownership/capacity until its terminal response or worker exit. */
 	private cancelRequest(requestId: number, outcome: TranscriptReadUnavailable): void {
 		const pending = this.pending.get(requestId);
 		if (!pending || pending.cancelled) return;
@@ -745,6 +761,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		Atomics.store(pending.control.cancelled, 0, 1);
 		clearTimeout(pending.timeout);
 		pending.removeAbortListener();
+		pending.resolve(outcome);
 	}
 
 	/** Post to the worker; a post that throws is a worker failure with its real cause. */
@@ -877,6 +894,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		this.pending.delete(requestId);
 		clearTimeout(pending.timeout);
 		pending.removeAbortListener();
+		pending.finishPhysical();
 		pending.resolve(
 			pending.cancelled ??
 				(Date.now() >= pending.control.deadlineAt

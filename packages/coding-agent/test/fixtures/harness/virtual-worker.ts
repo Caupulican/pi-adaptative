@@ -301,6 +301,8 @@ export class VirtualWorkerThreads {
 	readonly inboundLog: Array<{ readonly worker: number; readonly type: string }> = [];
 	/** Requests and responses of every worker in one order, as the parent saw them: the call-order witness for interleavings. */
 	readonly messageLog: WorkerMessageRecord[] = [];
+	/** Physical exit identities, recorded before native exit listeners run. */
+	readonly exitedWorkerIds: number[] = [];
 	private nextSeq = 1;
 	private readonly live = new Set<VirtualHostedWorker>();
 	private startedCount = 0;
@@ -627,6 +629,7 @@ export class VirtualWorkerThreads {
 
 	exited(worker: VirtualHostedWorker): void {
 		this.live.delete(worker);
+		this.exitedWorkerIds.push(worker.id);
 	}
 
 	assertNoLiveWorkers(): void {

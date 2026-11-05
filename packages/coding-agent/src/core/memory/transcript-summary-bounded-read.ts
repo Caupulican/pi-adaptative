@@ -57,16 +57,25 @@ export class TranscriptBoundedRead<T> {
 		}
 		const owned = selected;
 		try {
+			// Register a joining parent's physical ownership before admitting its independent wait.
+			const previous = owned.done;
+			if (previous)
+				context.onPhysicalRead?.(
+					previous.then(
+						() => undefined,
+						() => undefined,
+					),
+				);
 			return await this.reads.read(
 				String(owned.ticket),
-				async (signal, deadlineAt) => {
+				async (signal, deadlineAt, onPhysicalRead) => {
 					await owned.predecessor?.catch(() => undefined);
 					signal.throwIfAborted();
 					if (this.followUp === owned) {
 						this.followUp = undefined;
 						this.flight = owned;
 					}
-					return this.work(owned.ticket, { signal, deadlineAt });
+					return this.work(owned.ticket, { signal, deadlineAt, onPhysicalRead });
 				},
 				context.signal,
 				context.deadlineAt,
@@ -82,6 +91,13 @@ export class TranscriptBoundedRead<T> {
 							if (this.followUp === owned) this.followUp = undefined;
 						})
 						.catch(() => {});
+					if (done !== previous)
+						context.onPhysicalRead?.(
+							done.then(
+								() => undefined,
+								() => undefined,
+							),
+						);
 				},
 			);
 		} catch (error) {

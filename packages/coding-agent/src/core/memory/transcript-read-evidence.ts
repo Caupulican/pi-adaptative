@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
+import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadLifetime } from "./memory-read-context.ts";
 import {
 	formatTranscriptSourceHandle,
 	type TranscriptIndexObservation,
@@ -11,6 +11,16 @@ import {
 function readDigest(result: TranscriptSearchResult | TranscriptSourcePageResult): string {
 	const payload = result.status === "ok" ? (({ observation: _observation, ...value }) => value)(result) : result;
 	return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function transcriptReadInput<T extends MemoryReadLifetime>(request: T, context?: MemoryReadLifetime): T {
+	assertMemoryReadActive(context);
+	return {
+		...request,
+		signal: context?.signal ?? request.signal,
+		deadlineAt: context?.deadlineAt ?? request.deadlineAt,
+		onPhysicalRead: context?.onPhysicalRead ?? request.onPhysicalRead,
+	};
 }
 
 /** Records native index observations before rendering discards their typed source identities. */
@@ -53,12 +63,7 @@ export function observedTranscriptReader(
 	};
 	return {
 		search: async (request) => {
-			assertMemoryReadActive(context);
-			const input = {
-				...request,
-				signal: context?.signal ?? request.signal,
-				deadlineAt: context?.deadlineAt ?? request.deadlineAt,
-			};
+			const input = transcriptReadInput(request, context);
 			const result = await reader.search(input);
 			assertMemoryReadActive(context);
 			if (result.status === "ok")
@@ -67,22 +72,28 @@ export function observedTranscriptReader(
 					result.observation,
 					result.hits.map((hit) => formatTranscriptSourceHandle(hit.span.ref)),
 					!result.coverage.truncated && result.coverage.activeFailures === 0,
-					(next) => reader.search({ ...input, signal: next.signal, deadlineAt: next.deadlineAt }),
+					(next) =>
+						reader.search({
+							...input,
+							signal: next.signal,
+							deadlineAt: next.deadlineAt,
+							onPhysicalRead: next.onPhysicalRead,
+						}),
 				);
 			return result;
 		},
 		readSource: async (request) => {
-			assertMemoryReadActive(context);
-			const input = {
-				...request,
-				signal: context?.signal ?? request.signal,
-				deadlineAt: context?.deadlineAt ?? request.deadlineAt,
-			};
+			const input = transcriptReadInput(request, context);
 			const result = await reader.readSource(input);
 			assertMemoryReadActive(context);
 			if (result.status === "ok")
 				observe(result, result.observation, [formatTranscriptSourceHandle(result.span.ref)], true, (next) =>
-					reader.readSource({ ...input, signal: next.signal, deadlineAt: next.deadlineAt }),
+					reader.readSource({
+						...input,
+						signal: next.signal,
+						deadlineAt: next.deadlineAt,
+						onPhysicalRead: next.onPhysicalRead,
+					}),
 				);
 			return result;
 		},

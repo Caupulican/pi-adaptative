@@ -2078,6 +2078,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			checks,
 			priority: "foreground",
 			signal: context.signal,
+			onPhysicalRead: context.onPhysicalRead,
 			deadlineAt,
 		});
 		if (verified.status !== "ok" || verified.verdicts.some((verdict) => verdict !== "live")) return false;

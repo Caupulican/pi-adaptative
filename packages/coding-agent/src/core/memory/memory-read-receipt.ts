@@ -41,8 +41,8 @@ export function createMemoryReadReceipt(input: {
 			input.flights
 				.read(
 					validationKey,
-					async (signal, deadlineAt) => {
-						const context: MemoryReadContext = { signal, deadlineAt };
+					async (signal, deadlineAt, onPhysicalRead) => {
+						const context: MemoryReadContext = { signal, deadlineAt, onPhysicalRead };
 						if (input.disposition !== "read" || evidence.length === 0 || !isCurrent()) return false;
 						for (const part of evidence) {
 							assertMemoryReadActive(context);

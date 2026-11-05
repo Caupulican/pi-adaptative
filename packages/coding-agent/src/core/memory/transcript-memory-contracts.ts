@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { RECALLED_HISTORY_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
+import type { MemoryReadLifetime } from "./memory-read-context.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Source identity
@@ -326,7 +327,7 @@ export interface TranscriptCoverage {
 	lastRecoveryAt?: string;
 }
 
-export interface TranscriptSearchRequest {
+export interface TranscriptSearchRequest extends MemoryReadLifetime {
 	query: string;
 	maxResults: number;
 	/** Include spans on side branches, labelled `alternate`. Default: selected lineage only. */
@@ -347,7 +348,7 @@ export type TranscriptSearchResult =
 	  }
 	| TranscriptReadUnavailable;
 
-export interface TranscriptSourcePageRequest {
+export interface TranscriptSourcePageRequest extends MemoryReadLifetime {
 	ref: TranscriptSourceRef;
 	/** UTF-8 byte offset into the part text. Default 0. */
 	cursor?: number;
@@ -385,7 +386,7 @@ export interface TranscriptSessionSummary {
 /** Bound of one explicit (foreground) history operation, a tool call: one second. */
 export const TRANSCRIPT_FOREGROUND_READ_MS = 1_000;
 
-export interface TranscriptLineageSpansRequest {
+export interface TranscriptLineageSpansRequest extends MemoryReadLifetime {
 	sessionId: string;
 	/** Zero-based position on the selected lineage to start from. */
 	fromIndex: number;
@@ -495,7 +496,7 @@ export interface TranscriptLineageRangeCheck {
  */
 export type TranscriptLineageRangeVerdict = "live" | "moved" | "session_gone";
 
-export interface TranscriptLineageVerifyRequest {
+export interface TranscriptLineageVerifyRequest extends MemoryReadLifetime {
 	checks: readonly TranscriptLineageRangeCheck[];
 	/** As {@link TranscriptLineageSpansRequest.priority}. */
 	priority?: "foreground" | "background";

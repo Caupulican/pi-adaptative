@@ -208,7 +208,6 @@ export async function runJourney1ProactivityMemory(world: HarnessWorld): Promise
 	world.provider.enqueue("root", readStep("cancelled"));
 	const cancelledRequests = world.provider.requests.length;
 	const cancellation = cancelled.session.backgroundLanes.runProactiveReviewOnce();
-	let disposal: ReturnType<HarnessWorld["disposeSessionInBody"]> | undefined;
 	let acknowledgement: Promise<unknown> | undefined;
 	try {
 		const request = await withDeadline(trace, "native query reaches the real worker boundary", held.reached);
@@ -230,10 +229,12 @@ export async function runJourney1ProactivityMemory(world: HarnessWorld): Promise
 			Atomics.load(request.control.cancelled, 0),
 			"last consumer cancellation reaches synchronous worker reads",
 		).toBe(1);
-		disposal = world.disposeSessionInBody(cancelled.session);
-		expect(await settlementState(disposal), "shutdown retains physical ownership until the worker acknowledges").toBe(
-			"pending",
-		);
+		expect(
+			await withDeadline(trace, "cancelled consumer detaches before physical acknowledgement", cancellation),
+		).toMatchObject({
+			delivered: [],
+			skipReason: "review_context_changed",
+		});
 	} finally {
 		held.release();
 	}
@@ -241,9 +242,9 @@ export async function runJourney1ProactivityMemory(world: HarnessWorld): Promise
 		delivered: [],
 		skipReason: "review_context_changed",
 	});
-	if (!acknowledgement || !disposal) throw new Error("The native cancellation did not reach shutdown");
+	if (!acknowledgement) throw new Error("The native cancellation did not reach the worker");
 	await withDeadline(trace, "worker acknowledges physical cancellation", acknowledgement);
-	expect(await withDeadline(trace, "native source ownership drains before disposal", disposal)).toBeUndefined();
+	expect(await world.disposeSessionInBody(cancelled.session)).toBeUndefined();
 	expect(
 		world.provider.requests.length - cancelledRequests,
 		"cancelled source evidence never reaches another provider request",
@@ -251,5 +252,52 @@ export async function runJourney1ProactivityMemory(world: HarnessWorld): Promise
 	expect(cancelled.outcomes).toEqual(["failed"]);
 	expect(notes(cancelled)).toEqual([]);
 	cancelled.off();
+
+	// A missing terminal response cannot prevent shutdown from retiring the producer that owns it.
+	const stopping = await createReview("shutdown");
+	const stoppedQuery = "proactivity native standing memory shutdown";
+	const stoppedRead = world.guard.threads.holdNext(
+		"native read held through producer retirement",
+		"query",
+		(request) =>
+			isTranscriptRecallWorkerRequest(request) && request.type === "query" && request.query === stoppedQuery,
+	);
+	world.provider.enqueue("root", readStep("shutdown"));
+	const stoppedReview = stopping.session.backgroundLanes.runProactiveReviewOnce();
+	try {
+		const request = await withDeadline(trace, "shutdown query reaches worker port", stoppedRead.reached);
+		if (!isTranscriptRecallWorkerRequest(request) || request.type !== "query")
+			throw new Error("Missing shutdown query");
+		const dispatch = world.guard.threads.messageLog.find(
+			(message) =>
+				message.direction === "inbound" && message.type === "query" && message.facts.query === stoppedQuery,
+		);
+		if (!dispatch) throw new Error("Missing physical shutdown dispatch");
+		expect(world.guard.threads.exitedWorkerIds).not.toContain(dispatch.worker);
+		expect(
+			await withDeadline(
+				trace,
+				"shutdown joins worker exit while its response remains held",
+				world.disposeSessionInBody(stopping.session),
+			),
+		).toBeUndefined();
+		expect(Atomics.load(request.control.cancelled, 0)).toBe(1);
+		expect(world.guard.threads.exitedWorkerIds, "disposal owns the physical producer through exit").toContain(
+			dispatch.worker,
+		);
+		expect(
+			world.guard.threads.messageLog.some(
+				(message) =>
+					message.direction === "outbound" &&
+					message.worker === dispatch.worker &&
+					message.requestId === request.requestId,
+			),
+		).toBe(false);
+	} finally {
+		stoppedRead.release();
+	}
+	expect(await withDeadline(trace, "retired native review settles", stoppedReview)).toMatchObject({ delivered: [] });
+	expect(notes(stopping)).toEqual([]);
+	stopping.off();
 	trace.mark("root", "proactivity.memory.done");
 }

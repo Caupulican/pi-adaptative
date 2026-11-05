@@ -971,6 +971,7 @@ export class TranscriptSummaryCatalog {
 		if (node.children) {
 			const verified = await context.reader.verifyLineageRanges({
 				signal: context.signal,
+				onPhysicalRead: context.onPhysicalRead,
 				checks: [dependency.check],
 				priority: context.priority,
 				...(context.deadlineAt !== undefined ? { deadlineAt: context.deadlineAt } : {}),
@@ -984,6 +985,7 @@ export class TranscriptSummaryCatalog {
 			// One listing of the whole dependency range: the check and the listed metadata come from one answer.
 			const live = await context.reader.listLineageSpans({
 				signal: context.signal,
+				onPhysicalRead: context.onPhysicalRead,
 				sessionId: node.sessionId,
 				fromIndex: dependency.fromIndex,
 				maxSpans: dependency.refs.length,
@@ -1070,6 +1072,7 @@ export class TranscriptSummaryCatalog {
 		}
 		const verified = await context.reader.verifyLineageRanges({
 			signal: context.signal,
+			onPhysicalRead: context.onPhysicalRead,
 			checks: candidates.map((candidate) => candidate.check),
 			priority: context.priority,
 			...(context.deadlineAt !== undefined ? { deadlineAt: context.deadlineAt } : {}),
@@ -1179,6 +1182,7 @@ export class TranscriptSummaryCatalog {
 								checks,
 								priority: "foreground",
 								signal: read.signal,
+								onPhysicalRead: read.onPhysicalRead,
 								deadlineAt: read.deadlineAt,
 							})
 						: undefined;

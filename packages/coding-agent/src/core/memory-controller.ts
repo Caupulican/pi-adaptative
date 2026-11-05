@@ -1004,11 +1004,13 @@ export class MemoryController {
 			const activation = this._activationAbort;
 			this._activationAbort = undefined;
 			activation?.abort(new Error("Memory activation stopped by shutdown."));
-			await this._laneMemoryReads.abort(new Error("Memory reads stopped by shutdown."));
+			const readsStopped = this._laneMemoryReads.abort(new Error("Memory reads stopped by shutdown."));
 			this._fileStoreWriter = undefined;
-			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
+			// Retire the producer before joining physical reads: a missing reply can end only at
+			// worker exit. The coordinator's terminal handoff still drains before stores are released.
 			const hierarchyStopped = this._hierarchy?.detach();
-			const continuousChatStopped = this._releaseContinuousChat();
+			const recallStopped = this._transcriptRecall?.shutdown();
+			const continuousChatStopped = this._releaseContinuousChat(readsStopped);
 			const knowledgeStopped = this._stopKnowledgeCollector();
 			this._unsubscribeSettingsChanges?.();
 			this._unsubscribeSettingsChanges = undefined;
@@ -1017,6 +1019,8 @@ export class MemoryController {
 			this._releaseTranscriptRecall();
 			// Attach to all already-started stops immediately; one rejection must not leave another unobserved.
 			const draining = Promise.allSettled([
+				readsStopped,
+				recallStopped,
 				hierarchyStopped,
 				continuousChatStopped,
 				knowledgeStopped,
@@ -2557,11 +2561,12 @@ export class MemoryController {
 	): Promise<{ value: T; evidence: readonly MemoryReadEvidence[] }> {
 		return this._laneMemoryReads.read(
 			key,
-			async (signal, deadlineAt) => {
+			async (signal, deadlineAt, onPhysicalRead) => {
 				const evidence: MemoryReadEvidence[] = [];
 				const context = {
 					signal,
 					deadlineAt,
+					onPhysicalRead,
 					observe: (item: MemoryReadEvidence) => {
 						evidence.push(item);
 					},
@@ -3291,14 +3296,21 @@ export class MemoryController {
 		});
 		this._memoryManager = manager;
 		this._fileStoreWriter = undefined;
-		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes. A live ICM
+		// The previous generation's coordinator records its terminal handoff while its read producer retires. A live ICM
 		// chat outlives the generation: its runtime lease and any turn in flight belong to the chat, so an ICM generation
 		// keeps it. Only a switch away from ICM, or a failed activation, releases it.
 		const keptChat = system === "icm" ? this._continuousChat : undefined;
-		const hierarchyStopped = readsStopped.then(() => this._hierarchy?.detach());
+		const hierarchyStopped = this._hierarchy?.detach();
+		const recallStopped = this._transcriptRecall?.shutdown();
 		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat(readsStopped) : undefined;
 		const knowledgeStopped = this._stopKnowledgeCollector();
-		const stopping = Promise.allSettled([readsStopped, hierarchyStopped, continuousChatStopped, knowledgeStopped]);
+		const stopping = Promise.allSettled([
+			readsStopped,
+			recallStopped,
+			hierarchyStopped,
+			continuousChatStopped,
+			knowledgeStopped,
+		]);
 		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
 		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
 			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
