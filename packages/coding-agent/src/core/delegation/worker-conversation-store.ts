@@ -67,7 +67,11 @@ import {
 	workerControlOf,
 } from "../../kernel/worker-control-stamp.ts";
 import { workerConversationSessionsDir } from "../agent-paths.ts";
-import type { HostEventDeliveryBinding, HostEventTranscriptReceipt } from "../events/host-event-contract.ts";
+import {
+	type HostEventDeliveryBinding,
+	HostEventError,
+	type HostEventTranscriptReceipt,
+} from "../events/host-event-contract.ts";
 import type { HostEventRuntime } from "../events/host-event-runtime.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import {
@@ -1546,10 +1550,10 @@ export class WorkerConversation {
 							else transaction.retireUnconsumedBinding();
 							return { delivered: receipt !== undefined, appended: false };
 						});
+					// The copy's attempt is not the transcript's open window: an execution fence, settled by
+					// the copy's lifecycle owners instead of failing the run that met it.
 					if (boundary < 0 || nextBoundary >= 0)
-						throw new WorkerConversationOwnershipError(
-							"Host event cannot append outside its current attempt boundary.",
-						);
+						throw new HostEventError("stale_execution", "Host event attempt window is no longer open.");
 					return hostEvents.guardedDelivery(binding, "consume", (transaction) => {
 						const entryId = this.appendSessionEntryLocked(sessionManager, (owner) =>
 							owner.appendMessage(

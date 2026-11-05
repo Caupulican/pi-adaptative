@@ -1094,6 +1094,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							): AgentMessage[] => {
 								const accepted = options.agentControl.consumeHostEventMessages(
 									options.agentId,
+									options.durableHandle,
 									options.conversation,
 									messages,
 								);

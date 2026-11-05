@@ -122,6 +122,34 @@ export function assertHostEventWorkerScope(
 	return attempt;
 }
 
+/**
+ * True once a bound execution can never again be the live task execution: the attempt left
+ * `running` (a resume issues the next fence), another attempt was selected, or its lease, agent or
+ * conversation moved on. Lease time and source readiness are deliberately excluded: renewal and
+ * catch-up can restore those, so they fence a copy without retiring it.
+ */
+export function hostEventExecutionSuperseded(
+	state: TaskRuntimeProjection,
+	execution: HostEventDeliveryBinding["execution"],
+): boolean {
+	const attempt = state.attempts[execution.attemptId];
+	const agent = state.agents[execution.agentId];
+	return (
+		!attempt ||
+		!agent ||
+		attempt.taskId !== execution.taskId ||
+		attempt.status !== "running" ||
+		attempt.agentId !== execution.agentId ||
+		attempt.lease?.leaseId !== execution.leaseId ||
+		attempt.lease.fencingToken !== execution.fencingToken ||
+		selectedTaskAttempt(state, attempt.taskId)?.attemptId !== execution.attemptId ||
+		agent.activeAttemptId !== execution.attemptId ||
+		agent.resumeContext.sessionId !== execution.sessionId ||
+		agent.resumeContext.sessionFile !== execution.sessionFile ||
+		hostEventTaskDisposition(state, attempt.taskId) === "closed"
+	);
+}
+
 export function assertHostEventExecution(
 	state: TaskRuntimeProjection,
 	binding: HostEventDeliveryBinding,
@@ -175,6 +203,20 @@ export function replaceHostEventSubscriptions(
 	const revision = existing.reduce((maximum, subscription) => Math.max(maximum, subscription.revision), 0);
 	if (revision !== expectedRevision)
 		throw new HostEventError("stale_subscription", "Task subscription revision changed.");
+	// Fan-out is bounded where membership is admitted, so a source can always accept its next event.
+	for (const input of inputs) {
+		const key = ciSubjectKey(input.subject);
+		const others = Object.values(subscriptions).filter(
+			(subscription) =>
+				subscription.taskId !== taskId &&
+				subscription.revokedOrdinal === undefined &&
+				ciSubjectKey(subscription.subject) === key &&
+				hostEventTaskDisposition(state, subscription.taskId) !== "closed",
+		).length;
+		const own = inputs.filter((candidate) => ciSubjectKey(candidate.subject) === key).length;
+		if (others + own >= MAX_HOST_EVENT_TARGETS)
+			throw new HostEventError("capacity", "CI subject already has the maximum number of subscribed tasks.");
+	}
 	for (const subscription of existing)
 		subscriptions[subscription.subscriptionId] = { ...subscription, revision: revision + 1, revokedOrdinal: ordinal };
 	for (const input of inputs) {

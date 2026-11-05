@@ -103,7 +103,11 @@ import {
 } from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
-import { WorkerHostEventTransport, workerHostEventMessage } from "./worker-host-event-transport.ts";
+import {
+	type HostEventConsumingExecution,
+	WorkerHostEventTransport,
+	workerHostEventMessage,
+} from "./worker-host-event-transport.ts";
 import { attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
@@ -357,6 +361,13 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				options.withConversationAdmission ? options.withConversationAdmission(agent, operation) : operation(),
 			resume: (agentId) => this.resumeWorkerAgent(agentId).started,
 			available: () => !this.disposed && options.isControlAvailable(),
+			warn: (message) => {
+				try {
+					options.warn?.(message);
+				} catch {
+					// Diagnostics are observers; the unsettled binding and its physical copy remain the retry source.
+				}
+			},
 		});
 	}
 
@@ -412,14 +423,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.hostEventTransport.reconcileDelivery(delivery);
 	}
 
-	/** Called synchronously after fitness/abort admission. Ordinary controls retain their next boundary. */
+	/**
+	 * Called synchronously after fitness/abort admission. Ordinary controls retain their next boundary;
+	 * copies bound to another execution of this agent are settled, never appended by this run.
+	 */
 	consumeHostEventMessages(
 		agentId: string,
+		execution: HostEventConsumingExecution,
 		conversation: WorkerConversation,
 		candidates: readonly WorkerMailboxConversationMessage[],
 	): WorkerMailboxConversationMessage[] {
 		const events = candidates.filter(({ message }) => workerControlOf(message)?.k === "host_event");
-		const accepted = events.filter(({ message }) => this.hostEventTransport.consume(agentId, conversation, message));
+		const accepted = events.filter(({ message }) =>
+			this.hostEventTransport.consume(agentId, execution, conversation, message),
+		);
 		return accepted.length
 			? accepted
 			: candidates.filter(({ message }) => workerControlOf(message)?.k !== "host_event");

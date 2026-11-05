@@ -19,6 +19,10 @@ export interface HostEventSessionControllerDeps {
 	subscribeContext(listener: () => void): () => void;
 	subscribeSettings(listener: () => void): () => void;
 	deliverParent(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
+	/**
+	 * `dormant` keeps the delivery pending until a state, readiness or control change re-drives it;
+	 * `unavailable` means the running execution can never hold the event and hands it back.
+	 */
 	deliverTask(delivery: HostEventDelivery, signal: AbortSignal): Promise<"queued" | "dormant" | "unavailable">;
 	/** Reconcile the original transcript and settle its physical mailbox before handback. */
 	reconcileTask(delivery: HostEventDelivery): void;

@@ -4,8 +4,10 @@ import type { UserMessage } from "@caupulican/pi-ai";
 import { stampWorkerControl, workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { type HostEventDeliveryBinding, HostEventError } from "../events/host-event-contract.ts";
 import { hostEventEvidenceText } from "../events/host-event-delivery.ts";
+import { hostEventExecutionSuperseded } from "../events/host-event-reducer.ts";
 import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
+import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { WorkerAgentMailbox } from "./worker-agent-control.ts";
 import type { WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
@@ -21,7 +23,14 @@ interface WorkerHostEventTransportPort {
 	admit<T>(agent: AgentBindingContract, operation: () => T): T;
 	resume(agentId: string): boolean;
 	available(): boolean;
+	warn(message: string): void;
 }
+
+/** The started attempt whose provider boundary is admitting mailbox copies. */
+export type HostEventConsumingExecution = Pick<
+	StartedDelegationAttempt,
+	"taskId" | "attemptId" | "leaseId" | "fencingToken"
+>;
 
 /** One projection is used at enqueue, physical reconciliation and provider admission. */
 export function workerHostEventMessage(binding: HostEventDeliveryBinding, content: string): UserMessage {
@@ -40,39 +49,57 @@ function deliveryFenceChanged(error: unknown): boolean {
 /** Coordinates physical transport only; task, source and receipt authority stays in the runtime. */
 export class WorkerHostEventTransport {
 	private readonly port: WorkerHostEventTransportPort;
+	private readonly unsettledWarnings = new Map<string, string>();
 	constructor(port: WorkerHostEventTransportPort) {
 		this.port = port;
 	}
 
+	/**
+	 * `dormant` leaves the obligation pending for a later state, readiness or control change;
+	 * `unavailable` is permanent for the running execution and hands the event back.
+	 */
 	deliver(input: HostEventDelivery, signal: AbortSignal): "queued" | "dormant" | "unavailable" {
 		signal.throwIfAborted();
-		if (!this.port.available()) return "unavailable";
+		// A missing control surface (tool-set switch, teardown, reload) is re-driven by the next
+		// orchestration, foreground-activity or runtime-availability notification.
+		if (!this.port.available()) return "dormant";
 		const runtime = this.port.lifecycle().ledger.runtime;
 		const events = runtime.hostEvents;
-		const delivery = events.getDelivery(input.deliveryId);
+		let delivery = events.getDelivery(input.deliveryId);
 		if (delivery?.target.kind !== "task") throw new HostEventError("invalid", "Worker event has no task target.");
 		if (delivery.transcriptReceipt) {
 			this.reconcileDelivery(delivery);
 			return "queued";
+		}
+		// Settle a copy bound to an execution that can never run again before any dormant return, so a
+		// later attempt of the same agent never meets it in its mailbox.
+		if (
+			delivery.binding &&
+			!delivery.mailboxSettled &&
+			(delivery.bindingRetired || hostEventExecutionSuperseded(runtime.getSnapshot(), delivery.binding.execution))
+		) {
+			this.reconcileDelivery(delivery);
+			delivery = events.getDelivery(input.deliveryId);
+			if (delivery?.target.kind !== "task") throw new HostEventError("invalid", "Worker event has no task target.");
+			if (delivery.transcriptReceipt) return "queued";
 		}
 		if (!events.eligible(delivery.deliveryId)) return "dormant";
 		const snapshot = runtime.getSnapshot();
 		const attempt = selectedWorkerAttempt(snapshot, delivery.target.taskId);
 		const agentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId;
 		const agent = agentId ? snapshot.agents[agentId] : undefined;
-		if (
-			!agent ||
-			agent.status === "retired" ||
-			agent.resumeContext.provider !== "pi" ||
-			!agent.resumeContext.sessionFile
-		)
-			return "unavailable";
-		if (attempt?.status === "suspended") {
+		// A queued, expired or retry-pending task has no executing agent yet.
+		if (!attempt || !agent) return "dormant";
+		// The selected execution's conversation can never hold a mailbox event: permanent handback.
+		if (agent.status === "retired" || agent.resumeContext.provider !== "pi" || !agent.resumeContext.sessionFile)
+			return attempt.status === "suspended" || attempt.status === "running" ? "unavailable" : "dormant";
+		if (attempt.status === "suspended") {
 			const subscription = snapshot.threadSubscriptions[delivery.target.subscriptionId];
 			if (subscription?.wake === "resume_same_task") this.port.resume(agent.agentId);
 			return "dormant";
 		}
-		if (!attempt?.lease || (attempt.status !== "running" && attempt.status !== "leased")) return "dormant";
+		// Binding requires a running execution; a leased attempt is re-driven by its start commit.
+		if (attempt.status !== "running" || !attempt.lease) return "dormant";
 		const accepted = events.getEvent(delivery.eventId);
 		if (!accepted) throw new HostEventError("missing", "Worker event evidence is missing.");
 		const content = hostEventEvidenceText(accepted, delivery);
@@ -137,7 +164,10 @@ export class WorkerHostEventTransport {
 		this.reconcile(delivery.binding, hostEventEvidenceText(accepted, delivery));
 	}
 
-	/** Lifecycle recovery leaves current live evidence queued; only ended obligations are retired. */
+	/**
+	 * Lifecycle recovery leaves current live evidence queued; ended obligations and copies bound to an
+	 * execution that can never run again are settled in their original transcript.
+	 */
 	reconcileInactive(agentId: string): void {
 		const runtime = this.port.lifecycle().ledger.runtime;
 		const snapshot = runtime.getSnapshot();
@@ -152,6 +182,8 @@ export class WorkerHostEventTransport {
 			if (
 				delivery.status === "consumed" ||
 				delivery.status === "settled" ||
+				delivery.bindingRetired ||
+				hostEventExecutionSuperseded(snapshot, delivery.binding.execution) ||
 				runtime.hostEvents.taskDisposition(delivery.target.taskId) === "closed" ||
 				!subscription ||
 				subscription.revokedOrdinal !== undefined ||
@@ -161,8 +193,30 @@ export class WorkerHostEventTransport {
 		}
 	}
 
+	/**
+	 * Another execution's copy never fails this run: it is excluded from admission and settled by its
+	 * lifecycle owners (this call, `deliver`, `reconcileInactive` at every execution transition).
+	 */
+	private settleStaleCopies(agentId: string): void {
+		try {
+			this.reconcileInactive(agentId);
+			this.unsettledWarnings.delete(agentId);
+		} catch (error) {
+			// Each provider boundary retries; one diagnostic per distinct failure.
+			const message = `Worker host-event copy for ${agentId} remains unsettled: ${error instanceof Error ? error.message : String(error)}`;
+			if (this.unsettledWarnings.get(agentId) === message) return;
+			this.unsettledWarnings.set(agentId, message);
+			this.port.warn(message);
+		}
+	}
+
 	/** The only new worker-event append. Called after all awaited admission work, before loop emission. */
-	consume(agentId: string, conversation: WorkerConversation, message: UserMessage): boolean {
+	consume(
+		agentId: string,
+		execution: HostEventConsumingExecution,
+		conversation: WorkerConversation,
+		message: UserMessage,
+	): boolean {
 		const control = workerControlOf(message);
 		if (control?.k !== "host_event" || !control.hostEvent || control.hostEvent.execution.agentId !== agentId)
 			throw new HostEventError("invalid", "Worker event candidate has no exact binding.");
@@ -177,6 +231,17 @@ export class WorkerHostEventTransport {
 			!isDeepStrictEqual(physical.task.binding, binding)
 		)
 			return false;
+		// Only the execution a copy was bound to may append it. A copy left by an earlier attempt or
+		// fence of this agent (or by its previous task) is that execution's obligation, not this run's.
+		if (
+			binding.execution.taskId !== execution.taskId ||
+			binding.execution.attemptId !== execution.attemptId ||
+			binding.execution.leaseId !== execution.leaseId ||
+			binding.execution.fencingToken !== execution.fencingToken
+		) {
+			this.settleStaleCopies(agentId);
+			return false;
+		}
 		try {
 			let appended = false;
 			mailbox.settleHostEvent(binding, events, (pending) => {
@@ -190,13 +255,10 @@ export class WorkerHostEventTransport {
 			});
 			return appended;
 		} catch (error) {
+			// A fence (catch-up, settlement, retirement, a moved execution) leaves this run intact;
+			// a copy whose execution ended is settled by its lifecycle owners.
 			if (deliveryFenceChanged(error)) {
-				const current = events.getDelivery(binding.deliveryId);
-				if (
-					isDeepStrictEqual(current?.binding, binding) &&
-					(current?.bindingRetired || current?.status === "settled")
-				)
-					this.reconcile(binding, physical.content);
+				this.settleStaleCopies(agentId);
 				return false;
 			}
 			throw error;

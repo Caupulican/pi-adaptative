@@ -253,6 +253,7 @@ export class HostEventRuntime {
 				source.registration.scopeVersion === catchUp.scopeVersion
 			)
 				return;
+			this.pruneWithin(tx);
 			tx.commit({
 				type: "host_source.catchup_started",
 				aggregateId: catchUp.sourceId,
@@ -279,6 +280,7 @@ export class HostEventRuntime {
 			if (source && envelope.sourceSequence <= source.retiredThrough)
 				throw new HostEventError("outside_replay_horizon", "Host event is outside the retained replay horizon.");
 			assertWorkerReceiptAdmission(context.origin);
+			this.pruneWithin(tx);
 			tx.commit({
 				type: "host_event.accepted",
 				aggregateId: envelope.event.eventId,
@@ -573,20 +575,23 @@ export class HostEventRuntime {
 	}
 
 	prune(): number {
-		return this.port.transact((tx) => {
-			const now = this.port.now();
-			const eventIds = Object.values(tx.snapshot.hostEvents)
-				.filter((event) => hostEventCanPrune(tx.snapshot, event, now))
-				.slice(0, 64)
-				.map((event) => event.envelope.event.eventId);
-			if (eventIds.length)
-				tx.commit({
-					type: "host_event.pruned",
-					aggregateId: "host-events",
-					actor: "runtime",
-					payload: toJsonObject({ eventIds }),
-				});
-			return eventIds.length;
-		});
+		return this.port.transact((tx) => this.pruneWithin(tx));
+	}
+
+	/** Reclaim settled history inside an admission, so reclamation never waits for a later seal. */
+	private pruneWithin(tx: HostEventRuntimeTransaction): number {
+		const now = this.port.now();
+		const eventIds = Object.values(tx.snapshot.hostEvents)
+			.filter((event) => hostEventCanPrune(tx.snapshot, event, now))
+			.slice(0, 64)
+			.map((event) => event.envelope.event.eventId);
+		if (eventIds.length)
+			tx.commit({
+				type: "host_event.pruned",
+				aggregateId: "host-events",
+				actor: "runtime",
+				payload: toJsonObject({ eventIds }),
+			});
+		return eventIds.length;
 	}
 }

@@ -89,9 +89,19 @@ policy through this tool.
 Subscriptions belong to the durable task, not the reusable worker. Delivery checks the current
 attempt, execution lease and conversation context before mailbox acceptance and again before
 consumption. An event cannot create a new task, widen permissions or reach a worker's later unrelated
-assignment. A task that cannot consume an event can return it to the main session.
+assignment. Only the execution an event copy was bound to can append it. A copy left by an earlier
+attempt, lease or task of the same worker never fails a later run; it is settled in its original
+transcript and the event is offered to the current execution. A task that is waiting (queued, leased,
+retrying, or suspended on a resumable conversation), or whose worker controls are briefly
+unavailable, keeps the event pending. Only a running or suspended execution whose conversation can
+never hold the event returns it to the main session.
 
 Source custody, canonical event acceptance, mailbox acceptance and transcript consumption have
 separate receipts. Restart replays retained work using those identities. Retention and recall are
-bounded; capacity pressure leaves unaccepted evidence with its source. Host events remain untrusted
-operational evidence in memory and never become owner preferences or permission grants.
+bounded. Each open delivery reserves only its own settlement, and a worker copy reserves its
+transcript receipt when it is bound, so a refused binding leaves the delivery pending with a visible
+warning. Settled history is reclaimed whenever new evidence is accepted, not only after a source
+reconciles. A task subscription is refused when its CI subject already has the maximum number of
+subscribed tasks, so admitted subscriptions never block the source's next event. Capacity pressure
+leaves unaccepted evidence with its source, which reports it and stays unready. Host events remain
+untrusted operational evidence in memory and never become owner preferences or permission grants.
