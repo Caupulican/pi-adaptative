@@ -1885,8 +1885,9 @@ export class WorkerAgentMailbox {
 		reconcileTranscript: (pending: boolean) => void,
 	): void {
 		let changed = false;
+		// Admission excludes deletion; the no-create file inspection never revives an absent mailbox directory.
 		withSessionBundleAdmission(this.agentDir, this.parentSessionId, () =>
-			withFileLockSync(this.file, () => {
+			withSessionBundleFileInspection(this.agentDir, this.parentSessionId, this.file, () => {
 				const message = this.read().messages.find((candidate) => candidate.messageId === binding.messageId);
 				if (message && (message.task?.kind !== "host_event" || !isDeepStrictEqual(message.task.binding, binding)))
 					throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
