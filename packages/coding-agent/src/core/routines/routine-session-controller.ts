@@ -2,7 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
-import { nextRoutineAt, type RoutineDefinitionView, type RoutineScheduleInput } from "./routine-contract.ts";
+import { hostTimeZone } from "./calendar-schedule.ts";
+import { nextRoutineAt, type RoutineDefinitionView, routineScheduleInputOf } from "./routine-contract.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
@@ -23,19 +24,13 @@ interface RoutineSessionDeps {
 	isDisposed(): boolean;
 }
 
-function authoredSchedule(routine: RoutineDefinitionView): RoutineScheduleInput {
-	return routine.schedule.kind === "interval"
-		? { kind: "interval", intervalMs: routine.schedule.intervalMs }
-		: { kind: "once", at: routine.schedule.at };
-}
-
 function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 	const nextRunAt = nextRoutineAt(routine.schedule, routine.cursor);
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
 		enabled: routine.enabled,
-		schedule: authoredSchedule(routine),
+		schedule: routineScheduleInputOf(routine.schedule),
 		...(nextRunAt === undefined ? {} : { nextRunAt }),
 		...(routine.lastRunAt === undefined ? {} : { lastRunAt: routine.lastRunAt }),
 		...(routine.lastStatus === undefined ? {} : { lastStatus: routine.lastStatus }),
@@ -97,7 +92,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				expectedRevision,
 				target: routine.target,
 				prompt: routine.prompt,
-				schedule: authoredSchedule(routine),
+				schedule: routineScheduleInputOf(routine.schedule),
 				enabled,
 				executionSnapshot: routine.executionSnapshot,
 				nowMs: this.deps.now(),
@@ -153,7 +148,11 @@ export class RoutineSessionController implements RoutineToolPort {
 				routineId: input.routineId,
 				prompt: input.prompt,
 				target: { kind: "session", parentSessionId: this.deps.parentSessionId },
-				schedule: input.schedule,
+				// A calendar rule without a zone follows the wall clock of the session that authored it.
+				schedule:
+					input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
+						? { ...input.schedule, timeZone: hostTimeZone() }
+						: input.schedule,
 				enabled: prior?.enabled ?? true,
 				nowMs: this.deps.now(),
 				executionSnapshot: {

@@ -91,9 +91,14 @@ function parseIdList(raw: string): string[] {
 }
 
 function routineScheduleLabel(routine: RoutineDefinitionView): string {
-	return routine.schedule.kind === "interval"
-		? `every ${formatDurationIntervalMs(routine.schedule.intervalMs)}`
-		: `once at ${new Date(routine.schedule.at).toISOString()}`;
+	switch (routine.schedule.kind) {
+		case "interval":
+			return `every ${formatDurationIntervalMs(routine.schedule.intervalMs)}`;
+		case "once":
+			return `once at ${new Date(routine.schedule.at).toISOString()}`;
+		case "calendar":
+			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
+	}
 }
 
 function chatRoutine(store: PersistentBotTeamStore, routineId: string): RoutineDefinitionView | undefined {

@@ -5,6 +5,15 @@ import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { parseWorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import {
+	canonicalCalendarCron,
+	canonicalCalendarTimeZone,
+	isCalendarTimeZone,
+	MAX_CALENDAR_CRON_CHARS,
+	MAX_CALENDAR_MISSED_COUNT,
+	MAX_CALENDAR_TIME_ZONE_CHARS,
+	nextCalendarSlotAfter,
+} from "./calendar-schedule.ts";
 
 export const MIN_ROUTINE_INTERVAL_MS = 10_000;
 export const MAX_ROUTINE_ID_CHARS = 128;
@@ -32,8 +41,28 @@ const onceSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-/** Only schedules the host can execute are accepted. Cron is intentionally absent until a validating calendar adapter exists. */
-export const routineScheduleInputSchema = Type.Union([intervalSchema, onceSchema]);
+const calendarSchema = Type.Object(
+	{
+		kind: Type.Literal("calendar"),
+		cron: Type.String({
+			minLength: 9,
+			maxLength: MAX_CALENDAR_CRON_CHARS,
+			description:
+				"Five fields: minute hour day-of-month month day-of-week (0 or 7 is Sunday). Numbers, *, ranges a-b, steps /n and comma lists only. When both day fields are restricted, either may match.",
+		}),
+		timeZone: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_CALENDAR_TIME_ZONE_CHARS,
+				description: "IANA time zone such as Europe/Lisbon. Omit to use this host's zone.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
+/** Only schedules the host can execute are accepted; calendar rules are validated by the calendar owner. */
+export const routineScheduleInputSchema = Type.Union([intervalSchema, onceSchema, calendarSchema]);
 
 /** Model-facing authoring input. Recipient and compiled authority are host-owned and absent from this schema. */
 export const routineAuthoringSchema = Type.Object(
@@ -49,7 +78,9 @@ export type RoutineScheduleInput = Static<typeof routineScheduleInputSchema>;
 export type RoutineAuthoringInput = Static<typeof routineAuthoringSchema>;
 export type RoutineCursor =
 	| { readonly kind: "interval"; readonly nextIndex: number }
-	| { readonly kind: "once"; readonly consumed: boolean };
+	| { readonly kind: "once"; readonly consumed: boolean }
+	/** Next slot computed when the previous one was claimed; null once no slot is representable. */
+	| { readonly kind: "calendar"; readonly nextAt: number | null };
 
 export type PersistentRoutineTarget =
 	| { readonly kind: "bot"; readonly agentId: string }
@@ -65,10 +96,12 @@ export interface RoutineExecutionSnapshot {
 	readonly savedIntent: WorkerSavedIntent;
 }
 
-/** Explicit elapsed-time schedule. The cursor is mutable independently of immutable routine revision. */
+/** Explicit schedule. The cursor is mutable independently of immutable routine revision. */
 export type RoutineSchedule =
 	| { readonly kind: "interval"; readonly intervalMs: number; readonly anchorAt: number }
-	| { readonly kind: "once"; readonly at: number };
+	| { readonly kind: "once"; readonly at: number }
+	/** Slots strictly after anchorAt (the authoring instant) in the stored zone. */
+	| { readonly kind: "calendar"; readonly cron: string; readonly timeZone: string; readonly anchorAt: number };
 
 export interface PersistentRoutineDefinition {
 	readonly routineId: string;
@@ -198,7 +231,37 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 		(value.at as number) <= MAX_ROUTINE_INSTANT_MS
 	)
 		return { kind: "once", at: value.at as number };
-	throw new TypeError("Routine schedule must be an executable interval or one-time UTC instant.");
+	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone"])) {
+		const cron = canonicalCalendarCron(value.cron);
+		return value.timeZone === undefined
+			? { kind: "calendar", cron }
+			: { kind: "calendar", cron, timeZone: canonicalCalendarTimeZone(value.timeZone) };
+	}
+	throw new TypeError("Routine schedule must be an executable interval, one-time UTC instant or calendar rule.");
+}
+
+/** Authored form of a stored schedule, without host-owned anchors. */
+export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineScheduleInput {
+	switch (schedule.kind) {
+		case "interval":
+			return { kind: "interval", intervalMs: schedule.intervalMs };
+		case "once":
+			return { kind: "once", at: schedule.at };
+		case "calendar":
+			return { kind: "calendar", cron: schedule.cron, timeZone: schedule.timeZone };
+	}
+}
+
+/** Cursor of a newly authored or changed schedule; a calendar rule with no slot in the search horizon gets null. */
+export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
+	switch (schedule.kind) {
+		case "interval":
+			return { kind: "interval", nextIndex: 1 };
+		case "once":
+			return { kind: "once", consumed: false };
+		case "calendar":
+			return { kind: "calendar", nextAt: nextCalendarSlotAfter(schedule, schedule.anchorAt) ?? null };
+	}
 }
 
 export function parseRoutineExecutionSnapshot(value: unknown): RoutineExecutionSnapshot {
@@ -291,6 +354,14 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			);
 			if (cursor.nextIndex > lastIndex + 1) return undefined;
 		}
+		// Calendar slots are never re-derived here: zone rules may change after a slot was computed.
+		if (
+			definition.schedule.kind === "calendar" &&
+			cursor.kind === "calendar" &&
+			cursor.nextAt !== null &&
+			cursor.nextAt <= definition.schedule.anchorAt
+		)
+			return undefined;
 		const nextRunAt = nextRoutineAt(definition.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
 		if (
 			rawNextRunAt !== nextRunAt ||
@@ -388,6 +459,9 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			};
 			if (definition.schedule.kind === "once") {
 				if (trigger.scheduledAt !== definition.schedule.at || trigger.missedCount !== 0) return undefined;
+			} else if (definition.schedule.kind === "calendar") {
+				if (trigger.scheduledAt <= definition.schedule.anchorAt || trigger.missedCount > MAX_CALENDAR_MISSED_COUNT)
+					return undefined;
 			} else {
 				const index = (trigger.scheduledAt - definition.schedule.anchorAt) / definition.schedule.intervalMs;
 				if (!Number.isSafeInteger(index) || index < 1 || trigger.missedCount >= index) return undefined;
@@ -568,11 +642,24 @@ export function parseLegacyRoutineDefinition(value: unknown): PersistentRoutineD
 
 export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 	if (!isPlainRecord(value)) throw new TypeError("Routine schedule is invalid.");
+	if (value.kind === "calendar") {
+		// Stored zones are only checked for support: canonical spellings may differ across runtimes.
+		if (
+			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt"]) &&
+			typeof value.cron === "string" &&
+			canonicalCalendarCron(value.cron) === value.cron &&
+			isCalendarTimeZone(value.timeZone) &&
+			validInstant(value.anchorAt)
+		)
+			return { kind: "calendar", cron: value.cron, timeZone: value.timeZone, anchorAt: value.anchorAt };
+		throw new TypeError("Persisted calendar schedule requires a canonical rule, a supported zone and an anchor.");
+	}
 	const authored = parseRoutineScheduleInput(
 		value.kind === "interval" ? { kind: "interval", intervalMs: value.intervalMs } : value,
 	);
 	if (authored.kind === "once") return authored;
 	if (
+		authored.kind === "interval" &&
 		hasOnlyKeys(value, ["kind", "intervalMs", "anchorAt"]) &&
 		validInstant(value.anchorAt) &&
 		validInstant(value.anchorAt + authored.intervalMs)
@@ -607,6 +694,12 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 		return { kind: "interval", nextIndex: value.nextIndex as number };
 	if (value.kind === "once" && hasOnlyKeys(value, ["kind", "consumed"]) && typeof value.consumed === "boolean")
 		return { kind: "once", consumed: value.consumed };
+	if (
+		value.kind === "calendar" &&
+		hasOnlyKeys(value, ["kind", "nextAt"]) &&
+		(value.nextAt === null || validInstant(value.nextAt))
+	)
+		return { kind: "calendar", nextAt: value.nextAt };
 	throw new TypeError("Routine cursor is invalid.");
 }
 
@@ -614,6 +707,10 @@ export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor):
 	if (schedule.kind === "once") {
 		if (cursor.kind !== "once") throw new TypeError("Routine cursor does not match its schedule.");
 		return cursor.consumed ? undefined : schedule.at;
+	}
+	if (schedule.kind === "calendar") {
+		if (cursor.kind !== "calendar") throw new TypeError("Routine cursor does not match its schedule.");
+		return cursor.nextAt ?? undefined;
 	}
 	if (cursor.kind !== "interval") throw new TypeError("Routine cursor does not match its schedule.");
 	const nextAt = schedule.anchorAt + schedule.intervalMs * cursor.nextIndex;

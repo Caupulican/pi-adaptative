@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "../../config.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { WorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
@@ -9,6 +10,13 @@ import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
+	countCalendarSlots,
+	latestCalendarSlotAtOrBefore,
+	MAX_CALENDAR_MISSED_COUNT,
+	nextCalendarSlotAfter,
+} from "../routines/calendar-schedule.ts";
+import {
+	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
 	MAX_ROUTINE_MANUAL_TOMBSTONES,
 	MAX_ROUTINE_OCCURRENCES,
@@ -29,9 +37,11 @@ import {
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
+	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	routineOccurrenceId,
 	routineResultDigest,
+	routineScheduleInputOf,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -729,6 +739,14 @@ export class PersistentBotTeamStore {
 		nowMs: number,
 	): Extract<RoutineOccurrence["trigger"], { kind: "schedule" }> {
 		if (routine.schedule.kind === "once") return { kind: "schedule", scheduledAt: firstDueAt, missedCount: 0 };
+		if (routine.schedule.kind === "calendar") {
+			const scheduledAt = latestCalendarSlotAtOrBefore(routine.schedule, nowMs, firstDueAt);
+			return {
+				kind: "schedule",
+				scheduledAt,
+				missedCount: countCalendarSlots(routine.schedule, firstDueAt, scheduledAt, MAX_CALENDAR_MISSED_COUNT),
+			};
+		}
 		const lastIndex = Math.floor((nowMs - routine.schedule.anchorAt) / routine.schedule.intervalMs);
 		const scheduledAt = routine.schedule.anchorAt + routine.schedule.intervalMs * lastIndex;
 		const firstIndex = routine.cursor.kind === "interval" ? routine.cursor.nextIndex : 1;
@@ -1394,29 +1412,18 @@ export class PersistentBotTeamStore {
 			if (session !== (input.executionSnapshot !== undefined))
 				throw new Error("Session routines require a host-admitted execution snapshot.");
 			const scheduleChanged =
-				!existing ||
-				JSON.stringify(
-					existing.schedule.kind === "interval"
-						? { kind: existing.schedule.kind, intervalMs: existing.schedule.intervalMs }
-						: existing.schedule,
-				) !== JSON.stringify(scheduleInput);
-			const schedule =
-				scheduleInput.kind === "interval"
-					? {
-							kind: "interval" as const,
-							intervalMs: scheduleInput.intervalMs,
-							anchorAt: scheduleChanged
-								? (input.nowMs ?? Date.now())
-								: (existing!.schedule as Extract<RoutineDefinitionView["schedule"], { kind: "interval" }>)
-										.anchorAt,
-						}
-					: { kind: "once" as const, at: scheduleInput.at };
-			const cursor: RoutineCursor =
-				scheduleChanged || !existing
-					? schedule.kind === "interval"
-						? { kind: "interval", nextIndex: 1 }
-						: { kind: "once", consumed: false }
-					: existing.cursor;
+				!existing || !isDeepStrictEqual(routineScheduleInputOf(existing.schedule), scheduleInput);
+			const anchorAt =
+				!scheduleChanged && existing && "anchorAt" in existing.schedule
+					? existing.schedule.anchorAt
+					: (input.nowMs ?? Date.now());
+			let schedule: RoutineSchedule;
+			if (scheduleInput.kind === "interval")
+				schedule = { kind: "interval", intervalMs: scheduleInput.intervalMs, anchorAt };
+			else if (scheduleInput.kind === "once") schedule = { kind: "once", at: scheduleInput.at };
+			else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
+			else schedule = { kind: "calendar", cron: scheduleInput.cron, timeZone: scheduleInput.timeZone, anchorAt };
+			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
 			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
 			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
 				throw new Error("Routine revision counter is exhausted.");
@@ -1447,6 +1454,8 @@ export class PersistentBotTeamStore {
 			const plannedRunAt = nextRoutineAt(schedule, cursor);
 			if (plannedRunAt === undefined && schedule.kind === "interval")
 				throw new Error("Routine interval has no representable future instant.");
+			if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
+				throw new Error("Calendar rule matches no time within the next eight years.");
 			const nextRunAt = plannedRunAt ?? Number.MAX_SAFE_INTEGER;
 			const view: RoutineDefinitionView = {
 				...definition,
@@ -1569,7 +1578,12 @@ export class PersistentBotTeamStore {
 									Math.floor((trigger.scheduledAt - routine.schedule.anchorAt) / routine.schedule.intervalMs) +
 									1,
 							}
-						: { kind: "once", consumed: true };
+						: routine.schedule.kind === "calendar"
+							? {
+									kind: "calendar",
+									nextAt: nextCalendarSlotAfter(routine.schedule, trigger.scheduledAt) ?? null,
+								}
+							: { kind: "once", consumed: true };
 				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
 				this.routines.set(id, {
 					...routine,
