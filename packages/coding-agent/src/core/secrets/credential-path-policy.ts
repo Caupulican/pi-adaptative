@@ -10,6 +10,11 @@ import { requireSynchronousPreflight } from "../preflight.ts";
 export interface CredentialPathProtection {
 	protectedFiles?: readonly string[];
 	protectedDirectories?: readonly string[];
+	/**
+	 * Protected files a recursive search may pass through: denied to a read that names them, but project files rather
+	 * than storage (a project's own settings file), so a search root containing one is not refused for it.
+	 */
+	searchableFiles?: readonly string[];
 	/** Native harness storage, not an implicit home on a foreign backend. */
 	agentDir?: string;
 }
@@ -26,6 +31,19 @@ export interface CredentialPathProbe {
 /** `~`, `$HOME`/`${HOME}` (POSIX shells) and `$USERPROFILE`/`$env:USERPROFILE`/`%USERPROFILE%` (Windows shells) at a path's start. */
 const HOME_PREFIX_RE = /^(?:~|\$HOME|\$\{HOME\})(?=$|[\\/])/u;
 const WINDOWS_HOME_PREFIX_RE = /^(?:\$USERPROFILE|\$\{USERPROFILE\}|\$env:USERPROFILE|%USERPROFILE%)(?=$|[\\/])/iu;
+/**
+ * `/proc/<pid>[/task/<tid>]/{environ,mem}`: the environment or memory of whichever process it names (another session's
+ * environment can carry credentials). A command line stays readable: `ps` prints every one anyway.
+ */
+const PROCESS_SECRET_FILE_RE = /^\/proc\/[^/]+(?:\/task\/[^/]+)?\/(?:environ|mem)$/u;
+
+/** Protection entries with every spelling the policy compares: as written and canonical. */
+interface ProtectionRoots {
+	readonly files: readonly string[];
+	readonly directories: readonly string[];
+	/** Every protected file and directory except the searchable files: what a search root must not contain. */
+	readonly storage: readonly string[];
+}
 
 /** One path-classification owner for file, process, shell, Python and search credential checks. */
 export class CredentialPathPolicy {
@@ -36,6 +54,8 @@ export class CredentialPathPolicy {
 	private readonly caseSensitive: boolean;
 	private readonly probe: CredentialPathProbe;
 	private readonly protectionCwd: string | undefined;
+	/** The synchronous protection roots, resolved once per policy (search-output masking asks per output line). */
+	private synchronousRoots: ProtectionRoots | undefined;
 
 	constructor(options: {
 		cwd: string;
@@ -89,20 +109,87 @@ export class CredentialPathPolicy {
 		return isPathWithinScopeWithDialect(target, root, this.flavor, this.caseSensitive);
 	}
 
-	private candidates(path: string): string[] {
-		const candidates = [path];
-		const canonical = requireSynchronousPreflight(this.probe.canonicalPath(path));
-		if (typeof canonical === "string" && canonical !== path) candidates.push(canonical);
+	/**
+	 * Every spelling a written path is compared by: resolved from the cwd, and, when it walks `..`, the same words joined
+	 * to the cwd unnormalized. A `..` after a symbolic link leaves the link's target, not its lexical parent
+	 * (`node_modules/linked/../../x`), which only the probe's canonical form of the unnormalized spelling shows.
+	 */
+	private spellings(rawPath: string): string[] {
+		const expanded = this.expandHome(rawPath);
+		const resolved = resolveExecutionPath(expanded, this.cwd, this.flavor);
+		if (!expanded.split(this.flavor === "win32" ? /[\\/]/u : /\//u).includes("..")) return [resolved];
+		return [resolved, this.paths.isAbsolute(expanded) ? expanded : `${this.cwd}${this.paths.sep}${expanded}`];
+	}
+
+	/** The first spelling as written, then the canonical form of each spelling the probe resolves. */
+	private candidates(spellings: readonly string[]): string[] {
+		const candidates = [spellings[0]];
+		for (const spelling of spellings) {
+			const canonical = requireSynchronousPreflight(this.probe.canonicalPath(spelling));
+			if (typeof canonical === "string" && !candidates.includes(canonical)) candidates.push(canonical);
+		}
 		return candidates;
 	}
 
-	private async candidatesAsync(path: string, signal?: AbortSignal): Promise<string[]> {
-		signal?.throwIfAborted();
-		const candidates = [path];
-		const canonical = await this.probe.canonicalPath(path, signal);
-		signal?.throwIfAborted();
-		if (canonical !== undefined && canonical !== path) candidates.push(canonical);
+	private async candidatesAsync(spellings: readonly string[], signal?: AbortSignal): Promise<string[]> {
+		const candidates = [spellings[0]];
+		for (const spelling of spellings) {
+			signal?.throwIfAborted();
+			const canonical = await this.probe.canonicalPath(spelling, signal);
+			signal?.throwIfAborted();
+			if (canonical !== undefined && !candidates.includes(canonical)) candidates.push(canonical);
+		}
 		return candidates;
+	}
+
+	/** The protection entries resolved the way they are compared, before canonical forms are added. */
+	private protectionEntries(): { files: string[]; directories: string[]; storage: string[] } {
+		const resolve = (values: readonly string[] | undefined) =>
+			(values ?? []).flatMap((path) => {
+				if (this.protectionCwd === undefined) {
+					try {
+						assertExecutionAbsolutePath(path, this.flavor);
+					} catch {
+						return [];
+					}
+					return [this.paths.normalize(path)];
+				}
+				return [resolveExecutionPath(path, this.protectionCwd, this.flavor)];
+			});
+		const files = resolve(this.protection?.protectedFiles);
+		const directories = resolve(this.protection?.protectedDirectories);
+		const searchable = resolve(this.protection?.searchableFiles);
+		const storage = [...new Set([...files, ...directories])].filter(
+			(entry) => !searchable.some((file) => this.samePath(file, entry)),
+		);
+		return { files, directories, storage };
+	}
+
+	private roots(): ProtectionRoots {
+		if (this.synchronousRoots === undefined) {
+			const entries = this.protectionEntries();
+			const canonical = (values: readonly string[]) => values.flatMap((value) => this.candidates([value]));
+			this.synchronousRoots = {
+				files: canonical(entries.files),
+				directories: canonical(entries.directories),
+				storage: canonical(entries.storage),
+			};
+		}
+		return this.synchronousRoots;
+	}
+
+	private async rootsAsync(signal?: AbortSignal): Promise<ProtectionRoots> {
+		const entries = this.protectionEntries();
+		const canonical = async (values: readonly string[]) => {
+			const collected: string[] = [];
+			for (const value of values) collected.push(...(await this.candidatesAsync([value], signal)));
+			return collected;
+		};
+		return {
+			files: await canonical(entries.files),
+			directories: await canonical(entries.directories),
+			storage: await canonical(entries.storage),
+		};
 	}
 
 	private hasCredentialFilename(path: string): boolean {
@@ -144,69 +231,41 @@ export class CredentialPathPolicy {
 	}
 
 	isProtected(rawPath: string): boolean {
-		const candidates = this.candidates(resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor));
-		const roots = (values: readonly string[] | undefined) =>
-			(values ?? []).flatMap((path) => {
-				if (this.protectionCwd === undefined) {
-					try {
-						assertExecutionAbsolutePath(path, this.flavor);
-					} catch {
-						return [];
-					}
-				}
-				return this.candidates(
-					this.protectionCwd === undefined
-						? this.paths.normalize(path)
-						: resolveExecutionPath(path, this.protectionCwd, this.flavor),
-				);
-			});
-		const files = roots(this.protection?.protectedFiles);
-		const directories = roots(this.protection?.protectedDirectories);
-		return this.matchesProtectionCriteria(candidates, files, directories);
+		return this.matchesProtectionCriteria(this.candidates(this.spellings(rawPath)), this.roots());
 	}
 
 	async isProtectedAsync(rawPath: string, signal?: AbortSignal): Promise<boolean> {
 		signal?.throwIfAborted();
-		const resolvedTarget = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
-		const candidates = await this.candidatesAsync(resolvedTarget, signal);
-		const roots = async (values: readonly string[] | undefined) => {
-			const collected: string[] = [];
-			for (const path of values ?? []) {
-				signal?.throwIfAborted();
-				if (this.protectionCwd === undefined) {
-					try {
-						assertExecutionAbsolutePath(path, this.flavor);
-					} catch {
-						continue;
-					}
-				}
-				const resolved =
-					this.protectionCwd === undefined
-						? this.paths.normalize(path)
-						: resolveExecutionPath(path, this.protectionCwd, this.flavor);
-				const cands = await this.candidatesAsync(resolved, signal);
-				collected.push(...cands);
-			}
-			return collected;
-		};
-		const files = await roots(this.protection?.protectedFiles);
-		const directories = await roots(this.protection?.protectedDirectories);
-		return this.matchesProtectionCriteria(candidates, files, directories);
+		const candidates = await this.candidatesAsync(this.spellings(rawPath), signal);
+		return this.matchesProtectionCriteria(candidates, await this.rootsAsync(signal));
 	}
 
-	private matchesProtectionCriteria(
-		candidates: readonly string[],
-		files: readonly string[],
-		directories: readonly string[],
-	): boolean {
-		return candidates.some((candidate) => {
-			if (
-				files.some((file) => this.samePath(file, candidate)) ||
-				directories.some((root) => this.isInside(root, candidate))
-			)
-				return true;
-			return this.hasCredentialFilename(candidate);
-		});
+	/**
+	 * True when a protected path other than a searchable file lies inside `rawRoot`, so a recursive search from it would
+	 * descend into storage. A root that is itself protected is {@link isProtected}'s.
+	 */
+	containsProtectedPath(rawRoot: string): boolean {
+		return this.containsStorage(this.candidates(this.spellings(rawRoot)), this.roots());
+	}
+
+	async containsProtectedPathAsync(rawRoot: string, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
+		const candidates = await this.candidatesAsync(this.spellings(rawRoot), signal);
+		return this.containsStorage(candidates, await this.rootsAsync(signal));
+	}
+
+	private containsStorage(candidates: readonly string[], roots: ProtectionRoots): boolean {
+		return candidates.some((candidate) => roots.storage.some((entry) => this.isInside(candidate, entry)));
+	}
+
+	private matchesProtectionCriteria(candidates: readonly string[], roots: ProtectionRoots): boolean {
+		return candidates.some(
+			(candidate) =>
+				roots.files.some((file) => this.samePath(file, candidate)) ||
+				roots.directories.some((root) => this.isInside(root, candidate)) ||
+				this.hasCredentialFilename(candidate) ||
+				(this.flavor === "posix" && PROCESS_SECRET_FILE_RE.test(candidate)),
+		);
 	}
 
 	isFile(rawPath: string): boolean | undefined {

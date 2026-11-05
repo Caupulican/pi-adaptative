@@ -506,12 +506,16 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		: undefined;
 	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
+	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
+	// recursive project search may pass through; everything else denied is harness storage.
+	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
 	const privatePathBoundary =
 		deniedPaths && deniedPaths.length > 0
 			? {
 					redactSensitiveText: redactKnownSecrets,
 					protectedFiles: deniedPaths,
 					protectedDirectories: deniedPaths,
+					searchableFiles: [projectSettingsPath],
 				}
 			: undefined;
 	const readEnvelope: CapabilityEnvelope = {
@@ -577,12 +581,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		? createWorkerRunEnvironment(
 				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
 				options.onWorkerProcessesReaped,
-				{ offline: options.readOnly === true && !networkGranted },
+				{ offline: options.readOnly === true && !networkGranted, readOnly: options.readOnly === true },
 			)
 		: undefined;
-	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
-	// recursive project search may pass through; everything else denied is harness storage.
-	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
 	const shellReadRoots = options.shellReadRoots?.flatMap((entry) => {
 		const root = path.resolve(entry);
 		return [...new Set([root, safeRealpathSync(root)])];

@@ -39,7 +39,8 @@ export function resolveNativeLinkTarget(linkPath: string, target: string, flavor
 /**
  * Canonicalize component by component in the backend's own syntax. The filesystem root is its own
  * canonical name, so a session started at a drive or filesystem root always admits; every resolved
- * link keeps a drive/UNC spelling. Missing and non-directory components surface with their native codes.
+ * link keeps a drive/UNC spelling. Missing and non-directory components surface with their native codes. A `..`
+ * leaves the physical directory reached so far, as the kernel walks it: after a link, its target's parent.
  */
 async function canonicalizeNativePath(
 	path: string,
@@ -48,15 +49,19 @@ async function canonicalizeNativePath(
 	hops = 0,
 ): Promise<string> {
 	const paths = executionPathApi(flavor);
-	const absolute = paths.resolve(path);
+	const absolute = paths.isAbsolute(path) ? path : paths.resolve(path);
 	const { root } = paths.parse(absolute);
 	const segments = absolute
 		.slice(root.length)
 		.split(flavor === "win32" ? /[\\/]+/u : /\/+/u)
-		.filter((segment) => segment.length > 0);
+		.filter((segment) => segment.length > 0 && segment !== ".");
 	let current = root;
 	for (const segment of segments) {
 		signal?.throwIfAborted();
+		if (segment === "..") {
+			current = paths.dirname(current);
+			continue;
+		}
 		const candidate = paths.join(current, segment);
 		const info = await lstat(candidate);
 		if (!info.isSymbolicLink()) {

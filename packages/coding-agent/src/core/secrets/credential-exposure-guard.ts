@@ -1,3 +1,4 @@
+import { minimatch } from "minimatch";
 import type { TSchema } from "typebox";
 import {
 	type AgentTool,
@@ -9,8 +10,18 @@ import {
 } from "../../kernel/index.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
-import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
-import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";
+import {
+	parseShellSearchInvocationScope,
+	type ShellContentSearchTool,
+	type ShellSearchInvocationScope,
+} from "../tools/search-command-guard.ts";
+import {
+	MAX_TRACKED_DIRECTORIES,
+	redirectTakesTarget,
+	type ShellCommandDialect,
+	type ShellToken,
+	tokenizeShellCommand,
+} from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { isRecordObject as isRecord } from "../util/value-guards.ts";
@@ -25,7 +36,8 @@ import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtectio
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
 
-const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls", "image_generate"]);
+/** Tools whose path arguments name the files they read or write. */
+const PATH_ARGUMENT_TOOLS = new Set(["read", "edit", "write", "patch", "ls", "image_generate"]);
 
 /** Files a repo_read call addresses: its pathspecs and the object path of every `rev:path` revision. */
 function repoReadFileSpecs(args: Record<string, unknown>): string[] {
@@ -42,12 +54,34 @@ function repoReadFileSpecs(args: Record<string, unknown>): string[] {
 	}
 	return specs;
 }
+/** Commands that print, copy or transform the content of the files they name. */
 const SHELL_INSPECTION_COMMANDS = new Set([
 	"cat",
 	"head",
 	"tail",
 	"less",
 	"more",
+	"bat",
+	"nl",
+	"tac",
+	"od",
+	"xxd",
+	"hexdump",
+	"strings",
+	"base64",
+	"cut",
+	"sort",
+	"uniq",
+	"diff",
+	"comm",
+	"paste",
+	"column",
+	"fold",
+	"rev",
+	"iconv",
+	"cp",
+	"tar",
+	"jq",
 	"sed",
 	"awk",
 	"grep",
@@ -58,10 +92,19 @@ const SHELL_INSPECTION_COMMANDS = new Set([
 	"select-string",
 	"source",
 ]);
+/**
+ * A dotenv path following a reading command in the same simple command, in the raw text: the backstop for what the
+ * structural walk cannot see (a nested `sh -c` script, a command substitution). The `.env` must start a path
+ * component or a word, so a pattern such as `process.env` is not one.
+ */
 const SHELL_SECRET_READ_RE =
-	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
+	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:[\s\\/'"=(])\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
+const DOTENV_GLOB_RE = /(?:^|[\\/])?\.env(?:\.|\*|$)/i;
+/** Hidden dotenv names a shell glob must not be able to expand to. */
+const HIDDEN_DOTENV_NAMES = [".env", ".env.local"];
+const GLOB_COMPONENT_RE = /[*?[]|\{[^{}]*,[^{}]*\}/u;
 const MAX_REDACTED_DETAIL_DEPTH = 8;
 const MAX_REDACTED_DETAIL_NODES = 10_000;
 const NON_DATA_DETAIL_OMITTED = "[NON-DATA DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
@@ -99,6 +142,7 @@ export type CredentialExposureMode = "mock" | "deny";
 export interface CredentialExposureAssessment {
 	/** `search`: only lines attributed to protected files are mocked; `content`: the whole output is. */
 	kind: "none" | "search" | "content";
+	/** Why deny mode refuses the call; absent when the call runs in both modes. */
 	reason?: string;
 }
 
@@ -135,32 +179,143 @@ export async function isProtectedCredentialPathAsync(
 	).isProtectedAsync(rawPath, signal);
 }
 
+/**
+ * A filesystem fact the credential walk asks for. The walk is written once as a generator; the synchronous and the
+ * asynchronous checks answer its questions with the policy's synchronous or asynchronous methods, so both judge alike.
+ */
+interface PathQuery {
+	readonly kind: "protected" | "token" | "file" | "storage";
+	readonly path: string;
+	readonly policy: CredentialPathPolicy;
+}
+type PathAnswer = boolean | undefined;
+type CredentialWalk<T> = Generator<PathQuery, T, PathAnswer>;
+
+const SYNC_PATH_ANSWERS: Record<PathQuery["kind"], (policy: CredentialPathPolicy, path: string) => PathAnswer> = {
+	protected: (policy, path) => policy.isProtected(path),
+	token: (policy, path) => policy.isProtectedToken(path),
+	file: (policy, path) => policy.isFile(path),
+	storage: (policy, path) => policy.containsProtectedPath(path),
+};
+const ASYNC_PATH_ANSWERS: Record<
+	PathQuery["kind"],
+	(policy: CredentialPathPolicy, path: string, signal?: AbortSignal) => Promise<PathAnswer>
+> = {
+	protected: (policy, path, signal) => policy.isProtectedAsync(path, signal),
+	token: (policy, path, signal) => policy.isProtectedTokenAsync(path, signal),
+	file: (policy, path, signal) => policy.isFileAsync(path, signal),
+	storage: (policy, path, signal) => policy.containsProtectedPathAsync(path, signal),
+};
+
+/** A missing path is an unknown file type; every other failure stays the caller's. */
+function missingFileAnswer(query: PathQuery, error: unknown): PathAnswer {
+	if (query.kind !== "file" || !isMissingPathError(error)) throw error;
+	return undefined;
+}
+
+function runCredentialWalk<T>(walk: CredentialWalk<T>): T {
+	let step = walk.next();
+	while (!step.done) {
+		let answer: PathAnswer;
+		try {
+			answer = SYNC_PATH_ANSWERS[step.value.kind](step.value.policy, step.value.path);
+		} catch (error) {
+			answer = missingFileAnswer(step.value, error);
+		}
+		step = walk.next(answer);
+	}
+	return step.value;
+}
+
+async function runCredentialWalkAsync<T>(walk: CredentialWalk<T>, signal?: AbortSignal): Promise<T> {
+	let step = walk.next();
+	while (!step.done) {
+		signal?.throwIfAborted();
+		let answer: PathAnswer;
+		try {
+			answer = await ASYNC_PATH_ANSWERS[step.value.kind](step.value.policy, step.value.path, signal);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			answer = missingFileAnswer(step.value, error);
+		}
+		step = walk.next(answer);
+	}
+	return step.value;
+}
+
+/** True when the query holds from any of the directories a command may resolve `path` from. */
+function* anyDirectory(
+	kind: PathQuery["kind"],
+	path: string,
+	policies: readonly CredentialPathPolicy[],
+): CredentialWalk<boolean> {
+	for (const policy of policies) if ((yield { kind, path, policy }) === true) return true;
+	return false;
+}
+
+/**
+ * What a call risks exposing: `credential_path` names a protected file, `process_environment` projects the process
+ * environment, `storage_search` searches a root that holds harness storage or a credential store, `dotenv_search`
+ * descends where dotenv files are read, `broad_search` searches without a file filter (its output lines are masked
+ * by file; deny mode admits it), `directory_overflow` changes directory past what the walk tracks.
+ */
+type CredentialRisk =
+	| "credential_path"
+	| "process_environment"
+	| "storage_search"
+	| "dotenv_search"
+	| "broad_search"
+	| "directory_overflow";
+
 interface ShellInvocationSegment {
 	invocation: string[];
+	/** Files read through input redirections (`<`, `N<`, `<>`). */
+	inputs: string[];
+	/** Command lines nested in its words: command and process substitutions, PowerShell blocks and groups. */
+	nested: string[];
 	readsPipe: boolean;
+}
+
+function nestedCommandLines(token: ShellToken): string[] {
+	return [
+		...(token.expansions ?? [])
+			.filter((expansion) => expansion.kind === "command" || expansion.kind === "process")
+			.map((expansion) => expansion.body),
+		...(token.groups ?? []).map((group) => group.body),
+	];
 }
 
 function parseShellInvocations(tokens: readonly ShellToken[]): ShellInvocationSegment[] {
 	const segments: ShellInvocationSegment[] = [];
 	let invocation: string[] = [];
-	let skipRedirectTarget = false;
+	let inputs: string[] = [];
+	let nested: string[] = [];
+	let redirectTarget: "input" | "other" | undefined;
 	let readsPipe = false;
 	for (const token of tokens) {
 		if (token.kind === "arg") {
-			if (skipRedirectTarget) skipRedirectTarget = false;
-			else invocation.push(token.value);
+			nested.push(...nestedCommandLines(token));
+			if (redirectTarget === "input") inputs.push(token.value);
+			else if (redirectTarget === undefined) invocation.push(token.value);
+			redirectTarget = undefined;
 			continue;
 		}
 		if (token.kind === "redirect") {
-			skipRedirectTarget = !/^\d*[<>]&[\d-]+$/u.test(token.value);
+			redirectTarget = !redirectTakesTarget(token.value)
+				? undefined
+				: /^\d*<>?$/u.test(token.value)
+					? "input"
+					: "other";
 			continue;
 		}
-		if (invocation.length > 0) segments.push({ invocation, readsPipe });
+		if (invocation.length > 0 || inputs.length > 0) segments.push({ invocation, inputs, nested, readsPipe });
 		invocation = [];
-		skipRedirectTarget = false;
+		inputs = [];
+		nested = [];
+		redirectTarget = undefined;
 		readsPipe = token.kind === "pipe";
 	}
-	if (invocation.length > 0) segments.push({ invocation, readsPipe });
+	if (invocation.length > 0 || inputs.length > 0) segments.push({ invocation, inputs, nested, readsPipe });
 	return segments;
 }
 
@@ -171,6 +326,89 @@ function extractFallbackSearchLines(command: string): string[] {
 		if (/^(?:rg|ripgrep|grep)\b/iu.test(trimmed)) lines.push(trimmed);
 	}
 	return lines;
+}
+
+/** A word whose last component is a shell glob that can expand to a hidden dotenv name (`.env*`, `.e?v`, `.*`). */
+function globMayNameDotenv(word: string): boolean {
+	const name = word.split(/[\\/]/u).at(-1) ?? "";
+	return GLOB_COMPONENT_RE.test(name) && HIDDEN_DOTENV_NAMES.some((dotenv) => minimatch(dotenv, name));
+}
+
+/** The directory a glob word expands under: its components before the first glob component; undefined for no glob. */
+function globRoot(word: string): string | undefined {
+	const components = word.split(/(?<=[\\/])/u);
+	const first = components.findIndex((component) => GLOB_COMPONENT_RE.test(component));
+	if (first < 0) return undefined;
+	return components.slice(0, first).join("") || ".";
+}
+
+function isCredentialSafeGlob(glob: string): boolean {
+	if (DOTENV_GLOB_RE.test(glob)) return false;
+	const filePattern = glob.replace(/\\/g, "/").split("/").at(-1) ?? "";
+	if (/^[A-Za-z0-9_][A-Za-z0-9_.-]{2,}\*$/u.test(filePattern) && !/\.env/i.test(filePattern)) return true;
+	const braceSuffixes = filePattern.match(/\.\{([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)+)\}$/)?.[1];
+	const suffixes = braceSuffixes
+		? braceSuffixes.split(",").map((suffix) => suffix.toLowerCase())
+		: [filePattern.match(/\.([A-Za-z0-9_-]+)$/)?.[1]?.toLowerCase()].filter(
+				(suffix): suffix is string => suffix !== undefined,
+			);
+	return suffixes.length > 0 && suffixes.every((suffix) => suffix !== "env");
+}
+
+function isCommandLineExplicitOperand(
+	target: string,
+	commandLineOperands: boolean,
+	allowShellVariables: boolean,
+): boolean {
+	return (
+		(commandLineOperands && target === "-") ||
+		(allowShellVariables && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/u.test(target))
+	);
+}
+
+/**
+ * The credential judgment of one content search (shell rg/grep, a process, the grep tool), from every directory the
+ * command may run from. A named protected path, or a glob that can expand to a dotenv name, is a credential read. A
+ * search root (a directory operand, a glob's directory, the cwd when none is named) that contains harness storage
+ * or a credential store is refused, glob or not. A descent that may read dotenv files is refused without a narrow
+ * non-dotenv glob. Otherwise a search without a file filter is broad: it runs, its output lines masked by file. A
+ * file that exists in any of the directories is an explicit file, not a root (`cd sub && grep x Makefile`).
+ */
+function* searchCredentialRisk(
+	scope: ShellSearchInvocationScope,
+	policies: readonly CredentialPathPolicy[],
+	commandLineOperands: boolean,
+	allowShellVariables: boolean,
+): CredentialWalk<CredentialRisk | undefined> {
+	for (const target of scope.targets) {
+		if (target === "-") continue;
+		if (commandLineOperands && globMayNameDotenv(target)) return "credential_path";
+		if (yield* anyDirectory("protected", target, policies)) return "credential_path";
+	}
+	if (scope.metaOnly || scope.readsStdin) return undefined;
+	const storageRoots: string[] = [];
+	const contentRoots: string[] = [];
+	for (const target of scope.targets) {
+		if (isCommandLineExplicitOperand(target, commandLineOperands, allowShellVariables)) continue;
+		if (policies.some((policy) => policy.isHarnessOwnedSearchTarget(target))) continue;
+		const root = commandLineOperands ? globRoot(target) : undefined;
+		if (root !== undefined) {
+			storageRoots.push(root);
+			if (!isCredentialSafeGlob(target)) contentRoots.push(root);
+			continue;
+		}
+		if (yield* anyDirectory("file", target, policies)) continue;
+		storageRoots.push(target);
+		contentRoots.push(target);
+	}
+	if (scope.targets.length === 0 && scope.recursive) {
+		storageRoots.push(".");
+		contentRoots.push(".");
+	}
+	for (const root of storageRoots) if (yield* anyDirectory("storage", root, policies)) return "storage_search";
+	const hasSafeGlob = scope.positiveGlobs.length > 0 && scope.positiveGlobs.every(isCredentialSafeGlob);
+	if (contentRoots.length === 0 || hasSafeGlob) return undefined;
+	return scope.recursive && scope.mayReadDotenv ? "dotenv_search" : "broad_search";
 }
 
 function inspectToolCredentialRisk(
@@ -186,27 +424,8 @@ function inspectToolCredentialRisk(
 	return { searchTool };
 }
 
-function hasProtectedArgumentToken(args: readonly string[], paths: CredentialPathPolicy): boolean {
-	return args.some((token) =>
-		Boolean(token && !token.startsWith("-") && token !== "." && paths.isProtectedToken(token)),
-	);
-}
-
-async function hasProtectedArgumentTokenAsync(
-	args: readonly string[],
-	paths: CredentialPathPolicy,
-	signal?: AbortSignal,
-): Promise<boolean> {
-	for (const token of args) {
-		signal?.throwIfAborted();
-		if (token && !token.startsWith("-") && token !== "." && (await paths.isProtectedTokenAsync(token, signal))) {
-			return true;
-		}
-	}
-	return false;
-}
-
 interface ParsedInvocationCommand {
+	toolName: string;
 	args: string[];
 	searchTool?: ShellContentSearchTool;
 	envRisk?: "process_environment";
@@ -218,6 +437,7 @@ function parseInvocationCommand(invocation: readonly string[], index: number): P
 	const args = invocation.slice(index + 1);
 	const inspected = inspectToolCredentialRisk(toolName, args);
 	return {
+		toolName,
 		args,
 		searchTool: inspected.searchTool,
 		envRisk: inspected.risk,
@@ -225,8 +445,22 @@ function parseInvocationCommand(invocation: readonly string[], index: number): P
 	};
 }
 
+/** jq's module directories (`-L dir`, `-Ldir`, `--library-path dir`, `--library-path=dir`): `import` reads below them. */
+function jqLibraryRoots(args: readonly string[]): string[] {
+	const roots: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "--") break;
+		if (arg === "-L" || arg === "--library-path") {
+			const value = args[++index];
+			if (value !== undefined) roots.push(value);
+		} else if (arg.startsWith("--library-path=")) roots.push(arg.slice("--library-path=".length));
+		else if (/^-L./u.test(arg)) roots.push(arg.slice(2));
+	}
+	return roots;
+}
+
 const DIRECTORY_CHANGE_COMMANDS = new Set(["cd", "chdir", "pushd", "set-location", "sl", "push-location"]);
-const MAX_SHELL_WORKING_DIRECTORIES = 64;
 
 /**
  * The directories later commands of one command line may resolve relative paths from, after `invocation` ran: a
@@ -234,7 +468,7 @@ const MAX_SHELL_WORKING_DIRECTORIES = 64;
  * conditional or a subshell may or may not hold for what follows, so every earlier directory stays a candidate and a
  * path is judged from all of them. A group's `(`/`{` and `)` stay attached to the words they touch, so they are peeled
  * off. `cd -` returns to a directory already a candidate. Undefined when the line changes to more distinct directories
- * than the bound, which is judged as a credential read.
+ * than the bound the read-only shell line shares.
  */
 function workingDirectoriesAfter(
 	invocation: readonly string[],
@@ -254,77 +488,67 @@ function workingDirectoriesAfter(
 		const moved = policy.withCwd(target);
 		if (!next.some((known) => known.workingDirectory === moved.workingDirectory)) next.push(moved);
 	}
-	return next.length > MAX_SHELL_WORKING_DIRECTORIES ? undefined : next;
+	return next.length > MAX_TRACKED_DIRECTORIES ? undefined : next;
 }
-
-/** One step of a command line's credential walk: a file-inspecting command, or a risk the walk itself decided. */
-type ShellInspectionStep =
-	| {
-			readonly kind: "command";
-			readonly cmd: ParsedInvocationCommand;
-			readonly readsPipe: boolean;
-			/** Every directory the command may resolve its relative paths from. */
-			readonly policies: readonly CredentialPathPolicy[];
-	  }
-	| { readonly kind: "risk"; readonly risk: "credential_path" | "process_environment" };
 
 /**
- * The one walk over a command line that the synchronous and the asynchronous credential checks share: each command
- * that inspects files, in order, with the working directories earlier `cd`/`pushd` commands made possible, and the risks
- * the line itself carries (a process-environment read, a working-directory change past the bound). The walk ends at
- * its first risk.
+ * The credential walk over one shell command line, shared by the synchronous and asynchronous checks: nested command
+ * lines (substitutions, PowerShell blocks), input redirections, every command that inspects files (at any word
+ * position, so a wrapper's program is judged too), every search, and `cd`/`pushd` tracking. A refusal ends the walk; a broad search is remembered and the walk goes on.
  */
-function* shellInspectionSteps(
-	shellTokens: readonly ShellToken[],
-	paths: CredentialPathPolicy,
-): Generator<ShellInspectionStep> {
-	let policies: readonly CredentialPathPolicy[] = [paths];
-	for (const segment of parseShellInvocations(shellTokens)) {
-		for (let i = 0; i < segment.invocation.length; i++) {
-			const cmd = parseInvocationCommand(segment.invocation, i);
-			if (cmd.envRisk) {
-				yield { kind: "risk", risk: cmd.envRisk };
-				return;
-			}
-			if (cmd.isInspectionCommand) yield { kind: "command", cmd, readsPipe: segment.readsPipe, policies };
-		}
-		const moved = workingDirectoriesAfter(segment.invocation, policies);
-		if (!moved) {
-			yield { kind: "risk", risk: "credential_path" };
-			return;
-		}
-		policies = moved;
-	}
-}
-
-function shellCredentialRisk(
+function* shellCredentialRisk(
 	command: string,
+	dialect: ShellCommandDialect,
 	paths: CredentialPathPolicy,
-): "broad_search" | "credential_path" | "process_environment" | undefined {
-	const shellTokens = tokenizeShellCommand(command);
+): CredentialWalk<CredentialRisk | undefined> {
+	if (SHELL_SECRET_READ_RE.test(command)) return "credential_path";
+	const shellTokens = tokenizeShellCommand(command, dialect);
 	if (!shellTokens) {
-		for (const trimmed of extractFallbackSearchLines(command)) {
-			const lineTokens = tokenizeShellCommand(trimmed);
-			if (!lineTokens) continue;
-			const risk = shellCredentialRisk(trimmed, paths);
+		for (const line of extractFallbackSearchLines(command)) {
+			if (!tokenizeShellCommand(line, dialect)) continue;
+			const risk = yield* shellCredentialRisk(line, dialect, paths);
 			if (risk) return risk;
 		}
 		return undefined;
 	}
-
-	for (const step of shellInspectionSteps(shellTokens, paths)) {
-		if (step.kind === "risk") return step.risk;
-		const { cmd } = step;
-		for (const policy of step.policies) {
+	let policies: readonly CredentialPathPolicy[] = [paths];
+	let broad = false;
+	for (const segment of parseShellInvocations(shellTokens)) {
+		for (const nested of segment.nested) {
+			for (const policy of policies) {
+				const risk = yield* shellCredentialRisk(nested, dialect, policy);
+				if (risk === "broad_search") broad = true;
+				else if (risk) return risk;
+			}
+		}
+		for (const input of segment.inputs) {
+			if (globMayNameDotenv(input) || (yield* anyDirectory("protected", input, policies))) return "credential_path";
+		}
+		for (let index = 0; index < segment.invocation.length; index++) {
+			const cmd = parseInvocationCommand(segment.invocation, index);
+			if (cmd.envRisk) return cmd.envRisk;
 			if (cmd.searchTool) {
-				const searchRisk = searchCredentialRisk(cmd.searchTool, cmd.args, step.readsPipe, policy, true);
-				if (searchRisk) return searchRisk;
+				const scope = parseShellSearchInvocationScope(cmd.searchTool, cmd.args, segment.readsPipe);
+				const risk = yield* searchCredentialRisk(scope, policies, true, true);
+				if (risk === "broad_search") broad = true;
+				else if (risk) return risk;
 				continue;
 			}
-			if (hasProtectedArgumentToken(cmd.args, policy)) return "credential_path";
+			if (!cmd.isInspectionCommand) continue;
+			for (const arg of cmd.args) {
+				if (!arg || arg.startsWith("-") || arg === ".") continue;
+				if (globMayNameDotenv(arg) || (yield* anyDirectory("token", arg, policies))) return "credential_path";
+			}
+			if (cmd.toolName !== "jq") continue;
+			for (const root of jqLibraryRoots(cmd.args)) {
+				if (yield* anyDirectory("storage", root, policies)) return "storage_search";
+			}
 		}
+		const moved = workingDirectoriesAfter(segment.invocation, policies);
+		if (!moved) return "directory_overflow";
+		policies = moved;
 	}
-	return undefined;
+	return broad ? "broad_search" : undefined;
 }
 
 function jqFilterFromArgs(args: string[]): string | undefined {
@@ -349,231 +573,36 @@ function jqFilterReadsProcessEnvironment(filter: string): boolean {
 	return /(?:^|[\s|,(:;[])(?:env|\$ENV)(?=$|[\s|),.;[\]}])/u.test(filter);
 }
 
-function isCredentialSafeGlob(glob: string): boolean {
-	if (/(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob)) return false;
-	const filePattern = glob.replace(/\\/g, "/").split("/").at(-1) ?? "";
-	if (/^[A-Za-z0-9_][A-Za-z0-9_.-]{2,}\*$/u.test(filePattern) && !/\.env/i.test(filePattern)) return true;
-	const braceSuffixes = filePattern.match(/\.\{([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)+)\}$/)?.[1];
-	const suffixes = braceSuffixes
-		? braceSuffixes.split(",").map((suffix) => suffix.toLowerCase())
-		: [filePattern.match(/\.([A-Za-z0-9_-]+)$/)?.[1]?.toLowerCase()].filter(
-				(suffix): suffix is string => suffix !== undefined,
-			);
-	return suffixes.length > 0 && suffixes.every((suffix) => suffix !== "env");
-}
-
-function resolveExplicitFileSafety(isFileResult: boolean | undefined, rawPath: string, allowMissing: boolean): boolean {
-	return isFileResult ?? (allowMissing && isCredentialSafeGlob(rawPath));
-}
-
-function isCredentialSafeExplicitFile(rawPath: string, paths: CredentialPathPolicy, allowMissing: boolean): boolean {
-	try {
-		return resolveExplicitFileSafety(paths.isFile(rawPath), rawPath, allowMissing);
-	} catch (error) {
-		if (!isMissingPathError(error)) throw error;
-		return allowMissing && isCredentialSafeGlob(rawPath);
-	}
-}
-
-async function isCredentialSafeExplicitFileAsync(
-	rawPath: string,
+function* processCredentialRisk(
+	executable: string,
+	args: readonly string[],
 	paths: CredentialPathPolicy,
-	allowMissing: boolean,
-	signal?: AbortSignal,
-): Promise<boolean> {
-	try {
-		return resolveExplicitFileSafety(await paths.isFileAsync(rawPath, signal), rawPath, allowMissing);
-	} catch (error) {
-		if (!isMissingPathError(error)) throw error;
-		return allowMissing && isCredentialSafeGlob(rawPath);
-	}
-}
-
-function isBroadSearchScope(
-	scope: { metaOnly: boolean; readsStdin: boolean; positiveGlobs: readonly string[] },
-	hasOnlyExplicitFiles: boolean,
-): boolean {
-	const hasSafeGlob = scope.positiveGlobs.length > 0 && scope.positiveGlobs.every(isCredentialSafeGlob);
-	return !scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles;
-}
-
-function isCommandLineExplicitOperand(
-	target: string,
-	commandLineOperands: boolean,
-	allowShellVariables: boolean,
-): boolean {
-	return (
-		(commandLineOperands && target === "-") ||
-		(allowShellVariables && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/u.test(target))
+): CredentialWalk<CredentialRisk | undefined> {
+	if (yield { kind: "protected", path: executable, policy: paths }) return "credential_path";
+	for (const argument of args) if (yield { kind: "token", path: argument, policy: paths }) return "credential_path";
+	const inspected = inspectToolCredentialRisk(paths.executableName(executable), args);
+	if (inspected.risk) return inspected.risk;
+	if (!inspected.searchTool) return undefined;
+	return yield* searchCredentialRisk(
+		parseShellSearchInvocationScope(inspected.searchTool, [...args], false),
+		[paths],
+		true,
+		false,
 	);
 }
 
-function searchCredentialRisk(
-	searchTool: ShellContentSearchTool,
-	args: readonly string[],
-	readsPipe: boolean,
-	paths: CredentialPathPolicy,
-	allowShellVariables: boolean,
-): "broad_search" | "credential_path" | undefined {
-	const scope = parseShellSearchInvocationScope(searchTool, [...args], readsPipe);
-	return contentSearchCredentialRisk(scope, paths, true, allowShellVariables);
-}
-
-async function searchCredentialRiskAsync(
-	searchTool: ShellContentSearchTool,
-	args: readonly string[],
-	readsPipe: boolean,
-	paths: CredentialPathPolicy,
-	allowShellVariables: boolean,
-	signal?: AbortSignal,
-): Promise<"broad_search" | "credential_path" | undefined> {
-	const scope = parseShellSearchInvocationScope(searchTool, [...args], readsPipe);
-	return contentSearchCredentialRiskAsync(scope, paths, true, allowShellVariables, signal);
-}
-
-function contentSearchCredentialRisk(
-	scope: { targets: readonly string[]; positiveGlobs: readonly string[]; metaOnly: boolean; readsStdin: boolean },
-	paths: CredentialPathPolicy,
-	commandLineOperands: boolean,
-	allowShellVariables: boolean,
-): "broad_search" | "credential_path" | undefined {
-	if (scope.targets.some((target) => target !== "-" && paths.isProtected(target))) {
-		return "credential_path";
-	}
-	const hasOnlyExplicitFiles =
-		scope.targets.length > 0 &&
-		scope.targets.every(
-			(target) =>
-				isCommandLineExplicitOperand(target, commandLineOperands, allowShellVariables) ||
-				isCredentialSafeExplicitFile(target, paths, commandLineOperands) ||
-				paths.isHarnessOwnedSearchTarget(target),
-		);
-	if (isBroadSearchScope(scope, hasOnlyExplicitFiles)) return "broad_search";
-	return undefined;
-}
-
-async function contentSearchCredentialRiskAsync(
-	scope: { targets: readonly string[]; positiveGlobs: readonly string[]; metaOnly: boolean; readsStdin: boolean },
-	paths: CredentialPathPolicy,
-	commandLineOperands: boolean,
-	allowShellVariables: boolean,
-	signal?: AbortSignal,
-): Promise<"broad_search" | "credential_path" | undefined> {
-	for (const target of scope.targets) {
-		signal?.throwIfAborted();
-		if (target !== "-" && (await paths.isProtectedAsync(target, signal))) {
-			return "credential_path";
-		}
-	}
-	let hasOnlyExplicitFiles = scope.targets.length > 0;
-	if (hasOnlyExplicitFiles) {
-		for (const target of scope.targets) {
-			signal?.throwIfAborted();
-			const isExplicit =
-				isCommandLineExplicitOperand(target, commandLineOperands, allowShellVariables) ||
-				(await isCredentialSafeExplicitFileAsync(target, paths, commandLineOperands, signal)) ||
-				paths.isHarnessOwnedSearchTarget(target);
-			if (!isExplicit) {
-				hasOnlyExplicitFiles = false;
-				break;
-			}
-		}
-	}
-	if (isBroadSearchScope(scope, hasOnlyExplicitFiles)) return "broad_search";
-	return undefined;
-}
-
-function pythonInspectsCredentialPath(code: string, paths: CredentialPathPolicy): boolean {
-	if (!PYTHON_INSPECTION_RE.test(code)) return false;
-	for (const candidate of pythonCredentialPathCandidates(code)) {
-		if (paths.isProtectedToken(candidate)) return true;
-	}
-	return false;
-}
-
-async function pythonInspectsCredentialPathAsync(
+function* pythonInspectsCredentialPath(
 	code: string,
+	scriptPath: string | undefined,
 	paths: CredentialPathPolicy,
-	signal?: AbortSignal,
-): Promise<boolean> {
-	if (!PYTHON_INSPECTION_RE.test(code)) return false;
-	for (const candidate of pythonCredentialPathCandidates(code)) {
-		signal?.throwIfAborted();
-		if (await paths.isProtectedTokenAsync(candidate, signal)) return true;
-	}
-	return false;
-}
-
-async function shellCredentialRiskAsync(
-	command: string,
-	paths: CredentialPathPolicy,
-	signal?: AbortSignal,
-): Promise<"broad_search" | "credential_path" | "process_environment" | undefined> {
-	const shellTokens = tokenizeShellCommand(command);
-	if (!shellTokens) {
-		for (const trimmed of extractFallbackSearchLines(command)) {
-			const lineTokens = tokenizeShellCommand(trimmed);
-			if (!lineTokens) continue;
-			const risk = await shellCredentialRiskAsync(trimmed, paths, signal);
-			if (risk) return risk;
-		}
-		return undefined;
-	}
-
-	for (const step of shellInspectionSteps(shellTokens, paths)) {
-		signal?.throwIfAborted();
-		if (step.kind === "risk") return step.risk;
-		const { cmd } = step;
-		for (const policy of step.policies) {
-			if (cmd.searchTool) {
-				const searchRisk = await searchCredentialRiskAsync(
-					cmd.searchTool,
-					cmd.args,
-					step.readsPipe,
-					policy,
-					true,
-					signal,
-				);
-				if (searchRisk) return searchRisk;
-				continue;
-			}
-			if (await hasProtectedArgumentTokenAsync(cmd.args, policy, signal)) return "credential_path";
+): CredentialWalk<boolean> {
+	if (PYTHON_SECRET_READ_RE.test(code)) return true;
+	if (PYTHON_INSPECTION_RE.test(code)) {
+		for (const candidate of pythonCredentialPathCandidates(code)) {
+			if (yield { kind: "token", path: candidate, policy: paths }) return true;
 		}
 	}
-	return undefined;
-}
-
-function runProcessCredentialRisk(
-	executable: string,
-	args: readonly string[],
-	paths: CredentialPathPolicy,
-): "broad_search" | "credential_path" | "process_environment" | undefined {
-	if (paths.isProtected(executable)) return "credential_path";
-	if (args.some((argument) => paths.isProtectedToken(argument))) return "credential_path";
-
-	const inspected = inspectToolCredentialRisk(paths.executableName(executable), args);
-	if (inspected.risk) return inspected.risk;
-	if (!inspected.searchTool) return undefined;
-	return searchCredentialRisk(inspected.searchTool, args, false, paths, false);
-}
-
-async function runProcessCredentialRiskAsync(
-	executable: string,
-	args: readonly string[],
-	paths: CredentialPathPolicy,
-	signal?: AbortSignal,
-): Promise<"broad_search" | "credential_path" | "process_environment" | undefined> {
-	signal?.throwIfAborted();
-	if (await paths.isProtectedAsync(executable, signal)) return "credential_path";
-	for (const argument of args) {
-		signal?.throwIfAborted();
-		if (await paths.isProtectedTokenAsync(argument, signal)) return "credential_path";
-	}
-
-	const inspected = inspectToolCredentialRisk(paths.executableName(executable), args);
-	if (inspected.risk) return inspected.risk;
-	if (!inspected.searchTool) return undefined;
-	return searchCredentialRiskAsync(inspected.searchTool, args, false, paths, false, signal);
+	return scriptPath !== undefined && (yield { kind: "protected", path: scriptPath, policy: paths }) === true;
 }
 
 /** Deny mode is the leaf-worker contract: the worker cannot decide this, so its parent does. */
@@ -585,10 +614,13 @@ const CREDENTIAL_BLOCK_REASONS = {
 		"Credential file access is model-blind. Use secret_store migrate with this path, or activate an existing profile, without inspecting credential data.",
 	dotenvBlind:
 		"Credential dotenv files are model-blind. Use secret_store discover instead of searching their contents.",
-	grepFileRequired:
-		"Credential-safe grep requires one explicit regular file or a narrow non-dotenv file glob (for example *.ts). Refine the search instead of scanning a directory without a file filter.",
-	shellSearchRequired:
-		"Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.",
+	grepDotenvSearch:
+		"The grep tool also searches hidden files, so a directory search without a file filter reads dotenv credential files, which are model-blind. Give a narrow non-dotenv glob (for example *.ts) or one file, or search with rg in the shell, which skips hidden files.",
+	shellDotenvSearch:
+		"This search would read dotenv credential files, which are model-blind: grep -r needs --exclude='.env*' (or a non-dotenv --include), and rg searches hidden or ignored files only with -g '!.env*'. Use secret_store discover for credential names.",
+	storageSearch:
+		"A search root contains harness storage or a credential store (for example the agent directory or ~/.ssh), which this session may not read. Search a project directory instead.",
+	directoryOverflow: `The command line changes directory more often than the credential check tracks (${MAX_TRACKED_DIRECTORIES} possible directories). Run its parts as separate commands.`,
 	processEnvBlocked:
 		"Direct process-environment projection is blocked because it can expose credentials. Use secret_store discover to list eligible source names without exposing values.",
 	shellInspectionBlocked:
@@ -597,31 +629,123 @@ const CREDENTIAL_BLOCK_REASONS = {
 		"Direct Python inspection of credential files is blocked. Use secret_store migrate with the file path, then run the credential-consuming program normally.",
 } as const;
 
-function evaluateShellOrProcessRisk(
-	risk: "broad_search" | "credential_path" | "process_environment" | undefined,
-	extraDirectBlock = false,
-): string | undefined {
-	if (risk === "broad_search") return CREDENTIAL_BLOCK_REASONS.shellSearchRequired;
-	if (risk === "process_environment") return CREDENTIAL_BLOCK_REASONS.processEnvBlocked;
-	if (risk === "credential_path" || extraDirectBlock) return CREDENTIAL_BLOCK_REASONS.shellInspectionBlocked;
-	return undefined;
+const NO_EXPOSURE: CredentialExposureAssessment = { kind: "none" };
+
+/** A shell or process risk as an assessment: what deny mode refuses, and how mock mode masks the output. */
+function commandAssessment(risk: CredentialRisk | undefined): CredentialExposureAssessment {
+	switch (risk) {
+		case undefined:
+			return NO_EXPOSURE;
+		case "broad_search":
+			return { kind: "search" };
+		case "storage_search":
+			return { kind: "search", reason: CREDENTIAL_BLOCK_REASONS.storageSearch };
+		case "dotenv_search":
+			return { kind: "search", reason: CREDENTIAL_BLOCK_REASONS.shellDotenvSearch };
+		case "process_environment":
+			return { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.processEnvBlocked };
+		case "directory_overflow":
+			return { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.directoryOverflow };
+		case "credential_path":
+			return { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.shellInspectionBlocked };
+	}
 }
 
-function evaluateGrepRisk(risk: "broad_search" | "credential_path" | undefined, glob?: string): string | undefined {
-	if (risk === "credential_path" || (glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))) {
-		return CREDENTIAL_BLOCK_REASONS.dotenvBlind;
+function grepToolAssessment(risk: CredentialRisk | undefined, glob: string | undefined): CredentialExposureAssessment {
+	if (risk === "credential_path" || (glob !== undefined && DOTENV_GLOB_RE.test(glob))) {
+		return { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.dotenvBlind };
 	}
-	if (risk === "broad_search") {
-		return CREDENTIAL_BLOCK_REASONS.grepFileRequired;
-	}
-	return undefined;
+	if (risk === "dotenv_search") return { kind: "search", reason: CREDENTIAL_BLOCK_REASONS.grepDotenvSearch };
+	return commandAssessment(risk);
 }
 
-function evaluateFindRisk(pathIsProtected: boolean, pattern?: string): string | undefined {
-	if (pathIsProtected || (pattern && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(pattern))) {
-		return CREDENTIAL_BLOCK_REASONS.dotenvBlind;
+function stringArgument(args: Record<string, unknown>, name: string): string | undefined {
+	const value = args[name];
+	return typeof value === "string" ? value : undefined;
+}
+
+/** The credential assessment of one tool call, written once for the synchronous and asynchronous checks. */
+function* toolCredentialAssessment(
+	toolName: string,
+	args: Record<string, unknown>,
+	paths: CredentialPathPolicy,
+): CredentialWalk<CredentialExposureAssessment> {
+	const fileBlind: CredentialExposureAssessment = { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.fileBlind };
+	switch (toolName) {
+		case "grep": {
+			const target = stringArgument(args, "path");
+			const glob = stringArgument(args, "glob");
+			// The grep tool descends into every directory and passes `--hidden`.
+			const scope: ShellSearchInvocationScope = {
+				targets: target ? [target] : [],
+				positiveGlobs: glob ? [glob] : [],
+				hasScopeFilter: glob !== undefined,
+				metaOnly: false,
+				readsStdin: false,
+				recursive: true,
+				mayReadDotenv: true,
+			};
+			return grepToolAssessment(yield* searchCredentialRisk(scope, [paths], false, false), glob);
+		}
+		case "find": {
+			const target = stringArgument(args, "path");
+			const pattern = stringArgument(args, "pattern");
+			const named = target !== undefined && (yield { kind: "protected", path: target, policy: paths }) === true;
+			return named || (pattern !== undefined && DOTENV_GLOB_RE.test(pattern))
+				? { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.dotenvBlind }
+				: NO_EXPOSURE;
+		}
+		case "repo_read":
+			for (const spec of repoReadFileSpecs(args))
+				if (yield { kind: "protected", path: spec, policy: paths }) return fileBlind;
+			return NO_EXPOSURE;
+		case "run_process": {
+			const executable = stringArgument(args, "executable");
+			if (executable === undefined) return NO_EXPOSURE;
+			const argv = Array.isArray(args.args)
+				? args.args.filter((argument): argument is string => typeof argument === "string")
+				: [];
+			return commandAssessment(yield* processCredentialRisk(executable, argv, paths));
+		}
+		case "bash":
+		case "powershell":
+			return commandAssessment(
+				yield* shellCredentialRisk(
+					stringArgument(args, "command") ?? "",
+					toolName === "powershell" ? "powershell" : "posix",
+					paths,
+				),
+			);
+		case "python":
+			return (yield* pythonInspectsCredentialPath(
+				stringArgument(args, "code") ?? "",
+				stringArgument(args, "scriptPath"),
+				paths,
+			))
+				? { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.pythonInspectionBlocked }
+				: NO_EXPOSURE;
+		default:
+			if (!PATH_ARGUMENT_TOOLS.has(toolName)) return NO_EXPOSURE;
+			for (const path of extractToolPathArguments(toolName, args)) {
+				if (yield { kind: "protected", path, policy: paths }) return fileBlind;
+			}
+			return NO_EXPOSURE;
 	}
-	return undefined;
+}
+
+function credentialPolicyFor(
+	cwd: string,
+	boundary: CredentialExposureBoundary | undefined,
+	executionContext: ExecutionContext | undefined,
+	pathAuthority: ExecutionPathAuthority | undefined,
+): CredentialPathPolicy {
+	return createCredentialPathPolicy(
+		cwd,
+		boundary,
+		executionContext,
+		boundary?.getPathProbe?.(executionContext),
+		pathAuthority,
+	);
 }
 
 export function credentialToolBlockReason(
@@ -633,85 +757,8 @@ export function credentialToolBlockReason(
 	pathAuthority?: ExecutionPathAuthority,
 ): string | undefined {
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
-	const paths = createCredentialPathPolicy(
-		cwd,
-		boundary,
-		executionContext,
-		boundary?.getPathProbe?.(executionContext),
-		pathAuthority,
-	);
-	switch (toolName) {
-		case "read":
-		case "write":
-		case "edit":
-		case "patch":
-			return extractToolPathArguments(toolName, args).some((p) => paths.isProtected(p))
-				? CREDENTIAL_BLOCK_REASONS.fileBlind
-				: undefined;
-		case "grep": {
-			const target = typeof args.path === "string" ? args.path : undefined;
-			const patternGlob = typeof args.glob === "string" ? args.glob : undefined;
-			const risk = contentSearchCredentialRisk(
-				{
-					targets: target ? [target] : [],
-					positiveGlobs: patternGlob ? [patternGlob] : [],
-					metaOnly: false,
-					readsStdin: false,
-				},
-				paths,
-				false,
-				false,
-			);
-			return evaluateGrepRisk(risk, patternGlob);
-		}
-		case "find": {
-			const target = typeof args.path === "string" ? args.path : undefined;
-			const pat = typeof args.pattern === "string" ? args.pattern : undefined;
-			return evaluateFindRisk(Boolean(target && paths.isProtected(target)), pat);
-		}
-		case "repo_read":
-			return repoReadFileSpecs(args).some((spec) => paths.isProtected(spec))
-				? CREDENTIAL_BLOCK_REASONS.fileBlind
-				: undefined;
-		case "run_process": {
-			const bin = typeof args.executable === "string" ? args.executable : undefined;
-			const argv = Array.isArray(args.args)
-				? args.args.filter((item): item is string => typeof item === "string")
-				: [];
-			return evaluateShellOrProcessRisk(bin ? runProcessCredentialRisk(bin, argv, paths) : undefined);
-		}
-		case "bash":
-		case "powershell": {
-			const script = typeof args.command === "string" ? args.command : "";
-			return evaluateShellOrProcessRisk(shellCredentialRisk(script, paths), SHELL_SECRET_READ_RE.test(script));
-		}
-		case "python": {
-			const src = typeof args.code === "string" ? args.code : "";
-			const file = typeof args.scriptPath === "string" ? args.scriptPath : undefined;
-			if (
-				PYTHON_SECRET_READ_RE.test(src) ||
-				pythonInspectsCredentialPath(src, paths) ||
-				(file && paths.isProtected(file))
-			) {
-				return CREDENTIAL_BLOCK_REASONS.pythonInspectionBlocked;
-			}
-			return undefined;
-		}
-		default:
-			if (DIRECT_PATH_TOOLS.has(toolName)) {
-				return extractToolPathArguments(toolName, args).some((p) => paths.isProtected(p))
-					? CREDENTIAL_BLOCK_REASONS.fileBlind
-					: undefined;
-			}
-			return undefined;
-	}
-}
-
-function assessmentFromReason(reason: string | undefined): CredentialExposureAssessment {
-	if (reason === undefined) return { kind: "none" };
-	const search =
-		reason === CREDENTIAL_BLOCK_REASONS.shellSearchRequired || reason === CREDENTIAL_BLOCK_REASONS.grepFileRequired;
-	return { kind: search ? "search" : "content", reason };
+	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
+	return runCredentialWalk(toolCredentialAssessment(toolName, args, paths)).reason;
 }
 
 export async function assessCredentialExposureAsync(
@@ -723,9 +770,10 @@ export async function assessCredentialExposureAsync(
 	pathAuthority?: ExecutionPathAuthority,
 	signal?: AbortSignal,
 ): Promise<CredentialExposureAssessment> {
-	return assessmentFromReason(
-		await credentialToolBlockReasonAsync(toolName, args, cwd, boundary, executionContext, pathAuthority, signal),
-	);
+	if (toolName === "secret_store" || !isRecord(args)) return NO_EXPOSURE;
+	signal?.throwIfAborted();
+	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
+	return runCredentialWalkAsync(toolCredentialAssessment(toolName, args, paths), signal);
 }
 
 export async function credentialToolBlockReasonAsync(
@@ -737,75 +785,8 @@ export async function credentialToolBlockReasonAsync(
 	pathAuthority?: ExecutionPathAuthority,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	if (toolName === "secret_store" || !isRecord(args)) return undefined;
-	signal?.throwIfAborted();
-	const paths = createCredentialPathPolicy(
-		cwd,
-		boundary,
-		executionContext,
-		boundary?.getPathProbe?.(executionContext),
-		pathAuthority,
-	);
-	if (DIRECT_PATH_TOOLS.has(toolName)) {
-		for (const path of extractToolPathArguments(toolName, args)) {
-			signal?.throwIfAborted();
-			if (await paths.isProtectedAsync(path, signal)) {
-				return CREDENTIAL_BLOCK_REASONS.fileBlind;
-			}
-		}
-	}
-	if (toolName === "grep") {
-		const path = typeof args.path === "string" ? args.path : undefined;
-		const glob = typeof args.glob === "string" ? args.glob : undefined;
-		const risk = await contentSearchCredentialRiskAsync(
-			{ targets: path ? [path] : [], positiveGlobs: glob ? [glob] : [], metaOnly: false, readsStdin: false },
-			paths,
-			false,
-			false,
-			signal,
-		);
-		return evaluateGrepRisk(risk, glob);
-	}
-	if (toolName === "find") {
-		const path = typeof args.path === "string" ? args.path : undefined;
-		const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
-		const isProt = Boolean(path && (await paths.isProtectedAsync(path, signal)));
-		return evaluateFindRisk(isProt, pattern);
-	}
-	if (toolName === "repo_read") {
-		for (const spec of repoReadFileSpecs(args)) {
-			signal?.throwIfAborted();
-			if (await paths.isProtectedAsync(spec, signal)) return CREDENTIAL_BLOCK_REASONS.fileBlind;
-		}
-		return undefined;
-	}
-	if (toolName === "run_process") {
-		const executable = typeof args.executable === "string" ? args.executable : undefined;
-		const processArgs = Array.isArray(args.args)
-			? args.args.filter((argument): argument is string => typeof argument === "string")
-			: [];
-		const processRisk = executable
-			? await runProcessCredentialRiskAsync(executable, processArgs, paths, signal)
-			: undefined;
-		return evaluateShellOrProcessRisk(processRisk);
-	}
-	if (toolName === "bash" || toolName === "powershell") {
-		const command = typeof args.command === "string" ? args.command : "";
-		const shellRisk = await shellCredentialRiskAsync(command, paths, signal);
-		return evaluateShellOrProcessRisk(shellRisk, SHELL_SECRET_READ_RE.test(command));
-	}
-	if (toolName === "python") {
-		const code = typeof args.code === "string" ? args.code : "";
-		const scriptPath = typeof args.scriptPath === "string" ? args.scriptPath : undefined;
-		if (
-			PYTHON_SECRET_READ_RE.test(code) ||
-			(await pythonInspectsCredentialPathAsync(code, paths, signal)) ||
-			(scriptPath !== undefined && (await paths.isProtectedAsync(scriptPath, signal)))
-		) {
-			return CREDENTIAL_BLOCK_REASONS.pythonInspectionBlocked;
-		}
-	}
-	return undefined;
+	return (await assessCredentialExposureAsync(toolName, args, cwd, boundary, executionContext, pathAuthority, signal))
+		.reason;
 }
 
 /** Known values first (exact), then the shape-preserving mock, which also covers secret-shaped text. */

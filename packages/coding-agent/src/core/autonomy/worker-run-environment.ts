@@ -64,12 +64,32 @@ export function secretEnvironmentNames(env: NodeJS.ProcessEnv = process.env): st
 	return Object.keys(env).filter((name) => isSecretEnvironmentName(name) && !granted.has(name.toUpperCase()));
 }
 
+/**
+ * Variables that load options a command line does not show: ripgrep's configuration file can add `--hidden` or a
+ * `--pre` program, so the gates that judge a worker's command by its arguments would judge another command.
+ */
+const ARGUMENT_STEERING_VARIABLES = ["RIPGREP_CONFIG_PATH"];
+
+/** The names in `env` a worker's commands do not inherit: credentials (minus the grant) and argument steering. */
+function omittedEnvironmentNames(env: NodeJS.ProcessEnv): string[] {
+	return [...secretEnvironmentNames(env), ...ARGUMENT_STEERING_VARIABLES.filter((name) => name in env)];
+}
+
+/**
+ * npm settings for a read-only worker: no update check (a registry request) and no debug log file under the user's
+ * npm cache (a write outside scratch), whichever npm subcommand it runs.
+ */
+const READ_ONLY_NPM_ENVIRONMENT: NodeJS.ProcessEnv = {
+	npm_config_update_notifier: "false",
+	npm_config_logs_max: "0",
+};
+
 export interface WorkerRunEnvironment {
 	/** Random per-run marker value (see {@link WORKER_RUN_MARKER_ENV}). */
 	readonly marker: string;
 	/** Per-worker scratch directory every command uses as its temp directory. */
 	readonly scratchDirectory: string;
-	/** Names the worker's python commands must not inherit. */
+	/** Names the worker's python commands must not inherit (credentials and argument-steering variables). */
 	readonly omittedEnvironmentVariables: readonly string[];
 	/** The attribution variables (scratch, marker, role, label, committer identity) for tools that build their own environment. */
 	readonly attributionEnvironment: Readonly<NodeJS.ProcessEnv>;
@@ -157,12 +177,13 @@ function offlineGitEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * zero-footprint, so those processes are ended, but never silently: the owner is told what was left
  * running and that a durable long-running process belongs to the root's own background runs.
  * `offline`: the worker holds no network grant and edits nothing, so git's implicit network and program paths are
- * closed in its commands' environment too (see {@link offlineGitEnvironment}).
+ * closed in its commands' environment too (see {@link offlineGitEnvironment}). `readOnly`: the worker edits nothing,
+ * so npm neither checks for updates nor writes its log file.
  */
 export function createWorkerRunEnvironment(
 	label: string,
 	onReaped?: (processes: readonly string[]) => void,
-	options: { offline?: boolean } = {},
+	options: { offline?: boolean; readOnly?: boolean } = {},
 ): WorkerRunEnvironment {
 	const workerLabel = sanitizeWorkerLabel(label);
 	const marker = randomUUID();
@@ -179,11 +200,12 @@ export function createWorkerRunEnvironment(
 		[PI_PARENT_PID_ENV]: String(process.pid),
 		[WORKER_LABEL_ENV]: workerLabel,
 		...workerCommitterEnvironment(workerLabel),
+		...(options.readOnly ? READ_ONLY_NPM_ENVIRONMENT : {}),
 		...(options.offline ? offlineGitEnvironment(process.env) : {}),
 	};
 	const spawnHook: BashSpawnHook = (context) => {
 		const env: NodeJS.ProcessEnv = { ...context.env };
-		const stripped = new Set(secretEnvironmentNames(env));
+		const stripped = new Set(omittedEnvironmentNames(env));
 		for (const name of Object.keys(env)) if (stripped.has(name)) delete env[name];
 		return {
 			...context,
@@ -193,7 +215,7 @@ export function createWorkerRunEnvironment(
 	return {
 		marker,
 		scratchDirectory,
-		omittedEnvironmentVariables: secretEnvironmentNames(),
+		omittedEnvironmentVariables: omittedEnvironmentNames(process.env),
 		attributionEnvironment,
 		spawnHook,
 		dispose: () => {

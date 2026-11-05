@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
-import { stripShellInvocationPrefixes, tokenizeShellCommand } from "./shell-command-parser.ts";
+import { minimatch } from "minimatch";
+import { redirectTakesTarget, stripShellInvocationPrefixes, tokenizeShellCommand } from "./shell-command-parser.ts";
 
 export const BROAD_SEARCH_OUTPUT_ROUTE = "route-to-file" as const;
 
@@ -53,6 +54,20 @@ export interface ShellSearchInvocationScope {
 	hasScopeFilter: boolean;
 	readsStdin: boolean;
 	metaOnly: boolean;
+	/** The search descends into directories: rg always, grep with -r/-R/`--directories=recurse`. */
+	recursive: boolean;
+	/**
+	 * A descent may read dotenv files (`.env`, `.env.*`): rg only when told to search hidden or ignored files, grep
+	 * whenever it recurses; neither when an exclusion glob covers every dotenv name.
+	 */
+	mayReadDotenv: boolean;
+}
+
+/** Dotenv names an exclusion glob must cover to keep a descent out of dotenv files. */
+const DOTENV_NAMES = [".env", ".env.local"];
+
+function excludesDotenv(globs: readonly string[]): boolean {
+	return globs.some((glob) => DOTENV_NAMES.every((name) => minimatch(name, glob, { dot: true, matchBase: true })));
 }
 
 function targetScope(target: string, cwd: string): TargetScope {
@@ -104,6 +119,15 @@ interface RgArguments {
 	metaOnly: boolean;
 	positionals: string[];
 	positiveGlobs: string[];
+	negativeGlobs: string[];
+	/** `--hidden`, `-.`, `-u`, `--unrestricted` or a `--no-ignore*` option: hidden or ignored files are searched too. */
+	searchesHidden: boolean;
+}
+
+function addRgGlob(parsed: RgArguments, glob: string | undefined): void {
+	if (!glob) return;
+	if (glob.startsWith("!")) parsed.negativeGlobs.push(glob.slice(1));
+	else parsed.positiveGlobs.push(glob);
 }
 
 function parseRgArguments(args: string[]): RgArguments {
@@ -114,6 +138,8 @@ function parseRgArguments(args: string[]): RgArguments {
 		metaOnly: false,
 		positionals: [],
 		positiveGlobs: [],
+		negativeGlobs: [],
+		searchesHidden: false,
 	};
 	let pastDoubleDash = false;
 
@@ -146,18 +172,18 @@ function parseRgArguments(args: string[]): RgArguments {
 		}
 		if (arg === "--glob" || arg === "--iglob") {
 			parsed.hasScopeFilter = true;
-			const glob = args[++index];
-			if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+			addRgGlob(parsed, args[++index]);
 			continue;
 		}
 		if (arg.startsWith("--glob=") || arg.startsWith("--iglob=")) {
 			parsed.hasScopeFilter = true;
-			const glob = arg.slice(arg.indexOf("=") + 1);
-			if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+			addRgGlob(parsed, arg.slice(arg.indexOf("=") + 1));
 			continue;
 		}
 		if (arg.startsWith("--")) {
 			const flag = arg.split("=", 1)[0];
+			if (flag === "--hidden" || flag === "--unrestricted" || flag.startsWith("--no-ignore"))
+				parsed.searchesHidden = true;
 			if (RG_SCOPE_LONG_FLAGS.has(flag)) parsed.hasScopeFilter = true;
 			if (RG_LONG_VALUE_FLAGS.has(flag) && !arg.includes("=")) index++;
 			continue;
@@ -167,11 +193,10 @@ function parseRgArguments(args: string[]): RgArguments {
 			for (let flagIndex = 0; flagIndex < cluster.length; flagIndex++) {
 				const flag = cluster[flagIndex];
 				if (flag === "e" || flag === "f") parsed.hasPatternOption = true;
+				if (flag === "." || flag === "u") parsed.searchesHidden = true;
 				if (RG_SCOPE_SHORT_FLAGS.has(flag)) parsed.hasScopeFilter = true;
 				if (flag === "g") {
-					const attachedGlob = cluster.slice(flagIndex + 1);
-					const glob = attachedGlob || args[++index];
-					if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+					addRgGlob(parsed, cluster.slice(flagIndex + 1) || args[++index]);
 					break;
 				}
 				if (flag === "e" || RG_SHORT_VALUE_FLAGS.has(flag)) {
@@ -200,15 +225,20 @@ interface GrepArguments {
 	hasScopeFilter: boolean;
 	targets: string[];
 	positiveGlobs: string[];
+	negativeGlobs: string[];
 }
 
 function parseGrepArguments(args: string[]): GrepArguments {
 	const recursive = args.some(
-		(arg) => arg === "-r" || arg === "-R" || arg === "--recursive" || /^-[^-]*[rR]/u.test(arg),
+		(arg, index) =>
+			/^--(?:dereference-)?recursive$|^--directories=recurse$|^-d=?recurse$/u.test(arg) ||
+			(/^(?:-d|--directories)$/u.test(arg) && args[index + 1] === "recurse") ||
+			/^-[^-]*[rR]/u.test(arg),
 	);
 	let hasPatternOption = false;
 	let hasScopeFilter = false;
 	const positiveGlobs: string[] = [];
+	const negativeGlobs: string[] = [];
 	const positionals: string[] = [];
 	const valueFlags = new Set(["-A", "-B", "-C", "-D", "-d", "-e", "-f", "-m", "--regexp", "--file"]);
 	let pastDoubleDash = false;
@@ -237,11 +267,13 @@ function parseGrepArguments(args: string[]): GrepArguments {
 		}
 		if (["--exclude", "--exclude-dir"].includes(arg)) {
 			hasScopeFilter = true;
-			index++;
+			const glob = args[++index];
+			if (arg === "--exclude" && glob) negativeGlobs.push(glob);
 			continue;
 		}
 		if (arg.startsWith("--exclude=") || arg.startsWith("--exclude-dir=")) {
 			hasScopeFilter = true;
+			if (arg.startsWith("--exclude=")) negativeGlobs.push(arg.slice("--exclude=".length));
 			continue;
 		}
 		if (arg === "-e" || arg === "-f" || arg === "--regexp" || arg === "--file") {
@@ -265,6 +297,7 @@ function parseGrepArguments(args: string[]): GrepArguments {
 		hasScopeFilter,
 		targets: hasPatternOption ? positionals : positionals.slice(1),
 		positiveGlobs,
+		negativeGlobs,
 	};
 }
 
@@ -283,6 +316,9 @@ export function parseShellSearchInvocationScope(
 			hasScopeFilter: parsed.hasScopeFilter,
 			readsStdin: readsPipe && targets.length === 0 && !parsed.filesMode,
 			metaOnly: parsed.metaOnly,
+			recursive: true,
+			// `--files` lists names and reads no content.
+			mayReadDotenv: !parsed.filesMode && parsed.searchesHidden && !excludesDotenv(parsed.negativeGlobs),
 		};
 	}
 
@@ -293,6 +329,8 @@ export function parseShellSearchInvocationScope(
 		hasScopeFilter: parsed.hasScopeFilter,
 		readsStdin: readsPipe && parsed.targets.length === 0,
 		metaOnly: false,
+		recursive: parsed.recursive,
+		mayReadDotenv: parsed.recursive && !excludesDotenv(parsed.negativeGlobs),
 	};
 }
 
@@ -431,7 +469,7 @@ export function assessShellSearchScope(command: string, cwd: string): SearchScop
 			continue;
 		}
 		if (token.kind === "redirect") {
-			ignoreRedirectTarget = true;
+			ignoreRedirectTarget = redirectTakesTarget(token.value);
 			continue;
 		}
 		const assessment = assessCurrent();
@@ -482,7 +520,7 @@ export function expectedContentSearchNoMatch(
 			continue;
 		}
 		if (token.kind === "redirect") {
-			ignoreRedirectTarget = true;
+			ignoreRedirectTarget = redirectTakesTarget(token.value);
 			continue;
 		}
 		finishInvocation();

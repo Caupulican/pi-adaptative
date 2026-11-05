@@ -64,6 +64,7 @@ import {
 	resolveToolkitScriptScope,
 } from "./autonomy/edge-policy.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
+import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
 import { type SharedLaneToolOptions, WORKER_WRITE_SCOPE_GUIDANCE } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import {
@@ -754,6 +755,8 @@ export class RuntimeBuilder {
 				managedSecretEnvDir(deps.getAgentDir()),
 				...(this._workerSessionPrivatePathEnvelope?.deniedPaths ?? []),
 			],
+			// The project's own settings file is denied by name but is a project file a recursive search may pass through.
+			searchableFiles: [projectLaneSettingsPath(deps.getCwd())],
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};

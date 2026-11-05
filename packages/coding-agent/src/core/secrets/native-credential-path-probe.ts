@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExecutionContext, ExecutionPathAuthority } from "../../kernel/index.ts";
 import { getWorkTenantDir } from "../agent-paths.ts";
+import { physicalPathSync } from "../autonomy/path-scope.ts";
 import {
 	CredentialPathPolicy,
 	type CredentialPathProbe,
@@ -42,8 +43,13 @@ export function createCredentialPathPolicy(
 				try {
 					return realpathSync.native(path);
 				} catch {
-					// Preserve the native lexical check for missing/inaccessible paths and new write targets.
-					return undefined;
+					// A missing path or new write target: its longest existing prefix canonical, the rest as written (a `..`
+					// after a link still leaves the link's target). A link cycle keeps the lexical check only.
+					try {
+						return physicalPathSync(path, path);
+					} catch {
+						return undefined;
+					}
 				}
 			},
 			isFile: (path) => statSync(path).isFile(),

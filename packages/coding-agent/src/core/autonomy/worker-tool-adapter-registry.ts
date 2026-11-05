@@ -96,6 +96,7 @@ function composeCredentialExposureBoundaries(
 	return {
 		protectedFiles: [...new Set([...(host.protectedFiles ?? []), ...(lane.protectedFiles ?? [])])],
 		protectedDirectories: [...new Set([...(host.protectedDirectories ?? []), ...(lane.protectedDirectories ?? [])])],
+		searchableFiles: [...new Set([...(host.searchableFiles ?? []), ...(lane.searchableFiles ?? [])])],
 		...((host.agentDir ?? lane.agentDir) ? { agentDir: host.agentDir ?? lane.agentDir } : {}),
 		redactSensitiveText: (text, additionalValues) =>
 			host.redactSensitiveText(lane.redactSensitiveText(text), additionalValues),
