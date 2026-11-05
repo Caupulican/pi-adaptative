@@ -431,6 +431,11 @@ export class OwnerEvidenceLedger {
 	private readonly byRecord = new Map<string, number>();
 	private readonly bySource = new Map<string, number>();
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
+	/**
+	 * Sources this process recorded since the session's last completed run. Not rebuilt from the branch: after a
+	 * restart or branch change no earlier statement is current, so a destructive request must be stated again.
+	 */
+	private readonly currentTurn = new Set<string>();
 
 	constructor(deps: OwnerEvidenceLedgerDeps) {
 		this.deps = deps;
@@ -450,7 +455,18 @@ export class OwnerEvidenceLedger {
 		this.records = [];
 		this.byRecord.clear();
 		this.bySource.clear();
+		this.currentTurn.clear();
 		for (const listener of this.listeners) listener("branch");
+	}
+
+	/** The session's run ended (not a retry): every statement recorded so far belongs to a past owner turn. */
+	endOwnerTurn(): void {
+		this.currentTurn.clear();
+	}
+
+	/** Whether `sourceId` is owner input recorded during the current run, the turn a tool call answers. */
+	isCurrentTurnSource(sourceId: string): boolean {
+		return this.currentTurn.has(sourceId);
 	}
 
 	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
@@ -508,6 +524,7 @@ export class OwnerEvidenceLedger {
 		}
 		this.sourceEntries?.add(entryId);
 		this.indexRecord(recordId, record);
+		this.currentTurn.add(sourceId);
 		ledger.push({ sessionId, sourceId, entryId, text: text.slice(0, OWNER_EVIDENCE_PAGE_CHARS), createdAt });
 		if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
 		for (const listener of this.listeners) listener("source");

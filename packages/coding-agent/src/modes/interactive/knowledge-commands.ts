@@ -168,7 +168,7 @@ async function change(
 		action === "forget"
 			? await confirm(
 					"Forget knowledge",
-					`Forget this ${record.kind} fact at revision ${record.revision}? Its value and revision history are removed; its identity stays, so only newer owner evidence can teach it again.\n${fact}: ${bounded(record.text, 240)}`,
+					`Forget this ${record.kind} fact at revision ${record.revision}? Its value, revision history and names are removed; only owner evidence newer than this request can teach it again.\n${fact}: ${bounded(record.text, 240)}`,
 				)
 			: await confirm(
 					"Correct knowledge",

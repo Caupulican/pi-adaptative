@@ -14,7 +14,10 @@ System One judges meaning when it is bound. Otherwise the collection model judge
 
 - an inferred pattern (`uncalibrated_inference`);
 - forgetting proposed by background collection (`uncalibrated_background_forget`); the owner asks for it directly instead;
-- a proposal that matches a live fact without naming it (`identity_ambiguous`), until it names that fact's exact id and expected revision. A forgotten identity can still be relearned.
+- a proposal that matches a live fact without naming it (`identity_ambiguous`), until it names that fact's exact id and expected revision. A forgotten identity can still be relearned;
+- a background change to an explicit fact the owner did not ask to change (`uncalibrated_background_correction`).
+
+Whatever the judge, the host refuses before any judgment: evidence older than any request to forget, or not newer than a forgotten or accepted value of the same identity (`stale_evidence`), and a forget or keyed correction through the `knowledge` tool whose citation is not the owner's statement from the turn the call answers (`owner_turn_required`). A validity that ends a current fact is forgetting and needs an explicit owner request. Live facts are matched across global and project reach; forgotten facts keep no names, only their identity digest.
 
 The `disabled` switch (`autoLearn.enabled: false`) stops automatic collection only; explicit requests are still judged. A model with no declared price is never used: collection reports `model_unpriced` and starts no request.
 
@@ -53,7 +56,7 @@ Forgetting is conservative about existing work identities: a retired result is n
 /knowledge forget <id>
 ```
 
-`list`, `show` and `history` page current records, citations and revisions with their provenance: owner message or owner command, evidence dates, revision, scope and validity. An ID may be a unique prefix of at least eight characters. `correct` replaces the value verbatim and keeps the fact's identity, scope and validity; the old value stays in history. `forget` removes the value and its history and leaves the identity as an evidence barrier. Both ask for confirmation on the owner's screen first and are refused without an owner UI. They pass through the same admission and store fences as the `knowledge` tool (expected revision, forgotten sources, newer-evidence rules, replay receipts) and run no judge and spend nothing, with or without System One. The typed command, its session and its time are the change's evidence; they are never added to the owner-evidence ledger, so model and collector proposals still cite only original owner messages.
+`list`, `show` and `history` page current records, citations and revisions with their provenance: owner message or owner command, evidence dates, revision, scope and validity. An ID may be a unique prefix of at least eight characters. `correct` replaces the value verbatim and keeps the fact's identity, scope and validity; the old value stays in history. `forget` removes the value, its history and its names and leaves only the identity digest as an evidence barrier. Both ask for confirmation on the owner's screen first and are refused without an owner UI. They pass through the same admission and store fences as the `knowledge` tool (expected revision, forgotten sources, newer-evidence rules, replay receipts) and run no judge and spend nothing, with or without System One. The typed command, its session and its time are the change's evidence; they are never added to the owner-evidence ledger, so model and collector proposals still cite only original owner messages.
 
 ## What history recall covers
 

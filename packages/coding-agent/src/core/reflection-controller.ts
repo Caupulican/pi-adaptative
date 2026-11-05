@@ -1008,6 +1008,8 @@ export class ReflectionController {
 	 * DID end; only its delivery request failed) to be re-offered on the retry.
 	 */
 	finishCurrentTurnCue(messages: AgentMessage[], options: { willRetry: boolean }): void {
+		// The run answered its owner turn; a later run cannot treat these statements as its own request.
+		if (!options.willRetry) this.ownerEvidence.endOwnerTurn();
 		if (!this.isAutomaticReflectionEnabled()) {
 			this.synchronizeCurrentTurnCueWithSettings();
 			return;

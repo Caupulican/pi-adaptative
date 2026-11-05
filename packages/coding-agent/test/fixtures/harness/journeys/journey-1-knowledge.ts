@@ -103,23 +103,27 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 		prompt: string,
 		change: () => KnowledgeChange,
 		expected: string,
-		matching = false,
+		// What the change is judged on: a host refusal before judgment asks nothing; a live-slot scan adds identity.
+		judged: "none" | "admission" | "identity" = "admission",
 	) => {
 		world.systemOne.enterPhase(label, {
 			...ICM_INTAKE_JUDGMENTS,
-			...(world.systemOne.enabled ? { ...GROUNDED, ...(matching ? SAME_SLOT : {}) } : {}),
+			...(world.systemOne.enabled && judged !== "none"
+				? { ...GROUNDED, ...(judged === "identity" ? SAME_SLOT : {}) }
+				: {}),
 		});
 		let proposed: KnowledgeChange | undefined;
 		const quote = () => proposed!.evidence[0]!.quote;
 		// The tool's judgments run between its call and the turn's next request, on the same session-model track.
-		const judgments: ScriptStep[] = world.systemOne.enabled
-			? []
-			: [
-					knowledgeJudgment(`${label}-admission`, "knowledge.admission", JUDGED_REQUESTED, quote),
-					...(matching
-						? [knowledgeJudgment(`${label}-identity`, "knowledge.identity", JUDGED_SAME_SLOT, quote)]
-						: []),
-				];
+		const judgments: ScriptStep[] =
+			world.systemOne.enabled || judged === "none"
+				? []
+				: [
+						knowledgeJudgment(`${label}-admission`, "knowledge.admission", JUDGED_REQUESTED, quote),
+						...(judged === "identity"
+							? [knowledgeJudgment(`${label}-identity`, "knowledge.identity", JUDGED_SAME_SLOT, quote)]
+							: []),
+					];
 		world.provider.enqueue(
 			"root",
 			{
@@ -174,7 +178,7 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			"Actually, remember I use spaces.",
 			() => remember("Uses spaces.", "I use spaces", source(), "whitespace"),
 			world.systemOne.enabled ? '"status":"applied"' : "exact id and revision",
-			true,
+			"identity",
 		);
 		if (!world.systemOne.enabled) {
 			expect(store.get(id), "a self-reported match never rewrites a live fact by itself").toMatchObject({
@@ -213,25 +217,32 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 		);
 		expect(store.get(id), "forget removes the accepted value").toBeUndefined();
 		expect(store.history(id), "forget removes value history too").toEqual([]);
+		// Alternate wording of the forgotten fact from evidence older than the forget request: the host's forget fence
+		// refuses it before any judgment, since the forgotten names are erased and no judge may compare against them.
 		await turn(
 			"knowledge-replay",
 			"Inspect that old request.",
 			() => remember("Uses tabs.", "I use tabs", firstSource, "formatting"),
-			"not newer",
-			true,
+			"not newer than a request to forget",
+			"none",
 		);
 		expect(store.get(id), "alternate wording cannot replay forgotten evidence").toBeUndefined();
+		expect(
+			store.slots({ project: "", role: "", audience: "owner" }, "behavior"),
+			"a forgotten fact keeps no names a judge could read",
+		).toEqual([]);
+		// The same identity is found by its digest alone: relearning continues the forgotten revision.
 		await turn(
 			"knowledge-relearn",
 			"Remember I use tabs again.",
-			() => remember("Uses tabs again.", "I use tabs again", source(), "formatting"),
+			() => remember("Uses tabs again.", "I use tabs again"),
 			'"status":"applied"',
-			true,
 		);
 		expect(store.get(id), "a fresh explicit request can relearn the same slot").toMatchObject({
 			revision: 4,
 			text: "Uses tabs again.",
 		});
+		// A tool call may forget only on the owner's statement in the turn it answers.
 		await turn(
 			"knowledge-old-forget",
 			"Inspect the earlier forgetting request.",
@@ -241,7 +252,8 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 				expectedRevision: 4,
 				evidence: [{ source: forgetSource, quote: "Forget my indentation preference" }],
 			}),
-			"older than the current knowledge",
+			"in the current turn",
+			"none",
 		);
 		expect(store.get(id), "an old forgetting request cannot delete a fresh fact").toMatchObject({
 			revision: 4,
@@ -260,7 +272,9 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 				const report = resolveSemanticUsageEntry(entry)?.report;
 				return report?.route === "knowledge_collection" ? [report.origin?.operationId] : [];
 			});
-			expect(judged, "every session-model judgment keeps its own explicit-change receipt").toHaveLength(10);
+			// Seven explicit changes: the replay and the stale forget are refused before judgment, the relearn needs no
+			// identity judgment, and the unkeyed correction pays admission and identity.
+			expect(judged, "every session-model judgment keeps its own explicit-change receipt").toHaveLength(6);
 			for (const operationId of judged) expect(operationId).toMatch(/^knowledge-collection:explicit:/);
 		} else {
 			root.settingsManager.setProactivitySettings({
@@ -425,9 +439,11 @@ async function runOwnerKnowledgeCommands(
 	);
 	expect(store.get(id), "the confirmed forget removes the value").toBeUndefined();
 	expect(store.history(id), "and its value history").toEqual([]);
-	expect(store.slots(global, "behavior"), "its identity stays as the evidence barrier").toEqual([
-		expect.objectContaining({ id, revision: 6, forgotten: true }),
-	]);
+	expect(store.slots(global, "behavior"), "its names are erased").toEqual([]);
+	expect(store.evidenceFence(id), "its digest stays as the evidence barrier").toMatchObject({
+		revision: 6,
+		forgotten: true,
+	});
 	expect((await run(`/knowledge forget ${short}`)).failed, "a forgotten record is no longer addressable").toBe(
 		`No current knowledge record ${short} in this scope.`,
 	);

@@ -11,6 +11,7 @@ import {
 	isKnowledgeTimestamp,
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
+	type KnowledgeEvidenceFence,
 	type KnowledgeKind,
 	type KnowledgeListOptions,
 	type KnowledgeMutationReceipt,
@@ -30,8 +31,17 @@ import { KNOWLEDGE_WINDOW_SCHEMA } from "./knowledge-window-journal.ts";
 import { KNOWLEDGE_WORK_SCHEMA, KnowledgeWorkJournal } from "./knowledge-work-journal.ts";
 import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const MAX_QUERY_TERMS = 8;
+/**
+ * Forgotten identities keep only their digest: the plaintext subject/key is erased, so no later identity judgment can
+ * send a forgotten name to a provider. The forget fence replaces name matching for alternate wording; legacy
+ * forgotten rows seed it with their own barrier, the most conservative time they retain.
+ */
+const SCHEMA_V5 = `ALTER TABLE meta ADD COLUMN forget_fence TEXT;
+UPDATE meta SET forget_fence=(SELECT max(evidence_after) FROM entries WHERE body IS NULL) WHERE id=1;
+UPDATE entries SET identity=NULL WHERE body IS NULL;
+PRAGMA user_version=${SCHEMA_VERSION};`;
 
 function terms(text: string): string[] {
 	return [
@@ -82,15 +92,26 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION)
+			if (
+				version !== 0 &&
+				version !== 1 &&
+				version !== 2 &&
+				version !== 3 &&
+				version !== 4 &&
+				version !== SCHEMA_VERSION
+			)
 				throw new Error("Unsupported ICM knowledge schema");
 			const store = new KnowledgeStore(db, collectionTime);
 			if (version !== SCHEMA_VERSION)
 				store.transaction(() => {
 					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
 					if (lockedVersion === SCHEMA_VERSION) return;
+					if (lockedVersion === 4) {
+						db.exec(SCHEMA_V5);
+						return;
+					}
 					if (lockedVersion === 3) {
-						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
+						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5}`);
 						return;
 					}
 					if (lockedVersion === 1) {
@@ -125,7 +146,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					db.exec(`CREATE TABLE operation_receipts (
 					 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('remember','forget')),
 					 entry_id TEXT NOT NULL REFERENCES entries(id), revision INTEGER NOT NULL CHECK(revision>0)
-						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
+						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5}`);
 				});
 			return store;
 		});
@@ -252,14 +273,12 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			throw new TypeError("Invalid knowledge slot scope");
 		if (after !== undefined) requireId(after);
 		return this.db
-			.prepare(`SELECT id,revision,identity,body IS NULL AS forgotten FROM entries
-			WHERE audience=? AND project=? AND role=? AND kind=? AND id>? ORDER BY id LIMIT ?`)
+			.prepare(`SELECT id,revision,identity FROM entries
+			WHERE body IS NOT NULL AND audience=? AND project=? AND role=? AND kind=? AND id>? ORDER BY id LIMIT ?`)
 			.all(scope.audience, scope.project, scope.role, kind, after ?? "", MAX_KNOWLEDGE_PAGE_SIZE)
 			.map((row) => {
 				if (typeof row.identity !== "string" || row.identity.length > 4_000)
-					throw new Error(
-						"A forgotten knowledge slot has no recoverable identity; new admission cannot resolve duplicates safely",
-					);
+					throw new Error("A live knowledge slot has no identity");
 				const names: unknown = JSON.parse(row.identity);
 				if (!Array.isArray(names) || names.length !== 2) throw new Error("Invalid knowledge slot names");
 				return parseKnowledgeSlot({
@@ -269,9 +288,29 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					scope,
 					subject: names[0],
 					key: names[1],
-					forgotten: row.forgotten === 1,
 				});
 			});
+	}
+
+	evidenceFence(id: string): KnowledgeEvidenceFence | undefined {
+		requireId(id);
+		const row = this.db
+			.prepare("SELECT revision,evidence_after,body IS NULL AS forgotten FROM entries WHERE id=?")
+			.get(id);
+		if (!row) return undefined;
+		if (!isKnowledgeTimestamp(row.evidence_after)) throw new Error("Invalid knowledge evidence barrier");
+		return {
+			revision: requireVersion(row.revision),
+			evidenceAfter: row.evidence_after,
+			forgotten: row.forgotten === 1,
+		};
+	}
+
+	forgetFence(): string | undefined {
+		const value = this.db.prepare("SELECT forget_fence FROM meta WHERE id=1").get()?.forget_fence;
+		if (value === null || value === undefined) return undefined;
+		if (!isKnowledgeTimestamp(value)) throw new Error("Invalid knowledge forget fence");
+		return value;
 	}
 
 	list(scope: KnowledgeScope, options: KnowledgeListOptions = {}): KnowledgeRecord[] {
@@ -442,8 +481,11 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					.prepare("INSERT OR IGNORE INTO forgotten_sources VALUES(?,?,?)")
 					.run(id, citation.sessionId, citation.sourceId);
 			this.db
-				.prepare("UPDATE entries SET revision=revision+1,body=NULL,evidence_after=? WHERE id=?")
+				.prepare("UPDATE entries SET revision=revision+1,body=NULL,evidence_after=?,identity=NULL WHERE id=?")
 				.run(barrier, id);
+			// Evidence the owner gave before asking to forget never teaches knowledge again, under any wording.
+			const requested = citations.map((citation) => citation.at).sort()[0]!;
+			this.db.prepare("UPDATE meta SET forget_fence=max(coalesce(forget_fence,''),?) WHERE id=1").run(requested);
 			this.db.prepare("DELETE FROM versions WHERE id=?").run(id);
 			this.db.prepare("DELETE FROM terms WHERE id=?").run(id);
 			this.db.prepare("DELETE FROM sources WHERE id=?").run(id);

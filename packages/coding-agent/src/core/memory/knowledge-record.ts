@@ -38,10 +38,16 @@ export interface KnowledgeRecord {
 	citations: KnowledgeCitation[];
 }
 
-/** Identity retained after forgetting a value, so alternate wording cannot evade its evidence barrier. */
-export type KnowledgeSlot = Pick<KnowledgeRecord, "id" | "revision" | "kind" | "scope" | "subject" | "key"> & {
+/** Identity of one live fact, as the semantic identity judgment sees it. Forgotten identities are never listed. */
+export type KnowledgeSlot = Pick<KnowledgeRecord, "id" | "revision" | "kind" | "scope" | "subject" | "key">;
+
+/** Ordering fence of one stored identity, live or forgotten. */
+export interface KnowledgeEvidenceFence {
+	revision: number;
+	/** Citations at or before this time cannot change the identity (the live value's evidence, or the forget time). */
+	evidenceAfter: string;
 	forgotten: boolean;
-};
+}
 
 export interface KnowledgeSnapshot {
 	revision: number;
@@ -201,15 +207,14 @@ export function parseKnowledgeRecord(value: unknown): KnowledgeRecord {
 export function parseKnowledgeSlot(value: unknown): KnowledgeSlot {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["id", "revision", "kind", "scope", "subject", "key", "forgotten"]) ||
+		!hasOnlyKeys(value, ["id", "revision", "kind", "scope", "subject", "key"]) ||
 		!KNOWLEDGE_KINDS.some((kind) => kind === value.kind) ||
 		!isKnowledgeScope(value.scope) ||
 		!boundedString(value.subject, MAX_NAME_CHARS) ||
 		!boundedString(value.key, MAX_NAME_CHARS) ||
 		typeof value.revision !== "number" ||
 		!Number.isSafeInteger(value.revision) ||
-		value.revision < 1 ||
-		typeof value.forgotten !== "boolean"
+		value.revision < 1
 	)
 		throw new TypeError("Invalid knowledge slot identity");
 	const slot: KnowledgeSlot = {
@@ -219,7 +224,6 @@ export function parseKnowledgeSlot(value: unknown): KnowledgeSlot {
 		scope: { ...value.scope },
 		subject: value.subject,
 		key: value.key,
-		forgotten: value.forgotten,
 	};
 	if (slot.id !== knowledgeId(slot)) throw new TypeError("Knowledge slot identity changed");
 	return slot;
@@ -251,8 +255,12 @@ export interface KnowledgeStorePort {
 	version(id: string): number;
 	snapshot(scope: KnowledgeScope, at: string): KnowledgeRecordSnapshot;
 	get(id: string): KnowledgeRecord | undefined;
-	/** Exact scope only; includes forgotten identities. The caller must follow full pages before declaring no match. */
+	/** Live identities of this exact scope only. The caller must follow full pages before declaring no match. */
 	slots(scope: KnowledgeScope, kind: KnowledgeKind, after?: string): KnowledgeSlot[];
+	/** The ordering fence of one stored identity; forgotten identities keep only their digest and this fence. */
+	evidenceFence(id: string): KnowledgeEvidenceFence | undefined;
+	/** Owner time of the latest request to forget; evidence strictly older than it never teaches knowledge again. */
+	forgetFence(): string | undefined;
 	list(scope: KnowledgeScope, options?: KnowledgeListOptions): KnowledgeRecord[];
 	/** Live records in scope whose identity starts with `prefix` (at least 8 hex), at most two so ambiguity shows. */
 	resolve(scope: KnowledgeScope, prefix: string): KnowledgeRecord[];
