@@ -3,6 +3,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { measureJsonLength } from "../../kernel/provider-request-estimator.ts";
 import { estimateTokensFromChars } from "../context/context-item.ts";
+import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
@@ -101,7 +102,9 @@ export type KnowledgeHoldCode =
 	| "insufficient_observations"
 	| "identity_ambiguous"
 	| "category_conflict"
-	| "learning_policy";
+	| "learning_policy"
+	| "uncalibrated_inference"
+	| "uncalibrated_background_forget";
 export type KnowledgeAdmissionOutcome =
 	| { status: "applied"; action: KnowledgeChange["action"]; id: string; revision: number }
 	| {
@@ -146,6 +149,14 @@ export interface KnowledgeAdmissionDeps {
 
 const MAX_SLOT_SCAN = 2_000;
 const SLOT_JUDGMENT_BATCH = 25;
+
+/**
+ * Only a calibrated probability makes the 0.9 gates below a measured bound. A self-reported answer is a
+ * certain 1 or 0, so under it inference, background forgetting and unkeyed rewrites of live facts are held.
+ */
+function calibrated(provenance: ConfidenceProvenance): boolean {
+	return provenance === "native_calibrated" || provenance === "derived_calibrated_probability";
+}
 
 /** Meaning is judged once; exact identity, evidence, versioning and effects are enforced by the host. */
 export class KnowledgeAdmission implements KnowledgeAdmissionPort {
@@ -203,6 +214,13 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				"engine_unavailable",
 				"configuration",
 				"Knowledge meaning cannot be judged while the semantic engine is unavailable",
+			);
+		let selfReported = !calibrated(engine.capabilities().confidenceProvenance);
+		if (selfReported && input.action === "forget" && execution)
+			return held(
+				"uncalibrated_background_forget",
+				"configuration",
+				"Background collection forgets only with a calibrated semantic engine; ask for the forgetting directly",
 			);
 		const existing = input.id ? store.get(input.id) : undefined;
 		if (
@@ -304,6 +322,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 					{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
 				);
 		assertCurrent();
+		if (judged && !calibrated(judged.engine.confidence_provenance)) selfReported = true;
 		const grounded = judged?.results.grounded;
 		const basis = longGrounding
 			? { kind: "choice" as const, selected: longGrounding.basis, confidence: { value: longGrounding.confidence } }
@@ -351,6 +370,12 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				...store.forget(input.id, input.expectedRevision, citations, assertCurrent, signal, operation),
 			};
 		}
+		if (basis.selected === "inferred" && selfReported)
+			return held(
+				"uncalibrated_inference",
+				"configuration",
+				"An inferred pattern is admitted only with a calibrated semantic engine",
+			);
 		if (basis.selected === "inferred" && originals.length < 2)
 			return held(
 				"insufficient_observations",
@@ -359,7 +384,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			);
 		let slot: KnowledgeSlot | undefined = existing ? { ...existing, forgotten: false } : undefined;
 		if (!slot) {
-			const resolution = await this.resolveSlot(input, scope, assertCurrent, signal);
+			const resolution = await this.resolveSlot(input, scope, selfReported, assertCurrent, signal);
 			if (resolution && "status" in resolution) return resolution;
 			slot = resolution;
 		}
@@ -431,6 +456,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 	private async resolveSlot(
 		input: Extract<KnowledgeChange, { action: "remember" }>,
 		scope: KnowledgeScope,
+		selfReported: boolean,
 		assertCurrent: () => void,
 		signal?: AbortSignal,
 	): Promise<KnowledgeSlot | KnowledgeHold | undefined> {
@@ -465,6 +491,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 						{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
 					);
 					assertCurrent();
+					const unkeyedRewriteHeld = selfReported || !calibrated(judged.engine.confidence_provenance);
 					for (const [index, candidate] of batch.entries()) {
 						const answer = judged.results[`same_${index}`];
 						if (
@@ -488,6 +515,14 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 									"identity_ambiguous",
 									"context",
 									"More than one existing slot matches this fact; consolidation is required",
+								);
+							// A self-reported match cannot tell a correction from a distinct fact; a live fact
+							// changes only through its exact id and revision. Forgotten slots keep the store fences.
+							if (unkeyedRewriteHeld && !candidate.forgotten)
+								return held(
+									"identity_ambiguous",
+									"context",
+									"This fact may already be known; read it and change it by its exact id and revision",
 								);
 							found = candidate;
 						}
