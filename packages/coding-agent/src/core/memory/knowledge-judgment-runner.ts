@@ -2,7 +2,6 @@
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
-import type { TSchema } from "typebox";
 import type { AgentTool } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
@@ -11,6 +10,7 @@ import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delive
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import {
 	type LlmCompletionRunner,
+	STRUCTURED_JUDGMENT_SUBMISSION_SCHEMA,
 	type StructuredJudgmentRequest,
 	StructuredLlmDecisionEngine,
 } from "../decision/engines/structured-llm-engine.ts";
@@ -57,11 +57,12 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 		const usage = new BoundedCompletionUsage(this.deps.usageOwner, "knowledge_collection", budget, 1, origin);
 		const unsubscribe = options.onRequestAdmitted ? budget.subscribeAdmission(options.onRequestAdmitted) : undefined;
 		const capture: { answers?: unknown } = {};
-		const submit: AgentTool<TSchema> = {
+		// One fixed definition for every program: the offered tool never breaks the judge's cached prefix.
+		const submit: AgentTool<typeof STRUCTURED_JUDGMENT_SUBMISSION_SCHEMA> = {
 			name: KNOWLEDGE_JUDGMENT_TOOL_NAME,
 			label: "Submit judgment",
-			description: "Submit the answer to every decision. This ends the judgment.",
-			parameters: request.answerSchema,
+			description: "Submit one answer for every decision of the program. This ends the judgment.",
+			parameters: STRUCTURED_JUDGMENT_SUBMISSION_SCHEMA,
 			executionMode: "sequential",
 			execute: async (_id, params) => {
 				if (capture.answers !== undefined)
@@ -77,7 +78,17 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 		try {
 			const result = await this.deps.runIsolatedCompletion({
 				systemPrompt: request.systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: request.payload }], timestamp: Date.now() }],
+				// The program is identical for every judgment of its kind; the boundary declares the prefix through it stable.
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: request.program, cacheBoundary: true },
+							{ type: "text", text: request.state },
+						],
+						timestamp: Date.now(),
+					},
+				],
 				model,
 				thinkingLevel: resolveModelThinkingLevel(model, "low"),
 				maxTokens: Math.min(model.maxTokens, MAX_JUDGMENT_OUTPUT_TOKENS),

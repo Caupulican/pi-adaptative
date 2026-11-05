@@ -1435,10 +1435,10 @@ export function icmLatestResult(request: ScriptedRequest, toolName: string): { i
 	return result;
 }
 
-/** One answer of the session-model knowledge judge, in the structured submission's own shape. */
+/** One answer of the session-model knowledge judge, in the fixed submission shape every program uses. */
 export type KnowledgeJudgmentAnswer =
-	| { readonly value: boolean; readonly confidence: number }
-	| { readonly selected: string; readonly confidence: number };
+	| { readonly id: string; readonly value: boolean; readonly confidence: number }
+	| { readonly id: string; readonly selected: string; readonly confidence: number };
 
 /**
  * One session-model knowledge judgment: an isolated request that carries only the program and state as
@@ -1447,26 +1447,29 @@ export type KnowledgeJudgmentAnswer =
 export function knowledgeJudgment(
 	name: string,
 	program: "knowledge.admission" | "knowledge.identity",
-	answers: Readonly<Record<string, KnowledgeJudgmentAnswer>>,
+	answers: readonly KnowledgeJudgmentAnswer[],
 	evidence: () => string,
 ): ScriptStep {
 	return {
 		name,
 		check: (request) => {
+			// The tool definition never varies by program; the world's prompt-prefix monitor fails the run if it does.
 			expect(
 				request.context.tools?.map((tool) => tool.name),
 				"the judge offers only its submission",
 			).toEqual([KNOWLEDGE_JUDGMENT_TOOL_NAME]);
-			expect(
-				request.context.messages.map((message) => message.role),
-				"the judgment carries no conversation",
-			).toEqual(["user"]);
-			const payload = JSON.stringify(request.context.messages);
-			expect(payload, "the judgment names its program").toContain(program);
-			expect(payload, "the judgment carries the owner's original words").toContain(evidence());
+			const [message, ...conversation] = request.context.messages;
+			expect(conversation, "the judgment carries no conversation").toEqual([]);
+			expect(message?.role).toBe("user");
+			const blocks = message?.role === "user" && Array.isArray(message.content) ? message.content : [];
+			const [stable, state] = blocks.map((block) => (block.type === "text" ? block : undefined));
+			expect(blocks, "the program and the state are separate blocks").toHaveLength(2);
+			expect(stable?.cacheBoundary, "the program closes the declared stable prefix").toBe(true);
+			expect(stable?.text, "the stable block names its program").toContain(`"id":"${program}"`);
+			expect(state?.text, "the state carries the owner's original words").toContain(evidence());
 		},
 		reply: {
-			content: [{ type: "toolCall", id: name, name: KNOWLEDGE_JUDGMENT_TOOL_NAME, arguments: { ...answers } }],
+			content: [{ type: "toolCall", id: name, name: KNOWLEDGE_JUDGMENT_TOOL_NAME, arguments: { answers } }],
 			stopReason: "toolUse",
 		},
 	};

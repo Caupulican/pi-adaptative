@@ -13,12 +13,16 @@ import { runJourney1LongCollection } from "./journey-1-long-collection.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmWaitForChatIdle, knowledgeJudgment } from "./shared.ts";
 
 /** The session model's answers with System One off: a stated fact that was not a request to remember it. */
-const JUDGED_STATED = {
-	grounded: { value: true, confidence: 0.98 },
-	basis: { selected: "explicit", confidence: 0.98 },
-	requested: { value: false, confidence: 0.98 },
-} as const;
-const JUDGED_INFERRED = { ...JUDGED_STATED, basis: { selected: "inferred", confidence: 0.98 } } as const;
+const JUDGED_STATED = [
+	{ id: "grounded", value: true, confidence: 0.98 },
+	{ id: "basis", selected: "explicit", confidence: 0.98 },
+	{ id: "requested", value: false, confidence: 0.98 },
+] as const;
+const JUDGED_INFERRED = [
+	{ id: "grounded", value: true, confidence: 0.98 },
+	{ id: "basis", selected: "inferred", confidence: 0.98 },
+	{ id: "requested", value: false, confidence: 0.98 },
+] as const;
 
 /**
  * Journey 1 follows automatic collection through the real root, idle lane, admission and restart. With System One
