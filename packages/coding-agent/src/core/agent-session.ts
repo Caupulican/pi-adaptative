@@ -87,7 +87,11 @@ import { type ContextCompositionReport, formatContextCompositionDashboard } from
 import type { ContextProjection } from "./context/context-projection.ts";
 import type { EnforcePromptPolicyResult, PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
-import type { MemoryPromptInclusionReport, TranscriptHistoryStatus } from "./context/memory-diagnostics.ts";
+import {
+	knowledgeCollectionNotice,
+	type MemoryPromptInclusionReport,
+	type TranscriptHistoryStatus,
+} from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
@@ -158,6 +162,7 @@ import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
+import { HarnessNoticeController } from "./harness-notice.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { subscribeHumanInputActivity } from "./human-input-activity.ts";
@@ -471,6 +476,7 @@ export class AgentSession {
 	private readonly _backgroundToolTasks: BackgroundToolTaskController;
 	private readonly _terminalHandoffs: ForegroundTerminalHandoffController;
 	private readonly _durableCustomMessageTurns: DurableCustomMessageTurnController;
+	private readonly _harnessNotices: HarnessNoticeController;
 	private readonly _humanInput: HumanInputController;
 	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
@@ -1081,9 +1087,16 @@ export class AgentSession {
 			this._goals.activateQueuedOwnerChatGoal(message, this.agent.state.messages),
 		);
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
+		this._harnessNotices = new HarnessNoticeController({
+			getSessionManager: () => this.sessionManager,
+			isChildSession: () => this._isChildSession,
+			deliver: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
+			warn: (message) => this._emit({ type: "warning", message }),
+		});
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
+			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
@@ -1258,7 +1271,10 @@ export class AgentSession {
 					isForegroundBusy: () => this._foregroundRecovery.isBusy,
 					subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 					maxEstimatedUsd: () => this.capabilityEnvelope?.maxEstimatedUsd,
-					onTerminal: (outcome, handoff) => this._emit({ type: "knowledge_collection", ...outcome, handoff }),
+					onTerminal: (outcome, handoff) => {
+						this._emit({ type: "knowledge_collection", ...outcome, handoff });
+						this._observeKnowledgeCollection();
+					},
 				}),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
@@ -1659,7 +1675,9 @@ export class AgentSession {
 		// continuation runs) releases its submission lease when it ends, so that release is the idle
 		// event; the end of `prompt()` is only one of the paths that reach it.
 		const unsubscribeQueuedWorkers = this._foregroundRecovery.subscribeActivity(() => {
-			if (!this._isForegroundPhaseBusy()) this._backgroundLanes.drainQueuedWorkerDelegations();
+			if (this._isForegroundPhaseBusy()) return;
+			this._backgroundLanes.drainQueuedWorkerDelegations();
+			this._observeKnowledgeCollection(); // model, judge and memory activation change without a collector signal
 		});
 		this._semanticPlane.setEvaluationIdleListener(wakeIdleOccupancy);
 		this._unsubscribeIdleOccupancy = () => {
@@ -2447,6 +2465,7 @@ export class AgentSession {
 		this._unsubscribeSettingsChanges = this.settingsManager.subscribeChanges(() => {
 			this._compaction.reconcileIdlePreparationSettings();
 			this._refreshBaseSystemPrompt();
+			this._observeKnowledgeCollection();
 		});
 		this._localPrefixWarm.schedule(this.agent.state.model);
 	}
@@ -3185,6 +3204,13 @@ export class AgentSession {
 			offLanes();
 			offHandoff();
 		};
+	}
+
+	/** Automatic knowledge collection, as the owner is told about it: read on the signals its own collector reads. */
+	private _observeKnowledgeCollection(): void {
+		this._harnessNotices.observe("knowledge-collection", () =>
+			knowledgeCollectionNotice(this._memory.getKnowledgeCollectionStatus(), this.settingsManager),
+		);
 	}
 
 	/**
@@ -3941,6 +3967,7 @@ export class AgentSession {
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
 		safely(() => this._unsubscribeIdleOccupancy?.());
 		this._unsubscribeIdleOccupancy = undefined;
+		safely(() => this._harnessNotices.close());
 		safely(() => this._foregroundRecovery.shutdown());
 		safely(() => this._durableCustomMessageTurns.shutdown());
 		safely(() => this.abortRetry());

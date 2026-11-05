@@ -11,6 +11,10 @@ spending limit of $0.05. Across sessions and restarts, the last rolling 24 hours
 spend (`maxUsdPerDay`) and three parent turns started without an owner message, by notes and CI
 events together (`maxTurnWakesPerDay`). At the spend bound no review starts; past the wake bound,
 accepted notes and CI events wait for the owner's next turn.
+When reviews or automatic knowledge collection stop for a reason the owner can change (a reached
+spending limit, a model that does not resolve or has no declared price, invalid limits), the
+harness saves one notice that is shown with the owner's next turn and names the setting to change.
+It starts no turn and calls no model, and the same state is not reported twice.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 

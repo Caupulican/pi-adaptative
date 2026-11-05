@@ -11,9 +11,12 @@
  * allow-list cannot leak a field it was never told to copy.
  */
 
+import type { HarnessNoticeObservation } from "../harness-notice.ts";
+import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
 import type { KnowledgeCollectionInactiveReason, KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import { MEMORY_RETRIEVAL_DISABLED_REASON, type TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
 import type { TranscriptSummaryHeldByKind, TranscriptSummaryHoldKind } from "../memory/transcript-summary-store.ts";
+import type { AutoLearnSettings, AutonomySettings } from "../settings/settings-schema.ts";
 import type { MemoryPolicyRejectionReason } from "./memory-provider-contract.ts";
 import type { MemoryProviderRetrievalStatus, MemoryRetrievalReport } from "./memory-retrieval.ts";
 
@@ -647,6 +650,63 @@ const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveR
 	child_session: "child sessions do not collect knowledge",
 	memory_unavailable: "ICM memory is not active",
 };
+
+/**
+ * What the owner can change for each inactive reason the harness tells them about by itself. Every other reason is the
+ * owner's own switch (`disabled`), transient (`accounting_unresolved`) or not applicable to this session.
+ */
+const KNOWLEDGE_NOTICE_ACTIONS: Readonly<Partial<Record<KnowledgeCollectionInactiveReason, string>>> = {
+	invalid_settings:
+		" Fix autoLearn.knowledgeMaxUsd, knowledgeSessionMaxUsd, knowledgeIdleDelayMs or knowledgeMaxSourcesPerPass.",
+	no_model: " Set autoLearn.model to a configured, signed-in model.",
+	model_unpriced: " Set autoLearn.model to a model with a declared price.",
+	no_engine: "",
+};
+
+/**
+ * The owner notice for one collection status: `clear` when collection is active, undefined for a reason the owner is
+ * not told about. A spending hold names the bound that binds, in the order status() takes the minimum; the per-source
+ * limit is the resolved one the collector reads.
+ */
+export function knowledgeCollectionNotice(
+	status: KnowledgeCollectionStatus,
+	settings: {
+		getAutonomySettings(): Pick<Required<AutonomySettings>, "mode">;
+		getAutoLearnSettings(): AutoLearnSettings;
+	},
+): HarnessNoticeObservation | undefined {
+	if (status.state === "active") return "clear";
+	const paused = "Automatic knowledge collection paused because";
+	if (status.reason === "budget_exhausted") {
+		if (
+			status.spentUsd !== undefined &&
+			status.sessionMaxUsd !== undefined &&
+			status.sessionMaxUsd - status.spentUsd <= 0
+		)
+			return {
+				reason: "budget_exhausted:session",
+				text: `${paused} ${KNOWLEDGE_INACTIVE_SENTENCES.budget_exhausted} (autoLearn.knowledgeSessionMaxUsd). Raise autoLearn.knowledgeSessionMaxUsd to resume it in this session.`,
+			};
+		if (
+			resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings())
+				.knowledgeMaxUsd <= 0
+		)
+			return {
+				reason: "budget_exhausted:source",
+				text: `${paused} autoLearn.knowledgeMaxUsd is zero, so no source can be paid for. Raise autoLearn.knowledgeMaxUsd to resume it.`,
+			};
+		return {
+			reason: "budget_exhausted:cap",
+			text: `${paused} this session's estimated cost cap allows no further spend.`,
+		};
+	}
+	const action = status.reason === undefined ? undefined : KNOWLEDGE_NOTICE_ACTIONS[status.reason];
+	if (status.reason === undefined || action === undefined) return undefined;
+	return {
+		reason: status.reason,
+		text: `${paused} ${KNOWLEDGE_INACTIVE_SENTENCES[status.reason]}.${action}`,
+	};
+}
 
 /** One safe line for context_audit and `/memory knowledge`: state, judge, spending and the last pass. */
 export function formatKnowledgeCollectionLine(status: KnowledgeCollectionStatus): string {

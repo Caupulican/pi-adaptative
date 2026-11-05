@@ -1,12 +1,14 @@
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
 } from "../../../../src/core/learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1LongCollection } from "./journey-1-long-collection.ts";
@@ -192,7 +194,26 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 
 		// An exhausted session allowance holds the new source before any request, and says so.
 		const beforeCap = world.provider.requests.length;
+		const notices = () =>
+			root.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === HARNESS_NOTICE_CUSTOM_TYPE);
+		const noticeSaved = createBarrier();
+		const stopNotice = root.sessionManager.onEntriesPersisted(() => {
+			if (notices().length > 0) noticeSaved.release();
+		});
 		root.settingsManager.setAutoLearnSettings({ ...autoLearn, knowledgeSessionMaxUsd: 0 });
+		// The harness tells the owner by itself, for their next turn. Saving it holds the foreground for a moment, which
+		// re-arms the collection alarm, so the pass is armed only after the notice is saved.
+		await withDeadline(world.trace, "capped collection notice saved", noticeSaved.promise);
+		stopNotice();
+		expect(
+			notices().map((entry) => [parentInputOf(entry)?.metadata.mode, parentInputOriginalDetails(entry)]),
+			"one notice names the bound that holds collection",
+		).toEqual([
+			["next-owner-turn", { kind: "knowledge-collection", reason: "budget_exhausted:session", generation: 0 }],
+		]);
+		expect(root.sessionManager.getPendingParentInputs("turn"), "the notice wakes no turn").toEqual([]);
 		await withDeadline(world.trace, "capped collection armed", world.timers.whenArmed("knowledge-collection"));
 		const capped = terminal(root.session);
 		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
@@ -205,6 +226,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			held: 1,
 		});
 		expect(world.provider.requests.length, "an exhausted allowance starts no request").toBe(beforeCap);
+		expect(notices(), "the held pass observes the same state and adds no notice").toHaveLength(1);
 		expect(status(), "the owner sees why collection starts no requests").toMatchObject({
 			state: "inactive",
 			reason: "budget_exhausted",

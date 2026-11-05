@@ -184,7 +184,11 @@ export interface BackgroundLaneControllerDeps
 		LaneModelResolverDeps,
 		Pick<
 			ProactivityControllerDeps,
-			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
+			| "deliverNotes"
+			| "captureReviewContext"
+			| "subscribeForegroundActivity"
+			| "aggregateUsageWindow"
+			| "observeHarnessNotice"
 		> {
 	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
 	getSessionManager(): SessionManager;

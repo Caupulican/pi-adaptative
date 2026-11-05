@@ -5,7 +5,8 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage-delivery.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
-import { parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
+import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { formatProactivityStatus } from "../../../../src/modes/interactive/proactivity-commands.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
@@ -628,14 +629,16 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	const heldNote = "The migration rollback plan was promised and is still missing.";
 	const crossNote = "The next task still has no acceptance check.";
 	type Root = Awaited<ReturnType<HarnessWorld["createRootSession"]>>;
-	const ownerTurn = async (root: Root, label: string, prompt: string, carries?: string): Promise<void> => {
+	const ownerTurn = async (root: Root, label: string, prompt: string, ...carries: string[]): Promise<void> => {
 		world.provider.enqueue("root", {
 			...text(label, "Understood."),
 			check: (request) => {
 				const messages = JSON.stringify(request.context.messages);
 				expect(messages, `${label}: the owner's words reach the request`).toContain(prompt);
-				if (carries !== undefined)
-					expect(messages, `${label}: the held note rides this owner turn`).toContain(carries);
+				for (const carried of carries)
+					expect(messages, `${label}: the held input rides this owner turn`).toContain(
+						JSON.stringify(carried).slice(1, -1),
+					);
 			},
 		});
 		await withDeadline(trace, label, root.session.prompt(prompt));
@@ -766,6 +769,15 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	});
 	const secondLanes = second.session.backgroundLanes;
 	await ownerTurn(second, "daily-owner-4", "Start the next task.");
+	const notices = (root: Root) =>
+		root.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === HARNESS_NOTICE_CUSTOM_TYPE);
+	// The reached spend bound is a gate the owner can act on: the harness saves one notice for their next turn by itself.
+	const noticeSaved = createBarrier();
+	const stopNotice = second.sessionManager.onEntriesPersisted(() => {
+		if (notices(second).length > 0) noticeSaved.release();
+	});
 	const beforeRefused = world.provider.requests.length;
 	const refused = await withDeadline(
 		trace,
@@ -777,7 +789,29 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 		skipReason: "max_usd_per_day_reached",
 		delivered: [],
 	});
-	expect(world.provider.requests.length - beforeRefused, "a refused review sends no request").toBe(0);
+	await withDeadline(trace, "daily bounds: the spend gate's notice is saved", noticeSaved.promise);
+	stopNotice();
+	const [spendNotice] = notices(second);
+	if (spendNotice?.type !== "custom_message" || typeof spendNotice.content !== "string")
+		throw new Error("The spend gate's notice is not a saved text message.");
+	expect(parentInputOf(spendNotice)?.metadata.mode, "the notice never wakes a turn").toBe("next-owner-turn");
+	expect(parentInputOriginalDetails(spendNotice)).toEqual({
+		kind: "proactive-review",
+		reason: "max_usd_per_day_reached",
+		generation: 0,
+	});
+	const spendNoticeText = "reached proactivity.maxUsdPerDay";
+	expect(spendNotice.content, "the notice names the bound the owner can raise").toContain(spendNoticeText);
+	expect(second.sessionManager.getPendingParentInputs("turn"), "no parent wake is pending").toEqual([]);
+	expect(world.provider.requests.length - beforeRefused, "a refused review and its notice send no request").toBe(0);
+	// The same gate observed again is the same state: no second notice.
+	const refusedAgain = await withDeadline(
+		trace,
+		"daily bounds: review past the spend bound again",
+		secondLanes.runProactiveReviewOnce(),
+	);
+	expect(refusedAgain.skipReason).toBe("max_usd_per_day_reached");
+	expect(world.provider.requests.length - beforeRefused, "the repeated gate sends no request").toBe(0);
 	expect(secondLanes.getLastProactivitySkipReason()).toBe("max_usd_per_day_reached");
 	expect(secondLanes.getProactivityDailyState().measured, "the first session's spend and wake").toMatchObject({
 		reviewUsd: 2 * reviewUsd,
@@ -801,6 +835,25 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	expect(cross.deliveryHold, "another session's wake counts toward the bound").toBe("max_turn_wakes_per_day_reached");
 	expect(world.provider.requests.length - beforeCross).toBe(2);
 	expect(second.sessionManager.getPendingParentInputs("turn"), "no parent wake is pending").toEqual([]);
-	await ownerTurn(second, "daily-owner-5", "Continue.", crossNote);
+	// The owner's next turn carries the notice and shows it on their screen, once; nothing else is bought for it.
+	const shownNotices: string[] = [];
+	const stopShown = second.session.subscribe((event) => {
+		if (
+			event.type === "message_start" &&
+			event.message.role === "custom" &&
+			event.message.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+			typeof event.message.content === "string"
+		)
+			shownNotices.push(event.message.content);
+	});
+	const beforeOwner5 = world.provider.requests.length;
+	await ownerTurn(second, "daily-owner-5", "Continue.", crossNote, spendNoticeText);
+	stopShown();
+	expect(world.provider.requests.length - beforeOwner5, "the owner's turn is the only request").toBe(1);
+	expect(shownNotices, "the owner sees the notice with their turn").toEqual([spendNotice.content]);
+	expect(second.sessionManager.getPendingParentInputs(), "the owner's turn consumed the notice").toEqual([]);
+	expect(notices(second), "the review started after the raise and the owner's turn add no second notice").toHaveLength(
+		1,
+	);
 	expect(await world.disposeSessionInBody(second.session)).toBeUndefined();
 }

@@ -8,6 +8,7 @@ import type { DailyUsageTotals, DailyUsageWindow } from "../cost/daily-usage.ts"
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import type { HarnessNotice, HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -64,6 +65,38 @@ export function parentTurnWakes(day: Pick<DailyUsageTotals, "proactiveTurnWakes"
 	return day.proactiveTurnWakes + day.hostEventTurnWakes;
 }
 
+/**
+ * The owner notice for a review that did not start, or undefined for a gate that is normal flow (busy, too few owner
+ * turns, the per-session count), the owner's own switch, a transient model quota, or a session with no model at all.
+ */
+export function proactiveReviewNotice(
+	skipReason: string,
+	settings: Pick<ResolvedProactivitySettings, "model">,
+): HarnessNotice | undefined {
+	const paused = "Proactive review paused because";
+	switch (skipReason) {
+		case "max_usd_per_day_reached":
+			return {
+				reason: skipReason,
+				text: `${paused} review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if proactivity.maxUsdPerDay is raised.`,
+			};
+		case "no_proactivity_model":
+			return settings.model === undefined
+				? undefined
+				: {
+						reason: skipReason,
+						text: `${paused} proactivity.model ${JSON.stringify(settings.model)} does not resolve to an available model. Set proactivity.model to a configured, signed-in model, or remove it to use the session model.`,
+					};
+		case "model_proactivity_unsupported":
+			return {
+				reason: skipReason,
+				text: `${paused} its model's capability tier allows no background lanes. Set proactivity.model to a model with a larger context window.`,
+			};
+		default:
+			return undefined;
+	}
+}
+
 /** How one parent delivery was made, and the bound that carried it with the owner's next turn instead of waking. */
 export interface ParentWakeDelivery {
 	readonly mode: ParentInputMode;
@@ -107,6 +140,8 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	deliverNotes(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** The `proactivity` port; defaults to the system timers. */
 	timers?: TimerPort;
+	/** The session's harness notices: a gate the owner can act on is told once, a started review clears it. */
+	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 }
 
 /** The active goal and what is still open on it, bounded: the host's own record of work the owner asked for. */
@@ -183,6 +218,7 @@ export class ProactivityController {
 		this._lastSkipReason = reason;
 		if (reason !== undefined) {
 			this.clearTimer();
+			this.noticeSkip(reason, this.deps.getSettingsManager().getProactivitySettings());
 			return;
 		}
 		const settings = this.deps.getSettingsManager().getProactivitySettings();
@@ -213,6 +249,10 @@ export class ProactivityController {
 		return undefined;
 	}
 
+	private noticeSkip(skipReason: string, settings: Pick<ResolvedProactivitySettings, "model">): void {
+		this.deps.observeHarnessNotice?.("proactive-review", () => proactiveReviewNotice(skipReason, settings));
+	}
+
 	private async runScheduled(): Promise<void> {
 		try {
 			if (this._isRunning || this._aborted || this.deps.isDisposed()) return;
@@ -235,11 +275,17 @@ export class ProactivityController {
 			return { started: false, skipReason: "session_disposed", delivered: [] };
 		const skipped = this.gate();
 		this._lastSkipReason = skipped;
-		if (skipped !== undefined) return { started: false, skipReason: skipped, delivered: [] };
 		const settingsSource = this.deps.getSettingsManager();
 		const settings = structuredClone(settingsSource.getProactivitySettings());
+		if (skipped !== undefined) {
+			this.noticeSkip(skipped, settings);
+			return { started: false, skipReason: skipped, delivered: [] };
+		}
 		const shipment = this.models.resolveShipment(settings, "no_proactivity_model");
-		if (!shipment.ok) return { started: false, skipReason: shipment.skipReason, delivered: [] };
+		if (!shipment.ok) {
+			this.noticeSkip(shipment.skipReason, settings);
+			return { started: false, skipReason: shipment.skipReason, delivered: [] };
+		}
 		const { model } = shipment;
 		const capability = this.models.capabilityProfile(model);
 		const manager = this.deps.getSessionManager();
@@ -314,6 +360,7 @@ export class ProactivityController {
 			const remainingDayUsd = settings.maxUsdPerDay - day.proactivityCost;
 			if (remainingDayUsd <= 0) {
 				this._lastSkipReason = "max_usd_per_day_reached";
+				this.noticeSkip("max_usd_per_day_reached", settings);
 				return { started: false, skipReason: "max_usd_per_day_reached", delivered: [] };
 			}
 			// Past the wake bound the review still runs; its accepted notes wait for the owner's next turn.
@@ -329,6 +376,8 @@ export class ProactivityController {
 			runtimeLease.assertCurrent();
 			assertCurrent();
 			started = true;
+			// A review that starts has passed every gate the owner may have been told about.
+			this.deps.observeHarnessNotice?.("proactive-review", () => "clear");
 			this._runs++;
 			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
 			deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${this._runs}`);
