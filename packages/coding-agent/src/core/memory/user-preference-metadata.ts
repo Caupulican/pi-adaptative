@@ -151,7 +151,7 @@ export function describeUserPreferenceStrength(metadata: UserPreferenceMetadata 
 }
 
 /**
- * One prompt line for a preference: text plus its strength label, trailer omitted. A legacy line
+ * One prompt line for a preference: text plus its strength label and the day it was learned, trailer omitted. A legacy line
  * keeps the USER.md section it was written under (`section`, the nearest heading path) as
  * rendered context, because that heading is the only scope its author gave it; an annotated line
  * carries machine-verified scope and never borrows a heading.
@@ -159,7 +159,13 @@ export function describeUserPreferenceStrength(metadata: UserPreferenceMetadata 
 export function renderUserPreferenceForPrompt(parsed: ParsedUserPreferenceLine, section?: string): string {
 	const strength = describeUserPreferenceStrength(parsed.metadata);
 	const text = parsed.text.replace(/^[-*+]\s+/, "");
-	if (parsed.metadata) return strength ? `- ${text} (${strength})` : `- ${text}`;
+	if (parsed.metadata) {
+		// The day the newest owner evidence was said lets the model weigh an old preference against a recent one.
+		const learned =
+			parsed.metadata.evidenceAt === undefined ? "" : `learned ${parsed.metadata.evidenceAt.slice(0, 10)}`;
+		const label = [strength, learned].filter((part) => part.length > 0).join(", ");
+		return label ? `- ${text} (${label})` : `- ${text}`;
+	}
 	return section ? `- ${section}: ${text}` : `- ${text}`;
 }
 
