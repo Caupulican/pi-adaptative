@@ -677,6 +677,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getHostEventControl().changeHostEventSubscriptions(input, scope);
 	}
 
+	/**
+	 * A guard captured now that throws `message` once the session's branch moved, the session was replaced or disposed, or
+	 * `stillValid` no longer holds: what a routine origin or an intake decision is checked against before it is saved.
+	 */
+	private sessionBranchGuard(message: string, stillValid: () => boolean = () => true): () => void {
+		const manager = this.deps.getSessionManager();
+		const assertBranch = manager.captureBranchContext();
+		return () => {
+			assertBranch();
+			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager || !stillValid())
+				throw new Error(message);
+		};
+	}
+
 	private _getHostEventControl(): HostEventControlPort {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
@@ -1434,15 +1448,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			canDispatch: () => this.deps.isDelegateToolActive(),
 			getReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			canUseOrigin,
-			captureOriginGuard: (origin) => {
-				const manager = this.deps.getSessionManager();
-				const assertBranch = manager.captureBranchContext();
-				return () => {
-					assertBranch();
-					if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager || !canUseOrigin(origin))
-						throw new Error("Routine origin is not on the current durable parent branch.");
-				};
-			},
+			captureOriginGuard: (origin) =>
+				this.sessionBranchGuard("Routine origin is not on the current durable parent branch.", () =>
+					canUseOrigin(origin),
+				),
 			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
 			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
 			hostEvents: {
@@ -1569,15 +1578,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
 			subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			captureBranchGuard: () => {
-				const manager = this.deps.getSessionManager();
-				const assertBranch = manager.captureBranchContext();
-				return () => {
-					assertBranch();
-					if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
-						throw new Error("Routine intake session changed before its decision was saved.");
-				};
-			},
+			captureBranchGuard: () =>
+				this.sessionBranchGuard("Routine intake session changed before its decision was saved."),
 			deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
 			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
