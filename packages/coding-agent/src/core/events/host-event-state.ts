@@ -5,9 +5,9 @@ import type {
 	HostEventReceipt,
 	HostEventReplayGap,
 	HostEventSealedFrontier,
+	HostEventSequenceRange,
 	HostEventSourceRegistration,
 	HostEventSubscriptionInput,
-	HostEventTombstone,
 	HostEventTranscriptReceipt,
 } from "./host-event-contract.ts";
 
@@ -19,8 +19,11 @@ export interface HostEventSourceState {
 	readonly replayFloor: number;
 	readonly lastReplayGap?: HostEventReplayGap;
 	readonly seal?: HostEventSealedFrontier;
-	/** Pruned occurrences a later seal may still name; bounded by `MAX_HOST_EVENT_TOMBSTONES`. */
-	readonly prunedEvents?: readonly HostEventTombstone[];
+	/**
+	 * Positions below `replayFloor` this consumer never accepted: before `registration.startingSequence`
+	 * and inside replay gaps, minus accepted snapshots. Every other retired position is its own history.
+	 */
+	readonly unaccepted: readonly HostEventSequenceRange[];
 }
 
 export interface HostEventSubscription extends HostEventSubscriptionInput {

@@ -14,18 +14,17 @@ import {
 	hostEventRecord,
 	hostEventString,
 	hostEventSubscriptionId,
-	hostEventTombstoneMatches,
 	MAX_HOST_EVENT_TARGETS,
-	MAX_HOST_EVENT_TOMBSTONES,
 	parseHostEventCatchUpSeal,
 	parseHostEventDeliveryBinding,
 	parseHostEventEnvelope,
 	parseHostEventReplayGap,
+	parseHostEventSequenceRanges,
 	parseHostEventSourceRegistration,
 	parseHostEventSubscriptionInput,
-	parseHostEventTombstone,
 	parseHostEventTranscriptReceipt,
 } from "./host-event-contract.ts";
+import { hostEventObservationIsHistory } from "./host-event-reducer.ts";
 import {
 	type AcceptedHostEvent,
 	HOST_EVENT_RECORD_FIELDS,
@@ -64,14 +63,10 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 			"replayFloor",
 			"lastReplayGap",
 			"seal",
-			"prunedEvents",
+			"unaccepted",
 		],
 		"host event source",
 	);
-	const prunedEvents =
-		record.prunedEvents === undefined
-			? undefined
-			: hostEventArray(record.prunedEvents, MAX_HOST_EVENT_TOMBSTONES, parseHostEventTombstone, "pruned events");
 	const source = {
 		registration: parseHostEventSourceRegistration(record.registration),
 		acceptedThrough: hostEventInteger(record.acceptedThrough, "acceptedThrough", 0),
@@ -80,15 +75,15 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 		replayFloor: hostEventInteger(record.replayFloor, "replayFloor"),
 		...(record.lastReplayGap === undefined ? {} : { lastReplayGap: parseHostEventReplayGap(record.lastReplayGap) }),
 		...(record.seal === undefined ? {} : { seal: parseHostEventCatchUpSeal(record.seal) }),
-		...(prunedEvents === undefined ? {} : { prunedEvents }),
+		unaccepted: parseHostEventSequenceRanges(record.unaccepted),
 	};
+	// Unaccepted positions lie below the replay floor; without a replay gap only before the stream floor.
+	const unacceptedThrough = source.unaccepted.at(-1)?.through ?? 0;
 	if (
-		prunedEvents &&
-		(prunedEvents.length === 0 ||
-			new Set(prunedEvents.map((tombstone) => tombstone.subjectKey)).size !== prunedEvents.length ||
-			prunedEvents.some((tombstone) => tombstone.sourceSequence > source.retiredThrough))
+		unacceptedThrough >= source.replayFloor ||
+		(!source.lastReplayGap && unacceptedThrough >= source.registration.startingSequence)
 	)
-		throw new HostEventError("invalid", "Pruned event tombstones are inconsistent.");
+		throw new HostEventError("invalid", "Unaccepted source positions are inconsistent.");
 	if (
 		source.retiredThrough > source.acceptedThrough ||
 		source.acceptedThrough < source.registration.startingSequence - 1 ||
@@ -317,18 +312,16 @@ export function validateHostEventGraph(state: TaskRuntimeProjection): void {
 	for (const [id, source] of Object.entries(state.eventSources)) {
 		if (id !== source.registration.sourceId)
 			throw new HostEventError("invalid", "Source map key differs from its identity.");
-		for (const tombstone of source.prunedEvents ?? [])
-			if (state.hostEvents[tombstone.eventId])
-				throw new HostEventError("invalid", "A pruned event tombstone names a retained event.");
 		for (const observation of source.seal?.observations ?? []) {
 			if (observation.status !== "completed") continue;
 			const envelope = observation.eventId ? state.hostEvents[observation.eventId]?.envelope : undefined;
 			const event = envelope?.event;
-			if (!envelope && source.prunedEvents?.some((tombstone) => hostEventTombstoneMatches(tombstone, observation)))
-				continue;
+			// A sealed occurrence this consumer accepted and pruned is retired history, not a missing event.
+			if (!envelope && hostEventObservationIsHistory(state, source, observation)) continue;
 			if (
 				!event ||
 				envelope?.sourceId !== id ||
+				envelope.sourceSequence !== observation.sourceSequence ||
 				ciSubjectKey(ciEventSubject(event)) !== ciSubjectKey(observation.subject) ||
 				event.identity.runId !== observation.runId ||
 				event.identity.runNumber !== observation.runNumber ||

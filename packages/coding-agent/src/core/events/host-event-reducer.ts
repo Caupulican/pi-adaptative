@@ -13,6 +13,7 @@ import {
 	type HostEventDeliveryBinding,
 	type HostEventEnvelope,
 	HostEventError,
+	type HostEventSealObservation,
 	type HostEventSubscriptionInput,
 	type HostEventWorkerScope,
 	hostEventArray,
@@ -20,16 +21,16 @@ import {
 	hostEventInteger,
 	hostEventRecord,
 	hostEventSealedFrontier,
+	hostEventSequenceRetired,
+	hostEventSequenceUnaccepted,
 	hostEventString,
 	hostEventSubscriptionId,
-	hostEventTombstone,
-	hostEventTombstoneIsSnapshot,
-	hostEventTombstoneMatches,
+	hostEventUnacceptedWith,
+	hostEventUnacceptedWithout,
 	MAX_HOST_EVENT_DELIVERIES,
 	MAX_HOST_EVENT_DOMAIN_BYTES,
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
 	MAX_HOST_EVENT_TARGETS,
-	MAX_HOST_EVENT_TOMBSTONES,
 	MAX_HOST_EVENTS,
 	parseHostEventCatchUp,
 	parseHostEventCatchUpSeal,
@@ -71,7 +72,7 @@ export function hostEventSealDigest(source: HostEventSourceState): string | unde
 		source.seal.generation === source.catchUpGeneration &&
 		source.seal.scopeVersion === source.registration.scopeVersion &&
 		source.seal.throughSequence === source.acceptedThrough
-		? hostEventHash("pi-host-event-seal-v1", source.seal)
+		? hostEventHash("pi-host-event-seal-v2", source.seal)
 		: undefined;
 }
 
@@ -82,6 +83,30 @@ export function hostEventIsCurrent(state: TaskRuntimeProjection, event: Accepted
 		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(event.envelope.event)),
 	);
 	return observation?.status === "completed" && observation.eventId === event.envelope.event.eventId;
+}
+
+/**
+ * A completed observation names an occurrence this consumer accepted and has since pruned: its position
+ * is retired, accepted history and no retained event holds it. The seal then treats it as history.
+ */
+export function hostEventObservationIsHistory(
+	state: Pick<TaskRuntimeProjection, "hostEvents">,
+	source: HostEventSourceState,
+	observation: HostEventSealObservation,
+): boolean {
+	const sequence = observation.sourceSequence;
+	return (
+		observation.status === "completed" &&
+		sequence !== undefined &&
+		(observation.eventId === undefined || !state.hostEvents[observation.eventId]) &&
+		hostEventSequenceRetired(source, sequence) &&
+		!Object.values(state.hostEvents).some(
+			(accepted) =>
+				accepted.envelope.sourceId === source.registration.sourceId &&
+				accepted.envelope.sourceEpoch === source.registration.sourceEpoch &&
+				accepted.envelope.sourceSequence === sequence,
+		)
+	);
 }
 
 export function hostEventDeliveryEligible(state: TaskRuntimeProjection, delivery: HostEventDelivery): boolean {
@@ -321,12 +346,16 @@ function acceptCanonicalHostEvent(
 		)
 	)
 		throw new HostEventError("identity_conflict", "Source position already belongs to another event.");
+	// Up to the frontier every position not still unaccepted was this consumer's custody: only a new
+	// stream position or an unaccepted snapshot position below the floor takes a new occurrence.
 	if (
-		source.prunedEvents?.some(
-			(tombstone) => tombstone.eventId === id || tombstone.sourceSequence === envelope.sourceSequence,
-		)
+		envelope.sourceSequence <= source.acceptedThrough &&
+		!hostEventSequenceUnaccepted(source.unaccepted, envelope.sourceSequence)
 	)
-		throw new HostEventError("identity_conflict", "A pruned occurrence cannot be accepted again.");
+		throw new HostEventError(
+			"identity_conflict",
+			"A position already in this consumer's custody cannot be accepted again.",
+		);
 	const key = ciSubjectKey(ciEventSubject(envelope.event));
 	if (!source.registration.subjects.some((subject) => ciSubjectKey(subject) === key))
 		throw new HostEventError("source_conflict", "Event is outside registered source scope.");
@@ -446,6 +475,9 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 					retiredThrough: registration.startingSequence - 1,
 					catchUpGeneration: 0,
 					replayFloor: registration.startingSequence,
+					// The fixed stream floor: earlier positions reach this consumer only as snapshots.
+					unaccepted:
+						registration.startingSequence > 1 ? [{ from: 1, through: registration.startingSequence - 1 }] : [],
 				};
 			break;
 		}
@@ -482,6 +514,10 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				retiredThrough: gap.throughSequence,
 				replayFloor: gap.throughSequence + 1,
 				lastReplayGap: gap,
+				unaccepted: hostEventUnacceptedWith(source.unaccepted, {
+					from: gap.afterSequence + 1,
+					through: gap.throughSequence,
+				}),
 			};
 			break;
 		}
@@ -507,6 +543,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				const observation = seal.observations.find((candidate) => candidate.eventId === snapshot.event.eventId);
 				if (
 					observation?.status !== "completed" ||
+					observation.sourceSequence !== snapshot.sourceSequence ||
 					snapshot.sourceId !== seal.sourceId ||
 					snapshot.sourceEpoch !== seal.sourceEpoch ||
 					snapshot.sourceSequence >= source.replayFloor
@@ -516,15 +553,22 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 						"Snapshot is not a current terminal observation below the stream replay floor.",
 					);
 				const retained = events[snapshot.event.eventId];
-				const pruned = source.prunedEvents?.find((tombstone) => tombstone.eventId === snapshot.event.eventId);
+				const custody = sources[seal.sourceId];
 				if (retained) {
 					if (!isDeepStrictEqual(retained.envelope, snapshot))
 						throw new HostEventError("identity_conflict", "Current snapshot differs from retained occurrence.");
-				} else if (pruned) {
-					// Its custody was already transferred and settled; a snapshot never delivers it again.
-					if (!hostEventTombstoneIsSnapshot(pruned, snapshot))
-						throw new HostEventError("identity_conflict", "Current snapshot differs from pruned occurrence.");
-				} else acceptCanonicalHostEvent(state, event, snapshot, payload.consumerId, payload.origin);
+				} else if (hostEventSequenceUnaccepted(custody.unaccepted, snapshot.sourceSequence)) {
+					acceptCanonicalHostEvent(state, event, snapshot, payload.consumerId, payload.origin);
+					sources[seal.sourceId] = {
+						...custody,
+						unaccepted: hostEventUnacceptedWithout(custody.unaccepted, snapshot.sourceSequence),
+					};
+				} else if (!hostEventObservationIsHistory(state, custody, observation))
+					throw new HostEventError(
+						"identity_conflict",
+						"Snapshot names a position this consumer holds without that occurrence.",
+					);
+				// Otherwise its custody was already transferred and released: a snapshot never delivers it again.
 			}
 			for (const observation of seal.observations) {
 				const key = ciSubjectKey(observation.subject);
@@ -549,14 +593,12 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				if (observation.status === "completed") {
 					const terminal = observation.eventId ? events[observation.eventId] : undefined;
 					const item = terminal?.envelope.event;
-					if (
-						!terminal &&
-						source.prunedEvents?.some((tombstone) => hostEventTombstoneMatches(tombstone, observation))
-					)
-						continue;
+					// A released occurrence of this consumer's own history: the seal neither fails nor redelivers it.
+					if (!terminal && hostEventObservationIsHistory(state, sources[seal.sourceId], observation)) continue;
 					if (
 						!terminal ||
 						terminal.envelope.sourceId !== seal.sourceId ||
+						terminal.envelope.sourceSequence !== observation.sourceSequence ||
 						!item ||
 						ciSubjectKey(ciEventSubject(item)) !== key ||
 						item.identity.runId !== observation.runId ||
@@ -567,7 +609,8 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 						throw new HostEventError("source_conflict", "Seal terminal outcome has no matching accepted event.");
 				}
 			}
-			sources[seal.sourceId] = { ...source, seal: frontier };
+			// Accepted snapshots already narrowed this source's unaccepted positions.
+			sources[seal.sourceId] = { ...sources[seal.sourceId], seal: frontier };
 			for (const accepted of Object.values(events).filter(
 				(candidate) => candidate.envelope.sourceId === seal.sourceId,
 			)) {
@@ -855,21 +898,10 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				if (!accepted) continue;
 				if (!hostEventCanPrune(state, accepted, Date.parse(event.occurredAt), pressure))
 					throw new HostEventError("retained", "Host event still owns recall, replay or delivery obligations.");
+				// Its position stays retired, accepted history (`hostEventSequenceRetired`), so a later seal
+				// naming it neither fails nor accepts it again.
 				for (const deliveryId of accepted.deliveryIds) delete deliveries[deliveryId];
 				delete events[id];
-				// The newest pruned occurrence of a subject stays verifiable by a later seal.
-				const sourceId = accepted.envelope.sourceId;
-				const tombstone = hostEventTombstone(accepted.envelope);
-				const kept = (sources[sourceId].prunedEvents ?? []).filter(
-					(prior) => prior.subjectKey !== tombstone.subjectKey || prior.sourceSequence > tombstone.sourceSequence,
-				);
-				const prunedEvents = kept.some((prior) => prior.subjectKey === tombstone.subjectKey)
-					? kept
-					: [...kept, tombstone].sort((left, right) => left.sourceSequence - right.sourceSequence);
-				sources[sourceId] = {
-					...sources[sourceId],
-					prunedEvents: prunedEvents.slice(-MAX_HOST_EVENT_TOMBSTONES),
-				};
 			}
 			break;
 		}

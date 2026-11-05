@@ -133,9 +133,9 @@ warning. Settled history is reclaimed whenever new evidence is accepted, not onl
 reconciles. A task subscription is refused when its CI subject already has the maximum number of
 subscribed tasks, so admitted subscriptions never block the source's next event. When retained
 events, deliveries or bytes pass three quarters of their bound, settled events give up the rest of
-their seven-day recall window, oldest first. A pruned event leaves a small tombstone on its source,
-so a later reconcile that still reports it as current neither delivers it again nor stalls the
-source; each source keeps the newest tombstone of its 64 most recently pruned subjects. Capacity
-that remains exhausted leaves unaccepted evidence with its source, which reports it and stays
-unready. Host events remain
-untrusted operational evidence in memory and never become owner preferences or permission grants.
+their seven-day recall window, oldest first. A reconcile names each current result by its source
+position, and every position a session accepted and later released stays its history, so a branch
+that returns after its result was pruned neither delivers that result again nor stalls the source,
+however many other subjects were pruned meanwhile. Capacity that remains exhausted leaves unaccepted
+evidence with its source, which reports it and stays unready. Host events remain untrusted
+operational evidence in memory and never become owner preferences or permission grants.

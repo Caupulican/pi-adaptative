@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
 import { parseWorkerHostEventRecord, type WorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH, MAX_WORKER_AUTHORITY_PATH_LENGTH } from "../orchestration/contracts.ts";
 
@@ -98,10 +97,19 @@ export interface CiCurrentObservation {
 	readonly eventId?: string;
 }
 
+/**
+ * A sealed current observation. A completed one names its terminal occurrence by event id and by
+ * the source position the source assigned it, so a consumer that already pruned the occurrence can
+ * still recognise it as its own history.
+ */
+export interface HostEventSealObservation extends CiCurrentObservation {
+	readonly sourceSequence?: number;
+}
+
 /** Absent subjects have no matching run. Failed/incomplete collection must never seal. */
 export interface HostEventCatchUpSeal extends HostEventCatchUp {
 	readonly throughSequence: number;
-	readonly observations: readonly CiCurrentObservation[];
+	readonly observations: readonly HostEventSealObservation[];
 	/** Exact current terminal envelopes below this consumer's stream replay floor. */
 	readonly snapshots?: readonly HostEventEnvelope[];
 }
@@ -120,73 +128,107 @@ export function hostEventSealedFrontier(seal: HostEventCatchUpSeal): HostEventSe
 	};
 }
 
+/** An inclusive run of source positions. */
+export interface HostEventSequenceRange {
+	readonly from: number;
+	readonly through: number;
+}
+
 /**
- * The identity a pruned event leaves on its source. A later seal may still name the event as its
- * subject's current attempt (the subject left scope and returned); the tombstone lets that seal
- * verify it without re-accepting the payload as a new occurrence or failing for a missing event.
+ * Bound on a source's unaccepted ranges. Past it the two lowest ranges coalesce: the oldest positions
+ * this consumer did accept between them count as unaccepted again, so a later snapshot of one of
+ * them is accepted (possibly delivered twice) rather than an event never accepted being lost.
  */
-export interface HostEventTombstone {
-	readonly eventId: string;
-	readonly sourceSequence: number;
-	readonly payloadDigest: string;
-	readonly subjectKey: string;
-	readonly runId: number;
-	readonly runNumber: number;
-	readonly runAttempt: number;
-	readonly conclusion: CiTerminalConclusion;
+export const MAX_HOST_EVENT_UNACCEPTED_RANGES = 256;
+
+/** Position bookkeeping of one consumer's custody of a source stream. */
+export interface HostEventCustodyPositions {
+	readonly retiredThrough: number;
+	/** Merged positions below the replay floor this consumer never accepted: before its starting
+	 * sequence and inside replay gaps, minus snapshot occurrences it accepted since. */
+	readonly unaccepted: readonly HostEventSequenceRange[];
 }
 
-/** Per source; only the newest tombstone of each subject is kept, the oldest subject evicted first. */
-export const MAX_HOST_EVENT_TOMBSTONES = MAX_HOST_EVENT_SUBJECTS;
-
-export function hostEventTombstone(envelope: HostEventEnvelope): HostEventTombstone {
-	const event = envelope.event;
-	return {
-		eventId: event.eventId,
-		sourceSequence: envelope.sourceSequence,
-		payloadDigest: event.payloadDigest,
-		subjectKey: ciSubjectKey(ciEventSubject(event)),
-		runId: event.identity.runId,
-		runNumber: event.identity.runNumber,
-		runAttempt: event.identity.runAttempt,
-		conclusion: event.conclusion,
-	};
+export function hostEventSequenceUnaccepted(ranges: readonly HostEventSequenceRange[], sequence: number): boolean {
+	return ranges.some((range) => sequence >= range.from && sequence <= range.through);
 }
 
-export function parseHostEventTombstone(value: unknown): HostEventTombstone {
-	const entry = hostEventRecord(
+/**
+ * The position is retired history of this consumer: it accepted the occurrence there (from its stream
+ * or as a snapshot) and released it. A pruned occurrence named again by a later seal is recognised
+ * here, so it neither fails the seal nor is accepted and delivered a second time.
+ */
+export function hostEventSequenceRetired(source: HostEventCustodyPositions, sequence: number): boolean {
+	return sequence <= source.retiredThrough && !hostEventSequenceUnaccepted(source.unaccepted, sequence);
+}
+
+/** Past `bound` the two lowest ranges coalesce, so only the oldest history between them is blurred. */
+function coalesceLowestRanges(ranges: HostEventSequenceRange[], bound: number): HostEventSequenceRange[] {
+	while (ranges.length > bound) {
+		const [first, second] = ranges;
+		ranges.splice(0, 2, { from: first!.from, through: second!.through });
+	}
+	return ranges;
+}
+
+/** Adds one inclusive range to sorted ranges, merging overlapping and adjacent ones, within `bound` ranges. */
+export function mergeSequenceRanges(
+	ranges: readonly HostEventSequenceRange[],
+	added: HostEventSequenceRange,
+	bound: number,
+): HostEventSequenceRange[] {
+	const merged: HostEventSequenceRange[] = [];
+	for (const range of [...ranges, added].sort((left, right) => left.from - right.from)) {
+		const last = merged.at(-1);
+		if (last && range.from <= last.through + 1)
+			merged[merged.length - 1] = { from: last.from, through: Math.max(last.through, range.through) };
+		else merged.push(range);
+	}
+	return coalesceLowestRanges(merged, bound);
+}
+
+/** Adds a replay gap's positions. */
+export function hostEventUnacceptedWith(
+	ranges: readonly HostEventSequenceRange[],
+	added: HostEventSequenceRange,
+): HostEventSequenceRange[] {
+	return mergeSequenceRanges(ranges, added, MAX_HOST_EVENT_UNACCEPTED_RANGES);
+}
+
+/** Removes one position whose snapshot occurrence this consumer just accepted. */
+export function hostEventUnacceptedWithout(
+	ranges: readonly HostEventSequenceRange[],
+	sequence: number,
+): HostEventSequenceRange[] {
+	return coalesceLowestRanges(
+		ranges.flatMap((range) =>
+			sequence < range.from || sequence > range.through
+				? [range]
+				: [
+						...(range.from < sequence ? [{ from: range.from, through: sequence - 1 }] : []),
+						...(sequence < range.through ? [{ from: sequence + 1, through: range.through }] : []),
+					],
+		),
+		MAX_HOST_EVENT_UNACCEPTED_RANGES,
+	);
+}
+
+export function parseHostEventSequenceRanges(value: unknown): HostEventSequenceRange[] {
+	const ranges = hostEventArray(
 		value,
-		["eventId", "sourceSequence", "payloadDigest", "subjectKey", "runId", "runNumber", "runAttempt", "conclusion"],
-		"host event tombstone",
+		MAX_HOST_EVENT_UNACCEPTED_RANGES,
+		(entry) => {
+			const range = hostEventRecord(entry, ["from", "through"], "host event sequence range");
+			const from = hostEventInteger(range.from, "from");
+			const through = hostEventInteger(range.through, "through");
+			if (through < from) throw new HostEventError("invalid", "Host event sequence range is reversed.");
+			return { from, through };
+		},
+		"unaccepted ranges",
 	);
-	return {
-		eventId: hostEventString(entry.eventId, "eventId"),
-		sourceSequence: hostEventInteger(entry.sourceSequence, "sourceSequence"),
-		payloadDigest: hostEventDigest(entry.payloadDigest, "payloadDigest"),
-		subjectKey: hostEventDigest(entry.subjectKey, "subjectKey"),
-		runId: hostEventInteger(entry.runId, "runId"),
-		runNumber: hostEventInteger(entry.runNumber, "runNumber"),
-		runAttempt: hostEventInteger(entry.runAttempt, "runAttempt"),
-		conclusion: ciConclusion(entry.conclusion),
-	};
-}
-
-/** A terminal observation names exactly this pruned occurrence. */
-export function hostEventTombstoneMatches(tombstone: HostEventTombstone, observation: CiCurrentObservation): boolean {
-	return (
-		observation.status === "completed" &&
-		observation.eventId === tombstone.eventId &&
-		ciSubjectKey(observation.subject) === tombstone.subjectKey &&
-		observation.runId === tombstone.runId &&
-		observation.runNumber === tombstone.runNumber &&
-		observation.runAttempt === tombstone.runAttempt &&
-		observation.conclusion === tombstone.conclusion
-	);
-}
-
-/** A snapshot of a pruned occurrence transfers no new custody; it must be the same occurrence. */
-export function hostEventTombstoneIsSnapshot(tombstone: HostEventTombstone, snapshot: HostEventEnvelope): boolean {
-	return isDeepStrictEqual(hostEventTombstone(snapshot), tombstone);
+	if (ranges.some((range, index) => index > 0 && range.from <= ranges[index - 1]!.through + 1))
+		throw new HostEventError("invalid", "Unaccepted ranges must be sorted, disjoint and merged.");
+	return ranges;
 }
 
 /** The source guarantees retired positions can never be replayed under a new sequence. */
@@ -530,6 +572,22 @@ export function parseCiCurrentObservation(value: unknown): CiCurrentObservation 
 	};
 }
 
+/** A completed sealed observation carries its occurrence's source position; any other carries none. */
+export function parseHostEventSealObservation(value: unknown): HostEventSealObservation {
+	const entry = hostEventRecord(
+		value,
+		["subject", "runId", "runNumber", "runAttempt", "status", "conclusion", "eventId", "sourceSequence"],
+		"sealed CI observation",
+	);
+	const { sourceSequence, ...current } = entry;
+	const observation = parseCiCurrentObservation(current);
+	if ((observation.status === "completed") !== (sourceSequence !== undefined))
+		throw new HostEventError("invalid", "A sealed observation names a source position exactly when it is terminal.");
+	return observation.status === "completed"
+		? { ...observation, sourceSequence: hostEventInteger(sourceSequence, "sourceSequence") }
+		: observation;
+}
+
 export function parseHostEventCatchUpSeal(value: unknown): HostEventCatchUpSeal {
 	const entry = hostEventRecord(
 		value,
@@ -545,7 +603,7 @@ export function parseHostEventCatchUpSeal(value: unknown): HostEventCatchUpSeal 
 	const observations = hostEventArray(
 		entry.observations,
 		MAX_HOST_EVENT_SUBJECTS,
-		parseCiCurrentObservation,
+		parseHostEventSealObservation,
 		"seal observations",
 	);
 	if (new Set(observations.map((observation) => ciSubjectKey(observation.subject))).size !== observations.length)

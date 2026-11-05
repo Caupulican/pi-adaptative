@@ -26,7 +26,6 @@ import {
 	hostEventInteger,
 	hostEventSealedFrontier,
 	hostEventString,
-	hostEventTombstoneIsSnapshot,
 	MAX_HOST_EVENT_SOURCES,
 	parseHostEventCatchUp,
 	parseHostEventCatchUpSeal,
@@ -41,6 +40,7 @@ import {
 	assertHostEventExecution,
 	hostEventCanPrune,
 	hostEventDeliveryEligible,
+	hostEventObservationIsHistory,
 	hostEventRetentionPressure,
 	hostEventSealDigest,
 	hostEventTaskDisposition,
@@ -302,11 +302,15 @@ export class HostEventRuntime {
 		this.port.transact((tx) => {
 			const source = tx.snapshot.eventSources[seal.sourceId];
 			if (isDeepStrictEqual(source?.seal, hostEventSealedFrontier(seal))) {
+				// The first seal accepted each snapshot; a replay finds it retained or released as history.
 				for (const snapshot of seal.snapshots ?? []) {
-					const pruned = source.prunedEvents?.find((tombstone) => tombstone.eventId === snapshot.event.eventId);
+					const observation = seal.observations.find((entry) => entry.eventId === snapshot.event.eventId);
 					if (
 						!isDeepStrictEqual(tx.snapshot.hostEvents[snapshot.event.eventId]?.envelope, snapshot) &&
-						!(pruned && hostEventTombstoneIsSnapshot(pruned, snapshot))
+						!(
+							observation?.sourceSequence === snapshot.sourceSequence &&
+							hostEventObservationIsHistory(tx.snapshot, source, observation)
+						)
 					)
 						throw new HostEventError("identity_conflict", "Replayed snapshot differs from canonical custody.");
 				}

@@ -17,6 +17,7 @@ import {
 	hostEventRecord,
 	hostEventString,
 	MAX_HOST_EVENT_SUBJECTS,
+	mergeSequenceRanges,
 	parseCiCurrentObservation,
 	parseCiSubject,
 	parseHostEventCatchUp,
@@ -324,21 +325,9 @@ function addRetiredRun(state: SourceState, key: string, runNumber: number): void
 		frontier = { key, ranges: [] };
 		state.retiredRuns.push(frontier);
 	}
-	const ranges = [...frontier.ranges, { from: runNumber, through: runNumber }].sort((a, b) => a.from - b.from);
-	const merged: CiRetiredRunRange[] = [];
-	for (const range of ranges) {
-		const last = merged.at(-1);
-		if (last && range.from <= last.through + 1)
-			merged[merged.length - 1] = { from: last.from, through: Math.max(last.through, range.through) };
-		else merged.push(range);
-	}
 	// Past the bound, the two oldest ranges coalesce. Only the oldest history between them
 	// becomes unobservable; recent never-seen or pending run numbers stay admissible.
-	while (merged.length > MAX_RETIRED_RANGES) {
-		const [first, second] = merged;
-		merged.splice(0, 2, { from: first!.from, through: second!.through });
-	}
-	frontier.ranges = merged;
+	frontier.ranges = mergeSequenceRanges(frontier.ranges, { from: runNumber, through: runNumber }, MAX_RETIRED_RANGES);
 }
 
 /** One locked, bounded source journal owns occurrence identity and every consumer's custody. */

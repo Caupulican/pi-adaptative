@@ -8,6 +8,7 @@ import {
 	ciEventSubject,
 	ciSubjectKey,
 	HostEventError,
+	type HostEventSealObservation,
 	type HostEventSink,
 	type HostEventSource,
 	MAX_HOST_EVENT_SUBJECTS,
@@ -542,12 +543,27 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			this.forced = true;
 			return;
 		}
+		// A terminal observation names its occurrence's retained position, so a consumer that already
+		// pruned it recognises its own history. A run cursor another writer dropped meanwhile re-collects.
+		const sealed: HostEventSealObservation[] = [];
+		for (const observation of observations) {
+			if (observation.status !== "completed") {
+				sealed.push(observation);
+				continue;
+			}
+			const run = snapshot.runs.find((entry) => entry.latest.event.eventId === observation.eventId);
+			if (!run) {
+				this.forced = true;
+				return;
+			}
+			sealed.push({ ...observation, sourceSequence: run.latest.sourceSequence });
+		}
 		const floor = consumer.replayFloor;
 		await sink.seal(
 			{
 				...catchUp,
 				throughSequence: snapshot.nextSequence - 1,
-				observations,
+				observations: sealed,
 				snapshots: snapshot.runs.flatMap((run) =>
 					run.latest.sourceSequence < floor &&
 					observations.some((observation) => observation.eventId === run.latest.event.eventId)
