@@ -59,11 +59,32 @@ GitHub access and filesystem observation; the session receives validated facts a
 runs and attempts. This works with continuous chat as well as ordinary session history. SDK hosts
 can supply their own event source through the same session binding.
 
+The observed revisions are the checked-out HEAD, revisions whose pre-push watcher has not recorded
+an outcome, revisions named by task subscriptions, and revisions of retained events this session has
+not accepted yet. Settled branch records are not observed again. A revision that cannot be collected
+is reported and blocks the next seal, while the other revisions' evidence is still retained.
+
 Pending upstream runs have bounded completion monitors, including runs started from another
 machine. Completion requests a fresh authoritative observation; process output itself never becomes
-a CI verdict. The host also discovers new upstream runs every two minutes while the session is
-active, so reruns without a local file change remain visible. Stopping or replacing the session
-cancels discovery and joins the monitors.
+a CI verdict. A monitor that ends while its run still looks pending is re-armed after 30 seconds.
+The host also discovers new upstream runs every two minutes while the session is active, so reruns
+without a local file change remain visible. Only HEAD, branch references, CI status records and
+subscriptions trigger a local observation; index writes, the source's own record updates and
+foreground activity do not. An observation that finds nothing new commits nothing and keeps the
+sealed source ready. Stopping or replacing the session cancels discovery and joins the monitors.
+
+Session start and session switches never wait for Git, `gh` or the network and never fail on them.
+Outside a Git work tree, in a repository without `.github/workflows/ci.yml`, or without `gh`
+installed, the source stays inactive without a message. Other source problems are reported once
+through the terminal warning channel, which the interactive screen releases when it exits.
+`"proactivity": { "ciEvents": false }` stops CI discovery entirely. The footer CI verdict reads the
+local record written by the pre-push watcher either way.
+
+Stopping a session parks its consumer instead of removing it: CI results that finish while Pi is
+closed stay retained and are delivered when the session resumes. A consumer parked for seven days,
+or the oldest parked consumer when the source reaches capacity, is retired; it later resumes through
+an explicit replay gap. A source journal that cannot be read is moved aside and a new source epoch
+starts.
 
 A failure becomes actionable only after the source has reconciled the current attempt. An older
 failed attempt followed by a running or successful rerun remains available as historical evidence
