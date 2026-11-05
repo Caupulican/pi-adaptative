@@ -57,10 +57,12 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	// The same first response also asks the read-only shell for a network client and for a redirection into the project: the lane's
 	// production admission refuses both before the shell (no network grant; writes only inside the worker's scratch directory), while
 	// the plain read in the same batch runs. The read is one command line of the reads a code-reading worker runs most (a search
-	// without a file filter, a git history search for a word, a wrapped git command, an input redirection): the read-only line and the
-	// deny-mode credential check both admit it. Five more calls carry bypass shapes the gate refuses before the shell, each with the
-	// cause it names: a configuration file named by an environment assignment, a line continuation that walks a write out of
-	// scratch, an awk program that reads through ARGV, a harness storage root named before `-e`, and a tsc build-info write.
+	// without a file filter, a git history search for a word, a wrapped git command, an input redirection, a `for` loop that only
+	// prints): the read-only line and the deny-mode credential check both admit it. Seven more calls carry shapes the gate refuses
+	// before the shell, each with the cause it names: a configuration file named by an environment assignment, a line continuation
+	// that walks a write out of scratch, an awk program that reads through ARGV, a harness storage root named before `-e`, a tsc
+	// build-info write, a `for` loop whose body runs a mutating program (the refusal names the program, not the loop), and a
+	// network-share path for a worker without a network grant.
 	// The read line runs rg, so the host has it installed: Pi's managed rg sits where the managed tools resolve it, as the
 	// installed uv does. The Windows engine path prepares rg for the line before it runs (POSIX runs through the world's shell
 	// operations, which need no preparation); with rg installed nothing is downloaded. The file is removed when the leg ends.
@@ -95,7 +97,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	const e8Wake = createBarrier();
 	const E8_USAGE = { ...createEmptyUsage(), input: 1_000, cacheRead: 20_000, totalTokens: 21_000 };
 	const E8_READS =
-		"echo e8-bash && rg e8-marker src && git log -S apply --oneline && timeout 30 git log -1 --oneline && wc -l < package.json";
+		"echo e8-bash && rg e8-marker src && git log -S apply --oneline && timeout 30 git log -1 --oneline && wc -l < package.json && for f in e8-a e8-b; do echo $f; done";
 	// Each refused call: its command and the cause its refusal must name.
 	const E8_REFUSALS = [
 		{
@@ -122,6 +124,16 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			id: "e8-tsc-1",
 			command: "tsc --noEmit --incremental --tsBuildInfoFile e8.tsbuildinfo",
 			cause: "tsc is not a command the read-only line admits",
+		},
+		{
+			id: "e8-loop-1",
+			command: "for f in e8-a e8-b; do echo $f; touch e8-loop-mark; done",
+			cause: "touch is not a command the read-only line admits",
+		},
+		{
+			id: "e8-unc-1",
+			command: "cat //e8-host.invalid/share/e8-unc.txt",
+			cause: "it names //e8-host.invalid/share/e8-unc.txt, a network share, and this worker holds no network grant",
 		},
 	];
 	const e8InstalledRipgrep = getManagedToolBinaryPath("rg");
@@ -268,7 +280,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	).toBe(1);
 	expect(
 		world.shell.requests.filter((request) =>
-			/curl|e8-notes|e8-rgrc|e8-escape|ARGV|e8-token|tsBuildInfo/u.test(request.command),
+			/curl|e8-notes|e8-rgrc|e8-escape|ARGV|e8-token|tsBuildInfo|e8-loop|e8-host/u.test(request.command),
 		),
 		"the read-only shell's network client, project write and refused bypass shapes never reach the shell",
 	).toHaveLength(0);
