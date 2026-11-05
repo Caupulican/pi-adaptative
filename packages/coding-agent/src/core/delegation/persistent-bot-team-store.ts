@@ -1417,10 +1417,11 @@ export class PersistentBotTeamStore {
 			const session = input.target.kind === "session";
 			if (session !== (input.executionSnapshot !== undefined))
 				throw new Error("Session routines require a host-admitted execution snapshot.");
+			// The stored side is re-canonicalized: a runtime may spell a stored zone differently than when it was saved.
 			const scheduleChanged =
 				!existing ||
 				!isDeepStrictEqual(
-					routineSlotRule(routineScheduleInputOf(existing.schedule)),
+					routineSlotRule(parseRoutineScheduleInput(routineScheduleInputOf(existing.schedule))),
 					routineSlotRule(scheduleInput),
 				);
 			const anchorAt =
@@ -1434,6 +1435,13 @@ export class PersistentBotTeamStore {
 			else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
 			else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
 			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
+			if (
+				schedule.kind === "once" &&
+				schedule.notAfter !== undefined &&
+				schedule.notAfter < (input.nowMs ?? Date.now()) &&
+				!(existing?.schedule.kind === "once" && existing.schedule.notAfter === schedule.notAfter)
+			)
+				throw new Error("One-time routine start window has already closed.");
 			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
 			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
 				throw new Error("Routine revision counter is exhausted.");

@@ -202,6 +202,24 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		).toBeNull();
 		expect(first.executionSnapshot?.savedIntent.knowledgeReferences).toEqual([]);
 		expect(first.nextRunAt).toBe(at);
+		for (const [schedule, refusal] of [
+			[{ kind: "calendar", cron: "60 9 * * *", timeZone: "UTC" }, /minute field/],
+			[{ kind: "calendar", cron: "0 9 * * *", timeZone: "Mars/Olympus_Mons" }, /not supported/],
+			[{ kind: "calendar", cron: "0 0 31 2 *", timeZone: "UTC" }, /no time within/],
+		] as const)
+			expect(
+				() =>
+					store().upsertRoutine({
+						routineId: "refused-calendar",
+						target: first.target,
+						prompt: original,
+						schedule,
+						executionSnapshot: first.executionSnapshot,
+						createOnly: true,
+					}),
+				"an invalid, unsupported or unsatisfiable calendar rule never enters durable state",
+			).toThrow(refusal);
+		expect(store().getRoutine("refused-calendar")).toBeUndefined();
 		world.provider.enqueue("worker-a", workerReply("manual-routine", original, release.promise, entered.release));
 		await command("routine-manual", { action: "run", routineId, expectedRevision: first.revision });
 		await withDeadline(world.trace, "manual routine entered its saved worker request", entered.promise);
