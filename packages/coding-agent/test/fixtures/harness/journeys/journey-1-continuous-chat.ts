@@ -368,7 +368,19 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					expect(currentKnowledge(request), "the corrected fact survives the turn boundary").toContain(
 						"K-CORRECTED-PREFERENCE",
 					);
-					knowledge.forget(fact.id, 2, () => {});
+					knowledge.forget(
+						fact.id,
+						2,
+						[
+							{
+								sessionId: "prior-owner",
+								sourceId: "prior-owner/forget",
+								quote: "Forget that preference",
+								at: "2023-01-01T00:00:00.000Z",
+							},
+						],
+						() => {},
+					);
 					if (raw.includes("<chat>")) turn2ChatView = raw;
 					if (raw.includes("Current time: ")) turn2StateText = raw;
 				},

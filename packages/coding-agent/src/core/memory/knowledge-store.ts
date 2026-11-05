@@ -4,21 +4,26 @@ import { dirname } from "node:path";
 import { knowledgeDatabaseFile } from "../agent-paths.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import {
+	isKnowledgeCitation,
 	isKnowledgeScope,
 	isKnowledgeTimestamp,
 	KNOWLEDGE_KINDS,
+	type KnowledgeCitation,
 	type KnowledgeKind,
 	type KnowledgeRecord,
 	type KnowledgeRecordSnapshot,
 	type KnowledgeScope,
+	type KnowledgeSlot,
 	type KnowledgeStorePort,
 	knowledgeAppliesTo,
+	MAX_KNOWLEDGE_CITATIONS,
 	MAX_KNOWLEDGE_PAGE_SIZE,
 	parseKnowledgeRecord,
+	parseKnowledgeSlot,
 } from "./knowledge-record.ts";
 import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_QUERY_TERMS = 8;
 
 function terms(text: string): string[] {
@@ -66,12 +71,19 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if (version !== 0 && version !== SCHEMA_VERSION) throw new Error("Unsupported ICM knowledge schema");
+			if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION)
+				throw new Error("Unsupported ICM knowledge schema");
 			const store = new KnowledgeStore(db);
-			if (version === 0)
+			if (version !== SCHEMA_VERSION)
 				store.transaction(() => {
 					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
 					if (lockedVersion === SCHEMA_VERSION) return;
+					if (lockedVersion === 1) {
+						db.exec(`ALTER TABLE entries ADD COLUMN identity TEXT;
+						UPDATE entries SET identity=json_array(json_extract(body,'$.subject'),json_extract(body,'$.key')) WHERE body IS NOT NULL;
+						PRAGMA user_version=${SCHEMA_VERSION};`);
+						return;
+					}
 					if (lockedVersion !== 0) throw new Error("ICM knowledge schema changed during initialization");
 					db.exec(`
 					CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
@@ -79,7 +91,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					CREATE TABLE entries (
 					 id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0), kind TEXT NOT NULL,
 					 project TEXT NOT NULL, role TEXT NOT NULL, audience TEXT NOT NULL,
-					 body TEXT CHECK(body IS NULL OR length(body)<=64000), evidence_after TEXT NOT NULL
+					 body TEXT CHECK(body IS NULL OR length(body)<=64000), evidence_after TEXT NOT NULL, identity TEXT
 					) STRICT;
 					CREATE INDEX scope ON entries(audience,project,role,kind,id);
 					CREATE TABLE versions (
@@ -171,6 +183,33 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		requireId(id);
 		const row = this.db.prepare("SELECT id,revision,body FROM entries WHERE id=? AND body IS NOT NULL").get(id);
 		return row && decode(row);
+	}
+
+	slots(scope: KnowledgeScope, kind: KnowledgeKind, after?: string): KnowledgeSlot[] {
+		if (!isKnowledgeScope(scope) || !KNOWLEDGE_KINDS.includes(kind))
+			throw new TypeError("Invalid knowledge slot scope");
+		if (after !== undefined) requireId(after);
+		return this.db
+			.prepare(`SELECT id,revision,identity,body IS NULL AS forgotten FROM entries
+			WHERE audience=? AND project=? AND role=? AND kind=? AND id>? ORDER BY id LIMIT ?`)
+			.all(scope.audience, scope.project, scope.role, kind, after ?? "", MAX_KNOWLEDGE_PAGE_SIZE)
+			.map((row) => {
+				if (typeof row.identity !== "string" || row.identity.length > 4_000)
+					throw new Error(
+						"A forgotten knowledge slot has no recoverable identity; new admission cannot resolve duplicates safely",
+					);
+				const names: unknown = JSON.parse(row.identity);
+				if (!Array.isArray(names) || names.length !== 2) throw new Error("Invalid knowledge slot names");
+				return parseKnowledgeSlot({
+					id: row.id,
+					revision: row.revision,
+					kind,
+					scope,
+					subject: names[0],
+					key: names[1],
+					forgotten: row.forgotten === 1,
+				});
+			});
 	}
 
 	list(
@@ -267,7 +306,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			admission.begin();
 			this.db
 				.prepare(
-					`INSERT INTO entries VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,body=excluded.body,evidence_after=excluded.evidence_after`,
+					`INSERT INTO entries VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,body=excluded.body,evidence_after=excluded.evidence_after,identity=excluded.identity`,
 				)
 				.run(
 					record.id,
@@ -278,6 +317,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					record.scope.audience,
 					body,
 					record.lastEvidencedAt,
+					JSON.stringify([record.subject, record.key]),
 				);
 			this.db.prepare("INSERT INTO versions VALUES(?,?,?)").run(record.id, record.revision, body);
 			this.db.prepare("DELETE FROM terms WHERE id=?").run(record.id);
@@ -289,9 +329,17 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		});
 	}
 
-	forget(id: string, expectedRevision: number, assertCurrent: () => void, signal?: AbortSignal): void {
+	forget(
+		id: string,
+		expectedRevision: number,
+		citations: readonly KnowledgeCitation[],
+		assertCurrent: () => void,
+		signal?: AbortSignal,
+	): void {
 		requireId(id);
 		requireVersion(expectedRevision);
+		if (citations.length < 1 || citations.length > MAX_KNOWLEDGE_CITATIONS || !citations.every(isKnowledgeCitation))
+			throw new TypeError("Forgetting requires bounded original owner evidence");
 		const admission = new MemoryMutationAdmission(signal);
 		this.transaction(() => {
 			admission.assertPending();
@@ -301,12 +349,18 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			requireVersion(expectedRevision + 1);
 			requireVersion(this.revision() + 1);
 			const current = this.get(id)!;
+			if (citations.some((citation) => citation.at <= current.lastEvidencedAt))
+				throw new Error("The request to forget is older than the current knowledge");
 			const now = new Date().toISOString();
-			const barrier = now > current.lastEvidencedAt ? now : current.lastEvidencedAt;
+			const barrier = [now, current.lastEvidencedAt, ...citations.map((citation) => citation.at)].sort().at(-1)!;
 			admission.begin();
 			this.db
 				.prepare("INSERT OR IGNORE INTO forgotten_sources SELECT id,session,source FROM sources WHERE id=?")
 				.run(id);
+			for (const citation of citations)
+				this.db
+					.prepare("INSERT OR IGNORE INTO forgotten_sources VALUES(?,?,?)")
+					.run(id, citation.sessionId, citation.sourceId);
 			this.db
 				.prepare("UPDATE entries SET revision=revision+1,body=NULL,evidence_after=? WHERE id=?")
 				.run(barrier, id);

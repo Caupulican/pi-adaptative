@@ -1,4 +1,39 @@
-import { constants, type DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import {
+	constants,
+	type DatabaseSync,
+	type DatabaseSyncOptions,
+	type SQLInputValue,
+	type SQLOutputValue,
+} from "node:sqlite";
+
+/** Reused RAM backings still enforce constructor types; capture accessors once before native or generated SQL. */
+function readOpenOptions(value: unknown): DatabaseSyncOptions {
+	if (value === undefined) return {};
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new TypeError("SQLite options must be an object");
+	const options: Record<string, unknown> = { ...value };
+	for (const name of [
+		"open",
+		"readOnly",
+		"enableForeignKeyConstraints",
+		"enableDoubleQuotedStringLiterals",
+		"allowExtension",
+		"readBigInts",
+		"returnArrays",
+		"allowBareNamedParameters",
+		"allowUnknownNamedParameters",
+		"defensive",
+	]) {
+		if (options[name] !== undefined && typeof options[name] !== "boolean")
+			throw new TypeError(`SQLite ${name} must be a boolean`);
+	}
+	if (options.timeout !== undefined) {
+		if (typeof options.timeout !== "number") throw new TypeError("SQLite timeout must be a number");
+		if (!Number.isSafeInteger(options.timeout) || options.timeout < 0 || options.timeout > 2_147_483_647)
+			throw new RangeError("SQLite timeout must fit a non-negative signed 32-bit integer");
+	}
+	return options as DatabaseSyncOptions;
+}
 
 interface SqliteFiles {
 	path(value: unknown): string;
@@ -17,12 +52,55 @@ interface Backing {
 	readonly handles: Set<Handle>;
 	/** The journal mode a real file database would report; the RAM engine can only answer `memory`. */
 	journalMode: string;
+	readonly connectionDefaults: ConnectionSettings;
+	activeHandle?: Handle;
+	restoringSettings: boolean;
+	settingsUnavailable: boolean;
 }
 
 interface Handle {
 	path: string;
 	open: boolean;
 	readOnly: boolean;
+	settings?: ConnectionSettings;
+}
+
+const CONNECTION_PRAGMAS = ["foreign_keys", "busy_timeout", "synchronous", "cache_size"] as const;
+type ConnectionSettings = Record<(typeof CONNECTION_PRAGMAS)[number], number>;
+const CONNECTION_PRAGMA_NAMES: ReadonlySet<string> = new Set(CONNECTION_PRAGMAS);
+
+function readConnectionSettings(database: DatabaseSync): ConnectionSettings {
+	const value = (name: (typeof CONNECTION_PRAGMAS)[number]): number => {
+		const result = Object.values(database.prepare(`PRAGMA ${name}`).get() ?? {})[0];
+		if (typeof result !== "number" || !Number.isSafeInteger(result))
+			throw new Error(`Invalid RAM SQLite connection setting: ${name}`);
+		return result;
+	};
+	return {
+		foreign_keys: value("foreign_keys"),
+		busy_timeout: value("busy_timeout"),
+		synchronous: value("synchronous"),
+		cache_size: value("cache_size"),
+	};
+}
+
+/** One RAM engine serves separate logical connections; restore their settings before native prepare or execution. */
+function activateConnection(backing: Backing, handle: Handle): void {
+	if (backing.activeHandle === handle) return;
+	if (!handle.settings) throw new Error("RAM SQLite connection settings were not initialized");
+	for (const name of CONNECTION_PRAGMAS) {
+		if (!Number.isSafeInteger(handle.settings[name])) throw new TypeError(`Invalid SQLite ${name} setting`);
+	}
+	backing.restoringSettings = true;
+	try {
+		for (const name of CONNECTION_PRAGMAS) backing.database.exec(`PRAGMA ${name}=${handle.settings[name]}`);
+		backing.activeHandle = handle;
+	} catch (error) {
+		backing.settingsUnavailable = true;
+		throw error;
+	} finally {
+		backing.restoringSettings = false;
+	}
 }
 
 export type SqliteFaultOperation = "exec" | "prepare" | "run";
@@ -202,7 +280,7 @@ export class VirtualSqlite {
 		if (!this.active) return this.reject("sqlite.after_dispose");
 		const memoryOnly = arguments_[0] === ":memory:";
 		const path = memoryOnly ? ":memory:" : this.files.path(arguments_[0]);
-		const options = arguments_[1] as { readOnly?: boolean; open?: boolean } | undefined;
+		const options = readOpenOptions(arguments_[1]);
 		if (options?.open === false) return this.reject("sqlite.deferred_open");
 		const handle: Handle = { path, open: true, readOnly: options?.readOnly === true };
 		if (!memoryOnly && !this.files.existsSync(path)) {
@@ -221,10 +299,34 @@ export class VirtualSqlite {
 			if (typeof database.setAuthorizer !== "function") throw new Error("RAM SQLite requires native setAuthorizer");
 			database.enableLoadExtension(false);
 			database.exec("PRAGMA temp_store = MEMORY");
-			backing = { database, identity: identity ?? 0, readOnly: false, handles: new Set(), journalMode: "delete" };
+			backing = {
+				database,
+				identity: identity ?? 0,
+				readOnly: false,
+				handles: new Set(),
+				journalMode: "delete",
+				connectionDefaults: readConnectionSettings(database),
+				restoringSettings: false,
+				settingsUnavailable: false,
+			};
 			const authorized = backing;
-			database.setAuthorizer((action, first, second) => {
+			database.setAuthorizer((action, first, second, schema) => {
 				const name = first?.toLowerCase();
+				const connectionPragma = action === constants.SQLITE_PRAGMA && CONNECTION_PRAGMA_NAMES.has(name ?? "");
+				if (authorized.restoringSettings && connectionPragma) return constants.SQLITE_OK;
+				if (
+					connectionPragma &&
+					second !== null &&
+					schema !== null &&
+					schema !== "main" &&
+					(name === "cache_size" || name === "synchronous")
+				) {
+					try {
+						this.reject("sqlite.connection_pragma_schema");
+					} catch {
+						return constants.SQLITE_DENY;
+					}
+				}
 				if (action === constants.SQLITE_FUNCTION && second?.toLowerCase() === "load_extension") {
 					try {
 						this.reject("sqlite.load_extension");
@@ -250,7 +352,8 @@ export class VirtualSqlite {
 					authorized.readOnly &&
 					action === constants.SQLITE_PRAGMA &&
 					second !== null &&
-					!["busy_timeout", "temp_store"].includes(name ?? "")
+					!connectionPragma &&
+					name !== "temp_store"
 				) {
 					// Read-only consumers may tune supported connection settings, never mutate persistent metadata.
 					try {
@@ -263,7 +366,10 @@ export class VirtualSqlite {
 					action === constants.SQLITE_PRAGMA &&
 					second !== null &&
 					[...authorized.handles].filter((lease) => lease.open).length > 1 &&
-					!["busy_timeout", "journal_mode"].includes(name ?? "") &&
+					!connectionPragma &&
+					!["journal_mode", "user_version"].includes(name ?? "") &&
+					// RAM has no memory-mapped file. Disabling mmap changes no other handle's behavior.
+					!(name === "mmap_size" && second === "0") &&
 					!SCHEMA_INTROSPECTION_PRAGMAS.has(name ?? "")
 				) {
 					try {
@@ -278,6 +384,11 @@ export class VirtualSqlite {
 		}
 		this.handles.add(handle);
 		backing.handles.add(handle);
+		handle.settings = {
+			...backing.connectionDefaults,
+			foreign_keys: options?.enableForeignKeyConstraints === false ? 0 : 1,
+			busy_timeout: options?.timeout ?? 0,
+		};
 		const current = backing;
 		const check = () => {
 			if (!this.active) return this.reject("sqlite.after_dispose");
@@ -285,9 +396,11 @@ export class VirtualSqlite {
 		};
 		const invoke = (target: object, key: PropertyKey, args: unknown[]): unknown => {
 			check();
+			if (current.settingsUnavailable) throw new Error("RAM SQLite connection settings are unavailable");
 			if (current.database.isTransaction && current.transactionOwner !== handle) {
 				return this.reject("sqlite.concurrent_transaction");
 			}
+			activateConnection(current, handle);
 			const sql = key === "run" ? Reflect.get(target, "sourceSQL", target) : args[0];
 			const faultIndex = this.faults.findIndex(
 				(fault) => fault.operation === key && typeof sql === "string" && sql.includes(fault.sql),
@@ -302,12 +415,25 @@ export class VirtualSqlite {
 			if (typeof method !== "function") throw new TypeError(`SQLite ${String(key)} is not callable`);
 			const previous = current.readOnly;
 			current.readOnly = handle.readOnly;
+			let result: unknown;
+			const errors: unknown[] = [];
 			try {
-				return Reflect.apply(method, target, args);
+				result = Reflect.apply(method, target, args);
+			} catch (error) {
+				errors.push(error);
 			} finally {
 				current.transactionOwner = current.database.isTransaction ? handle : undefined;
 				current.readOnly = previous;
 			}
+			try {
+				handle.settings = readConnectionSettings(current.database);
+			} catch (captureError) {
+				current.settingsUnavailable = true;
+				errors.push(captureError);
+			}
+			if (errors.length > 1) throw new AggregateError(errors, "SQLite operation and settings capture failed");
+			if (errors.length) throw errors[0];
+			return result;
 		};
 		const close = (idempotent: boolean) => {
 			if (!this.active) return this.reject("sqlite.after_dispose");

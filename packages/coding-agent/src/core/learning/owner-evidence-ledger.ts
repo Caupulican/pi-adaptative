@@ -26,14 +26,14 @@ export interface OwnerEvidenceRecord {
 	sourceId: string;
 	entryId: string;
 	/**
-	 * The owner's ORIGINAL words, bounded: what they typed before any input transform, skill or
+	 * The owner's ORIGINAL words: what they typed before any input transform, skill or
 	 * template expansion rewrote the message the model received. Never reconstructed from the
 	 * persisted message content.
 	 */
 	text: string;
 	/** sha256 prefix of `text` as stored; a record whose text does not match on load is dropped. */
 	digest: string;
-	/** Length of the full original input (may exceed the stored bound). */
+	/** Length of the full original input. Older records may contain only its first 4,000 characters. */
 	chars: number;
 	createdAt: string;
 }
@@ -42,7 +42,24 @@ export interface OwnerEvidenceEntry
 	extends Pick<OwnerEvidenceRecord, "sessionId" | "sourceId" | "entryId" | "createdAt" | "text"> {}
 
 const MAX_OWNER_EVIDENCE_ENTRIES = 64;
-const MAX_OWNER_EVIDENCE_TEXT_CHARS = 4_000;
+/** Legacy reflection gets a small preview; collection pages through the original independently. */
+export const OWNER_EVIDENCE_PAGE_CHARS = 4_000;
+
+export interface OwnerEvidenceCursor {
+	/** Canonical custom-entry identity, so two branches never silently rebind a cursor. */
+	recordId: string;
+	offset: number;
+}
+
+export interface OwnerEvidencePage {
+	recordId: string;
+	source: Omit<OwnerEvidenceRecord, "text">;
+	offset: number;
+	text: string;
+	/** False for older truncated records; their available prefix cannot acknowledge the full input. */
+	completeSource: boolean;
+	next?: OwnerEvidenceCursor;
+}
 
 function evidenceTextDigest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
@@ -62,7 +79,6 @@ function isOwnerEvidenceRecord(value: unknown): value is OwnerEvidenceRecord {
 		record.sourceId.length > 0 &&
 		typeof record.entryId === "string" &&
 		typeof record.text === "string" &&
-		record.text.length <= MAX_OWNER_EVIDENCE_TEXT_CHARS &&
 		typeof record.digest === "string" &&
 		record.digest === evidenceTextDigest(record.text) &&
 		typeof record.chars === "number" &&
@@ -172,6 +188,9 @@ export class OwnerEvidenceLedger {
 	private ownerEvidence: OwnerEvidenceEntry[] | undefined;
 	/** Identity index follows the canonical branch; only the text projection is limited to 64 records. */
 	private sourceEntries: Set<string> | undefined;
+	private records: Array<{ recordId: string; record: OwnerEvidenceRecord }> = [];
+	private readonly byRecord = new Map<string, number>();
+	private readonly bySource = new Map<string, number>();
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
 
 	constructor(deps: OwnerEvidenceLedgerDeps) {
@@ -181,6 +200,9 @@ export class OwnerEvidenceLedger {
 	invalidate(): void {
 		this.ownerEvidence = undefined;
 		this.sourceEntries = undefined;
+		this.records = [];
+		this.byRecord.clear();
+		this.bySource.clear();
 	}
 
 	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
@@ -219,7 +241,7 @@ export class OwnerEvidenceLedger {
 			if (Number.isFinite(lastMs) && createdAtMs <= lastMs) createdAtMs = lastMs + 1;
 		}
 		const createdAt = new Date(createdAtMs).toISOString();
-		const text = originalText.slice(0, MAX_OWNER_EVIDENCE_TEXT_CHARS);
+		const text = originalText;
 		const record: OwnerEvidenceRecord = {
 			sessionId,
 			sourceId,
@@ -229,14 +251,16 @@ export class OwnerEvidenceLedger {
 			chars: originalText.length,
 			createdAt,
 		};
+		let recordId: string;
 		try {
-			appendSessionSnapshot(this.deps.getSessionManager(), OWNER_EVIDENCE_CODEC, record);
+			recordId = appendSessionSnapshot(this.deps.getSessionManager(), OWNER_EVIDENCE_CODEC, record);
 		} catch {
 			this.deps.warn("Owner evidence could not be recorded durably for this turn.");
 			return false;
 		}
 		this.sourceEntries?.add(entryId);
-		ledger.push({ sessionId, sourceId, entryId, text, createdAt });
+		this.indexRecord(recordId, record);
+		ledger.push({ sessionId, sourceId, entryId, text: text.slice(0, OWNER_EVIDENCE_PAGE_CHARS), createdAt });
 		if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
 		return true;
 	}
@@ -244,6 +268,49 @@ export class OwnerEvidenceLedger {
 	/** The owner evidence this branch knows, oldest first, bounded. */
 	listOwnerEvidence(): readonly OwnerEvidenceEntry[] {
 		return this.loadOwnerEvidence().map((entry) => ({ ...entry }));
+	}
+
+	/**
+	 * Read one bounded page from original owner input, oldest first, without the reflection cache's
+	 * 64-source limit. A cursor names the exact custom entry and offset; a missing cursor is stale,
+	 * never permission to start reading a different branch. No summaries or transformed messages enter.
+	 */
+	readPage(cursor?: OwnerEvidenceCursor): OwnerEvidencePage | undefined {
+		if (cursor && (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0))
+			throw new RangeError("Invalid owner evidence cursor");
+		this.loadOwnerEvidence();
+		const start = cursor ? this.byRecord.get(cursor.recordId) : 0;
+		if (start === undefined) throw new Error("Owner evidence cursor is no longer on the active branch");
+		for (let index = start; index < this.records.length; index++) {
+			const { recordId, record } = this.records[index]!;
+			const offset = index === start ? (cursor?.offset ?? 0) : 0;
+			if (offset > record.text.length) throw new RangeError("Owner evidence cursor exceeds its original input");
+			if (offset === record.text.length) continue;
+			const text = record.text.slice(offset, offset + OWNER_EVIDENCE_PAGE_CHARS);
+			const { text: _original, ...source } = record;
+			return {
+				recordId,
+				source,
+				offset,
+				text,
+				completeSource: record.chars === record.text.length,
+				next: { recordId, offset: offset + text.length },
+			};
+		}
+		return undefined;
+	}
+
+	/** Resolve a citation against the actual original input, never a reflection preview. */
+	findSource(sourceId: string): OwnerEvidenceRecord | undefined {
+		this.loadOwnerEvidence();
+		const index = this.bySource.get(sourceId);
+		return index === undefined ? undefined : { ...this.records[index]!.record };
+	}
+
+	private indexRecord(recordId: string, record: OwnerEvidenceRecord): void {
+		this.byRecord.set(recordId, this.records.length);
+		this.bySource.set(record.sourceId, this.records.length);
+		this.records.push({ recordId, record });
 	}
 
 	/**
@@ -255,6 +322,9 @@ export class OwnerEvidenceLedger {
 		if (this.ownerEvidence) return this.ownerEvidence;
 		const records: OwnerEvidenceEntry[] = [];
 		const sourceEntries = new Set<string>();
+		this.records = [];
+		this.byRecord.clear();
+		this.bySource.clear();
 		const entries = this.deps.getSessionManager().getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE]);
 		for (const entry of entries) {
 			if (entry.type !== "custom" || entry.customType !== OWNER_EVIDENCE_CUSTOM_TYPE) continue;
@@ -262,11 +332,12 @@ export class OwnerEvidenceLedger {
 			const record = decodeSessionSnapshotPayload(entry.data, OWNER_EVIDENCE_CODEC);
 			if (!record || sourceEntries.has(record.entryId)) continue;
 			sourceEntries.add(record.entryId);
+			this.indexRecord(entry.id, record);
 			records.push({
 				...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }),
 				sourceId: record.sourceId,
 				entryId: record.entryId,
-				text: record.text,
+				text: record.text.slice(0, OWNER_EVIDENCE_PAGE_CHARS),
 				createdAt: record.createdAt,
 			});
 			if (records.length > MAX_OWNER_EVIDENCE_ENTRIES) records.shift();

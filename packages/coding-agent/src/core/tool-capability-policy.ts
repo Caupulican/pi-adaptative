@@ -84,7 +84,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[GOAL_LIFECYCLE_TOOL_NAMES[1], policy([["memory.query"]], "memory-broker")],
 	[GOAL_LIFECYCLE_TOOL_NAMES[2], policy([["memory.mutate"]], "memory-broker")],
 	[ROOT_MEMORY_TOOL_NAME, policy([["memory.mutate", "memory.query"]], "memory-broker")],
-	[KNOWLEDGE_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
+	[KNOWLEDGE_TOOL_NAME, policy([["memory.query", "memory.mutate"]], "memory-broker")],
 	[WORKER_MEMORY_READ_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
 	[CONTINUOUS_CHAT_ZOOM_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
 	[CONTINUOUS_CHAT_DATE_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
@@ -224,6 +224,13 @@ export function toolCapabilityRequirementClauses(
 		const action =
 			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
 		return action === "view" ? [["settings.read"]] : [["settings.write"]];
+	}
+	if (name === KNOWLEDGE_TOOL_NAME && args !== undefined) {
+		const action =
+			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
+		return action === "search" || action === "read" || action === "history" || action === "evidence"
+			? [["memory.query"]]
+			: [["memory.mutate"]];
 	}
 	if (name === "peer" && args && typeof args === "object" && !Array.isArray(args)) {
 		const record = args as Record<string, unknown>;

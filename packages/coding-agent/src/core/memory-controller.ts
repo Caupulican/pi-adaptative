@@ -70,9 +70,11 @@ import {
 	TRANSCRIPT_MEMORY_PROVIDER_ID,
 	transcriptSummaryBody,
 } from "./context/transcript-memory-provider.ts";
+import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./memory/continuous-chat-compaction-adapter.ts";
 import { ContinuousChatHost, type ContinuousChatHostPorts } from "./memory/continuous-chat-host.ts";
@@ -95,6 +97,7 @@ import {
 import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { memoryFailure } from "./memory/history-tool.ts";
+import { KnowledgeAdmission, type KnowledgeAdmissionPort } from "./memory/knowledge-admission.ts";
 import {
 	KNOWLEDGE_CONTEXT_CLEARED,
 	KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
@@ -103,6 +106,7 @@ import {
 } from "./memory/knowledge-projection.ts";
 import type { KnowledgeScope } from "./memory/knowledge-record.ts";
 import { KnowledgeStore } from "./memory/knowledge-store.ts";
+import type { KnowledgeReadSource } from "./memory/knowledge-tool.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
@@ -160,9 +164,15 @@ import type {
 	WorkerMemorySourceAnswer,
 } from "./memory/worker-memory-tools.ts";
 import type { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
+import { hasMaskableSecretText } from "./security/secret-text.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
-import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
+import type {
+	MemorySystem,
+	ResolvedLearningPolicySettings,
+	SettingsError,
+	SettingsScope,
+} from "./settings/settings-schema.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { runAsyncReleaseSteps } from "./util/resource-release.ts";
 
@@ -177,6 +187,8 @@ export interface MemoryControllerSettingsSource {
 		allowExternalEgress: boolean;
 	};
 	getMemorySystem(): MemorySystem;
+	getAutoLearnSettings(): { enabled?: boolean };
+	getLearningPolicySettings(): ResolvedLearningPolicySettings;
 	setMemorySystem(system: MemorySystem, scope?: SettingsScope): void;
 	/** Opt-in summary hierarchy settings. Absent in narrow hosts: the hierarchy is then off. */
 	getMemoryHistorySettings?(): TranscriptHistorySettings;
@@ -513,6 +525,11 @@ export interface MemoryControllerDeps {
 	 */
 	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
 	getUserPreferenceLearning?(): UserPreferenceLearningPort;
+	knowledge?: {
+		evidence(): OwnerEvidenceLedger;
+		engine(): SemanticDecisionEngine | undefined;
+		captureGuard(): () => string | undefined;
+	};
 	/**
 	 * Durable-publication events of this session's entries, for incremental history ingestion. The
 	 * returned function unsubscribes. Absent in narrow hosts: recall then covers only what it indexed
@@ -1525,6 +1542,66 @@ export class MemoryController {
 
 	private _knowledgeScope(): KnowledgeScope {
 		return { project: this._projectId(), role: "", audience: "owner" };
+	}
+
+	/** Shared mutation authority for the root tool and the original-owner collection coordinator. */
+	getKnowledgeAdmission(): KnowledgeAdmissionPort | undefined {
+		const store = this._knowledgeStore;
+		const host = this.deps.knowledge;
+		if (!store || !host || !this._currentKnowledgeReader()) return undefined;
+		const generation = this._memoryGeneration;
+		const guard = host.captureGuard();
+		const engine = host.engine();
+		const learningPolicy = this.deps.getSettingsManager().getLearningPolicySettings();
+		const automaticEnabled = this.deps.getSettingsManager().getAutoLearnSettings().enabled !== false;
+		return new KnowledgeAdmission({
+			store,
+			evidence: host.evidence(),
+			scope: this._knowledgeScope(),
+			engine,
+			learningPolicy,
+			automaticEnabled,
+			assertCurrent: () => {
+				const failure = guard();
+				if (
+					failure ||
+					generation !== this._memoryGeneration ||
+					store !== this._knowledgeStore ||
+					engine !== host.engine() ||
+					!isDeepStrictEqual(learningPolicy, this.deps.getSettingsManager().getLearningPolicySettings()) ||
+					!this._currentKnowledgeReader() ||
+					automaticEnabled !== (this.deps.getSettingsManager().getAutoLearnSettings().enabled !== false)
+				)
+					throw new Error(failure ?? "Knowledge admission context changed");
+			},
+		});
+	}
+
+	private _knowledgeToolSource(): KnowledgeReadSource | undefined {
+		if (!this._currentKnowledgeReader() || !this._knowledgeStore) return undefined;
+		return {
+			store: this._knowledgeStore,
+			scope: this._knowledgeScope(),
+			retrievalEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
+			admission: () => this.getKnowledgeAdmission(),
+			readEvidence: this.deps.knowledge
+				? (cursor) => {
+						const evidence = this.deps.knowledge!.evidence();
+						const page = evidence.readPage(cursor);
+						if (!page) return undefined;
+						const original = evidence.findSource(page.source.sourceId);
+						if (!original) throw new Error("Original owner evidence changed while reading");
+						if (hasMaskableSecretText(original.text))
+							return {
+								...page,
+								text: "",
+								withheld: "This source contains credentials.",
+								next: { recordId: page.recordId, offset: original.text.length },
+							};
+						return page;
+					}
+				: undefined,
+		};
 	}
 
 	private _currentKnowledgeReader(): KnowledgeProjectionReader | undefined {
@@ -2725,12 +2802,7 @@ export class MemoryController {
 								history,
 								() => this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 								() => this.continuousChatHost()?.port,
-								() =>
-									this._currentKnowledgeReader() &&
-									this._knowledgeStore &&
-									this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled
-										? { store: this._knowledgeStore, scope: this._knowledgeScope() }
-										: undefined,
+								() => this._knowledgeToolSource(),
 							),
 						);
 					} else {

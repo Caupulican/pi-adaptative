@@ -4,14 +4,20 @@ ICM keeps accepted knowledge in `memory/knowledge.sqlite` under the agent direct
 
 The main session receives a bounded current view through the normal memory request planner, including in continuous chat. Explicit, applicable and recent facts take priority. Future and expired records are excluded, and the view reports omissions. Knowledge changes invalidate a pending request plan; the next request reads the committed revision. The chat's cached summary prefix stays stable. Derived knowledge projections exist only on the current request; they never enter durable conversation history or chat summaries.
 
-The `knowledge` tool reads this collection on demand:
+The `knowledge` tool reads and changes this collection on demand:
 
 - `search` accepts up to eight terms, an optional category and an `after` cursor. Omitting the query browses the category.
 - `read` opens an exact record ID and pages its evidence citations.
 - `history` pages earlier revisions of an exact record ID. Expired and historical records are evidence, not current instructions.
+- `evidence` pages original owner inputs in 4,000-character portions. Its cursor names the exact source record and offset. Older truncated sources are identified as incomplete.
+- `change` accepts a `remember` or `forget` command with original owner source IDs and quotes. A targeted correction or forgetting also names the current record ID and expected revision. The host checks the evidence, semantic meaning and canonical identity before writing. Held proposals are not saved.
 
-Scope is supplied by the host. The root tool cannot be delegated to workers, and it cannot read another audience's records. Disabling memory retrieval also disables these reads; excluding memory from the prompt removes the automatic view without disabling explicit reads.
+Audience and project identity are supplied by the host. New facts can apply globally or to the current project. The root tool cannot be delegated to workers or read another audience's records. Disabling memory retrieval disables reads; excluding memory from the prompt removes the automatic view without disabling explicit reads. Explicit requested changes remain possible while retrieval is off.
 
-Current owner instructions and corrections take precedence. Stored preferences do not grant permissions. Forgetting a record removes its accepted value and revision history from this collection; it does not delete the original conversation.
+Current owner instructions and corrections take precedence. Stored preferences do not grant permissions. Forgetting removes the accepted value and revision history while retaining its subject/key identity and an evidence barrier. A newer explicit instruction can relearn it; old remember or forget requests cannot overwrite newer evidence. This does not delete the original conversation, including dated tool-result echoes. Those echoes are historical evidence, not a current knowledge view.
 
-Automatic collection and model-facing mutation of accepted knowledge are not currently enabled.
+Inferred changes require independent original sources and the existing learning policy. Disabling Auto Learn still permits explicit owner requests to remember, correct or forget. The semantic engine must establish the meaning of a proposed change; no engine or an uncertain verdict leaves it held. Secret-bearing sources and values are refused before admission. One admission accepts at most 24,000 characters of complete original evidence and scans at most 2,000 canonical identities; exceeding those bounds leaves the proposal held.
+
+Schema-1 databases migrate on open. A previously forgotten schema-1 record has no recoverable subject/key identity: new identity scans in its scope remain held instead of treating that lost identity as absent. Its deleted value is never reconstructed from conversation history.
+
+Background automatic collection is not currently enabled.

@@ -181,6 +181,17 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	let reader: typeof writer | undefined;
 	try {
 		reader = new sqlite.DatabaseSync(statePath, { readOnly: true });
+		for (const options of [
+			{ timeout: "0; PRAGMA user_version=99" },
+			{ enableForeignKeyConstraints: "false" },
+			{ readOnly: "true" },
+		]) {
+			expect(
+				() => Reflect.construct(sqlite.DatabaseSync, [statePath, options]),
+				"every open validates constructor options",
+			).toThrow(TypeError);
+		}
+		expect(() => new sqlite.DatabaseSync(statePath, { timeout: -1 })).toThrow(RangeError);
 		const metadataRefusal = probeOn(reader, "PRAGMA user_version = 42");
 		expect(
 			{ statement: "PRAGMA user_version = 42", error: metadataRefusal.error, labels: metadataRefusal.labels },
@@ -199,6 +210,37 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			timeout: 100,
 		});
 		expect(world.guard.escapes.slice(busyBefore), "the supported setting records no denial").toEqual([]);
+		expect(writer.prepare("PRAGMA busy_timeout").get(), "connection settings do not leak to another handle").toEqual({
+			timeout: 0,
+		});
+		writer.exec("PRAGMA foreign_keys=OFF; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048");
+		reader.exec("PRAGMA synchronous=NORMAL; PRAGMA cache_size=-512");
+		const foreignKeys = writer.prepare("PRAGMA foreign_keys");
+		expect(reader.prepare("PRAGMA foreign_keys").get(), "a new logical connection retains its own defaults").toEqual({
+			foreign_keys: 1,
+		});
+		expect(foreignKeys.get(), "prepared statements activate their owning connection too").toEqual({
+			foreign_keys: 0,
+		});
+		for (const [setting, ownerValue, readerValue] of [
+			["synchronous", 2, 1],
+			["cache_size", -2048, -512],
+		] as const) {
+			expect(writer.prepare(`PRAGMA ${setting}`).get()).toEqual({ [setting]: ownerValue });
+			expect(reader.prepare(`PRAGMA ${setting}`).get()).toEqual({ [setting]: readerValue });
+		}
+		writer.exec("BEGIN IMMEDIATE; PRAGMA user_version=7; COMMIT");
+		expect(reader.prepare("PRAGMA user_version").get(), "durable metadata is shared between connections").toEqual({
+			user_version: 7,
+		});
+		expect(probeOn(writer, "PRAGMA recursive_triggers=ON"), "unsupported connection state is still refused").toEqual({
+			error: expect.stringMatching(/not authorized/i),
+			labels: ["sqlite.concurrent_connection_pragma"],
+		});
+		expect(probeOn(writer, "PRAGMA temp.cache_size=-123"), "unbanked schema settings are refused").toEqual({
+			error: expect.stringMatching(/not authorized/i),
+			labels: ["sqlite.connection_pragma_schema"],
+		});
 	} finally {
 		reader?.close();
 		writer.close();

@@ -37,6 +37,11 @@ export interface KnowledgeRecord {
 	citations: KnowledgeCitation[];
 }
 
+/** Identity retained after forgetting a value, so alternate wording cannot evade its evidence barrier. */
+export type KnowledgeSlot = Pick<KnowledgeRecord, "id" | "revision" | "kind" | "scope" | "subject" | "key"> & {
+	forgotten: boolean;
+};
+
 export interface KnowledgeSnapshot {
 	revision: number;
 	text: string;
@@ -173,6 +178,33 @@ export function parseKnowledgeRecord(value: unknown): KnowledgeRecord {
 	return record;
 }
 
+export function parseKnowledgeSlot(value: unknown): KnowledgeSlot {
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["id", "revision", "kind", "scope", "subject", "key", "forgotten"]) ||
+		!KNOWLEDGE_KINDS.some((kind) => kind === value.kind) ||
+		!isKnowledgeScope(value.scope) ||
+		!boundedString(value.subject, MAX_NAME_CHARS) ||
+		!boundedString(value.key, MAX_NAME_CHARS) ||
+		typeof value.revision !== "number" ||
+		!Number.isSafeInteger(value.revision) ||
+		value.revision < 1 ||
+		typeof value.forgotten !== "boolean"
+	)
+		throw new TypeError("Invalid knowledge slot identity");
+	const slot: KnowledgeSlot = {
+		id: String(value.id),
+		revision: value.revision,
+		kind: value.kind as KnowledgeKind,
+		scope: { ...value.scope },
+		subject: value.subject,
+		key: value.key,
+		forgotten: value.forgotten,
+	};
+	if (slot.id !== knowledgeId(slot)) throw new TypeError("Knowledge slot identity changed");
+	return slot;
+}
+
 /** Only scope dimensions may widen; an audience must always match exactly. */
 export function knowledgeAppliesTo(record: KnowledgeScope, scope: KnowledgeScope): boolean {
 	return (
@@ -188,6 +220,8 @@ export interface KnowledgeStorePort {
 	version(id: string): number;
 	snapshot(scope: KnowledgeScope, at: string): KnowledgeRecordSnapshot;
 	get(id: string): KnowledgeRecord | undefined;
+	/** Exact scope only; includes forgotten identities. The caller must follow full pages before declaring no match. */
+	slots(scope: KnowledgeScope, kind: KnowledgeKind, after?: string): KnowledgeSlot[];
 	list(
 		scope: KnowledgeScope,
 		options?: { query?: string; kind?: KnowledgeKind; after?: string; limit?: number },
@@ -195,6 +229,12 @@ export interface KnowledgeStorePort {
 	history(id: string, beforeRevision?: number): KnowledgeRecord[];
 	isSourceForgotten(id: string, sessionId: string, sourceId: string): boolean;
 	put(record: KnowledgeRecord, expectedRevision: number, assertCurrent: () => void, signal?: AbortSignal): void;
-	forget(id: string, expectedRevision: number, assertCurrent: () => void, signal?: AbortSignal): void;
+	forget(
+		id: string,
+		expectedRevision: number,
+		citations: readonly KnowledgeCitation[],
+		assertCurrent: () => void,
+		signal?: AbortSignal,
+	): void;
 	close(): void;
 }

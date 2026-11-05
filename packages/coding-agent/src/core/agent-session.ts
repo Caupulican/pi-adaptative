@@ -1258,6 +1258,11 @@ export class AgentSession {
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			onActivation: (event) => this._emit({ type: "memory_activation", ...event }),
 			getUserPreferenceLearning: () => this._reflection.userPreferenceLearning,
+			knowledge: {
+				evidence: () => this._reflection.ownerEvidence,
+				engine: () => this._semanticPlane.recordingSemanticEngine(),
+				captureGuard: () => this._reflection.captureLearningContext(),
+			},
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
 			providerRequest: {
