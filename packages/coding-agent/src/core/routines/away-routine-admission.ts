@@ -1,7 +1,8 @@
 /**
  * Which saved routine runs may run away (their session not open). A run away has no System One operation gate, no
  * worktree lane isolation, no memory and no owner words: those are the open session's. So only a run whose admitted
- * authority (worker and mandatory verifier) reads and reports runs away; a run that can change files, processes,
+ * authority (worker and mandatory verifier) reads and reports, with at most a read-only profile's shell, runs away; a
+ * run that can change files, processes,
  * memory, settings, skills or publish waits for its session and is reported once.
  */
 
@@ -43,8 +44,12 @@ export function awayRunRefusal(intent: WorkerSavedIntent): string | undefined {
 	const profiles = contract.verifier ? [contract.worker, contract.verifier] : [contract.worker];
 	const outside = new Set<string>();
 	for (const profile of profiles) {
+		// Every worker is granted the host's shell (`process.exec`). A read-only profile keeps only a shell whose commands
+		// the deterministic read-only line admits, with no interpreter or script tool, as in a session with System One off.
+		const readOnlyShell = profile.profile.readOnly === true;
 		for (const capability of profile.authority.capabilities)
-			if (!AWAY_CAPABILITIES.has(capability)) outside.add(capability);
+			if (!AWAY_CAPABILITIES.has(capability) && !(readOnlyShell && capability === "process.exec"))
+				outside.add(capability);
 		if (profile.authority.writePaths.length > 0) outside.add("filesystem.write");
 	}
 	if (intent.knowledgeReferences.length > 0) outside.add("memory.query");

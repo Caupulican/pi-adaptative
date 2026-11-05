@@ -1437,7 +1437,24 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			delivery: {
-				deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
+				deliver: (delivery) => {
+					const { occurrence } = delivery;
+					const intent = occurrence.definition.executionSnapshot?.savedIntent;
+					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
+					// result waits while one cannot land yet. A run of this session wrote its claims itself.
+					if (occurrence.executor === "away" && occurrence.dispatchKey && intent) {
+						const attemptIds = worker.notificationAttemptIds({
+							intent,
+							instructions: routineInstructions(occurrence),
+							dispatchKey: occurrence.dispatchKey,
+						});
+						this._landRecordedParentWrites(this._getWorkerLifecycle());
+						for (const attemptId of attemptIds)
+							if (this._parentWriteHolds.has(attemptId))
+								throw new Error("Routine result is waiting for the claims its run recorded away to land.");
+					}
+					return this.deps.deliverParentInput(routineParentInput(delivery));
+				},
 				findCarriedQuietResult: (routineId) => {
 					const manager = this.deps.getSessionManager();
 					const carried = manager

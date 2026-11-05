@@ -162,6 +162,8 @@ function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 
 /** One process currently holding a lifetime lease on a persisted session, as {@link readSessionLeaseHolders} sees it. */
 export interface SessionLeaseHolder {
+	/** The hold's identity; {@link sessionBundleLeaseToken} names the hold a caller acquired itself. */
+	readonly token: string;
 	readonly owner: ProcessOwner;
 	readonly processInstanceId: string;
 	/** {@link judgeOwner}'s standing. Only `dead` proves the holder no longer serves the session. */
@@ -179,6 +181,7 @@ export interface SessionLeaseHolder {
 export function readSessionLeaseHolders(agentDir: string, parentSessionId: string): SessionLeaseHolder[] {
 	const file = `${orchestrationSessionDeletionFile(resolve(agentDir), parentSessionId)}.leases.json`;
 	return readHolders(file, parentSessionId).map((holder) => ({
+		token: holder.token,
 		owner: holder.owner,
 		processInstanceId: holder.processInstanceId,
 		standing: judgeOwner(holder.owner),
@@ -228,6 +231,16 @@ export function acquireSessionBundleLease(agentDir: string, parentSessionId: str
 	});
 	bundleLeases.set(lease, state);
 	return lease;
+}
+
+/**
+ * The holder token of a hold {@link acquireSessionBundleLease} returned, as {@link readSessionLeaseHolders} lists it.
+ * A process can hold the same session more than once, so `self` cannot tell its holds apart; the token does.
+ */
+export function sessionBundleLeaseToken(lease: SessionBundleLease): string {
+	const state = bundleLeases.get(lease);
+	if (!state) throw new Error("Not a session bundle lifetime lease acquired by this process.");
+	return state.holder.token;
 }
 
 /** Direct construction must transfer a real, unclaimed hold for this exact persisted session. */

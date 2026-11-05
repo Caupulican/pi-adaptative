@@ -1029,21 +1029,16 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R52",
-		owner: "core/delegation/worker-delegation-controller.ts",
+		owner: "core/background-lane-controller.ts",
 		journey: 1,
 		phase: "routines parent-write import",
-		fault: "an attempt's terminal is pending while its recorded claim cannot land yet (no persisted parent transcript)",
-		witness: "the terminal is published only after the claim lands",
+		fault: "a routine run away finished while its parent was closed: its result is pending while its claim waits in the attempt's outbox",
+		witness:
+			"the parent file is unchanged by the run away; on reopen the claim lands once through the outbox before the result, which is delivered once, and a second import pass lands nothing",
 		control: "an attempt without recorded writes publishes its terminal at once",
-		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"an away-executed terminal with a pending outbox claim exists only once the away runner dispatches (P4)",
-			},
-		],
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R53",
@@ -1056,25 +1051,41 @@ const rows: readonly FaultMatrixRow[] = [
 		estSeconds: 3,
 		status: "open",
 		needs: [
-			{ kind: "witness", detail: "away notices are recorded only by the away runner's parent write port (P4)" },
+			{
+				kind: "witness",
+				detail:
+					"a run away is admitted only with read-only authority and no worktree lane, so it records no notice; the cut exists once a run that keeps a lane runs away",
+			},
 		],
 	},
 	{
 		id: "R54",
+		owner: "core/background-lane-controller.ts",
+		journey: 1,
+		phase: "routines parent-write import",
+		fault: "another host records a write for an attempt while its parent is open",
+		witness:
+			"the write lands on the next routine store change committed through another store instance, without a reopen, exactly once",
+		control: "a write recorded while the parent is closed lands on open (the run away's claim)",
+		estSeconds: 0.5,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R54s",
 		owner: "core/orchestration/task-runtime.ts",
 		journey: 1,
 		phase: "routines parent-write import",
-		fault: "the away host stops before recording a write, or records it while the parent is open",
-		witness:
-			"an unrecorded write leaves no entry and parent recovery re-derives the terminal; a write recorded while the parent is open lands without waiting for a reopen",
-		control: "a write recorded while the parent is closed lands on open (R51)",
+		fault: "the away host stops after a run's terminal and before recording its claim",
+		witness: "the unrecorded write leaves no entry and parent recovery re-derives the terminal",
+		control: "a write recorded before the stop lands on open (R52)",
 		estSeconds: 1,
 		status: "open",
 		needs: [
 			{
 				kind: "witness",
 				detail:
-					"both cuts need the away runner's dispatch and its stop point, and the open parent's import on the away host's committed store change (P4)",
+					"the stop between a run away's terminal and its claim record needs an IO fault on the orchestration event append of that record",
 			},
 		],
 	},

@@ -20,7 +20,11 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
-import { acquireSessionBundleLease, type SessionBundleLease } from "../../kernel/session/session-bundle-lifecycle.ts";
+import {
+	acquireSessionBundleLease,
+	type SessionBundleLease,
+	sessionBundleLeaseToken,
+} from "../../kernel/session/session-bundle-lifecycle.ts";
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { configFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
@@ -74,6 +78,8 @@ export interface AwayParentContext {
 	readonly parentSessionId: string;
 	readonly lifecycle: WorkerLifecycle;
 	readonly workers: WorkerDelegationController;
+	/** The token of this context's own hold on the parent bundle; every other live holder means the parent is open. */
+	readonly holdToken: string;
 	/** The parent transcript as last read; reopened when the file changed. */
 	reader(): ReadonlySessionManager;
 	/** Every orchestration ledger event this context records (worker admission, progress and terminals). */
@@ -161,6 +167,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 	};
 
 	const hold: SessionBundleLease = acquireSessionBundleLease(agentDir, parentSessionId);
+	const holdToken = sessionBundleLeaseToken(hold);
 	let ephemeral: AgentSession | undefined;
 	let closed = false;
 	try {
@@ -360,6 +367,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			parentSessionId,
 			lifecycle,
 			workers,
+			holdToken,
 			reader: () => readerNow(),
 			subscribeExecution: (listener) => store.subscribe(() => listener()),
 			hasLiveRun: () => {

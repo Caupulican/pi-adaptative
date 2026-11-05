@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { expect } from "vitest";
+import { configFile } from "../../../../src/core/agent-paths.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
+import { PersistentBotTeamStore } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshotForAttempt,
@@ -21,16 +23,19 @@ import {
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import { AwayRoutineSupervisor } from "../../../../src/core/routines/away-routine-host.ts";
 import {
 	MAX_ROUTINE_INSTANT_MS,
+	ROUTINE_AWAY_SPEND_REFUSAL,
 	type RoutineIntakeBatch,
 	routineScheduleInputOf,
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
+import type { ResolvedRoutineAwaySettings } from "../../../../src/core/settings/settings-schema.ts";
 import type { SessionManager } from "../../../../src/kernel/node.ts";
 import { parentInputMessage, parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, SCRIPTED_TRACKS, withDeadline } from "../session-fixture.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, knowledgeJudgment, latestBatchResults } from "./shared.ts";
 
 /** Saved intent, native execution, daemon due-time ownership and one durable parent delivery. */
@@ -703,6 +708,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				);
 		expect(parentWriteIds(awayManager), "no foreground claim carries a parent-write marker").toEqual([]);
 		world.faultMatrix.witness("R51", { control: true });
+		// The recovered run recorded no parent write, and its result was delivered and acknowledged above.
+		world.faultMatrix.witness("R52", { control: true });
 		const awayClaim = getWorkerClaimSnapshotForAttempt(
 			awayManager.getEntries(),
 			awayAttempt.taskId,
@@ -756,6 +763,203 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(parentWriteIds(root.sessionManager)).toEqual(["away-claim-landed", "away-claim-pending"]);
 		expect(attemptClaims(root.sessionManager)).toBe(3);
 		world.faultMatrix.witness("R51", { control: false });
+
+		// A routine of this parent comes due while the parent is closed. The production away supervisor, hosted here as
+		// the daemon hosts it (its own routine store, the owner's settings file), runs it on the parent opened away.
+		const awayRoutineId = "away-review";
+		const awayPrompt = "Inspect the away review task and report its status.";
+		const awayAt = world.timers.port("routines").now() + 60_000;
+		await command("routine-away-create", {
+			action: "create",
+			routineId: awayRoutineId,
+			prompt: awayPrompt,
+			schedule: { kind: "once", at: awayAt },
+			profileId: profile.profileId,
+		});
+		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		const fileWhileAway = world.io.peekFile(file);
+		world.io.seed(
+			configFile(agentDir, "settings.json"),
+			JSON.stringify({
+				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
+			}),
+		);
+		const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
+		const workerRequestsBeforeAway = workerRequests();
+		const awayReports: string[] = [];
+		const awayStore = new PersistentBotTeamStore(agentDir, (message) => awayReports.push(message));
+		try {
+			let awaySettings: ResolvedRoutineAwaySettings = {
+				enabled: true,
+				maxUsdPerRun: 0.25,
+				// No room for one run: the spend gate refuses before any claim.
+				maxUsdPerDay: 0.1,
+				maxParentHosts: 4,
+			};
+			const supervisor = new AwayRoutineSupervisor({
+				store: awayStore,
+				agentDir,
+				timers: world.timers,
+				settings: () => awaySettings,
+				report: (message) => awayReports.push(message),
+				authStorage: world.authStorage,
+				modelRegistry: world.modelRegistry,
+			});
+			const spendRefusals = () => awayReports.filter((message) => message.includes(ROUTINE_AWAY_SPEND_REFUSAL));
+			try {
+				const refused = createBarrier();
+				const stopObservingRefusal = awayStore.subscribe(() => {
+					if (awayStore.getRoutine(awayRoutineId)?.awayRefusal?.reason === ROUTINE_AWAY_SPEND_REFUSAL)
+						refused.release();
+				});
+				try {
+					world.timers.advance("routines", 60_000);
+					supervisor.wake();
+					await withDeadline(world.trace, "the spend gate refuses the due run away", refused.promise);
+				} finally {
+					stopObservingRefusal();
+				}
+				expect(workerRequests(), "a refused run makes no worker request").toBe(workerRequestsBeforeAway);
+				expect(awayStore.listRoutineOccurrences({ routineId: awayRoutineId }), "a refusal claims nothing").toEqual(
+					[],
+				);
+				expect(awayStore.getRoutine(awayRoutineId)?.nextRunAt, "the refused slot stays due").toBe(awayAt);
+				expect(spendRefusals(), "the refusal is reported once").toHaveLength(1);
+
+				// Room again: the same due slot runs away.
+				awaySettings = { ...awaySettings, maxUsdPerDay: 1 };
+				world.provider.enqueue("worker-a", workerReply("away-routine", awayPrompt));
+				const ranAway = createBarrier();
+				const stopObservingRun = awayStore.subscribe(() => {
+					if (
+						awayStore
+							.listRoutineOccurrences({ routineId: awayRoutineId })
+							.some((occurrence) => occurrence.phase === "terminal")
+					)
+						ranAway.release();
+				});
+				try {
+					supervisor.wake();
+					await withDeadline(world.trace, "the due routine runs away", ranAway.promise);
+				} finally {
+					stopObservingRun();
+				}
+			} finally {
+				await supervisor.close();
+			}
+			const ranOccurrences = awayStore.listRoutineOccurrences({ routineId: awayRoutineId });
+			expect(ranOccurrences).toHaveLength(1);
+			expect(ranOccurrences[0]?.executor).toBe("away");
+			expect(ranOccurrences[0]?.result?.outcome).toBe("succeeded");
+			expect(ranOccurrences[0]?.result?.delivery, "a run away leaves its result for the parent").toBe("pending");
+			expect(
+				awayStore.getRoutine(awayRoutineId)?.awayRefusal,
+				"the admitted run cleared the refusal",
+			).toBeUndefined();
+			expect(workerRequests(), "the run away made exactly one worker request").toBe(workerRequestsBeforeAway + 1);
+			expect(spendRefusals(), "no refusal is reported again").toHaveLength(1);
+			expect(world.io.peekFile(file), "nothing wrote the parent transcript while it was closed").toBe(fileWhileAway);
+			const awayRunAttempt = ranOccurrences[0]!.executionRef!;
+
+			// Reopening imports the run's recorded claim first, then delivers its result once.
+			world.systemOne.enterPhase("routine-away-parent", {});
+			world.provider.enqueue("root", {
+				...text("routine-away-parent", "The away review completed."),
+				check: (request) => expect(JSON.stringify(request.context.messages)).toContain("away-routine completed."),
+			});
+			root = await world.createRootSession("root", {
+				agentDir,
+				sessionManager: world.openSessionManager(file, agentDir),
+				settings,
+			});
+			const awaySettled = parentSettled(41);
+			await root.session.backgroundLanes.tickPersistentRoutines();
+			await withDeadline(world.trace, "the run away is delivered on reopen", awaySettled);
+			const awayClaimIndexes = (manager: SessionManager) =>
+				manager
+					.getEntries()
+					.flatMap((entry, index) =>
+						entry.type === "custom" &&
+						entry.customType === WORKER_CLAIM_CUSTOM_TYPE &&
+						(entry.data as WorkerClaimSnapshotPayload).claim.terminalAttemptId === awayRunAttempt.attemptId
+							? [index]
+							: [],
+					);
+			const claimIndexes = awayClaimIndexes(root.sessionManager);
+			expect(claimIndexes, "the run's claim lands exactly once").toHaveLength(1);
+			const claimEntry = root.sessionManager.getEntries()[claimIndexes[0]!];
+			if (claimEntry?.type !== "custom") throw new Error("The away claim index names no custom entry.");
+			expect(
+				(claimEntry.data as WorkerClaimSnapshotPayload).parentWriteId,
+				"the claim came through the parent write outbox",
+			).toBeDefined();
+			const completionIndex = root.sessionManager
+				.getEntries()
+				.findIndex(
+					(entry) =>
+						entry.type === "custom_message" &&
+						entry.customType === "routine-completion" &&
+						JSON.stringify(entry).includes("away-routine completed."),
+				);
+			expect(completionIndex, "the run's result is delivered").toBeGreaterThanOrEqual(0);
+			expect(claimIndexes[0], "the claim lands before the result it explains").toBeLessThan(completionIndex);
+			expect(
+				store().listRoutineOccurrences({ routineId: awayRoutineId })[0]?.result?.delivery,
+				"the reopened parent acknowledged the result",
+			).toBe("acknowledged");
+			expect(
+				root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[awayRunAttempt.attemptId]?.parentWrites,
+				"every write recorded away is acknowledged",
+			).toBeUndefined();
+			root.session.backgroundLanes.drainQueuedWorkerDelegations();
+			expect(awayClaimIndexes(root.sessionManager), "a second import pass lands nothing").toHaveLength(1);
+			expect(parentInputs()).toHaveLength(41);
+			world.faultMatrix.witness("R52", { control: false });
+			world.faultMatrix.witness("R54", { control: true });
+
+			// Another host records a write while the parent is open: it lands on the next routine store change, without a
+			// reopen. The change here is an edit committed through another store instance, as another process commits it.
+			const openWriteId = "away-claim-open";
+			const openClaim = getWorkerClaimSnapshotForAttempt(
+				root.sessionManager.getEntries(),
+				awayRunAttempt.taskId,
+				awayRunAttempt.attemptId,
+			)!;
+			const landed = createBarrier();
+			const stopObservingLanding = root.sessionManager.onEntriesPersisted(() => {
+				if (parentWriteIds(root.sessionManager).includes(openWriteId)) landed.release();
+			});
+			try {
+				awayRuntime.recordParentWrite(awayRunAttempt.attemptId, openWriteId, {
+					kind: "worker_claim",
+					claim: toJsonObject(openClaim.claim),
+					...(openClaim.request ? { request: toJsonObject(openClaim.request) } : {}),
+				});
+				expect(parentWriteIds(root.sessionManager), "a recorded write alone lands nothing").not.toContain(
+					openWriteId,
+				);
+				awayStore.reload();
+				expect(
+					awayStore.deleteRoutine(
+						recycledId,
+						awayStore.getRoutine(recycledId)!.revision,
+						world.timers.port("routines").now(),
+					),
+				).toBe(true);
+				await withDeadline(world.trace, "the open parent lands a write recorded away", landed.promise);
+			} finally {
+				stopObservingLanding();
+			}
+			root.session.backgroundLanes.drainQueuedWorkerDelegations();
+			expect(
+				parentWriteIds(root.sessionManager).filter((id) => id === openWriteId),
+				"the write recorded while open lands exactly once",
+			).toHaveLength(1);
+			expect(parentInputs(), "the import delivers no result again").toHaveLength(41);
+			world.faultMatrix.witness("R54", { control: false });
+		} finally {
+			awayStore.dispose();
+		}
 		world.trace.mark("root", "routine.native-durable-delivery");
 	} finally {
 		release.release();

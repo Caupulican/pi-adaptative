@@ -4,7 +4,7 @@
  * held parent gets one routine scheduler on an away parent context (`openAwayParentContext`). Their results stay
  * pending in the store for the parent's own scheduler to deliver when it opens.
  *
- * - A parent a live process holds (any lease holder other than this process that is not proven dead) is open: its own
+ * - A parent anything else holds (a lease holder other than its host's own hold, not proven dead) is open: its own
  *   scheduler owns its routines, and a host it already has here dispatches nothing new and closes once its runs end.
  * - A due run that cannot run away is recorded on its routine with the reason (`recordRoutineAwayRefusals`), once per
  *   reason, and reported once here; the parent reports it when it opens and the slot stays due for it.
@@ -503,13 +503,15 @@ export class AwayRoutineSupervisor {
 	}
 
 	/**
-	 * Whether a live process other than this one holds the parent's session: only a holder proven dead does not count.
-	 * `unknown` when the lease registry cannot be read; nothing then proves the session closed.
+	 * Whether any hold other than this supervisor's own host's holds the parent's session: only a holder proven dead
+	 * does not count. `unknown` when the lease registry cannot be read; nothing then proves the session closed.
 	 */
 	private parentOpen(parentSessionId: string): boolean | "unknown" {
+		// Only this supervisor's own hold is discounted: a session open in this same process holds the parent too.
+		const ownHold = this.hosts.get(parentSessionId)?.context.holdToken;
 		try {
 			return readSessionLeaseHolders(this.deps.agentDir, parentSessionId).some(
-				(holder) => !holder.self && holder.standing !== "dead",
+				(holder) => holder.token !== ownHold && holder.standing !== "dead",
 			);
 		} catch {
 			return "unknown";
