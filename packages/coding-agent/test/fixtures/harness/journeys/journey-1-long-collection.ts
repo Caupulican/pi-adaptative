@@ -1,6 +1,8 @@
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { journalSlotOf, readJournal } from "../../../../src/core/cost/semantic-usage-journal.ts";
+import { createSessionManagerLedgerPort } from "../../../../src/core/cost/session-ledger-port.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
@@ -211,10 +213,21 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 			persisted: true,
 		});
 		expect(await disposal).toBeUndefined();
+		const cancelledSlot = journalSlotOf(createSessionManagerLedgerPort(cancelledManager).identity());
+		expect(cancelledSlot).toBeDefined();
+		const unresolved = readJournal(cancelledSlot!)?.unresolved;
+		expect(unresolved).toHaveLength(1);
+		expect(unresolved![0]).toMatchObject({
+			provider: "harness-script",
+			model: "root",
+			route: "knowledge_collection",
+			origin: { sessionId: cancelledManager.getSessionId() },
+		});
 		expect(
 			world.warnings.slice(warningMark),
 			"shutdown retains the gated request with explicit unknown usage",
 		).toEqual([
+			`Provider request ${unresolved![0]!.requestId} ended locally with usage still unknown; its original accounting identity is retained in the session journal.`,
 			"Usage handoff: 0 usage report(s) pending in the session journal, 0 not retained, 0 confirmed row(s) with a journal copy left, 0 unmatched journal(s), 1 request(s) with unknown usage; none is charged to another session.",
 		]);
 		world.warnings.splice(warningMark);
