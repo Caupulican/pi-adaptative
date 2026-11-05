@@ -1,4 +1,17 @@
-import { HOST_EVENT_RECALL_MS, type HostEventEnvelope } from "./host-event-contract.ts";
+import {
+	GITHUB_THREAD_EVENT_KINDS,
+	type GithubThreadEvent,
+	type GithubThreadEventKind,
+	githubBranchName,
+	githubLogin,
+	HOST_EVENT_RECALL_MS,
+	type HostEventEnvelope,
+	HostEventError,
+	hostEventArray,
+	hostEventDate,
+	hostEventInteger,
+	hostEventRecord,
+} from "./host-event-contract.ts";
 
 /**
  * Who wrote an event's content. `owner-controlled` facts come from the owner's own systems (a verdict of the owner's
@@ -137,6 +150,62 @@ export const HOST_EVENT_LISTENER_LIMITS = {
 	/** Listeners of one source that a session holds at once. */
 	maxListenersPerSource: 16,
 } as const;
+
+/**
+ * What one GitHub listener asks its source to collect, and the predicate that selects its occurrences. `since` is the
+ * instant the listener began: an occurrence before it is history and never selected.
+ */
+export interface GithubThreadInterest {
+	readonly kinds: readonly GithubThreadEventKind[];
+	readonly pullRequest?: number;
+	readonly branch?: string;
+	/** Logins compare case-insensitively, as GitHub's do. */
+	readonly authors?: readonly string[];
+	readonly since: string;
+}
+
+export function githubInterestMatches(interest: GithubThreadInterest, event: GithubThreadEvent): boolean {
+	if (!interest.kinds.includes(event.kind) || Date.parse(event.occurredAt) < Date.parse(interest.since)) return false;
+	if (
+		interest.pullRequest !== undefined &&
+		(!event.thread.pullRequest || event.thread.number !== interest.pullRequest)
+	)
+		return false;
+	if (interest.branch !== undefined && event.thread.branch !== interest.branch) return false;
+	const author = event.author.toLowerCase();
+	return interest.authors === undefined || interest.authors.some((login) => login.toLowerCase() === author);
+}
+
+export function parseGithubThreadInterest(value: unknown): GithubThreadInterest {
+	const entry = hostEventRecord(value, ["kinds", "pullRequest", "branch", "authors", "since"], "GitHub interest");
+	const kinds = hostEventArray(
+		entry.kinds,
+		HOST_EVENT_LISTENER_LIMITS.maxKinds,
+		(kind) => {
+			if (!GITHUB_THREAD_EVENT_KINDS.some((candidate) => candidate === kind))
+				throw new HostEventError("invalid", "GitHub interest names an unknown kind.");
+			return kind as GithubThreadEventKind;
+		},
+		"GitHub interest kinds",
+	);
+	if (kinds.length === 0) throw new HostEventError("invalid", "GitHub interest names no kind.");
+	return {
+		kinds,
+		...(entry.pullRequest === undefined ? {} : { pullRequest: hostEventInteger(entry.pullRequest, "pullRequest") }),
+		...(entry.branch === undefined ? {} : { branch: githubBranchName(entry.branch) }),
+		...(entry.authors === undefined
+			? {}
+			: {
+					authors: hostEventArray(
+						entry.authors,
+						HOST_EVENT_LISTENER_LIMITS.maxAuthors,
+						githubLogin,
+						"GitHub interest authors",
+					),
+				}),
+		since: hostEventDate(entry.since, "since"),
+	};
+}
 
 export function isHostEventKind(value: unknown): value is HostEventKind {
 	return typeof value === "string" && Object.hasOwn(HOST_EVENT_KINDS, value);

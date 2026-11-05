@@ -7,6 +7,7 @@ import {
 	type CiSubject,
 	ciEventSubject,
 	ciSubjectKey,
+	type GithubThreadEvent,
 	HostEventError,
 	type HostEventSealObservation,
 	type HostEventSink,
@@ -16,7 +17,11 @@ import {
 	isCiEnvelope,
 	MAX_HOST_EVENT_SUBJECTS,
 } from "../../core/events/host-event-contract.ts";
-import { HOST_EVENT_KINDS } from "../../core/events/host-event-kinds.ts";
+import {
+	type GithubThreadInterest,
+	githubInterestMatches,
+	HOST_EVENT_KINDS,
+} from "../../core/events/host-event-kinds.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import type { CiProvider, CiRepository } from "./ci-provider.ts";
@@ -27,6 +32,7 @@ import {
 	CiSourceVersionError,
 	ciSourceRetainedAttempts,
 	ciSourceRetiredRuns,
+	type GithubThreadCursor,
 } from "./ci-source-store.ts";
 import {
 	CI_REGISTRATION_GRACE_MS,
@@ -41,6 +47,7 @@ import {
 	writeCiStatus,
 } from "./ci-status-record.ts";
 import { createCiCommandPort, GithubActionsCiProvider, isCiCommandMissing } from "./github-actions-ci-provider.ts";
+import { type GithubIdCursor, GithubThreadProvider, MAX_REVIEWED_PULL_REQUESTS } from "./github-thread-provider.ts";
 
 // Discover upstream runs/reruns that have no local filesystem event. Known runs use terminal monitors.
 const CI_DISCOVERY_INTERVAL_MS = 2 * 60 * 1000;
@@ -66,6 +73,10 @@ export interface CiHostRuntimeOptions {
 	readonly signal?: AbortSignal;
 	readonly getSubscribedSubjects?: () => readonly CiSubject[];
 	readonly subscribeSubjects?: (listener: () => void) => () => void;
+	readonly threads?: GithubThreadProvider;
+	/** This session's GitHub listeners; collection serves the union of every consumer's recorded ones. */
+	readonly getGithubInterests?: () => readonly GithubThreadInterest[];
+	readonly subscribeGithubInterests?: (listener: () => void) => () => void;
 }
 
 interface CiLocalInputs {
@@ -76,6 +87,7 @@ interface CiLocalInputs {
 	/** Revisions whose watcher has not recorded an outcome (pending or watch_failed). */
 	readonly unsettled: readonly string[];
 	readonly subscribed: readonly CiSubject[];
+	readonly interests: readonly GithubThreadInterest[];
 	readonly fingerprint: string;
 }
 
@@ -83,6 +95,7 @@ function inputFingerprint(
 	head: Pick<CiLocalInputs, "headSha" | "headBranch" | "refDirectory">,
 	records: readonly CiStatusRecord[],
 	subscribed: readonly CiSubject[],
+	interests: readonly GithubThreadInterest[],
 ): string {
 	return JSON.stringify([
 		head.headSha,
@@ -101,7 +114,30 @@ function inputFingerprint(
 			)
 			.sort(),
 		subscribed.map(ciSubjectKey).sort(),
+		interests.map((interest) => JSON.stringify(interest)).sort(),
 	]);
+}
+
+const COMMENT_KINDS = ["pull-request-comment", "review-comment"] as const;
+const ISSUE_EVENT_KINDS = ["review-requested", "issue-assigned", "pull-request-merged", "pull-request-closed"] as const;
+
+/** The earliest start among interests naming one of `kinds`, never before the recall floor; none when no interest does. */
+function anchorOf(
+	interests: readonly GithubThreadInterest[],
+	kinds: readonly string[],
+	floor: string,
+): string | undefined {
+	const since = interests
+		.filter((interest) => interest.kinds.some((kind) => kinds.includes(kind)))
+		.map((interest) => interest.since)
+		.sort()[0];
+	return since === undefined ? undefined : since < floor ? floor : since;
+}
+
+/** A recorded position no older than the floor; a new one at the anchor. */
+function idCursor(previous: GithubIdCursor | undefined, anchor: string, floor: string): GithubIdCursor {
+	if (!previous) return { afterId: 0, since: anchor };
+	return previous.since < floor ? { afterId: previous.afterId, since: floor } : previous;
 }
 
 function sameSubjects(left: readonly CiSubject[], right: readonly CiSubject[]): boolean {
@@ -138,6 +174,10 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private readonly lifetimeSignal?: AbortSignal;
 	private readonly getSubscribedSubjects: () => readonly CiSubject[];
 	private readonly subscribeSubjects?: (listener: () => void) => () => void;
+	private readonly threads?: GithubThreadProvider;
+	private readonly getGithubInterests: () => readonly GithubThreadInterest[];
+	private readonly subscribeGithubInterests?: (listener: () => void) => () => void;
+	private unsubscribeInterests?: () => void;
 	/** Last reported text per diagnostic key: a repeating failure is reported once until it changes. */
 	private readonly reported = new Map<string, string>();
 	private watchers: FSWatcher[] = [];
@@ -178,7 +218,15 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		provider: CiProvider,
 		store: CiSourceStore,
 		diagnostic: (message: string) => void,
-		options: Pick<CiHostRuntimeOptions, "signal" | "getSubscribedSubjects" | "subscribeSubjects"> = {},
+		options: Pick<
+			CiHostRuntimeOptions,
+			| "signal"
+			| "getSubscribedSubjects"
+			| "subscribeSubjects"
+			| "threads"
+			| "getGithubInterests"
+			| "subscribeGithubInterests"
+		> = {},
 	) {
 		this.paths = paths;
 		this.provider = provider;
@@ -187,6 +235,9 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.lifetimeSignal = options.signal;
 		this.getSubscribedSubjects = options.getSubscribedSubjects ?? (() => []);
 		this.subscribeSubjects = options.subscribeSubjects;
+		this.threads = options.threads;
+		this.getGithubInterests = options.getGithubInterests ?? (() => []);
+		this.subscribeGithubInterests = options.subscribeGithubInterests;
 	}
 
 	/** Local setup only: consumer activation, git reads and network discovery run in the reconcile. */
@@ -205,12 +256,14 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			if (this.sinkBlocked) this.request(true);
 		});
 		this.subjectFingerprint = this.subscribedFingerprint();
-		this.unsubscribeSubjects = this.subscribeSubjects?.(() => {
+		const onSubscriptions = () => {
 			const fingerprint = this.subscribedFingerprint();
 			if (fingerprint === this.subjectFingerprint) return;
 			this.subjectFingerprint = fingerprint;
 			this.request(true);
-		});
+		};
+		this.unsubscribeSubjects = this.subscribeSubjects?.(onSubscriptions);
+		this.unsubscribeInterests = this.subscribeGithubInterests?.(onSubscriptions);
 		mkdirSync(this.paths.statusDir, { recursive: true });
 		this.armWatchers();
 		this.request(true);
@@ -231,6 +284,8 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.unsubscribeWritable = undefined;
 		this.unsubscribeSubjects?.();
 		this.unsubscribeSubjects = undefined;
+		this.unsubscribeInterests?.();
+		this.unsubscribeInterests = undefined;
 		for (const watcher of this.watchers) closeWatcher(watcher);
 		this.watchers = [];
 		this.watchDirectories = "";
@@ -284,7 +339,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	}
 
 	private subscribedFingerprint(): string {
-		return JSON.stringify(this.getSubscribedSubjects().map(ciSubjectKey).sort());
+		return JSON.stringify([
+			this.getSubscribedSubjects().map(ciSubjectKey).sort(),
+			this.getGithubInterests()
+				.map((interest) => JSON.stringify(interest))
+				.sort(),
+		]);
 	}
 
 	private report(key: string, message: string): void {
@@ -477,12 +537,20 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			),
 		].sort();
 		const subscribed = this.getSubscribedSubjects().map((subject) => ({ ...subject }));
+		const interests = this.threads ? [...this.getGithubInterests()] : [];
 		const local = {
 			...(head.sha ? { headSha: head.sha } : {}),
 			...(head.branch ? { headBranch: head.branch } : {}),
 			refDirectory: head.refDirectory,
 		};
-		return { ...local, records, unsettled, subscribed, fingerprint: inputFingerprint(local, records, subscribed) };
+		return {
+			...local,
+			records,
+			unsettled,
+			subscribed,
+			interests,
+			fingerprint: inputFingerprint(local, records, subscribed, interests),
+		};
 	}
 
 	private async reconcile(sink: HostEventSink, signal: AbortSignal): Promise<void> {
@@ -501,6 +569,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		let snapshot = this.store.snapshot();
 		let consumer = this.consumer(snapshot, sink.consumerId, activationId);
 		if (!consumer) return;
+		this.store.recordInterests(sink.consumerId, activationId, inputs.interests);
 		const { subjects: scope, required } = this.scope(repository, inputs, snapshot, consumer.acknowledged);
 		if (!scope.length) {
 			// No revision to observe (unborn HEAD, nothing subscribed or unsettled) and nothing retained.
@@ -560,6 +629,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		signal.throwIfAborted();
 		this.monitor?.reconcile(observations, unresolved);
 		if (failures.length) throw new Error(`CI collection failed for ${failures.join("; ")}`);
+		await this.collectThreads(repository, signal);
 		if (this.fingerprint() !== inputs.fingerprint) {
 			this.forced = true;
 			return;
@@ -742,11 +812,97 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			inputs,
 			inputs.records.map((record) => (record.branch ? (written.get(record.branch) ?? record) : record)),
 			inputs.subscribed,
+			inputs.interests,
 		);
 		if (this.fingerprint() !== this.lastInputs) this.forced = true;
 		// Recovered failures report again if they recur; standing notices stay reported once.
 		for (const key of [...this.reported.keys()])
 			if (!key.startsWith("retention:") && !key.startsWith("subject:") && key !== "scope") this.reported.delete(key);
+	}
+
+	/**
+	 * GitHub thread occurrences of the repository for the union of every consumer's recorded interests, retained with
+	 * the moved cursor in one journal write. An endpoint no interest needs is not read and loses its cursor, so a later
+	 * interest starts at its own start. A failure is reported and moves nothing: CI collection and seals go on.
+	 */
+	private async collectThreads(repository: CiRepository, signal: AbortSignal): Promise<void> {
+		if (!this.threads) return;
+		const key = `${repository.host}/${repository.repositoryId}`;
+		const snapshot = this.store.snapshot();
+		const interests = snapshot.consumers.flatMap((consumer) => consumer.interests);
+		const previous = snapshot.threads.find((cursor) => cursor.key === key);
+		if (!interests.length && !previous) return;
+		const floor = new Date(Date.now() - HOST_EVENT_KINDS["pull-request-comment"].recallMs).toISOString();
+		const next: GithubThreadCursor = { key, reviews: [] };
+		const events: GithubThreadEvent[] = [];
+		const notes: string[] = [];
+		const take = (
+			label: string,
+			collection: { events: readonly GithubThreadEvent[]; truncated: boolean; skipped: number },
+		) => {
+			events.push(...collection.events);
+			if (collection.truncated) notes.push(`${label} exceeded the page bound; later ones wait for the next check`);
+			if (collection.skipped) notes.push(`${collection.skipped} ${label} did not fit an event and were skipped`);
+		};
+		try {
+			for (const kind of COMMENT_KINDS) {
+				const anchor = anchorOf(interests, [kind], floor);
+				if (!anchor) continue;
+				const field = kind === "review-comment" ? "reviewComments" : "comments";
+				const recorded = previous?.[field];
+				const start = recorded && recorded.at >= floor ? recorded : { at: anchor, ids: [] };
+				const collection = await this.threads.comments(repository, kind, start, signal);
+				next[field] = collection.cursor;
+				take(kind, collection);
+			}
+			const issueAnchor = anchorOf(interests, ISSUE_EVENT_KINDS, floor);
+			if (issueAnchor) {
+				const collection = await this.threads.issueEvents(
+					repository,
+					idCursor(previous?.issueEvents, issueAnchor, floor),
+					signal,
+				);
+				next.issueEvents = collection.cursor;
+				take("issue events", collection);
+			}
+			const reviewAnchor = anchorOf(interests, ["review-submitted"], floor);
+			if (reviewAnchor) {
+				const pullRequests = new Set<number>();
+				for (const interest of interests) {
+					if (!interest.kinds.includes("review-submitted")) continue;
+					if (interest.pullRequest !== undefined) pullRequests.add(interest.pullRequest);
+					if (interest.branch !== undefined)
+						for (const number of await this.threads.pullRequestsOf(repository, interest.branch, signal))
+							pullRequests.add(number);
+				}
+				const reviewed = [...pullRequests].sort((a, b) => a - b);
+				if (reviewed.length > MAX_REVIEWED_PULL_REQUESTS)
+					notes.push(`reviews of ${reviewed.length - MAX_REVIEWED_PULL_REQUESTS} pull requests wait for capacity`);
+				for (const pullRequest of reviewed.slice(0, MAX_REVIEWED_PULL_REQUESTS)) {
+					const recorded = previous?.reviews.find((entry) => entry.pullRequest === pullRequest)?.cursor;
+					const collection = await this.threads.reviews(
+						repository,
+						pullRequest,
+						idCursor(recorded, reviewAnchor, floor),
+						signal,
+					);
+					next.reviews.push({ pullRequest, cursor: collection.cursor });
+					take("reviews", collection);
+				}
+			}
+			signal.throwIfAborted();
+			this.store.retainThreads(
+				next,
+				events.filter((event) => interests.some((interest) => githubInterestMatches(interest, event))),
+			);
+			this.reported.delete("threads");
+		} catch (error) {
+			signal.throwIfAborted();
+			this.report("threads", `GitHub thread events remain pending: ${errorText(error)}`);
+			return;
+		}
+		if (notes.length) this.report("threads-bound", `GitHub thread events: ${notes.join("; ")}.`);
+		else this.reported.delete("threads-bound");
 	}
 
 	private subjectOf(repository: CiRepository, headSha: string): CiSubject {
@@ -891,11 +1047,12 @@ export async function createCiHostRuntime(options: CiHostRuntimeOptions): Promis
 	signal.throwIfAborted();
 	if (!paths) return undefined;
 	if (!options.provider && !existsSync(join(paths.root, ".github", "workflows", CI_WORKFLOW))) return undefined;
+	const port = createCiCommandPort(paths.root, options.onDiagnostic);
 	return new CiHostEventSource(
 		paths,
-		options.provider ?? new GithubActionsCiProvider(createCiCommandPort(paths.root, options.onDiagnostic)),
+		options.provider ?? new GithubActionsCiProvider(port),
 		options.store ?? new CiSourceStore(paths.statusDir, { onDiagnostic: options.onDiagnostic }),
 		options.onDiagnostic,
-		options,
+		{ ...options, threads: options.threads ?? (options.provider ? undefined : new GithubThreadProvider(port)) },
 	);
 }

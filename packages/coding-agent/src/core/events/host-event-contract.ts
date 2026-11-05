@@ -614,7 +614,7 @@ export function parseCiAttemptTerminalEvent(value: unknown): CiAttemptTerminalEv
 	return event;
 }
 
-function githubLogin(value: unknown): string {
+export function githubLogin(value: unknown): string {
 	const login = hostEventString(value, "GitHub login", MAX_GITHUB_LOGIN_LENGTH + "[bot]".length);
 	const base = login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
 	if (base.length > MAX_GITHUB_LOGIN_LENGTH || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(base))

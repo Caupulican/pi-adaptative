@@ -8,6 +8,7 @@ import {
 	type CiSubject,
 	ciEventSubject,
 	ciSubjectKey,
+	type GithubThreadEvent,
 	type HostEventCatchUp,
 	type HostEventConsumerCheckpoint,
 	type HostEventEnvelope,
@@ -15,6 +16,7 @@ import {
 	type HostEventReplayGapReason,
 	type HostEventSourceRegistration,
 	hostEventArray,
+	hostEventDate,
 	hostEventInteger,
 	hostEventRecord,
 	hostEventString,
@@ -29,6 +31,11 @@ import {
 	parseHostEventEnvelope,
 	parseHostEventSourceRegistration,
 } from "../../core/events/host-event-contract.ts";
+import {
+	type GithubThreadInterest,
+	HOST_EVENT_LISTENER_LIMITS,
+	parseGithubThreadInterest,
+} from "../../core/events/host-event-kinds.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../../core/util/atomic-file.ts";
 import {
 	isProcessOwnerRecord,
@@ -38,6 +45,7 @@ import {
 } from "../../kernel/reliability/owner-identity.ts";
 import { BoundedReadError, readBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
 import type { CiRetiredRunRange } from "./ci-provider.ts";
+import type { GithubCommentCursor, GithubIdCursor } from "./github-thread-provider.ts";
 
 export const CI_SOURCE_MAX_EVENTS = 2_048;
 export const CI_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
@@ -45,15 +53,20 @@ export const CI_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
 export const CI_PARKED_CONSUMER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Each version has its own journal file, so a build that reads an older shape never quarantines a newer journal it
- * shares the repository's status directory with. Version 3 records departures, gap causes and connection state.
+ * shares the repository's status directory with. Version 3 records departures, gap causes and connection state;
+ * version 4 adds GitHub thread cursors and every consumer's GitHub interests.
  */
-const CI_SOURCE_VERSION = 3;
+const CI_SOURCE_VERSION = 4;
 const MAX_CONSUMERS = 64;
 const MAX_RUNS = 128;
 const MAX_RETIRED_RANGES = MAX_RUNS + 1;
 const MAX_WORKFLOWS = 32;
 /** Removed consumers remembered for their next claim's gap cause; older departures resume as `consumer_inactive`. */
 const MAX_DEPARTED = 128;
+/** Retained GitHub thread occurrences: their own bound inside the event list, so a burst cannot crowd out CI. */
+export const CI_SOURCE_MAX_THREAD_EVENTS = 512;
+const MAX_THREAD_REPOSITORIES = 8;
+const MAX_REVIEW_CURSORS = 64;
 
 /** A journal written by a newer release is never rewritten or quarantined by an older reader. */
 export class CiSourceVersionError extends Error {}
@@ -82,6 +95,17 @@ interface Consumer {
 	pendingGap?: { afterSequence: number; throughSequence: number; cause: HostEventReplayGapReason };
 	/** The active host's last connection transition; absent while armed. Cleared by the next claim. */
 	connection?: { state: "waiting" | "suspended"; reason: string; since: number };
+	/** The consumer's GitHub listeners, kept while it is parked: collection serves the union of every consumer's. */
+	interests: GithubThreadInterest[];
+}
+
+/** One repository's GitHub collection positions; an endpoint no interest needs has none. */
+export interface GithubThreadCursor {
+	key: string;
+	comments?: GithubCommentCursor;
+	reviewComments?: GithubCommentCursor;
+	issueEvents?: GithubIdCursor;
+	reviews: { pullRequest: number; cursor: GithubIdCursor }[];
 }
 
 /** Why a consumer's custody was removed while no host owned it. */
@@ -111,6 +135,7 @@ interface SourceState {
 	/** Run numbers whose custody was dropped. Never-seen and pending run numbers are never retired. */
 	retiredRuns: { key: string; ranges: CiRetiredRunRange[] }[];
 	departed: DepartedConsumer[];
+	threads: GithubThreadCursor[];
 }
 
 export interface CiSourceSnapshot {
@@ -122,6 +147,7 @@ export interface CiSourceSnapshot {
 	readonly runs: readonly Readonly<RetainedRun>[];
 	readonly consumers: readonly Readonly<Consumer>[];
 	readonly retiredRuns: readonly { readonly key: string; readonly ranges: readonly CiRetiredRunRange[] }[];
+	readonly threads: readonly Readonly<GithubThreadCursor>[];
 }
 
 function workflowKey(subject: Pick<CiSubject, "host" | "repositoryId" | "workflowId">): string {
@@ -146,6 +172,7 @@ function parseConsumer(value: unknown): Consumer {
 			"parkedAt",
 			"pendingGap",
 			"connection",
+			"interests",
 		],
 		"CI consumer",
 	);
@@ -169,6 +196,12 @@ function parseConsumer(value: unknown): Consumer {
 		...(entry.parkedAt === undefined ? {} : { parkedAt: hostEventInteger(entry.parkedAt, "parkedAt", 0) }),
 		...(entry.pendingGap === undefined ? {} : { pendingGap: parseConsumerGap(entry.pendingGap) }),
 		...(entry.connection === undefined ? {} : { connection: parseConsumerConnection(entry.connection) }),
+		interests: hostEventArray(
+			entry.interests,
+			HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource,
+			parseGithubThreadInterest,
+			"consumer GitHub interests",
+		),
 	};
 	if ((consumer.activation === undefined) === (consumer.parkedAt === undefined))
 		throw new Error("CI consumer must be either active or parked.");
@@ -222,6 +255,45 @@ function parseConsumerStart(value: unknown): ConsumerStart {
 	return { registration, catchUp };
 }
 
+function parseCommentCursor(value: unknown): GithubCommentCursor {
+	const entry = hostEventRecord(value, ["at", "ids"], "GitHub comment cursor");
+	return {
+		at: hostEventDate(entry.at, "cursor at"),
+		ids: hostEventArray(entry.ids, 1_000, (id) => hostEventInteger(id, "comment id"), "cursor ids"),
+	};
+}
+
+function parseIdCursor(value: unknown): GithubIdCursor {
+	const entry = hostEventRecord(value, ["afterId", "since"], "GitHub id cursor");
+	return { afterId: hostEventInteger(entry.afterId, "afterId", 0), since: hostEventDate(entry.since, "cursor since") };
+}
+
+function parseThreadCursor(value: unknown): GithubThreadCursor {
+	const entry = hostEventRecord(
+		value,
+		["key", "comments", "reviewComments", "issueEvents", "reviews"],
+		"GitHub thread cursor",
+	);
+	return {
+		key: hostEventString(entry.key, "thread cursor key", 512),
+		...(entry.comments === undefined ? {} : { comments: parseCommentCursor(entry.comments) }),
+		...(entry.reviewComments === undefined ? {} : { reviewComments: parseCommentCursor(entry.reviewComments) }),
+		...(entry.issueEvents === undefined ? {} : { issueEvents: parseIdCursor(entry.issueEvents) }),
+		reviews: hostEventArray(
+			entry.reviews,
+			MAX_REVIEW_CURSORS,
+			(review) => {
+				const item = hostEventRecord(review, ["pullRequest", "cursor"], "GitHub review cursor");
+				return {
+					pullRequest: hostEventInteger(item.pullRequest, "pullRequest"),
+					cursor: parseIdCursor(item.cursor),
+				};
+			},
+			"GitHub review cursors",
+		),
+	};
+}
+
 function parseRetiredRange(value: unknown): CiRetiredRunRange {
 	const range = hostEventRecord(value, ["from", "through"], "retired run range");
 	const from = hostEventInteger(range.from, "from");
@@ -244,6 +316,7 @@ function parseState(value: unknown): SourceState {
 			"consumers",
 			"retiredRuns",
 			"departed",
+			"threads",
 		],
 		"CI source",
 	);
@@ -288,6 +361,7 @@ function parseState(value: unknown): SourceState {
 			"retired CI workflows",
 		),
 		departed: hostEventArray(entry.departed, MAX_DEPARTED, parseDeparted, "departed CI consumers"),
+		threads: hostEventArray(entry.threads, MAX_THREAD_REPOSITORIES, parseThreadCursor, "GitHub thread cursors"),
 	};
 	if (
 		state.nextSequence !== state.retiredThrough + state.events.length + 1 ||
@@ -315,6 +389,8 @@ function parseState(value: unknown): SourceState {
 		new Set(state.consumers.map((consumer) => consumer.id)).size !== state.consumers.length ||
 		new Set(state.departed.map((consumer) => consumer.id)).size !== state.departed.length ||
 		new Set(state.runs.map((run) => run.key)).size !== state.runs.length ||
+		new Set(state.threads.map((cursor) => cursor.key)).size !== state.threads.length ||
+		new Set(state.events.map((event) => event.event.eventId)).size !== state.events.length ||
 		state.consumers.some(
 			(consumer) =>
 				consumer.acknowledged < state.retiredThrough ||
@@ -407,6 +483,7 @@ export class CiSourceStore {
 			consumers: [],
 			retiredRuns: [],
 			departed: [],
+			threads: [],
 		};
 	}
 
@@ -522,6 +599,7 @@ export class CiSourceStore {
 						}
 					: {}),
 				activation: { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() },
+				interests: existing?.interests ?? [],
 			};
 			state.consumers = [...state.consumers.filter((entry) => entry !== existing), consumer];
 		});
@@ -611,6 +689,53 @@ export class CiSourceStore {
 		});
 	}
 
+	/**
+	 * The consumer's current GitHub listeners. A listener already recorded keeps its start; a new one starts no earlier
+	 * than now, so the occurrences collection skipped before the source knew it stay history.
+	 */
+	recordInterests(consumerId: string, activationId: string, interests: readonly GithubThreadInterest[]): void {
+		this.change((state) => {
+			const consumer = activeConsumer(state, consumerId, activationId);
+			const now = new Date(this.now()).toISOString();
+			const scopeKey = (interest: GithubThreadInterest) => JSON.stringify({ ...interest, since: undefined });
+			consumer.interests = interests.map((interest) => {
+				const known = consumer.interests.find((entry) => scopeKey(entry) === scopeKey(interest));
+				return parseGithubThreadInterest({
+					...interest,
+					since: known?.since ?? (interest.since > now ? interest.since : now),
+				});
+			});
+		});
+	}
+
+	/**
+	 * Retains one collection's thread occurrences and moves its repository's cursor in the same journal write, so a
+	 * crash neither repeats nor drops an occurrence. An occurrence already retained is not appended again.
+	 */
+	retainThreads(cursor: GithubThreadCursor, events: readonly GithubThreadEvent[]): void {
+		this.change((state) => {
+			this.compact(state);
+			const retained = new Set(state.events.map((entry) => entry.event.eventId));
+			for (const event of [...events].sort(
+				(a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.githubId - b.githubId,
+			)) {
+				if (retained.has(event.eventId)) continue;
+				this.makeRoom(state, false, true);
+				state.events.push(
+					parseHostEventEnvelope({
+						sourceId: state.sourceId,
+						sourceEpoch: state.sourceEpoch,
+						sourceSequence: state.nextSequence++,
+						event,
+					}),
+				);
+				retained.add(event.eventId);
+			}
+			state.threads = [...state.threads.filter((entry) => entry.key !== cursor.key), cursor];
+			if (state.threads.length > MAX_THREAD_REPOSITORIES) throw new Error("GitHub thread cursor capacity reached.");
+		});
+	}
+
 	retain(events: readonly CiAttemptTerminalEvent[]): void {
 		if (!events.length) return;
 		this.change((state) => {
@@ -673,10 +798,12 @@ export class CiSourceStore {
 	 * Admission at capacity first drops an unpinned run cursor, then expires the parked consumer
 	 * pinning the most history. Live consumers' custody is never evicted: that is backpressure.
 	 */
-	private makeRoom(state: SourceState, newRun: boolean): void {
+	private makeRoom(state: SourceState, newRun: boolean, thread = false): void {
 		for (;;) {
 			this.compact(state);
-			const eventsFull = state.events.length >= CI_SOURCE_MAX_EVENTS;
+			const eventsFull =
+				state.events.length >= CI_SOURCE_MAX_EVENTS ||
+				(thread && state.events.filter((entry) => !isCiEnvelope(entry)).length >= CI_SOURCE_MAX_THREAD_EVENTS);
 			if (!eventsFull && (!newRun || state.runs.length < MAX_RUNS)) return;
 			if (!eventsFull && this.dropUnpinnedRun(state)) return;
 			const evicted = oldestParkedConsumer(state);
