@@ -13,6 +13,8 @@ export const MAX_NOTE_WHY_CHARS = 200;
 /** Recent conversation text carried into one review, newest last. */
 export const MAX_REVIEW_TRANSCRIPT_CHARS = 8_000;
 export const MAX_REVIEW_MESSAGES = 16;
+/** What memory knows about the owner, carried into one review. */
+export const MAX_REVIEW_PROFILE_CHARS = 2_000;
 /** Earlier notes shown to the review so it does not repeat them. */
 export const MAX_PRIOR_NOTES_SHOWN = 8;
 
@@ -185,6 +187,7 @@ export function priorNotes(entries: readonly SessionEntry[]): { digests: Set<str
 export function buildReviewPrompt(input: {
 	entries: readonly SessionEntry[];
 	preferences: string;
+	ownerProfile: string;
 	goalSummary?: string;
 }): string {
 	const turns = conversationEntries(input.entries).slice(-MAX_REVIEW_MESSAGES);
@@ -203,6 +206,9 @@ export function buildReviewPrompt(input: {
 	const prior = priorNotes(input.entries).recent;
 	const sections = [
 		input.preferences.length > 0 ? `Owner's standing preferences:\n${input.preferences}` : "",
+		input.ownerProfile.length > 0
+			? `What is known about the owner:\n${input.ownerProfile.slice(0, MAX_REVIEW_PROFILE_CHARS)}`
+			: "",
 		input.goalSummary ? `Active goal:\n${input.goalSummary}` : "",
 		prior.length > 0 ? `Notes already raised (do not repeat):\n${prior.map((text) => `- ${text}`).join("\n")}` : "",
 		`Recent conversation:\n${lines.join("\n\n")}`,

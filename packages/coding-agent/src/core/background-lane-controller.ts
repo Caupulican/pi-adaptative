@@ -245,11 +245,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._laneModels,
 		);
 		this._proactivity = new ProactivityController(
-			{
-				...deps,
-				onContinuationActivity: () => this._notifyContinuationActivity(),
-				timers: deps.getTimers().port("proactivity"),
-			},
+			{ ...deps, timers: deps.getTimers().port("proactivity") },
 			this._laneModels,
 		);
 		this._fitness = new ModelFitnessController(deps, this._laneModels);
@@ -688,11 +684,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * consults this so a debounce timer armed moments earlier suppresses the notification.
 	 */
 	hasPendingIdleContinuation(): boolean {
-		return (
-			this._goalAutoContinue.hasPendingContinuation() ||
-			this._research.hasPendingContinuation() ||
-			this._proactivity.hasPendingContinuation()
-		);
+		return this._goalAutoContinue.hasPendingContinuation() || this._research.hasPendingContinuation();
 	}
 
 	subscribeIdleContinuationActivity(listener: () => void): () => void {

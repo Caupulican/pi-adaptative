@@ -8,11 +8,25 @@ const NOTE_TEXT = "The changelog entry you asked for is still not written.";
 const NOTE_MARKER = "[proactive note]";
 
 /**
+ * The judgments System One makes about the previous owner turn when the next one is prepared: whether its words carry
+ * forward, what authority they grant, and whether they changed the optional tools. This phase grants nothing.
+ */
+const PREVIOUS_TURN_JUDGMENTS = {
+	carries_0: { kind: "noul", probability: 0.02 },
+	capabilities_authorized: { kind: "noul", probability: 0.02 },
+	changes_model_pools: { kind: "noul", probability: 0.02 },
+	local_commits_only: { kind: "noul", probability: 0.02 },
+	lifts_delivery_block: { kind: "noul", probability: 0.02 },
+	full_handoff: { kind: "noul", probability: 0.02 },
+	optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+} as const;
+
+/**
  * Proactivity: an idle review of the conversation may raise a note the owner did not ask for. One owner turn ends and the
  * review is armed on the proactivity timer; the review sees the owner's standing preferences and the conversation, offers
  * exactly one tool, and raises a note that reaches the owner's next turn once; a review that raises the same note again, and
- * a review that raises nothing, deliver nothing; the per-session cap stops further reviews; and a session with the feature
- * off arms no timer and sends no review request.
+ * a review that raises nothing, deliver nothing; the per-session cap stops further reviews; and a session whose owner turned
+ * the feature off arms no timer and sends no review request.
  */
 export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -38,23 +52,18 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	const session: AgentSession = created.session;
 	const lanes = session.backgroundLanes;
 
-	/** The session has no armed or running idle work: the review, if one was due, has ended. */
-	const lanesQuiet = (label: string): Promise<void> =>
-		withDeadline(
-			trace,
-			label,
-			new Promise<void>((resolve) => {
-				const settle = (): void => {
-					if (lanes.hasPendingIdleContinuation()) return;
-					off();
-					resolve();
-				};
-				const off = lanes.subscribeIdleContinuationActivity(settle);
-				settle();
-			}),
-		);
+	/** Resolves with how the next proactive review ends; the session announces it as an event. */
+	const reviewEnds = (): Promise<"raised" | "quiet" | "failed"> =>
+		new Promise((resolve) => {
+			const off = session.subscribe((event) => {
+				if (event.type !== "proactive_review") return;
+				off();
+				resolve(event.outcome);
+			});
+		});
 
 	const ownerRequests: string[] = [];
+	let turns = 0;
 	const ownerTurn = async (label: string, prompt: string): Promise<void> => {
 		world.provider.enqueue("root", {
 			name: `${label}-reply`,
@@ -63,7 +72,9 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			},
 			reply: { content: [{ type: "text", text: "Understood." }] },
 		});
-		world.systemOne.enterPhase(label, {});
+		// A turn's words are judged when the next turn is prepared, so only the later turns have judgments to answer.
+		world.systemOne.enterPhase(label, turns === 0 ? {} : PREVIOUS_TURN_JUDGMENTS);
+		turns += 1;
 		await withDeadline(trace, `${label} owner turn`, session.prompt(prompt));
 	};
 
@@ -72,8 +83,9 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		label: string,
 		answer: readonly ScriptStep[],
 		inspect?: (context: Context) => void,
-	): Promise<void> => {
+	): Promise<"raised" | "quiet" | "failed"> => {
 		await withDeadline(trace, `${label} armed`, world.timers.whenArmed("proactivity"));
+		const ended = reviewEnds();
 		const reached = createBarrier();
 		const [first, ...rest] = answer;
 		if (first === undefined) throw new Error(`${label}: the review needs an answer`);
@@ -90,7 +102,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		);
 		expect(world.timers.advance("proactivity", 1_000), `${label}: the idle delay fires the review once`).toBe(1);
 		await withDeadline(trace, `${label} reached the model`, reached.promise);
-		await lanesQuiet(`${label} ended`);
+		return withDeadline(trace, `${label} ended`, ended);
 	};
 
 	const noteCount = (request: string): number => request.split(NOTE_MARKER).length - 1;
@@ -101,7 +113,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		"proactivity-1",
 		"Finish the migration and update the changelog. I will ask about the changelog later.",
 	);
-	await review(
+	const first = await review(
 		"proactivity-review-1",
 		[
 			calls("proactivity-review-1-raise", [
@@ -125,6 +137,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			});
 		},
 	);
+	expect(first, "a review that raised a note says so").toBe("raised");
 	expect(seen[0]?.tools, "the review can only record a note").toEqual(["raise_note"]);
 	expect(seen[0]?.systemPrompt, "the review is told to stay quiet by default").toContain("Stay quiet by default");
 	expect(seen[0]?.messages, "the review reads the owner's standing preferences").toContain(preferences);
@@ -137,7 +150,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(noteCount(second), "the note is delivered once").toBe(1);
 
 	// Review 2 raises the same note again: it is a repeat, so nothing more is delivered.
-	await review("proactivity-review-2", [
+	const repeat = await review("proactivity-review-2", [
 		calls("proactivity-review-2-raise", [
 			{
 				id: "raise-2",
@@ -147,11 +160,13 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		]),
 		text("proactivity-review-2-done", "none"),
 	]);
+	expect(repeat, "a repeated note leaves the review quiet").toBe("quiet");
 	await ownerTurn("proactivity-3", "Still thinking.");
 	expect(noteCount(ownerRequests.at(-1) ?? ""), "a repeated note is not delivered again").toBe(1);
 
 	// Review 3 raises nothing: the default is quiet.
-	await review("proactivity-review-3", [text("proactivity-review-3-none", "none")]);
+	const nothing = await review("proactivity-review-3", [text("proactivity-review-3-none", "none")]);
+	expect(nothing, "a review with nothing to raise is quiet").toBe("quiet");
 	await ownerTurn("proactivity-4", "Carry on.");
 	expect(noteCount(ownerRequests.at(-1) ?? ""), "a review with nothing to raise delivers nothing").toBe(1);
 
@@ -160,22 +175,21 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(lanes.getLastProactivitySkipReason(), "the cap names itself as the reason").toBe("max_runs_reached");
 	expect(await world.disposeSessionInBody(session), "the proactivity session closes cleanly").toBeUndefined();
 
-	// The feature is off by default: no timer, no review request.
+	// The owner can turn it off: no timer, no review request.
 	const offDir = `${world.agentDir}-proactivity-off`;
 	const off = await world.createRootSession("root", {
 		agentDir: offDir,
 		sessionManager: world.createSessionManager(offDir),
-		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false }, proactivity: { enabled: false } },
 	});
 	const requestsBefore = world.provider.requests.length;
 	world.provider.enqueue("root", text("proactivity-off-reply", "Understood."));
 	world.systemOne.enterPhase("proactivity-off", {});
 	await withDeadline(trace, "proactivity-off owner turn", off.session.prompt("Hello."));
 	expect(world.timers.armedDelays("proactivity"), "a session without the feature arms no review").toEqual([]);
-	expect(
-		off.session.backgroundLanes.getLastProactivitySkipReason(),
-		"the feature is off unless the owner turns it on",
-	).toBe("proactivity_disabled");
+	expect(off.session.backgroundLanes.getLastProactivitySkipReason(), "the owner turned the feature off").toBe(
+		"proactivity_disabled",
+	);
 	expect(world.provider.requests.length - requestsBefore, "only the owner's own turn reached the provider").toBe(1);
 	expect(await world.disposeSessionInBody(off.session), "the off session closes cleanly").toBeUndefined();
 	trace.mark("root", "proactivity.done");

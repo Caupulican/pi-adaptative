@@ -45,8 +45,9 @@ export interface ProactivityControllerDeps {
 	getSettingsManager(): ProactivityControllerSettingsSource;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getGoalStateSnapshot(): GoalState | undefined;
+	/** What the memory system knows about the owner (the same guidance a delegated lane receives); absent when memory is off. */
+	getHandoffPersonaGuidance?(): string | undefined;
 	emit(event: AgentSessionEvent): void;
-	onContinuationActivity?(): void;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
@@ -88,10 +89,6 @@ export class ProactivityController {
 		return this._lastSkipReason;
 	}
 
-	hasPendingContinuation(): boolean {
-		return this._timer !== undefined || this._isRunning;
-	}
-
 	abort(): void {
 		if (this._aborted) return;
 		this._aborted = true;
@@ -103,7 +100,6 @@ export class ProactivityController {
 		if (this._timer === undefined) return;
 		(this.deps.timers ?? SYSTEM_TIMER_PORT).clearTimeout(this._timer);
 		this._timer = undefined;
-		this.deps.onContinuationActivity?.();
 	}
 
 	/** Arms the review when every gate holds; otherwise records the first gate that did not and arms nothing. */
@@ -120,12 +116,11 @@ export class ProactivityController {
 		const timer = timers.setTimeout(() => {
 			if (this._timer !== timer) return;
 			this._timer = undefined;
-			void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
+			void this.runScheduled();
 		}, settings.idleDelayMs);
 		const previous = this._timer;
 		this._timer = timer;
 		if (previous !== undefined) timers.clearTimeout(previous);
-		this.deps.onContinuationActivity?.();
 	}
 
 	private gate(): string | undefined {
@@ -185,7 +180,6 @@ export class ProactivityController {
 
 			this._isRunning = true;
 			this._runs++;
-			this.deps.onContinuationActivity?.();
 			const entries = getActiveSessionBranchEntries(this.deps.getSessionManager());
 			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
 			const runIndex = this._runs;
@@ -205,6 +199,7 @@ export class ProactivityController {
 									text: buildReviewPrompt({
 										entries,
 										preferences: settings.preferences,
+										ownerProfile: this.deps.getHandoffPersonaGuidance?.() ?? "",
 										...(goal && isGoalExecutionActive(goal.status) ? { goalSummary: goal.userGoal } : {}),
 									}),
 								},
@@ -239,7 +234,10 @@ export class ProactivityController {
 					priorNotes(getActiveSessionBranchEntries(this.deps.getSessionManager())).digests,
 					settings.maxNotesPerRun,
 				);
-				if (notes.length === 0) return { started: true, delivered: [] };
+				if (notes.length === 0) {
+					this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
+					return { started: true, delivered: [] };
+				}
 				await this.deps.deliverNotes(
 					{
 						customType: PROACTIVE_NOTE_CUSTOM_TYPE,
@@ -249,10 +247,13 @@ export class ProactivityController {
 					},
 					settings.delivery,
 				);
+				this.deps.emit({ type: "proactive_review", outcome: "raised", noteCount: notes.length });
 				return { started: true, delivered: notes };
+			} catch (error) {
+				this.deps.emit({ type: "proactive_review", outcome: "failed", noteCount: 0 });
+				throw error;
 			} finally {
 				this._isRunning = false;
-				this.deps.onContinuationActivity?.();
 				deregisterInFlight();
 			}
 		} finally {

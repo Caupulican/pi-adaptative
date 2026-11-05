@@ -279,7 +279,7 @@ export interface ModelRouterSettings {
 }
 
 export interface ProactivitySettings {
-	enabled?: boolean; // default: false — unsolicited review runs spend tokens, so they are opt-in
+	enabled?: boolean; // default: true — a bounded idle review that raises notes; false turns it off
 	model?: string; // model pattern for the review; unset inherits the session model
 	idleDelayMs?: number; // default: 120000 — foreground idle time before a review may start
 	minOwnerTurnsBetweenRuns?: number; // default: 3 — new owner turns required since the last review
@@ -718,7 +718,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
-	proactivity?: ProactivitySettings; // Opt-in idle review that raises notes the owner would want to hear
+	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default
