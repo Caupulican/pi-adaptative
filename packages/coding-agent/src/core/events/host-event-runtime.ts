@@ -26,6 +26,7 @@ import {
 	hostEventInteger,
 	hostEventSealedFrontier,
 	hostEventString,
+	hostEventTombstoneIsSnapshot,
 	MAX_HOST_EVENT_SOURCES,
 	parseHostEventCatchUp,
 	parseHostEventCatchUpSeal,
@@ -40,6 +41,7 @@ import {
 	assertHostEventExecution,
 	hostEventCanPrune,
 	hostEventDeliveryEligible,
+	hostEventRetentionPressure,
 	hostEventSealDigest,
 	hostEventTaskDisposition,
 } from "./host-event-reducer.ts";
@@ -298,10 +300,16 @@ export class HostEventRuntime {
 		const seal = parseHostEventCatchUpSeal(value);
 		this.assertSourceOwner(seal.sourceId, context.lifetime);
 		this.port.transact((tx) => {
-			if (isDeepStrictEqual(tx.snapshot.eventSources[seal.sourceId]?.seal, hostEventSealedFrontier(seal))) {
-				for (const snapshot of seal.snapshots ?? [])
-					if (!isDeepStrictEqual(tx.snapshot.hostEvents[snapshot.event.eventId]?.envelope, snapshot))
+			const source = tx.snapshot.eventSources[seal.sourceId];
+			if (isDeepStrictEqual(source?.seal, hostEventSealedFrontier(seal))) {
+				for (const snapshot of seal.snapshots ?? []) {
+					const pruned = source.prunedEvents?.find((tombstone) => tombstone.eventId === snapshot.event.eventId);
+					if (
+						!isDeepStrictEqual(tx.snapshot.hostEvents[snapshot.event.eventId]?.envelope, snapshot) &&
+						!(pruned && hostEventTombstoneIsSnapshot(pruned, snapshot))
+					)
 						throw new HostEventError("identity_conflict", "Replayed snapshot differs from canonical custody.");
+				}
 				return;
 			}
 			assertWorkerReceiptAdmission(context.origin);
@@ -395,9 +403,9 @@ export class HostEventRuntime {
 				delivery.binding &&
 				!delivery.bindingRetired &&
 				isDeepStrictEqual(delivery.binding.execution, execution) &&
-				delivery.binding.contentDigest === contentDigest &&
-				delivery.binding.sourceSealDigest === sourceSealDigest
+				delivery.binding.contentDigest === contentDigest
 			) {
+				// A re-seal of the same current event keeps the binding; its seal fields are provenance.
 				assertHostEventExecution(tx.snapshot, delivery.binding, this.port.now());
 				return delivery.binding;
 			}
@@ -578,19 +586,33 @@ export class HostEventRuntime {
 		return this.port.transact((tx) => this.pruneWithin(tx));
 	}
 
-	/** Reclaim settled history inside an admission, so reclamation never waits for a later seal. */
+	/**
+	 * Reclaim settled history inside an admission, so reclamation never waits for a later seal. Under
+	 * retention pressure the oldest settled events also give up their recall window.
+	 */
 	private pruneWithin(tx: HostEventRuntimeTransaction): number {
 		const now = this.port.now();
-		const eventIds = Object.values(tx.snapshot.hostEvents)
+		const settled = Object.values(tx.snapshot.hostEvents).sort(
+			(left, right) => left.acceptedOrdinal - right.acceptedOrdinal,
+		);
+		let pressure = false;
+		let eventIds = settled
 			.filter((event) => hostEventCanPrune(tx.snapshot, event, now))
 			.slice(0, 64)
 			.map((event) => event.envelope.event.eventId);
+		if (eventIds.length === 0 && hostEventRetentionPressure(tx.snapshot)) {
+			pressure = true;
+			eventIds = settled
+				.filter((event) => hostEventCanPrune(tx.snapshot, event, now, true))
+				.slice(0, 64)
+				.map((event) => event.envelope.event.eventId);
+		}
 		if (eventIds.length)
 			tx.commit({
 				type: "host_event.pruned",
 				aggregateId: "host-events",
 				actor: "runtime",
-				payload: toJsonObject({ eventIds }),
+				payload: toJsonObject({ eventIds, ...(pressure && eventIds.length ? { pressure: true } : {}) }),
 			});
 		return eventIds.length;
 	}

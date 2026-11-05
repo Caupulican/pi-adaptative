@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { parseWorkerHostEventRecord, type WorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH, MAX_WORKER_AUTHORITY_PATH_LENGTH } from "../orchestration/contracts.ts";
 
@@ -117,6 +118,75 @@ export function hostEventSealedFrontier(seal: HostEventCatchUpSeal): HostEventSe
 		throughSequence: seal.throughSequence,
 		observations: seal.observations,
 	};
+}
+
+/**
+ * The identity a pruned event leaves on its source. A later seal may still name the event as its
+ * subject's current attempt (the subject left scope and returned); the tombstone lets that seal
+ * verify it without re-accepting the payload as a new occurrence or failing for a missing event.
+ */
+export interface HostEventTombstone {
+	readonly eventId: string;
+	readonly sourceSequence: number;
+	readonly payloadDigest: string;
+	readonly subjectKey: string;
+	readonly runId: number;
+	readonly runNumber: number;
+	readonly runAttempt: number;
+	readonly conclusion: CiTerminalConclusion;
+}
+
+/** Per source; only the newest tombstone of each subject is kept, the oldest subject evicted first. */
+export const MAX_HOST_EVENT_TOMBSTONES = MAX_HOST_EVENT_SUBJECTS;
+
+export function hostEventTombstone(envelope: HostEventEnvelope): HostEventTombstone {
+	const event = envelope.event;
+	return {
+		eventId: event.eventId,
+		sourceSequence: envelope.sourceSequence,
+		payloadDigest: event.payloadDigest,
+		subjectKey: ciSubjectKey(ciEventSubject(event)),
+		runId: event.identity.runId,
+		runNumber: event.identity.runNumber,
+		runAttempt: event.identity.runAttempt,
+		conclusion: event.conclusion,
+	};
+}
+
+export function parseHostEventTombstone(value: unknown): HostEventTombstone {
+	const entry = hostEventRecord(
+		value,
+		["eventId", "sourceSequence", "payloadDigest", "subjectKey", "runId", "runNumber", "runAttempt", "conclusion"],
+		"host event tombstone",
+	);
+	return {
+		eventId: hostEventString(entry.eventId, "eventId"),
+		sourceSequence: hostEventInteger(entry.sourceSequence, "sourceSequence"),
+		payloadDigest: hostEventDigest(entry.payloadDigest, "payloadDigest"),
+		subjectKey: hostEventDigest(entry.subjectKey, "subjectKey"),
+		runId: hostEventInteger(entry.runId, "runId"),
+		runNumber: hostEventInteger(entry.runNumber, "runNumber"),
+		runAttempt: hostEventInteger(entry.runAttempt, "runAttempt"),
+		conclusion: ciConclusion(entry.conclusion),
+	};
+}
+
+/** A terminal observation names exactly this pruned occurrence. */
+export function hostEventTombstoneMatches(tombstone: HostEventTombstone, observation: CiCurrentObservation): boolean {
+	return (
+		observation.status === "completed" &&
+		observation.eventId === tombstone.eventId &&
+		ciSubjectKey(observation.subject) === tombstone.subjectKey &&
+		observation.runId === tombstone.runId &&
+		observation.runNumber === tombstone.runNumber &&
+		observation.runAttempt === tombstone.runAttempt &&
+		observation.conclusion === tombstone.conclusion
+	);
+}
+
+/** A snapshot of a pruned occurrence transfers no new custody; it must be the same occurrence. */
+export function hostEventTombstoneIsSnapshot(tombstone: HostEventTombstone, snapshot: HostEventEnvelope): boolean {
+	return isDeepStrictEqual(hostEventTombstone(snapshot), tombstone);
 }
 
 /** The source guarantees retired positions can never be replayed under a new sequence. */

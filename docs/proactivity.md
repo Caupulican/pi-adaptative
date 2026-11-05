@@ -80,7 +80,9 @@ The `delegate` tool exposes bounded event recall and task subscriptions:
   `subject`, and `wake` policy (`never` or `resume_same_task`).
 - `subscriptions` with `taskId` reads the task's subscriptions and their revision. Providing
   `expectedRevision` and a replacement `subscriptions` array changes that set; an empty array
-  revokes it. Workers can only narrow their own task's subscriptions.
+  revokes it. Workers can only narrow their own task's subscriptions. Rows the replacement leaves
+  unchanged keep their revision and pending events; a wake-only change keeps them too. Only a
+  removed row or a changed subject unsubscribes the task from that thread's undelivered events.
 
 Workers use the scoped `task_events` tool for the same evidence and subscription views. The host
 supplies their task identity; workers cannot choose a different task, add subjects or widen a wake
@@ -94,7 +96,10 @@ attempt, lease or task of the same worker never fails a later run; it is settled
 transcript and the event is offered to the current execution. A task that is waiting (queued, leased,
 retrying, or suspended on a resumable conversation), or whose worker controls are briefly
 unavailable, keeps the event pending. Only a running or suspended execution whose conversation can
-never hold the event returns it to the main session.
+never hold the event returns it to the main session. A queued copy stays valid while its event is
+current, so a source reconnect that observes nothing new does not rebind it. Events for the main
+session wait for the foreground on their own lane; worker deliveries and runtime replacement never
+wait behind a parent turn.
 
 Source custody, canonical event acceptance, mailbox acceptance and transcript consumption have
 separate receipts. Restart replays retained work using those identities. Retention and recall are
@@ -102,6 +107,11 @@ bounded. Each open delivery reserves only its own settlement, and a worker copy 
 transcript receipt when it is bound, so a refused binding leaves the delivery pending with a visible
 warning. Settled history is reclaimed whenever new evidence is accepted, not only after a source
 reconciles. A task subscription is refused when its CI subject already has the maximum number of
-subscribed tasks, so admitted subscriptions never block the source's next event. Capacity pressure
-leaves unaccepted evidence with its source, which reports it and stays unready. Host events remain
+subscribed tasks, so admitted subscriptions never block the source's next event. When retained
+events, deliveries or bytes pass three quarters of their bound, settled events give up the rest of
+their seven-day recall window, oldest first. A pruned event leaves a small tombstone on its source,
+so a later reconcile that still reports it as current neither delivers it again nor stalls the
+source; each source keeps the newest tombstone of its 64 most recently pruned subjects. Capacity
+that remains exhausted leaves unaccepted evidence with its source, which reports it and stays
+unready. Host events remain
 untrusted operational evidence in memory and never become owner preferences or permission grants.

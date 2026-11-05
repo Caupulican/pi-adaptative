@@ -14,13 +14,16 @@ import {
 	hostEventRecord,
 	hostEventString,
 	hostEventSubscriptionId,
+	hostEventTombstoneMatches,
 	MAX_HOST_EVENT_TARGETS,
+	MAX_HOST_EVENT_TOMBSTONES,
 	parseHostEventCatchUpSeal,
 	parseHostEventDeliveryBinding,
 	parseHostEventEnvelope,
 	parseHostEventReplayGap,
 	parseHostEventSourceRegistration,
 	parseHostEventSubscriptionInput,
+	parseHostEventTombstone,
 	parseHostEventTranscriptReceipt,
 } from "./host-event-contract.ts";
 import {
@@ -61,9 +64,14 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 			"replayFloor",
 			"lastReplayGap",
 			"seal",
+			"prunedEvents",
 		],
 		"host event source",
 	);
+	const prunedEvents =
+		record.prunedEvents === undefined
+			? undefined
+			: hostEventArray(record.prunedEvents, MAX_HOST_EVENT_TOMBSTONES, parseHostEventTombstone, "pruned events");
 	const source = {
 		registration: parseHostEventSourceRegistration(record.registration),
 		acceptedThrough: hostEventInteger(record.acceptedThrough, "acceptedThrough", 0),
@@ -72,7 +80,15 @@ function sourceFromValue(value: unknown): HostEventSourceState {
 		replayFloor: hostEventInteger(record.replayFloor, "replayFloor"),
 		...(record.lastReplayGap === undefined ? {} : { lastReplayGap: parseHostEventReplayGap(record.lastReplayGap) }),
 		...(record.seal === undefined ? {} : { seal: parseHostEventCatchUpSeal(record.seal) }),
+		...(prunedEvents === undefined ? {} : { prunedEvents }),
 	};
+	if (
+		prunedEvents &&
+		(prunedEvents.length === 0 ||
+			new Set(prunedEvents.map((tombstone) => tombstone.subjectKey)).size !== prunedEvents.length ||
+			prunedEvents.some((tombstone) => tombstone.sourceSequence > source.retiredThrough))
+	)
+		throw new HostEventError("invalid", "Pruned event tombstones are inconsistent.");
 	if (
 		source.retiredThrough > source.acceptedThrough ||
 		source.acceptedThrough < source.registration.startingSequence - 1 ||
@@ -244,7 +260,8 @@ function deliveryFromValue(value: unknown): HostEventDelivery {
 			delivery.binding.eventId !== delivery.eventId ||
 			delivery.binding.generation !== delivery.generation ||
 			delivery.binding.subscriptionId !== delivery.target.subscriptionId ||
-			delivery.binding.subscriptionRevision !== delivery.target.subscriptionRevision ||
+			// A wake-only subscription change moves an open delivery's target past its binding's revision.
+			delivery.binding.subscriptionRevision > delivery.target.subscriptionRevision ||
 			delivery.binding.execution.taskId !== delivery.target.taskId)
 	)
 		throw new HostEventError("invalid", "Delivery binding differs from immutable target.");
@@ -300,10 +317,15 @@ export function validateHostEventGraph(state: TaskRuntimeProjection): void {
 	for (const [id, source] of Object.entries(state.eventSources)) {
 		if (id !== source.registration.sourceId)
 			throw new HostEventError("invalid", "Source map key differs from its identity.");
+		for (const tombstone of source.prunedEvents ?? [])
+			if (state.hostEvents[tombstone.eventId])
+				throw new HostEventError("invalid", "A pruned event tombstone names a retained event.");
 		for (const observation of source.seal?.observations ?? []) {
 			if (observation.status !== "completed") continue;
 			const envelope = observation.eventId ? state.hostEvents[observation.eventId]?.envelope : undefined;
 			const event = envelope?.event;
+			if (!envelope && source.prunedEvents?.some((tombstone) => hostEventTombstoneMatches(tombstone, observation)))
+				continue;
 			if (
 				!event ||
 				envelope?.sourceId !== id ||

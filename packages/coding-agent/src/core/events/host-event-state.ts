@@ -7,6 +7,7 @@ import type {
 	HostEventSealedFrontier,
 	HostEventSourceRegistration,
 	HostEventSubscriptionInput,
+	HostEventTombstone,
 	HostEventTranscriptReceipt,
 } from "./host-event-contract.ts";
 
@@ -18,6 +19,8 @@ export interface HostEventSourceState {
 	readonly replayFloor: number;
 	readonly lastReplayGap?: HostEventReplayGap;
 	readonly seal?: HostEventSealedFrontier;
+	/** Pruned occurrences a later seal may still name; bounded by `MAX_HOST_EVENT_TOMBSTONES`. */
+	readonly prunedEvents?: readonly HostEventTombstone[];
 }
 
 export interface HostEventSubscription extends HostEventSubscriptionInput {

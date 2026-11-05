@@ -1,7 +1,7 @@
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
-import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { HostEventError, type HostEventSink, hostEventHash, hostEventString } from "./host-event-contract.ts";
 import { hostEventParentInput } from "./host-event-delivery.ts";
@@ -29,6 +29,43 @@ export interface HostEventSessionControllerDeps {
 	warn(message: string): void;
 }
 
+/** One serialized, level-triggered drain: a request during a pass schedules exactly one more pass. */
+class DeliveryLane {
+	private readonly run: () => Promise<void>;
+	private readonly isActive: () => boolean;
+	private readonly fail: (error: unknown) => void;
+	private pending: Promise<void> | undefined;
+	private requested = false;
+
+	constructor(run: () => Promise<void>, isActive: () => boolean, fail: (error: unknown) => void) {
+		this.run = run;
+		this.isActive = isActive;
+		this.fail = fail;
+	}
+
+	request(): void {
+		if (!this.isActive()) return;
+		this.requested = true;
+		if (this.pending) return;
+		this.pending = Promise.resolve()
+			.then(async () => {
+				while (this.requested && this.isActive()) {
+					this.requested = false;
+					await this.run();
+				}
+			})
+			.catch(this.fail)
+			.finally(() => {
+				this.pending = undefined;
+				if (this.requested) this.request();
+			});
+	}
+
+	async settled(): Promise<void> {
+		await this.pending;
+	}
+}
+
 /** Joins host custody to canonical task delivery. No timer, provider I/O or second accepted-event store. */
 export class HostEventSessionController {
 	readonly sink: HostEventSink;
@@ -37,8 +74,16 @@ export class HostEventSessionController {
 	private readonly signal: AbortSignal;
 	private readonly unsubscribe: (() => void)[] = [];
 	private readonly warned = new Map<string, string>();
-	private pending: Promise<void> | undefined;
-	private requested = false;
+	private readonly taskLane = new DeliveryLane(
+		() => this.drainTasks(),
+		() => this.active(),
+		(error) => this.report("session", error),
+	);
+	private readonly rootLane = new DeliveryLane(
+		() => this.drainRoot(),
+		() => this.active(),
+		(error) => this.report("session", error),
+	);
 	private closed = false;
 	private readonly sourceLifetime: HostEventSourceLifetime;
 
@@ -104,6 +149,10 @@ export class HostEventSessionController {
 		this.schedule();
 	}
 
+	private active(): boolean {
+		return !this.closed && !this.signal.aborted;
+	}
+
 	private assertCurrent(): void {
 		this.signal.throwIfAborted();
 		if (this.closed) throw new HostEventError("closed", "Host event session closed.");
@@ -126,25 +175,15 @@ export class HostEventSessionController {
 		}
 	}
 
+	/** Task and root deliveries are independent serialized lanes, both level-triggered by the same notifications. */
 	private schedule(): void {
 		if (this.closed || this.signal.aborted) return;
-		this.requested = true;
-		if (this.pending) return;
-		this.pending = Promise.resolve()
-			.then(async () => {
-				while (this.requested && !this.signal.aborted) {
-					this.requested = false;
-					await this.drain();
-				}
-			})
-			.catch((error: unknown) => this.report("session", error))
-			.finally(() => {
-				this.pending = undefined;
-				if (this.requested) this.schedule();
-			});
+		this.taskLane.request();
+		this.rootLane.request();
 	}
 
-	private async drain(): Promise<void> {
+	/** Task delivery is synchronous host work, so it runs under one runtime work lease. */
+	private async drainTasks(): Promise<void> {
 		this.assertCurrent();
 		if (!this.deps.canDeliver()) return;
 		const lease = runtimeGenerationAdmission(this.deps.agentDir).tryAdmitWork({
@@ -155,28 +194,24 @@ export class HostEventSessionController {
 		try {
 			const events = this.deps.runtime.hostEvents;
 			for (const delivery of events.pendingDeliveries()) {
+				if (delivery.target.kind !== "task") continue;
 				this.assertCurrent();
 				lease.assertCurrent();
 				if (!this.deps.canDeliver()) return;
 				try {
-					if (delivery.target.kind === "task") {
-						const subscription =
-							this.deps.runtime.getSnapshot().threadSubscriptions[delivery.target.subscriptionId];
-						if (
-							!subscription ||
-							subscription.revokedOrdinal !== undefined ||
-							subscription.revision !== delivery.target.subscriptionRevision
-						) {
-							this.settleTask(delivery.deliveryId, "unsubscribed");
-						} else if (events.taskDisposition(delivery.target.taskId) === "closed") {
-							this.settleTask(delivery.deliveryId, "task_closed");
-						} else if (events.eligible(delivery.deliveryId)) {
-							const outcome = await this.deps.deliverTask(delivery, this.signal);
-							this.assertCurrent();
-							if (outcome === "unavailable") this.settleTask(delivery.deliveryId, "handed_back");
-						}
+					const subscription = this.deps.runtime.getSnapshot().threadSubscriptions[delivery.target.subscriptionId];
+					if (
+						!subscription ||
+						subscription.revokedOrdinal !== undefined ||
+						subscription.revision !== delivery.target.subscriptionRevision
+					) {
+						this.settleTask(delivery.deliveryId, "unsubscribed");
+					} else if (events.taskDisposition(delivery.target.taskId) === "closed") {
+						this.settleTask(delivery.deliveryId, "task_closed");
 					} else if (events.eligible(delivery.deliveryId)) {
-						await this.deliverRoot(delivery, lease);
+						const outcome = await this.deps.deliverTask(delivery, this.signal);
+						this.assertCurrent();
+						if (outcome === "unavailable") this.settleTask(delivery.deliveryId, "handed_back");
 					}
 					this.warned.delete(delivery.deliveryId);
 				} catch (error) {
@@ -185,6 +220,34 @@ export class HostEventSessionController {
 			}
 		} finally {
 			lease.release();
+		}
+	}
+
+	/**
+	 * Root delivery waits for the foreground, so it holds no runtime work lease while waiting: the
+	 * parent-input path admits its own reader when it takes ownership. Runtime replacement and task
+	 * delivery never queue behind a parent turn.
+	 */
+	private async drainRoot(): Promise<void> {
+		this.assertCurrent();
+		const events = this.deps.runtime.hostEvents;
+		for (const delivery of events.pendingDeliveries()) {
+			if (delivery.target.kind !== "root") continue;
+			this.assertCurrent();
+			if (!this.deps.canDeliver()) return;
+			// A replacing runtime re-drives this lane through its availability notification.
+			const probe = runtimeGenerationAdmission(this.deps.agentDir).tryAdmitWork({
+				kind: "host-event",
+				label: "host event parent delivery",
+			});
+			if (!probe) return;
+			probe.release();
+			try {
+				if (events.eligible(delivery.deliveryId)) await this.deliverRoot(delivery);
+				this.warned.delete(delivery.deliveryId);
+			} catch (error) {
+				this.report(delivery.deliveryId, error);
+			}
 		}
 	}
 
@@ -198,17 +261,16 @@ export class HostEventSessionController {
 		if (events.getDelivery(deliveryId)?.status === "pending") events.settle(deliveryId, reason);
 	}
 
-	private async deliverRoot(delivery: HostEventDelivery, lease: RuntimeWorkLease): Promise<void> {
+	private async deliverRoot(delivery: HostEventDelivery): Promise<void> {
 		const events = this.deps.runtime.hostEvents;
 		const accepted = events.getEvent(delivery.eventId);
 		if (!accepted) throw new HostEventError("missing", "Host event evidence is missing.");
+		// The foreground submission's own runtime reader is asserted before this append.
 		const receipt = await this.deps.deliverParent(hostEventParentInput(accepted, delivery), {
 			signal: this.signal,
-			runtimeLease: lease,
 			withAppend: (append) =>
 				events.guardedRootDelivery(delivery.deliveryId, "append", (transaction) => {
 					this.assertCurrent();
-					lease.assertCurrent();
 					if (!this.deps.canDeliver())
 						throw new HostEventError("disabled", "Proactive event delivery is disabled.");
 					const receipt = append();
@@ -236,7 +298,7 @@ export class HostEventSessionController {
 		this.abort.abort(new Error("Host event session closed."));
 		this.deps.runtime.hostEvents.closeSourceLifetime(this.sourceLifetime);
 		for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
-		await this.pending;
+		await Promise.all([this.taskLane.settled(), this.rootLane.settled()]);
 		this.warned.clear();
 	}
 }

@@ -4,6 +4,7 @@ import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { taskAwaitsVerification } from "../orchestration/verification-identity.ts";
 import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
+import { hostEventCapacity } from "./host-event-capacity.ts";
 import {
 	assertHostEventReceiptMatchesBinding,
 	ciEventSubject,
@@ -21,8 +22,15 @@ import {
 	hostEventSealedFrontier,
 	hostEventString,
 	hostEventSubscriptionId,
+	hostEventTombstone,
+	hostEventTombstoneIsSnapshot,
+	hostEventTombstoneMatches,
+	MAX_HOST_EVENT_DELIVERIES,
+	MAX_HOST_EVENT_DOMAIN_BYTES,
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
 	MAX_HOST_EVENT_TARGETS,
+	MAX_HOST_EVENT_TOMBSTONES,
+	MAX_HOST_EVENTS,
 	parseHostEventCatchUp,
 	parseHostEventCatchUpSeal,
 	parseHostEventDeliveryBinding,
@@ -150,25 +158,25 @@ export function hostEventExecutionSuperseded(
 	);
 }
 
+/**
+ * A binding stays valid while its event is current under the source's present seal. The seal
+ * digest, catch-up generation and scope version recorded in the binding are provenance only: a
+ * reconnect that re-seals the same current event neither invalidates a queued copy nor forces a
+ * rebind, while an unsealed source or a superseding event still fences it through eligibility.
+ */
 export function assertHostEventExecution(
 	state: TaskRuntimeProjection,
 	binding: HostEventDeliveryBinding,
 	now: number,
 ): HostEventDelivery {
 	const delivery = state.eventDeliveries[binding.deliveryId];
-	const event = delivery ? state.hostEvents[delivery.eventId] : undefined;
-	const source = event ? state.eventSources[event.envelope.sourceId] : undefined;
 	if (
 		!delivery ||
-		!source ||
 		delivery.bindingRetired ||
 		!isDeepStrictEqual(delivery.binding, binding) ||
-		!hostEventDeliveryEligible(state, delivery) ||
-		hostEventSealDigest(source) !== binding.sourceSealDigest ||
-		binding.sourceGeneration !== source.catchUpGeneration ||
-		binding.scopeVersion !== source.registration.scopeVersion
+		!hostEventDeliveryEligible(state, delivery)
 	)
-		throw new HostEventError("stale_delivery", "Host event delivery or source frontier is stale.");
+		throw new HostEventError("stale_delivery", "Host event delivery is stale or no longer current.");
 	const execution = binding.execution;
 	const attempt = assertHostEventWorkerScope(state, execution, now);
 	const agent = state.agents[execution.agentId];
@@ -217,11 +225,36 @@ export function replaceHostEventSubscriptions(
 		if (others + own >= MAX_HOST_EVENT_TARGETS)
 			throw new HostEventError("capacity", "CI subject already has the maximum number of subscribed tasks.");
 	}
+	// Only rows whose membership or wake changes take the next revision. An identical row keeps its
+	// revision, so its open deliveries stay subscribed; a wake-only change keeps membership and moves
+	// its open deliveries with the row. A changed subject or a removed row is a real unsubscribe.
+	const next = revision + 1;
+	const declared = new Set(inputs.map((input) => hostEventSubscriptionId(taskId, input.threadKey)));
 	for (const subscription of existing)
-		subscriptions[subscription.subscriptionId] = { ...subscription, revision: revision + 1, revokedOrdinal: ordinal };
+		if (subscription.revokedOrdinal === undefined && !declared.has(subscription.subscriptionId))
+			subscriptions[subscription.subscriptionId] = { ...subscription, revision: next, revokedOrdinal: ordinal };
+	const deliveries = state.eventDeliveries as Record<string, HostEventDelivery>;
 	for (const input of inputs) {
 		const id = hostEventSubscriptionId(taskId, input.threadKey);
-		subscriptions[id] = { ...input, subscriptionId: id, taskId, revision: revision + 1, createdOrdinal: ordinal };
+		const prior = Object.hasOwn(subscriptions, id) ? subscriptions[id] : undefined;
+		const member = prior?.revokedOrdinal === undefined && isDeepStrictEqual(prior?.subject, input.subject);
+		if (!prior || !member) {
+			subscriptions[id] = { ...input, subscriptionId: id, taskId, revision: next, createdOrdinal: ordinal };
+			continue;
+		}
+		if (prior.wake === input.wake) continue;
+		subscriptions[id] = { ...prior, wake: input.wake, revision: next };
+		for (const delivery of Object.values(deliveries))
+			if (
+				delivery.target.kind === "task" &&
+				delivery.target.subscriptionId === id &&
+				delivery.target.subscriptionRevision === prior.revision &&
+				(delivery.status === "pending" || delivery.status === "reserved")
+			)
+				deliveries[delivery.deliveryId] = {
+					...delivery,
+					target: { ...delivery.target, subscriptionRevision: next },
+				};
 	}
 }
 
@@ -234,11 +267,28 @@ function settleUnusedRoot(state: TaskRuntimeProjection, event: AcceptedHostEvent
 		deliveries[root.deliveryId] = { ...root, status: "settled", reason: "task_delivery_settled", settledAt: at };
 }
 
-export function hostEventCanPrune(state: TaskRuntimeProjection, event: AcceptedHostEvent, now: number): boolean {
+/**
+ * Retained state is within a quarter of a record or byte bound. Settled history then gives up its
+ * recall window, so a burst of evidence never leaves the source unable to accept its next event.
+ */
+export function hostEventRetentionPressure(state: TaskRuntimeProjection): boolean {
+	if (Object.keys(state.hostEvents).length > (MAX_HOST_EVENTS * 3) / 4) return true;
+	if (Object.keys(state.eventDeliveries).length > (MAX_HOST_EVENT_DELIVERIES * 3) / 4) return true;
+	const { bytes, reservedBytes } = hostEventCapacity(state);
+	return bytes + reservedBytes > (MAX_HOST_EVENT_DOMAIN_BYTES * 3) / 4;
+}
+
+/** `pressure` waives only the recall window; replay, seal and delivery obligations always pin an event. */
+export function hostEventCanPrune(
+	state: TaskRuntimeProjection,
+	event: AcceptedHostEvent,
+	now: number,
+	pressure = false,
+): boolean {
 	const source = state.eventSources[event.envelope.sourceId];
 	return (
 		event.envelope.sourceSequence <= source.retiredThrough &&
-		Date.parse(event.recallUntil) <= now &&
+		(pressure || Date.parse(event.recallUntil) <= now) &&
 		!source.seal?.observations.some((observation) => observation.eventId === event.envelope.event.eventId) &&
 		event.deliveryIds.every((id) => {
 			const delivery = state.eventDeliveries[id];
@@ -271,6 +321,12 @@ function acceptCanonicalHostEvent(
 		)
 	)
 		throw new HostEventError("identity_conflict", "Source position already belongs to another event.");
+	if (
+		source.prunedEvents?.some(
+			(tombstone) => tombstone.eventId === id || tombstone.sourceSequence === envelope.sourceSequence,
+		)
+	)
+		throw new HostEventError("identity_conflict", "A pruned occurrence cannot be accepted again.");
 	const key = ciSubjectKey(ciEventSubject(envelope.event));
 	if (!source.registration.subjects.some((subject) => ciSubjectKey(subject) === key))
 		throw new HostEventError("source_conflict", "Event is outside registered source scope.");
@@ -460,9 +516,14 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 						"Snapshot is not a current terminal observation below the stream replay floor.",
 					);
 				const retained = events[snapshot.event.eventId];
+				const pruned = source.prunedEvents?.find((tombstone) => tombstone.eventId === snapshot.event.eventId);
 				if (retained) {
 					if (!isDeepStrictEqual(retained.envelope, snapshot))
 						throw new HostEventError("identity_conflict", "Current snapshot differs from retained occurrence.");
+				} else if (pruned) {
+					// Its custody was already transferred and settled; a snapshot never delivers it again.
+					if (!hostEventTombstoneIsSnapshot(pruned, snapshot))
+						throw new HostEventError("identity_conflict", "Current snapshot differs from pruned occurrence.");
 				} else acceptCanonicalHostEvent(state, event, snapshot, payload.consumerId, payload.origin);
 			}
 			for (const observation of seal.observations) {
@@ -488,6 +549,11 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				if (observation.status === "completed") {
 					const terminal = observation.eventId ? events[observation.eventId] : undefined;
 					const item = terminal?.envelope.event;
+					if (
+						!terminal &&
+						source.prunedEvents?.some((tombstone) => hostEventTombstoneMatches(tombstone, observation))
+					)
+						continue;
 					if (
 						!terminal ||
 						terminal.envelope.sourceId !== seal.sourceId ||
@@ -781,13 +847,29 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				(id) => hostEventString(id, "eventId"),
 				"pruned events",
 			);
+			const pressure = payload.pressure === true;
+			if (pressure && !hostEventRetentionPressure(state))
+				throw new HostEventError("retained", "Host event recall is waived only under retention pressure.");
 			for (const id of ids) {
 				const accepted = events[id];
 				if (!accepted) continue;
-				if (!hostEventCanPrune(state, accepted, Date.parse(event.occurredAt)))
+				if (!hostEventCanPrune(state, accepted, Date.parse(event.occurredAt), pressure))
 					throw new HostEventError("retained", "Host event still owns recall, replay or delivery obligations.");
 				for (const deliveryId of accepted.deliveryIds) delete deliveries[deliveryId];
 				delete events[id];
+				// The newest pruned occurrence of a subject stays verifiable by a later seal.
+				const sourceId = accepted.envelope.sourceId;
+				const tombstone = hostEventTombstone(accepted.envelope);
+				const kept = (sources[sourceId].prunedEvents ?? []).filter(
+					(prior) => prior.subjectKey !== tombstone.subjectKey || prior.sourceSequence > tombstone.sourceSequence,
+				);
+				const prunedEvents = kept.some((prior) => prior.subjectKey === tombstone.subjectKey)
+					? kept
+					: [...kept, tombstone].sort((left, right) => left.sourceSequence - right.sourceSequence);
+				sources[sourceId] = {
+					...sources[sourceId],
+					prunedEvents: prunedEvents.slice(-MAX_HOST_EVENT_TOMBSTONES),
+				};
 			}
 			break;
 		}
