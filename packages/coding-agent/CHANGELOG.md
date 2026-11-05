@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Knowledge citations no longer admit text the owner only showed. Quoted regions were found by counting `"` and backtick characters on trimmed text, so curly quotes, guillemets, CJK quotes, `~~~` and indented code, quote elements, or one stray `27"` or escaped `\"` turned a later quotation into stated text. Regions are now paired on the untrimmed original, and a quote overlapping any of them is shown. A quote must also state the change itself: it needs at least four letters of the owner's own words, a fact whose terms the cited sources hold only inside shown text is rejected, and a quote must name a fact term whenever its source does. These checks run before any judgment is paid for.
 - Closing a session while the ICM chat still has summaries to build no longer reports `Continuous-chat compaction <node> failed: This operation was aborted` or records those summaries as failed. The closing session starts no new summary, and one its close interrupts is left for the next session to build.
 - A routine result that coalesces missed scheduled slots now states how many in the result delivered to the session (`missedCount` in its details); the count was recorded but not delivered.
 - A routine's `lastStatus` in `list` and `get` now follows its most recently claimed run to that run's outcome (succeeded, failed, cancelled or uncertain), including manual runs; it no longer stays `running` after the run ends. `get` also shows the finished run's summary.

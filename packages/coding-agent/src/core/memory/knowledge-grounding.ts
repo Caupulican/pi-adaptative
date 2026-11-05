@@ -4,16 +4,13 @@ import { estimateTokensFromChars } from "../context/context-item.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionResult } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import {
-	locateOwnerQuote,
-	type OwnerEvidenceLedger,
-	type OwnerEvidenceRecord,
-} from "../learning/owner-evidence-ledger.ts";
+import type { OwnerEvidenceLedger, OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import { nextOwnerEvidenceWindow, type OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { KnowledgeChange } from "./knowledge-admission.ts";
+import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { type KnowledgeScope, type KnowledgeStorePort, knowledgeAppliesTo } from "./knowledge-record.ts";
 
 const RELATIONS = ["explicit", "inferred", "unrelated", "conflict", "unresolved"] as const;
@@ -156,13 +153,12 @@ export class KnowledgeGrounding {
 		if (hasMaskableSecretText(JSON.stringify(change)))
 			throw new KnowledgeGroundingEvidenceRefusal("Unsafe knowledge grounding candidate");
 		const sources = new Map<string, OwnerEvidenceRecord>();
+		const cited: CitedOwnerWords[] = [];
 		for (const citation of change.evidence) {
 			const source = this.deps.evidence.findSource(citation.source);
 			if (!source?.sessionId || source.chars !== source.text.length || hasMaskableSecretText(source.text))
 				throw new KnowledgeGroundingEvidenceRefusal("Grounding requires complete safe original owner evidence");
-			const location = locateOwnerQuote(source.text, citation.quote);
-			if (!location.found || location.shown)
-				throw new KnowledgeGroundingEvidenceRefusal("Invalid original owner citation");
+			cited.push({ source: source.text, quote: citation.quote });
 			sources.set(source.sourceId, source);
 		}
 		const target = change.id ? this.deps.store.get(change.id) : undefined;
@@ -171,6 +167,8 @@ export class KnowledgeGrounding {
 			(!target || !knowledgeAppliesTo(target.scope, this.deps.scope) || target.revision !== change.expectedRevision)
 		)
 			throw new KnowledgeGroundingEvidenceRefusal("Knowledge grounding target is not current in the owner scope");
+		if (ownerCitationRefusal(change.action === "remember" ? change : target, cited))
+			throw new KnowledgeGroundingEvidenceRefusal("Invalid original owner citation");
 		return { change, target, sources: [...sources.values()] };
 	}
 	private key(candidate: Candidate, window: OwnerEvidenceWindow): string {

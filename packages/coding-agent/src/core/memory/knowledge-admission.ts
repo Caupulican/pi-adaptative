@@ -8,10 +8,10 @@ import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine
 import { createDecisionProgram } from "../decision/program.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
-import { locateOwnerQuote } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import type { ResolvedLearningPolicySettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
+import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { KnowledgeGrounding } from "./knowledge-grounding.ts";
 import {
 	isKnowledgeCitation,
@@ -268,6 +268,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		};
 		const citations: KnowledgeCitation[] = [];
 		const originals: Array<{ source: string; text: string }> = [];
+		const cited: CitedOwnerWords[] = [];
 		for (const citation of input.evidence) {
 			const source = evidence.findSource(citation.source);
 			if (!source?.sessionId || source.chars !== source.text.length)
@@ -276,13 +277,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 					"evidence",
 					"A citation has no complete original owner source on this branch",
 				);
-			const location = locateOwnerQuote(source.text, citation.quote);
-			if (!location.found || location.shown)
-				return held(
-					"invalid_citation",
-					"never",
-					"A citation is absent or quotes text the owner showed, rather than stated",
-				);
+			cited.push({ source: source.text, quote: citation.quote });
 			if (hasMaskableSecretText(source.text) || hasMaskableSecretText(citation.quote))
 				return held("secret", "never", "Secret-bearing evidence is not admitted to knowledge");
 			if (!originals.some((original) => original.source === source.sourceId))
@@ -294,6 +289,8 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				at: source.createdAt,
 			});
 		}
+		const unsupported = ownerCitationRefusal(input.action === "remember" ? input : existing, cited);
+		if (unsupported) return held("invalid_citation", "never", unsupported);
 		const at = citations.map((citation) => citation.at).sort();
 		if (input.action === "remember" && input.validUntil && input.validUntil <= (input.validFrom ?? at.at(-1)!))
 			return held("invalid_change", "never", "The knowledge validity interval ends before it starts");

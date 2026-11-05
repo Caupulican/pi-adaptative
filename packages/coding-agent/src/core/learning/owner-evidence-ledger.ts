@@ -112,80 +112,307 @@ export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): Own
 	return getSessionSnapshots(entries, OWNER_EVIDENCE_CODEC);
 }
 
-/** Lowercase, plain quotes, collapsed horizontal whitespace; newlines are kept so line structure survives. */
-function normalizeQuoteText(text: string): string {
-	return text
-		.toLowerCase()
-		.replace(/[\u2018\u2019]/g, "'")
-		.replace(/[\u201c\u201d]/g, '"')
-		.replace(/\r\n?/g, "\n")
-		.split("\n")
-		.map((line) => line.replace(/[ \t]+/g, " ").trim())
-		.join("\n");
+/**
+ * One region of the owner's original text that the owner SHOWED rather than said, in original code-unit offsets
+ * (`end` exclusive, delimiters included). `inlineCode` marks a backtick or `<code>` span inside a sentence: how
+ * identifiers are written, still shown text for a citation, but not quotation of someone else's words.
+ */
+export interface OwnerShownRegion {
+	readonly start: number;
+	readonly end: number;
+	readonly inlineCode: boolean;
 }
 
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+const SPACE_CHAR = /\s/u;
+/** Opening quotation characters and the characters that may close each of them. */
+const QUOTE_CLOSERS: Readonly<Record<string, string>> = {
+	'"': '"',
+	"'": "'",
+	"\uff02": "\uff02",
+	"\u201c": "\u201d\u201c",
+	"\u201e": "\u201c\u201d",
+	"\u201f": "\u201d",
+	"\u201d": "\u201d",
+	"\u2018": "\u2019",
+	"\u201a": "\u2018\u2019",
+	"\u00ab": "\u00bb",
+	"\u00bb": "\u00ab",
+	"\u2039": "\u203a",
+	"\u203a": "\u2039",
+	"\u300c": "\u300d",
+	"\u300e": "\u300f",
+	"\ufe41": "\ufe42",
+	"\ufe43": "\ufe44",
+	"\uff62": "\uff63",
+};
+/** Bracket quotes of scripts written without spaces pair by direction alone. */
+const BRACKET_QUOTES = "\u300c\u300d\u300e\u300f\ufe41\ufe42\ufe43\ufe44\uff62\uff63";
+/** Guillemets allow typographic spacing inside the quotation. */
+const GUILLEMETS = "\u00ab\u00bb\u2039\u203a";
+/** Also apostrophes: an unpaired one is a letter, not an open quotation. */
+const APOSTROPHES = "'\u2019";
+const SHOWN_TAGS = /<(blockquote|q|pre|code)\b[^>]*>/giu;
+
 /**
- * Whether a span of the owner's text is text the owner SHOWED rather than said: inside quotation
- * marks or backticks, inside a fenced block, or on a blockquote line. A pasted excerpt is evidence
- * of what the owner showed, never automatically of what they believe; this is the host's
- * deterministic half of that judgment. The semantic half stays model work.
+ * Every region of the owner's original words that is shown rather than stated: fenced (``` or ~~~) and indented code
+ * blocks, blockquote lines, `<blockquote>`/`<q>`/`<pre>`/`<code>` elements, inline code spans, and quotations in any
+ * common style (ASCII, curly, low-9, guillemets, CJK brackets). Computed once on the untrimmed original. Quotation marks
+ * pair by position (an opener follows no letter or digit, a closer precedes none), so a stray `27"` or an escaped `\"`
+ * never shifts later quotations into stated text. Unclosed openers, fences and elements extend to the end of the text:
+ * every uncertainty resolves to shown.
  */
-function isShownSpan(haystack: string, start: number, end: number): boolean {
-	const before = haystack.slice(0, start);
-	const fences = (before.match(/```/g) ?? []).length;
-	if ((fences & 1) === 1) return true;
-	const inlineTicks = (before.replace(/```/g, "").match(/`/g) ?? []).length;
-	if ((inlineTicks & 1) === 1) return true;
-	if (((before.match(/"/g) ?? []).length & 1) === 1) return true;
-	// Blockquote: any line the span touches starts with ">".
-	let lineStart = before.lastIndexOf("\n") + 1;
-	while (lineStart <= end && lineStart < haystack.length) {
-		if (haystack.slice(lineStart).startsWith(">")) return true;
-		const next = haystack.indexOf("\n", lineStart);
-		if (next < 0) break;
-		lineStart = next + 1;
+export function ownerShownRegions(text: string): OwnerShownRegion[] {
+	const regions: OwnerShownRegion[] = [];
+	const lines: Array<{ start: number; end: number; text: string }> = [];
+	for (let start = 0; start <= text.length; ) {
+		const newline = text.indexOf("\n", start);
+		const end = newline < 0 ? text.length : newline;
+		lines.push({ start, end, text: text.slice(start, end).replace(/\r$/, "") });
+		if (newline < 0) break;
+		start = newline + 1;
 	}
-	return false;
-}
-
-/**
- * Where a cited quote sits in the owner's words. Every occurrence is tried: a quote that appears
- * first inside shown text and later as the owner's own statement is found as stated. Returns the
- * sentence around the first stated occurrence for the explicit/corrective wording check.
- */
-export function locateOwnerQuote(
-	ownerText: string,
-	quote: string,
-): { found: boolean; shown: boolean; sentence: string } {
-	const haystack = normalizeQuoteText(ownerText);
-	const needle = normalizeQuoteText(quote)
-		.replace(/\n/g, " ")
-		.replace(/^["'`]+|["'`.,;:!?]+$/g, "");
-	if (needle.length === 0) return { found: false, shown: false, sentence: "" };
-	// Newlines count as spaces for matching only; positions are preserved one to one.
-	const flat = haystack.replace(/\n/g, " ");
-	let index = flat.indexOf(needle);
-	let sawShown = false;
-	while (index >= 0) {
-		const end = index + needle.length;
-		if (!isShownSpan(haystack, index, end)) {
-			const before = haystack.slice(0, index);
-			const sentenceStart =
-				Math.max(
-					before.lastIndexOf("."),
-					before.lastIndexOf("!"),
-					before.lastIndexOf("?"),
-					before.lastIndexOf("\n"),
-				) + 1;
-			const after = haystack.slice(end);
-			const stop = after.search(/[.!?\n]/);
-			const sentenceEnd = stop < 0 ? haystack.length : end + stop;
-			return { found: true, shown: false, sentence: haystack.slice(sentenceStart, sentenceEnd).trim() };
+	let fence: { marker: string; start: number } | undefined;
+	let previousBlank = true;
+	let previousIndented = false;
+	for (const line of lines) {
+		const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line.text)?.[1];
+		if (fence) {
+			if (
+				marker &&
+				marker[0] === fence.marker[0] &&
+				marker.length >= fence.marker.length &&
+				!/\S/.test(line.text.slice(line.text.indexOf(marker) + marker.length))
+			) {
+				regions.push({ start: fence.start, end: line.end, inlineCode: false });
+				fence = undefined;
+			}
+			continue;
 		}
-		sawShown = true;
-		index = flat.indexOf(needle, index + 1);
+		if (marker) {
+			fence = { marker, start: line.start };
+			previousBlank = false;
+			previousIndented = false;
+			continue;
+		}
+		const blank = !/\S/.test(line.text);
+		const indented: boolean = !blank && /^( {4}|\t)/.test(line.text) && (previousBlank || previousIndented);
+		if (indented || /^ {0,3}>/.test(line.text)) regions.push({ start: line.start, end: line.end, inlineCode: false });
+		previousIndented = indented;
+		previousBlank = blank;
 	}
-	return { found: sawShown, shown: sawShown, sentence: "" };
+	if (fence) regions.push({ start: fence.start, end: text.length, inlineCode: false });
+	for (const tag of text.matchAll(SHOWN_TAGS)) {
+		const close = new RegExp(`</${tag[1]}\\s*>`, "iu");
+		const after = tag.index + tag[0].length;
+		const found = close.exec(text.slice(after));
+		regions.push({
+			start: tag.index,
+			end: found ? after + found.index + found[0].length : text.length,
+			inlineCode: tag[1]!.toLowerCase() === "code",
+		});
+	}
+	const blockMask = shownMask(
+		text,
+		regions.filter((region) => !region.inlineCode),
+	);
+	const blocked = (index: number): boolean => blockMask[index] === 1;
+	const wordAt = (index: number): boolean => index >= 0 && index < text.length && WORD_CHAR.test(text[index]!);
+	const spaceAt = (index: number): boolean => index < 0 || index >= text.length || SPACE_CHAR.test(text[index]!);
+	const opens = (index: number): boolean => {
+		const char = text[index]!;
+		if (BRACKET_QUOTES.includes(char)) return true;
+		return !wordAt(index - 1) && (GUILLEMETS.includes(char) || !spaceAt(index + 1));
+	};
+	const closes = (index: number): boolean => {
+		const char = text[index]!;
+		if (BRACKET_QUOTES.includes(char)) return true;
+		return !wordAt(index + 1) && (GUILLEMETS.includes(char) || !spaceAt(index - 1));
+	};
+	for (let index = 0; index < text.length; index++) {
+		if (blocked(index)) continue;
+		const char = text[index]!;
+		if (char === "\\") {
+			index++;
+			continue;
+		}
+		if (char === "`") {
+			let run = 1;
+			while (text[index + run] === "`") run++;
+			let search = index + run;
+			let closing = -1;
+			while (search < text.length) {
+				const next = text.indexOf("`".repeat(run), search);
+				if (next < 0) break;
+				let length = run;
+				while (text[next + length] === "`") length++;
+				if (length === run && text[next - 1] !== "`") {
+					closing = next;
+					break;
+				}
+				search = next + length;
+			}
+			if (closing >= 0) {
+				regions.push({ start: index, end: closing + run, inlineCode: true });
+				index = closing + run - 1;
+			} else index += run - 1;
+			continue;
+		}
+		const closers = QUOTE_CLOSERS[char];
+		if (!closers || !opens(index)) continue;
+		let closing = -1;
+		for (let next = index + 1; next < text.length; next++) {
+			if (text[next] === "\\") {
+				next++;
+				continue;
+			}
+			if (closers.includes(text[next]!) && !blocked(next) && closes(next)) {
+				closing = next;
+				break;
+			}
+		}
+		// An unpaired apostrophe-like mark is a letter; any other unpaired opener shows the rest of the text.
+		if (closing < 0 && APOSTROPHES.includes(char)) continue;
+		const end = closing < 0 ? text.length : closing + 1;
+		regions.push({ start: index, end, inlineCode: false });
+		index = end - 1;
+	}
+	return regions.sort((left, right) => left.start - right.start || right.end - left.end);
+}
+
+/** One flag per code unit of `text`: 1 inside any of `regions`. */
+function shownMask(text: string, regions: readonly OwnerShownRegion[]): Uint8Array {
+	const mask = new Uint8Array(text.length);
+	for (const region of regions) mask.fill(1, region.start, region.end);
+	return mask;
+}
+
+/** The original text of `[start, end)` with every shown code unit removed. */
+function statedText(text: string, mask: Uint8Array, start: number, end: number): string {
+	let result = "";
+	for (let index = start; index < end; index++) if (mask[index] !== 1) result += text[index];
+	return result;
+}
+
+/**
+ * Lowercase, plain quotes and single spaces, with each normalized code unit mapped back to the original range that
+ * produced it, so a match found on normalized text is tested against regions computed on the untrimmed original.
+ */
+function normalizeWithOrigins(text: string): { text: string; starts: number[]; ends: number[] } {
+	let normalized = "";
+	const starts: number[] = [];
+	const ends: number[] = [];
+	for (let index = 0; index < text.length; ) {
+		const point = String.fromCodePoint(text.codePointAt(index)!);
+		const end = index + point.length;
+		if (SPACE_CHAR.test(point)) {
+			if (normalized.length > 0 && !normalized.endsWith(" ")) {
+				normalized += " ";
+				starts.push(index);
+				ends.push(end);
+			}
+		} else {
+			const lowered = point
+				.replace(/[\u2018\u2019\u201a\u201b]/u, "'")
+				.replace(/[\u201c\u201d\u201e\u201f\u00ab\u00bb\uff02]/u, '"')
+				.toLowerCase();
+			for (const unit of lowered) {
+				normalized += unit;
+				for (let count = 0; count < unit.length; count++) {
+					starts.push(index);
+					ends.push(end);
+				}
+			}
+		}
+		index = end;
+	}
+	while (normalized.endsWith(" ")) {
+		normalized = normalized.slice(0, -1);
+		starts.pop();
+		ends.pop();
+	}
+	return { text: normalized, starts, ends };
+}
+
+/** Where a cited quote sits in the owner's original words; see {@link locateOwnerQuote}. */
+export interface OwnerQuoteLocation {
+	readonly found: boolean;
+	readonly shown: boolean;
+	readonly sentence: string;
+	readonly stated: string;
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Shown-region masks of one original: every region, and only quotations and blocks (inline code excluded). */
+function shownMasks(ownerText: string): { all: Uint8Array; quoted: Uint8Array } {
+	const regions = ownerShownRegions(ownerText);
+	return {
+		all: shownMask(ownerText, regions),
+		quoted: shownMask(
+			ownerText,
+			regions.filter((region) => !region.inlineCode),
+		),
+	};
+}
+
+function spanIsShown(ownerText: string, masks: { all: Uint8Array; quoted: Uint8Array }, start: number, end: number) {
+	return (
+		masks.quoted.subarray(start, end).includes(1) || !WORD_CHAR.test(statedText(ownerText, masks.all, start, end))
+	);
+}
+
+/**
+ * Whether `[start, end)` of the owner's original text is text the owner SHOWED rather than said: it overlaps any
+ * quotation, quoted block or code block, or none of its letters or digits lies outside inline code. A pasted excerpt
+ * is evidence of what the owner showed, never automatically of what they believe; this is the host's deterministic
+ * half of that judgment. The semantic half stays model work. Inline code inside a stated sentence (`we use \`vitest\``)
+ * does not make the sentence shown.
+ */
+export function isShownSpan(ownerText: string, start: number, end: number): boolean {
+	return spanIsShown(ownerText, shownMasks(ownerText), start, end);
+}
+
+/**
+ * Where a cited quote sits in the owner's words. Every occurrence is tried; an occurrence that is not shown (see
+ * {@link isShownSpan}) wins, the one with the most stated letters first, so a quote that appears inside shown text
+ * and also as the owner's own statement is found as stated. `stated` is the chosen occurrence's words without inline
+ * code, and `sentence` the stated words of the sentence around it, both normalized, for the explicit/corrective
+ * wording check. `start`/`end` are the chosen occurrence's original offsets (-1 when no stated occurrence exists).
+ */
+export function locateOwnerQuote(ownerText: string, quote: string): OwnerQuoteLocation {
+	const haystack = normalizeWithOrigins(ownerText);
+	const needle = normalizeWithOrigins(quote)
+		.text.replace(/^["'`]+|["'`.,;:!?]+$/g, "")
+		.trim();
+	if (needle.length === 0) return { found: false, shown: false, sentence: "", stated: "", start: -1, end: -1 };
+	const masks = shownMasks(ownerText);
+	const mask = masks.all;
+	let best: { start: number; end: number; stated: string; letters: number } | undefined;
+	let found = false;
+	for (let index = haystack.text.indexOf(needle); index >= 0; index = haystack.text.indexOf(needle, index + 1)) {
+		found = true;
+		const start = haystack.starts[index]!;
+		const end = haystack.ends[index + needle.length - 1]!;
+		if (spanIsShown(ownerText, masks, start, end)) continue;
+		const stated = statedText(ownerText, mask, start, end);
+		const letters = stated.match(/[\p{L}\p{N}]/gu)?.length ?? 0;
+		if (letters > (best?.letters ?? 0)) best = { start, end, stated, letters };
+	}
+	if (!best) return { found, shown: found, sentence: "", stated: "", start: -1, end: -1 };
+	const boundary = (index: number): boolean => /[.!?\n]/.test(ownerText[index]!) && mask[index] !== 1;
+	let sentenceStart = best.start;
+	while (sentenceStart > 0 && !boundary(sentenceStart - 1)) sentenceStart--;
+	let sentenceEnd = best.end;
+	while (sentenceEnd < ownerText.length && !boundary(sentenceEnd)) sentenceEnd++;
+	return {
+		found: true,
+		shown: false,
+		sentence: normalizeWithOrigins(statedText(ownerText, mask, sentenceStart, sentenceEnd)).text,
+		stated: normalizeWithOrigins(best.stated).text,
+		start: best.start,
+		end: best.end,
+	};
 }
 
 interface OwnerEvidenceLedgerDeps {

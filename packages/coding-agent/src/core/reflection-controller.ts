@@ -1208,8 +1208,8 @@ export class ReflectionController {
 			if (
 				EXPLICIT_DURABLE_SIGNAL.test(location.sentence) ||
 				CORRECTION_SIGNAL.test(location.sentence) ||
-				EXPLICIT_DURABLE_SIGNAL.test(citation.quote) ||
-				CORRECTION_SIGNAL.test(citation.quote)
+				EXPLICIT_DURABLE_SIGNAL.test(location.stated) ||
+				CORRECTION_SIGNAL.test(location.stated)
 			) {
 				explicitVerified = true;
 			} else
