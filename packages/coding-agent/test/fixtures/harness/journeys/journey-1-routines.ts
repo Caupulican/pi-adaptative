@@ -1107,6 +1107,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			if (heldEntries().length > 0 && harnessNotices("routine-result-wakes").length > 0) heldSaved.release();
 		});
 		const heldRelease = createBarrier();
+		let rootRequestsBeforeHeld = -1;
 		try {
 			// The run reports only after the owner's turn ends. No parent reply is scripted for its result: a turn it
 			// started would find none.
@@ -1122,6 +1123,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					.some((request) => JSON.stringify(request.context.messages).includes("was paused after 3 failed runs")),
 				"the owner's turn carried the pause notice",
 			).toBe(true);
+			rootRequestsBeforeHeld = world.provider.requests.filter((request) => request.model.id === "root").length;
 			heldRelease.release();
 			await withDeadline(world.trace, "the held result and its notice are saved", heldSaved.promise);
 		} finally {
@@ -1129,7 +1131,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			stopObservingHeld();
 		}
 		await withDeadline(world.trace, "nothing runs for the held result", root.session.agent.waitForIdle());
-		const rootRequestsBeforeOwner = world.provider.requests.filter((request) => request.model.id === "root").length;
+		expect(
+			world.provider.requests.filter((request) => request.model.id === "root"),
+			"the held result made no root request",
+		).toHaveLength(rootRequestsBeforeHeld);
 		expect(
 			heldEntries().map((entry) => [parentInputOf(entry)?.metadata.mode, parentInputOriginalDetails(entry)]),
 			"the result past the bound waits for the owner's next turn",
@@ -1142,7 +1147,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			check: (request) => {
 				const wire = JSON.stringify(request.context.messages);
 				expect(wire, "the owner's next turn carries the held result").toContain(heldSummary);
-				expect(wire, "and the notice naming the bound").toContain("routines.maxResultWakesPerDay");
+				expect(wire, "and the notice naming the bound").toContain("Routine results started");
 			},
 		});
 		await withDeadline(
@@ -1151,7 +1156,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			root.session.prompt("What did the scheduled review report?"),
 		);
 		expect(world.provider.requests.filter((request) => request.model.id === "root")).toHaveLength(
-			rootRequestsBeforeOwner + 1,
+			rootRequestsBeforeHeld + 1,
 		);
 		expect(root.sessionManager.getPendingParentInputs(), "the owner's turn consumed what was held").toEqual([]);
 		world.trace.mark("root", "routine.native-durable-delivery");
