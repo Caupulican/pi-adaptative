@@ -135,6 +135,8 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	): MaintenanceUsageLease;
 	/** Reports a logically ended request that still has no measured usage. Never throws. */
 	reportUnresolvedRequest(requestId: string): void;
+	/** Whether this session measured the usage of `requestId`: a held receipt or a confirmed row, and nothing unknown. */
+	hasUsageReceipt(requestId: string): boolean;
 	readonly disposed: boolean;
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
@@ -751,6 +753,13 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		}
 		this.undispatchedRequests.delete(requestId);
 		this.clearUnresolved(requestId);
+	}
+
+	hasUsageReceipt(requestId: string): boolean {
+		return (
+			!this.unresolved.has(requestId) &&
+			(this.held.has(requestId) || this.ledger.findCanonical(requestId) !== undefined)
+		);
 	}
 
 	reportUnresolvedRequest(requestId: string): void {

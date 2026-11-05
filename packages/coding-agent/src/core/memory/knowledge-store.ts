@@ -31,7 +31,7 @@ import { KNOWLEDGE_WINDOW_SCHEMA } from "./knowledge-window-journal.ts";
 import { KNOWLEDGE_WORK_SCHEMA, KnowledgeWorkJournal } from "./knowledge-work-journal.ts";
 import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const MAX_QUERY_TERMS = 8;
 /**
  * Forgotten identities keep only their digest: the plaintext subject/key is erased, so no later identity judgment can
@@ -40,7 +40,9 @@ const MAX_QUERY_TERMS = 8;
  */
 const SCHEMA_V5 = `ALTER TABLE meta ADD COLUMN forget_fence TEXT;
 UPDATE meta SET forget_fence=(SELECT max(evidence_after) FROM entries WHERE body IS NULL) WHERE id=1;
-UPDATE entries SET identity=NULL WHERE body IS NULL;
+UPDATE entries SET identity=NULL WHERE body IS NULL;`;
+/** Held sources count their retries, so a source that keeps failing stops buying work even on a zero-priced model. */
+const SCHEMA_V6 = `ALTER TABLE collection_sources ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version=${SCHEMA_VERSION};`;
 
 function terms(text: string): string[] {
@@ -78,13 +80,22 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	readonly work: KnowledgeWorkJournal;
 	private closed = false;
 
-	private constructor(db: SqliteDatabase, collectionTime?: Pick<TimerPort, "now">) {
+	private constructor(
+		db: SqliteDatabase,
+		collectionTime?: Pick<TimerPort, "now">,
+		hasUsageReceipt?: (requestId: string) => boolean,
+	) {
 		this.db = db;
 		this.collection = new KnowledgeCollectionJournal(db, collectionTime);
-		this.work = new KnowledgeWorkJournal(db);
+		this.work = new KnowledgeWorkJournal(db, hasUsageReceipt);
 	}
 
-	static open(agentDir: string, collectionTime?: Pick<TimerPort, "now">): KnowledgeStore {
+	/** `hasUsageReceipt` is the owning session's usage owner: it releases work a crashed process left measured. */
+	static open(
+		agentDir: string,
+		collectionTime?: Pick<TimerPort, "now">,
+		hasUsageReceipt?: (requestId: string) => boolean,
+	): KnowledgeStore {
 		const databasePath = knowledgeDatabaseFile(agentDir);
 		mkdirSync(dirname(databasePath), { recursive: true });
 		return constructSqliteDatabase({ databasePath }, (db) => {
@@ -98,20 +109,25 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				version !== 2 &&
 				version !== 3 &&
 				version !== 4 &&
+				version !== 5 &&
 				version !== SCHEMA_VERSION
 			)
 				throw new Error("Unsupported ICM knowledge schema");
-			const store = new KnowledgeStore(db, collectionTime);
+			const store = new KnowledgeStore(db, collectionTime, hasUsageReceipt);
 			if (version !== SCHEMA_VERSION)
 				store.transaction(() => {
 					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
 					if (lockedVersion === SCHEMA_VERSION) return;
+					if (lockedVersion === 5) {
+						db.exec(SCHEMA_V6);
+						return;
+					}
 					if (lockedVersion === 4) {
-						db.exec(SCHEMA_V5);
+						db.exec(`${SCHEMA_V5} ${SCHEMA_V6}`);
 						return;
 					}
 					if (lockedVersion === 3) {
-						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5}`);
+						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5} ${SCHEMA_V6}`);
 						return;
 					}
 					if (lockedVersion === 1) {
@@ -146,7 +162,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					db.exec(`CREATE TABLE operation_receipts (
 					 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('remember','forget')),
 					 entry_id TEXT NOT NULL REFERENCES entries(id), revision INTEGER NOT NULL CHECK(revision>0)
-						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5}`);
+						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5} ${SCHEMA_V6}`);
 				});
 			return store;
 		});

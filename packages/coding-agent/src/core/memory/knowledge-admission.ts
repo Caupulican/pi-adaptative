@@ -5,12 +5,14 @@ import { measureJsonLength } from "../../kernel/provider-request-estimator.ts";
 import { estimateTokensFromChars } from "../context/context-item.ts";
 import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
-import { createDecisionProgram } from "../decision/program.ts";
+import type { DecisionEvaluation } from "../decision/evaluation.ts";
+import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import type { ResolvedLearningPolicySettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { KnowledgeGrounding } from "./knowledge-grounding.ts";
 import {
@@ -214,6 +216,63 @@ function calibrated(provenance: ConfidenceProvenance): boolean {
 	return provenance === "native_calibrated" || provenance === "derived_calibrated_probability";
 }
 
+interface JudgedAnswer {
+	readonly probabilityTrue?: number;
+	readonly selected?: string;
+	readonly confidence: number;
+}
+
+/** What one judgment answered, reduced to what admission reads. Content-free, so it is retained and reused. */
+interface KnowledgeJudgment {
+	readonly calibrated: boolean;
+	readonly answers: Readonly<Record<string, JudgedAnswer>>;
+}
+
+function judgmentOf(evaluation: DecisionEvaluation): KnowledgeJudgment {
+	const answers: Record<string, JudgedAnswer> = {};
+	for (const [id, result] of Object.entries(evaluation.results)) {
+		if (result.kind === "boolean")
+			answers[id] = { probabilityTrue: result.probabilityTrue, confidence: result.confidence.value };
+		else if (result.kind === "choice")
+			answers[id] = { selected: result.selected, confidence: result.confidence.value };
+	}
+	return { calibrated: calibrated(evaluation.engine.confidence_provenance), answers };
+}
+
+function retainedJudgment(value: unknown): KnowledgeJudgment {
+	if (!isPlainRecord(value) || typeof value.calibrated !== "boolean" || !isPlainRecord(value.answers))
+		throw new Error("Invalid retained knowledge judgment");
+	const answers: Record<string, JudgedAnswer> = {};
+	for (const [id, answer] of Object.entries(value.answers)) {
+		if (
+			!isPlainRecord(answer) ||
+			typeof answer.confidence !== "number" ||
+			(answer.probabilityTrue !== undefined && typeof answer.probabilityTrue !== "number") ||
+			(answer.selected !== undefined && typeof answer.selected !== "string")
+		)
+			throw new Error("Invalid retained knowledge judgment");
+		answers[id] = {
+			confidence: answer.confidence,
+			...(typeof answer.probabilityTrue === "number" ? { probabilityTrue: answer.probabilityTrue } : {}),
+			...(typeof answer.selected === "string" ? { selected: answer.selected } : {}),
+		};
+	}
+	return { calibrated: value.calibrated, answers };
+}
+
+/** A settled boolean answer: probability and confidence both at or above the 0.9 gate. */
+function decisivelyTrue(answer: JudgedAnswer | undefined): boolean {
+	return (
+		answer?.probabilityTrue !== undefined &&
+		Number.isFinite(answer.probabilityTrue) &&
+		answer.probabilityTrue >= 0.9 &&
+		answer.probabilityTrue <= 1 &&
+		Number.isFinite(answer.confidence) &&
+		answer.confidence >= 0.9 &&
+		answer.confidence <= 1
+	);
+}
+
 /** Meaning is judged once; exact identity, evidence, versioning and effects are enforced by the host. */
 export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 	private readonly deps: KnowledgeAdmissionDeps;
@@ -340,10 +399,11 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			: [...digests].map((id) => store.get(id)).find((record) => record !== undefined);
 		// The same subject and key as a live fact is that fact; a self-reported judge cannot tell a correction from a
 		// restatement, so the change waits for its exact id without paying for a judgment.
+		// In the background no later read can supply the id, so the hold waits for a calibrated engine instead.
 		if (liveDigest && selfReported)
 			return held(
 				"identity_ambiguous",
-				"context",
+				background ? "configuration" : "context",
 				"This fact is already known; read it and change it by its exact id and revision",
 			);
 		const forgotten = store.evidenceFence(ownId);
@@ -441,7 +501,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		const longGrounding = longSource ? await this.grounding().result(input, signal) : undefined;
 		const judged = longGrounding
 			? undefined
-			: await engine.evaluate(
+			: await this.judge(
 					createDecisionProgram({
 						id: "knowledge.admission",
 						decisions: [
@@ -480,23 +540,19 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 						],
 					}),
 					state,
-					{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
+					signal,
 				);
 		assertCurrent();
-		if (judged && !calibrated(judged.engine.confidence_provenance)) selfReported = true;
-		const grounded = judged?.results.grounded;
-		const basis = longGrounding
-			? { kind: "choice" as const, selected: longGrounding.basis, confidence: { value: longGrounding.confidence } }
-			: judged?.results.basis;
-		const groundedProbability = longGrounding
-			? longGrounding.grounded
-				? 1
-				: 0
-			: grounded?.kind === "boolean"
-				? grounded.probabilityTrue
-				: 0;
+		if (judged && !judged.calibrated) selfReported = true;
+		const grounded = judged?.answers.grounded;
+		const basisAnswer: JudgedAnswer | undefined = longGrounding
+			? { selected: longGrounding.basis, confidence: longGrounding.confidence }
+			: judged?.answers.basis;
+		const groundedProbability = longGrounding ? (longGrounding.grounded ? 1 : 0) : (grounded?.probabilityTrue ?? 0);
 		const groundedConfidence =
-			longGrounding?.confidence ?? (grounded?.kind === "boolean" ? grounded.confidence.value : 0);
+			longGrounding?.confidence ?? (grounded?.probabilityTrue === undefined ? 0 : grounded.confidence);
+		const basisConfidence = basisAnswer?.confidence ?? 0;
+		const basisSelected = basisAnswer?.selected;
 		if (
 			!Number.isFinite(groundedProbability) ||
 			groundedProbability < 0.9 ||
@@ -504,23 +560,14 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			!Number.isFinite(groundedConfidence) ||
 			groundedConfidence < 0.9 ||
 			groundedConfidence > 1 ||
-			basis?.kind !== "choice" ||
-			!Number.isFinite(basis.confidence.value) ||
-			basis.confidence.value < 0.9 ||
-			basis.confidence.value > 1 ||
-			(basis.selected !== "explicit" && basis.selected !== "inferred")
+			!Number.isFinite(basisConfidence) ||
+			basisConfidence < 0.9 ||
+			basisConfidence > 1 ||
+			(basisSelected !== "explicit" && basisSelected !== "inferred")
 		)
 			return held("ungrounded", "evidence", "The proposed knowledge is not sufficiently grounded");
-		const requested = judged?.results.requested;
-		const explicitlyRequested =
-			longGrounding?.requested ??
-			(requested?.kind === "boolean" &&
-				Number.isFinite(requested.probabilityTrue) &&
-				requested.probabilityTrue >= 0.9 &&
-				requested.probabilityTrue <= 1 &&
-				Number.isFinite(requested.confidence.value) &&
-				requested.confidence.value >= 0.9 &&
-				requested.confidence.value <= 1);
+		const basis = { selected: basisSelected, confidence: basisConfidence };
+		const explicitlyRequested = longGrounding?.requested ?? decisivelyTrue(judged?.answers.requested);
 		if (!this.deps.automaticEnabled && !explicitlyRequested)
 			return held("automatic_disabled", "configuration", "Automatic knowledge collection is disabled");
 		if (input.action === "forget") {
@@ -545,7 +592,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			);
 		let slot: KnowledgeSlot | undefined = existing ?? liveOwn;
 		if (!slot) {
-			const resolution = await this.resolveSlot(input, selfReported, assertCurrent, signal);
+			const resolution = await this.resolveSlot(input, selfReported, execution !== undefined, assertCurrent, signal);
 			if (resolution && "status" in resolution) return resolution;
 			slot = resolution;
 		}
@@ -579,7 +626,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				if (selfReported)
 					return held(
 						"identity_ambiguous",
-						"context",
+						execution ? "configuration" : "context",
 						"This fact may already be known; read it and change it by its exact id and revision",
 					);
 				if (!execution && !this.citesCurrentTurn(citations))
@@ -626,7 +673,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 						? `Restore knowledge revision ${previous.revision} of ${previous.id}.`
 						: "Forget the exact newly created knowledge record.",
 				},
-				confidence: Math.min(basis.confidence.value, groundedProbability) * 100,
+				confidence: Math.min(basis.confidence, groundedProbability) * 100,
 				observations: originals.length,
 				contradictions: slot ? 1 : 0,
 				settings: {
@@ -720,6 +767,47 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		return { status: "applied", ...store.put(record, existing.revision, assertCurrent, signal, operation) };
 	}
 
+	/**
+	 * One paid judgment per exact program, state and engine. Its content-free answers are retained in the work journal
+	 * and reused instead of buying the same answer again; every gate stays with the caller, and every host fence has
+	 * already run. An engine that cannot checkpoint request admission is asked every time.
+	 */
+	private async judge(program: DecisionProgram, state: unknown, signal?: AbortSignal): Promise<KnowledgeJudgment> {
+		const { engine, store } = this.deps;
+		if (!engine) throw new Error("Knowledge judgment engine unavailable");
+		const options = {
+			...this.deps.request,
+			signal,
+			consequence: "high" as const,
+			occupancy: "background" as const,
+		};
+		if (!engine.capabilities().requestLifecycle) return judgmentOf(await engine.evaluate(program, state, options));
+		const key = canonicalDigest({ program, state, engine: [engine.id, engine.model] });
+		const retained = store.work.read(key);
+		if (retained !== undefined) return retainedJudgment(retained);
+		let begun = false;
+		let evaluation: DecisionEvaluation;
+		try {
+			evaluation = await engine.evaluate(program, state, {
+				...options,
+				onRequestAdmitted: (requestId) => {
+					if (begun) return;
+					store.work.beginBatch(
+						[{ id: key, owner: canonicalDigest(state), window: canonicalDigest(program), kind: "grounding" }],
+						requestId,
+					);
+					begun = true;
+				},
+			});
+		} catch (error) {
+			if (begun) store.work.discard(key);
+			throw error;
+		}
+		const judgment = judgmentOf(evaluation);
+		if (begun) store.work.complete(key, judgment);
+		return judgment;
+	}
+
 	private capacityHold(state: unknown): KnowledgeHold | undefined {
 		const limit = this.deps.engine?.capabilities().maxStateTokens;
 		if (
@@ -744,6 +832,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 	private async resolveSlot(
 		input: Extract<KnowledgeChange, { action: "remember" }>,
 		selfReported: boolean,
+		background: boolean,
 		assertCurrent: () => void,
 		signal?: AbortSignal,
 	): Promise<KnowledgeSlot | KnowledgeHold | undefined> {
@@ -769,7 +858,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			const state = { proposed: input, slots: batch };
 			const capacity = this.capacityHold(state);
 			if (capacity) return capacity;
-			const judged = await this.deps.engine!.evaluate(
+			const judged = await this.judge(
 				createDecisionProgram({
 					id: "knowledge.identity",
 					decisions: batch.map((_slot, index) => ({
@@ -779,28 +868,30 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 					})),
 				}),
 				state,
-				{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
+				signal,
 			);
 			assertCurrent();
-			const unkeyedRewriteHeld = selfReported || !calibrated(judged.engine.confidence_provenance);
+			const unkeyedRewriteHeld = selfReported || !judged.calibrated;
 			for (const [index, candidate] of batch.entries()) {
-				const answer = judged.results[`same_${index}`];
+				const answer = judged.answers[`same_${index}`];
+				const probability = answer?.probabilityTrue;
 				if (
-					answer?.kind !== "boolean" ||
-					!Number.isFinite(answer.probabilityTrue) ||
-					answer.probabilityTrue < 0 ||
-					answer.probabilityTrue > 1 ||
-					!Number.isFinite(answer.confidence.value) ||
-					answer.confidence.value < 0.9 ||
-					answer.confidence.value > 1 ||
-					(answer.probabilityTrue > 0.1 && answer.probabilityTrue < 0.9)
+					answer === undefined ||
+					probability === undefined ||
+					!Number.isFinite(probability) ||
+					probability < 0 ||
+					probability > 1 ||
+					!Number.isFinite(answer.confidence) ||
+					answer.confidence < 0.9 ||
+					answer.confidence > 1 ||
+					(probability > 0.1 && probability < 0.9)
 				)
 					return held(
 						"identity_ambiguous",
 						"context",
 						"Knowledge identity is ambiguous; read the existing facts before proposing a change",
 					);
-				if (answer.probabilityTrue >= 0.9) {
+				if (probability >= 0.9) {
 					if (found)
 						return held(
 							"identity_ambiguous",
@@ -808,11 +899,11 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 							"More than one existing slot matches this fact; consolidation is required",
 						);
 					// A self-reported match cannot tell a correction from a distinct fact; a live fact
-					// changes only through its exact id and revision.
+					// changes only through its exact id and revision, which background collection cannot supply.
 					if (unkeyedRewriteHeld)
 						return held(
 							"identity_ambiguous",
-							"context",
+							background ? "configuration" : "context",
 							"This fact may already be known; read it and change it by its exact id and revision",
 						);
 					found = candidate;

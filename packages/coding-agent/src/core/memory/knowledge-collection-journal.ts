@@ -32,6 +32,8 @@ export interface KnowledgeCollectionClaim {
 	readonly source: KnowledgeCollectionSource;
 	readonly id: string;
 	readonly token: string;
+	/** Times this source resumed from a hold that may buy work again, since its configuration last changed. */
+	readonly retries: number;
 }
 
 export interface KnowledgeCollectionCandidate {
@@ -140,7 +142,9 @@ export class KnowledgeCollectionJournal {
 				VALUES(?,?,?,?,?,'pending')`)
 					.run(id, source.sourceId, source.digest, JSON.stringify(source.scope), source.extractorVersion);
 				const row = this.db
-					.prepare("SELECT status,expires,dependency,retry_at,hold_code FROM collection_sources WHERE id=?")
+					.prepare(
+						"SELECT status,expires,dependency,retry_at,hold_code,attempts FROM collection_sources WHERE id=?",
+					)
 					.get(id)!;
 				const code = typeof row.hold_code === "string" ? row.hold_code : undefined;
 				const currentDependency = dependency(code);
@@ -168,13 +172,22 @@ export class KnowledgeCollectionJournal {
 						.run(knowledgeCollectionSourceIdentity(source));
 					this.db.prepare("UPDATE collection_sources SET manifest=NULL,manifest_digest=NULL WHERE id=?").run(id);
 				}
+				// A configuration change starts the count again. A hold before any request (spending accounting) bought
+				// nothing, and a pass deadline resumes from the windows it already retained, so neither counts.
+				const previous = timestamp(row.attempts);
+				const retries =
+					row.status !== "held" || code?.startsWith("accounting:") || code?.startsWith("time:")
+						? previous
+						: code?.startsWith("configuration:")
+							? 0
+							: previous + 1;
 				const token = randomUUID();
 				this.db
 					.prepare(
-						"UPDATE collection_sources SET status='claimed',token=?,expires=?,hold_code=NULL,dependency=NULL,retry_at=NULL WHERE id=?",
+						"UPDATE collection_sources SET status='claimed',token=?,expires=?,hold_code=NULL,dependency=NULL,retry_at=NULL,attempts=? WHERE id=?",
 					)
-					.run(token, now + CLAIM_MS, id);
-				return { id, token, source: structuredClone(source) };
+					.run(token, now + CLAIM_MS, retries, id);
+				return { id, token, source: structuredClone(source), retries };
 			},
 			"Knowledge collection claim",
 		);

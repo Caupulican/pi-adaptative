@@ -544,6 +544,8 @@ export class ReflectionController {
 			engine,
 			explicitRequest: (selected) => judge.explicitRequest(selected),
 			captureGuard: () => this.captureLearningContext(),
+			hasUsageReceipt: (requestId) =>
+				sessionSemanticUsageOf(this.deps.getSessionManager()).hasUsageReceipt(requestId),
 			ephemeral,
 			createCollector: (binding) => {
 				const manager = this.deps.getSessionManager();

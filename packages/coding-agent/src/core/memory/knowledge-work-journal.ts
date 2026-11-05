@@ -1,7 +1,9 @@
 /**
  * Retained semantic work on the canonical knowledge connection; never a separate spend ledger.
  *
- * `started`: a physical request was admitted and no usable result was retained; automatic replay is refused.
+ * `started`: a physical request was admitted and no usable result was retained yet; automatic replay is refused. The
+ * caller that began it releases it when its request ends without a result, and a request left by an earlier process
+ * is released once this session holds its measured usage receipt; until then the cell refuses replay.
  * `complete`: the typed result is retained and reused without another request.
  * `retired`: a content-free identity whose value is no longer retained (its owner finished with it, or forgetting
  * erased it). Work that is needed again is new paid work, bounded by the caller's existing spending owner.
@@ -49,18 +51,32 @@ export interface KnowledgeWorkCache {
 	beginBatch(work: readonly KnowledgeWorkIdentity[], requestId: string): void;
 	complete(id: string, result: unknown, outcome?: "complete" | "subdivide" | "judged"): void;
 	/** Resolves a started request whose result must not be retained; it can be requested again later. */
-	discard(id: string): void;
+	discard(id: string, outcome?: "forgotten" | null): void;
 	barrier(): string | null;
 }
 
 export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 	private readonly db: SqliteDatabase;
-	constructor(db: SqliteDatabase) {
+	private readonly hasUsageReceipt: (requestId: string) => boolean;
+	/** Cells begun by this process whose request has not ended: their receipt may precede their result. */
+	private readonly live = new Set<string>();
+	constructor(db: SqliteDatabase, hasUsageReceipt: (requestId: string) => boolean = () => false) {
 		this.db = db;
+		this.hasUsageReceipt = hasUsageReceipt;
 	}
 	read(id: string): unknown {
-		const row = this.db.prepare("SELECT state,result,result_digest FROM knowledge_work WHERE id=?").get(id);
+		const row = this.db
+			.prepare("SELECT state,request_id,result,result_digest FROM knowledge_work WHERE id=?")
+			.get(id);
 		if (!row || row.state === "retired") return undefined;
+		if (row.state === "started" && !this.live.has(id) && typeof row.request_id === "string") {
+			// An earlier process ended after this request was measured but before its result was retained: the answer is
+			// lost and its charge is known, so the work may be requested again under the caller's spending limits.
+			if (this.hasUsageReceipt(row.request_id)) {
+				this.discard(id);
+				return undefined;
+			}
+		}
 		if (row.state !== "complete" || typeof row.result !== "string")
 			throw new Error("Knowledge work has an unresolved paid attempt; automatic replay is refused");
 		const result: unknown = JSON.parse(row.result);
@@ -96,8 +112,10 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			},
 			"Knowledge work batch admission",
 		);
+		for (const item of work) this.live.add(item.id);
 	}
 	complete(id: string, result: unknown, outcome: "complete" | "subdivide" | "judged" = "judged"): void {
+		this.live.delete(id);
 		const text = JSON.stringify(result);
 		if (!text || text.length > 256_000 || hasMaskableSecretText(text))
 			throw new Error("Unsafe knowledge work result");
@@ -110,7 +128,7 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 				if (!row) return;
 				// An extraction begun before a forget may quote what was forgotten; it is not retained.
 				if (row.kind === "extraction" && row.barrier !== this.barrier()) {
-					this.discard(id);
+					this.discard(id, "forgotten");
 					return;
 				}
 				this.db
@@ -122,12 +140,14 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			"Knowledge work result",
 		);
 	}
-	discard(id: string): void {
+	/** Retires a started cell: `forgotten` when a forget fenced its result, no outcome when its request ended without one. */
+	discard(id: string, outcome: "forgotten" | null = null): void {
+		this.live.delete(id);
 		this.db
 			.prepare(
-				"UPDATE knowledge_work SET state='retired',result=NULL,result_digest=NULL,outcome='forgotten' WHERE id=? AND state='started'",
+				"UPDATE knowledge_work SET state='retired',result=NULL,result_digest=NULL,outcome=? WHERE id=? AND state='started'",
 			)
-			.run(id);
+			.run(outcome, id);
 	}
 	barrier(): string | null {
 		const value = this.db.prepare("SELECT forget_barrier FROM collection_meta WHERE id=1").get()?.forget_barrier;

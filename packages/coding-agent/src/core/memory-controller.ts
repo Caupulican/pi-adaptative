@@ -3482,7 +3482,12 @@ export class MemoryController {
 					this._activeMemorySystem = system;
 					if (system === "icm" && !this.deps.isChildSession()) {
 						this._knowledgeHost = this.deps.knowledge?.();
-						this._knowledgeStore = KnowledgeStore.open(this.deps.getAgentDir(), this._knowledgeHost?.time);
+						const host = this._knowledgeHost;
+						this._knowledgeStore = KnowledgeStore.open(
+							this.deps.getAgentDir(),
+							host?.time,
+							host ? (requestId) => host.hasUsageReceipt(requestId) : undefined,
+						);
 						this._knowledgeReader = new KnowledgeProjectionReader(this._knowledgeStore);
 					}
 					this._fileStoreWriter = writer;
