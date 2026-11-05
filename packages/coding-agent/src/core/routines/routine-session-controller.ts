@@ -152,6 +152,21 @@ export class RoutineSessionController implements RoutineToolPort {
 					signal,
 				);
 		this.check(signal);
+		return this.persist(input, savedIntent, {
+			enabled: prior?.enabled ?? true,
+			...(expectedRevision === undefined ? {} : { expectedRevision }),
+		});
+	}
+
+	/**
+	 * The one write of a saved routine for every creation path: the parent check, the calendar zone default, the
+	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces.
+	 */
+	private persist(
+		input: RoutineToolInput,
+		savedIntent: WorkerSavedIntent,
+		extras: { readonly enabled: boolean; readonly expectedRevision?: number },
+	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
 			throw new Error("Routine parent changed during admission.");
 		return view(
@@ -164,7 +179,7 @@ export class RoutineSessionController implements RoutineToolPort {
 					input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
 						? { ...input.schedule, timeZone: hostTimeZone() }
 						: input.schedule,
-				enabled: prior?.enabled ?? true,
+				enabled: extras.enabled,
 				nowMs: this.deps.now(),
 				...(input.schedule.kind === "event" ? { eventAnchor: this.deps.eventAnchor() } : {}),
 				executionSnapshot: {
@@ -173,7 +188,9 @@ export class RoutineSessionController implements RoutineToolPort {
 					savedIntent,
 					...(input.profileId === undefined ? {} : { profileId: input.profileId }),
 				},
-				...(expectedRevision === undefined ? { createOnly: true } : { expectedRevision }),
+				...(extras.expectedRevision === undefined
+					? { createOnly: true }
+					: { expectedRevision: extras.expectedRevision }),
 			}),
 		);
 	}
