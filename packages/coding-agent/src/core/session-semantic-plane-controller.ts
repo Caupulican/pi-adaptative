@@ -25,7 +25,8 @@ import {
 export interface SessionSemanticPlaneControllerDeps {
 	readonly agentDirForLedger: string;
 	isDisposed(): boolean;
-	getSessionManager(): SessionManager;
+	/** The plane keys its ledger rows by the session and its directory; it reads nothing else of the session. */
+	getSessionManager(): Pick<SessionManager, "getSessionId" | "getCwd">;
 	getSystemOneSettings(): { enabled?: boolean };
 	readonly systemOneEnabled?: boolean;
 	readonly controller?: SystemOneController;

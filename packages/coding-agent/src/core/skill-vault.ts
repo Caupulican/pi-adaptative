@@ -13,6 +13,7 @@ import {
 	MAX_SESSION_SKILL_EXCLUSIONS,
 	SESSION_SKILL_POLICY_CUSTOM_TYPE,
 	type SessionSkillPolicyPort,
+	type SessionSkillPolicyReader,
 	type SkillExclusionRecord,
 } from "./session-skill-policy.ts";
 import {
@@ -146,7 +147,13 @@ export interface SkillVaultControllerOptions {
 	idleTimeoutMs?: number;
 	getMaxBodyBytes?: () => number;
 	onSkillUsed?: (skill: Skill, usedAtMs: number) => void;
-	getSessionManager?: () => SessionSkillPolicyPort | undefined;
+	/** The session whose skill-policy entries the vault replays: its exclusions hold for every read. */
+	getSessionManager?: () => SessionSkillPolicyReader | undefined;
+	/**
+	 * Records an exclusion on that session. Absent, the vault serves reads only (a worker's skill access over a parent
+	 * opened read-only) and refuses an exclusion rather than keeping one the session never records.
+	 */
+	appendPolicyEntry?: SessionSkillPolicyPort["appendCustomEntry"];
 }
 
 function compactDescription(description: string): string {
@@ -296,7 +303,8 @@ export class SkillVaultController {
 	private readonly idleTimeoutMs: number;
 	private readonly getMaxBodyBytes: () => number;
 	private readonly onSkillUsed: ((skill: Skill, usedAtMs: number) => void) | undefined;
-	private getSessionManager: (() => SessionSkillPolicyPort | undefined) | undefined;
+	private getSessionManager: (() => SessionSkillPolicyReader | undefined) | undefined;
+	private readonly appendPolicyEntry: SessionSkillPolicyPort["appendCustomEntry"] | undefined;
 	private cachedSessionId: string | undefined;
 	private lastReplayedIndex = 0;
 	private exclusions = new Map<string, SkillExclusionRecord>();
@@ -319,6 +327,7 @@ export class SkillVaultController {
 		this.getMaxBodyBytes = options.getMaxBodyBytes ?? (() => MAX_ACTIVE_SKILL_BODY_BYTES);
 		this.onSkillUsed = options.onSkillUsed;
 		this.getSessionManager = options.getSessionManager;
+		this.appendPolicyEntry = options.appendPolicyEntry;
 	}
 
 	private syncExclusions(): void {
@@ -441,9 +450,21 @@ export class SkillVaultController {
 		const sm = this.getSessionManager?.();
 		let record: SkillExclusionRecord;
 		if (sm) {
+			const append = this.appendPolicyEntry;
+			if (!append) {
+				return {
+					ok: false,
+					reason: "persistence_failed",
+					message: "This skill vault only reads its session; an exclusion cannot be recorded here.",
+				};
+			}
 			try {
 				const existingRecords = [...this.exclusions.values()];
-				const appended = appendSessionSkillExclusion(sm, existingRecords, { name, reason: boundedReason });
+				const appended = appendSessionSkillExclusion(
+					{ getSessionId: () => sm.getSessionId(), appendCustomEntry: append },
+					existingRecords,
+					{ name, reason: boundedReason },
+				);
 				record = appended.record;
 				this.lastReplayedIndex = sm.getEntryCount();
 			} catch (error) {

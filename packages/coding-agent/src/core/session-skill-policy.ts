@@ -22,10 +22,14 @@ export interface SessionSkillPolicyPayload {
 	exclusions: SkillExclusionRecord[];
 }
 
-export interface SessionSkillPolicyPort {
+/** What a skill vault reads of its session: the session's exclusions are replayed from these entries. */
+export interface SessionSkillPolicyReader {
 	getSessionId(): string;
 	getEntryCount(): number;
 	getEntriesSince(startIndex: number): SessionEntry[];
+}
+
+export interface SessionSkillPolicyPort extends SessionSkillPolicyReader {
 	appendCustomEntry(customType: string, data: unknown): string;
 }
 
@@ -90,7 +94,7 @@ export function decodeSessionSkillPolicyPayload(
 }
 
 export function appendSessionSkillExclusion(
-	sessionManager: SessionSkillPolicyPort,
+	sessionManager: Pick<SessionSkillPolicyPort, "getSessionId" | "appendCustomEntry">,
 	currentExclusions: readonly SkillExclusionRecord[],
 	newExclusion: { name: string; reason: string },
 ): { payload: SessionSkillPolicyPayload; record: SkillExclusionRecord } {

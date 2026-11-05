@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { Api, AssistantMessage, ImageContent, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
@@ -117,6 +117,7 @@ import type { WorkerResponseObservation } from "./delegation/worker-attempt-exec
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
+import { createWorkerSkillAccess } from "./delegation/worker-skill-access.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type { PeerReviewController } from "./expert-routing/peer-review.ts";
@@ -304,7 +305,7 @@ import type { MemorySystem, ResourceProfileFilterSettings, SettingsScope } from 
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
-import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
+import { skillsForSessionRole } from "./skills.ts";
 import { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
@@ -888,6 +889,7 @@ export class AgentSession {
 				if (skill.promoted) this._skillCurator.recordUse(skill.name, Date.now());
 			},
 			getSessionManager: () => this.sessionManager,
+			appendPolicyEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
 		});
 		this._toolProtocol = new ToolProtocolController({
 			agent: this.agent,
@@ -1160,22 +1162,7 @@ export class AgentSession {
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),
-			// An in-process worker holds no effect grant: skills that declare one are neither listed nor readable.
-			getSkillReadBroker: () => ({
-				search: (query) => {
-					const result = this._skillVault.search(query);
-					const withheld = this._effectfulSkillNames();
-					return { ...result, candidates: result.candidates.filter((candidate) => !withheld.has(candidate.name)) };
-				},
-				read: (name) =>
-					this._effectfulSkillNames().has(name)
-						? { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` }
-						: this._skillVault.read(name),
-			}),
-			getSkillAuditSource: () => ({
-				getSkills: () => workerEligibleSkills(this._skillVault.getSkillsSnapshot()),
-				redactPath: (path: string) => `skill:${createHash("sha256").update(path).digest("hex").slice(0, 12)}`,
-			}),
+			...createWorkerSkillAccess(this._skillVault),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			// RAW loop, deliberately bypassing the public `continueGoalLoop` — that method now delegates
@@ -2828,13 +2815,6 @@ export class AgentSession {
 		});
 		if (review.doubt) this._emit({ type: "warning", message: `${review.doubt}.` });
 		return review.steer;
-	}
-
-	/** Names of the skills that declare an effect: an in-process worker is never offered them. */
-	private _effectfulSkillNames(): Set<string> {
-		const snapshot = this._skillVault.getSkillsSnapshot();
-		const eligible = new Set(workerEligibleSkills(snapshot).map((skill) => skill.name));
-		return new Set(snapshot.map((skill) => skill.name).filter((name) => !eligible.has(name)));
 	}
 
 	/** Why a model cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
