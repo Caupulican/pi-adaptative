@@ -33,7 +33,7 @@ export const MAX_ROUTINE_OCCURRENCES = 256;
 export const MAX_ROUTINE_REPLAY_TOMBSTONES = 2_048;
 /** Bound on superseded or coalesced CI attempts one event run reports as missed. */
 export const MAX_ROUTINE_EVENT_MISSED_COUNT = 100_000;
-const MAX_ROUTINE_WORKFLOW_PATH_CHARS = 2_048;
+export const MAX_ROUTINE_WORKFLOW_PATH_CHARS = 2_048;
 export const MAX_ROUTINE_SUMMARY_CHARS = 1_000;
 export const MAX_ROUTINE_INSTANT_MS = 8_640_000_000_000_000;
 export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
@@ -51,7 +51,11 @@ export const ROUTINE_INTAKE_LIVE_CAP = 10;
 export const MAX_ROUTINE_INTAKE_SESSIONS = 256;
 /** Owner sources one intake pass reads at most; later sources wait for the next pass. */
 export const MAX_ROUTINE_INTAKE_BATCH_SOURCES = 4;
-export const MAX_ROUTINE_INTAKE_SOURCE_REQUESTS = 4;
+/** Requests one owner source can yield; more would only meet the session's daily cap. */
+export const MAX_ROUTINE_INTAKE_SOURCE_REQUESTS = 2;
+/** Host-chosen timing parts recorded per intake request and routine origin, and the bound of each description. */
+const MAX_ROUTINE_INTAKE_DEFAULTS = 4;
+const MAX_ROUTINE_INTAKE_TEXT_CHARS = 300;
 /** Every intake spend is accounted under this operation prefix, one operation per pass. */
 export const ROUTINE_INTAKE_OPERATION_PREFIX = "routine-intake:";
 const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
@@ -235,6 +239,8 @@ export interface RoutineOrigin {
 	readonly kind: "owner-intake";
 	/** The owner-evidence source whose words asked for the routine. */
 	readonly sourceId: string;
+	/** Timing parts the owner left open that the host filled with its fixed defaults, as announced. */
+	readonly defaults?: readonly string[];
 }
 
 /** The identity of one owner request the host turned into a routine: consumed once, never recreated. */
@@ -245,6 +251,8 @@ export interface RoutineIntakeOrigin {
 	 */
 	readonly key: string;
 	readonly sourceId: string;
+	/** Host-chosen timing parts, recorded on the routine's origin; not part of the identity. */
+	readonly defaults?: readonly string[];
 }
 
 /** One owner request an intake pass extracted and grounded, decided at most once. */
@@ -253,7 +261,12 @@ export interface RoutineIntakeRequest {
 	readonly sourceId: string;
 	/** The owner's verbatim words for what to do: the routine prompt. */
 	readonly prompt: string;
+	/** The host-compiled schedule. */
 	readonly schedule: RoutineScheduleInput;
+	/** The schedule in plain words and the routine's own zone, as the judge and the owner read it. */
+	readonly cadence: string;
+	/** Timing parts the owner left open that the host filled with its fixed defaults. */
+	readonly defaults?: readonly string[];
 	/** Created, refused or rejected; never judged again. */
 	readonly done?: true;
 }
@@ -1274,16 +1287,34 @@ function isRoutineDigest(value: unknown): value is string {
 }
 
 function parseRoutineOrigin(value: unknown): RoutineOrigin {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["kind", "sourceId"]) || value.kind !== "owner-intake")
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["kind", "sourceId", "defaults"]) || value.kind !== "owner-intake")
 		throw new TypeError("Routine origin is invalid.");
-	return { kind: "owner-intake", sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id") };
+	return {
+		kind: "owner-intake",
+		sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
+		...parseIntakeDefaults(value.defaults),
+	};
+}
+
+/** Optional host-chosen timing parts: a bounded, non-empty list of bounded descriptions. */
+function parseIntakeDefaults(value: unknown): { defaults?: readonly string[] } {
+	if (value === undefined) return {};
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ROUTINE_INTAKE_DEFAULTS)
+		throw new TypeError("Routine intake defaults are invalid.");
+	return {
+		defaults: value.map((entry: unknown) => boundedString(entry, MAX_ROUTINE_INTAKE_TEXT_CHARS, "intake default")),
+	};
 }
 
 /** The host's intake identity for one creation; a malformed one is a programming error, not a refusal. */
 export function parseRoutineIntakeOrigin(value: unknown): RoutineIntakeOrigin {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["key", "sourceId"]) || !isRoutineDigest(value.key))
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["key", "sourceId", "defaults"]) || !isRoutineDigest(value.key))
 		throw new TypeError("Routine intake origin is invalid.");
-	return { key: value.key, sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id") };
+	return {
+		key: value.key,
+		sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
+		...parseIntakeDefaults(value.defaults),
+	};
 }
 
 /** The persisted consumed-origin journal, oldest first; one malformed or repeated entry rejects the whole journal. */
@@ -1366,7 +1397,7 @@ export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string)
 	const requests = (value.requests as unknown[] | undefined)?.map((entry): RoutineIntakeRequest => {
 		if (
 			!isPlainRecord(entry) ||
-			!hasOnlyKeys(entry, ["key", "sourceId", "prompt", "schedule", "done"]) ||
+			!hasOnlyKeys(entry, ["key", "sourceId", "prompt", "schedule", "cadence", "defaults", "done"]) ||
 			!isRoutineDigest(entry.key) ||
 			keys.has(entry.key) ||
 			typeof entry.sourceId !== "string" ||
@@ -1380,6 +1411,8 @@ export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string)
 			sourceId: entry.sourceId,
 			prompt: boundedString(entry.prompt, MAX_ROUTINE_PROMPT_CHARS, "prompt"),
 			schedule: parseRoutineScheduleInput(entry.schedule),
+			cadence: boundedString(entry.cadence, MAX_ROUTINE_INTAKE_TEXT_CHARS, "cadence"),
+			...parseIntakeDefaults(entry.defaults),
 			...(entry.done ? { done: true as const } : {}),
 		};
 	});

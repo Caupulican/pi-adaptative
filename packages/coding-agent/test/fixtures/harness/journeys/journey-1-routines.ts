@@ -734,8 +734,9 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 
 /**
  * Hands-off intake through the real root: after the turn settles, the owner's stated request becomes a read-only
- * routine announced on the next turn, while a pasted request is never grounded. Words the model already answered with
- * a routine save are passed over unread, and a pass replayed after the owner removed its routine creates nothing.
+ * routine on host-compiled timing, announced on the next turn with the hour and days the host chose, while a pasted
+ * request and an hour the owner's quoted timing words do not carry are never judged. Words the model already answered
+ * with a routine save are passed over unread, and a pass replayed after the owner removed its routine creates nothing.
  */
 async function runJourney1RoutineIntake(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
 	const agentDir = `${world.agentDir}-routine-intake`;
@@ -797,12 +798,22 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 	const owner =
 		"My colleague wrote:\n> Check the release notes every hour.\nEvery morning, summarize the open review comments.";
 	const instruction = "summarize the open review comments";
+	const unstatedHour = "Post the build summary every evening at 7.";
 	try {
 		world.systemOne.enterPhase("routine-intake-owner", {});
 		world.provider.enqueue("root", text("routine-intake-owner-reply", "Noted."));
 		await withDeadline(world.trace, "routine intake owner words", root.session.prompt(owner));
 		const source = latestSource();
 		expect(source.text).toBe(owner);
+		// A second request before the pass: its proposed hour is absent from the timing words the model quoted.
+		world.systemOne.enterPhase("routine-intake-second-owner", {
+			...ICM_INTAKE_JUDGMENTS,
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue("root", text("routine-intake-second-owner-reply", "Noted."));
+		await withDeadline(world.trace, "routine intake second owner words", root.session.prompt(unstatedHour));
+		const second = latestSource();
+		expect(second.text).toBe(unstatedHour);
 
 		world.systemOne.enterPhase("routine-intake-pass", {
 			requests_automation: { kind: "noul", probability: 0.98 },
@@ -817,9 +828,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 					expect(request.context.tools?.map((tool) => tool.name)).toEqual([ROUTINE_INTAKE_SUBMISSION_TOOL_NAME]);
 					expect(
 						request.context.messages,
-						"extraction carries the owner's original as its only message",
+						"extraction carries the owner's originals in its only message",
 					).toHaveLength(1);
 					expect(JSON.stringify(request.context.messages)).toContain(instruction);
+					expect(JSON.stringify(request.context.messages)).toContain(unstatedHour);
 				},
 				reply: {
 					content: [
@@ -836,12 +848,24 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 											{
 												instruction: "Check the release notes",
 												when: "every hour",
-												schedule: { kind: "interval", intervalMs: 3_600_000 },
+												timing: { kind: "interval", every: 1, unit: "hour" },
 											},
+											// A part of the day without a time: the host chooses the hour and the days, and says so.
 											{
 												instruction,
 												when: "Every morning",
-												schedule: { kind: "calendar", cron: "0 9 * * *" },
+												timing: { kind: "daily", partOfDay: "morning" },
+											},
+										],
+									},
+									{
+										id: "m2",
+										requests: [
+											// The quoted timing words lack the hour: the host drops it before any judgment.
+											{
+												instruction: "Post the build summary",
+												when: "every evening",
+												timing: { kind: "daily", time: "19:00" },
 											},
 										],
 									},
@@ -892,18 +916,27 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		const routine = automatic[0]!;
 		expect(routine.origin?.sourceId).toBe(source.sourceId);
 		expect(routine.prompt, "the routine runs the owner's own words").toBe(instruction);
-		expect(routineScheduleInputOf(routine.schedule)).toMatchObject({ kind: "calendar", cron: "0 9 * * *" });
+		const hostDefaults = ['09:00 for "morning"', "weekdays only, as no days were stated"];
+		expect(
+			routineScheduleInputOf(routine.schedule),
+			"the host compiles the stated part of the day to its fixed hour on weekdays, with a start window",
+		).toMatchObject({ kind: "calendar", cron: "0 9 * * 1-5", maxLatenessMs: 1_800_000 });
+		expect(routine.origin?.defaults, "the origin records what the host chose").toEqual(hostDefaults);
 		expect(
 			routine.executionSnapshot?.savedIntent.executionContract.worker.profile.readOnly,
 			"intake grants no write authority",
 		).toBe(true);
-		expect(retained.batch?.requests?.map((request) => request.prompt)).toEqual([instruction]);
+		expect(
+			retained.batch?.requests?.map((request) => request.prompt),
+			"neither the pasted request nor the hour its words do not carry is retained",
+		).toEqual([instruction]);
 		expect(store().hasRoutineIntakeOrigin(retained.batch!.requests![0]!.key)).toBe(true);
-		expect(intakeState()?.through, "the pass ends at the source it read").toBe(Date.parse(source.createdAt));
+		expect(intakeState()?.through, "the pass ends at the last source it read").toBe(Date.parse(second.createdAt));
 		const notice = notices()[0]!;
 		const content = notice.type === "custom_message" && typeof notice.content === "string" ? notice.content : "";
-		expect(content).toContain("Scheduled (read-only): ");
+		expect(content).toContain("Scheduled (read-only): weekdays at 09:00 (");
 		expect(content).toContain(` - ${JSON.stringify(instruction)}\nRoutine ${routine.routineId} was created`);
+		expect(content, "the notice names every host choice").toContain(`so the host chose: ${hostDefaults.join("; ")}.`);
 		expect(parentInputOf(notice)?.metadata.mode, "the notice waits for the owner's next turn").toBe(
 			"next-owner-turn",
 		);
@@ -912,9 +945,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		expect(rootRequests() - beforePass, "one extraction; the session model judges only with System One off").toBe(
 			providerRequests,
 		);
-		expect(world.systemOne.decoded.length - decodedBeforePass, "System One gates the source and judges once").toBe(
-			world.systemOne.enabled ? 2 : 0,
-		);
+		expect(
+			world.systemOne.decoded.length - decodedBeforePass,
+			"System One gates both sources and judges only the grounded request",
+		).toBe(world.systemOne.enabled ? 3 : 0);
 		const receipts = root.sessionManager.getEntries().flatMap((entry) => {
 			const report = resolveSemanticUsageEntry(entry)?.report;
 			return report?.route === "routine_intake" ? [report] : [];
@@ -924,7 +958,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		expect(root.session.backgroundLanes.getRoutineIntakeStatus()).toMatchObject({
 			state: "active",
 			...(world.systemOne.enabled ? {} : { judge: `structured-llm (${HARNESS_PROVIDER}/root)` }),
-			last: { status: "completed", sources: 1, created: 1, refused: 0 },
+			last: { status: "completed", sources: 2, created: 1, refused: 0 },
 		});
 
 		// The model answers the next request with a routine save; intake passes those words over unread.
@@ -1015,7 +1049,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		expect(rootRequests(), "a decided request is not extracted or judged again").toBe(beforeReplay);
 		expect(root.session.backgroundLanes.getRoutineIntakeStatus()?.last).toEqual({
 			status: "completed",
-			sources: 1,
+			sources: 2,
 			created: 0,
 			refused: 0,
 		});

@@ -123,10 +123,17 @@ so an automatic routine has the same parent check, authority capture and store l
 save, with read-only worker authority. After an owner turn settles and the foreground stays idle,
 one pass reads at most four unread complete originals from the owner-evidence ledger. With System
 One bound, each original passes a cheap gate first; one bounded extraction request then proposes
-requests with verbatim excerpts, and the host keeps only proposals whose excerpts it finds as the
-owner's stated (not shown) words. Each proposal is judged for being an explicit request and for a
-faithful schedule, by System One or else the session model, and is created only when both hold at
-0.9 probability and confidence. A notice rides with the owner's next turn. The pass, its extracted
+at most two requests per original, each with two verbatim excerpts (what and when) and timing slots,
+never a cron rule or an instant. The host keeps a proposal only when both excerpts are the owner's
+stated (not shown) words of at least two words, the instruction is more than the timing words, and
+the stated timing words carry every slot value: hour and minute, interval count and unit, weekdays,
+day of month, date, zone and CI outcome, as digits or through small English, Portuguese and Spanish
+word tables (`routine-intake-timing.ts`). The host then compiles the schedule, filling open parts
+with fixed defaults it records and announces: part-of-day hours or 09:00 with a 30-minute start
+window, and weekdays for a daily request without days. Each proposal is judged for being an
+explicit request and for a faithful schedule, given the host-chosen parts, by System One or else
+the session model, and is created only when both hold at 0.9 probability and confidence. A notice
+with the plain cadence and the host-chosen parts rides with the owner's next turn. The pass, its extracted
 requests and the origin of every created routine are retained in the routine store, so a restart
 resumes the pass without a second extraction, and a decided request is never created twice, even
 after its routine is deleted. Messages the model answered with a `routine` save are passed over.

@@ -49,6 +49,7 @@ import {
 	type RoutineHostEventFeed,
 	type RoutineIntakeBatch,
 	type RoutineIntakeConsumption,
+	type RoutineIntakeOrigin,
 	RoutineIntakeRefusal,
 	type RoutineIntakeSession,
 	type RoutineOccurrence,
@@ -1571,7 +1572,13 @@ export class PersistentBotTeamStore {
 				...(existing?.origin
 					? { origin: existing.origin }
 					: intake
-						? { origin: { kind: "owner-intake" as const, sourceId: intake.sourceId } }
+						? {
+								origin: {
+									kind: "owner-intake" as const,
+									sourceId: intake.sourceId,
+									...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
+								},
+							}
 						: {}),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
@@ -1622,11 +1629,7 @@ export class PersistentBotTeamStore {
 	 * origin is consumed, when the session created {@link ROUTINE_INTAKE_WINDOW_CAP} routines within the cap
 	 * window, or when it holds {@link ROUTINE_INTAKE_LIVE_CAP} live intake routines.
 	 */
-	private admitRoutineIntake(input: UpsertPersistentRoutineInput): {
-		key: string;
-		sourceId: string;
-		parentSessionId: string;
-	} {
+	private admitRoutineIntake(input: UpsertPersistentRoutineInput): RoutineIntakeOrigin & { parentSessionId: string } {
 		const origin = parseRoutineIntakeOrigin(input.intakeOrigin);
 		if (input.target.kind !== "session" || !input.createOnly || input.expectedRevision !== undefined)
 			throw new Error("A routine intake creation is a create-only session routine.");

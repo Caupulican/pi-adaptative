@@ -22,6 +22,7 @@ import type { TimerPort } from "../util/timer-port.ts";
 import { countCalendarSlots, hostTimeZone, nextCalendarSlotAfter } from "./calendar-schedule.ts";
 import {
 	MAX_ROUTINE_INTAKE_BATCH_SOURCES,
+	MAX_ROUTINE_INTAKE_SOURCE_REQUESTS,
 	MAX_ROUTINE_PROMPT_CHARS,
 	ROUTINE_INTAKE_OPERATION_PREFIX,
 	type RoutineIntakeBatch,
@@ -30,7 +31,8 @@ import {
 	type RoutineScheduleInput,
 } from "./routine-contract.ts";
 import { extractRoutineRequests } from "./routine-intake-extractor.ts";
-import { describeRoutineSchedule, routineIntakeNotice } from "./routine-parent-input.ts";
+import { compileIntakeTiming } from "./routine-intake-timing.ts";
+import { routineIntakeNotice } from "./routine-parent-input.ts";
 import { type RoutineSessionController, routineIntakeRoutineId } from "./routine-session-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 
@@ -47,6 +49,9 @@ const MAX_BATCH_CHARS = 32_000;
 const MIN_INTAKE_INTERVAL_MS = 15 * 60_000;
 const MAX_INTAKE_SLOTS_PER_DAY = 96;
 const DAY_MS = 86_400_000;
+/** Each grounded excerpt is at least this long and this many words, so a lone number or word never grounds a request. */
+const MIN_QUOTE_CHARS = 8;
+const MIN_QUOTE_WORDS = 2;
 
 const GATE_PROGRAM = createDecisionProgram({
 	id: "routine.intake.gate",
@@ -73,7 +78,7 @@ const JUDGE_PROGRAM = createDecisionProgram({
 			kind: "boolean",
 			id: "faithful",
 			instruction:
-				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its schedule and upcoming runs must be the timing the owner stated, in the right time zone. A named part of the day without a time may take its conventional hour (morning 09:00, noon 12:00, afternoon 15:00, evening 18:00, night 21:00).",
+				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check.",
 		},
 	],
 });
@@ -435,8 +440,10 @@ export class RoutineIntake {
 
 	/**
 	 * With System One bound, each source passes its pre-gate first; one extraction request covers every remaining
-	 * source. A proposal survives only when both excerpts are the owner's stated (not shown) words; the routine prompt
-	 * is the owner's original instruction span, and its identity is the grounded spans' offsets.
+	 * source. A proposal survives only when both excerpts are the owner's stated (not shown) words of at least two words
+	 * each, the instruction is more than the timing words, and the stated timing words carry every timing value; the
+	 * host then compiles the schedule. The routine prompt is the owner's original instruction span, and its identity is
+	 * the grounded spans' offsets. At most two requests per source survive.
 	 */
 	private async extract(
 		batch: RoutineIntakeBatch,
@@ -476,12 +483,29 @@ export class RoutineIntake {
 		const requests: RoutineIntakeRequest[] = [];
 		const keys = new Set<string>();
 		for (const [index, source] of candidates.entries()) {
+			let accepted = 0;
 			for (const proposal of proposals[index] ?? []) {
+				if (accepted >= MAX_ROUTINE_INTAKE_SOURCE_REQUESTS) break;
 				const instruction = locateOwnerQuote(source.text, proposal.instruction);
 				const when = locateOwnerQuote(source.text, proposal.when);
-				if (instruction.start < 0 || when.start < 0) continue;
+				// Words found only inside quoted, pasted or code text are what the owner showed, not what they asked.
+				if (!instruction.found || instruction.shown || !when.found || when.shown) continue;
 				const prompt = source.text.slice(instruction.start, instruction.end).trim();
-				if (!prompt || prompt.length > MAX_ROUTINE_PROMPT_CHARS || prompt.includes("\0")) continue;
+				if (
+					!substantial(prompt) ||
+					!substantial(source.text.slice(when.start, when.end)) ||
+					(instruction.start >= when.start && instruction.end <= when.end) ||
+					prompt.length > MAX_ROUTINE_PROMPT_CHARS ||
+					prompt.includes("\0")
+				)
+					continue;
+				const timing = compileIntakeTiming(proposal.timing, {
+					stated: when.stated,
+					sentAt: Date.parse(source.createdAt),
+					now: this.deps.time.now(),
+					hostTimeZone: hostTimeZone(),
+				});
+				if (!timing) continue;
 				const key = canonicalDigest({
 					parentSessionId: this.deps.parentSessionId,
 					sourceId: source.sourceId,
@@ -491,7 +515,15 @@ export class RoutineIntake {
 				});
 				if (keys.has(key)) continue;
 				keys.add(key);
-				requests.push({ key, sourceId: source.sourceId, prompt, schedule: proposal.schedule });
+				accepted++;
+				requests.push({
+					key,
+					sourceId: source.sourceId,
+					prompt,
+					schedule: timing.schedule,
+					cadence: timing.cadence,
+					...(timing.defaults.length > 0 ? { defaults: [...timing.defaults] } : {}),
+				});
 			}
 		}
 		return requests;
@@ -505,7 +537,11 @@ export class RoutineIntake {
 		request: IntakeRequestOptions,
 		signal: AbortSignal,
 	): Promise<"created" | "refused" | "rejected" | "consumed"> {
-		const identity = { key: intake.key, sourceId: intake.sourceId };
+		const identity = {
+			key: intake.key,
+			sourceId: intake.sourceId,
+			...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
+		};
 		if (this.deps.store.hasRoutineIntakeOrigin(intake.key)) {
 			this.announceExisting(intake, origin);
 			return "consumed";
@@ -520,8 +556,9 @@ export class RoutineIntake {
 				hostTimeZone: hostTimeZone(),
 				proposedRoutine: {
 					instruction: intake.prompt,
-					schedule: describeRoutineSchedule(intake.schedule),
+					timing: intake.cadence,
 					upcomingRuns: upcomingRuns(intake.schedule, Date.parse(source.createdAt)),
+					hostDefaults: intake.defaults ?? [],
 				},
 			},
 			{ ...request, signal, consequence: "high", occupancy: "background" },
@@ -581,6 +618,10 @@ export class RoutineIntake {
 			// Diagnostics never fail the pass.
 		}
 	}
+}
+
+function substantial(text: string): boolean {
+	return text.trim().length >= MIN_QUOTE_CHARS && (text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0) >= MIN_QUOTE_WORDS;
 }
 
 function holds(judged: DecisionEvaluation, id: string): boolean {
