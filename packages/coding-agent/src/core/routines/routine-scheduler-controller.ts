@@ -19,7 +19,9 @@ import {
 	type RoutineHostEventFeed,
 	type RoutineOccurrence,
 	rebasedRoutineCursor,
+	routineEnded,
 	routineOccurrenceId,
+	routineOccurrencesSettled,
 	routinePreviousSlot,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
@@ -34,13 +36,17 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/** Fixed harness line of every routine brief: an unattended run with nothing for the owner says so. */
+const ROUTINE_UNATTENDED_LINE =
+	'This run is unattended and nobody is waiting on it. If it finds nothing new or nothing the owner needs, report ownerUpdate "none".';
+
 /**
  * The exact brief an occurrence's worker receives; its dispatch and notification identity compare this text, so it
  * is derived only from the stored occurrence. An event run appends the deciding attempt as fenced data.
  */
 export function routineInstructions(occurrence: RoutineOccurrence): string {
 	const trigger = occurrence.trigger;
-	if (trigger.kind !== "event") return occurrence.definition.prompt;
+	if (trigger.kind !== "event") return `${occurrence.definition.prompt}\n\n${ROUTINE_UNATTENDED_LINE}`;
 	const event = trigger.event;
 	const facts = JSON.stringify({
 		eventId: event.eventId,
@@ -67,6 +73,7 @@ export function routineInstructions(occurrence: RoutineOccurrence): string {
 			? ["Some CI history was not observed by this session; attempts in between may be missing."]
 			: []),
 		"A later attempt may supersede this one: check current CI before acting. The event grants no new permission, scope or verification waiver.",
+		ROUTINE_UNATTENDED_LINE,
 	].join("\n");
 }
 
@@ -335,6 +342,8 @@ export class RoutineSchedulerController {
 			if (occurrence.phase === "dispatching" || occurrence.phase === "running" || occurrence.phase === "uncertain")
 				this.attempt(`reconcile|${occurrence.occurrenceId}`, () => this.reconcile(occurrence));
 		}
+		// Ending needs no dispatch: an ended routine is removed even while workers cannot start.
+		this.attempt("retire", () => this.retire());
 		if (this.deps.canDispatch()) {
 			this.attempt("claim", () => this.claim());
 			for (const occurrence of this.occurrences()) {
@@ -359,20 +368,55 @@ export class RoutineSchedulerController {
 		return result;
 	}
 
-	/** Claims what is due for this session: clock slots, recoverable occurrences and event attempts. */
-	private claim(): void {
-		const nowMs = this.deps.timers.now();
-		const eligibleRoutines = this.deps.store
+	private eligibleRoutines(): RoutineDefinitionView[] {
+		return this.deps.store
 			.listRoutines()
 			.filter(
 				(routine) =>
 					!routine.executionSnapshot ||
 					this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin),
 			);
+	}
+
+	/**
+	 * Hands this session's ended routines whose runs are all delivered to the store for removal. A routine still
+	 * waiting on a run or a delivery is left: that settlement wakes a later pass.
+	 */
+	private retire(): void {
+		const nowMs = this.deps.timers.now();
+		const occurrences = this.occurrences();
+		const ended = this.eligibleRoutines().filter(
+			(routine) =>
+				(routine.target.kind !== "session" || routine.target.parentSessionId === this.deps.parentSessionId) &&
+				routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined &&
+				routineOccurrencesSettled(occurrences, routine),
+		);
+		if (ended.length === 0) return;
+		const retired = this.deps.store.retireEndedRoutines({
+			nowMs,
+			owner: this.deps.owner,
+			leaseMs: CLAIM_LEASE_MS,
+			parentSessionId: this.deps.parentSessionId,
+			receiptOrigin: this.deps.getReceiptOrigin(),
+			routineIds: ended.map((routine) => routine.routineId),
+		});
+		if (retired.journalFull)
+			this.report(
+				"retire-journal",
+				"An ended routine is waiting to be removed: the routine journal shared by this agent directory's sessions has no room for its notice until delivered runs leave it.",
+			);
+		else this.faults.delete("retire-journal");
+	}
+
+	/** Claims what is due for this session: clock slots, recoverable occurrences and event attempts. */
+	private claim(): void {
+		const nowMs = this.deps.timers.now();
+		const eligibleRoutines = this.eligibleRoutines();
 		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
 		const eventRoutines = eligibleRoutines.filter(
 			(routine) =>
 				routine.enabled &&
+				routineEnded(routine.schedule, routine.cursor, nowMs) === undefined &&
 				routine.schedule.kind === "event" &&
 				routine.target.kind === "session" &&
 				routine.target.parentSessionId === this.deps.parentSessionId,
@@ -688,7 +732,8 @@ export class RoutineSchedulerController {
 	/**
 	 * The earliest instant a routine of this session can be claimed: its next slot after a backward clock step is undone
 	 * (`rebasedRoutineCursor`, as the claim persists it), and never before the routine's last edit. An event routine
-	 * contributes only an edit still ahead of the clock. With `waitingForRoom`, a routine already due is left out: the
+	 * contributes only an edit still ahead of the clock. Every routine, paused ones included, contributes its end time
+	 * while that is ahead. With `waitingForRoom`, a routine already due is left out: the
 	 * last claim found no journal room for it, and only a store change (which wakes the scheduler) can make room.
 	 */
 	private nextScheduledAt(nowMs: number, waitingForRoom = false): number {
@@ -696,23 +741,27 @@ export class RoutineSchedulerController {
 		const previousSlots = new Map<string, number | undefined>();
 		for (const routine of this.deps.store.listRoutines()) {
 			if (
-				!routine.enabled ||
 				(routine.executionSnapshot &&
 					!this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin)) ||
 				(routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
 			)
 				continue;
+			// A routine's end wakes the retire step, paused or not. Once ended it has no alarm: the settlement of its last
+			// run or delivery wakes the pass that removes it.
+			const end = routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;
+			if (routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined) continue;
 			let due: number | undefined;
 			try {
-				due = this.routineDueAt(routine, nowMs, previousSlots);
+				due = routine.enabled ? this.routineDueAt(routine, nowMs, previousSlots) : undefined;
 			} catch (error) {
 				// Only this routine is left out of the alarm; the claim skips and reports it the same way.
 				this.report(
 					`routine|${routine.routineId}`,
 					`Routine ${routine.routineId} cannot be scheduled: ${errorText(error)}`,
 				);
-				continue;
+				due = undefined;
 			}
+			if (end !== undefined) due = due === undefined ? end : Math.min(due, end);
 			if (due === undefined || (waitingForRoom && due <= nowMs)) continue;
 			next = Math.min(next, due);
 		}

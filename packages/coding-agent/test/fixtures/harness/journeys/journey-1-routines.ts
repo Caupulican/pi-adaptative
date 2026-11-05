@@ -978,7 +978,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 							action: "create",
 							routineId: "changelog-review",
 							prompt: "Check the changelog.",
-							schedule: { kind: "interval", intervalMs: 86_400_000 },
+							// Saved for an hour only: its first slot lies a day out, so it ends without a run.
+							schedule: {
+								kind: "interval",
+								intervalMs: 86_400_000,
+								expiresAt: world.timers.port("routines").now() + 3_600_000,
+							},
 							profileId: profile.profileId,
 						},
 					},
@@ -1054,6 +1059,38 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			refused: 0,
 		});
 		expect(world.timers.armedDelays("routine-intake")).toEqual([]);
+
+		// Once the routine clock passes the changelog routine's end, the routine is removed and the owner hears it once,
+		// with the next turn, without a run or a parent wake.
+		const completions = () =>
+			root.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === "routine-completion");
+		expect(store().getRoutine("changelog-review")).toBeDefined();
+		expect(completions()).toHaveLength(0);
+		const expiryNoticed = new Promise<void>((resolve) => {
+			const stop = root.sessionManager.onEntriesPersisted(() => {
+				if (completions().length === 0) return;
+				stop();
+				resolve();
+			});
+		});
+		world.timers.advance("routines", 3_600_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		await withDeadline(world.trace, "routine expiry notice", expiryNoticed);
+		expect(store().getRoutine("changelog-review"), "an ended routine is removed").toBeUndefined();
+		expect(completions(), "the end is announced once").toHaveLength(1);
+		const expiry = completions()[0]!;
+		const expiryText = expiry.type === "custom_message" && typeof expiry.content === "string" ? expiry.content : "";
+		expect(expiryText).toContain("Routine changelog-review reached the end time it was saved with and was removed");
+		expect(parentInputOf(expiry)?.metadata.mode, "the end waits for the owner's next turn").toBe("next-owner-turn");
+		expect(root.sessionManager.getPendingParentInputs("turn")).toHaveLength(0);
+		expect(
+			store()
+				.listRoutineOccurrences({ routineId: "changelog-review" })
+				.map((occurrence) => occurrence.trigger.kind),
+			"the routine ended without a run",
+		).toEqual(["expiry"]);
 		world.trace.mark("root", "routine.owner-intake");
 	} finally {
 		if (open) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();

@@ -130,7 +130,10 @@ the stated timing words carry every slot value: hour and minute, interval count 
 day of month, date, zone and CI outcome, as digits or through small English, Portuguese and Spanish
 word tables (`routine-intake-timing.ts`). The host then compiles the schedule, filling open parts
 with fixed defaults it records and announces: part-of-day hours or 09:00 with a 30-minute start
-window, and weekdays for a daily request without days. Each proposal is judged for being an
+window, and weekdays for a daily request without days. A request the extraction marks as lasting only
+until something happens gets an end 14 days out (`expiresAt`), and a one-time CI request runs for the next
+matching attempt only (`stopAfterFirstRun`) with the same end; an ended routine is removed after its runs are
+delivered, and an expired one is announced once. Each proposal is judged for being an
 explicit request and for a faithful schedule, given the host-chosen parts, by System One or else
 the session model, and is created only when both hold at 0.9 probability and confidence. A notice
 with the plain cadence and the host-chosen parts rides with the owner's next turn. The pass, its extracted

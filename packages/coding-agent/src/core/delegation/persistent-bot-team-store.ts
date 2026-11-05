@@ -55,11 +55,14 @@ import {
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
+	type RoutineRetireInput,
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	rebasedRoutineCursor,
 	routineCursorAfter,
+	routineEnded,
 	routineOccurrenceId,
+	routineOccurrencesSettled,
 	routinePreviousSlot,
 	routineResultDigest,
 	routineScheduleInputOf,
@@ -927,8 +930,9 @@ export class PersistentBotTeamStore {
 		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
 			const item = removable.shift();
 			if (!item) continue;
-			// Slot occurrences cannot recur behind their cursor; manual commands and CI attempts can be re-presented.
-			if (item.trigger.kind !== "schedule") {
+			// Slot occurrences cannot recur behind their cursor, nor an expiry notice after its routine is removed; manual
+			// commands and CI attempts can be re-presented.
+			if (item.trigger.kind === "manual" || item.trigger.kind === "event") {
 				if (this.routineReplayTombstones.size >= MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
 				this.routineReplayTombstones.add(item.occurrenceId);
 			}
@@ -1524,7 +1528,12 @@ export class PersistentBotTeamStore {
 					: (input.nowMs ?? Date.now());
 			let schedule: RoutineSchedule;
 			if (scheduleInput.kind === "interval")
-				schedule = { kind: "interval", intervalMs: scheduleInput.intervalMs, anchorAt };
+				schedule = {
+					kind: "interval",
+					intervalMs: scheduleInput.intervalMs,
+					anchorAt,
+					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+				};
 			else if (scheduleInput.kind === "once") schedule = scheduleInput;
 			else if (scheduleInput.kind === "event") {
 				// Host events are decided by the session that owns their ledger; a bot or team has none.
@@ -1539,6 +1548,8 @@ export class PersistentBotTeamStore {
 					source: scheduleInput.source,
 					conclusions: scheduleInput.conclusions ?? ["failure"],
 					...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
+					...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
 					anchorOrdinal: anchor.ordinal,
 					anchorReplayGaps: anchor.replayGaps,
 				};
@@ -1552,6 +1563,14 @@ export class PersistentBotTeamStore {
 				!(existing?.schedule.kind === "once" && existing.schedule.notAfter === schedule.notAfter)
 			)
 				throw new Error("One-time routine start window has already closed.");
+			// An end time already reached is refused unless it is the saved one resubmitted (a pause or prompt edit).
+			if (
+				schedule.kind !== "once" &&
+				schedule.expiresAt !== undefined &&
+				schedule.expiresAt <= (input.nowMs ?? Date.now()) &&
+				!(existing && existing.schedule.kind !== "once" && existing.schedule.expiresAt === schedule.expiresAt)
+			)
+				throw new Error("Routine end time has already passed; send a later expiresAt.");
 			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
 			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
 				throw new Error("Routine revision counter is exhausted.");
@@ -1734,6 +1753,63 @@ export class PersistentBotTeamStore {
 		});
 	}
 
+	/**
+	 * Removes the session's ended routines among `routineIds` once every run of their incarnation is past dispatch and
+	 * delivered. A spent one-run routine leaves quietly: its run's result was the last word. An expired routine leaves a
+	 * terminal notice occurrence, written in the same store write as the removal, so the owner is told exactly once even
+	 * across a crash. `journalFull`: an expired routine stays until delivered results make room for its notice.
+	 */
+	retireEndedRoutines(input: RoutineRetireInput): {
+		readonly retired: readonly string[];
+		readonly journalFull: boolean;
+	} {
+		return this.mutate(() => {
+			const retired: string[] = [];
+			let journalFull = false;
+			for (const routineId of new Set(input.routineIds)) {
+				const routine = this.routines.get(routineId);
+				if (!routine || input.nowMs < Date.parse(routine.updatedAt)) continue;
+				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
+				const ended = routineEnded(routine.schedule, routine.cursor, input.nowMs);
+				if (!ended || !routineOccurrencesSettled(this.routineOccurrences.values(), routine)) continue;
+				if (ended === "expired" && routine.schedule.kind !== "once" && routine.schedule.expiresAt !== undefined) {
+					const parentOrigin =
+						routine.target.kind === "session"
+							? routine.executionSnapshot?.savedIntent.receiptOrigin
+							: input.receiptOrigin;
+					if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
+					if (!this.routineJournalHasRoom()) {
+						journalFull = true;
+						continue;
+					}
+					const trigger = { kind: "expiry" as const, expiresAt: routine.schedule.expiresAt };
+					const notice = this.createClaimedOccurrence(
+						routine,
+						routineOccurrenceId(routine, trigger),
+						trigger,
+						input.owner,
+						input.leaseMs,
+						input.nowMs,
+						parentOrigin,
+					);
+					this.routineOccurrences.set(
+						notice.occurrenceId,
+						this.withResult(
+							{ ...notice, phase: "terminal" },
+							"cancelled",
+							"The routine reached its end time and was removed.",
+							parentOrigin.sessionId,
+						),
+					);
+				}
+				this.routines.delete(routineId);
+				retired.push(routineId);
+			}
+			if (retired.length > 0) this.save();
+			return { retired, journalFull };
+		});
+	}
+
 	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult {
 		return this.mutate(() => {
 			if (
@@ -1814,6 +1890,8 @@ export class PersistentBotTeamStore {
 				if (output.length >= limit) break;
 				if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
 				if (eligible && !eligible.has(id)) continue;
+				// An ended routine starts nothing more; `retireEndedRoutines` removes it once its runs are delivered.
+				if (routineEnded(stored.schedule, stored.cursor, input.nowMs)) continue;
 				if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;
 				// An occurrence is never older than its definition: with the clock behind the last edit, wait for it.
 				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
@@ -2055,6 +2133,8 @@ export class PersistentBotTeamStore {
 				kind: "event",
 				throughOrdinal: decision.cursor.throughOrdinal,
 				replayGaps: decision.cursor.replayGaps,
+				// A one-run routine is spent in the write that records its run, so no second attempt can start it.
+				...(routine.schedule.stopAfterFirstRun ? { spent: true as const } : {}),
 			};
 			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
 			output.push(occurrence);

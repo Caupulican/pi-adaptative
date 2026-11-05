@@ -15,9 +15,11 @@ const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
  * result, so a redelivery after restart presents the same identity: a quiet result rides with the owner's next turn,
  * every other outcome starts a parent turn.
  */
-export function routineParentInput({ occurrence, result }: RoutineDelivery): ParentInputDelivery {
-	const quiet = result.ownerUpdate === "none";
+export function routineParentInput(delivery: RoutineDelivery): ParentInputDelivery {
+	const { occurrence, result } = delivery;
 	const trigger = occurrence.trigger;
+	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger.expiresAt);
+	const quiet = result.ownerUpdate === "none";
 	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
 	// A count recorded at its saturation bound stands for that many or more.
 	const saturated =
@@ -65,6 +67,15 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 			...(quiet ? { ownerUpdate: "none" as const } : {}),
 		},
 	};
+	return routineCompletionInput({ occurrence, result }, message, quiet);
+}
+
+/** One stored result's parent input: its identity is the occurrence and result digest, so a redelivery is the same. */
+function routineCompletionInput(
+	{ occurrence, result }: RoutineDelivery,
+	message: ParentInputDelivery["message"],
+	nextOwnerTurn: boolean,
+): ParentInputDelivery {
 	return {
 		deliveryId: `routine:${createHash("sha256")
 			.update(JSON.stringify([occurrence.occurrenceId, result.digest]))
@@ -72,8 +83,30 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 		payloadDigest: createHash("sha256").update(JSON.stringify(message)).digest("hex"),
 		message,
 		origin: occurrence.parentOrigin,
-		...(quiet ? { mode: "next-owner-turn" as const } : {}),
+		...(nextOwnerTurn ? { mode: "next-owner-turn" as const } : {}),
 	};
+}
+
+/**
+ * The host's one notice that a routine reached its end time and was removed. It carries no worker text and rides
+ * with the owner's next turn; its identity is the stored occurrence's, so a redelivery after restart is the same input.
+ */
+function routineExpiryNotice(delivery: RoutineDelivery, expiresAt: number): ParentInputDelivery {
+	const { occurrence, result } = delivery;
+	const message = {
+		customType: ROUTINE_COMPLETION_TYPE,
+		display: true,
+		content: `Routine ${occurrence.routineId} reached the end time it was saved with and was removed; it stopped watching and will not run again. Tell the owner once, briefly, when it bears on what they ask next; they can ask for it again or for a later end.`,
+		details: {
+			occurrenceId: occurrence.occurrenceId,
+			routineId: occurrence.routineId,
+			routineRevision: occurrence.routineRevision,
+			outcome: result.outcome,
+			resultDigest: result.digest,
+			expiresAt,
+		},
+	};
+	return routineCompletionInput(delivery, message, true);
 }
 
 /**

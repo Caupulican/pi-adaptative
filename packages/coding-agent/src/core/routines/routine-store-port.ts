@@ -8,6 +8,7 @@ import type {
 	RoutineOccurrence,
 	RoutineOccurrenceClaimInput,
 	RoutineOccurrenceListFilter,
+	RoutineRetireInput,
 	RoutineTerminalOutcome,
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
@@ -28,6 +29,10 @@ export interface RoutineStorePort {
 		change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null },
 	): void;
 	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult;
+	retireEndedRoutines(input: RoutineRetireInput): {
+		readonly retired: readonly string[];
+		readonly journalFull: boolean;
+	};
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
 		expectedRevision?: number;

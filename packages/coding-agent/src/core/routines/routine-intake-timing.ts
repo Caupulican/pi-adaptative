@@ -9,6 +9,7 @@ import { type Static, Type } from "typebox";
 import { CI_TERMINAL_CONCLUSIONS, type CiTerminalConclusion } from "../events/host-event-contract.ts";
 import { canonicalCalendarTimeZone, MAX_CALENDAR_TIME_ZONE_CHARS, nextCalendarSlotAfter } from "./calendar-schedule.ts";
 import {
+	MAX_ROUTINE_INTAKE_TEXT_CHARS,
 	MAX_ROUTINE_WORKFLOW_PATH_CHARS,
 	parseRoutineScheduleInput,
 	type RoutineScheduleInput,
@@ -134,6 +135,12 @@ export const intakeTimingSchema = Type.Union([
 
 export type IntakeTiming = Static<typeof intakeTimingSchema>;
 
+/** How long the owner wants a request to keep running, as the extraction model read it; omitted means standing. */
+export const INTAKE_LIFETIMES = ["until_condition", "next_time_only"] as const;
+export type IntakeLifetime = (typeof INTAKE_LIFETIMES)[number];
+/** The end the host gives a conditional or one-time watch that names none, stated to the owner. */
+export const INTAKE_WATCH_LIFETIME_MS = 14 * DAY_MS;
+
 /** A compiled intake schedule: what runs, how the owner reads it, and which parts the host chose. */
 export interface CompiledIntakeTiming {
 	readonly schedule: RoutineScheduleInput;
@@ -160,6 +167,32 @@ export interface IntakeTimingContext {
 export function compileIntakeTiming(
 	timing: IntakeTiming,
 	context: IntakeTimingContext,
+	lifetime?: IntakeLifetime,
+): CompiledIntakeTiming | undefined {
+	// A one-time watch exists only for CI results; a clock request that should happen once is a `once` timing.
+	if (lifetime === "next_time_only" && timing.kind !== "event" && timing.kind !== "once") return undefined;
+	const base = compileTimingSlots(timing, context, lifetime === "next_time_only");
+	if (!base || base.schedule.kind === "once" || lifetime === undefined) return base;
+	const expiresAt = context.now + INTAKE_WATCH_LIFETIME_MS;
+	const zone = (base.schedule.kind === "calendar" ? base.schedule.timeZone : undefined) ?? context.hostTimeZone;
+	const end = `${localStamp(expiresAt, zone)} (${zone})`;
+	if (lifetime === "next_time_only")
+		return base.schedule.kind !== "event"
+			? undefined
+			: compiled({ ...base.schedule, stopAfterFirstRun: true, expiresAt }, base.cadence, [
+					...base.defaults,
+					`stops watching on ${end}, 14 days after the request, if that has not happened, as no end was stated`,
+				]);
+	return compiled({ ...base.schedule, expiresAt }, `${base.cadence}, until ${end}`, [
+		...base.defaults,
+		`ends on ${end}, 14 days after the request, as no end was stated`,
+	]);
+}
+
+function compileTimingSlots(
+	timing: IntakeTiming,
+	context: IntakeTimingContext,
+	nextTimeOnly: boolean,
 ): CompiledIntakeTiming | undefined {
 	const words = timingWords(context.stated);
 	if (timing.kind === "interval") {
@@ -171,7 +204,7 @@ export function compileIntakeTiming(
 			[],
 		);
 	}
-	if (timing.kind === "event") return compileEvent(timing, words);
+	if (timing.kind === "event") return compileEvent(timing, words, nextTimeOnly);
 	const zone = intakeZone(timing.timeZone, words, context.hostTimeZone);
 	const clock = zone === undefined ? undefined : intakeClock(timing.time, timing.partOfDay, words);
 	if (zone === undefined || clock === undefined) return undefined;
@@ -219,6 +252,8 @@ function compiled(
 	cadence: string,
 	defaults: readonly string[],
 ): CompiledIntakeTiming | undefined {
+	// The retained request bounds every description; a cadence that would not fit (a long workflow path) is dropped.
+	if ([cadence, ...defaults].some((text) => text.length > MAX_ROUTINE_INTAKE_TEXT_CHARS)) return undefined;
 	try {
 		return { schedule: parseRoutineScheduleInput(schedule), cadence, defaults };
 	} catch {
@@ -226,7 +261,11 @@ function compiled(
 	}
 }
 
-function compileEvent(timing: Extract<IntakeTiming, { kind: "event" }>, words: readonly string[]) {
+function compileEvent(
+	timing: Extract<IntakeTiming, { kind: "event" }>,
+	words: readonly string[],
+	nextTimeOnly: boolean,
+) {
 	if (!hasAny(words, CI_WORDS)) return undefined;
 	const conclusions: readonly CiTerminalConclusion[] = timing.conclusions ?? ["failure"];
 	const every = CI_TERMINAL_CONCLUSIONS.every((conclusion) => conclusions.includes(conclusion));
@@ -245,9 +284,24 @@ function compileEvent(timing: Extract<IntakeTiming, { kind: "event" }>, words: r
 			...(timing.conclusions === undefined ? {} : { conclusions: [...timing.conclusions] }),
 			...(timing.workflowPath === undefined ? {} : { workflowPath: timing.workflowPath }),
 		},
-		`every time a CI attempt of the checked-out revision ${every ? "finishes" : `ends in ${conclusions.join(" or ")}`}${timing.workflowPath === undefined ? "" : ` (${timing.workflowPath})`}`,
+		`${nextTimeOnly ? "once, the next time" : "every time"} a CI attempt of the checked-out revision ${every ? "finishes" : `ends in ${conclusions.join(" or ")}`}${timing.workflowPath === undefined ? "" : ` (${timing.workflowPath})`}${nextTimeOnly ? ", then it is removed" : ""}`,
 		[],
 	);
+}
+
+/** `YYYY-MM-DD HH:MM` on a 24-hour clock in the zone. */
+function localStamp(instant: number, zone: string): string {
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone: zone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+	}).formatToParts(instant);
+	const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? "";
+	return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
 }
 
 /** A stated zone must be canonical and named in the owner's words by its city or name; otherwise the host's zone. */

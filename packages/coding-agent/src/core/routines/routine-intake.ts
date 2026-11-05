@@ -78,7 +78,7 @@ const JUDGE_PROGRAM = createDecisionProgram({
 			kind: "boolean",
 			id: "faithful",
 			instruction:
-				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check.",
+				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check. How long it runs must match too: a one-time request must not run every time, a request meant to last only until something happens must have an end, and a standing request must not end.",
 		},
 	],
 });
@@ -499,12 +499,16 @@ export class RoutineIntake {
 					prompt.includes("\0")
 				)
 					continue;
-				const timing = compileIntakeTiming(proposal.timing, {
-					stated: when.stated,
-					sentAt: Date.parse(source.createdAt),
-					now: this.deps.time.now(),
-					hostTimeZone: hostTimeZone(),
-				});
+				const timing = compileIntakeTiming(
+					proposal.timing,
+					{
+						stated: when.stated,
+						sentAt: Date.parse(source.createdAt),
+						now: this.deps.time.now(),
+						hostTimeZone: hostTimeZone(),
+					},
+					proposal.lasts,
+				);
 				if (!timing) continue;
 				const key = canonicalDigest({
 					parentSessionId: this.deps.parentSessionId,

@@ -55,15 +55,25 @@ export const MAX_ROUTINE_INTAKE_BATCH_SOURCES = 4;
 export const MAX_ROUTINE_INTAKE_SOURCE_REQUESTS = 2;
 /** Host-chosen timing parts recorded per intake request and routine origin, and the bound of each description. */
 const MAX_ROUTINE_INTAKE_DEFAULTS = 4;
-const MAX_ROUTINE_INTAKE_TEXT_CHARS = 300;
+export const MAX_ROUTINE_INTAKE_TEXT_CHARS = 300;
 /** Every intake spend is accounted under this operation prefix, one operation per pass. */
 export const ROUTINE_INTAKE_OPERATION_PREFIX = "routine-intake:";
 const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
+
+const expiresAtField = Type.Optional(
+	Type.Integer({
+		minimum: 0,
+		maximum: MAX_ROUTINE_INSTANT_MS,
+		description:
+			"Optional UTC epoch-ms end, in the future. No new slot or CI attempt is taken at or after it; once work already admitted has finished and been delivered, the routine is removed and the owner is told once. Send a later value to extend it.",
+	}),
+);
 
 const intervalSchema = Type.Object(
 	{
 		kind: Type.Literal("interval"),
 		intervalMs: Type.Integer({ minimum: MIN_ROUTINE_INTERVAL_MS, maximum: MAX_ROUTINE_INSTANT_MS }),
+		expiresAt: expiresAtField,
 	},
 	{ additionalProperties: false },
 );
@@ -109,6 +119,7 @@ const calendarSchema = Type.Object(
 					"Optional bound on how late a slot may start. A slot that cannot start within it is skipped and counted as missed by the next run.",
 			}),
 		),
+		expiresAt: expiresAtField,
 	},
 	{ additionalProperties: false },
 );
@@ -134,6 +145,13 @@ const eventSchema = Type.Object(
 				description: "Only attempts of this workflow file, for example .github/workflows/ci.yml.",
 			}),
 		),
+		stopAfterFirstRun: Type.Optional(
+			Type.Literal(true, {
+				description:
+					"Run for the next matching attempt only, for a one-time 'tell me when CI finishes'; the routine is removed once that run's result is delivered.",
+			}),
+		),
+		expiresAt: expiresAtField,
 	},
 	{ additionalProperties: false },
 );
@@ -172,6 +190,8 @@ export type RoutineCursor =
 			readonly replayGaps: string;
 			readonly skipped?: number;
 			readonly historyGap?: true;
+			/** A `stopAfterFirstRun` routine has taken its one run. */
+			readonly spent?: true;
 	  };
 
 export type PersistentRoutineTarget =
@@ -190,7 +210,8 @@ export interface RoutineExecutionSnapshot {
 
 /** Explicit schedule. The cursor is mutable independently of immutable routine revision. */
 export type RoutineSchedule =
-	| { readonly kind: "interval"; readonly intervalMs: number; readonly anchorAt: number }
+	/** `expiresAt`: no new slot or attempt is taken at or after it; the routine is retired once its runs are delivered. */
+	| { readonly kind: "interval"; readonly intervalMs: number; readonly anchorAt: number; readonly expiresAt?: number }
 	| { readonly kind: "once"; readonly at: number; readonly notAfter?: number }
 	/** Slots strictly after anchorAt (the authoring instant) in the stored zone. */
 	| {
@@ -199,6 +220,7 @@ export type RoutineSchedule =
 			readonly timeZone: string;
 			readonly anchorAt: number;
 			readonly maxLatenessMs?: number;
+			readonly expiresAt?: number;
 	  }
 	/** Root-applicable CI attempts accepted into the session ledger after `anchorOrdinal`. */
 	| {
@@ -206,6 +228,8 @@ export type RoutineSchedule =
 			readonly source: "ci";
 			readonly conclusions: readonly CiTerminalConclusion[];
 			readonly workflowPath?: string;
+			readonly stopAfterFirstRun?: true;
+			readonly expiresAt?: number;
 			readonly anchorOrdinal: number;
 			readonly anchorReplayGaps: string;
 	  };
@@ -368,7 +392,9 @@ export type RoutineOccurrenceTrigger =
 			readonly missedCount: number;
 			readonly historyGap?: true;
 			readonly event: CiAttemptTerminalEvent;
-	  };
+	  }
+	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
+	| { readonly kind: "expiry"; readonly expiresAt: number };
 export type RoutineTerminalOutcome = "succeeded" | "failed" | "cancelled" | "uncertain";
 
 export interface RoutineResult {
@@ -423,7 +449,41 @@ export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed"
 /** The instant a claim is attributed to: its scheduled slot, the manual request time or the event claim time. */
 export function routineTriggerAt(trigger: RoutineOccurrenceTrigger): number {
 	if (trigger.kind === "schedule") return trigger.scheduledAt;
+	if (trigger.kind === "expiry") return trigger.expiresAt;
 	return trigger.kind === "manual" ? trigger.requestedAt : trigger.triggeredAt;
+}
+
+/**
+ * Whether a routine has ended at `nowMs`: its one-run event routine took its run (`spent`, whose result is the last
+ * word), or its end time passed (`expired`, announced once). An ended routine is never claimed again.
+ */
+export function routineEnded(
+	schedule: RoutineSchedule,
+	cursor: RoutineCursor,
+	nowMs: number,
+): "spent" | "expired" | undefined {
+	if (schedule.kind === "once") return undefined;
+	if (schedule.kind === "event" && schedule.stopAfterFirstRun && cursor.kind === "event" && cursor.spent)
+		return "spent";
+	return schedule.expiresAt !== undefined && nowMs >= schedule.expiresAt ? "expired" : undefined;
+}
+
+/**
+ * Whether every occurrence of the routine's incarnation is past dispatch and has its results delivered, so removing
+ * the routine loses no run and no result.
+ */
+export function routineOccurrencesSettled(
+	occurrences: Iterable<RoutineOccurrence>,
+	routine: Pick<PersistentRoutineDefinition, "routineId" | "incarnationId">,
+): boolean {
+	for (const occurrence of occurrences) {
+		if (occurrence.routineId !== routine.routineId || occurrence.definition.incarnationId !== routine.incarnationId)
+			continue;
+		if (occurrence.phase !== "terminal" && occurrence.phase !== "uncertain") return false;
+		if (occurrence.result?.delivery === "pending" || occurrence.priorUncertaintyResult?.delivery === "pending")
+			return false;
+	}
+	return true;
 }
 
 /** Whether a CI attempt satisfies an event schedule's filter. Root applicability is decided by the caller. */
@@ -449,6 +509,17 @@ export interface RoutineOccurrenceClaimInput {
 	readonly routineId?: string;
 	/** Retained host events of the claiming session; event routines are decided only when present. */
 	readonly hostEvents?: RoutineHostEventFeed;
+}
+
+/** The ended routines one session asks the store to remove; the store rechecks each under its lock. */
+export interface RoutineRetireInput {
+	readonly nowMs: number;
+	readonly owner: string;
+	readonly leaseMs: number;
+	readonly parentSessionId: string;
+	/** The parent anchor a bot or team routine's expiry notice is delivered at; session routines use their own. */
+	readonly receiptOrigin: WorkerSavedIntent["receiptOrigin"];
+	readonly routineIds: readonly string[];
 }
 
 export interface RoutineClaimResult {
@@ -547,14 +618,17 @@ export function parseRoutineAuthoringInput(value: unknown): RoutineAuthoringInpu
 
 export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput {
 	if (!isPlainRecord(value)) throw new TypeError("Routine schedule is invalid.");
+	if (value.expiresAt !== undefined && (value.kind === "once" || !validInstant(value.expiresAt)))
+		throw new TypeError("Routine end time must be a UTC epoch-ms instant on a repeating or event schedule.");
+	const expiry = value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt as number };
 	if (
 		value.kind === "interval" &&
-		hasOnlyKeys(value, ["kind", "intervalMs"]) &&
+		hasOnlyKeys(value, ["kind", "intervalMs", "expiresAt"]) &&
 		Number.isSafeInteger(value.intervalMs) &&
 		(value.intervalMs as number) >= MIN_ROUTINE_INTERVAL_MS &&
 		(value.intervalMs as number) <= MAX_ROUTINE_INSTANT_MS
 	)
-		return { kind: "interval", intervalMs: value.intervalMs as number };
+		return { kind: "interval", intervalMs: value.intervalMs as number, ...expiry };
 	if (
 		value.kind === "once" &&
 		hasOnlyKeys(value, ["kind", "at", "notAfter"]) &&
@@ -563,7 +637,7 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			(validInstant(value.notAfter) && value.notAfter >= value.at + MIN_ROUTINE_START_WINDOW_MS))
 	)
 		return { kind: "once", at: value.at, ...(value.notAfter === undefined ? {} : { notAfter: value.notAfter }) };
-	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone", "maxLatenessMs"])) {
+	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone", "maxLatenessMs", "expiresAt"])) {
 		const cron = canonicalCalendarCron(value.cron);
 		if (
 			value.maxLatenessMs !== undefined &&
@@ -577,12 +651,14 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			cron,
 			...(value.timeZone === undefined ? {} : { timeZone: canonicalCalendarTimeZone(value.timeZone) }),
 			...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
+			...expiry,
 		};
 	}
 	if (
 		value.kind === "event" &&
 		value.source === "ci" &&
-		hasOnlyKeys(value, ["kind", "source", "conclusions", "workflowPath"])
+		hasOnlyKeys(value, ["kind", "source", "conclusions", "workflowPath", "stopAfterFirstRun", "expiresAt"]) &&
+		(value.stopAfterFirstRun === undefined || value.stopAfterFirstRun === true)
 	)
 		return {
 			kind: "event",
@@ -591,6 +667,8 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			...(value.workflowPath === undefined
 				? {}
 				: { workflowPath: boundedString(value.workflowPath, MAX_ROUTINE_WORKFLOW_PATH_CHARS, "workflow path") }),
+			...(value.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+			...expiry,
 		};
 	throw new TypeError(
 		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule or CI event filter.",
@@ -612,9 +690,10 @@ function canonicalRoutineConclusions(value: unknown): CiTerminalConclusion[] {
 
 /** Authored form of a stored schedule, without host-owned anchors. */
 export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineScheduleInput {
+	const expiry = schedule.kind === "once" || schedule.expiresAt === undefined ? {} : { expiresAt: schedule.expiresAt };
 	switch (schedule.kind) {
 		case "interval":
-			return { kind: "interval", intervalMs: schedule.intervalMs };
+			return { kind: "interval", intervalMs: schedule.intervalMs, ...expiry };
 		case "once":
 			return {
 				kind: "once",
@@ -627,6 +706,7 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				cron: schedule.cron,
 				timeZone: schedule.timeZone,
 				...(schedule.maxLatenessMs === undefined ? {} : { maxLatenessMs: schedule.maxLatenessMs }),
+				...expiry,
 			};
 		case "event":
 			return {
@@ -634,11 +714,16 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				source: schedule.source,
 				conclusions: [...schedule.conclusions],
 				...(schedule.workflowPath === undefined ? {} : { workflowPath: schedule.workflowPath }),
+				...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+				...expiry,
 			};
 	}
 }
 
-/** Fields that place slots. Start windows are excluded: changing one must neither replay nor move a slot. */
+/**
+ * Fields that place slots. Start windows and end times are excluded: changing one must neither replay nor move a slot,
+ * so an end time is extended in place.
+ */
 export function routineSlotRule(schedule: RoutineScheduleInput): RoutineScheduleInput {
 	switch (schedule.kind) {
 		case "interval":
@@ -652,12 +737,14 @@ export function routineSlotRule(schedule: RoutineScheduleInput): RoutineSchedule
 				...(schedule.timeZone === undefined ? {} : { timeZone: schedule.timeZone }),
 			};
 		case "event":
-			// The whole filter decides which events run it: any change re-anchors at the ledger's current position.
+			// The whole filter decides which events run it: any change re-anchors at the ledger's current position. The
+			// one-run flag is part of it, so turning it off after the run starts a fresh cursor instead of a spent one.
 			return {
 				kind: "event",
 				source: schedule.source,
 				conclusions: canonicalRoutineConclusions(schedule.conclusions),
 				...(schedule.workflowPath === undefined ? {} : { workflowPath: schedule.workflowPath }),
+				...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
 			};
 	}
 }
@@ -990,6 +1077,18 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 				...(value.trigger.historyGap ? { historyGap: true as const } : {}),
 				event,
 			};
+		} else if (
+			isPlainRecord(value.trigger) &&
+			value.trigger.kind === "expiry" &&
+			hasOnlyKeys(value.trigger, ["kind", "expiresAt"]) &&
+			definition.schedule.kind !== "once" &&
+			definition.schedule.expiresAt !== undefined &&
+			value.trigger.expiresAt === definition.schedule.expiresAt &&
+			definition.schedule.expiresAt <= value.createdAt &&
+			value.phase === "terminal" &&
+			value.dispatchKey === undefined
+		) {
+			trigger = { kind: "expiry", expiresAt: definition.schedule.expiresAt };
 		} else return undefined;
 		if (target.kind !== "session" && trigger.kind === "event") return undefined;
 		if (value.occurrenceId !== routineOccurrenceId(definition, trigger)) return undefined;
@@ -1157,12 +1256,15 @@ export function parseLegacyRoutineDefinition(value: unknown): PersistentRoutineD
 
 export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 	if (!isPlainRecord(value)) throw new TypeError("Routine schedule is invalid.");
+	if (value.expiresAt !== undefined && (value.kind === "once" || !validInstant(value.expiresAt)))
+		throw new TypeError("Persisted routine end time is invalid.");
+	const expiry = value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt as number };
 	if (value.kind === "calendar") {
 		// A stored zone is checked for shape only: canonical spellings and supported zones differ across runtimes, and a
 		// zone this runtime cannot use makes that routine unschedulable here (`routineZoneUnsupported`), never the store
 		// unreadable. Saving still refuses an unsupported zone (`parseRoutineScheduleInput`).
 		if (
-			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt", "maxLatenessMs"]) &&
+			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt", "maxLatenessMs", "expiresAt"]) &&
 			typeof value.cron === "string" &&
 			canonicalCalendarCron(value.cron) === value.cron &&
 			isCalendarTimeZoneName(value.timeZone) &&
@@ -1178,12 +1280,22 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 				timeZone: value.timeZone,
 				anchorAt: value.anchorAt,
 				...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
+				...expiry,
 			};
 		throw new TypeError("Persisted calendar schedule requires a canonical rule, a zone name and an anchor.");
 	}
 	if (value.kind === "event") {
 		if (
-			hasOnlyKeys(value, ["kind", "source", "conclusions", "workflowPath", "anchorOrdinal", "anchorReplayGaps"]) &&
+			hasOnlyKeys(value, [
+				"kind",
+				"source",
+				"conclusions",
+				"workflowPath",
+				"stopAfterFirstRun",
+				"expiresAt",
+				"anchorOrdinal",
+				"anchorReplayGaps",
+			]) &&
 			Number.isSafeInteger(value.anchorOrdinal) &&
 			(value.anchorOrdinal as number) >= 0 &&
 			isRoutineDigest(value.anchorReplayGaps)
@@ -1193,6 +1305,8 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 				source: value.source,
 				conclusions: value.conclusions,
 				...(value.workflowPath === undefined ? {} : { workflowPath: value.workflowPath }),
+				...(value.stopAfterFirstRun === undefined ? {} : { stopAfterFirstRun: value.stopAfterFirstRun }),
+				...expiry,
 			});
 			if (authored.kind === "event" && isDeepStrictEqual(authored.conclusions, value.conclusions))
 				return {
@@ -1200,6 +1314,8 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 					source: authored.source,
 					conclusions: canonicalRoutineConclusions(authored.conclusions),
 					...(authored.workflowPath === undefined ? {} : { workflowPath: authored.workflowPath }),
+					...(authored.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...expiry,
 					anchorOrdinal: value.anchorOrdinal as number,
 					anchorReplayGaps: value.anchorReplayGaps,
 				};
@@ -1207,12 +1323,12 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 		throw new TypeError("Persisted event schedule requires a canonical filter and a ledger anchor.");
 	}
 	const authored = parseRoutineScheduleInput(
-		value.kind === "interval" ? { kind: "interval", intervalMs: value.intervalMs } : value,
+		value.kind === "interval" ? { kind: "interval", intervalMs: value.intervalMs, ...expiry } : value,
 	);
 	if (authored.kind === "once") return authored;
 	if (
 		authored.kind === "interval" &&
-		hasOnlyKeys(value, ["kind", "intervalMs", "anchorAt"]) &&
+		hasOnlyKeys(value, ["kind", "intervalMs", "anchorAt", "expiresAt"]) &&
 		validInstant(value.anchorAt) &&
 		validInstant(value.anchorAt + authored.intervalMs)
 	)
@@ -1262,7 +1378,8 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 		};
 	if (
 		value.kind === "event" &&
-		hasOnlyKeys(value, ["kind", "throughOrdinal", "replayGaps", "skipped", "historyGap"]) &&
+		hasOnlyKeys(value, ["kind", "throughOrdinal", "replayGaps", "skipped", "historyGap", "spent"]) &&
+		(value.spent === undefined || value.spent === true) &&
 		Number.isSafeInteger(value.throughOrdinal) &&
 		(value.throughOrdinal as number) >= 0 &&
 		isRoutineDigest(value.replayGaps) &&
@@ -1278,6 +1395,7 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 			replayGaps: value.replayGaps,
 			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
 			...(value.historyGap ? { historyGap: true as const } : {}),
+			...(value.spent ? { spent: true as const } : {}),
 		};
 	throw new TypeError("Routine cursor is invalid.");
 }
@@ -1484,6 +1602,7 @@ export function routineOccurrenceId(
 ): string {
 	let suffix: string;
 	if (trigger.kind === "schedule") suffix = String(trigger.scheduledAt);
+	else if (trigger.kind === "expiry") suffix = `expiry:${trigger.expiresAt}`;
 	else if (trigger.kind === "manual")
 		suffix = `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
 	else {
