@@ -45,6 +45,15 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const managerB = world.createSessionManager(agentDirB);
 	const settings = { memorySystem: "okf", autoLearn: { enabled: false } } as const;
 	const extensionErrors: string[] = [];
+	const notices: string[] = [];
+	// The scripted human has no notification or status line; this phase records the two the extension drives.
+	const ui = new Proxy(world.humanInput.ui, {
+		get: (target, property, receiver) => {
+			if (property === "notify") return (message: string) => void notices.push(message);
+			if (property === "setStatus") return () => undefined;
+			return Reflect.get(target, property, receiver);
+		},
+	});
 	/** The status of the one target, with the whole result and any extension error as the assertion's evidence. */
 	const expectStatus = (result: { readonly details: unknown }, expected: string, label: string): void => {
 		const sent = result.details as AgentSendResult;
@@ -61,7 +70,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			extensionFactories: [(pi) => piChatExtension(pi, { stateRoot })],
 		});
 		await created.session.bindExtensions({
-			uiContext: world.humanInput.ui,
+			uiContext: ui,
 			onError: (error) => extensionErrors.push(`${error.event}: ${error.error}`),
 		});
 		return created.session;
@@ -122,6 +131,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	await withDeadline(trace, "B takes the live message", liveTurn.promise);
 	await sessionB.agent.waitForIdle();
 	expect(taken.at(-1), "B's turn carries the live message").toContain("live hello from A");
+	expect(notices.join("\n"), "B's owner is told a peer message arrived").toContain("pi-chat: message from");
 	expect(world.io.existsSync(inboxDir) ? world.io.readdirSync(inboxDir) : [], "a live message holds nothing").toEqual(
 		[],
 	);
