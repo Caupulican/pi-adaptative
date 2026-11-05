@@ -450,7 +450,8 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		]);
 		for (const key of [...preferences.map((item) => item.key), "indentation", "editor"])
 			expect(inspected[key]).toEqual([0, 8_000, 16_000]);
-		const records = store.list({ project: "", role: "", audience: "owner" });
+		// The default page holds 20 rows; include every expected fact and one slot to expose unexpected extras.
+		const records = store.list({ project: "", role: "", audience: "owner" }, { limit: preferences.length + 3 });
 		expect(records.map((record) => record.text).sort()).toEqual(
 			[...preferences.map((item) => item.text), "Prefers tabs only when offline.", "Uses Helix."].sort(),
 		);
