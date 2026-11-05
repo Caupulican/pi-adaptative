@@ -36,12 +36,13 @@ import {
 	repositoryKeyAt,
 	type WorkerLaneCreation,
 } from "../worktree-sync/worker-lane.ts";
+import type { ParentWriteOrigin } from "./parent-execution-context.ts";
 
 export interface WorkerLaneIsolationDeps {
 	/** Engine deps rooted at `cwd`, or undefined when worktree-sync is disabled. */
 	engineDeps(cwd: string): WorktreeSyncEngineDeps | undefined;
-	/** Tell the parent session about a lane that was kept because it holds work. */
-	notifyParent(text: string): void;
+	/** Tell the parent session about a lane that was kept because it holds work, as a write of the worker's attempt. */
+	notifyParent(text: string, origin?: ParentWriteOrigin): void;
 	warn(message: string): void;
 }
 
@@ -230,7 +231,7 @@ export class WorkerLaneIsolation {
 	 * `release_lane`). A lane bound to another worker or owner is superseded and warned. Anything else (a git error, an
 	 * unavailable checkout, a throw) rejects, so the caller retains and retries the release.
 	 */
-	async release(cwd: string, agentId: string): Promise<ReleaseOutcome> {
+	async release(cwd: string, agentId: string, attemptId: string): Promise<ReleaseOutcome> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return { kind: "released" };
 		const released = await releaseWorkerLane(engine, cwd, agentId);
@@ -239,6 +240,7 @@ export class WorkerLaneIsolation {
 			const cause = released.message ?? "it holds work";
 			this.deps.notifyParent(
 				`Worker ${agentId} was retired and its worktree lane '${released.laneKey}' was kept: ${cause}`,
+				{ attemptId },
 			);
 			return {
 				kind: "abandoned",

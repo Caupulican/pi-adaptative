@@ -574,6 +574,8 @@ export class WorkerDelegationController {
 		readonly isolation: WorkerLaneIsolation;
 		readonly cwd: string;
 		readonly agentId: string;
+		/** The retired worker's latest attempt: a kept-lane notice is that attempt's parent write. */
+		readonly attemptId: string;
 	}>;
 	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
@@ -806,8 +808,8 @@ export class WorkerDelegationController {
 		this.laneReleases = new AsyncRetainedReleases({
 			retryOwner: "worker delegation controller lane release",
 			timers: this.writeReservations.releaseTimers,
-			release: async ({ isolation, cwd, agentId }) => {
-				const outcome = await isolation.release(cwd, agentId);
+			release: async ({ isolation, cwd, agentId, attemptId }) => {
+				const outcome = await isolation.release(cwd, agentId, attemptId);
 				if (outcome.kind === "superseded") return { superseded: outcome.detail };
 				if (outcome.kind === "abandoned") return { abandoned: outcome.cause, reaper: outcome.reaper };
 				return "released";
@@ -6208,18 +6210,20 @@ export class WorkerDelegationController {
 	 */
 	releaseRetiredAgentLane(agentId: string): void {
 		const isolation = this.laneIsolation;
-		const cwd = this.lifecycle.getLatestAgentAttempt(agentId)?.dispatch.executionContract?.worker.authority.cwd;
-		if (!isolation || !cwd) return;
+		const attempt = this.lifecycle.getLatestAgentAttempt(agentId);
+		const cwd = attempt?.dispatch.executionContract?.worker.authority.cwd;
+		if (!isolation || !attempt || !cwd) return;
+		const attemptId = attempt.attemptId;
 		// Owned, never fire-and-forget: a release that may pass later is retained, and shutdown joins every one.
 		const task = (async () => {
 			try {
-				await isolation.release(cwd, agentId);
+				await isolation.release(cwd, agentId, attemptId);
 			} catch (error) {
 				if (this.laneReleases.closed) {
 					this.safeWarn(`Worker lane release failed: ${releaseFailureCause(error)}`);
 					return;
 				}
-				this.laneReleases.retain(`lane:${agentId}`, { isolation, cwd, agentId }, error);
+				this.laneReleases.retain(`lane:${agentId}`, { isolation, cwd, agentId, attemptId }, error);
 				this.safeWarn(
 					`Retired worker ${agentId}'s worktree lane release failed; retrying: ${releaseFailureCause(error)}`,
 				);

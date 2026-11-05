@@ -46,7 +46,7 @@ import {
 } from "./delegation/foreground-parent-writes.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
-import type { ParentExecutionContext } from "./delegation/parent-execution-context.ts";
+import type { ParentExecutionContext, ParentWriteOrigin } from "./delegation/parent-execution-context.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -400,7 +400,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _worktreeLaneHostDeps() {
 		return {
 			engineDeps: (cwd?: string) => this._worktreeEngineDeps(cwd),
-			notifyParent: (text: string) => this.deps.notifyParentSession?.("worktree-sync-notice", text),
+			notifyParent: (text: string, origin?: ParentWriteOrigin) =>
+				this.deps.notifyParentSession?.("worktree-sync-notice", text, origin),
 			warn: (message: string) => this._safeWarn(message),
 		};
 	}
