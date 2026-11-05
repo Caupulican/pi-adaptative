@@ -2,6 +2,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.
 import {
 	type CiAttemptTerminalEvent,
 	type CiCurrentObservation,
+	type CiHostEventEnvelope,
 	type CiSubject,
 	ciSubjectKey,
 	ciThreadKey,
@@ -11,9 +12,10 @@ import {
 	type HostEventWorkerScope,
 	hostEventInteger,
 	hostEventString,
+	isCiEnvelope,
 } from "./host-event-contract.ts";
 import { hostEventIsCurrent, hostEventSealDigest } from "./host-event-reducer.ts";
-import type { HostEventSourceState, HostEventSubscription } from "./host-event-state.ts";
+import type { AcceptedHostEvent, HostEventSourceState, HostEventSubscription } from "./host-event-state.ts";
 
 export const MAX_HOST_EVENT_PAGE_BYTES = 12 * 1024;
 export const MAX_HOST_EVENT_PAGE_ITEMS = 32;
@@ -153,9 +155,12 @@ export function readHostEventPage(
 				),
 		);
 	} else {
+		// Task evidence is CI attempts only: a GitHub thread occurrence carries a third party's words and reaches only the
+		// routines that listen for it, fenced in their run.
 		items = Object.values(state.hostEvents)
 			.filter(
-				(accepted) =>
+				(accepted): accepted is AcceptedHostEvent & { readonly envelope: CiHostEventEnvelope } =>
+					isCiEnvelope(accepted.envelope) &&
 					(query.eventId === undefined || accepted.envelope.event.eventId === query.eventId) &&
 					(taskId === undefined ||
 						accepted.deliveryIds.some((id) => {

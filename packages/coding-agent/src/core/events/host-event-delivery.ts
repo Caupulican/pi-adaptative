@@ -1,13 +1,15 @@
 import type { ParentInputMode } from "../../kernel/session/parent-input-ledger.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import { ciEventSubject, ciThreadKey, hostEventHash } from "./host-event-contract.ts";
+import { ciEventSubject, ciThreadKey, HostEventError, hostEventHash, isCiEnvelope } from "./host-event-contract.ts";
 import { hostEventAuthorship } from "./host-event-kinds.ts";
 import type { AcceptedHostEvent, HostEventDelivery } from "./host-event-state.ts";
 
 /** The same bounded evidence text reaches a subscribed worker or its owning session. */
 export function hostEventEvidenceText(accepted: AcceptedHostEvent, delivery: HostEventDelivery): string {
-	const event = accepted.envelope.event;
+	const envelope = accepted.envelope;
+	if (!isCiEnvelope(envelope)) throw new HostEventError("invalid", "Only a CI attempt has deliveries.");
+	const event = envelope.event;
 	const identity = event.identity;
 	const evidence = JSON.stringify({
 		eventId: event.eventId,

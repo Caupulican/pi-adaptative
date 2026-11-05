@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import {
 	type CiAttemptTerminalEvent,
 	type CiCurrentObservation,
+	type CiHostEventEnvelope,
 	type CiSubject,
 	ciEventSubject,
 	ciSubjectKey,
@@ -17,10 +18,12 @@ import {
 	hostEventInteger,
 	hostEventRecord,
 	hostEventString,
+	isCiEnvelope,
 	isHostEventReplayGapReason,
 	MAX_HOST_EVENT_SUBJECTS,
 	mergeSequenceRanges,
 	parseCiCurrentObservation,
+	parseCiHostEventEnvelope,
 	parseCiSubject,
 	parseHostEventCatchUp,
 	parseHostEventEnvelope,
@@ -93,7 +96,7 @@ interface RetainedRun {
 	headSha: string;
 	runNumber: number;
 	throughAttempt: number;
-	latest: HostEventEnvelope;
+	latest: CiHostEventEnvelope;
 }
 
 interface SourceState {
@@ -266,7 +269,7 @@ function parseState(value: unknown): SourceState {
 					headSha: hostEventString(run.headSha, "run SHA", 64),
 					runNumber: hostEventInteger(run.runNumber, "runNumber"),
 					throughAttempt: hostEventInteger(run.throughAttempt, "throughAttempt"),
-					latest: parseHostEventEnvelope(run.latest),
+					latest: parseCiHostEventEnvelope(run.latest),
 				};
 			},
 			"retained CI runs",
@@ -616,7 +619,7 @@ export class CiSourceStore {
 				(a, b) => a.identity.runNumber - b.identity.runNumber || a.identity.runAttempt - b.identity.runAttempt,
 			)) {
 				const known =
-					state.events.find((entry) => entry.event.eventId === event.eventId)?.event ??
+					state.events.filter(isCiEnvelope).find((entry) => entry.event.eventId === event.eventId)?.event ??
 					state.runs.find((run) => run.latest.event.eventId === event.eventId)?.latest.event;
 				if (known) {
 					if (
@@ -643,7 +646,7 @@ export class CiSourceStore {
 				if (identity.runAttempt !== (run?.throughAttempt ?? 0) + 1)
 					throw new Error("CI terminal attempt history has a gap.");
 				this.makeRoom(state, !run);
-				const envelope = parseHostEventEnvelope({
+				const envelope = parseCiHostEventEnvelope({
 					sourceId: state.sourceId,
 					sourceEpoch: state.sourceEpoch,
 					sourceSequence: state.nextSequence++,
@@ -692,7 +695,9 @@ export class CiSourceStore {
 		const candidate = state.runs
 			.filter(
 				(run) =>
-					!state.events.some((entry) => entry.event.identity.runId === run.latest.event.identity.runId) &&
+					!state.events.some(
+						(entry) => isCiEnvelope(entry) && entry.event.identity.runId === run.latest.event.identity.runId,
+					) &&
 					!observed.has(`${ciSubjectKey(ciEventSubject(run.latest.event))}#${run.latest.event.identity.runId}`),
 			)
 			.sort((a, b) => a.latest.sourceSequence - b.latest.sourceSequence)[0];

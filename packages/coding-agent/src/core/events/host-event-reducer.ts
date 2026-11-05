@@ -7,9 +7,9 @@ import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-or
 import { hostEventCapacity } from "./host-event-capacity.ts";
 import {
 	assertHostEventReceiptMatchesBinding,
+	type CiHostEventEnvelope,
 	ciEventSubject,
 	ciSubjectKey,
-	HOST_EVENT_RECALL_MS,
 	type HostEventDeliveryBinding,
 	type HostEventEnvelope,
 	HostEventError,
@@ -28,6 +28,7 @@ import {
 	hostEventSubscriptionId,
 	hostEventUnacceptedWith,
 	hostEventUnacceptedWithout,
+	isCiEnvelope,
 	MAX_HOST_EVENT_DELIVERIES,
 	MAX_HOST_EVENT_DOMAIN_BYTES,
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
@@ -44,6 +45,7 @@ import {
 	parseHostEventSubscriptionInput,
 	parseHostEventTranscriptReceipt,
 } from "./host-event-contract.ts";
+import { HOST_EVENT_KINDS } from "./host-event-kinds.ts";
 import type {
 	AcceptedHostEvent,
 	HostEventDelivery,
@@ -79,12 +81,15 @@ export function hostEventSealDigest(source: HostEventSourceState): string | unde
 }
 
 export function hostEventIsCurrent(state: TaskRuntimeProjection, event: AcceptedHostEvent): boolean {
-	const source = state.eventSources[event.envelope.sourceId];
+	const envelope = event.envelope;
+	const source = state.eventSources[envelope.sourceId];
 	if (!source || !hostEventSealDigest(source)) return false;
+	// An occurrence kind is current once its source has sealed through it: no later occurrence replaces it.
+	if (!isCiEnvelope(envelope)) return envelope.sourceSequence <= (source.seal?.throughSequence ?? 0);
 	const observation = source.seal?.observations.find(
-		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(event.envelope.event)),
+		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(envelope.event)),
 	);
-	return observation?.status === "completed" && observation.eventId === event.envelope.event.eventId;
+	return observation?.status === "completed" && observation.eventId === envelope.event.eventId;
 }
 
 /**
@@ -92,11 +97,12 @@ export function hostEventIsCurrent(state: TaskRuntimeProjection, event: Accepted
  * an unsealed source, proves nothing about the event.
  */
 export function hostEventSuperseded(state: TaskRuntimeProjection, event: AcceptedHostEvent): boolean {
-	const source = state.eventSources[event.envelope.sourceId];
-	if (!source || !hostEventSealDigest(source)) return false;
-	const { identity } = event.envelope.event;
+	const envelope = event.envelope;
+	const source = state.eventSources[envelope.sourceId];
+	if (!source || !hostEventSealDigest(source) || !isCiEnvelope(envelope)) return false;
+	const { identity } = envelope.event;
 	const observation = source.seal?.observations.find(
-		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(event.envelope.event)),
+		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(envelope.event)),
 	);
 	return (
 		observation !== undefined &&
@@ -131,15 +137,17 @@ export function hostEventObservationIsHistory(
 
 export function hostEventDeliveryEligible(state: TaskRuntimeProjection, delivery: HostEventDelivery): boolean {
 	const event = state.hostEvents[delivery.eventId];
-	if (!event || delivery.status !== "pending") return false;
+	const envelope = event?.envelope;
+	// Only a CI attempt has deliveries.
+	if (!event || !envelope || delivery.status !== "pending" || !isCiEnvelope(envelope)) return false;
 	if (delivery.purpose !== "handback" && !hostEventIsCurrent(state, event)) return false;
 	if (delivery.target.kind === "root") {
 		if (delivery.purpose !== "failure") return true;
-		const source = state.eventSources[event.envelope.sourceId];
+		const source = state.eventSources[envelope.sourceId];
 		return (
 			source.registration.scopeVersion === delivery.target.scopeVersion &&
 			source.registration.rootSubjects.some(
-				(subject) => ciSubjectKey(subject) === ciSubjectKey(ciEventSubject(event.envelope.event)),
+				(subject) => ciSubjectKey(subject) === ciSubjectKey(ciEventSubject(envelope.event)),
 			)
 		);
 	}
@@ -355,7 +363,6 @@ function acceptCanonicalHostEvent(
 ): void {
 	const source = state.eventSources[envelope.sourceId];
 	const events = state.hostEvents as Record<string, AcceptedHostEvent>;
-	const deliveries = state.eventDeliveries as Record<string, HostEventDelivery>;
 	const id = envelope.event.eventId;
 	if (
 		Object.values(events).some(
@@ -376,6 +383,44 @@ function acceptCanonicalHostEvent(
 			"identity_conflict",
 			"A position already in this consumer's custody cannot be accepted again.",
 		);
+	let deliveryIds: string[] = [];
+	if (isCiEnvelope(envelope)) deliveryIds = ciEventDeliveries(state, source, envelope);
+	else {
+		const { host, repositoryId } = envelope.event.repository;
+		if (
+			!source.registration.subjects.some((subject) => subject.host === host && subject.repositoryId === repositoryId)
+		)
+			throw new HostEventError("source_conflict", "Event is outside registered source scope.");
+		// An occurrence kind has no task or root delivery: routines read it from the ledger.
+	}
+	events[id] = {
+		envelope,
+		receipt: {
+			consumerId: hostEventString(consumerId, "consumerId"),
+			sourceId: envelope.sourceId,
+			sourceEpoch: envelope.sourceEpoch,
+			sourceSequence: envelope.sourceSequence,
+			eventId: id,
+			payloadDigest: envelope.event.payloadDigest,
+			canonicalReceiptId: `her-${hostEventHash("pi-host-event-receipt-v1", [event.eventId, id])}`,
+		},
+		origin: workerReceiptOriginFromValue(origin),
+		acceptedOrdinal: event.ordinal,
+		recallUntil: new Date(
+			Date.parse(event.occurredAt) + HOST_EVENT_KINDS[envelope.event.kind].recallMs,
+		).toISOString(),
+		deliveryIds,
+	};
+}
+
+/** A CI attempt's task copies, one per live subscription of its subject, and its root copy. */
+function ciEventDeliveries(
+	state: TaskRuntimeProjection,
+	source: HostEventSourceState,
+	envelope: CiHostEventEnvelope,
+): string[] {
+	const deliveries = state.eventDeliveries as Record<string, HostEventDelivery>;
+	const id = envelope.event.eventId;
 	const key = ciSubjectKey(ciEventSubject(envelope.event));
 	if (!source.registration.subjects.some((subject) => ciSubjectKey(subject) === key))
 		throw new HostEventError("source_conflict", "Event is outside registered source scope.");
@@ -419,22 +464,7 @@ function acceptCanonicalHostEvent(
 		purpose: envelope.event.conclusion === "failure" ? "failure" : "update",
 		generation: 0,
 	};
-	events[id] = {
-		envelope,
-		receipt: {
-			consumerId: hostEventString(consumerId, "consumerId"),
-			sourceId: envelope.sourceId,
-			sourceEpoch: envelope.sourceEpoch,
-			sourceSequence: envelope.sourceSequence,
-			eventId: id,
-			payloadDigest: envelope.event.payloadDigest,
-			canonicalReceiptId: `her-${hostEventHash("pi-host-event-receipt-v1", [event.eventId, id])}`,
-		},
-		origin: workerReceiptOriginFromValue(origin),
-		acceptedOrdinal: event.ordinal,
-		recallUntil: new Date(Date.parse(event.occurredAt) + HOST_EVENT_RECALL_MS).toISOString(),
-		deliveryIds,
-	};
+	return deliveryIds;
 }
 
 /** Pure mutation of reducer-owned copied record maps; never performs I/O or owns another store. */
@@ -475,7 +505,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 				const priorRootSubjects = new Set(prior.registration.rootSubjects.map(ciSubjectKey));
 				const nextRootSubjects = new Set(registration.rootSubjects.map(ciSubjectKey));
 				for (const accepted of Object.values(events)) {
-					if (accepted.envelope.sourceId !== registration.sourceId) continue;
+					if (accepted.envelope.sourceId !== registration.sourceId || !isCiEnvelope(accepted.envelope)) continue;
 					const subject = ciSubjectKey(ciEventSubject(accepted.envelope.event));
 					for (const id of accepted.deliveryIds) {
 						const delivery = deliveries[id];
@@ -633,7 +663,7 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 					throw new HostEventError("source_conflict", "Completed attempt observation cannot change.");
 				if (observation.status === "completed") {
 					const terminal = observation.eventId ? events[observation.eventId] : undefined;
-					const item = terminal?.envelope.event;
+					const item = terminal && isCiEnvelope(terminal.envelope) ? terminal.envelope.event : undefined;
 					// A released occurrence of this consumer's own history: the seal neither fails nor redelivers it.
 					if (!terminal && hostEventObservationIsHistory(state, sources[seal.sourceId], observation)) continue;
 					if (
@@ -655,15 +685,20 @@ export function applyHostEvent(state: TaskRuntimeProjection, event: Orchestratio
 			for (const accepted of Object.values(events).filter(
 				(candidate) => candidate.envelope.sourceId === seal.sourceId,
 			)) {
+				if (!isCiEnvelope(accepted.envelope)) continue;
 				const current = hostEventIsCurrent(state, accepted);
 				const subjectKey = ciSubjectKey(ciEventSubject(accepted.envelope.event));
-				const consumedPrior = Object.values(deliveries).filter(
-					(delivery) =>
+				const consumedPrior = Object.values(deliveries).filter((delivery) => {
+					const prior = events[delivery.eventId]?.envelope;
+					return (
 						delivery.status === "consumed" &&
 						delivery.eventId !== accepted.envelope.event.eventId &&
-						events[delivery.eventId]?.envelope.event.conclusion === "failure" &&
-						ciSubjectKey(ciEventSubject(events[delivery.eventId].envelope.event)) === subjectKey,
-				);
+						prior !== undefined &&
+						isCiEnvelope(prior) &&
+						prior.event.conclusion === "failure" &&
+						ciSubjectKey(ciEventSubject(prior.event)) === subjectKey
+					);
+				});
 				for (const id of accepted.deliveryIds) {
 					const delivery = deliveries[id];
 					if (delivery.status !== "pending" && delivery.status !== "reserved") continue;

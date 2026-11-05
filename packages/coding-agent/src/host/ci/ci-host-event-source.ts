@@ -13,6 +13,7 @@ import {
 	type HostEventSource,
 	type HostEventSourceConnection,
 	hostEventHash,
+	isCiEnvelope,
 	MAX_HOST_EVENT_SUBJECTS,
 } from "../../core/events/host-event-contract.ts";
 import { HOST_EVENT_KINDS } from "../../core/events/host-event-kinds.ts";
@@ -587,7 +588,14 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			pending = snapshot.events.filter((event) => event.sourceSequence > consumer!.acknowledged);
 		}
 		const registered = new Set(consumer.subjects.map(ciSubjectKey));
-		if (pending.some((event) => !registered.has(ciSubjectKey(ciEventSubject(event.event))))) {
+		const repositories = new Set(consumer.subjects.map((subject) => `${subject.host}/${subject.repositoryId}`));
+		if (
+			pending.some((event) =>
+				isCiEnvelope(event)
+					? !registered.has(ciSubjectKey(ciEventSubject(event.event)))
+					: !repositories.has(`${event.event.repository.host}/${event.event.repository.repositoryId}`),
+			)
+		) {
 			// Another writer retained a subject after the scope was read: widen it first.
 			this.forced = true;
 			return;
@@ -771,7 +779,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		const scope: CiSubject[] = [];
 		if (inputs.headSha) addSubject(scope, this.subjectOf(repository, inputs.headSha));
 		for (const event of snapshot.events)
-			if (event.sourceSequence > acknowledged) addSubject(scope, ciEventSubject(event.event));
+			if (event.sourceSequence > acknowledged && isCiEnvelope(event)) addSubject(scope, ciEventSubject(event.event));
 		const pinned = scope.length;
 		for (const subject of inputs.subscribed) if (this.ownWorkflow(repository, subject)) addSubject(scope, subject);
 		// A delivery can target only these: their observation must be current before a seal.

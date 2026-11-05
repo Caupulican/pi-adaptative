@@ -62,11 +62,86 @@ export interface CiAttemptTerminalEvent {
 	readonly payloadDigest: string;
 }
 
-export interface HostEventEnvelope {
+/** What a GitHub thread occurrence records. Each kind is declared in `host-event-kinds.ts`. */
+export const GITHUB_THREAD_EVENT_KINDS = [
+	"pull-request-comment",
+	"review-comment",
+	"review-submitted",
+	"review-requested",
+	"issue-assigned",
+	"pull-request-merged",
+	"pull-request-closed",
+] as const;
+export type GithubThreadEventKind = (typeof GITHUB_THREAD_EVENT_KINDS)[number];
+
+export const GITHUB_REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"] as const;
+export type GithubReviewState = (typeof GITHUB_REVIEW_STATES)[number];
+
+/** Bound of a retained comment or review body, in UTF-8 bytes. */
+export const MAX_GITHUB_EVENT_BODY_BYTES = 4 * 1024;
+/** GitHub's login bound; an app's login adds the `[bot]` suffix. */
+export const MAX_GITHUB_LOGIN_LENGTH = 39;
+
+/** A third party's words, cut at a character boundary: the cut is stated, never hidden. */
+export interface GithubEventBody {
+	readonly text: string;
+	readonly truncated: boolean;
+	/** UTF-8 length of the whole body as GitHub returned it. */
+	readonly bytes: number;
+}
+
+/**
+ * One occurrence on a pull request or issue thread. `githubId` is the comment, review or issue-event id; with the kind
+ * and repository it fixes `eventId`, so a re-listed occurrence is the same event. The first observation is kept: a
+ * later edit of the same comment never becomes a second event.
+ */
+export interface GithubThreadEvent {
+	readonly version: 1;
+	readonly kind: GithubThreadEventKind;
+	readonly eventId: string;
+	readonly githubId: number;
+	readonly repository: { readonly host: string; readonly repositoryId: number };
+	readonly thread: {
+		readonly number: number;
+		readonly pullRequest: boolean;
+		/** A pull request's head branch in this repository; absent for issues and for pull requests from forks. */
+		readonly branch?: string;
+	};
+	/** Login of who wrote the comment or review, or who acted (requested, assigned, merged, closed). */
+	readonly author: string;
+	readonly occurredAt: string;
+	readonly url: string;
+	readonly body?: GithubEventBody;
+	/** A submitted review's verdict. */
+	readonly state?: GithubReviewState;
+	readonly payloadDigest: string;
+}
+
+export type HostEventPayload = CiAttemptTerminalEvent | GithubThreadEvent;
+
+export function isCiAttemptEvent(event: HostEventPayload): event is CiAttemptTerminalEvent {
+	return event.kind === "ci-attempt-terminal";
+}
+
+interface HostEventPosition {
 	readonly sourceId: string;
 	readonly sourceEpoch: string;
 	readonly sourceSequence: number;
+}
+
+/** An envelope whose event is a CI attempt, the arm seals observe and deliveries carry. */
+export interface CiHostEventEnvelope extends HostEventPosition {
 	readonly event: CiAttemptTerminalEvent;
+}
+
+export interface GithubHostEventEnvelope extends HostEventPosition {
+	readonly event: GithubThreadEvent;
+}
+
+export type HostEventEnvelope = CiHostEventEnvelope | GithubHostEventEnvelope;
+
+export function isCiEnvelope(envelope: HostEventEnvelope): envelope is CiHostEventEnvelope {
+	return isCiAttemptEvent(envelope.event);
 }
 
 export interface HostEventSourceRegistration {
@@ -116,7 +191,7 @@ export interface HostEventCatchUpSeal extends HostEventCatchUp {
 	readonly throughSequence: number;
 	readonly observations: readonly HostEventSealObservation[];
 	/** Exact current terminal envelopes below this consumer's stream replay floor. */
-	readonly snapshots?: readonly HostEventEnvelope[];
+	readonly snapshots?: readonly CiHostEventEnvelope[];
 }
 
 /** Snapshot payloads transfer custody once; the retained frontier references canonical events. */
@@ -539,14 +614,183 @@ export function parseCiAttemptTerminalEvent(value: unknown): CiAttemptTerminalEv
 	return event;
 }
 
+function githubLogin(value: unknown): string {
+	const login = hostEventString(value, "GitHub login", MAX_GITHUB_LOGIN_LENGTH + "[bot]".length);
+	const base = login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+	if (base.length > MAX_GITHUB_LOGIN_LENGTH || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(base))
+		throw new HostEventError("invalid", "GitHub login is invalid.");
+	return login;
+}
+
+/** A GitHub branch name as a routine scope and an event's head branch: a bounded git ref name. */
+export function githubBranchName(value: unknown): string {
+	const branch = hostEventString(value, "GitHub branch", 255);
+	if (
+		!/^[\x21-\x7e]+$/.test(branch) ||
+		/[~^:?*[\\]|\.\.|@\{|\/\/|^\/|\/$|\.lock$|^-/.test(branch) ||
+		branch.endsWith(".")
+	)
+		throw new HostEventError("invalid", "GitHub branch name is invalid.");
+	return branch;
+}
+
+/**
+ * The body codec: any text, including surrounding whitespace, within the UTF-8 bound. Creation cuts a longer body at
+ * a character boundary and records the cut; a NUL becomes U+FFFD there, so a parsed body never carries one.
+ */
+export function githubEventBody(text: string): GithubEventBody {
+	const clean = text.replaceAll("\0", "\uFFFD");
+	const bytes = Buffer.byteLength(text, "utf8");
+	if (Buffer.byteLength(clean, "utf8") <= MAX_GITHUB_EVENT_BODY_BYTES) return { text: clean, truncated: false, bytes };
+	let kept = "";
+	let used = 0;
+	for (const character of clean) {
+		const size = Buffer.byteLength(character, "utf8");
+		if (used + size > MAX_GITHUB_EVENT_BODY_BYTES) break;
+		kept += character;
+		used += size;
+	}
+	return { text: kept, truncated: true, bytes };
+}
+
+function parseGithubEventBody(value: unknown): GithubEventBody {
+	const entry = hostEventRecord(value, ["text", "truncated", "bytes"], "GitHub event body");
+	if (
+		typeof entry.text !== "string" ||
+		entry.text.includes("\0") ||
+		Buffer.byteLength(entry.text, "utf8") > MAX_GITHUB_EVENT_BODY_BYTES ||
+		typeof entry.truncated !== "boolean"
+	)
+		throw new HostEventError("invalid", "GitHub event body is invalid.");
+	const bytes = hostEventInteger(entry.bytes, "body bytes", 0);
+	const kept = Buffer.byteLength(entry.text, "utf8");
+	if (entry.truncated ? bytes <= kept : bytes < kept)
+		throw new HostEventError("invalid", "GitHub event body length is inconsistent.");
+	return { text: entry.text, truncated: entry.truncated, bytes };
+}
+
+export function githubThreadEventId(
+	repository: GithubThreadEvent["repository"],
+	kind: GithubThreadEventKind,
+	githubId: number,
+): string {
+	return `gh-${hostEventHash("pi-github-thread-v1", [repository.host, repository.repositoryId, kind, githubId])}`;
+}
+
+export function createGithubThreadEvent(
+	input: Omit<GithubThreadEvent, "version" | "eventId" | "payloadDigest">,
+): GithubThreadEvent {
+	if (!GITHUB_THREAD_EVENT_KINDS.some((kind) => kind === input.kind))
+		throw new HostEventError("invalid", "Unknown GitHub thread event kind.");
+	const repository = {
+		host: ciHost(input.repository.host),
+		repositoryId: hostEventInteger(input.repository.repositoryId, "repositoryId"),
+	};
+	const githubId = hostEventInteger(input.githubId, "githubId");
+	const pullRequest = input.thread.pullRequest;
+	if (typeof pullRequest !== "boolean") throw new HostEventError("invalid", "GitHub thread kind is invalid.");
+	if (input.thread.branch !== undefined && !pullRequest)
+		throw new HostEventError("invalid", "Only a pull request has a head branch.");
+	const body = input.body === undefined ? undefined : parseGithubEventBody(input.body);
+	const commented = input.kind === "pull-request-comment" || input.kind === "review-comment";
+	if (
+		(commented && body === undefined) ||
+		(input.kind !== "review-submitted" && !commented && body !== undefined) ||
+		(input.kind === "review-submitted") !== (input.state !== undefined) ||
+		(input.kind !== "issue-assigned" && !pullRequest)
+	)
+		throw new HostEventError("invalid", "GitHub thread event fields do not fit its kind.");
+	if (input.state !== undefined && !GITHUB_REVIEW_STATES.some((state) => state === input.state))
+		throw new HostEventError("invalid", "Unknown GitHub review state.");
+	const event = {
+		version: 1 as const,
+		kind: input.kind,
+		eventId: githubThreadEventId(repository, input.kind, githubId),
+		githubId,
+		repository,
+		thread: {
+			number: hostEventInteger(input.thread.number, "thread number"),
+			pullRequest,
+			...(input.thread.branch === undefined ? {} : { branch: githubBranchName(input.thread.branch) }),
+		},
+		author: githubLogin(input.author),
+		occurredAt: hostEventDate(input.occurredAt, "occurredAt"),
+		url: hostEventString(input.url, "url", 2_048),
+		...(body ? { body } : {}),
+		...(input.state === undefined ? {} : { state: input.state }),
+	};
+	const url = new URL(event.url);
+	if (url.protocol !== "https:" || url.hostname !== repository.host || url.username || url.password)
+		throw new HostEventError("invalid", "GitHub thread URL does not belong to its host.");
+	return { ...event, payloadDigest: hostEventHash("pi-github-thread-payload-v1", event) };
+}
+
+export function parseGithubThreadEvent(value: unknown): GithubThreadEvent {
+	const entry = hostEventRecord(
+		value,
+		[
+			"version",
+			"kind",
+			"eventId",
+			"githubId",
+			"repository",
+			"thread",
+			"author",
+			"occurredAt",
+			"url",
+			"body",
+			"state",
+			"payloadDigest",
+		],
+		"GitHub thread event",
+	);
+	if (entry.version !== 1) throw new HostEventError("invalid", "Unknown host event format.");
+	const repository = hostEventRecord(entry.repository, ["host", "repositoryId"], "GitHub repository");
+	const thread = hostEventRecord(entry.thread, ["number", "pullRequest", "branch"], "GitHub thread");
+	const event = createGithubThreadEvent({
+		kind: entry.kind as GithubThreadEventKind,
+		githubId: entry.githubId as number,
+		repository: { host: repository.host as string, repositoryId: repository.repositoryId as number },
+		thread: {
+			number: thread.number as number,
+			pullRequest: thread.pullRequest as boolean,
+			...(thread.branch === undefined ? {} : { branch: thread.branch as string }),
+		},
+		author: entry.author as string,
+		occurredAt: entry.occurredAt as string,
+		url: entry.url as string,
+		...(entry.body === undefined ? {} : { body: entry.body as GithubEventBody }),
+		...(entry.state === undefined ? {} : { state: entry.state as GithubReviewState }),
+	});
+	if (entry.eventId !== event.eventId || entry.payloadDigest !== event.payloadDigest)
+		throw new HostEventError(
+			"identity_conflict",
+			"GitHub event identity or payload digest differs from canonical content.",
+		);
+	return event;
+}
+
+export function parseHostEventPayload(value: unknown): HostEventPayload {
+	const kind = value && typeof value === "object" ? Reflect.get(value, "kind") : undefined;
+	return kind === "ci-attempt-terminal" ? parseCiAttemptTerminalEvent(value) : parseGithubThreadEvent(value);
+}
+
 export function parseHostEventEnvelope(value: unknown): HostEventEnvelope {
 	const entry = hostEventRecord(value, ["sourceId", "sourceEpoch", "sourceSequence", "event"], "host event envelope");
-	return {
+	const position = {
 		sourceId: sourceIdentifier(entry.sourceId),
 		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
 		sourceSequence: hostEventInteger(entry.sourceSequence, "sourceSequence"),
-		event: parseCiAttemptTerminalEvent(entry.event),
 	};
+	const event = parseHostEventPayload(entry.event);
+	return isCiAttemptEvent(event) ? { ...position, event } : { ...position, event };
+}
+
+/** A seal snapshot or a delivery always carries a CI attempt. */
+export function parseCiHostEventEnvelope(value: unknown): CiHostEventEnvelope {
+	const envelope = parseHostEventEnvelope(value);
+	if (!isCiEnvelope(envelope)) throw new HostEventError("invalid", "Only a CI attempt is a seal snapshot.");
+	return envelope;
 }
 
 export function parseHostEventSourceRegistration(value: unknown): HostEventSourceRegistration {
@@ -684,7 +928,7 @@ export function parseHostEventCatchUpSeal(value: unknown): HostEventCatchUpSeal 
 	const snapshots =
 		entry.snapshots === undefined
 			? undefined
-			: hostEventArray(entry.snapshots, MAX_HOST_EVENT_SUBJECTS, parseHostEventEnvelope, "seal snapshots");
+			: hostEventArray(entry.snapshots, MAX_HOST_EVENT_SUBJECTS, parseCiHostEventEnvelope, "seal snapshots");
 	if (snapshots && new Set(snapshots.map((snapshot) => snapshot.event.eventId)).size !== snapshots.length)
 		throw new HostEventError("invalid", "Seal snapshot identities must be unique.");
 	return {

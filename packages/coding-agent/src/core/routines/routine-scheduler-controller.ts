@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
-import { ciEventSubject, ciSubjectKey, hostEventHash } from "../events/host-event-contract.ts";
+import { ciEventSubject, ciSubjectKey, hostEventHash, isCiEnvelope } from "../events/host-event-contract.ts";
 import { hostEventIsCurrent } from "../events/host-event-reducer.ts";
 import type { HarnessNotice } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -116,21 +116,25 @@ export function routineHostEventFeed(
 	isSourceReady: (sourceId: string) => boolean,
 ): RoutineHostEventFeed {
 	const ready = new Map<string, boolean>();
-	const events = Object.values(state.hostEvents).map((accepted) => {
-		const sourceId = accepted.envelope.sourceId;
+	const events = Object.values(state.hostEvents).flatMap((accepted) => {
+		const envelope = accepted.envelope;
+		if (!isCiEnvelope(envelope)) return [];
+		const sourceId = envelope.sourceId;
 		if (!ready.has(sourceId)) ready.set(sourceId, isSourceReady(sourceId));
-		const subject = ciSubjectKey(ciEventSubject(accepted.envelope.event));
-		return {
-			acceptedOrdinal: accepted.acceptedOrdinal,
-			sourceSequence: accepted.envelope.sourceSequence,
-			event: accepted.envelope.event,
-			ready: ready.get(sourceId) === true,
-			current: hostEventIsCurrent(state, accepted),
-			rootApplicable:
-				state.eventSources[sourceId]?.registration.rootSubjects.some(
-					(candidate) => ciSubjectKey(candidate) === subject,
-				) === true,
-		};
+		const subject = ciSubjectKey(ciEventSubject(envelope.event));
+		return [
+			{
+				acceptedOrdinal: accepted.acceptedOrdinal,
+				sourceSequence: envelope.sourceSequence,
+				event: envelope.event,
+				ready: ready.get(sourceId) === true,
+				current: hostEventIsCurrent(state, accepted),
+				rootApplicable:
+					state.eventSources[sourceId]?.registration.rootSubjects.some(
+						(candidate) => ciSubjectKey(candidate) === subject,
+					) === true,
+			},
+		];
 	});
 	return { events, replayGaps: routineReplayGapDigest(state) };
 }
@@ -157,6 +161,7 @@ export function routineCiWorkflowPaths(
 	if (!live) return undefined;
 	const paths = new Set<string>();
 	for (const accepted of Object.values(state.hostEvents)) {
+		if (!isCiEnvelope(accepted.envelope)) continue;
 		const { identity, workflowPath } = accepted.envelope.event;
 		if (watched.has(workflowKey(identity.host, identity.repositoryId, identity.workflowId))) paths.add(workflowPath);
 	}

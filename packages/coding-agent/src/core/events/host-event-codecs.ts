@@ -16,6 +16,7 @@ import {
 	hostEventRecord,
 	hostEventString,
 	hostEventSubscriptionId,
+	isCiEnvelope,
 	MAX_HOST_EVENT_TARGETS,
 	parseHostEventCatchUpSeal,
 	parseHostEventDeliveryBinding,
@@ -333,7 +334,7 @@ export function validateHostEventGraph(state: TaskRuntimeProjection): void {
 		for (const observation of source.seal?.observations ?? []) {
 			if (observation.status !== "completed") continue;
 			const envelope = observation.eventId ? state.hostEvents[observation.eventId]?.envelope : undefined;
-			const event = envelope?.event;
+			const event = envelope && isCiEnvelope(envelope) ? envelope.event : undefined;
 			// A sealed occurrence this consumer accepted and pruned is retired history, not a missing event.
 			if (!envelope && hostEventObservationIsHistory(state, source, observation)) continue;
 			if (
@@ -382,7 +383,8 @@ export function validateHostEventGraph(state: TaskRuntimeProjection): void {
 	}
 	for (const [id, delivery] of Object.entries(state.eventDeliveries)) {
 		const event = state.hostEvents[delivery.eventId];
-		if (id !== delivery.deliveryId || !event?.deliveryIds.includes(id))
+		// Only a CI attempt has deliveries; an occurrence kind reaches routines from the ledger alone.
+		if (id !== delivery.deliveryId || !event?.deliveryIds.includes(id) || !isCiEnvelope(event.envelope))
 			throw new HostEventError("invalid", "Delivery has no canonical event membership.");
 		if (delivery.target.kind === "task") {
 			const subscription = state.threadSubscriptions[delivery.target.subscriptionId];
