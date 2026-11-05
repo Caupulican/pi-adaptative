@@ -40,7 +40,11 @@ export const CI_SOURCE_MAX_EVENTS = 2_048;
 export const CI_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
 /** A parked consumer keeps its custody this long; later it resumes through an explicit replay gap. */
 export const CI_PARKED_CONSUMER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const CI_SOURCE_VERSION = 2;
+/**
+ * Each version has its own journal file, so a build that reads an older shape never quarantines a newer journal it
+ * shares the repository's status directory with. Version 3 records departures, gap causes and connection state.
+ */
+const CI_SOURCE_VERSION = 3;
 const MAX_CONSUMERS = 64;
 const MAX_RUNS = 128;
 const MAX_RETIRED_RANGES = MAX_RUNS + 1;
@@ -180,10 +184,8 @@ function parseConsumerGap(value: unknown): NonNullable<Consumer["pendingGap"]> {
 	const afterSequence = hostEventInteger(entry.afterSequence, "gap after sequence", 0);
 	const throughSequence = hostEventInteger(entry.throughSequence, "gap through sequence", 0);
 	if (afterSequence >= throughSequence) throw new Error("CI consumer replay gap is empty or reversed.");
-	// A pre-release journal recorded no cause.
-	const cause = entry.cause ?? "consumer_inactive";
-	if (!isHostEventReplayGapReason(cause)) throw new Error("CI consumer replay gap cause is unknown.");
-	return { afterSequence, throughSequence, cause };
+	if (!isHostEventReplayGapReason(entry.cause)) throw new Error("CI consumer replay gap cause is unknown.");
+	return { afterSequence, throughSequence, cause: entry.cause };
 }
 
 function parseConsumerConnection(value: unknown): NonNullable<Consumer["connection"]> {
@@ -282,11 +284,7 @@ function parseState(value: unknown): SourceState {
 			},
 			"retired CI workflows",
 		),
-		// A pre-release journal kept no departures.
-		departed:
-			entry.departed === undefined
-				? []
-				: hostEventArray(entry.departed, MAX_DEPARTED, parseDeparted, "departed CI consumers"),
+		departed: hostEventArray(entry.departed, MAX_DEPARTED, parseDeparted, "departed CI consumers"),
 	};
 	if (
 		state.nextSequence !== state.retiredThrough + state.events.length + 1 ||

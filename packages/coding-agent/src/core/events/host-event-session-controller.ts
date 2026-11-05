@@ -57,7 +57,8 @@ function replayGapNotice(gap: HostEventReplayGap): HarnessNoticeObservation {
 	return {
 		scope: `gap:${gap.sourceId}`,
 		state: {
-			reason: `${gap.reason}:${gap.afterSequence}-${gap.throughSequence}`,
+			// The notice id omits the scope: the source and range make each gap's notice its own.
+			reason: `${gap.reason}:${gap.sourceId}:${gap.afterSequence}-${gap.throughSequence}`,
 			text: `Up to ${count} CI ${count === 1 ? "result was" : "results were"} never delivered to this session: ${GAP_CAUSES[gap.reason]}. Check CI directly for results from that period.`,
 		},
 	};

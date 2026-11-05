@@ -431,7 +431,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 						this.connect({
 							state: "suspended",
 							reason: "reconcile-failing",
-							text: `CI results are suspended after ${this.reconcileFailures} failed checks in a row (${errorText(error)}). They retry by themselves at most every 30 minutes.`,
+							text: `CI results are suspended after ${this.reconcileFailures} failed checks in a row (${errorText(error)}). They retry by themselves at least once every 30 minutes.`,
 						});
 				}
 			}

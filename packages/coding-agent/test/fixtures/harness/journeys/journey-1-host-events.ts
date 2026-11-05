@@ -9,6 +9,7 @@ import {
 	type HostEventSink,
 } from "../../../../src/core/events/host-event-contract.ts";
 import { readHostEventPage } from "../../../../src/core/events/host-event-control.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
@@ -16,14 +17,14 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { createCiHostRuntime } from "../../../../src/host/ci/ci-host-event-source.ts";
 import type { CiProvider, CiProviderCollection, CiRepository } from "../../../../src/host/ci/ci-provider.ts";
-import { CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
+import { CI_PARKED_CONSUMER_TTL_MS, CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
 import {
 	type CiGitPaths,
 	ciStatusPath,
 	readCiStatusFile,
 	writeCiStatus,
 } from "../../../../src/host/ci/ci-status-record.ts";
-import { parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -512,6 +513,110 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			expect(sourceStore.snapshot().retiredThrough, "the offline consumer's unconsumed custody stays retained").toBe(
 				accepted.envelope.sourceSequence,
 			);
+
+			// A consumer parked past its retention resumes through a replay gap that names its cause; the owner is told once.
+			// Its own workflow and run keep this source's subjects and occurrences apart from the main source's.
+			let gapClockSkew = 0;
+			const gapPaths: CiGitPaths = { ...paths, statusDir: join(gitDir, "pi-ci-gap") };
+			const gapStore = new CiSourceStore(gapPaths.statusDir, { now: () => Date.now() + gapClockSkew });
+			const gapSubject: CiSubject = { ...subject, workflowId: 602 };
+			const gapAttempt = (runAttempt: number) =>
+				createCiAttemptTerminalEvent({
+					identity: { ...currentFailure.identity, workflowId: 602, runId: 702, runAttempt },
+					headSha: sha,
+					conclusion: "success",
+					workflowPath: repository.workflowPath,
+					observedAt: `2026-11-05T01:0${runAttempt}:00.000Z`,
+					runUrl: "https://github.com/harness/repository/actions/runs/702",
+				});
+			let gapEvents = [gapAttempt(1)];
+			const gapDiagnostics: string[] = [];
+			const gapSource = await createCiHostRuntime({
+				cwd: HARNESS_PROJECT_CWD,
+				paths: gapPaths,
+				provider: {
+					...provider,
+					repository: async () => ({ ...repository, workflowId: 602 }),
+					collect: async (_sha, signal) => {
+						signal.throwIfAborted();
+						const latest = gapEvents.at(-1)!;
+						return {
+							subject: gapSubject,
+							events: gapEvents,
+							current: { ...observation(latest), subject: gapSubject },
+						};
+					},
+				},
+				store: gapStore,
+				onDiagnostic: (message) => gapDiagnostics.push(message),
+			});
+			if (!gapSource) throw new Error("The second CI source did not open.");
+			const gapSealed = () => {
+				const sealed = createBarrier();
+				const sink: HostEventSink = {
+					...freshBinding.sink,
+					seal: async (seal, signal) => {
+						await freshBinding.sink.seal(seal, signal);
+						sealed.release();
+					},
+				};
+				return { sealed, sink };
+			};
+			const gapNotices = () =>
+				fresh.sessionManager.getEntries().filter((entry) => {
+					const details = parentInputOriginalDetails(entry);
+					return (
+						entry.type === "custom_message" &&
+						entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+						typeof details === "object" &&
+						details !== null &&
+						"kind" in details &&
+						details.kind === "host-event-gap"
+					);
+				});
+			try {
+				const registered = gapSealed();
+				await gapSource.source.start(registered.sink);
+				await withDeadline(
+					world.trace,
+					"a second CI source registers the fresh consumer",
+					registered.sealed.promise,
+				);
+				await gapSource.source.stop();
+				// Parked past its retention while the source retained a later attempt no other consumer pins.
+				gapClockSkew = CI_PARKED_CONSUMER_TTL_MS + 60_000;
+				gapEvents = [gapAttempt(1), gapAttempt(2)];
+				gapStore.retain(gapEvents);
+				const noticed = new Promise<void>((resolve) => {
+					const check = () => {
+						if (gapNotices().length === 0) return;
+						off();
+						resolve();
+					};
+					const off = fresh.sessionManager.onEntriesPersisted(check);
+					check();
+				});
+				const resumed = gapSealed();
+				await gapSource.source.start(resumed.sink);
+				await withDeadline(
+					world.trace,
+					"an expired consumer resumes through a replay gap and one owner notice",
+					Promise.all([resumed.sealed.promise, noticed]),
+				);
+				await gapSource.source.stop();
+				const gapState =
+					fresh.session.backgroundLanes.getTaskRuntimeSnapshot()!.eventSources[gapStore.snapshot().sourceId];
+				expect(gapState?.lastReplayGap, "the gap names its range and cause").toMatchObject({
+					reason: "consumer_expired",
+					afterSequence: 1,
+					throughSequence: 2,
+				});
+				expect(gapNotices(), "one owner notice per gap").toHaveLength(1);
+				expect(fresh.sessionManager.getPendingParentInputs("turn"), "a gap notice never wakes a turn").toEqual([]);
+				expect(gapDiagnostics).toEqual([]);
+			} finally {
+				await gapSource.source.stop();
+			}
 		} finally {
 			await freshSource.source.stop();
 			await freshBinding.close();
