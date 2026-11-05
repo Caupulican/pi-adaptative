@@ -43,7 +43,7 @@ export function isCiCommandMissing(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-export function createCiCommandPort(cwd: string): CiCommandPort {
+export function createCiCommandPort(cwd: string, onDiagnostic?: (message: string) => void): CiCommandPort {
 	return {
 		run: (executable, args, signal) =>
 			new Promise<string>((resolve, reject) => {
@@ -76,7 +76,7 @@ export function createCiCommandPort(cwd: string): CiCommandPort {
 					closed = true;
 					finish();
 				});
-				bindChildProcessAbort(child, signal);
+				bindChildProcessAbort(child, signal, onDiagnostic ? { onDiagnostic } : {});
 			}),
 		wait: (executable, args, signal) =>
 			new Promise<void>((resolve, reject) => {
@@ -112,7 +112,7 @@ export function createCiCommandPort(cwd: string): CiCommandPort {
 					if (!spawned) settle(null, null);
 				});
 				child.once("close", (code, signalCode) => settle(code, signalCode));
-				bindChildProcessAbort(child, signal);
+				bindChildProcessAbort(child, signal, onDiagnostic ? { onDiagnostic } : {});
 			}),
 	};
 }

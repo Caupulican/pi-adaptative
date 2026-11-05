@@ -61,8 +61,11 @@ can supply their own event source through the same session binding.
 
 The observed revisions are the checked-out HEAD, revisions whose pre-push watcher has not recorded
 an outcome, revisions named by task subscriptions, and revisions of retained events this session has
-not accepted yet. Settled branch records are not observed again. A revision that cannot be collected
-is reported and blocks the next seal, while the other revisions' evidence is still retained.
+not accepted yet. Settled branch records are not observed again. If HEAD, a subscribed revision or a
+revision with unaccepted events cannot be collected, the failure is reported and blocks the next
+seal; the other revisions' evidence is still retained. An unsettled push that cannot be collected is
+reported and sealed without an observation. A push whose watcher is gone and that has had no run for
+five minutes is recorded as `no_run` and leaves the observed set.
 
 Pending upstream runs have bounded completion monitors, including runs started from another
 machine. Completion requests a fresh authoritative observation; process output itself never becomes

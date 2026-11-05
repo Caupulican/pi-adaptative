@@ -114,6 +114,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 	const watcherStarted = createBarrier();
 	const runTerminal = createBarrier();
 	let watchedRuns = 0;
+	let jobDetailReads = 0;
 	const provider: CiProvider = {
 		repository: async () => repository,
 		collect: async (requestedSha, signal) => {
@@ -125,6 +126,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		// Event collection never reads job details; only the display record of a red attempt does.
 		failedJobs: async (identity) => {
 			expect(identity).toMatchObject({ runId: 701, runAttempt: 4 });
+			jobDetailReads++;
 			return ["harness job"];
 		},
 		waitForRun: async (runId, signal) => {
@@ -459,6 +461,9 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			reconciledBy: "pi",
 		});
 		expect(readCiStatusFile(ciStatusPath(paths.statusDir, "main"))).not.toHaveProperty("error");
+		expect(jobDetailReads, "only the red display record reads job details, once; event collection never does").toBe(
+			1,
+		);
 	} finally {
 		expectedSeal?.release.release();
 		abort.abort();

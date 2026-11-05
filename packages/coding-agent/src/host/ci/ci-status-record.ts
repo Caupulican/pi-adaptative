@@ -84,21 +84,27 @@ export function resolveCiGitPathsAsync(cwd: string, signal: AbortSignal): Promis
 	});
 }
 
+/** How long a pushed revision may wait for its workflow run before it is recorded as `no_run`. */
+export const CI_REGISTRATION_GRACE_MS = 5 * 60_000;
+
+/** `undefined` when the record names no watcher process. */
+export function ciWatcherAlive(record: CiStatusRecord): boolean | undefined {
+	if (record.pid === undefined) return undefined;
+	try {
+		process.kill(record.pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 /** File-only footer projection: no provider, network or source activation is needed. */
 export function readCiStatusView(paths: CiGitPaths, now = Date.now()): CiStatusView | undefined {
 	try {
 		const head = readCiHead(paths);
 		if (!head.branch) return undefined;
 		const record = readCiStatusFile(ciStatusPath(paths.statusDir, head.branch));
-		let watcherAlive: boolean | undefined;
-		if (record?.state === "pending" && record.pid !== undefined) {
-			try {
-				process.kill(record.pid, 0);
-				watcherAlive = true;
-			} catch (error) {
-				watcherAlive = (error as NodeJS.ErrnoException).code === "EPERM";
-			}
-		}
+		const watcherAlive = record?.state === "pending" ? ciWatcherAlive(record) : undefined;
 		return ciStatusViewFromRecord(record, head.branch, now, watcherAlive);
 	} catch {
 		return undefined;

@@ -431,46 +431,48 @@ export class CiSourceStore {
 			const now = this.now();
 			reclaimDeadConsumers(state, now);
 			this.expire(state, now);
-			let consumer = state.consumers.find((entry) => entry.id === consumerId);
-			if (consumer?.activation && consumer.activation.id !== activationId)
-				throw new Error("CI source consumer is already active in another host resource.");
-			if (!consumer) {
+			const existing = state.consumers.find((entry) => entry.id === consumerId);
+			if (existing?.activation) {
+				if (existing.activation.id !== activationId)
+					throw new Error("CI source consumer is already active in another host resource.");
+				return;
+			}
+			if (!existing) {
 				while (state.consumers.length >= MAX_CONSUMERS) {
 					const evicted = oldestParkedConsumer(state);
 					if (!evicted) throw new Error("CI source consumer capacity reached; offline custody remains retained.");
 					state.consumers = state.consumers.filter((entry) => entry !== evicted);
 				}
-				this.compact(state);
-				if (
-					checkpoint &&
-					(checkpoint.registration.sourceId !== state.sourceId ||
-						checkpoint.registration.sourceEpoch !== state.sourceEpoch)
-				)
-					throw new Error("CI source checkpoint names a different retained source.");
-				const acknowledged = checkpoint?.acceptedThrough ?? state.retiredThrough;
-				if (acknowledged >= state.nextSequence)
-					throw new Error("CI source checkpoint is ahead of retained history.");
-				consumer = {
-					id: hostEventString(consumerId, "consumerId"),
-					startingSequence: checkpoint?.registration.startingSequence ?? state.retiredThrough + 1,
-					acknowledged: Math.max(acknowledged, state.retiredThrough),
-					generation: checkpoint?.catchUpGeneration ?? 0,
-					scopeVersion: checkpoint?.registration.scopeVersion ?? 0,
-					subjects: checkpoint ? [...checkpoint.registration.subjects] : [],
-					rootSubjects: checkpoint ? [...checkpoint.registration.rootSubjects] : [],
-					observations: [],
-					replayFloor:
-						checkpoint && acknowledged >= state.retiredThrough
-							? checkpoint.replayFloor
-							: state.retiredThrough + 1,
-					...(acknowledged < state.retiredThrough
-						? { pendingGap: { afterSequence: acknowledged, throughSequence: state.retiredThrough } }
-						: {}),
-				};
-				state.consumers.push(consumer);
 			}
-			delete consumer.parkedAt;
-			consumer.activation = { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() };
+			this.compact(state);
+			if (
+				checkpoint &&
+				(checkpoint.registration.sourceId !== state.sourceId ||
+					checkpoint.registration.sourceEpoch !== state.sourceEpoch)
+			)
+				throw new Error("CI source checkpoint names a different retained source.");
+			// The session's durable checkpoint is authoritative on every claim, also for a parked consumer:
+			// a restored session that accepted less resumes from its own position, or through an explicit gap.
+			const acknowledged = checkpoint?.acceptedThrough ?? state.retiredThrough;
+			if (acknowledged >= state.nextSequence) throw new Error("CI source checkpoint is ahead of retained history.");
+			const consumer: Consumer = {
+				id: hostEventString(consumerId, "consumerId"),
+				startingSequence: checkpoint?.registration.startingSequence ?? state.retiredThrough + 1,
+				acknowledged: Math.max(acknowledged, state.retiredThrough),
+				generation: checkpoint?.catchUpGeneration ?? 0,
+				scopeVersion: checkpoint?.registration.scopeVersion ?? 0,
+				subjects: checkpoint ? [...checkpoint.registration.subjects] : [],
+				rootSubjects: checkpoint ? [...checkpoint.registration.rootSubjects] : [],
+				// A parked consumer's sealed observations keep pinning their runs until its next seal.
+				observations: existing?.observations ?? [],
+				replayFloor:
+					checkpoint && acknowledged >= state.retiredThrough ? checkpoint.replayFloor : state.retiredThrough + 1,
+				...(acknowledged < state.retiredThrough
+					? { pendingGap: { afterSequence: acknowledged, throughSequence: state.retiredThrough } }
+					: {}),
+				activation: { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() },
+			};
+			state.consumers = [...state.consumers.filter((entry) => entry !== existing), consumer];
 		});
 	}
 

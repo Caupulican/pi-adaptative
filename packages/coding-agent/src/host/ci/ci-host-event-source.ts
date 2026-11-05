@@ -24,9 +24,11 @@ import {
 	ciSourceRetiredRuns,
 } from "./ci-source-store.ts";
 import {
+	CI_REGISTRATION_GRACE_MS,
 	CI_WORKFLOW,
 	type CiGitPaths,
 	type CiStatusRecord,
+	ciWatcherAlive,
 	completedCiStatus,
 	readCiHead,
 	readCiStatusRecords,
@@ -322,10 +324,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private relevant(directory: string, refDirectory: string, filename: string): boolean {
 		if (directory === this.paths.statusDir) return filename.endsWith(".json");
 		if (filename.includes(".lock") || filename.includes(".tmp")) return false;
-		if (directory === refDirectory) return true;
+		// The allow-lists apply first: a detached HEAD or a packed-only branch names one of these
+		// directories as its reference directory, where index, logs and fetch heads are also written.
 		if (directory === this.paths.commonDir) return ["HEAD", "packed-refs", "refs"].includes(filename);
 		// A linked worktree's own git directory: only its HEAD names the checked-out revision.
-		return filename === "HEAD";
+		if (directory === this.paths.gitDir) return filename === "HEAD";
+		return directory === refDirectory;
 	}
 
 	private request(forced: boolean): void {
@@ -428,7 +432,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		let snapshot = this.store.snapshot();
 		let consumer = this.consumer(snapshot, sink.consumerId, activationId);
 		if (!consumer) return;
-		const scope = this.scope(repository, inputs, snapshot, consumer.acknowledged);
+		const { subjects: scope, required } = this.scope(repository, inputs, snapshot, consumer.acknowledged);
 		if (!scope.length) {
 			// No revision to observe (unborn HEAD, nothing subscribed or unsettled) and nothing retained.
 			this.monitor?.reconcile([]);
@@ -446,9 +450,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			await this.open(sink, activationId, scope, roots, signal);
 
 		// Collection is isolated per subject: one failing revision cannot discard another's evidence.
+		// Only a revision a delivery can target (HEAD, subscribed, unaccepted events) blocks the seal;
+		// an unsettled watcher record that cannot be observed is reported and sealed without observation.
 		const retainedAttempts = ciSourceRetainedAttempts(snapshot);
 		const observations: CiCurrentObservation[] = [];
 		const events = new Map<string, CiAttemptTerminalEvent>();
+		const runless = new Set<string>();
 		const unresolved = new Set<string>();
 		const failures: string[] = [];
 		for (const subject of scope) {
@@ -463,8 +470,10 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 				);
 				if (ciSubjectKey(collection.subject) !== key) throw new Error("CI provider returned a different subject.");
 				this.store.retain(collection.events);
+				this.reported.delete(`subject:${key}`);
 				for (const event of collection.events) events.set(event.eventId, event);
 				if (collection.current) observations.push(collection.current);
+				else if (!collection.predatesRetention && !collection.events.length) runless.add(subject.headSha);
 				if (collection.predatesRetention)
 					this.report(
 						`retention:${key}`,
@@ -474,7 +483,9 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 				signal.throwIfAborted();
 				if (isCiCommandMissing(error)) throw error;
 				unresolved.add(key);
-				failures.push(`${subject.headSha.slice(0, 9)}: ${errorText(error)}`);
+				const failure = `${subject.headSha.slice(0, 9)}: ${errorText(error)}`;
+				if (required.has(key)) failures.push(failure);
+				else this.report(`subject:${key}`, `CI result of an unsettled push is unavailable: ${failure}`);
 			}
 		}
 		signal.throwIfAborted();
@@ -496,7 +507,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			this.sealed.observed === observed &&
 			pending.length === 0
 		) {
-			await this.settle(sink, snapshot, inputs, observations, events, signal);
+			await this.settle(sink, snapshot, inputs, observations, events, runless, signal);
 			return;
 		}
 		if (this.sealed) {
@@ -548,7 +559,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		);
 		this.store.recordSeal(sink.consumerId, activationId, generation, observations);
 		this.sealed = { generation, observed };
-		await this.settle(sink, snapshot, inputs, observations, events, signal);
+		await this.settle(sink, snapshot, inputs, observations, events, runless, signal);
 	}
 
 	/** Retirement, status write-back and the input baseline after a reconcile that completed. */
@@ -558,6 +569,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		inputs: CiLocalInputs,
 		observations: readonly CiCurrentObservation[],
 		events: ReadonlyMap<string, CiAttemptTerminalEvent>,
+		runless: ReadonlySet<string>,
 		signal: AbortSignal,
 	): Promise<void> {
 		const throughSequence = this.store.retireAcknowledged();
@@ -569,7 +581,37 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			this.retiredSent = throughSequence;
 		}
 		const written = new Map<string, CiStatusRecord>();
+		const now = Date.now();
 		for (const record of inputs.records) {
+			// A push whose watcher is gone and that never got a run settles by the watcher's own rule,
+			// so it leaves the observed scope instead of being collected forever.
+			const since = Date.parse(record.startedAt ?? record.completedAt ?? "");
+			if (
+				record.branch &&
+				record.sha &&
+				(record.state === "pending" || record.state === "watch_failed") &&
+				runless.has(record.sha) &&
+				Number.isFinite(since) &&
+				now - since > CI_REGISTRATION_GRACE_MS &&
+				(record.state === "watch_failed" || ciWatcherAlive(record) !== true)
+			) {
+				const next: CiStatusRecord = {
+					sha: record.sha,
+					branch: record.branch,
+					workflow: CI_WORKFLOW,
+					state: "no_run",
+					error: `no ${CI_WORKFLOW} run appeared for this revision`,
+					completedAt: new Date(now).toISOString(),
+					reconciledBy: "pi",
+				};
+				try {
+					writeCiStatus(this.paths, record.branch, next, record.sha);
+					written.set(record.branch, next);
+				} catch (error) {
+					this.report(`status:${record.branch}`, `CI status record not updated: ${errorText(error)}`);
+				}
+				continue;
+			}
 			const current = observations.find((observation) => observation.subject.headSha === record.sha);
 			if (
 				!record.branch ||
@@ -613,7 +655,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		if (this.fingerprint() !== this.lastInputs) this.forced = true;
 		// Recovered failures report again if they recur; standing notices stay reported once.
 		for (const key of [...this.reported.keys()])
-			if (!key.startsWith("retention:") && key !== "scope") this.reported.delete(key);
+			if (!key.startsWith("retention:") && !key.startsWith("subject:") && key !== "scope") this.reported.delete(key);
 	}
 
 	private subjectOf(repository: CiRepository, headSha: string): CiSubject {
@@ -642,25 +684,27 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		inputs: CiLocalInputs,
 		snapshot: CiSourceSnapshot,
 		acknowledged: number,
-	): CiSubject[] {
+	): { subjects: CiSubject[]; required: ReadonlySet<string> } {
 		const scope: CiSubject[] = [];
 		if (inputs.headSha) addSubject(scope, this.subjectOf(repository, inputs.headSha));
 		for (const event of snapshot.events)
 			if (event.sourceSequence > acknowledged) addSubject(scope, ciEventSubject(event.event));
-		const required = scope.length;
+		const pinned = scope.length;
 		for (const subject of inputs.subscribed) if (this.ownWorkflow(repository, subject)) addSubject(scope, subject);
+		// A delivery can target only these: their observation must be current before a seal.
+		const required = new Set(scope.map(ciSubjectKey));
 		for (const headSha of inputs.unsettled) addSubject(scope, this.subjectOf(repository, headSha));
 		if (scope.length <= MAX_HOST_EVENT_SUBJECTS) {
 			this.reported.delete("scope");
-			return scope;
+			return { subjects: scope, required };
 		}
-		if (required > MAX_HOST_EVENT_SUBJECTS)
+		if (pinned > MAX_HOST_EVENT_SUBJECTS)
 			throw new Error("Retained CI events exceed the registered subject bound; they remain retained.");
 		this.report(
 			"scope",
 			`CI events observe ${MAX_HOST_EVENT_SUBJECTS} of ${scope.length} subscribed or unsettled revisions; the rest wait for capacity.`,
 		);
-		return scope.slice(0, MAX_HOST_EVENT_SUBJECTS);
+		return { subjects: scope.slice(0, MAX_HOST_EVENT_SUBJECTS), required };
 	}
 
 	/** Claims custody on first use; `undefined` when another writer replaced it (re-claimed next round). */
@@ -740,7 +784,7 @@ export async function createCiHostRuntime(options: CiHostRuntimeOptions): Promis
 	if (!options.provider && !existsSync(join(paths.root, ".github", "workflows", CI_WORKFLOW))) return undefined;
 	return new CiHostEventSource(
 		paths,
-		options.provider ?? new GithubActionsCiProvider(createCiCommandPort(paths.root)),
+		options.provider ?? new GithubActionsCiProvider(createCiCommandPort(paths.root, options.onDiagnostic)),
 		options.store ?? new CiSourceStore(paths.statusDir, { onDiagnostic: options.onDiagnostic }),
 		options.onDiagnostic,
 		options,

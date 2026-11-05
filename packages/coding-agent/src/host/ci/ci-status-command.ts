@@ -6,6 +6,7 @@ import { getStableSelfLaunchTarget } from "../../core/process-matrix/self-launch
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { CiSourceStore, ciSourceRetainedAttempts, ciSourceRetiredRuns } from "./ci-source-store.ts";
 import {
+	CI_REGISTRATION_GRACE_MS,
 	CI_WORKFLOW,
 	type CiGitPaths,
 	type CiStatusRecord,
@@ -27,7 +28,6 @@ export {
 	statusFile,
 } from "./ci-status-record.ts";
 export const CI_STATUS_COMMAND = "--ci-status";
-const REGISTRATION_GRACE_MS = 5 * 60_000;
 const REGISTRATION_INTERVAL_MS = 20_000;
 
 export function prePushTargets(stdin: string): { sha: string; branch: string }[] {
@@ -86,7 +86,7 @@ export async function watch(sha: string, branch: string, root = process.cwd()): 
 		for (;;) {
 			const status = await collectStatus(paths, sha, branch, signal);
 			if (!status) {
-				if (Date.now() - started > REGISTRATION_GRACE_MS) {
+				if (Date.now() - started > CI_REGISTRATION_GRACE_MS) {
 					// A rejected push or an untriggered workflow has no CI outcome: unknown, never red.
 					writeCiStatus(paths, branch, {
 						...base,
