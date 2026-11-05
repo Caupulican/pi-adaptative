@@ -2496,11 +2496,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					try {
 						this.enableAttemptAccountingForNextTask(agent);
 						const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
+						// A worker that read a third party's words passes them on in what it sends.
+						const sender =
+							message.senderAgentId && message.senderAgentId !== this.sessionRootAddress
+								? this.options.getLifecycle().getAgent(message.senderAgentId)
+								: undefined;
+						const senderOrigin = sender ? this.latestAgentAttempt(sender)?.dispatch.turnOrigin : undefined;
 						const prepared = this.options.getLifecycle().prepareAgentTurn({
 							agentId: agent.agentId,
 							instructions: message.content,
 							controlMessageId: message.messageId,
 							...(message.receiptOrigin ? { receiptOrigin: message.receiptOrigin } : {}),
+							...(senderOrigin?.thirdParty ? { turnOrigin: senderOrigin } : {}),
 							...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
 								? { dependsOnTaskIds: message.task.dependsOnTaskIds }
 								: {}),

@@ -580,6 +580,7 @@ export class WorkerRecoveryCoordinator {
 			...(attempt.dispatch.knowledgeReferences?.length ? { knowledge: attempt.dispatch.knowledgeReferences } : {}),
 			...(attempt.dispatch.subscriptions?.length ? { subscriptions: attempt.dispatch.subscriptions } : {}),
 			...(attempt.dispatch.receiptOrigin ? { receiptOrigin: attempt.dispatch.receiptOrigin } : {}),
+			...(attempt.dispatch.turnOrigin ? { turnOrigin: attempt.dispatch.turnOrigin } : {}),
 			profileId: attempt.dispatch.profileId,
 			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),
 			...(durableVerificationOfTaskId ? { verificationOfTaskId: durableVerificationOfTaskId } : {}),

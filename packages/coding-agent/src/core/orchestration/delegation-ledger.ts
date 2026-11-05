@@ -102,6 +102,8 @@ export interface PrepareAgentTurnInput {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
+	/** A third party's words the turn's message carries (its sender read them); the agent's own taint is kept anyway. */
+	turnOrigin?: OrchestrationDispatchRequest["turnOrigin"];
 	agentId: string;
 	instructions: string;
 	controlMessageId?: string;
@@ -399,6 +401,11 @@ export class DelegationOrchestrationLedger {
 				executionContract: contract,
 				dispatchMetadata: {
 					...evidence,
+					// The conversation keeps every word an earlier turn read, so a turn after one that carried a third
+					// party's words carries them too.
+					...(evidence.turnOrigin === undefined && prior.dispatch.turnOrigin
+						? { turnOrigin: prior.dispatch.turnOrigin }
+						: {}),
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
 					...(controlMessageId ? { controlMessageId } : {}),

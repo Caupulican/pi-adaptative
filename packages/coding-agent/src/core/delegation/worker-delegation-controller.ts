@@ -4581,14 +4581,17 @@ export class WorkerDelegationController {
 		inheritWorkerReceiptAdmission(request.receiptOrigin, capturedRequest.receiptOrigin);
 		if (existing) return capturedRequest;
 		const replay = this.replayedWorkerAttempt(request.messageReplayKey);
+		// A third party's words travel to every worker a worker that read them starts: a child, or its replay, carries the
+		// origin of the attempt that asked for it; the taint is only ever added here, never removed.
 		if (replay) {
 			capturedRequest.receiptOrigin = replay.dispatch.receiptOrigin;
+			capturedRequest.turnOrigin ??= replay.dispatch.turnOrigin;
 		} else if (request.parentAgentId) {
 			const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
 			const parentAttemptId = snapshot.agents[request.parentAgentId]?.activeAttemptId;
-			capturedRequest.receiptOrigin = parentAttemptId
-				? snapshot.attempts[parentAttemptId]?.dispatch.receiptOrigin
-				: undefined;
+			const parentDispatch = parentAttemptId ? snapshot.attempts[parentAttemptId]?.dispatch : undefined;
+			capturedRequest.receiptOrigin = parentDispatch?.receiptOrigin;
+			capturedRequest.turnOrigin ??= parentDispatch?.turnOrigin;
 		} else {
 			assertReceiptAdmission?.();
 			capturedRequest.receiptOrigin ??= this.deps.captureReceiptOrigin(
