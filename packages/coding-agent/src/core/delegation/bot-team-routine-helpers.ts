@@ -48,10 +48,35 @@ export interface PersistentBotDaemonStatus {
 	readonly lastTickAt?: number;
 	readonly activeRoutines: number;
 	readonly dueRoutines: number;
+	/** Enabled routines whose due run could not run away, with why; each runs when its session opens. */
+	readonly awayRefusals: readonly { readonly routineId: string; readonly reason: string; readonly at: number }[];
+	/** The latest daemon's own reports (refusals, open failures, diagnostics), oldest first and bounded. */
+	readonly reports: readonly BotDaemonReport[];
+	/** How the last daemon ended, while no daemon has claimed the lease since. */
+	readonly lastEnd?: BotDaemonEnd;
 	readonly legacy?: LegacyBotDaemonClaim;
 }
 
+/** One report of the detached daemon, kept in its lease record: the handoff a session reads back. */
+export interface BotDaemonReport {
+	readonly at: number;
+	readonly message: string;
+}
+
+/**
+ * The terminal record a released lease keeps: `released` by a session (`/bot daemon stop`), `signal` when the
+ * daemon process was asked to stop, `failed` when an error ended it (`detail` says which).
+ */
+export interface BotDaemonEnd {
+	readonly reason: "released" | "signal" | "failed";
+	readonly at: number;
+	readonly detail?: string;
+}
+
 const DAEMON_STALE_MS = 60_000;
+/** Reports kept in the lease record; older ones are dropped first. */
+const MAX_DAEMON_REPORTS = 20;
+const MAX_DAEMON_REPORT_CHARS = 500;
 
 export function parseDurationIntervalMs(raw: string): number {
 	const trimmed = raw.trim().toLowerCase();
@@ -153,6 +178,7 @@ interface DaemonLeaseRecord {
 	readonly owner?: ProcessOwner;
 	readonly lastHeartbeatAt?: number;
 	readonly lastTickAt?: number;
+	readonly reports?: readonly BotDaemonReport[];
 }
 
 const DAEMON_LEASE_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -208,9 +234,31 @@ function parseProcessOwner(value: unknown): ProcessOwner | undefined {
 	};
 }
 
+function parseDaemonReports(value: unknown): BotDaemonReport[] {
+	if (!Array.isArray(value)) return [];
+	const reports: BotDaemonReport[] = [];
+	for (const item of value.slice(-MAX_DAEMON_REPORTS)) {
+		if (!isRecordObject(item) || typeof item.message !== "string") continue;
+		const at = finiteNumber(item.at);
+		if (at !== undefined) reports.push({ at, message: item.message.slice(0, MAX_DAEMON_REPORT_CHARS) });
+	}
+	return reports;
+}
+
+function parseDaemonEnd(value: unknown): BotDaemonEnd | undefined {
+	if (!isRecordObject(value)) return undefined;
+	const at = finiteNumber(value.at);
+	const { reason, detail } = value;
+	if (at === undefined || (reason !== "released" && reason !== "signal" && reason !== "failed")) return undefined;
+	return { reason, at, ...(typeof detail === "string" ? { detail: detail.slice(0, MAX_DAEMON_REPORT_CHARS) } : {}) };
+}
+
 /** The current lease, or undefined when there is none: no file, a released lease, or a record without a token. */
 function readDaemonLease(leasePath: string): DaemonLeaseRecord | undefined {
-	const parsed = readLeaseJson(leasePath);
+	return daemonLeaseOf(readLeaseJson(leasePath));
+}
+
+function daemonLeaseOf(parsed: Record<string, unknown> | undefined): DaemonLeaseRecord | undefined {
 	if (
 		!parsed ||
 		typeof parsed.token !== "string" ||
@@ -222,6 +270,7 @@ function readDaemonLease(leasePath: string): DaemonLeaseRecord | undefined {
 	const owner = parseProcessOwner(parsed.owner);
 	const lastHeartbeatAt = finiteNumber(parsed.lastHeartbeatAt);
 	const lastTickAt = finiteNumber(parsed.lastTickAt);
+	const reports = parseDaemonReports(parsed.reports);
 	return {
 		token: parsed.token,
 		startedAt: parsed.startedAt,
@@ -229,6 +278,7 @@ function readDaemonLease(leasePath: string): DaemonLeaseRecord | undefined {
 		...(owner !== undefined ? { owner } : {}),
 		...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
 		...(lastTickAt !== undefined ? { lastTickAt } : {}),
+		...(reports.length > 0 ? { reports } : {}),
 	};
 }
 
@@ -250,8 +300,21 @@ function writeDaemonLease(leasePath: string, lease: DaemonLeaseRecord): void {
 	writeFileAtomicSync(leasePath, JSON.stringify(lease, null, 2));
 }
 
-function writeReleasedLease(leasePath: string, nowMs: number): void {
-	writeFileAtomicSync(leasePath, JSON.stringify({ releasedAt: nowMs }));
+/** A released lease: when, how its daemon ended (when known) and the reports it left, so a later session reads them. */
+function writeReleasedLease(
+	leasePath: string,
+	nowMs: number,
+	end?: BotDaemonEnd,
+	reports?: readonly BotDaemonReport[],
+): void {
+	writeFileAtomicSync(
+		leasePath,
+		JSON.stringify({
+			releasedAt: nowMs,
+			...(end ? { end } : {}),
+			...(reports && reports.length > 0 ? { reports } : {}),
+		}),
+	);
 }
 
 /** An earlier build's daemon still renewing the old lease file: renewed in the stale window, pid not proven gone. */
@@ -280,15 +343,29 @@ export function readDaemonLeaseStatus(
 ): PersistentBotDaemonStatus {
 	let activeRoutines = 0;
 	let dueRoutines = 0;
+	const awayRefusals: { routineId: string; reason: string; at: number }[] = [];
 	for (const r of routines) {
 		const next = nextRoutineAt(r.schedule, r.cursor);
 		if (!r.enabled || next === undefined) continue;
 		activeRoutines++;
 		if (next <= nowMs) dueRoutines++;
+		if (r.awayRefusal) awayRefusals.push({ routineId: r.routineId, ...r.awayRefusal });
 	}
 	const legacy = legacyDaemonClaimOf(readLeaseJson(legacyDaemonLeasePath(storeFilePath)), nowMs);
-	const lease = readDaemonLease(daemonLeasePath(storeFilePath));
-	if (!lease) return { running: false, activeRoutines, dueRoutines, ...(legacy ? { legacy } : {}) };
+	const parsed = readLeaseJson(daemonLeasePath(storeFilePath));
+	const lease = daemonLeaseOf(parsed);
+	if (!lease) {
+		const lastEnd = parseDaemonEnd(parsed?.end);
+		return {
+			running: false,
+			activeRoutines,
+			dueRoutines,
+			awayRefusals,
+			reports: parseDaemonReports(parsed?.reports),
+			...(lastEnd ? { lastEnd } : {}),
+			...(legacy ? { legacy } : {}),
+		};
+	}
 	const running = isDaemonLeaseHeld(lease, nowMs);
 	const pid = running ? (lease.owner?.pid ?? lease.launcherPid) : undefined;
 	return {
@@ -299,8 +376,16 @@ export function readDaemonLeaseStatus(
 		...(lease.lastTickAt !== undefined ? { lastTickAt: lease.lastTickAt } : {}),
 		activeRoutines,
 		dueRoutines,
+		awayRefusals,
+		reports: lease.reports ?? [],
 		...(legacy ? { legacy } : {}),
 	};
+}
+
+/** How the last daemon ended, while its released lease is still the current record (no later claim). */
+export function readDaemonEnd(storeFilePath: string): BotDaemonEnd | undefined {
+	const parsed = readLeaseJson(daemonLeasePath(storeFilePath));
+	return daemonLeaseOf(parsed) ? undefined : parseDaemonEnd(parsed?.end);
 }
 
 /** Takes the lease for a daemon about to be started with `token`; false while another holder keeps it. */
@@ -339,6 +424,24 @@ export function renewDaemonLeaseFile(
 	});
 }
 
+/** Appends reports to `token`'s lease record, the oldest dropped past the bound; nothing once the lease is not `token`'s. */
+export function recordDaemonReportsFile(
+	storeFilePath: string,
+	token: string,
+	reports: readonly BotDaemonReport[],
+): void {
+	const leasePath = daemonLeasePath(storeFilePath);
+	withLeaseLock(leasePath, () => {
+		const current = readDaemonLease(leasePath);
+		if (current?.token !== token) return;
+		const kept = [
+			...(current.reports ?? []),
+			...reports.map((report) => ({ at: report.at, message: report.message.slice(0, MAX_DAEMON_REPORT_CHARS) })),
+		].slice(-MAX_DAEMON_REPORTS);
+		writeDaemonLease(leasePath, { ...current, reports: kept });
+	});
+}
+
 /** Whether the lease currently names `token`; read without the lock, which atomic replacement makes consistent. */
 export function daemonLeaseBelongsTo(storeFilePath: string, token: string): boolean {
 	return readDaemonLease(daemonLeasePath(storeFilePath))?.token === token;
@@ -351,13 +454,25 @@ export type DaemonLeaseRelease =
 /**
  * Releases the lease (only when it is `token`'s, if one is given). `held` says whether a live holder had it, which
  * is the daemon that now exits on observing the release; a lease that was not held was stale and is simply cleared.
+ * The released record keeps the daemon's reports and how it ended (`released` unless the daemon says otherwise).
  */
-export function releaseDaemonLeaseFile(storeFilePath: string, token?: string, nowMs = Date.now()): DaemonLeaseRelease {
+export function releaseDaemonLeaseFile(
+	storeFilePath: string,
+	token?: string,
+	nowMs = Date.now(),
+	end: Omit<BotDaemonEnd, "at"> = { reason: "released" },
+): DaemonLeaseRelease {
 	const leasePath = daemonLeasePath(storeFilePath);
 	return withLeaseLock(leasePath, () => {
 		const current = readDaemonLease(leasePath);
 		if (!current || (token !== undefined && current.token !== token)) return { released: false };
-		writeReleasedLease(leasePath, nowMs);
+		const detail = end.detail?.slice(0, MAX_DAEMON_REPORT_CHARS);
+		writeReleasedLease(
+			leasePath,
+			nowMs,
+			{ reason: end.reason, at: nowMs, ...(detail !== undefined ? { detail } : {}) },
+			current.reports,
+		);
 		const pid = current.owner?.pid ?? current.launcherPid;
 		return { released: true, held: isDaemonLeaseHeld(current, nowMs), ...(pid !== undefined ? { pid } : {}) };
 	});

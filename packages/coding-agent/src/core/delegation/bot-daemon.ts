@@ -1,28 +1,188 @@
 /**
- * The detached bot daemon: queues due persistent routines across TUI restarts.
+ * The detached bot daemon: queues due persistent bot and team routines across TUI restarts, and runs the routines of
+ * closed sessions away (`AwayRoutineSupervisor`).
  *
  * A session claims the daemon lease with a fresh token, then launches `pi --bot-daemon <agentDir> <token>` through
- * the stable self-launch target. The daemon renews that lease while it is still its own and stops as soon as it is
- * not: released by `/bot daemon stop`, or claimed by a later start after this daemon's lease went stale. Ownership
- * changes are observed through a watch on the lease directory, and the renewal tick rechecks them. Each renewal
- * records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn may be a
- * launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it in the
- * shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`).
+ * the stable self-launch target. Sessions do this by themselves: on start while an enabled routine exists, and when a
+ * routine is saved (see `BackgroundLaneController`). The daemon renews that lease while it is still its own and stops
+ * as soon as it is not: released by `/bot daemon stop`, or claimed by a later start after this daemon's lease went
+ * stale. Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
+ * Each renewal records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn
+ * may be a launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it
+ * in the shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`), reloads the owner's settings and
+ * wakes the away supervisor, which is when a parent session's holder can have died.
  *
- * A lock held by another process through every bounded retry (`ELOCKED`) skips one tick: renewal recurs well inside
- * the lease's stale window and due routines stay due. Any other failure ends the process, and its unrenewed lease
- * goes stale, so status never reports a daemon that cannot work.
+ * The daemon reports into its lease record (bounded), and every end is recorded there: `signal` when its process is
+ * asked to stop, `failed` with the error that ended it, `released` by the session that stopped it. A lease another
+ * start took is that daemon's, so this one exits without writing it. A stop is joined: the renewal and the watch end,
+ * the supervisor closes its hosts (a run still executing is suspended and resumed later), then the lease is released.
+ *
+ * A lock held by another process through every bounded retry (`ELOCKED`) skips one renewal or report write: renewal
+ * recurs well inside the lease's stale window, due routines stay due and reports are written on the next tick.
  */
 import { type FSWatcher, watch } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
-import { ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
-import { daemonLeasePath, isDaemonLeaseToken } from "./bot-team-routine-helpers.ts";
+import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import type { AuthStorage } from "../auth-storage.ts";
+import type { ModelRegistry } from "../model-registry.ts";
+import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
+import { SettingsManager } from "../settings-manager.ts";
+import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
+import {
+	type BotDaemonEnd,
+	type BotDaemonReport,
+	daemonLeasePath,
+	isDaemonLeaseToken,
+} from "./bot-team-routine-helpers.ts";
 import { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
 const DAEMON_TICK_MS = 10_000;
+/** Reports waiting for a contended lease lock; older ones are dropped first. */
+const MAX_PENDING_REPORTS = 20;
 
 function isLockContention(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException | undefined)?.code === "ELOCKED";
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+export interface BotDaemonInput {
+	readonly agentDir: string;
+	/** The lease token the starting session claimed and passed in argv: the daemon's identity. */
+	readonly token: string;
+	/** The daemon's clock and alarms: the lease renewal and the away supervisor run on the `routines` port. */
+	readonly timers: TimerSource;
+	/** The identity each renewal records. */
+	readonly owner: ProcessOwner;
+	/** Shared credential owners, when the host has them; otherwise each parent run away builds them as the SDK does. */
+	readonly authStorage?: AuthStorage;
+	readonly modelRegistry?: ModelRegistry;
+}
+
+export interface BotDaemonRun {
+	/** Resolves with the process exit code once the daemon stopped and its stop was joined. */
+	readonly exited: Promise<number>;
+	/**
+	 * Stops the daemon (a signal to its process, by default) and resolves with its exit code once joined. A `failed`
+	 * end exits 1.
+	 */
+	stop(end?: Omit<BotDaemonEnd, "at">): Promise<number>;
+}
+
+/** Starts the daemon for `token`; it runs until its lease is no longer its own or it is stopped. */
+export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
+	const { agentDir, token, timers, owner } = input;
+	const clock = timers.port("routines");
+	const pending: BotDaemonReport[] = [];
+	let store: PersistentBotTeamStore | undefined;
+	let stopping: Promise<number> | undefined;
+	let resolveExit: (code: number) => void = () => {};
+	const exited = new Promise<number>((resolve) => {
+		resolveExit = resolve;
+	});
+	const fail = (error: unknown): void => {
+		void stop({ reason: "failed", detail: errorText(error) });
+	};
+	const flushReports = (): void => {
+		if (!store || pending.length === 0) return;
+		try {
+			store.recordDaemonReports(token, pending);
+			pending.length = 0;
+		} catch (error) {
+			if (!isLockContention(error)) fail(error);
+		}
+	};
+	const report = (message: string): void => {
+		pending.push({ at: clock.now(), message });
+		if (pending.length > MAX_PENDING_REPORTS) pending.splice(0, pending.length - MAX_PENDING_REPORTS);
+		flushReports();
+	};
+	const routineStore = new PersistentBotTeamStore(agentDir, (message) => report(`Routine store: ${message}`));
+	store = routineStore;
+	// The away bounds are the owner's global settings; no project's settings reach a daemon serving every project.
+	const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
+	const supervisor = new AwayRoutineSupervisor({
+		store: routineStore,
+		agentDir,
+		timers,
+		settings: () => settings.getRoutineAwaySettings(),
+		report,
+		...(input.authStorage ? { authStorage: input.authStorage } : {}),
+		...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
+	});
+	const leaseFile = daemonLeasePath(routineStore.getStoreFilePath());
+	let watcher: FSWatcher | undefined;
+
+	const stop = (end?: Omit<BotDaemonEnd, "at">): Promise<number> => {
+		stopping ??= (async () => {
+			ticker.stop();
+			watcher?.close();
+			watcher = undefined;
+			let code = end?.reason === "failed" ? 1 : 0;
+			let ended = end;
+			try {
+				await supervisor.close();
+			} catch (error) {
+				code = 1;
+				ended = { reason: "failed", detail: `the away supervisor did not close: ${errorText(error)}` };
+			}
+			flushReports();
+			// Without an end the lease is no longer this daemon's: whoever holds or released it owns the record.
+			if (ended) {
+				try {
+					routineStore.releaseDaemonLease(token, clock.now(), ended);
+				} catch (error) {
+					// A contended lease lock: the unrenewed lease goes stale on its own.
+					if (!isLockContention(error)) code = 1;
+				}
+			}
+			routineStore.dispose();
+			resolveExit(code);
+			return code;
+		})();
+		return stopping;
+	};
+
+	const tick = (): void => {
+		if (stopping) return;
+		const now = clock.now();
+		try {
+			if (!routineStore.renewDaemonLease(token, owner, now)) {
+				void stop();
+				return;
+			}
+			routineStore.queueDueRoutinesForDaemon(now);
+		} catch (error) {
+			if (!isLockContention(error)) {
+				fail(error);
+				return;
+			}
+		}
+		flushReports();
+		// An owner's settings change applies from the next pass.
+		void settings.reload().then(() => {
+			if (!stopping) supervisor.wake();
+		}, fail);
+	};
+	// The renewal is this process's whole life, so it alone keeps the process alive; every other alarm is unreferenced.
+	const ticker = repeatEvery(clock, DAEMON_TICK_MS, tick, { keepAlive: true });
+	try {
+		watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
+			if (filename !== null && filename.toString() !== basename(leaseFile)) return;
+			if (!stopping && !routineStore.daemonLeaseBelongsTo(token)) void stop();
+		});
+		// A watch that fails later leaves the renewal tick, which observes a release within one interval.
+		watcher.on("error", () => {
+			watcher?.close();
+			watcher = undefined;
+		});
+	} catch (error) {
+		fail(error);
+	}
+	tick();
+	return { exited, stop: (end = { reason: "signal" }) => stop(end) };
 }
 
 /** Runs the daemon for `pi --bot-daemon <agentDir> <token>`; resolves with the process exit code once it stops. */
@@ -30,51 +190,11 @@ export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
 	const [agentDir, token] = args;
 	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
 		return Promise.resolve(2);
-	const store = new PersistentBotTeamStore(agentDir);
-	const leaseFile = daemonLeasePath(store.getStoreFilePath());
-	const owner = ownProcessOwner();
-	return new Promise((resolve) => {
-		let stopped = false;
-		let timer: ReturnType<typeof setInterval> | undefined;
-		let watcher: FSWatcher | undefined;
-		const stop = (): void => {
-			if (stopped) return;
-			stopped = true;
-			clearInterval(timer);
-			watcher?.close();
-			try {
-				store.releaseDaemonLease(token);
-			} catch (error) {
-				// A contended lease lock: the unrenewed lease goes stale on its own.
-				if (!isLockContention(error)) throw error;
-			}
-			resolve(0);
-		};
-		const tick = (): void => {
-			if (stopped) return;
-			const now = Date.now();
-			try {
-				if (!store.renewDaemonLease(token, owner, now)) {
-					stop();
-					return;
-				}
-				store.queueDueRoutinesForDaemon(now);
-			} catch (error) {
-				if (!isLockContention(error)) throw error;
-			}
-		};
-		timer = setInterval(tick, DAEMON_TICK_MS);
-		watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
-			if (filename !== null && filename.toString() !== basename(leaseFile)) return;
-			if (!store.daemonLeaseBelongsTo(token)) stop();
-		});
-		// A watch that fails later leaves the renewal tick, which observes a release within one interval.
-		watcher.on("error", () => {
-			watcher?.close();
-			watcher = undefined;
-		});
-		process.once("SIGTERM", stop);
-		process.once("SIGINT", stop);
-		tick();
-	});
+	const run = startBotDaemon({ agentDir, token, timers: SYSTEM_TIMER_SOURCE, owner: ownProcessOwner() });
+	process.once("SIGTERM", () => void run.stop());
+	process.once("SIGINT", () => void run.stop());
+	// An error nothing caught ends the daemon with its terminal record instead of a silent exit.
+	process.once("uncaughtException", (error) => void run.stop({ reason: "failed", detail: errorText(error) }));
+	process.once("unhandledRejection", (reason) => void run.stop({ reason: "failed", detail: errorText(reason) }));
+	return run.exited;
 }

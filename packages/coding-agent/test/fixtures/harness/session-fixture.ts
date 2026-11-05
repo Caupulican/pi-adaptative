@@ -29,6 +29,8 @@ import {
 import { createSessionManagerLedgerPort } from "../../../src/core/cost/session-ledger-port.ts";
 import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../../../src/core/cost/usage-records.ts";
+import { type BotDaemonRun, startBotDaemon } from "../../../src/core/delegation/bot-daemon.ts";
+import { BOT_DAEMON_COMMAND } from "../../../src/core/delegation/bot-daemon-command.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
@@ -54,6 +56,7 @@ import type { ToolDef } from "../../../src/core/tools/index.ts";
 import { routeShellContract } from "../../../src/core/tools/shell-contract-router.ts";
 import type { TimerOwner, TimerPort, TimerSource } from "../../../src/core/util/timer-port.ts";
 import { isTransientFsShareError } from "../../../src/core/util/win32-transient-fs.ts";
+import { ownProcessOwner } from "../../../src/kernel/reliability/owner-identity.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -2131,19 +2134,48 @@ export class HarnessProcesses {
 		readonly cwd: string;
 		readonly env: Readonly<Record<string, string | undefined>>;
 	}> = [];
+	/** Every detached `pi --bot-daemon` a session launched, in launch order: its exact argv and environment. */
+	readonly botDaemonLaunches: HarnessBotDaemonLaunch[] = [];
 	private readonly settling = new Set<Promise<void>>();
 	/** Child causes retained after their spawn leaves `settling`, so every later drain still reports them. */
 	private readonly causes: unknown[] = [];
 	private readonly git: VirtualGit;
 	private readonly windows: ScriptedWindowsShellProcesses;
+	private readonly table: VirtualProcessTable;
+	private readonly timers: TimerSource;
+	/** Journeys waiting for the next launched daemon to run; a launch nobody waits for exits before its first renewal. */
+	private readonly botDaemonWaiters: Array<(daemon: HarnessBotDaemon) => void> = [];
+	private readonly runningBotDaemons = new Set<HarnessBotDaemon>();
+	/** The world's credential owners, which a daemon process reads from its agent directory as any session does. */
+	private readonly credentials: () => { authStorage: AuthStorage; modelRegistry: ModelRegistry };
 
-	constructor(git: VirtualGit, windows: ScriptedWindowsShellProcesses) {
+	constructor(
+		git: VirtualGit,
+		windows: ScriptedWindowsShellProcesses,
+		table: VirtualProcessTable,
+		timers: TimerSource,
+		credentials: () => { authStorage: AuthStorage; modelRegistry: ModelRegistry },
+	) {
 		this.git = git;
 		this.windows = windows;
+		this.table = table;
+		this.timers = timers;
+		this.credentials = credentials;
+	}
+
+	/**
+	 * The next `pi --bot-daemon` a session launches runs the production daemon body in this process, on the world's
+	 * timers, as its own process would; resolves when it is launched. Every other launch is a process that exits before
+	 * its first renewal, so its lease goes stale on the routines clock.
+	 */
+	runNextBotDaemon(): Promise<HarnessBotDaemon> {
+		return new Promise((resolve) => this.botDaemonWaiters.push(resolve));
 	}
 
 	/** Joins every spawned child: its stdio has closed and its close has fired. Failures are aggregated, never dropped. */
 	async drain(): Promise<void> {
+		// A daemon a journey left running is stopped as its process would be at shutdown, and joined.
+		for (const daemon of [...this.runningBotDaemons]) await daemon.stop();
 		await Promise.allSettled([...this.settling]);
 		if (this.causes.length > 0)
 			throw new AggregateError([...this.causes], "Virtual process children failed to settle");
@@ -2154,6 +2186,8 @@ export class HarnessProcesses {
 		const windowsResult = this.windows.tryRun(operation, args);
 		if (windowsResult?.handled) return windowsResult.value;
 		const [file, argv, options] = args;
+		if (operation === "spawn" && Array.isArray(argv) && argv.includes(BOT_DAEMON_COMMAND))
+			return this.launchBotDaemon(String(file), argv, options);
 		const isGit = file === "git" || file === "git.exe" || file === this.git.executable;
 		if (isGit && Array.isArray(argv)) {
 			if (!argv.every((arg): arg is string => typeof arg === "string"))
@@ -2273,6 +2307,74 @@ export class HarnessProcesses {
 		this.unscripted.push(`${operation} ${String(file)} ${JSON.stringify(argv)}`);
 		throw new Error(`Unscripted process ${operation}: ${String(file)}`);
 	}
+
+	/** A detached daemon launch: an owned child whose SIGTERM stops the daemon body, released once that stop is joined. */
+	private launchBotDaemon(file: string, argv: readonly unknown[], options: unknown): EventEmitter {
+		if (!argv.every((arg): arg is string => typeof arg === "string"))
+			throw new TypeError("Daemon process arguments must be strings");
+		const args = argv as readonly string[];
+		const at = args.indexOf(BOT_DAEMON_COMMAND);
+		const agentDir = args[at + 1];
+		const token = args[at + 2];
+		if (agentDir === undefined || token === undefined)
+			throw new Error("A daemon launch names no agent directory and lease token");
+		const spawnOptions = (options ?? {}) as { env?: Record<string, string | undefined>; detached?: boolean };
+		let run: BotDaemonRun | undefined;
+		const pid = this.table.registerChild({
+			detached: spawnOptions.detached === true,
+			deliver: () => void run?.stop(),
+		});
+		const launch: HarnessBotDaemonLaunch = Object.freeze({
+			file,
+			args: Object.freeze([...args]),
+			env: Object.freeze({ ...spawnOptions.env }),
+			agentDir,
+			token,
+			pid,
+		});
+		this.botDaemonLaunches.push(launch);
+		const child = Object.assign(new EventEmitter(), { pid, unref: () => undefined });
+		const waiter = this.botDaemonWaiters.shift();
+		if (!waiter) {
+			this.table.releaseChild(pid);
+			return child;
+		}
+		run = startBotDaemon({ agentDir, token, timers: this.timers, owner: ownProcessOwner(), ...this.credentials() });
+		let closed = false;
+		const daemon: HarnessBotDaemon = {
+			launch,
+			exited: run.exited.then((code) => {
+				closed = true;
+				this.table.releaseChild(pid);
+				this.runningBotDaemons.delete(daemon);
+				return code;
+			}),
+			stop: () => {
+				if (!closed) this.table.signal(pid, "SIGTERM");
+				return daemon.exited;
+			},
+		};
+		this.runningBotDaemons.add(daemon);
+		waiter(daemon);
+		return child;
+	}
+}
+
+/** One detached `pi --bot-daemon` launch a session made. */
+export interface HarnessBotDaemonLaunch {
+	readonly file: string;
+	readonly args: readonly string[];
+	readonly env: Readonly<Record<string, string | undefined>>;
+	readonly agentDir: string;
+	readonly token: string;
+	readonly pid: number;
+}
+
+/** A launched daemon running its production body in process: `stop` sends its process SIGTERM and joins the stop. */
+export interface HarnessBotDaemon {
+	readonly launch: HarnessBotDaemonLaunch;
+	readonly exited: Promise<number>;
+	stop(): Promise<number>;
 }
 
 export interface HarnessWorldOptions {
@@ -2549,7 +2651,10 @@ export class HarnessWorld {
 		this.warningAllowances = options.warningAllowances ?? [];
 		this.git = new VirtualGit(this.io, HARNESS_PROJECT_CWD);
 		this.windowsShell = new ScriptedWindowsShellProcesses(this.io, this.shell, this.processTable);
-		this.processes = new HarnessProcesses(this.git, this.windowsShell);
+		this.processes = new HarnessProcesses(this.git, this.windowsShell, this.processTable, this.timers, () => ({
+			authStorage: this.authStorage,
+			modelRegistry: this.modelRegistry,
+		}));
 		this.guard = new EffectGuard(this.io, {
 			sqlite: "memory",
 			process: (operation, args) => this.processes.run(operation, args),
@@ -2561,6 +2666,9 @@ export class HarnessWorld {
 		this.guard.install();
 		// The installed managed uv and interpreter are provisioned once per world, after the guard, at their actual canonical paths.
 		this.windowsShell.provisionInstalledRuntime(HARNESS_PROJECT_CWD);
+		// The running runtime exists where it runs: a Windows launch of pi's own command resolves it as an executable, not
+		// through a command shell, as on a real host.
+		if (process.platform === "win32") this.io.seed(process.execPath, "virtual pi runtime\n");
 		let provider: ScriptedProvider | undefined;
 		// A failure while building the world must not leave the process-wide guard or the provider registration installed.
 		try {

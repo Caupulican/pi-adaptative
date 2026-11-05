@@ -148,6 +148,12 @@ import {
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
+import {
+	PI_ORCHESTRATION_AGENT_ID_ENV,
+	PI_PARENT_PID_ENV,
+	PI_PARENT_SESSION_ENV,
+	PI_TASK_REF_ENV,
+} from "./process-identity.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -165,15 +171,27 @@ import { RoutineSessionController } from "./routines/routine-session-controller.
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
+import { getSessionRole, PI_SESSION_ROLE_ENV } from "./session-role.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
+import { PI_WORKTREE_LANE_ENV } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
+
+/** The starting process's session identity: the detached daemon serves the agent directory and is nobody's child. */
+const DAEMON_DROPPED_ENV = [
+	PI_SESSION_ROLE_ENV,
+	PI_PARENT_PID_ENV,
+	PI_PARENT_SESSION_ENV,
+	PI_ORCHESTRATION_AGENT_ID_ENV,
+	PI_TASK_REF_ENV,
+	PI_WORKTREE_LANE_ENV,
+] as const;
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
@@ -263,6 +281,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		| { scheduler: RoutineSchedulerController; session: RoutineSessionController; intake: RoutineIntake }
 		| undefined;
 	private routinesStarted = false;
+	/** The routine revision the daemon was last ensured for: a save moves it, the store's other writes do not. */
+	private _daemonRevision: number | undefined;
+	/** The last reason the daemon could not be started by itself, reported once until it changes. */
+	private _daemonStartFailure: string | undefined;
 	private readonly botBindings: BotRuntimeBindings;
 	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
 	private readonly botDispatches = new Map<string, Promise<void>>();
@@ -1362,6 +1384,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir(), (message) => this._safeWarn(message));
 			this._botTeamStore.subscribe(() => {
 				this._botViews = undefined;
+				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
+				if (this.routinesStarted && this._botTeamStore?.getRoutineRevision() !== this._daemonRevision)
+					this._ensureBotDaemon();
 				// A routine run away commits its occurrence after recording its parent writes; this store's change is the
 				// cross-process signal, so an open parent lands those writes now, before its scheduler (subscribed after
 				// this listener) delivers the run's result.
@@ -1549,6 +1574,30 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.getBotTeamStore();
 		this._routines?.scheduler.start();
 		this._routines?.intake.start();
+		this._ensureBotDaemon();
+	}
+
+	/**
+	 * Brings the detached daemon up by itself, with no command: at session start and on every routine save, while an
+	 * enabled routine exists and no daemon holds the lease. The claim is idempotent across sessions and processes, so
+	 * only one start launches. A worker process never starts one. A reason the daemon cannot start is reported once.
+	 */
+	private _ensureBotDaemon(): void {
+		const store = this._botTeamStore;
+		if (!store || this.deps.isDisposed() || getSessionRole() === "worker") return;
+		this._daemonRevision = store.getRoutineRevision();
+		let failure: string | undefined;
+		try {
+			const status = store.getDaemonStatus(this.deps.getTimers().port("routines").now());
+			if (!status.running && status.activeRoutines > 0) {
+				const started = this.startPersistentBotDaemon();
+				if (!started.started && !started.held) failure = started.detail;
+			}
+		} catch (error) {
+			failure = `Detached bot daemon could not be started: ${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (failure !== undefined && failure !== this._daemonStartFailure) this._safeWarn(failure);
+		this._daemonStartFailure = failure;
 	}
 
 	/** Automatic routine intake of this session; undefined where routines do not run (a child session). */
@@ -1586,7 +1635,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	getPersistentBotDaemonStatus(): PersistentBotDaemonStatus {
 		const store = this.getBotTeamStore();
 		store.reload();
-		return store.getDaemonStatus();
+		return store.getDaemonStatus(this.deps.getTimers().port("routines").now());
 	}
 
 	/**
@@ -1594,11 +1643,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * outlives this session and its runtime generation). Earlier-generation daemons are retired first (the store is
 	 * sealed against them on every platform; see `bot-daemon-legacy.ts`). The lease is claimed with a fresh token
 	 * before the spawn and the token travels in argv, so the daemon's identity is the lease it renews, never a pid read
-	 * back from disk; the spawned pid is recorded for display only (on Windows it can be a launcher wrapper's).
+	 * back from disk; the spawned pid is recorded for display only (on Windows it can be a launcher wrapper's). The
+	 * daemon serves the whole agent directory, so it carries none of this process's session identity. `held`: another
+	 * daemon already holds the lease. A previous daemon that ended on an error is reported once, by the start that
+	 * replaces it.
 	 */
-	startPersistentBotDaemon(): { started: boolean; pid?: number; detail: string } {
+	startPersistentBotDaemon(): { started: boolean; held?: boolean; pid?: number; detail: string } {
 		const store = this.getBotTeamStore();
 		store.reload();
+		const clock = this.deps.getTimers().port("routines");
 		const target = getStableSelfLaunchTarget();
 		if (!target) {
 			return {
@@ -1609,11 +1662,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const legacy = describeLegacyDaemonRetirement(retireLegacyBotDaemons(store));
 		const withLegacy = (detail: string): string => (legacy ? `${detail} ${legacy}` : detail);
 		const token = randomUUID();
-		if (!store.claimDaemonLease(token)) {
-			const current = store.getDaemonStatus();
+		const previousEnd = store.getDaemonEnd();
+		if (!store.claimDaemonLease(token, clock.now())) {
+			const current = store.getDaemonStatus(clock.now());
 			const starting = current.lastHeartbeatAt === undefined;
 			return {
 				started: false,
+				held: true,
 				...(current.pid !== undefined ? { pid: current.pid } : {}),
 				detail: withLegacy(
 					starting
@@ -1622,18 +1677,24 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				),
 			};
 		}
+		if (previousEnd?.reason === "failed")
+			this._safeWarn(
+				`The detached bot daemon stopped on an error${previousEnd.detail ? `: ${previousEnd.detail}` : ""}. It is started again.`,
+			);
 		const args = [...target.argsPrefix, ...botDaemonCommandArgs(this.deps.getAgentDir(), token)];
+		const env: NodeJS.ProcessEnv = { ...process.env, ...target.environment };
+		for (const name of DAEMON_DROPPED_ENV) delete env[name];
 		const child = spawnProcess(target.executable, args, {
 			detached: true,
 			stdio: "ignore",
 			windowsHide: true,
-			env: target.environment ? { ...process.env, ...target.environment } : process.env,
+			env,
 		});
 		child.once("error", (error) => {
 			this._safeWarn(`Detached bot daemon failed to start: ${error.message}`);
 			// The daemon never ran, so its claim is released now rather than left to go stale.
 			try {
-				store.releaseDaemonLease(token);
+				store.releaseDaemonLease(token, clock.now(), { reason: "failed", detail: error.message });
 			} catch (releaseError) {
 				this._safeWarn(
 					`Detached bot daemon lease stays claimed until it goes stale: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
@@ -1643,7 +1704,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		child.unref();
 		const pid = child.pid;
 		if (pid === undefined) {
-			store.releaseDaemonLease(token);
+			store.releaseDaemonLease(token, clock.now(), { reason: "failed", detail: "its process did not spawn" });
 			return { started: false, detail: withLegacy("Failed to spawn detached bot daemon process.") };
 		}
 		store.recordDaemonLaunchPid(token, pid);
@@ -1664,7 +1725,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	stopPersistentBotDaemon(): { stopped: boolean; detail: string } {
 		const store = this.getBotTeamStore();
 		store.reload();
-		const released = store.releaseDaemonLease();
+		const released = store.releaseDaemonLease(undefined, this.deps.getTimers().port("routines").now());
 		const retirement = retireLegacyBotDaemons(store);
 		const legacy = describeLegacyDaemonRetirement(retirement);
 		const legacyStopped = retirement.releasedTokenDaemon?.held === true || retirement.sweep.signalled.length > 0;

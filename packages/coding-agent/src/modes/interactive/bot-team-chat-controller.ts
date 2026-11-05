@@ -1056,11 +1056,20 @@ export class BotTeamChatController {
 				const legacyNote = status.legacy
 					? ` An older build's daemon${status.legacy.pid === undefined ? "" : ` (pid ${status.legacy.pid})`} is still running; it can no longer write the store.`
 					: "";
-				this.host.showStatus(
+				const endNote =
+					!status.running && status.lastEnd
+						? ` It last ended ${status.lastEnd.reason === "released" ? "when a session stopped it" : status.lastEnd.reason === "signal" ? "when its process was stopped" : `on an error${status.lastEnd.detail ? `: ${status.lastEnd.detail}` : ""}`}.`
+						: "";
+				const lines = [
 					status.running
 						? `Detached bot daemon running (${status.pid === undefined ? "" : `pid ${status.pid}, `}${counts}).${legacyNote}`
-						: `Detached bot daemon stopped (${counts}).${legacyNote}`,
-				);
+						: `Detached bot daemon stopped (${counts}).${endNote}${legacyNote}`,
+					...status.awayRefusals.map(
+						(refusal) => `Routine ${refusal.routineId} was not run away: ${refusal.reason}`,
+					),
+					...status.reports.slice(-5).map((report) => `${new Date(report.at).toISOString()} ${report.message}`),
+				];
+				this.host.showStatus(lines.join("\n"));
 				return;
 			}
 			case "start": {

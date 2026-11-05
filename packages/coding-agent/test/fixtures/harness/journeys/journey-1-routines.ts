@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { expect } from "vitest";
 import { configFile } from "../../../../src/core/agent-paths.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
+import { BOT_DAEMON_COMMAND } from "../../../../src/core/delegation/bot-daemon-command.ts";
 import { PersistentBotTeamStore } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import {
 	appendWorkerClaimSnapshot,
@@ -23,7 +24,6 @@ import {
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
-import { AwayRoutineSupervisor } from "../../../../src/core/routines/away-routine-host.ts";
 import {
 	MAX_ROUTINE_INSTANT_MS,
 	ROUTINE_AWAY_SPEND_REFUSAL,
@@ -31,7 +31,6 @@ import {
 	routineScheduleInputOf,
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
-import type { ResolvedRoutineAwaySettings } from "../../../../src/core/settings/settings-schema.ts";
 import type { SessionManager } from "../../../../src/kernel/node.ts";
 import { parentInputMessage, parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
@@ -764,11 +763,27 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(attemptClaims(root.sessionManager)).toBe(3);
 		world.faultMatrix.witness("R51", { control: false });
 
-		// A routine of this parent comes due while the parent is closed. The production away supervisor, hosted here as
-		// the daemon hosts it (its own routine store, the owner's settings file), runs it on the parent opened away.
+		// A routine of this parent comes due while the parent is closed, and nothing the owner types runs it: its save
+		// brings the detached daemon up by itself (the launched process's production body runs here, on the world's
+		// timers), and the daemon runs it on the parent opened away, under the owner's away settings file.
 		const awayRoutineId = "away-review";
 		const awayPrompt = "Inspect the away review task and report its status.";
 		const awayAt = world.timers.port("routines").now() + 60_000;
+		const seedAwaySettings = (maxUsdPerDay: number) =>
+			world.io.seed(
+				configFile(agentDir, "settings.json"),
+				JSON.stringify({
+					modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
+					routines: { away: { maxUsdPerDay } },
+				}),
+			);
+		// No room for one run (the default run bound is 0.25): the spend gate refuses before any claim.
+		seedAwaySettings(0.1);
+		// A daemon an earlier save launched is released first, so this save is the one that brings it up.
+		root.session.backgroundLanes.stopPersistentBotDaemon();
+		const daemonLaunches = () => world.processes.botDaemonLaunches.length;
+		const launchesBeforeSave = daemonLaunches();
+		const savedDaemon = world.processes.runNextBotDaemon();
 		await command("routine-away-create", {
 			action: "create",
 			routineId: awayRoutineId,
@@ -776,77 +791,82 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			schedule: { kind: "once", at: awayAt },
 			profileId: profile.profileId,
 		});
+		expect(daemonLaunches() - launchesBeforeSave, "the save launched exactly one daemon").toBe(1);
+		const firstDaemon = await savedDaemon;
+		expect(firstDaemon.launch.args.slice(-3)).toEqual([BOT_DAEMON_COMMAND, agentDir, firstDaemon.launch.token]);
+		for (const name of ["PI_SESSION_ROLE", "PI_PARENT_PID", "PI_PARENT_SESSION", "PI_WORKTREE_LANE"])
+			expect(firstDaemon.launch.env[name], `the daemon carries no session identity (${name})`).toBeUndefined();
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		const fileWhileAway = world.io.peekFile(file);
-		world.io.seed(
-			configFile(agentDir, "settings.json"),
-			JSON.stringify({
-				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
-			}),
-		);
 		const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 		const workerRequestsBeforeAway = workerRequests();
-		const awayReports: string[] = [];
-		const awayStore = new PersistentBotTeamStore(agentDir, (message) => awayReports.push(message));
+		const storeDiagnostics: string[] = [];
+		const awayStore = new PersistentBotTeamStore(agentDir, (message) => storeDiagnostics.push(message));
 		try {
-			let awaySettings: ResolvedRoutineAwaySettings = {
-				enabled: true,
-				maxUsdPerRun: 0.25,
-				// No room for one run: the spend gate refuses before any claim.
-				maxUsdPerDay: 0.1,
-				maxParentHosts: 4,
+			const daemonStatus = () => {
+				awayStore.reload();
+				return awayStore.getDaemonStatus(world.timers.port("routines").now());
 			};
-			const supervisor = new AwayRoutineSupervisor({
-				store: awayStore,
-				agentDir,
-				timers: world.timers,
-				settings: () => awaySettings,
-				report: (message) => awayReports.push(message),
-				authStorage: world.authStorage,
-				modelRegistry: world.modelRegistry,
+			const spendReports = (status: ReturnType<typeof daemonStatus>) =>
+				status.reports.filter((report) => report.message.includes(ROUTINE_AWAY_SPEND_REFUSAL));
+			const refused = createBarrier();
+			const stopObservingRefusal = awayStore.subscribe(() => {
+				if (awayStore.getRoutine(awayRoutineId)?.awayRefusal?.reason === ROUTINE_AWAY_SPEND_REFUSAL)
+					refused.release();
 			});
-			const spendRefusals = () => awayReports.filter((message) => message.includes(ROUTINE_AWAY_SPEND_REFUSAL));
 			try {
-				const refused = createBarrier();
-				const stopObservingRefusal = awayStore.subscribe(() => {
-					if (awayStore.getRoutine(awayRoutineId)?.awayRefusal?.reason === ROUTINE_AWAY_SPEND_REFUSAL)
-						refused.release();
-				});
-				try {
-					world.timers.advance("routines", 60_000);
-					supervisor.wake();
-					await withDeadline(world.trace, "the spend gate refuses the due run away", refused.promise);
-				} finally {
-					stopObservingRefusal();
-				}
-				expect(workerRequests(), "a refused run makes no worker request").toBe(workerRequestsBeforeAway);
-				expect(awayStore.listRoutineOccurrences({ routineId: awayRoutineId }), "a refusal claims nothing").toEqual(
-					[],
-				);
-				expect(awayStore.getRoutine(awayRoutineId)?.nextRunAt, "the refused slot stays due").toBe(awayAt);
-				expect(spendRefusals(), "the refusal is reported once").toHaveLength(1);
-
-				// Room again: the same due slot runs away.
-				awaySettings = { ...awaySettings, maxUsdPerDay: 1 };
-				world.provider.enqueue("worker-a", workerReply("away-routine", awayPrompt));
-				const ranAway = createBarrier();
-				const stopObservingRun = awayStore.subscribe(() => {
-					if (
-						awayStore
-							.listRoutineOccurrences({ routineId: awayRoutineId })
-							.some((occurrence) => occurrence.phase === "terminal")
-					)
-						ranAway.release();
-				});
-				try {
-					supervisor.wake();
-					await withDeadline(world.trace, "the due routine runs away", ranAway.promise);
-				} finally {
-					stopObservingRun();
-				}
+				// The parent's session is closed; the daemon's next renewal wakes its supervisor on the due slot.
+				world.timers.advance("routines", 60_000);
+				await withDeadline(world.trace, "the spend gate refuses the due run away", refused.promise);
 			} finally {
-				await supervisor.close();
+				stopObservingRefusal();
 			}
+			expect(workerRequests(), "a refused run makes no worker request").toBe(workerRequestsBeforeAway);
+			expect(awayStore.listRoutineOccurrences({ routineId: awayRoutineId }), "a refusal claims nothing").toEqual([]);
+			expect(awayStore.getRoutine(awayRoutineId)?.nextRunAt, "the refused slot stays due").toBe(awayAt);
+			const refusedStatus = daemonStatus();
+			expect(refusedStatus.running, "the daemon runs on with every session closed").toBe(true);
+			expect(refusedStatus.awayRefusals, "the daemon status lists the refusal").toContainEqual(
+				expect.objectContaining({ routineId: awayRoutineId, reason: ROUTINE_AWAY_SPEND_REFUSAL }),
+			);
+			expect(spendReports(refusedStatus), "the refusal is reported once").toHaveLength(1);
+			expect(await firstDaemon.stop(), "a signalled daemon exits cleanly once its stop is joined").toBe(0);
+			const stoppedStatus = daemonStatus();
+			expect(stoppedStatus.running).toBe(false);
+			expect(stoppedStatus.lastEnd?.reason, "its end is recorded").toBe("signal");
+			expect(spendReports(stoppedStatus), "its reports outlive it").toHaveLength(1);
+
+			// Room again, and the daemon comes back by itself: another session's start revives it while a routine is
+			// enabled, and that session closing leaves it running the due slot away.
+			seedAwaySettings(1);
+			world.provider.enqueue("worker-a", workerReply("away-routine", awayPrompt));
+			const ranAway = createBarrier();
+			const stopObservingRun = awayStore.subscribe(() => {
+				if (
+					awayStore
+						.listRoutineOccurrences({ routineId: awayRoutineId })
+						.some((occurrence) => occurrence.phase === "terminal")
+				)
+					ranAway.release();
+			});
+			try {
+				const launchesBeforeStart = daemonLaunches();
+				const startedDaemon = world.processes.runNextBotDaemon();
+				const other = await world.createRootSession("root", {
+					agentDir,
+					sessionManager: world.createSessionManager(agentDir),
+					settings,
+				});
+				expect(daemonLaunches() - launchesBeforeStart, "the session start launched exactly one daemon").toBe(1);
+				expect(await world.disposeSessionInBody(other.session)).toBeUndefined();
+				const revivedDaemon = await startedDaemon;
+				await withDeadline(world.trace, "the revived daemon runs the due routine away", ranAway.promise);
+				expect(await revivedDaemon.stop()).toBe(0);
+			} finally {
+				stopObservingRun();
+			}
+			expect(spendReports(daemonStatus()), "the revived daemon reports no refusal").toEqual([]);
+			expect(storeDiagnostics, "the observing store read every write").toEqual([]);
 			const ranOccurrences = awayStore.listRoutineOccurrences({ routineId: awayRoutineId });
 			expect(ranOccurrences).toHaveLength(1);
 			expect(ranOccurrences[0]?.executor).toBe("away");
@@ -857,7 +877,6 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				"the admitted run cleared the refusal",
 			).toBeUndefined();
 			expect(workerRequests(), "the run away made exactly one worker request").toBe(workerRequestsBeforeAway + 1);
-			expect(spendRefusals(), "no refusal is reported again").toHaveLength(1);
 			expect(world.io.peekFile(file), "nothing wrote the parent transcript while it was closed").toBe(fileWhileAway);
 			const awayRunAttempt = ranOccurrences[0]!.executionRef!;
 

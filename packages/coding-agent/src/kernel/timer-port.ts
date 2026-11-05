@@ -15,8 +15,9 @@ export interface TimerPort {
 export interface TimerOptions {
 	/**
 	 * The pending alarm holds the process open. Only a wait the process's own result is behind asks for it (a retry
-	 * backoff, a provider admission pause): a one-shot run must not exit in the middle of it. Every other alarm (a
-	 * watchdog, a heartbeat, a recovery wake) never keeps the process alive.
+	 * backoff, a provider admission pause, the detached bot daemon's lease renewal, which is that process's whole
+	 * life): a one-shot run must not exit in the middle of it. Every other alarm (a watchdog, a heartbeat, a recovery
+	 * wake) never keeps the process alive.
 	 */
 	readonly keepAlive?: boolean;
 }
@@ -87,17 +88,26 @@ export interface RepeatingAlarm {
 /**
  * `setInterval`/`clearInterval` on a port: each tick is one `setTimeout` of `intervalMs`, re-armed before the tick runs,
  * so a tick that throws or is slow never stops or skews the cadence and a tick that calls `stop` cancels the next one.
- * The alarm never keeps the process alive.
+ * The alarm keeps the process alive only when `options.keepAlive` asks: a process whose whole work is the cadence.
  */
-export function repeatEvery(timers: TimerPort, intervalMs: number, tick: () => void): RepeatingAlarm {
+export function repeatEvery(
+	timers: TimerPort,
+	intervalMs: number,
+	tick: () => void,
+	options?: TimerOptions,
+): RepeatingAlarm {
 	let handle: unknown;
 	let stopped = false;
 	const arm = (): void => {
-		handle = timers.setTimeout(() => {
-			if (stopped) return;
-			arm();
-			tick();
-		}, intervalMs);
+		handle = timers.setTimeout(
+			() => {
+				if (stopped) return;
+				arm();
+				tick();
+			},
+			intervalMs,
+			options,
+		);
 	};
 	arm();
 	return {

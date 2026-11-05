@@ -79,6 +79,8 @@ import {
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
+	type BotDaemonEnd,
+	type BotDaemonReport,
 	claimDaemonLeaseFile,
 	collectBotInboxEntries,
 	collectTeamInboxEntries,
@@ -88,8 +90,10 @@ import {
 	type PersistentBotDaemonStatus,
 	type PersistentBotInboxEntry,
 	parseDurationIntervalMs,
+	readDaemonEnd,
 	readDaemonLeaseStatus,
 	recordDaemonLaunchPidFile,
+	recordDaemonReportsFile,
 	releaseDaemonLeaseFile,
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
@@ -2651,9 +2655,27 @@ export class PersistentBotTeamStore {
 		return daemonLeaseBelongsTo(this.filePath, token);
 	}
 
-	/** Releases the daemon's lease (only `token`'s, when given); its daemon exits on observing the release. */
-	releaseDaemonLease(token?: string, nowMs = Date.now()): DaemonLeaseRelease {
-		return releaseDaemonLeaseFile(this.filePath, token, nowMs);
+	/** Keeps `token`'s daemon reports in its lease record (bounded), for status and the next session to read. */
+	recordDaemonReports(token: string, reports: readonly BotDaemonReport[]): void {
+		recordDaemonReportsFile(this.filePath, token, reports);
+	}
+
+	/** How the last daemon ended, while no later start has claimed the lease. */
+	getDaemonEnd(): BotDaemonEnd | undefined {
+		return readDaemonEnd(this.filePath);
+	}
+
+	/**
+	 * Releases the daemon's lease (only `token`'s, when given); its daemon exits on observing the release. The record
+	 * keeps how it ended: `released` by a session unless the daemon releases its own with its reason.
+	 */
+	releaseDaemonLease(token?: string, nowMs = Date.now(), end?: Omit<BotDaemonEnd, "at">): DaemonLeaseRelease {
+		return releaseDaemonLeaseFile(this.filePath, token, nowMs, end);
+	}
+
+	/** The revision of the last routine definition saved, by any process: it moves on every save and only then. */
+	getRoutineRevision(): number {
+		return this.routineRevisionCounter;
 	}
 
 	/** Releases a first-generation `pi --bot-daemon` lease in the old lease file; that daemon exits on observing it. */
