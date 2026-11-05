@@ -6,6 +6,7 @@ import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
 import { stateFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { KNOWLEDGE_JUDGMENT_TOOL_NAME } from "../../../../src/core/memory/knowledge-judgment-runner.ts";
 import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
 import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/settings-rules.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
@@ -1432,4 +1433,41 @@ export function icmLatestResult(request: ScriptedRequest, toolName: string): { i
 		.at(-1);
 	if (result === undefined) throw new Error(`the latest batch carries no ${toolName} result`);
 	return result;
+}
+
+/** One answer of the session-model knowledge judge, in the structured submission's own shape. */
+export type KnowledgeJudgmentAnswer =
+	| { readonly value: boolean; readonly confidence: number }
+	| { readonly selected: string; readonly confidence: number };
+
+/**
+ * One session-model knowledge judgment: an isolated request that carries only the program and state as
+ * data, offers only the structured submission, and is answered by exactly one submission call.
+ */
+export function knowledgeJudgment(
+	name: string,
+	program: "knowledge.admission" | "knowledge.identity",
+	answers: Readonly<Record<string, KnowledgeJudgmentAnswer>>,
+	evidence: () => string,
+): ScriptStep {
+	return {
+		name,
+		check: (request) => {
+			expect(
+				request.context.tools?.map((tool) => tool.name),
+				"the judge offers only its submission",
+			).toEqual([KNOWLEDGE_JUDGMENT_TOOL_NAME]);
+			expect(
+				request.context.messages.map((message) => message.role),
+				"the judgment carries no conversation",
+			).toEqual(["user"]);
+			const payload = JSON.stringify(request.context.messages);
+			expect(payload, "the judgment names its program").toContain(program);
+			expect(payload, "the judgment carries the owner's original words").toContain(evidence());
+		},
+		reply: {
+			content: [{ type: "toolCall", id: name, name: KNOWLEDGE_JUDGMENT_TOOL_NAME, arguments: { ...answers } }],
+			stopReason: "toolUse",
+		},
+	};
 }

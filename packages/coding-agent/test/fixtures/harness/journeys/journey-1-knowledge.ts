@@ -1,4 +1,5 @@
 import { expect } from "vitest";
+import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
@@ -6,8 +7,15 @@ import {
 import type { KnowledgeChange } from "../../../../src/core/memory/knowledge-admission.ts";
 import { knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { HARNESS_PROVIDER, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmLatestResult, icmWaitForChatIdle } from "./shared.ts";
+import {
+	ICM_INTAKE_JUDGMENTS,
+	icmContinuousSettings,
+	icmLatestResult,
+	icmWaitForChatIdle,
+	knowledgeJudgment,
+} from "./shared.ts";
 
 const GROUNDED = {
 	grounded: { kind: "noul", probability: 0.98 },
@@ -15,8 +23,19 @@ const GROUNDED = {
 	requested: { kind: "noul", probability: 0.98 },
 } as const;
 const SAME_SLOT = { same_0: { kind: "noul", probability: 0.98 } } as const;
+/** The session model's own answers when System One is off: the same meaning, reported without calibration. */
+const JUDGED_REQUESTED = {
+	grounded: { value: true, confidence: 0.98 },
+	basis: { selected: "explicit", confidence: 0.98 },
+	requested: { value: true, confidence: 0.98 },
+} as const;
+const JUDGED_SAME_SLOT = { same_0: { value: true, confidence: 0.98 } } as const;
 
-/** Existing journey 1: real tool admission, correction, forgetting, and both directions of stale replay. */
+/**
+ * Existing journey 1: real tool admission, correction, forgetting, and both directions of stale replay. With
+ * System One off the session model judges the same changes; its self-reported match never rewrites a live fact
+ * without the fact's exact id and revision.
+ */
 export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<void> {
 	const agentDir = `${world.agentDir}-knowledge`;
 	const root = await world.createRootSession("root", {
@@ -25,11 +44,12 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 		settings: icmContinuousSettings("worker-c", { autoLearn: { enabled: false }, proactivity: { enabled: false } }),
 	});
 	const store = KnowledgeStore.open(agentDir);
-	// Six turns publish four records each. Every possible leaf and aligned parent gets at most one reply:
-	// short nodes need no call, but concurrent compactions may consume these exact targets in any order.
+	// Six turns (seven with System One off) publish four records each. Every possible leaf and aligned parent gets
+	// at most one reply: short nodes need no call, but concurrent compactions may consume these exact targets in any order.
+	const records = world.systemOne.enabled ? 24 : 28;
 	const compactionTracks: string[] = [];
-	for (let size = 1; size <= 24; size *= 2) {
-		for (let first = 0; first + size <= 24; first += size) {
+	for (let size = 1; size <= records; size *= 2) {
+		for (let first = 0; first + size <= records; first += size) {
 			const task =
 				size === 1
 					? `Compaction: compress message ${first} into`
@@ -86,17 +106,37 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			...ICM_INTAKE_JUDGMENTS,
 			...(world.systemOne.enabled ? { ...GROUNDED, ...(matching ? SAME_SLOT : {}) } : {}),
 		});
+		let proposed: KnowledgeChange | undefined;
+		const quote = () => proposed!.evidence[0]!.quote;
+		// The tool's judgments run between its call and the turn's next request, on the same session-model track.
+		const judgments: ScriptStep[] = world.systemOne.enabled
+			? []
+			: [
+					knowledgeJudgment(`${label}-admission`, "knowledge.admission", JUDGED_REQUESTED, quote),
+					...(matching
+						? [knowledgeJudgment(`${label}-identity`, "knowledge.identity", JUDGED_SAME_SLOT, quote)]
+						: []),
+				];
 		world.provider.enqueue(
 			"root",
 			{
 				name: `${label}-call`,
-				reply: () => ({
-					content: [
-						{ type: "toolCall", id: label, name: "knowledge", arguments: { action: "change", change: change() } },
-					],
-					stopReason: "toolUse",
-				}),
+				reply: () => {
+					proposed = change();
+					return {
+						content: [
+							{
+								type: "toolCall",
+								id: label,
+								name: "knowledge",
+								arguments: { action: "change", change: proposed },
+							},
+						],
+						stopReason: "toolUse",
+					};
+				},
 			},
+			...judgments,
 			{
 				name: `${label}-done`,
 				check: (request) =>
@@ -120,12 +160,8 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 				firstSource = source();
 				return remember("Uses tabs.", "I use tabs");
 			},
-			world.systemOne.enabled ? '"status":"applied"' : "semantic engine is unavailable",
+			'"status":"applied"',
 		);
-		if (!world.systemOne.enabled) {
-			expect(store.get(id), "without semantic grounding, no durable fact is invented").toBeUndefined();
-			return;
-		}
 		expect(store.get(id), "explicit owner instructions work even with automatic learning disabled").toMatchObject({
 			text: "Uses tabs.",
 			revision: 1,
@@ -134,9 +170,21 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			"knowledge-correct",
 			"Actually, remember I use spaces.",
 			() => remember("Uses spaces.", "I use spaces", source(), "whitespace"),
-			'"status":"applied"',
+			world.systemOne.enabled ? '"status":"applied"' : "exact id and revision",
 			true,
 		);
+		if (!world.systemOne.enabled) {
+			expect(store.get(id), "a self-reported match never rewrites a live fact by itself").toMatchObject({
+				text: "Uses tabs.",
+				revision: 1,
+			});
+			await turn(
+				"knowledge-correct-keyed",
+				"Correct that stored preference by its id: I use spaces.",
+				() => ({ ...remember("Uses spaces.", "I use spaces"), id, expectedRevision: 1 }),
+				'"status":"applied"',
+			);
+		}
 		expect(store.get(id), "different wording corrects the existing semantic slot").toMatchObject({
 			text: "Uses spaces.",
 			revision: 2,
@@ -196,6 +244,24 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			revision: 4,
 			text: "Uses tabs again.",
 		});
+		if (!world.systemOne.enabled) {
+			expect(
+				root.session.memoryOperator.getKnowledgeCollectionStatus(),
+				"the session model judges explicit changes while automatic collection stays off",
+			).toMatchObject({
+				state: "inactive",
+				reason: "disabled",
+				engine: { id: "structured-llm", model: `${HARNESS_PROVIDER}/root`, provenance: "synthetic_self_report" },
+			});
+			const judged = root.sessionManager.getEntries().flatMap((entry) => {
+				const report = resolveSemanticUsageEntry(entry)?.report;
+				return report?.route === "knowledge_collection" ? [report.origin?.operationId] : [];
+			});
+			expect(judged, "every session-model judgment keeps its own explicit-change receipt").toHaveLength(10);
+			for (const operationId of judged) expect(operationId).toMatch(/^knowledge-collection:explicit:/);
+			world.trace.mark("root", "knowledge.admission-replay");
+			return;
+		}
 		root.settingsManager.setProactivitySettings({
 			...root.settingsManager.getProactivitySettings(),
 			enabled: true,
