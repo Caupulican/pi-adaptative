@@ -42,7 +42,7 @@ import {
 	type ForegroundTranscriptWrites,
 	importRecordedParentWrites,
 } from "./delegation/foreground-parent-writes.ts";
-import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
+import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
 import type { ParentExecutionContext } from "./delegation/parent-execution-context.ts";
 import {
@@ -181,8 +181,7 @@ export interface BackgroundLaneControllerDeps
 		Pick<
 			ProactivityControllerDeps,
 			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
-		>,
-		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
+		> {
 	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
 	getSessionManager(): SessionManager;
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */

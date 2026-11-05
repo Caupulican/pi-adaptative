@@ -118,6 +118,7 @@ import type { WorkerDelegationRequest } from "./delegation/worker-delegation-req
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { createWorkerRequestPlanner } from "./delegation/worker-request-planner.ts";
+import { createWorkerSettlementPolicy } from "./delegation/worker-settlement-policy.ts";
 import { createWorkerSkillAccess } from "./delegation/worker-skill-access.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
@@ -322,7 +323,6 @@ import { changesPlan, reviewPlan } from "./system-one/plan-review.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import type { SemanticEvaluationRecord } from "./system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "./system-one/semantic-plane-health.ts";
-import type { toolResultEvidence } from "./system-one/unsettled-ladder.ts";
 import type { SemanticVerificationObligationView } from "./system-one/verification-obligations.ts";
 import { createSessionWorkerControl, type SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
@@ -1171,9 +1171,9 @@ export class AgentSession {
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
-			reviewNewCode: ({ toolName, args, cwd }) => this._unsettledLadder.codeDuplicates.review(toolName, args, cwd),
-			reviewWorkerReport: (input) => this._unsettledLadder.answerClaims.workerReportBlockers(input),
-			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
+			...createWorkerSettlementPolicy(this._unsettledLadder.judges, (items) =>
+				this._unsettledLadder.queueWorkerUnsettled(items),
+			),
 			isModelAllowed: (model) =>
 				this._edgeIntent.modelPolicy.allows(model) &&
 				(!this.settingsManager.getModelRouterSettings().enabled ||
@@ -5741,17 +5741,6 @@ export class AgentSession {
 		signal?: AbortSignal;
 	}): Promise<OwnerQuestionConsult | undefined> {
 		return this._unsettledLadder.consultStrongerModel(input);
-	}
-
-	/**
-	 * A worker's missing evidence remains parent-owned; the ladder separately routes owner-reserved decisions.
-	 */
-	private async _settleWorkerInconclusive(input: {
-		items: readonly string[];
-		messages: Parameters<typeof toolResultEvidence>[0];
-		signal?: AbortSignal;
-	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }> {
-		return this._unsettledLadder.settleWorkerInconclusive(input);
 	}
 
 	private _announceOwnerFollowUpsWhenPresent(): void {

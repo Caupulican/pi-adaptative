@@ -345,6 +345,11 @@ export interface ParentWritePort {
 	 * can never land is reported once and `refused`, so it cannot hold its attempt's terminal.
 	 */
 	importParentWrite?(attemptId: string, write: AttemptParentWrite): ParentWriteImport;
+	/**
+	 * Findings a worker could not settle, kept by the parent for the owner's review at its next turn boundary. A host
+	 * without the parent's owner queue records them for the parent to import; it never drops them.
+	 */
+	recordUnsettledForOwner(items: readonly string[]): string | undefined;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },

@@ -1,6 +1,7 @@
 /**
- * Post-turn answer claim verification, unsettled-item ladder escalation (System One and
- * stronger-model consults), owner follow-up recording, and goal-completion owner decisions.
+ * Post-turn answer claim verification, owner and worker unsettled-item queues, owner follow-up recording, and
+ * goal-completion owner decisions. The judgments themselves (claim checks, code-duplicate review, the System One and
+ * stronger-model ladder) are the session's `SettlementJudges`.
  */
 
 import type { AssistantMessage } from "@caupulican/pi-ai";
@@ -21,12 +22,12 @@ import { decodeWorkerReceiptPublication } from "./orchestration/worker-receipt-p
 import type { SessionImageStore } from "./session-image-store.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import {
-	AnswerClaimChecker,
+	type AnswerClaimChecker,
 	type AnswerClaimScope,
 	assistantAnswerText,
 	type ClaimReceiptEvent,
 } from "./system-one/claim-delivery.ts";
-import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
+import type { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
 	appendOwnerFollowUp,
@@ -38,15 +39,8 @@ import {
 	ownerFollowUpPath,
 	parseConsultReply,
 } from "./system-one/owner-question-routing.ts";
-import {
-	itemConsultMessage,
-	type LadderOutcome,
-	parseItemConsult,
-	RESERVED_DECISION_KINDS,
-	settleUnsettledItems,
-	toolResultEvidence,
-	UNSETTLED_ITEM_CONSULT_PROMPT,
-} from "./system-one/unsettled-ladder.ts";
+import { SettlementJudges } from "./system-one/settlement-judges.ts";
+import { RESERVED_DECISION_KINDS } from "./system-one/unsettled-ladder.ts";
 import { resolveTurnMessages } from "./turn-window.ts";
 import { turnWorkWindow, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
 
@@ -76,6 +70,8 @@ export interface SessionUnsettledLadderControllerDeps {
 
 export class SessionUnsettledLadderController {
 	private readonly deps: SessionUnsettledLadderControllerDeps;
+	/** The session's settlement judges: the same instances judge the root's answers and its workers' reports. */
+	readonly judges: SettlementJudges;
 	readonly codeDuplicates: CodeDuplicateReviewer;
 	readonly answerClaims: AnswerClaimChecker;
 	private pendingOwnerItems: string[] = [];
@@ -88,19 +84,17 @@ export class SessionUnsettledLadderController {
 
 	constructor(deps: SessionUnsettledLadderControllerDeps) {
 		this.deps = deps;
-		this.codeDuplicates = new CodeDuplicateReviewer({
-			getController: () => this.deps.getSystemOneController(),
+		this.judges = new SettlementJudges({
+			getSystemOneController: () => this.deps.getSystemOneController(),
+			resolveExpensiveModel: () => this.deps.resolveExpensiveModel(),
+			runIsolatedCompletion: (opts) => this.deps.runIsolatedCompletion(opts),
 			warn: (message) => this.deps.emitWarning(message),
-		});
-		this.answerClaims = new AnswerClaimChecker({
-			getController: () => this.deps.getSystemOneController(),
-			warn: (message) => this.deps.emitWarning(message),
-			settle: (items, messages, interpretationContext) =>
-				this.settleInconclusive({ items, messages, interpretationContext }),
 			deliverToOwner: (items) => {
 				this.deliverToOwner(items);
 			},
 		});
+		this.codeDuplicates = this.judges.codeDuplicates;
+		this.answerClaims = this.judges.answerClaims;
 	}
 
 	/**
@@ -212,27 +206,6 @@ export class SessionUnsettledLadderController {
 		};
 	}
 
-	/** One bounded completion on the router's expensive-tier model, or undefined when none is configured. */
-	async consultExpensiveModel(input: {
-		systemPrompt: string;
-		message: string;
-		laneKind: string;
-		signal?: AbortSignal;
-	}): Promise<{ text: string; ref: string } | undefined> {
-		const expensive = this.deps.resolveExpensiveModel();
-		if ("skip" in expensive) return undefined;
-		const result = await this.deps.runIsolatedCompletion({
-			systemPrompt: input.systemPrompt,
-			messages: [{ role: "user", content: input.message, timestamp: Date.now() }],
-			model: expensive.model,
-			maxTokens: 600,
-			cacheRetention: "none",
-			laneKind: input.laneKind,
-			...(input.signal ? { signal: input.signal } : {}),
-		});
-		return { text: result.text, ref: expensive.ref };
-	}
-
 	/**
 	 * A stronger model settles a handed-off owner question only on a basis the owner's request states,
 	 * and System One checks that basis before the agent may use the answer.
@@ -242,7 +215,7 @@ export class SessionUnsettledLadderController {
 		request: string;
 		signal?: AbortSignal;
 	}): Promise<OwnerQuestionConsult | undefined> {
-		const reply = await this.consultExpensiveModel({
+		const reply = await this.judges.consultExpensiveModel({
 			systemPrompt: OWNER_QUESTION_CONSULT_PROMPT,
 			message: consultMessage(input),
 			laneKind: "owner-question-consult",
@@ -251,24 +224,6 @@ export class SessionUnsettledLadderController {
 		const consult = reply ? parseConsultReply(reply.text, reply.ref) : undefined;
 		if (consult?.kind !== "answered") return consult;
 		return groundConsultAnswer(this.deps.getSystemOneController(), { consult, ...input });
-	}
-
-	/**
-	 * Missing worker evidence remains with the parent. Only owner-reserved decisions are surfaced to
-	 * the owner, classified at the turn boundary so missing evidence never delays the terminal handoff.
-	 */
-	async settleWorkerInconclusive(input: {
-		items: readonly string[];
-		messages: Parameters<typeof toolResultEvidence>[0];
-		signal?: AbortSignal;
-	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }> {
-		const outcome = await this.settleInconclusive(input);
-		const settled = outcome.settled.map(
-			(entry) => `${entry.verdict}: ${entry.item} (${entry.by}${entry.basis ? `; basis: ${entry.basis}` : ""})`,
-		);
-		const unsettled = outcome.unsettled.map((entry) => `${entry.item} (missing: ${entry.missing})`);
-		this.queueWorkerUnsettled(unsettled);
-		return { settled, unsettled };
 	}
 
 	/** Both in-process and managed worker reports retain their unknowns for parent review. */
@@ -449,34 +404,5 @@ export class SessionUnsettledLadderController {
 				at,
 			});
 		return path;
-	}
-
-	/** Climb the unsettled-item ladder for a worker's inconclusive findings over its own tool results. */
-	settleInconclusive(input: {
-		items: readonly string[];
-		messages: Parameters<typeof toolResultEvidence>[0];
-		signal?: AbortSignal;
-		interpretationContext?: string;
-	}): Promise<LadderOutcome> {
-		return settleUnsettledItems(
-			{
-				getJudge: () => this.deps.getSystemOneController(),
-				consult: async ({ item, evidence, signal, interpretationContext }) => {
-					const reply = await this.consultExpensiveModel({
-						systemPrompt: UNSETTLED_ITEM_CONSULT_PROMPT,
-						message: itemConsultMessage({ item, evidence, interpretationContext }),
-						laneKind: "unsettled-item-consult",
-						...(signal ? { signal } : {}),
-					});
-					return reply ? parseItemConsult(reply.text, reply.ref) : undefined;
-				},
-			},
-			{
-				items: input.items,
-				evidence: toolResultEvidence(input.messages),
-				...(input.interpretationContext ? { interpretationContext: input.interpretationContext } : {}),
-				...(input.signal ? { signal: input.signal } : {}),
-			},
-		);
 	}
 }
