@@ -643,7 +643,7 @@ function appendBoundedFile(filePath: string, line: string, maxLines = 80): void 
 }
 
 const ROUTINE_AWAY_SPEND_REFUSAL =
-	"The away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
+	"the away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
 
 /**
  * The routine's run-state cache for one claimed occurrence: running until its result, then that result's outcome and
@@ -972,6 +972,26 @@ export class PersistentBotTeamStore {
 		if (!routine || routine.awayRefusal?.reason === reason) return false;
 		this.routines.set(routineId, { ...routine, awayRefusal: { reason, at: nowMs } });
 		return true;
+	}
+
+	/**
+	 * Records why routines a host running away cannot run (no pinned origin, an origin off the branch, an unreadable
+	 * parent); only a routine already due is recorded, and the same reason only once.
+	 */
+	recordRoutineAwayRefusals(input: {
+		refusals: readonly { readonly routineId: string; readonly reason: string }[];
+		nowMs: number;
+	}): void {
+		this.mutate(() => {
+			let changed = false;
+			for (const { routineId, reason } of input.refusals) {
+				const routine = this.routines.get(routineId);
+				if (!routine?.enabled || routine.nextRunAt > input.nowMs) continue;
+				const bounded = reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "This routine cannot run away.";
+				if (this.recordAwayRefusal(routineId, bounded, input.nowMs)) changed = true;
+			}
+			if (changed) this.save();
+		});
 	}
 
 	private cancelUndispatchedRoutineOccurrences(routineId: string, nowMs: number): void {
@@ -1940,6 +1960,12 @@ export class PersistentBotTeamStore {
 				};
 				this.routineOccurrences.set(occurrenceId, reclaimed);
 				output.push(reclaimed);
+				// The claim admits the routine again, as a new slot's claim does.
+				const owning = this.routines.get(occurrence.routineId);
+				if (owning?.awayRefusal) {
+					const { awayRefusal: _refusal, ...admitted } = owning;
+					this.routines.set(owning.routineId, admitted);
+				}
 			}
 			let journalFull = false;
 			const unschedulable: { routineId: string; reason: string }[] = [];

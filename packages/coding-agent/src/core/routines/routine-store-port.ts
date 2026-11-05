@@ -33,6 +33,11 @@ export interface RoutineStorePort {
 		readonly retired: readonly string[];
 		readonly journalFull: boolean;
 	};
+	/** Why due routines cannot run away; recorded on each routine until a claim admits it again. */
+	recordRoutineAwayRefusals(input: {
+		refusals: readonly { readonly routineId: string; readonly reason: string }[];
+		nowMs: number;
+	}): void;
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
 		expectedRevision?: number;

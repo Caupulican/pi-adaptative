@@ -436,11 +436,26 @@ export class RoutineSchedulerController {
 	private claim(): void {
 		const nowMs = this.deps.timers.now();
 		const away = this.deps.away;
-		const eligibleRoutines = this.deps.store.listRoutines().filter((routine) => this.schedulable(routine));
+		const routines = this.deps.store.listRoutines();
+		const eligibleRoutines = routines.filter((routine) => this.schedulable(routine));
 		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
+		if (away) {
+			// A due routine this host cannot run is recorded on the routine once, never held silently.
+			const refusals = routines.flatMap((routine) => {
+				const reason = this.awayUnrunnable(routine);
+				return reason !== undefined && routine.nextRunAt <= nowMs && routine.awayRefusal?.reason !== reason
+					? [{ routineId: routine.routineId, reason }]
+					: [];
+			});
+			if (refusals.length > 0) {
+				this.deps.store.recordRoutineAwayRefusals({ refusals, nowMs });
+				for (const { routineId, reason } of refusals)
+					this.report(`away|${routineId}`, `Routine ${routineId} was not run away: ${reason}`);
+			}
+		}
 		// A run that could not run while this session was closed is reported once, before its slot runs here.
-		if (!away)
-			for (const routine of eligibleRoutines)
+		else
+			for (const routine of routines)
 				if (
 					routine.awayRefusal &&
 					routine.target.kind === "session" &&
@@ -795,10 +810,14 @@ export class RoutineSchedulerController {
 		let next = Number.POSITIVE_INFINITY;
 		const previousSlots = new Map<string, number | undefined>();
 		for (const routine of this.deps.store.listRoutines()) {
-			if (
-				!this.schedulable(routine) ||
-				(routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
-			)
+			if (!this.schedulable(routine)) {
+				// Away, a routine this host cannot run still wakes it once when due, so its refusal is recorded.
+				const reason = this.awayUnrunnable(routine);
+				if (reason !== undefined && routine.awayRefusal?.reason !== reason)
+					next = Math.min(next, routine.nextRunAt);
+				continue;
+			}
+			if (routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
 				continue;
 			// A routine's end wakes the retire step, paused or not. Once ended it has no alarm: the settlement of its last
 			// run or delivery wakes the pass that removes it.
@@ -834,6 +853,26 @@ export class RoutineSchedulerController {
 			!this.deps.away ||
 			(snapshot !== undefined && routine.target.kind === "session" && routine.schedule.kind !== "event")
 		);
+	}
+
+	/**
+	 * Away only: why an enabled clock routine of this parent cannot run here, so it is reported instead of held
+	 * silently. Event routines need the open session's sealed sources and are not this host's to report.
+	 */
+	private awayUnrunnable(routine: RoutineDefinitionView): string | undefined {
+		if (
+			!this.deps.away ||
+			!routine.enabled ||
+			routine.target.kind !== "session" ||
+			routine.target.parentSessionId !== this.deps.parentSessionId ||
+			routine.schedule.kind === "event"
+		)
+			return undefined;
+		const snapshot = routine.executionSnapshot;
+		if (!snapshot) return "it has no saved run with a pinned origin, so it runs only while its session is open.";
+		return this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)
+			? undefined
+			: "its saved origin is not on the session's current branch, or that branch is empty, so it waits for the session to open.";
 	}
 
 	private routineDueAt(
