@@ -416,6 +416,41 @@ A rejected `compaction.selfMonitor` value (a non-boolean `enabled`, a fraction o
 }
 ```
 
+### Proactivity
+
+An opt-in review that raises notes the owner did not ask for. It is off by default because each review is a model request nobody asked for.
+
+```json
+{
+  "proactivity": {
+    "enabled": true,
+    "idleDelayMs": 120000,
+    "minOwnerTurnsBetweenRuns": 3,
+    "maxRunsPerSession": 4,
+    "maxNotesPerRun": 2,
+    "maxUsd": 0.05,
+    "delivery": "note",
+    "preferences": "Raise only work I asked for that is still undone."
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `false` | Allows the idle review. `/proactivity on` and `/proactivity off` write it. |
+| `model` | session model | Model pattern for the review. |
+| `idleDelayMs` | `120000` | Foreground idle time before a review starts. A turn that begins during the delay cancels it in effect: the next idle arms a fresh review. |
+| `minOwnerTurnsBetweenRuns` | `3` | New owner-typed turns required since the last review. Peer messages, goal continuations and other internal turns do not count. |
+| `maxRunsPerSession` | `4` | Reviews per running session, whether or not they raised anything. |
+| `maxNotesPerRun` | `2` | Notes one review may raise. |
+| `maxUsd` | `0.05` | Spend bound of one review. A review that spends more is reported as a warning; it is also limited to two provider requests. |
+| `delivery` | `"note"` | `"note"`: a visible `[proactive note]` carried with the owner's next turn. `"turn"`: the note starts a turn now. |
+| `preferences` | empty | The owner's standing words about what to raise, how often and in what tone, at most 2000 characters. Every review reads them and they override the review's defaults. |
+
+**What the review can do.** The host decides whether a review may start (opt-in, autonomy mode not `off`, the per-session cap, enough new owner turns, an idle foreground) and what it may do: its one tool records a note. The model only judges whether the conversation shows a need, so the behavior does not depend on a particular model. The host then drops notes that are empty, malformed or repeats of a note already raised on the branch, and delivers at most `maxNotesPerRun`. A review that raises nothing, the usual outcome, leaves no trace in the conversation.
+
+**Owner control.** `/proactivity status` shows the settings and the gate that last kept a review from running. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. These are prompt commands, so a model turn or an unattended run cannot change them.
+
 ### Cost Guard
 
 | Setting | Type | Default | Description |

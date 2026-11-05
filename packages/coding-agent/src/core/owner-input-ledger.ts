@@ -93,6 +93,14 @@ interface InputRecord {
 	readonly onUndelivered: Array<(end: OwnerInputEnd) => void>;
 }
 
+/**
+ * Whether the owner spoke the input an id names: every source but an extension's message (a peer's, say). The id format
+ * is minted by `accept` as `<source>:<uuid>`, and only this module reads the source back.
+ */
+export function isOwnerSpokenInputId(id: string): boolean {
+	return !id.startsWith("extension:");
+}
+
 export class OwnerInputLedger {
 	/** Every input that has not reached a terminal; a held input stays until the owner takes it back. */
 	private readonly records = new Map<OwnerInputId, InputRecord>();

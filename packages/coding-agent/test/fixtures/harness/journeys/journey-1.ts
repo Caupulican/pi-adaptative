@@ -5,6 +5,7 @@ import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
 import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
+import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
 import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
@@ -104,6 +105,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1WorkerBudgetsPhase(world);
 			await runJourney1WriteReservationsPhase(world);
 			await runJourney1PiChatPhase(world);
+			await runJourney1ProactivityPhase(world);
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},

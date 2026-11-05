@@ -132,6 +132,7 @@ import * as localModelCommands from "./local-model-commands.ts";
 import { handleMemoryCommand } from "./memory-commands.ts";
 import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalignment-continuation.ts";
 import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
+import * as proactivityCommands from "./proactivity-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
@@ -1755,6 +1756,18 @@ export class InteractiveMode {
 			}
 			if (text === "/autonomy" || text.startsWith("/autonomy ")) {
 				this.handleAutonomyCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/proactivity" || text.startsWith("/proactivity ")) {
+				proactivityCommands.handleProactivityCommand(
+					{
+						session: this.session,
+						settingsManager: this.settingsManager,
+						showStatus: (message) => this.showStatus(message),
+					},
+					text,
+				);
 				this.editor.setText("");
 				return;
 			}

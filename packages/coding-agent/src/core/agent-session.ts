@@ -374,7 +374,6 @@ import {
 	isInterruptedAssistantStopReason,
 	type ModelCycleResult,
 	type PromptOptions,
-	type ResearchLaneRunOutcome,
 	type SessionStats,
 	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
@@ -1148,6 +1147,8 @@ export class AgentSession {
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
+			deliverNotes: (message, delivery) =>
+				this.sendCustomMessage(message, delivery === "turn" ? { triggerTurn: true } : { deliverAs: "nextTurn" }),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
 			createLaneMemoryBroker: (capacity) => this._memory.createLaneMemoryBroker(capacity),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
@@ -5713,15 +5714,6 @@ export class AgentSession {
 			capabilityMode: this.settingsManager.getModelCapabilitySettings().mode,
 			toolProtocol: this._resolveModelToolProtocol(model),
 		});
-	}
-
-	/** Run one bounded, read-only research pass and persist its results. */
-	async runResearchLaneOnce(request?: {
-		query?: string;
-		context?: string;
-		goalId?: string;
-	}): Promise<ResearchLaneRunOutcome> {
-		return this._backgroundLanes.runResearchLaneOnce(request);
 	}
 
 	/** Run one durable worker-agent turn. */

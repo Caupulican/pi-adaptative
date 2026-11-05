@@ -43,6 +43,8 @@ export {
  *   transaction, lane registration) whose rename failed transiently.
  * - `tool-recovery-log`: the bound of a flush of the tool recovery log, which a closing session waits on for the log
  *   worker's acknowledgement.
+ * - `proactivity`: the idle delay before a proactive review may start. The review is armed only for an idle foreground and
+ *   every gate is checked again when the alarm fires.
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  */
@@ -65,6 +67,7 @@ export type TimerOwner =
 	| "branch-summary-retry"
 	| "worktree-sync"
 	| "continuous-chat"
+	| "proactivity"
 	| "tool-recovery-log";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */

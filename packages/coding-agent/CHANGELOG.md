@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Proactivity: an opt-in idle review that tells the owner what they did not ask about. After the foreground has been idle for `proactivity.idleDelayMs` (default 2 minutes) and at least `minOwnerTurnsBetweenRuns` new owner turns have passed, one bounded review reads the recent conversation, the active goal, notes already raised and the owner's standing preferences. Its only tool records a note (`raise_note`), so a review cannot read files, run commands, message anyone or write memory, and the same path runs for every model that can call a tool. Most reviews raise nothing. The host drops repeats and malformed notes, caps the notes per review and the reviews per session, and delivers what is left as a visible `[proactive note]` with the owner's next turn (`proactivity.delivery: "turn"` wakes a turn instead). It is off by default. `/proactivity [status|on|off|review|prefs <text>|prefs clear]` is the owner's switch and the place for standing preferences; both are typed at the prompt, never writable from a model turn. The preference lines of `USER.md` now show the day they were last evidenced.
+
 ### Changed
 
 - pi-chat addresses the pi session. A session's mesh id is `session-<session id>` instead of a random id per process, and its credential is kept in `sessions/local/credentials/` (mode 0600), so a resumed or restarted session is the same peer and re-claims its id after the broker restarted. A message to a named peer that is not on the mesh is held in that peer's inbox (`inbox/`, mode 0600) for up to 24 hours instead of being lost: the result is `queued`, the peer collects it when its session joins or its inbox changes, a settled message drops its body, and sending again with the same `messageId` returns its fate. `list_peers` also lists peers seen in the last 24 hours as offline. Message bodies are now stored while a message is held, and only then.

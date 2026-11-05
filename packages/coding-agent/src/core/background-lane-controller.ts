@@ -120,6 +120,7 @@ import type {
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
+import { ProactivityController, type ProactivityControllerDeps } from "./proactivity/proactivity-controller.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -141,6 +142,7 @@ export interface BackgroundLaneControllerDeps
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
+		Pick<ProactivityControllerDeps, "deliverNotes">,
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
 	getSettingsManager(): SettingsManager;
@@ -191,6 +193,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
 	private readonly _research: ResearchLaneController;
+	private readonly _proactivity: ProactivityController;
 	private readonly _fitness: ModelFitnessController;
 	/** Lazily materialized only when managed-lane state is queried or reported. */
 	private _managedLanes: ManagedLaneController | undefined;
@@ -239,6 +242,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._research = new ResearchLaneController(
 			{ ...deps, onContinuationActivity: () => this._notifyContinuationActivity() },
 			this._laneTracker,
+			this._laneModels,
+		);
+		this._proactivity = new ProactivityController(
+			{
+				...deps,
+				onContinuationActivity: () => this._notifyContinuationActivity(),
+				timers: deps.getTimers().port("proactivity"),
+			},
 			this._laneModels,
 		);
 		this._fitness = new ModelFitnessController(deps, this._laneModels);
@@ -593,6 +604,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		let workerShutdown = Promise.resolve();
 		this._runTeardownStep("dispose goal auto-continue", () => this._goalAutoContinue.dispose());
 		this._runTeardownStep("abort research lanes", () => this._research.abort());
+		this._runTeardownStep("abort proactive review", () => this._proactivity.abort());
 		this._runTeardownStep("abort model-fitness lanes", () => this._fitness.abort());
 		for (const record of this._laneTracker.getRecords()) {
 			if (record.status !== "queued" && record.status !== "running") continue;
@@ -668,6 +680,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	clearResearchLaneTimer(): void {
 		this._research.clearTimer();
+		this._proactivity.clearTimer();
 	}
 
 	/**
@@ -675,7 +688,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * consults this so a debounce timer armed moments earlier suppresses the notification.
 	 */
 	hasPendingIdleContinuation(): boolean {
-		return this._goalAutoContinue.hasPendingContinuation() || this._research.hasPendingContinuation();
+		return (
+			this._goalAutoContinue.hasPendingContinuation() ||
+			this._research.hasPendingContinuation() ||
+			this._proactivity.hasPendingContinuation()
+		);
 	}
 
 	subscribeIdleContinuationActivity(listener: () => void): () => void {
@@ -691,6 +708,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	scheduleResearchLaneFromIdle(): void {
 		this._research.scheduleFromIdle();
+		this._proactivity.scheduleFromIdle();
+	}
+
+	/** One proactive review now, past the idle timer; every other gate still applies. */
+	runProactiveReviewOnce() {
+		return this._proactivity.runOnce();
+	}
+
+	getLastProactivitySkipReason(): string | undefined {
+		return this._proactivity.getLastSkipReason();
 	}
 
 	resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined {

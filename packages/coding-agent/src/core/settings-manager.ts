@@ -56,6 +56,13 @@ import {
 	DEFAULT_MODEL_CAPABILITY_MODE,
 	DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
 	DEFAULT_MODEL_ROUTER_SELECTION_MODE,
+	DEFAULT_PROACTIVITY_DELIVERY,
+	DEFAULT_PROACTIVITY_ENABLED,
+	DEFAULT_PROACTIVITY_IDLE_DELAY_MS,
+	DEFAULT_PROACTIVITY_MAX_NOTES,
+	DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION,
+	DEFAULT_PROACTIVITY_MAX_USD,
+	DEFAULT_PROACTIVITY_MIN_OWNER_TURNS,
 	DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS,
 	DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS,
 	DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS,
@@ -101,6 +108,12 @@ import {
 	isWorkbenchGraphView,
 	MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
 	MAX_GRAPH_FRACTION,
+	MAX_PROACTIVITY_IDLE_DELAY_MS,
+	MAX_PROACTIVITY_MAX_NOTES,
+	MAX_PROACTIVITY_MAX_RUNS_PER_SESSION,
+	MAX_PROACTIVITY_MAX_USD,
+	MAX_PROACTIVITY_MIN_OWNER_TURNS,
+	MAX_PROACTIVITY_PREFERENCES_CHARS,
 	MAX_PROVIDER_ADMISSION_LIMIT,
 	MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
 	MAX_RESEARCH_LANE_IDLE_DELAY_MS,
@@ -159,6 +172,7 @@ import type {
 	ModelRouterSelectionMode,
 	ModelRouterSettings,
 	PackageSource,
+	ProactivitySettings,
 	ProfileDefinitionInput,
 	ProfilePersistenceScope,
 	ReasoningSettings,
@@ -166,6 +180,7 @@ import type {
 	ResolvedBackgroundToolSettings,
 	ResolvedEdgeSettings,
 	ResolvedLearningPolicySettings,
+	ResolvedProactivitySettings,
 	ResolvedProcessMatrixSettings,
 	ResolvedProviderAdmissionSettings,
 	ResolvedResearchLaneSettings,
@@ -3489,6 +3504,61 @@ export class SettingsManager {
 
 		this.globalSettings.autonomy = { ...settings };
 		this.markModified("autonomy");
+		this.save();
+	}
+
+	getProactivitySettings(): ResolvedProactivitySettings {
+		const configured = this.settings.proactivity ?? {};
+		const resolved: ResolvedProactivitySettings = {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_PROACTIVITY_ENABLED,
+			idleDelayMs: sanitizeIntegerSetting(
+				configured.idleDelayMs,
+				DEFAULT_PROACTIVITY_IDLE_DELAY_MS,
+				0,
+				MAX_PROACTIVITY_IDLE_DELAY_MS,
+			),
+			minOwnerTurnsBetweenRuns: sanitizeIntegerSetting(
+				configured.minOwnerTurnsBetweenRuns,
+				DEFAULT_PROACTIVITY_MIN_OWNER_TURNS,
+				1,
+				MAX_PROACTIVITY_MIN_OWNER_TURNS,
+			),
+			maxRunsPerSession: sanitizeIntegerSetting(
+				configured.maxRunsPerSession,
+				DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION,
+				0,
+				MAX_PROACTIVITY_MAX_RUNS_PER_SESSION,
+			),
+			maxUsd: sanitizeNumberSetting(configured.maxUsd, DEFAULT_PROACTIVITY_MAX_USD, 0, MAX_PROACTIVITY_MAX_USD),
+			maxNotesPerRun: sanitizeIntegerSetting(
+				configured.maxNotesPerRun,
+				DEFAULT_PROACTIVITY_MAX_NOTES,
+				1,
+				MAX_PROACTIVITY_MAX_NOTES,
+			),
+			delivery: configured.delivery === "turn" ? "turn" : DEFAULT_PROACTIVITY_DELIVERY,
+			preferences:
+				typeof configured.preferences === "string"
+					? configured.preferences.trim().slice(0, MAX_PROACTIVITY_PREFERENCES_CHARS)
+					: "",
+		};
+		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
+			resolved.model = configured.model;
+		}
+		return resolved;
+	}
+
+	setProactivitySettings(settings: ProactivitySettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.proactivity = { ...settings };
+			this.markProjectModified("proactivity");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.proactivity = { ...settings };
+		this.markModified("proactivity");
 		this.save();
 	}
 

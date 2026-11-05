@@ -278,6 +278,21 @@ export interface ModelRouterSettings {
 	hmoeWeights?: HmoeWeights;
 }
 
+export interface ProactivitySettings {
+	enabled?: boolean; // default: false — unsolicited review runs spend tokens, so they are opt-in
+	model?: string; // model pattern for the review; unset inherits the session model
+	idleDelayMs?: number; // default: 120000 — foreground idle time before a review may start
+	minOwnerTurnsBetweenRuns?: number; // default: 3 — new owner turns required since the last review
+	maxRunsPerSession?: number; // default: 4 reviews per session
+	maxUsd?: number; // default: 0.05 per review; the review is bounded by tokens and one tool turn
+	maxNotesPerRun?: number; // default: 2 notes a review may raise
+	delivery?: "note" | "turn"; // default: "note" — a visible note carried with the next turn; "turn" wakes the agent now
+	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)
+}
+
+export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model">> &
+	Pick<ProactivitySettings, "model">;
+
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
@@ -703,6 +718,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
+	proactivity?: ProactivitySettings; // Opt-in idle review that raises notes the owner would want to hear
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default

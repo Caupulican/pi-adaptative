@@ -236,6 +236,33 @@ export const MAX_RESEARCH_LANE_IDLE_DELAY_MS = 300_000;
 
 export const MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 100;
 
+export const DEFAULT_PROACTIVITY_ENABLED = false;
+
+export const DEFAULT_PROACTIVITY_IDLE_DELAY_MS = 120_000;
+
+export const DEFAULT_PROACTIVITY_MIN_OWNER_TURNS = 3;
+
+export const DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION = 4;
+
+export const DEFAULT_PROACTIVITY_MAX_USD = 0.05;
+
+export const DEFAULT_PROACTIVITY_MAX_NOTES = 2;
+
+export const DEFAULT_PROACTIVITY_DELIVERY: "note" | "turn" = "note";
+
+export const MAX_PROACTIVITY_IDLE_DELAY_MS = 3_600_000;
+
+export const MAX_PROACTIVITY_MIN_OWNER_TURNS = 100;
+
+export const MAX_PROACTIVITY_MAX_RUNS_PER_SESSION = 50;
+
+export const MAX_PROACTIVITY_MAX_USD = 1;
+
+export const MAX_PROACTIVITY_MAX_NOTES = 5;
+
+/** The owner's standing preferences travel in every review prompt, so they are bounded. */
+export const MAX_PROACTIVITY_PREFERENCES_CHARS = 2_000;
+
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;

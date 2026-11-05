@@ -158,7 +158,7 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 	}
 	if (action === "research") {
 		host.showStatus("Research lane: running…");
-		void host.session
+		void host.session.backgroundLanes
 			.runResearchLaneOnce()
 			.then((outcome) => {
 				if (!outcome.started) {
