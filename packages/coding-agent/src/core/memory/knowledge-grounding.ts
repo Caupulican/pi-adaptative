@@ -262,9 +262,8 @@ export class KnowledgeGrounding {
 				},
 			);
 		} catch (error) {
-			// The request ended without a verdict: its cells are released for a later attempt once its charge is measured;
-			// while the charge is unknown they keep refusing replay.
-			if (begun) for (const key of keys) this.deps.store.work.settle(key);
+			// A received, measured failure releases its cells for a later attempt; an aborted request is never replayed.
+			if (begun && !signal?.aborted) for (const key of keys) this.deps.store.work.settle(key);
 			throw error;
 		}
 		if (!begun) throw new Error("Semantic engine omitted request admission checkpoint");

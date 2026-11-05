@@ -635,9 +635,9 @@ export class KnowledgeCollector {
 							throw error;
 						} finally {
 							unsubscribe();
-							// An extraction that ended without a retained submission (failure, abort, owner typing) releases its
-							// cell once its charge is measured; a request whose charge is unknown keeps refusing replay.
-							if (begun) this.deps.store.work.settle(workId);
+							// An extraction that ended in a received, measured failure releases its cell. An aborted one (owner
+							// typing, deadline, shutdown) may have produced a result nobody received, so it is never replayed.
+							if (begun && !signal.aborted) this.deps.store.work.settle(workId);
 						}
 					}
 					assertCurrent();
@@ -702,8 +702,9 @@ export class KnowledgeCollector {
 				throw error;
 			}
 			assertCurrent();
-			// A paid attempt whose charge is unknown is not replayed; the source waits on the spending evidence.
-			if (error instanceof KnowledgeWorkUnresolved) hold("accounting:unresolved");
+			// A paid attempt with an unknown outcome is never replayed: its work is keyed by model and engine, so only a
+			// configuration change can give the source new work.
+			if (error instanceof KnowledgeWorkUnresolved) hold("configuration:unresolved_work");
 			else if (isRequestSpendRefusal(error)) hold("configuration:spending");
 			else if (error instanceof KnowledgeExtractionRefusal) hold(`configuration:${error.code}`);
 			// A failed request may be transient: it is tried again after a delay, within the retry bound.
