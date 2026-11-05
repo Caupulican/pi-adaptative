@@ -749,6 +749,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				if (!control.reconcileHostEventDelivery) throw new Error("Host event reconciliation is unavailable.");
 				control.reconcileHostEventDelivery(delivery);
 			},
+			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 			warn: (message) => this._safeWarn(message),
 		});
 	}

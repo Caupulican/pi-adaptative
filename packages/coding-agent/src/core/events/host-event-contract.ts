@@ -238,11 +238,22 @@ export interface HostEventReplayHorizon {
 	readonly throughSequence: number;
 }
 
+/**
+ * Why a consumer's replay entitlement ended: parked past its retention, removed to make room for live custody, or
+ * absent from the source for a cause it did not record (a session checkpoint older than its own custody).
+ */
+export const HOST_EVENT_REPLAY_GAP_REASONS = ["consumer_inactive", "consumer_expired", "consumer_evicted"] as const;
+export type HostEventReplayGapReason = (typeof HOST_EVENT_REPLAY_GAP_REASONS)[number];
+
 /** Source-attested unavailable history after this consumer released its replay entitlement. */
 export interface HostEventReplayGap extends HostEventCatchUp {
 	readonly afterSequence: number;
 	readonly throughSequence: number;
-	readonly reason: "consumer_inactive";
+	readonly reason: HostEventReplayGapReason;
+}
+
+export function isHostEventReplayGapReason(value: unknown): value is HostEventReplayGapReason {
+	return HOST_EVENT_REPLAY_GAP_REASONS.some((reason) => reason === value);
 }
 
 export interface HostEventReceipt {
@@ -637,7 +648,7 @@ export function parseHostEventReplayGap(value: unknown): HostEventReplayGap {
 		["sourceId", "sourceEpoch", "scopeVersion", "generation", "afterSequence", "throughSequence", "reason"],
 		"host event replay gap",
 	);
-	if (entry.reason !== "consumer_inactive") throw new HostEventError("invalid", "Unknown replay gap reason.");
+	if (!isHostEventReplayGapReason(entry.reason)) throw new HostEventError("invalid", "Unknown replay gap reason.");
 	const afterSequence = hostEventInteger(entry.afterSequence, "afterSequence", 0);
 	const throughSequence = hostEventInteger(entry.throughSequence, "throughSequence");
 	if (throughSequence <= afterSequence || throughSequence === Number.MAX_SAFE_INTEGER)

@@ -1,10 +1,17 @@
+import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import type { ParentWakeDelivery } from "../proactivity/proactivity-controller.ts";
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
-import { HostEventError, type HostEventSink, hostEventHash, hostEventString } from "./host-event-contract.ts";
+import {
+	HostEventError,
+	type HostEventReplayGap,
+	type HostEventSink,
+	hostEventHash,
+	hostEventString,
+} from "./host-event-contract.ts";
 import { hostEventParentInput } from "./host-event-delivery.ts";
 import type { HostEventSourceLifetime } from "./host-event-runtime.ts";
 import type { HostEventDelivery } from "./host-event-state.ts";
@@ -34,7 +41,26 @@ export interface HostEventSessionControllerDeps {
 	deliverTask(delivery: HostEventDelivery, signal: AbortSignal): Promise<"queued" | "dormant" | "unavailable">;
 	/** Reconcile the original transcript and settle its physical mailbox before handback. */
 	reconcileTask(delivery: HostEventDelivery): void;
+	/** The session's owner notices: history this session never observed is told once, with the owner's next turn. */
+	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	warn(message: string): void;
+}
+
+const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
+	consumer_expired: "this session's event custody expired after it stayed closed for 7 days",
+	consumer_evicted: "this session's event custody was removed while it was closed to make room for live sessions",
+	consumer_inactive: "this session's saved event position is older than the source's retained history",
+};
+
+function replayGapNotice(gap: HostEventReplayGap): HarnessNoticeObservation {
+	const count = gap.throughSequence - gap.afterSequence;
+	return {
+		scope: `gap:${gap.sourceId}`,
+		state: {
+			reason: `${gap.reason}:${gap.afterSequence}-${gap.throughSequence}`,
+			text: `Up to ${count} CI ${count === 1 ? "result was" : "results were"} never delivered to this session: ${GAP_CAUSES[gap.reason]}. Check CI directly for results from that period.`,
+		},
+	};
 }
 
 /** One serialized, level-triggered drain: a request during a pass schedules exactly one more pass. */
@@ -123,7 +149,10 @@ export class HostEventSessionController {
 				}),
 			register: async (source, signal) => this.mutate(signal, () => events.registerSource(source, lifetime)),
 			beginCatchUp: async (input, signal) => this.mutate(signal, () => events.beginCatchUp(input, lifetime)),
-			resumeGap: async (gap, signal) => this.mutate(signal, () => events.resumeGap(gap, lifetime)),
+			resumeGap: async (gap, signal) => {
+				this.mutate(signal, () => events.resumeGap(gap, lifetime));
+				this.observeSources();
+			},
 			accept: async (envelope, signal) =>
 				this.mutate(signal, () => events.accept(envelope, { consumerId, origin: deps.captureOrigin(), lifetime })),
 			seal: async (seal, signal) =>
@@ -154,7 +183,16 @@ export class HostEventSessionController {
 			deps.subscribeSettings(() => this.schedule()),
 			runtimeGenerationAdmission(deps.agentDir).subscribeAvailability(() => this.schedule()),
 		);
+		// A gap committed before a crash is told at the next open; a told gap finds its saved notice.
+		this.observeSources();
 		this.schedule();
+	}
+
+	private observeSources(): void {
+		for (const source of Object.values(this.deps.runtime.getSnapshot().eventSources)) {
+			const gap = source.lastReplayGap;
+			if (gap) this.deps.observeNotice("host-event-gap", () => replayGapNotice(gap));
+		}
 	}
 
 	private active(): boolean {

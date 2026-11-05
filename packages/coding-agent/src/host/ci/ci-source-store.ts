@@ -11,11 +11,13 @@ import {
 	type HostEventConsumerCheckpoint,
 	type HostEventEnvelope,
 	type HostEventReceipt,
+	type HostEventReplayGapReason,
 	type HostEventSourceRegistration,
 	hostEventArray,
 	hostEventInteger,
 	hostEventRecord,
 	hostEventString,
+	isHostEventReplayGapReason,
 	MAX_HOST_EVENT_SUBJECTS,
 	mergeSequenceRanges,
 	parseCiCurrentObservation,
@@ -43,6 +45,8 @@ const MAX_CONSUMERS = 64;
 const MAX_RUNS = 128;
 const MAX_RETIRED_RANGES = MAX_RUNS + 1;
 const MAX_WORKFLOWS = 32;
+/** Removed consumers remembered for their next claim's gap cause; older departures resume as `consumer_inactive`. */
+const MAX_DEPARTED = 128;
 
 /** A journal written by a newer release is never rewritten or quarantined by an older reader. */
 export class CiSourceVersionError extends Error {}
@@ -68,7 +72,14 @@ interface Consumer {
 	activation?: { id: string; owner: ProcessOwner };
 	/** Set exactly when no live host owns the consumer. Custody stays retained until expiry. */
 	parkedAt?: number;
-	pendingGap?: { afterSequence: number; throughSequence: number };
+	pendingGap?: { afterSequence: number; throughSequence: number; cause: HostEventReplayGapReason };
+}
+
+/** Why a consumer's custody was removed while no host owned it. */
+interface DepartedConsumer {
+	id: string;
+	cause: "consumer_expired" | "consumer_evicted";
+	at: number;
 }
 
 interface RetainedRun {
@@ -90,6 +101,7 @@ interface SourceState {
 	consumers: Consumer[];
 	/** Run numbers whose custody was dropped. Never-seen and pending run numbers are never retired. */
 	retiredRuns: { key: string; ranges: CiRetiredRunRange[] }[];
+	departed: DepartedConsumer[];
 }
 
 export interface CiSourceSnapshot {
@@ -160,11 +172,21 @@ function parseConsumerActivation(value: unknown): NonNullable<Consumer["activati
 }
 
 function parseConsumerGap(value: unknown): NonNullable<Consumer["pendingGap"]> {
-	const entry = hostEventRecord(value, ["afterSequence", "throughSequence"], "CI consumer pending gap");
+	const entry = hostEventRecord(value, ["afterSequence", "throughSequence", "cause"], "CI consumer pending gap");
 	const afterSequence = hostEventInteger(entry.afterSequence, "gap after sequence", 0);
 	const throughSequence = hostEventInteger(entry.throughSequence, "gap through sequence", 0);
 	if (afterSequence >= throughSequence) throw new Error("CI consumer replay gap is empty or reversed.");
-	return { afterSequence, throughSequence };
+	// A pre-release journal recorded no cause.
+	const cause = entry.cause ?? "consumer_inactive";
+	if (!isHostEventReplayGapReason(cause)) throw new Error("CI consumer replay gap cause is unknown.");
+	return { afterSequence, throughSequence, cause };
+}
+
+function parseDeparted(value: unknown): DepartedConsumer {
+	const entry = hostEventRecord(value, ["id", "cause", "at"], "departed CI consumer");
+	if (entry.cause !== "consumer_expired" && entry.cause !== "consumer_evicted")
+		throw new Error("Departed CI consumer cause is unknown.");
+	return { id: hostEventString(entry.id, "consumer id"), cause: entry.cause, at: hostEventInteger(entry.at, "at", 0) };
 }
 
 function parseConsumerStart(value: unknown): ConsumerStart {
@@ -201,6 +223,7 @@ function parseState(value: unknown): SourceState {
 			"runs",
 			"consumers",
 			"retiredRuns",
+			"departed",
 		],
 		"CI source",
 	);
@@ -244,6 +267,11 @@ function parseState(value: unknown): SourceState {
 			},
 			"retired CI workflows",
 		),
+		// A pre-release journal kept no departures.
+		departed:
+			entry.departed === undefined
+				? []
+				: hostEventArray(entry.departed, MAX_DEPARTED, parseDeparted, "departed CI consumers"),
 	};
 	if (
 		state.nextSequence !== state.retiredThrough + state.events.length + 1 ||
@@ -269,6 +297,7 @@ function parseState(value: unknown): SourceState {
 		throw new Error("CI retained current-attempt evidence is inconsistent.");
 	if (
 		new Set(state.consumers.map((consumer) => consumer.id)).size !== state.consumers.length ||
+		new Set(state.departed.map((consumer) => consumer.id)).size !== state.departed.length ||
 		new Set(state.runs.map((run) => run.key)).size !== state.runs.length ||
 		state.consumers.some(
 			(consumer) =>
@@ -306,6 +335,14 @@ function parkConsumer(consumer: Consumer, now: number): void {
 function reclaimDeadConsumers(state: SourceState, now: number): void {
 	for (const consumer of state.consumers)
 		if (consumer.activation && judgeOwner(consumer.activation.owner) === "dead") parkConsumer(consumer, now);
+}
+
+/** Removes a parked consumer and remembers why, so its next claim names the cause of its replay gap. */
+function removeConsumer(state: SourceState, consumer: Consumer, cause: DepartedConsumer["cause"], now: number): void {
+	state.consumers = state.consumers.filter((entry) => entry !== consumer);
+	state.departed = [...state.departed.filter((entry) => entry.id !== consumer.id), { id: consumer.id, cause, at: now }]
+		.sort((a, b) => a.at - b.at)
+		.slice(-MAX_DEPARTED);
 }
 
 /**
@@ -353,6 +390,7 @@ export class CiSourceStore {
 			runs: [],
 			consumers: [],
 			retiredRuns: [],
+			departed: [],
 		};
 	}
 
@@ -430,7 +468,7 @@ export class CiSourceStore {
 				while (state.consumers.length >= MAX_CONSUMERS) {
 					const evicted = oldestParkedConsumer(state);
 					if (!evicted) throw new Error("CI source consumer capacity reached; offline custody remains retained.");
-					state.consumers = state.consumers.filter((entry) => entry !== evicted);
+					removeConsumer(state, evicted, "consumer_evicted", now);
 				}
 			}
 			this.compact(state);
@@ -444,6 +482,8 @@ export class CiSourceStore {
 			// a restored session that accepted less resumes from its own position, or through an explicit gap.
 			const acknowledged = checkpoint?.acceptedThrough ?? state.retiredThrough;
 			if (acknowledged >= state.nextSequence) throw new Error("CI source checkpoint is ahead of retained history.");
+			const departure = existing ? undefined : state.departed.find((entry) => entry.id === consumerId);
+			state.departed = state.departed.filter((entry) => entry.id !== consumerId);
 			const consumer: Consumer = {
 				id: hostEventString(consumerId, "consumerId"),
 				startingSequence: checkpoint?.registration.startingSequence ?? state.retiredThrough + 1,
@@ -457,7 +497,13 @@ export class CiSourceStore {
 				replayFloor:
 					checkpoint && acknowledged >= state.retiredThrough ? checkpoint.replayFloor : state.retiredThrough + 1,
 				...(acknowledged < state.retiredThrough
-					? { pendingGap: { afterSequence: acknowledged, throughSequence: state.retiredThrough } }
+					? {
+							pendingGap: {
+								afterSequence: acknowledged,
+								throughSequence: state.retiredThrough,
+								cause: departure?.cause ?? "consumer_inactive",
+							},
+						}
 					: {}),
 				activation: { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() },
 			};
@@ -604,7 +650,7 @@ export class CiSourceStore {
 			if (!eventsFull && this.dropUnpinnedRun(state)) return;
 			const evicted = oldestParkedConsumer(state);
 			if (!evicted) throw new Error("CI source capacity reached; cursor was retained.");
-			state.consumers = state.consumers.filter((entry) => entry !== evicted);
+			removeConsumer(state, evicted, "consumer_evicted", this.now());
 		}
 	}
 
@@ -664,9 +710,9 @@ export class CiSourceStore {
 	}
 
 	private expire(state: SourceState, now: number): void {
-		state.consumers = state.consumers.filter(
-			(consumer) => consumer.parkedAt === undefined || now - consumer.parkedAt < CI_PARKED_CONSUMER_TTL_MS,
-		);
+		for (const consumer of state.consumers)
+			if (consumer.parkedAt !== undefined && now - consumer.parkedAt >= CI_PARKED_CONSUMER_TTL_MS)
+				removeConsumer(state, consumer, "consumer_expired", now);
 	}
 
 	/** Events retire once every registered consumer, live or parked, has acknowledged them. */

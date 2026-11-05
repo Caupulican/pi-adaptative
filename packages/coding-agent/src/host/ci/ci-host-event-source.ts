@@ -774,7 +774,15 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			await sink.beginCatchUp(start.catchUp, signal);
 			const gap = this.store.snapshot().consumers.find((consumer) => consumer.id === sink.consumerId)?.pendingGap;
 			if (gap) {
-				await sink.resumeGap({ ...start.catchUp, ...gap, reason: "consumer_inactive" }, signal);
+				await sink.resumeGap(
+					{
+						...start.catchUp,
+						afterSequence: gap.afterSequence,
+						throughSequence: gap.throughSequence,
+						reason: gap.cause,
+					},
+					signal,
+				);
 				this.store.confirmGap(sink.consumerId, activationId, gap);
 			}
 			this.store.confirmBegin(sink.consumerId, activationId, start);
