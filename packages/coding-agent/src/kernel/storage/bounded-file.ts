@@ -326,24 +326,30 @@ async function readFileSnapshot(
 ): Promise<Buffer> {
 	validateByteLimit(maxBytes);
 	assertBoundedReadActive(options);
-	const pathBefore = consistency === "current-path" ? await lstatAsync(filePath) : undefined;
+	const pathBefore = await lstatAsync(filePath);
 	assertBoundedReadActive(options);
-	if (pathBefore) assertRegularFile(pathBefore, label);
+	// Keep portable path admission: Windows does not implement O_NOFOLLOW.
+	// Immutable publication permits replacement by another regular file, not a symlink.
+	assertRegularFile(pathBefore, label);
 	const fileHandle = await openAsync(filePath, READ_FLAGS);
 	try {
 		assertBoundedReadActive(options);
 		const before = await fileHandle.stat();
-		if (pathBefore) assertOpenedPathVersion(pathBefore, before, label);
+		if (consistency === "current-path") assertOpenedPathVersion(pathBefore, before, label);
 		else assertRegularFile(before, label);
 		if (before.size > maxBytes) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
 		const content = await readFileHandleBounded(fileHandle, maxBytes, options);
 		if (!content) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
 		const after = await fileHandle.stat();
-		if (pathBefore) {
-			assertStableReadVersion(pathBefore, before, after, await lstatAsync(filePath), label);
-		} else if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-			// Unlinking an old publication may change ctime; it cannot change the captured bytes.
-			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
+		const pathAfter = await lstatAsync(filePath);
+		if (consistency === "current-path") {
+			assertStableReadVersion(pathBefore, before, after, pathAfter, label);
+		} else {
+			assertRegularFile(pathAfter, label);
+			if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+				// Unlinking an old publication may change ctime; it cannot change the captured bytes.
+				throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
+			}
 		}
 		assertBoundedReadActive(options);
 		if (content.byteLength !== before.size) {
