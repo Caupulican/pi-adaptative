@@ -10,6 +10,7 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney1KnowledgeManagedLeg } from "./journey-1-knowledge-managed.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, latestBatchResults } from "./shared.ts";
 
 /** Existing journey 1: exact task grants, current request projection, broker reads and revocation. */
@@ -518,4 +519,6 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}
+	// The same grant contract for an externally managed lane, whose only channel is its task text.
+	await runJourney1KnowledgeManagedLeg(world);
 }
