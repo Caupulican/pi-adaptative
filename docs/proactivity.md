@@ -147,25 +147,47 @@ of at least two words and the instruction is more than the timing words. It then
 itself (`routine-intake-timing.ts`): a positional English, Portuguese and Spanish grammar tokenizes
 the whole stated message once (accents folded, whole words only) and recognizes constructs ("every
 morning", "at 7", "every 2 hours", "Mondays and Thursdays", "the 15th of every month", "tomorrow",
-"when CI fails"), each consuming its words once. The schedule is derived from the constructs inside
-the timing excerpt alone, and every slot the model filled must equal it: a mismatch, a timing word
-of the excerpt no construct reads, a construct of the excerpt's sentence outside the excerpt (unless
-wholly inside a separate instruction excerpt), an excerpt edge inside a word, or two languages
-reading the excerpt differently drop the request, and the owner's next turn carries
-`Could not schedule what reads as a request: <reason> - "<instruction>"`. A proposal whose words are only
-shown, or not found in the message, stays silent. Wordings the host cannot compile faithfully also drop it: ordinal or relative weekdays ("first Monday", "next Friday"), the last day
-of the month, "every other", exceptions, "until" or "before" a time, "half past", "twice a day",
-months as limits ("in May"), numeric dates, seconds, months or years as intervals. "Every day at 9"
-is daily, never an interval. The host fills open parts with fixed defaults it records and announces:
-an hour without am or pm reads through a stated part of the day ("every evening at 7" is 19:00),
-otherwise on a 24-hour clock (`09:00 for "9", as no am or pm was stated`); part-of-day hours or 09:00
-when no time is stated, each of these with a 30-minute start window; weekdays for a daily request
-without days. Days 29 to 31 of the month compile as stated and the cadence names the months without
-a run (cron has no last-day rule). A request the extraction marks as lasting only
-until something happens keeps the end the owner stated, read by the host from their sentence (`endCondition`, at most
-300 characters, otherwise the request is dropped with a notice); every run's worker is told that end and reports first
-once it is reached, and the routine ends 14 days after the request at the latest (`expiresAt`), since the host cannot
-watch the stated end itself. A one-time CI request runs for the next
+"when CI fails"), each consuming its words once. The vocabulary is closed: every word of the timing
+excerpt must be read by a construct or be a listed filler ("the", "at", "please"; for a CI watch also
+its subject, outcome and lifetime words). The schedule, its lifetime, its CI outcomes and its zone
+are derived from the constructs inside the timing excerpt alone, and every slot the model filled
+must equal them. A request is dropped, and the owner's next turn carries
+`Could not schedule what reads as a request: <reason> - "<instruction>"` with a reason that names the
+words, when: the model's reading differs; a word of the excerpt is read by no construct or filler; a
+timing construct or timing word (a digit, a weekday, "every", a CI word for a watch) of the
+excerpts' sentences lies outside both excerpts, or inside the instruction when it schedules rather
+than describes the work ("summarize last week's PRs" is fine, a clock or "every Monday" there is
+not); another sentence holds only timing and fillers ("At 9pm.", "Not on Fridays."); an excerpt
+edge cuts a word; or two languages read the excerpt differently. A proposal whose words are only
+shown, or not found in the message, stays silent. Wordings the host cannot compile faithfully also
+drop it: ordinal or relative weekdays ("first Monday", "next Friday"), the last day of the month,
+"every other", exceptions and negations ("except Fridays", "not on weekends"), windows and ranges of
+time ("between 9 and 5", "9-17", "das 9 às 18"), durations and relative starts ("for two weeks",
+"in 10 minutes", "starting Monday"), business hours, meal, end-of-day and meeting words ("at lunch",
+"EOD", "after standup"), "until" or "before" a time, "half past", "twice a day", months as limits
+("in May"), numeric dates ("5/11"), zone abbreviations and offsets ("EST", "UTC+3"), zone names the
+runtime has no city for ("Pacific time", "horário de Brasília"), weekday abbreviations ("Mon-Fri"),
+digits other than ASCII, and seconds, months or years as intervals. "Every day at 9" is daily, never
+an interval. Daily wording, a recurring part of the day and "every day of the week" run on all seven
+days; named recurring days narrow daily wording to them. The host fills open hours with fixed
+defaults it records and announces: an hour without am or pm reads through a stated part of the day
+("every evening at 7" is 19:00, "às 8h da noite" 20:00), otherwise on a 24-hour clock
+(`09:00 for "9", as no am or pm was stated`); part-of-day hours or 09:00 when no time is stated, each
+of these with a 30-minute start window. A zone applies only when the timing excerpt names it (UTC,
+GMT, "Lisbon time", "hora de Lisboa", or a city; a city that is also an ordinary word counts only
+capitalized and marked as a zone), and the model must name exactly it. Days 29 to 31 of the month
+compile as stated and the cadence names the months without a run (cron has no last-day rule). The
+lifetime comes from the words: "every time", "whenever", "toda vez", "sempre que", "cada vez" and
+"siempre que" are standing; "next time", "próxima vez" and a bare "when", "quando" or "cuando" before
+a CI result watch only the next attempt; an "until" with an end after it ("until the release
+ships") makes the request conditional. A CI watch that states neither ("if CI fails") is dropped. Its
+outcomes are every outcome word of the excerpt, finishing or ending naming all of them, and a slot
+may omit them only when the words name failure alone. A watch of one named workflow is dropped: the
+host cannot check workflow names. A conditional request keeps the end the owner stated, read by the
+host from their sentence (`endCondition`, at most 300 characters, otherwise the request is dropped
+with a notice); every run's worker is told that end and reports first once it is reached, and the
+routine ends 14 days after the request at the latest (`expiresAt`), since the host cannot watch the
+stated end itself. A one-time CI request runs for the next
 matching attempt only (`stopAfterFirstRun`) with the same end; an ended routine is removed after its runs are
 delivered, and an expired one is announced once. Each proposal is judged for being an
 explicit request and for a faithful schedule, given the host-chosen parts and its next three runs (an

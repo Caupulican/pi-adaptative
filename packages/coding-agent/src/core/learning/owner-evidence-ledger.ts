@@ -240,6 +240,7 @@ const GUILLEMETS = "\u00ab\u00bb\u2039\u203a";
 /** Also apostrophes: an unpaired one is a letter, not an open quotation. */
 const APOSTROPHES = "'\u2019";
 const SHOWN_TAGS = /<(blockquote|q|pre|code)\b[^>]*>/giu;
+const SHOWN_CLOSING_TAGS = /<\/(blockquote|q|pre|code)\s*>/giu;
 /** Private use: no letter, digit, space, quotation mark or markup, so pasted text reads as no syntax at all. */
 const PASTED_UNIT = String.fromCharCode(0xe000);
 
@@ -301,14 +302,24 @@ export function ownerShownRegions(owner: OwnerWords): OwnerShownRegion[] {
 		previousBlank = blank;
 	}
 	if (fence) regions.push({ start: fence.start, end: text.length, inlineCode: false });
+	// One pass over the closing tags: each opening tag ends at the first closer of its name at or after its end.
+	const closers = new Map<string, { readonly ends: number[]; readonly starts: number[]; next: number }>();
+	for (const close of text.matchAll(SHOWN_CLOSING_TAGS)) {
+		const name = close[1]!.toLowerCase();
+		const entry = closers.get(name) ?? { ends: [], starts: [], next: 0 };
+		entry.starts.push(close.index);
+		entry.ends.push(close.index + close[0].length);
+		closers.set(name, entry);
+	}
 	for (const tag of text.matchAll(SHOWN_TAGS)) {
-		const close = new RegExp(`</${tag[1]}\\s*>`, "iu");
+		const name = tag[1]!.toLowerCase();
 		const after = tag.index + tag[0].length;
-		const found = close.exec(text.slice(after));
+		const entry = closers.get(name);
+		while (entry && entry.next < entry.starts.length && entry.starts[entry.next]! < after) entry.next++;
 		regions.push({
 			start: tag.index,
-			end: found ? after + found.index + found[0].length : text.length,
-			inlineCode: tag[1]!.toLowerCase() === "code",
+			end: entry && entry.next < entry.ends.length ? entry.ends[entry.next]! : text.length,
+			inlineCode: name === "code",
 		});
 	}
 	const blockMask = shownMask(

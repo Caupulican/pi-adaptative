@@ -1,9 +1,11 @@
 /**
  * Host-owned timing of routine intake. The extraction model only fills constrained timing slots; the host reads the
- * owner's own message with a fixed positional grammar (English, Portuguese and Spanish tables), derives the schedule
- * from the stated words alone, fills the parts the owner left open with fixed defaults it announces, and compiles the
- * executable schedule. A model slot can only refuse a compile, never change it, and anything the grammar does not read
- * refuses. The model never chooses an hour, a cron rule, an instant or a zone.
+ * owner's own message with a fixed positional grammar (English, Portuguese and Spanish tables) over a closed
+ * vocabulary, derives the schedule, its lifetime, its CI outcomes and its zone from the stated words alone, fills the
+ * parts the owner left open with fixed defaults it announces, and compiles the executable schedule. Every slot must
+ * equal what the words state. A word of the timing excerpt that no construct or filler of a language reads, a timing
+ * construct or word of the excerpts' sentences outside both excerpts, and a sentence that only modifies the timing
+ * refuse, with a reason the owner is told. The model never chooses an hour, a cron rule, an instant or a zone.
  */
 import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { type Static, Type } from "typebox";
@@ -24,6 +26,8 @@ export const INTAKE_DEFAULT_LATENESS_MS = 30 * MINUTE_MS;
 /** A one-time request must lie at least this far ahead when it is compiled, and at most a year ahead. */
 const MIN_ONCE_LEAD_MS = MINUTE_MS;
 const MAX_ONCE_LEAD_MS = 366 * DAY_MS;
+/** A refusal reason quotes at most this many characters of the owner's words at a time. */
+const MAX_QUOTED_CHARS = 60;
 
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
@@ -63,7 +67,7 @@ const timeZoneField = Type.Optional(
 	Type.String({
 		minLength: 1,
 		maxLength: MAX_CALENDAR_TIME_ZONE_CHARS,
-		description: "IANA zone, only when the owner named a zone or a city for the time.",
+		description: "IANA zone, only when the quoted timing words name a zone or a city for the time.",
 	}),
 );
 
@@ -88,7 +92,7 @@ export const intakeTimingSchema = Type.Union([
 					maxItems: 7,
 					uniqueItems: true,
 					description:
-						"Only the days the owner named. Omit it for a plain daily request; list all seven only when the owner explicitly included weekends or every single day.",
+						"Only the days the owner named. Leave it out when no day was named: daily wording and a recurring part of the day run on all seven days.",
 				}),
 			),
 			timeZone: timeZoneField,
@@ -126,10 +130,18 @@ export const intakeTimingSchema = Type.Union([
 					minItems: 1,
 					maxItems: CI_TERMINAL_CONCLUSIONS.length,
 					uniqueItems: true,
-					description: "Only the outcomes the owner named; omitted means failed attempts.",
+					description:
+						"Every outcome the owner named; finishing or ending names all of them. Leave it out when the owner named only failure.",
 				}),
 			),
-			workflowPath: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_ROUTINE_WORKFLOW_PATH_CHARS })),
+			workflowPath: Type.Optional(
+				Type.String({
+					minLength: 1,
+					maxLength: MAX_ROUTINE_WORKFLOW_PATH_CHARS,
+					description:
+						"Leave it out: the host cannot check workflow names, so a request about one workflow is not scheduled.",
+				}),
+			),
 		},
 		{ additionalProperties: false },
 	),
@@ -152,6 +164,14 @@ export interface CompiledIntakeTiming {
 	readonly defaults: readonly string[];
 	/** For a request meant only until something happens: the end the owner stated, in their own words. */
 	readonly endCondition?: string;
+}
+
+/**
+ * Why the host did not compile a request, for the owner's notice: it names the owner's words the host could not place
+ * or schedule, each quote whitespace-collapsed, without NUL and cut to a few words.
+ */
+export interface IntakeTimingRefusal {
+	readonly refused: string;
 }
 
 /** Original offsets of a grounded excerpt, end exclusive. */
@@ -177,68 +197,45 @@ export interface IntakeTimingContext {
 }
 
 /**
- * Compiles the slots when the owner's stated timing words, read by the host grammar, yield exactly the schedule the
- * slots describe; otherwise undefined, and the request is dropped before any judgment. A request meant only until
- * something happens also needs the end stated in the owner's words next to its timing.
+ * Compiles the slots when the owner's stated words, read by the host grammar, yield exactly the schedule, lifetime, CI
+ * outcomes and zone the slots describe; otherwise the refusal the owner is told, and the request is dropped before any
+ * judgment. Every language whose tables read the whole timing excerpt must compile the same schedule.
  */
 export function compileIntakeTiming(
 	timing: IntakeTiming,
 	context: IntakeTimingContext,
 	lifetime?: IntakeLifetime,
-): CompiledIntakeTiming | undefined {
-	// A one-time watch exists only for CI results; a clock request that should happen once is a `once` timing.
-	if (lifetime === "next_time_only" && timing.kind !== "event" && timing.kind !== "once") return undefined;
-	const base = compileTimingSlots(timing, context, lifetime === "next_time_only");
-	if (!base || base.schedule.kind === "once" || lifetime === undefined) return base;
-	const expiresAt = context.now + INTAKE_WATCH_LIFETIME_MS;
-	const zone = (base.schedule.kind === "calendar" ? base.schedule.timeZone : undefined) ?? context.hostTimeZone;
-	const end = `${localStamp(expiresAt, zone)} (${zone})`;
-	if (lifetime === "next_time_only")
-		return base.schedule.kind !== "event"
-			? undefined
-			: compiled({ ...base.schedule, stopAfterFirstRun: true, expiresAt }, base.cadence, [
-					...base.defaults,
-					`stops watching on ${end}, 14 days after the request, if that has not happened, as no end was stated`,
-				]);
-	// The host cannot watch an end stated in words: the routine keeps the owner's words for it and tells each run.
-	const endCondition = statedEnd(context);
-	if (endCondition === undefined) return undefined;
-	const compiledWatch = compiled({ ...base.schedule, expiresAt }, `${base.cadence}, for at most 14 days`, [
-		...base.defaults,
-		`ends on ${end} at the latest, 14 days after the request, since the host cannot watch the end the owner stated; each run is told that end and reports first once it is reached`,
-	]);
-	return compiledWatch && { ...compiledWatch, endCondition };
-}
-
-/**
- * The end the owner stated for a request meant only until something happens, in their own stated words: from the
- * first until-word of the timing excerpt's sentences to the end of that sentence's stated run, cut where a separate
- * instruction excerpt begins. Undefined when no until-word with words after it is stated there, or the end is longer
- * than a retained description.
- */
-function statedEnd(context: IntakeTimingContext): string | undefined {
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	// The CI watch follows one workflow, and no reader of the repository's workflow names reaches intake.
+	if (timing.kind === "event" && timing.workflowPath !== undefined)
+		return { refused: "the host cannot check workflow names, so it cannot watch one workflow" };
+	const when = context.owner.text.slice(context.when.start, context.when.end);
 	const tokens = tokenize(context.owner);
 	const span = excerptSpan(tokens, context.when);
-	if (!span) return undefined;
-	const sentences = new Set(tokens.slice(span.first, span.last).map((token) => token.sentence));
-	const untilWords = new Set(LANGUAGES.flatMap((language) => language.until));
-	const at = tokens.findIndex((token) => sentences.has(token.sentence) && untilWords.has(token.text));
-	if (at < 0) return undefined;
-	const first = tokens[at]!;
-	const cut = context.instruction.start > first.start ? context.instruction.start : Number.POSITIVE_INFINITY;
-	let end = first.end;
-	for (const token of tokens.slice(at + 1)) {
-		if (token.sentence !== first.sentence || token.run !== first.run || token.end > cut) break;
-		end = token.end;
+	if (!span) return { refused: placeReason(when) };
+	let agreed: CompiledIntakeTiming | undefined;
+	let closest: Unread | undefined;
+	for (const language of LANGUAGES) {
+		const result = compileIn({ language, tokens, span, timing, context, lasts: lifetime, when });
+		if ("unread" in result) {
+			if (!closest || result.unread.length < closest.unread.length) closest = result;
+			continue;
+		}
+		if ("refused" in result) return result;
+		if (agreed && JSON.stringify(agreed) !== JSON.stringify(result))
+			return { refused: `the host reads ${quoted(when)} in more than one way` };
+		agreed = result;
 	}
-	const text = context.owner.text.slice(first.start, end);
-	return end > first.end && text.length <= MAX_ROUTINE_INTAKE_TEXT_CHARS ? text : undefined;
+	if (agreed) return agreed;
+	if (closest?.refused !== undefined) return { refused: exactReason(closest.refused) };
+	return { refused: placeReason(tokenWords(context.owner.text, closest?.unread ?? [])) };
 }
 
 /**
- * Whether the owner's stated (not shown) words carry any timing the host grammar reads: a schedule construct in any
- * of its languages, or a CI subject together with an outcome word. It is the compile precondition evaluated over the
- * whole message, so a message for which it is false can never compile a request and buys no extraction.
+ * Whether the owner's stated (not shown) words carry timing the host grammar can compile: a construct of any of its
+ * languages that a schedule derives from, or a CI subject together with an outcome word. Every compile derives from
+ * such a construct or such words of the same parse, so a message for which it is false can never compile a request
+ * and buys no extraction.
  */
 export function statesIntakeTiming(owner: OwnerWords): boolean {
 	const tokens = tokenize(owner);
@@ -246,172 +243,304 @@ export function statesIntakeTiming(owner: OwnerWords): boolean {
 	return LANGUAGES.some(
 		(language) =>
 			parseTokens(tokens, language).some(
-				(construct) => construct.type !== "refusal" && construct.type !== "zone" && construct.type !== "event",
+				(construct) => SCHEDULE_TYPES.has(construct.type) || (construct.type === "part" && construct.recurring),
 			) || readsCi(language, tokens, everywhere),
 	);
 }
 
-/** One compile per language; every language that reads the whole excerpt must compile the same schedule. */
-function compileTimingSlots(
-	timing: IntakeTiming,
-	context: IntakeTimingContext,
-	nextTimeOnly: boolean,
-): CompiledIntakeTiming | undefined {
-	const tokens = tokenize(context.owner);
-	const span = excerptSpan(tokens, context.when);
-	if (!span) return undefined;
-	let agreed: { readonly result: CompiledIntakeTiming } | undefined;
-	for (const language of LANGUAGES) {
-		const result = compileIn(language, tokens, span, timing, context, nextTimeOnly);
-		if (result === "unread") continue;
-		if (result === undefined) return undefined;
-		if (agreed && JSON.stringify(agreed.result) !== JSON.stringify(result)) return undefined;
-		agreed = { result };
-	}
-	return agreed?.result;
+// ---------------------------------------------------------------------------------------------------------------
+// Reading one language
+
+interface Reading {
+	readonly language: Language;
+	readonly tokens: readonly Token[];
+	readonly span: TokenSpan;
+	readonly timing: IntakeTiming;
+	readonly context: IntakeTimingContext;
+	readonly lasts: IntakeLifetime | undefined;
+	/** The timing excerpt as the owner wrote it. */
+	readonly when: string;
+}
+
+/** How long a request runs, as its words state it. */
+type Lifetime = "standing" | "until" | "next" | "once";
+
+/** The timing excerpt's tokens a language leaves unread, with the words of a refusal construct it read there. */
+interface Unread {
+	readonly unread: readonly Token[];
+	readonly refused?: string;
+}
+
+/** An until-construct of the excerpts' sentences and the end of the words it states. */
+interface StatedUntil {
+	readonly construct: Construct;
+	readonly end: number;
 }
 
 /**
- * "unread" when a timing word of the excerpt is left over by this language's constructs. Otherwise the language's
- * compile: every construct of the excerpt's sentences must lie inside the excerpt (or wholly inside a separate
- * instruction excerpt), so the model cannot cut a meridiem, an ordinal, an exception or a clock off the timing.
+ * One language's compile, or the timing excerpt's words its tables leave unread. The excerpt reads only when each of
+ * its tokens is a construct, a filler, the stated end after an until-word, instruction words, or, for a CI watch, a CI
+ * subject, outcome, lifetime word or watch filler. Then every construct of the sentences of both excerpts must lie in
+ * the timing excerpt or, as one that only describes the work, in the instruction; every timing word there must lie in
+ * an excerpt; and another sentence made only of timing and fillers ("At 9pm.", "Except Fridays.") refuses.
  */
-function compileIn(
-	language: Language,
-	tokens: readonly Token[],
-	span: TokenSpan,
-	timing: IntakeTiming,
-	context: IntakeTimingContext,
-	nextTimeOnly: boolean,
-): CompiledIntakeTiming | undefined | "unread" {
+function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal | Unread {
+	const { language, tokens, span, timing, context } = reading;
+	const text = context.owner.text;
+	const event = timing.kind === "event";
 	const constructs = parseTokens(tokens, language);
-	const workflow = timing.kind === "event" ? workflowSpan(timing.workflowPath, tokens, span) : undefined;
-	if (workflow === null) return undefined;
-	const named = (first: number, last: number) =>
-		workflow !== undefined && first >= workflow.first && last <= workflow.last;
-	const consumed = new Uint8Array(tokens.length);
-	for (const construct of constructs) consumed.fill(1, construct.start, construct.end);
-	for (let index = span.first; index < span.last; index++)
-		if (!consumed[index] && !named(index, index + 1) && isAnchor(tokens[index]!)) return "unread";
-	if (timing.kind === "event" && !readsCi(language, tokens, span)) return "unread";
-	const sentences = new Set(tokens.slice(span.first, span.last).map((token) => token.sentence));
-	const { instruction, when } = context;
-	const apart = instruction.end <= when.start || instruction.start >= when.end;
-	const stated: Construct[] = [];
+	const instruction = excerptSpan(tokens, context.instruction);
+	const sentences = new Set<number>();
+	for (const excerpt of [span, instruction])
+		if (excerpt)
+			for (let index = excerpt.first; index < excerpt.last; index++) sentences.add(tokens[index]!.sentence);
+	const within = (index: number, excerpt: TokenSpan | undefined) =>
+		excerpt !== undefined && index >= excerpt.first && index < excerpt.last;
+	const holds = (construct: Construct, excerpt: TokenSpan | undefined) =>
+		excerpt !== undefined && construct.start >= excerpt.first && construct.end <= excerpt.last;
+	const covered = new Uint8Array(tokens.length);
+	for (const construct of constructs) covered.fill(1, construct.start, construct.end);
+	const untils: StatedUntil[] = [];
+	const tail = new Uint8Array(tokens.length);
 	for (const construct of constructs) {
-		if (!sentences.has(tokens[construct.start]!.sentence) || named(construct.start, construct.end)) continue;
-		if (timing.kind === "event") {
-			// A CI watch has no clock: any other timing in its sentence means the owner asked for something else.
-			if (construct.type !== "event") return undefined;
+		if (construct.type !== "until" || !sentences.has(tokens[construct.start]!.sentence)) continue;
+		const end = untilEnd(tokens, construct, context.instruction.start);
+		tail.fill(1, construct.end, end);
+		untils.push({ construct, end });
+	}
+
+	const vocabulary = event ? eventVocabulary(language) : language.fillers;
+	const unread: Token[] = [];
+	for (let index = span.first; index < span.last; ) {
+		if (covered[index] || tail[index] || within(index, instruction)) {
+			index++;
 			continue;
 		}
-		if (construct.start >= span.first && construct.end <= span.last) stated.push(construct);
-		else if (
-			!apart ||
-			tokens[construct.start]!.start < instruction.start ||
-			tokens[construct.end - 1]!.end > instruction.end
-		)
-			return undefined;
+		const end = freePhrase(tokens, index, span.last, vocabulary, covered);
+		if (end === undefined) unread.push(tokens[index]!);
+		index = end ?? index + 1;
 	}
-	if (timing.kind === "event") return compileEvent(timing, language, tokens, span, nextTimeOnly);
-	return compileCalendar(timing, stated, tokens, span, context);
+	if (unread.length > 0) {
+		// "twice a day": the wording this language cannot schedule names the reason better than the word it left unread.
+		const refused = constructs.find((construct) => construct.type === "refusal" && holds(construct, span));
+		return { unread, ...(refused ? { refused: constructWords(text, tokens, refused) } : {}) };
+	}
+
+	const stated: Construct[] = [];
+	let refusal: Construct | undefined;
+	let misplaced: Construct | undefined;
+	for (const construct of constructs) {
+		if (construct.type === "until" || !sentences.has(tokens[construct.start]!.sentence)) continue;
+		// The stated end is words the host keeps, never timing it reads: a construct after an until-word refuses.
+		const own = !tail[construct.start] && holds(construct, span);
+		if (own && construct.type !== "refusal") stated.push(construct);
+		else if (own || !holds(construct, instruction) || !describesWork(construct)) {
+			if (construct.type === "refusal") refusal ??= construct;
+			else misplaced ??= construct;
+		}
+	}
+	if (refusal) return { refused: exactReason(constructWords(text, tokens, refusal)) };
+	if (misplaced) return { refused: placeReason(constructWords(text, tokens, misplaced)) };
+	const watchWords = event ? eventWords(language) : undefined;
+	const stray: Token[] = [];
+	for (const [index, token] of tokens.entries())
+		if (
+			sentences.has(token.sentence) &&
+			!covered[index] &&
+			!tail[index] &&
+			!within(index, span) &&
+			!within(index, instruction) &&
+			(isAnchor(token) || watchWords?.has(token.text) === true)
+		)
+			stray.push(token);
+	if (stray.length > 0) return { refused: placeReason(tokenWords(text, stray)) };
+	const modifier = modifierSentence(language, tokens, constructs, covered, sentences, event);
+	if (modifier) return { refused: placeReason(spanText(text, tokens, modifier)) };
+	if (untils.length > 1) return { refused: exactReason(reading.when) };
+	return timing.kind === "event"
+		? compileEvent(reading, timing, stated, untils[0])
+		: compileCalendar(reading, timing, stated, untils[0]);
 }
 
-function compiled(
-	schedule: RoutineScheduleInput,
-	cadence: string,
-	defaults: readonly string[],
-): CompiledIntakeTiming | undefined {
-	// The retained request bounds every description; a cadence that would not fit (a long workflow path) is dropped.
-	if ([cadence, ...defaults].some((text) => text.length > MAX_ROUTINE_INTAKE_TEXT_CHARS)) return undefined;
-	try {
-		return { schedule: parseRoutineScheduleInput(schedule), cadence, defaults };
-	} catch {
-		return undefined;
+/** Constructs inside the instruction that describe the work rather than schedule it ("summarize last week's PRs"). */
+function describesWork(construct: Construct): boolean {
+	switch (construct.type) {
+		case "date":
+		case "todayPart":
+		case "refusal":
+			return true;
+		case "zone":
+			return !construct.marked;
+		case "part":
+		case "days":
+			return !construct.recurring;
+		default:
+			return false;
 	}
+}
+
+/**
+ * The end of the words an until-construct states: the rest of its run, cut where an instruction excerpt that begins
+ * after it starts.
+ */
+function untilEnd(tokens: readonly Token[], until: Construct, instructionStart: number): number {
+	const first = tokens[until.start]!;
+	const cut = instructionStart > first.start ? instructionStart : Number.POSITIVE_INFINITY;
+	let end = until.end;
+	while (end < tokens.length && tokens[end]!.run === first.run && tokens[end]!.end <= cut) end++;
+	return end;
+}
+
+/**
+ * Another sentence of the message holding timing and nothing but fillers besides ("At 9pm.", "Not on Fridays.", "Also
+ * when it passes."): it modifies a request whose excerpts leave it out.
+ */
+function modifierSentence(
+	language: Language,
+	tokens: readonly Token[],
+	constructs: readonly Construct[],
+	covered: Uint8Array,
+	excerpts: ReadonlySet<number>,
+	event: boolean,
+): TokenSpan | undefined {
+	const timed = new Set(constructs.map((construct) => tokens[construct.start]!.sentence));
+	if (event) for (const token of tokens) if (eventWords(language).has(token.text)) timed.add(token.sentence);
+	const vocabulary = event ? eventVocabulary(language) : language.fillers;
+	for (const sentence of timed) {
+		if (excerpts.has(sentence)) continue;
+		const first = tokens.findIndex((token) => token.sentence === sentence);
+		let last = first;
+		while (last < tokens.length && tokens[last]!.sentence === sentence) last++;
+		let index = first;
+		while (index < last) {
+			const end = covered[index] ? index + 1 : freePhrase(tokens, index, last, vocabulary, covered);
+			if (end === undefined) break;
+			index = end;
+		}
+		if (index === last) return { first, last };
+	}
+	return undefined;
 }
 
 function compileEvent(
+	reading: Reading,
 	timing: Extract<IntakeTiming, { kind: "event" }>,
-	language: Language,
-	tokens: readonly Token[],
-	span: TokenSpan,
-	nextTimeOnly: boolean,
-): CompiledIntakeTiming | undefined {
-	const conclusions: readonly CiTerminalConclusion[] = timing.conclusions ?? ["failure"];
-	const every = CI_TERMINAL_CONCLUSIONS.every((conclusion) => conclusions.includes(conclusion));
-	const carried = (outcome: CiOutcome) => language.outcomes[outcome].some((phrase) => spanHas(tokens, span, phrase));
+	stated: readonly Construct[],
+	until: StatedUntil | undefined,
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	const { language, tokens, span, when } = reading;
+	// A CI watch has no clock, day or zone: any other construct of its excerpt means the owner asked for something else.
+	if (stated.some((construct) => construct.type !== "event")) return { refused: exactReason(when) };
+	// Outcomes and lifetime words are read before an until-word; the words after it are the stated end.
+	const untilAt = until?.construct.start ?? span.last;
+	const head: TokenSpan = {
+		first: span.first,
+		last: untilAt > span.first && untilAt < span.last ? untilAt : span.last,
+	};
+	if (!readsCi(language, tokens, head)) return { refused: `${quoted(when)} names no CI result the host watches` };
+	let standing = false;
+	let next = language.nextWords.some((word) => spanHas(tokens, head, word));
+	for (const construct of stated)
+		if (construct.type === "event") {
+			if (construct.lifetime === "standing") standing = true;
+			else next = true;
+		}
+	if (!standing && !next) return { refused: `${quoted(when)} does not say whether every time or only the next time` };
+	if (next && (standing || until)) return { refused: exactReason(when) };
+	const lifetime: Lifetime = until ? "until" : standing ? "standing" : "next";
+	const named = new Set<CiOutcome>();
+	for (const outcome of Object.keys(language.outcomes) as CiOutcome[])
+		if (language.outcomes[outcome].some((phrase) => spanHas(tokens, head, phrase))) named.add(outcome);
+	const conclusions = CI_TERMINAL_CONCLUSIONS.filter(
+		(conclusion) => named.has("finish") || (conclusion !== "startup_failure" && named.has(conclusion)),
+	);
+	const failureOnly = conclusions.length === 1 && conclusions[0] === "failure";
 	if (
-		every
-			? !carried("finish")
-			: conclusions.some((conclusion) => !carried(conclusion === "startup_failure" ? "failure" : conclusion))
+		(timing.conclusions === undefined ? !failureOnly : !sameMembers(timing.conclusions, conclusions)) ||
+		!lifetimeMatches(lifetime, reading.lasts)
 	)
-		return undefined;
-	return compiled(
-		{
-			kind: "event",
-			source: "ci",
-			...(timing.conclusions === undefined ? {} : { conclusions: [...timing.conclusions] }),
-			...(timing.workflowPath === undefined ? {} : { workflowPath: timing.workflowPath }),
-		},
-		`${nextTimeOnly ? "once, the next time" : "every time"} a CI attempt of the checked-out revision ${every ? "finishes" : `ends in ${conclusions.join(" or ")}`}${timing.workflowPath === undefined ? "" : ` (${timing.workflowPath})`}${nextTimeOnly ? ", then it is removed" : ""}`,
+		return { refused: differsReason(when) };
+	const ending =
+		conclusions.length === CI_TERMINAL_CONCLUSIONS.length ? "finishes" : `ends in ${conclusions.join(" or ")}`;
+	const subject = `a CI attempt of the checked-out revision ${ending}`;
+	return withLifetime(
+		reading,
+		lifetime,
+		until,
+		{ kind: "event", source: "ci", ...(timing.conclusions === undefined ? {} : { conclusions: [...conclusions] }) },
+		lifetime === "next" ? `once, the next time ${subject}, then it is removed` : `every time ${subject}`,
 		[],
 	);
 }
 
 function compileCalendar(
+	reading: Reading,
 	timing: Exclude<IntakeTiming, { kind: "event" }>,
 	stated: readonly Construct[],
-	tokens: readonly Token[],
-	span: TokenSpan,
-	context: IntakeTimingContext,
-): CompiledIntakeTiming | undefined {
+	until: StatedUntil | undefined,
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	const { tokens, context, when } = reading;
+	const differs = { refused: differsReason(when) };
 	const zones = stated.filter((construct) => construct.type === "zone");
 	const derived = derive(stated.filter((construct) => construct.type !== "zone"));
-	if (!derived || derived.kind !== timing.kind) return undefined;
+	if (!derived || (derived.kind === "once" && until)) return { refused: exactReason(when) };
+	const lifetime: Lifetime = derived.kind === "once" ? "once" : until ? "until" : "standing";
+	if (derived.kind !== timing.kind || !lifetimeMatches(lifetime, reading.lasts)) return differs;
 	if (derived.kind === "interval" || timing.kind === "interval") {
-		if (derived.kind !== "interval" || timing.kind !== "interval" || zones.length > 0) return undefined;
+		if (derived.kind !== "interval" || timing.kind !== "interval") return differs;
+		if (zones.length > 0) return { refused: exactReason(when) };
 		const intervalMs = derived.every * INTERVAL_UNIT_MS[derived.unit];
-		if (timing.every * INTERVAL_UNIT_MS[timing.unit] !== intervalMs) return undefined;
-		return compiled(
+		if (timing.every * INTERVAL_UNIT_MS[timing.unit] !== intervalMs) return differs;
+		return withLifetime(
+			reading,
+			lifetime,
+			until,
 			{ kind: "interval", intervalMs },
 			derived.every === 1 ? `every ${derived.unit}` : `every ${derived.every} ${derived.unit}s`,
 			[],
 		);
 	}
-	const zone = intakeZone(timing.timeZone, zones, tokens, span, context.hostTimeZone);
+	const zone = intakeZone(timing.timeZone, zones, context.hostTimeZone, when);
+	if (typeof zone !== "string") return zone;
 	const clock = resolveClock(derived, tokens, context.owner.text);
-	if (zone === undefined || clock === undefined) return undefined;
-	if (timing.time !== undefined && !clock.readings.includes(timing.time)) return undefined;
+	if (!clock) return { refused: exactReason(when) };
 	if (
-		timing.partOfDay !== undefined &&
-		timing.partOfDay !== derived.part &&
-		!(timing.partOfDay === "noon" && derived.clock?.noon)
+		(timing.time !== undefined && !clock.readings.includes(timing.time)) ||
+		(timing.partOfDay !== undefined &&
+			timing.partOfDay !== derived.part &&
+			!(timing.partOfDay === "noon" && derived.clock?.noon))
 	)
-		return undefined;
+		return differs;
 	const at = `${pad(clock.hour)}:${pad(clock.minute)}`;
 	const window = clock.defaults.length > 0 ? { maxLatenessMs: INTAKE_DEFAULT_LATENESS_MS } : {};
 	if (derived.kind === "monthly") {
-		if (timing.kind !== "monthly" || timing.day !== derived.day) return undefined;
-		return compiled(
+		if (timing.kind !== "monthly" || timing.day !== derived.day) return differs;
+		return withLifetime(
+			reading,
+			lifetime,
+			until,
 			{ kind: "calendar", cron: `${clock.minute} ${clock.hour} ${derived.day} * *`, timeZone: zone, ...window },
 			`on day ${derived.day} of every month at ${at} (${zone})${SHORT_MONTHS[derived.day] ?? ""}`,
 			clock.defaults,
 		);
 	}
 	if (derived.kind === "daily") {
-		if (timing.kind !== "daily") return undefined;
-		const days = intakeDays(derived.days, timing.days);
-		if (!days) return undefined;
-		return compiled(
+		const days = timing.kind === "daily" ? intakeDays(derived.days, timing.days) : undefined;
+		if (!days) return differs;
+		return withLifetime(
+			reading,
+			lifetime,
+			until,
 			{ kind: "calendar", cron: `${clock.minute} ${clock.hour} * * ${days.field}`, timeZone: zone, ...window },
 			`${days.label} at ${at} (${zone})`,
-			[...clock.defaults, ...days.defaults],
+			clock.defaults,
 		);
 	}
-	if (timing.kind !== "once") return undefined;
+	if (timing.kind !== "once") return differs;
+	const none = { refused: `${quoted(when)} names no time between now and a year ahead` };
 	const date = onceDate(derived.date, localDate(context.sentAt, zone));
-	if (!date || isoDate(date) !== timing.date) return undefined;
+	if (!date) return none;
+	if (isoDate(date) !== timing.date) return differs;
 	const instant = nextCalendarSlotAfter(
 		{ cron: `${clock.minute} ${clock.hour} ${date.day} ${date.month} *`, timeZone: zone },
 		context.now,
@@ -422,7 +551,7 @@ function compileCalendar(
 		instant < context.now + MIN_ONCE_LEAD_MS ||
 		instant > context.now + MAX_ONCE_LEAD_MS
 	)
-		return undefined;
+		return none;
 	return compiled(
 		{
 			kind: "once",
@@ -431,6 +560,7 @@ function compileCalendar(
 		},
 		`once on ${timing.date} at ${at} (${zone})`,
 		clock.defaults,
+		when,
 	);
 }
 
@@ -444,14 +574,128 @@ const SHORT_MONTHS: Readonly<Record<number, string>> = {
 	31: ", with no run in February, April, June, September and November",
 };
 
+/**
+ * A request meant only until something happens gets the owner's words for that end and a 14-day bound; a one-time CI
+ * watch stops after its run or after 14 days. The host cannot watch an end stated in words: the routine keeps them and
+ * tells each run.
+ */
+function withLifetime(
+	reading: Reading,
+	lifetime: Lifetime,
+	until: StatedUntil | undefined,
+	schedule: Exclude<RoutineScheduleInput, { kind: "once" }>,
+	cadence: string,
+	defaults: readonly string[],
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	const { context, tokens, when } = reading;
+	if (lifetime === "standing" || lifetime === "once") return compiled(schedule, cadence, defaults, when);
+	const expiresAt = context.now + INTAKE_WATCH_LIFETIME_MS;
+	const zone = (schedule.kind === "calendar" ? schedule.timeZone : undefined) ?? context.hostTimeZone;
+	const end = `${localStamp(expiresAt, zone)} (${zone})`;
+	if (lifetime === "next")
+		return schedule.kind !== "event"
+			? { refused: exactReason(when) }
+			: compiled(
+					{ ...schedule, stopAfterFirstRun: true, expiresAt },
+					cadence,
+					[
+						...defaults,
+						`stops watching on ${end}, 14 days after the request, if that has not happened, as no end was stated`,
+					],
+					when,
+				);
+	if (!until || until.end === until.construct.end) return { refused: exactReason(when) };
+	const endCondition = context.owner.text.slice(tokens[until.construct.start]!.start, tokens[until.end - 1]!.end);
+	if (endCondition.length > MAX_ROUTINE_INTAKE_TEXT_CHARS) return { refused: LENGTH_REASON };
+	const watch = compiled(
+		{ ...schedule, expiresAt },
+		`${cadence}, for at most 14 days`,
+		[
+			...defaults,
+			`ends on ${end} at the latest, 14 days after the request, since the host cannot watch the end the owner stated; each run is told that end and reports first once it is reached`,
+		],
+		when,
+	);
+	return "refused" in watch ? watch : { ...watch, endCondition };
+}
+
+/** A standing request omits `lasts`; a one-time calendar request may also say next_time_only. */
+function lifetimeMatches(lifetime: Lifetime, lasts: IntakeLifetime | undefined): boolean {
+	switch (lifetime) {
+		case "standing":
+			return lasts === undefined;
+		case "until":
+			return lasts === "until_condition";
+		case "next":
+			return lasts === "next_time_only";
+		case "once":
+			return lasts !== "until_condition";
+	}
+}
+
+function compiled(
+	schedule: RoutineScheduleInput,
+	cadence: string,
+	defaults: readonly string[],
+	when: string,
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	// The retained request bounds every description.
+	if ([cadence, ...defaults].some((text) => text.length > MAX_ROUTINE_INTAKE_TEXT_CHARS))
+		return { refused: LENGTH_REASON };
+	try {
+		return { schedule: parseRoutineScheduleInput(schedule), cadence, defaults };
+	} catch {
+		return { refused: exactReason(when) };
+	}
+}
+
+function sameMembers(left: readonly string[], right: readonly string[]): boolean {
+	return new Set(left).size === right.length && left.every((item) => right.includes(item));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Refusal reasons: the owner's notice reads "Could not schedule what reads as a request: <reason> - <instruction>".
+
+const LENGTH_REASON = "its schedule cannot be described within the kept length";
+
+/** The owner's words, whitespace-collapsed, without NUL and cut to {@link MAX_QUOTED_CHARS}, in quotes. */
+function quoted(words: string): string {
+	const plain = words.replace(/\0/gu, "").replace(/\s+/gu, " ").trim();
+	return `"${plain.length <= MAX_QUOTED_CHARS ? plain : `${plain.slice(0, MAX_QUOTED_CHARS - 1).trimEnd()}…`}"`;
+}
+
+function placeReason(words: string): string {
+	return `the host cannot place ${quoted(words)} in a schedule`;
+}
+
+function exactReason(words: string): string {
+	return `the host cannot schedule ${quoted(words)} exactly`;
+}
+
+function differsReason(when: string): string {
+	return `the host reads ${quoted(when)} differently from the proposed timing`;
+}
+
+function tokenWords(text: string, tokens: readonly Token[]): string {
+	return tokens.map((token) => text.slice(token.start, token.end)).join(" ");
+}
+
+function spanText(text: string, tokens: readonly Token[], span: TokenSpan): string {
+	return text.slice(tokens[span.first]!.start, tokens[span.last - 1]!.end);
+}
+
+function constructWords(text: string, tokens: readonly Token[], construct: Construct): string {
+	return spanText(text, tokens, { first: construct.start, last: construct.end });
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Tokens
 
-type TokenKind = "word" | "number" | "clock" | "hclock" | "decimal";
+type TokenKind = "word" | "number" | "clock" | "hclock" | "decimal" | "foreign";
 
 interface Token {
 	readonly kind: TokenKind;
-	/** Folded text: accents removed and lowercase; `a.m.` and `p.m.` read as `am` and `pm`. */
+	/** Folded text: accents removed and lowercase; `a.m` and `p.m` read as `am` and `pm`. */
 	readonly text: string;
 	/** Original offsets, end exclusive. */
 	readonly start: number;
@@ -461,6 +705,10 @@ interface Token {
 	/** A construct never crosses a run: a sentence end or a shown region ends one. */
 	readonly run: number;
 	readonly sentence: number;
+	/** The original word starts with a capital letter. */
+	readonly capital: boolean;
+	/** The original word is two or more capital letters ("EST"). */
+	readonly upper: boolean;
 }
 
 /** Token indices, end exclusive. */
@@ -470,11 +718,22 @@ interface TokenSpan {
 }
 
 /**
- * `9:30` clock, `9h`/`9h30` clock (an interval after an interval marker), decimals (never part of a construct), digit
- * runs, `a.m.`/`p.m.`, and letter runs. Digits and letters split ("9am" is "9" "am").
+ * `9:30` clock, `9h`/`9h30` clock (an interval after an interval marker), decimals, ASCII digit runs, other digit runs
+ * (never read, always timing), `a.m`/`p.m` (ending at the `m`: the period after it is the meridiem's), and letter
+ * runs. Digits and letters split ("9am" is "9" "am").
  */
 const TOKEN_PATTERN =
-	/(\d{1,2}:\d{2})(?!\d)|(\d{1,2}h(?:\d{2})?)(?![\p{L}\p{N}])|(\d+(?:[.,]\d+)+)|(\d+)|([ap])\.m\b\.?|(\p{L}+)/gu;
+	/(\d{1,2}:\d{2})(?!\d)|(\d{1,2}h(?:\d{2})?)(?![\p{L}\p{N}])|(\d+(?:[.,]\d+)+)|(\d+)|(\p{Nd}+)|([ap])\.m\b|(\p{L}+)/gu;
+const TOKEN_KINDS: readonly (TokenKind | undefined)[] = [
+	undefined,
+	"clock",
+	"hclock",
+	"decimal",
+	"number",
+	"foreign",
+	"word",
+	"word",
+];
 const SENTENCE_END = /[.!?;\n]/u;
 
 /** Folds per code point (NFD, marks removed, lowercase) and keeps each folded character's original offsets. */
@@ -506,25 +765,33 @@ function tokenize(owner: OwnerWords): Token[] {
 	let sentence = 0;
 	let previousEnd = 0;
 	let previousFolded = 0;
+	let meridiem = false;
 	for (const match of folded.text.matchAll(TOKEN_PATTERN)) {
 		const at = match.index ?? 0;
 		const start = folded.starts[at]!;
 		const end = folded.ends[at + match[0].length - 1]!;
-		const gap = folded.text.slice(previousFolded, at);
+		const between = folded.text.slice(previousFolded, at);
+		// "p.m.": the period right after a dotted meridiem is its own, not a sentence end.
+		const gap = meridiem && between.startsWith(".") ? between.slice(1) : between;
 		if (tokens.length > 0) {
 			const ended = SENTENCE_END.test(gap);
 			if (ended) sentence++;
 			if (ended || shown.subarray(previousEnd, start).includes(1)) run++;
 		}
+		const kind = TOKEN_KINDS[match.findIndex((group, index) => index > 0 && group !== undefined)] ?? "word";
+		const original = text.slice(start, end);
 		tokens.push({
-			kind: match[1] ? "clock" : match[2] ? "hclock" : match[3] ? "decimal" : match[4] ? "number" : "word",
-			text: match[5] ? `${match[5]}m` : match[0],
+			kind,
+			text: match[6] ? `${match[6]}m` : match[0],
 			start,
 			end,
 			gap: gap.trim(),
 			run,
 			sentence,
+			capital: /^\p{Lu}/u.test(original),
+			upper: kind === "word" && original.length >= 2 && /^\p{Lu}+$/u.test(original),
 		});
+		meridiem = match[6] !== undefined;
 		previousEnd = end;
 		previousFolded = at + match[0].length;
 	}
@@ -532,17 +799,20 @@ function tokenize(owner: OwnerWords): Token[] {
 }
 
 function foldedWords(text: string): string[] {
-	return [...fold(text).text.matchAll(TOKEN_PATTERN)].map((match) => (match[5] ? `${match[5]}m` : match[0]));
+	return [...fold(text).text.matchAll(TOKEN_PATTERN)].map((match) => (match[6] ? `${match[6]}m` : match[0]));
 }
 
 /** The tokens wholly inside the excerpt; an excerpt edge that cuts a token ("9 hours" inside "19 hours") refuses. */
-function excerptSpan(tokens: readonly Token[], when: IntakeTextSpan): TokenSpan | undefined {
+function excerptSpan(tokens: readonly Token[], excerpt: IntakeTextSpan): TokenSpan | undefined {
 	let first = -1;
 	let last = -1;
 	for (const [index, token] of tokens.entries()) {
-		if ((token.start < when.start && token.end > when.start) || (token.start < when.end && token.end > when.end))
+		if (
+			(token.start < excerpt.start && token.end > excerpt.start) ||
+			(token.start < excerpt.end && token.end > excerpt.end)
+		)
 			return undefined;
-		if (token.start >= when.start && token.end <= when.end) {
+		if (token.start >= excerpt.start && token.end <= excerpt.end) {
 			if (first < 0) first = index;
 			last = index + 1;
 		}
@@ -557,6 +827,24 @@ function spanHas(tokens: readonly Token[], span: TokenSpan, phrase: string): boo
 	return false;
 }
 
+/** The end of the longest listed phrase at `index` whose tokens lie before `end` and in no construct. */
+function freePhrase(
+	tokens: readonly Token[],
+	index: number,
+	end: number,
+	phrases: readonly string[],
+	covered: Uint8Array,
+): number | undefined {
+	let best: number | undefined;
+	for (const phrase of phrases) {
+		const parts = phrase.split(" ");
+		if (index + parts.length > end) continue;
+		if (parts.every((part, offset) => !covered[index + offset] && tokens[index + offset]!.text === part))
+			best = Math.max(best ?? 0, index + parts.length);
+	}
+	return best;
+}
+
 /** A CI subject and an outcome word of one language, within the span. */
 function readsCi(language: Language, tokens: readonly Token[], span: TokenSpan): boolean {
 	return (
@@ -565,24 +853,39 @@ function readsCi(language: Language, tokens: readonly Token[], span: TokenSpan):
 	);
 }
 
-/** The named workflow's file name, as words of the excerpt; null when the excerpt does not carry it. */
-function workflowSpan(
-	path: string | undefined,
-	tokens: readonly Token[],
-	span: TokenSpan,
-): TokenSpan | null | undefined {
-	if (path === undefined) return undefined;
-	const words = foldedWords(
-		path
-			.split("/")
-			.at(-1)!
-			.replace(/\.[^.]*$/u, ""),
-	);
-	if (words.length === 0) return null;
-	for (let index = span.first; index + words.length <= span.last; index++)
-		if (words.every((word, offset) => tokens[index + offset]!.text === word))
-			return { first: index, last: index + words.length };
-	return null;
+const eventVocabularies = new Map<Language, readonly string[]>();
+
+/** Everything a CI watch's excerpt may hold besides constructs: fillers, subjects, outcomes and lifetime words. */
+function eventVocabulary(language: Language): readonly string[] {
+	let vocabulary = eventVocabularies.get(language);
+	if (!vocabulary) {
+		vocabulary = [
+			...language.fillers,
+			...language.eventFillers,
+			...language.ciSubjects,
+			...Object.values(language.outcomes).flat(),
+			...language.nextWords,
+			...language.ifWords,
+		];
+		eventVocabularies.set(language, vocabulary);
+	}
+	return vocabulary;
+}
+
+const eventWordSets = new Map<Language, ReadonlySet<string>>();
+
+/** Single words that carry a CI watch: its subjects, outcomes and lifetime words. */
+function eventWords(language: Language): ReadonlySet<string> {
+	let words = eventWordSets.get(language);
+	if (!words) {
+		words = new Set(
+			[...language.ciSubjects, ...Object.values(language.outcomes).flat(), ...language.nextWords].filter(
+				(phrase) => !phrase.includes(" "),
+			),
+		);
+		eventWordSets.set(language, words);
+	}
+	return words;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -601,14 +904,19 @@ interface ClockValue {
 	/** The meridiem is known: am/pm, a 24-hour form, a leading zero, or noon/midnight words. */
 	readonly exact: boolean;
 	readonly noon: boolean;
+	/** `8h`: exact on the 24-hour clock alone, yet read through a stated part of the day ("8h da noite"). */
+	readonly hForm: boolean;
 	/** First token of the stated time itself, after any marker such as "at". */
 	readonly core: number;
 }
 
 type ConstructValue =
 	| { readonly type: "refusal" }
-	| { readonly type: "zone"; readonly zone: string }
-	| { readonly type: "event" }
+	/** `marked`: named as a zone ("UTC", "Lisbon time", "hora de Lisboa"), not a bare city. */
+	| { readonly type: "zone"; readonly zone: string; readonly marked: boolean }
+	| { readonly type: "event"; readonly lifetime: "standing" | "next" }
+	/** An until-word with words after it: those words are the stated end. */
+	| { readonly type: "until" }
 	| { readonly type: "allWeek" }
 	| { readonly type: "monthDay"; readonly day: number }
 	| { readonly type: "days"; readonly days: readonly number[]; readonly recurring: boolean }
@@ -618,7 +926,7 @@ type ConstructValue =
 	| { readonly type: "monthly" }
 	| { readonly type: "interval"; readonly every: number; readonly unit: IntervalUnit }
 	| { readonly type: "todayPart"; readonly part: PartOfDay }
-	| { readonly type: "part"; readonly part: PartOfDay; readonly recurring: boolean; readonly lunch: boolean }
+	| { readonly type: "part"; readonly part: PartOfDay; readonly recurring: boolean }
 	| ClockValue
 	| { readonly type: "date"; readonly date: DateRef };
 
@@ -629,6 +937,20 @@ type Hit = readonly [end: number, value: ConstructValue];
 type ConstructReader = (reader: TokenReader, index: number) => Hit | undefined;
 
 const REFUSAL: ConstructValue = { type: "refusal" };
+
+/** Construct types that state a schedule on their own or with others; each successful compile derives from one. */
+const SCHEDULE_TYPES: ReadonlySet<ConstructValue["type"]> = new Set([
+	"interval",
+	"weekly",
+	"daily",
+	"allWeek",
+	"partCadence",
+	"monthDay",
+	"days",
+	"clock",
+	"todayPart",
+	"date",
+]);
 
 /** Reads one run of tokens with one language's tables. */
 class TokenReader {
@@ -676,6 +998,17 @@ class TokenReader {
 	skip(index: number, words: readonly string[]): number {
 		let at = index;
 		while (at < index + 2 && words.includes(this.word(at) ?? "")) at++;
+		return at;
+	}
+
+	/** Skips up to two listed phrases. */
+	skipPhrases(index: number, phrases: readonly string[]): number {
+		let at = index;
+		for (let step = 0; step < 2; step++) {
+			const end = this.phrase(at, phrases);
+			if (end === undefined) break;
+			at = end;
+		}
 		return at;
 	}
 
@@ -750,19 +1083,39 @@ function intervalOf(minutes: number): ConstructValue {
 		: { type: "interval", every: minutes, unit: "minute" };
 }
 
-/** UTC/GMT, "<city> time", or "hora de <city>": the zone must then match the model's. */
+/**
+ * UTC/GMT, "<city> time", "hora de <city>", or a bare city: the zone must then be the model's. A city that is also an
+ * ordinary word ("Christmas", "Lima") counts only capitalized and marked as a zone. A UTC offset, a zone abbreviation
+ * ("EST") and a zone name the runtime has no city for ("Pacific time", "horário de Brasília") refuse.
+ */
 function readZone(reader: TokenReader, index: number): Hit | undefined {
+	const token = reader.token(index);
 	const word = reader.word(index);
-	if (word === "utc" || word === "gmt")
-		return [index + 1, { type: "zone", zone: canonicalCalendarTimeZone(word.toUpperCase()) }];
-	const before = reader.phrase(index, reader.language.zoneBefore);
+	if (!token || word === undefined) return undefined;
+	if (word === "utc" || word === "gmt") {
+		const offset = reader.token(index + 1);
+		if (offset && offset.kind !== "word" && /^[+\-−±]$/u.test(offset.gap)) return [index + 2, REFUSAL];
+		return [index + 1, { type: "zone", zone: canonicalCalendarTimeZone(word.toUpperCase()), marked: true }];
+	}
+	if (token.upper && ZONE_ABBREVIATIONS.has(word)) return [index + 1, REFUSAL];
+	const language = reader.language;
+	const before = reader.phrase(index, language.zoneBefore);
 	if (before !== undefined) {
-		const city = readCity(reader, reader.skip(before, reader.language.connectors));
-		return city && [city[0], { type: "zone", zone: city[1] }];
+		const at = reader.skip(before, language.connectors);
+		const city = readCity(reader, at);
+		if (city && (!city.ordinary || reader.token(at)?.capital))
+			return [city.end, { type: "zone", zone: city.zone, marked: true }];
+		return reader.word(at) !== undefined && reader.token(at)?.capital ? [at + 1, REFUSAL] : undefined;
 	}
 	const city = readCity(reader, index);
-	const after = city && reader.phrase(city[0], reader.language.zoneAfter);
-	return city && after !== undefined ? [after, { type: "zone", zone: city[1] }] : undefined;
+	if (city) {
+		const after = reader.phrase(city.end, language.zoneAfter);
+		if (after !== undefined && (!city.ordinary || token.capital))
+			return [after, { type: "zone", zone: city.zone, marked: true }];
+		if (!city.ordinary) return [city.end, { type: "zone", zone: city.zone, marked: false }];
+	}
+	const after = language.zoneWords.includes(word) ? reader.phrase(index + 1, language.zoneAfter) : undefined;
+	return after === undefined ? undefined : [after, REFUSAL];
 }
 
 let cityZoneTable: ReadonlyMap<string, string> | undefined;
@@ -780,21 +1133,163 @@ function cityZones(): ReadonlyMap<string, string> {
 	return cityZoneTable;
 }
 
-function readCity(reader: TokenReader, index: number): readonly [number, string] | undefined {
+function readCity(
+	reader: TokenReader,
+	index: number,
+): { readonly end: number; readonly zone: string; readonly ordinary: boolean } | undefined {
 	for (let length = 4; length >= 1; length--) {
 		const words: string[] = [];
 		for (let offset = 0; offset < length; offset++) words.push(reader.word(index + offset) ?? "\0");
-		const zone = cityZones().get(words.join(" "));
-		if (zone !== undefined) return [index + length, zone];
+		const name = words.join(" ");
+		const zone = cityZones().get(name);
+		if (zone !== undefined) return { end: index + length, zone, ordinary: ORDINARY_CITIES.has(name) };
 	}
 	return undefined;
 }
 
-/** Wordings the host cannot compile faithfully; each refuses wherever the excerpt's sentence holds it. */
+/** Portuguese "de 2 em 2 horas": an interval when both numbers agree, else a refusal. */
+function readStepInterval(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	if (!language.step || reader.word(index) !== language.step[0]) return undefined;
+	const first = reader.number(index + 1);
+	if (!first || reader.word(first[0]) !== language.step[1]) return undefined;
+	const second = reader.number(first[0] + 1);
+	if (!second) return undefined;
+	const unit = language.units.get(reader.word(second[0]) ?? "");
+	if (unit === undefined) return [second[0], REFUSAL];
+	const every = first[1];
+	return [
+		second[0] + 1,
+		unit === null || every !== second[1] || every < 1 || every > 10_000 ? REFUSAL : { type: "interval", every, unit },
+	];
+}
+
+/** "every time", "whenever" (standing) or "the next time" (one-time) before a CI condition. */
+function readEvent(reader: TokenReader, index: number): Hit | undefined {
+	const standing = reader.phrase(index, reader.language.eventStanding);
+	const next = reader.phrase(index, reader.language.eventNext);
+	if (next !== undefined && (standing === undefined || next > standing))
+		return [next, { type: "event", lifetime: "next" }];
+	return standing === undefined ? undefined : [standing, { type: "event", lifetime: "standing" }];
+}
+
+const listedRefusals = new Map<Language, readonly string[]>();
+
+/** Listed wordings the host cannot schedule exactly: exceptions, rare cadences, working hours, meal and day events. */
+function readListedRefusal(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	let phrases = listedRefusals.get(language);
+	if (!phrases) {
+		phrases = [
+			...language.refusalWords,
+			...language.everyOther,
+			...language.businessHours,
+			...language.eventWords,
+			...language.whileWords,
+		];
+		listedRefusals.set(language, phrases);
+	}
+	const end = reader.phrase(index, phrases);
+	return end === undefined ? undefined : [end, REFUSAL];
+}
+
+/** The end of a time stated in digits or a named time at `index`, with its meridiem and hour word. */
+function timeEnd(reader: TokenReader, index: number): number | undefined {
+	const language = reader.language;
+	const kind = reader.token(index)?.kind;
+	let end =
+		reader.entry(index, language.namedClocks)?.[0] ??
+		(kind === "number" || kind === "clock" || kind === "hclock" || kind === "decimal" ? index + 1 : undefined);
+	if (end === undefined) return undefined;
+	const meridiem = reader.word(end);
+	if (meridiem === "am" || meridiem === "pm") end++;
+	return reader.phrase(end, language.hourWords) ?? end;
+}
+
+/** A window or range of times: "between 9 and 5", "from 9 to 17", "9-17", "9am to 5pm", "das 9 às 18". */
+function readWindow(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	const markers = [...language.connectors, ...language.clockMarkers, ...language.weakClockMarkers];
+	const from = reader.phrase(index, language.windowFrom);
+	if (from !== undefined) {
+		const first = timeEnd(reader, reader.skipPhrases(from, markers));
+		if (first === undefined) return undefined;
+		const to = reader.phrase(first, [...language.windowTo, ...language.windowAnd]);
+		const second = to === undefined ? undefined : timeEnd(reader, reader.skipPhrases(to, markers));
+		return [second ?? first, REFUSAL];
+	}
+	const at = reader.phrase(index, language.clockMarkers) ?? reader.phrase(index, language.weakClockMarkers) ?? index;
+	const first = timeEnd(reader, at);
+	if (first === undefined) return undefined;
+	const dashed = /^[-–—]$/u.test(reader.token(first)?.gap ?? "") ? timeEnd(reader, first) : undefined;
+	if (dashed !== undefined) return [dashed, REFUSAL];
+	const to = reader.phrase(first, language.windowTo);
+	const second = to === undefined ? undefined : timeEnd(reader, reader.skipPhrases(to, markers));
+	return second === undefined ? undefined : [second, REFUSAL];
+}
+
+/**
+ * A duration or relative start: "for 2 weeks", "during the next hour", "in 10 minutes", "daqui a 5 minutos", "en los
+ * próximos 3 días". A weak opener ("in", "nos", "en") needs a count or an upcoming-word before its unit.
+ */
+function readDuration(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	const strong = reader.phrase(index, language.durations);
+	const start = strong ?? reader.phrase(index, language.countedDurations);
+	if (start === undefined) return undefined;
+	let at = start;
+	let upcoming = false;
+	for (let step = 0; step < 4; step++) {
+		const word = reader.word(at) ?? "";
+		if (language.upcoming.includes(word)) upcoming = true;
+		else if (!language.fillers.includes(word)) break;
+		at++;
+	}
+	const count = reader.number(at);
+	const unitAt = count ? count[0] : at;
+	if (!language.units.has(reader.word(unitAt) ?? "")) return undefined;
+	return strong !== undefined || count || upcoming ? [unitAt + 1, REFUSAL] : undefined;
+}
+
+/** A stated start: "starting Monday", "a partir de amanhã", "a partir del 5". */
+function readStart(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	const start = reader.phrase(index, language.starts);
+	if (start === undefined) return undefined;
+	const at = reader.skip(start, language.connectors);
+	const timing = readConstruct(reader, at, TIMING_READERS);
+	if (timing) return [timing[0], REFUSAL];
+	const token = reader.token(at);
+	const word = reader.word(at) ?? "";
+	return token && (token.kind !== "word" || language.months.has(word) || language.ordinals.includes(word))
+		? [at + 1, REFUSAL]
+		: undefined;
+}
+
+/** A negation directly before timing, up to two fillers apart: "not on Fridays", "nunca à noite". */
+function readNegation(reader: TokenReader, index: number): Hit | undefined {
+	const language = reader.language;
+	let at = reader.phrase(index, language.negations);
+	for (let step = 0; at !== undefined && step <= 2; step++) {
+		const hit = readConstruct(reader, at, NEGATED_READERS);
+		if (hit) return [hit[0], REFUSAL];
+		at = reader.phrase(at, language.fillers);
+	}
+	return undefined;
+}
+
+/** "5/11", "5/11/2026": the day and month order is not stated. */
+function readNumericDate(reader: TokenReader, index: number): Hit | undefined {
+	if (reader.token(index)?.kind !== "number") return undefined;
+	const second = reader.token(index + 1);
+	if (second?.kind !== "number" || second.gap !== "/") return undefined;
+	const third = reader.token(index + 2);
+	return [third?.kind === "number" && third.gap === "/" ? index + 3 : index + 2, REFUSAL];
+}
+
+/** Wordings the host cannot compile faithfully; each refuses wherever the excerpts' sentences hold it. */
 function readRefusal(reader: TokenReader, index: number): Hit | undefined {
 	const language = reader.language;
-	const listed = reader.phrase(index, language.refusalWords) ?? reader.phrase(index, language.everyOther);
-	if (listed !== undefined) return [listed, REFUSAL];
 	const marker = reader.phrase(index, language.intervalMarkers);
 	const marked = marker === undefined ? undefined : reader.token(marker);
 	if (
@@ -808,6 +1303,9 @@ function readRefusal(reader: TokenReader, index: number): Hit | undefined {
 	if (language.ordinals.includes(word)) {
 		const day = readDayItem(reader, index + 1);
 		if (day) return [day === "refuse" ? index + 2 : day.end, REFUSAL];
+		// "this week", "next month": a relative period, never a schedule. "the first day" is a date.
+		const unit = reader.word(index + 1) ?? "";
+		if (language.units.has(unit) && !language.dayWords.includes(unit)) return [index + 2, REFUSAL];
 	}
 	if (language.nth.includes(word) && language.nthNouns.includes(reader.word(index + 1) ?? ""))
 		return [index + 2, REFUSAL];
@@ -818,8 +1316,10 @@ function readRefusal(reader: TokenReader, index: number): Hit | undefined {
 	if (language.until.includes(word) || language.bounds.includes(word) || language.within.includes(word)) {
 		const at = reader.skip(index + 1, language.connectors);
 		const month = language.months.has(reader.word(at) ?? "") ? at + 1 : undefined;
-		const timing = language.within.includes(word) ? undefined : readConstruct(reader, at, TIMING_READERS);
-		if (month !== undefined || timing) return [Math.max(month ?? 0, timing?.[0] ?? 0), REFUSAL];
+		const timing = language.within.includes(word)
+			? undefined
+			: (readConstruct(reader, at, TIMING_READERS)?.[0] ?? readListedRefusal(reader, at)?.[0]);
+		if (month !== undefined || timing !== undefined) return [Math.max(month ?? 0, timing ?? 0), REFUSAL];
 	}
 	const count = reader.number(index);
 	if (count && language.times.includes(reader.word(count[0]) ?? "")) return [count[0] + 1, REFUSAL];
@@ -831,22 +1331,33 @@ function readRefusal(reader: TokenReader, index: number): Hit | undefined {
 	return undefined;
 }
 
-const readEvent = phraseReader((language) => language.eventMarkers, { type: "event" });
+/** An until-word with words after it; an until-word before timing ("until Friday") is a refusal instead. */
+function readUntil(reader: TokenReader, index: number): Hit | undefined {
+	const end = reader.phrase(index, reader.language.until);
+	return end !== undefined && reader.token(end) ? [end, { type: "until" }] : undefined;
+}
+
 const readAllWeek = phraseReader((language) => language.allWeek, { type: "allWeek" });
 const readDaily = phraseReader((language) => language.daily, { type: "daily" });
 const readWeekly = phraseReader((language) => language.weekly, { type: "weekly" });
 const readMonthly = phraseReader((language) => language.monthly, { type: "monthly" });
 
-/** "every 15th", "todo dia 15", "cada día 15": a day of every month. */
+/** "every 15th", "todo dia 15", "cada día 15": a day of every month; "todo dia 9 da manhã" is an hour instead. */
 function readMonthDay(reader: TokenReader, index: number): Hit | undefined {
 	const language = reader.language;
 	const marker = reader.phrase(index, language.monthDayMarkers);
 	if (marker === undefined) return undefined;
+	const ordinal = reader.ordinalDay(marker);
+	if (ordinal) return [ordinal[0], { type: "monthDay", day: ordinal[1] }];
+	if (!language.bareMonthDay) return undefined;
+	const number = reader.number(marker);
+	if (number) {
+		if (reader.phrase(number[0], language.hourWords) !== undefined || partFollows(reader, number[0]))
+			return undefined;
+		return number[1] >= 1 && number[1] <= 31 ? [number[0], { type: "monthDay", day: number[1] }] : undefined;
+	}
 	const first = reader.phrase(marker, language.first);
-	const day =
-		reader.ordinalDay(marker) ??
-		(language.bareMonthDay ? (reader.number(marker) ?? (first === undefined ? undefined : [first, 1])) : undefined);
-	return day && day[1] >= 1 && day[1] <= 31 ? [day[0], { type: "monthDay", day: day[1] }] : undefined;
+	return first === undefined ? undefined : [first, { type: "monthDay", day: 1 }];
 }
 
 function readMarkedDays(reader: TokenReader, index: number): Hit | undefined {
@@ -974,52 +1485,99 @@ const readTodayPart: ConstructReader = (reader, index) => {
 
 function readPart(reader: TokenReader, index: number): Hit | undefined {
 	const hit = reader.entry(index, reader.language.parts);
-	if (hit) return [hit[0], { type: "part", part: hit[1][0], recurring: hit[1][1], lunch: false }];
-	const lunch = reader.phrase(index, reader.language.lunch);
-	return lunch === undefined ? undefined : [lunch, { type: "part", part: "noon", recurring: false, lunch: true }];
+	return hit && [hit[0], { type: "part", part: hit[1][0], recurring: hit[1][1] }];
+}
+
+/** A part of the day right after a number: "9 in the morning", "8 da noite", "9 de la mañana", "9 tonight". */
+function partFollows(reader: TokenReader, index: number): boolean {
+	if (readTodayPart(reader, index)) return true;
+	return reader.language.partSuffixes.some((suffix) => {
+		const at = reader.phrase(index, [suffix]);
+		return at !== undefined && readPart(reader, at) !== undefined;
+	});
+}
+
+function namedClock(reader: TokenReader, named: readonly [number, readonly [number, boolean]], core: number): Hit {
+	const minutes = reader.entry(named[0], reader.language.namedMinutes);
+	const minute = minutes?.[1] ?? 0;
+	return [
+		minutes?.[0] ?? named[0],
+		{ type: "clock", hour: named[1][0], minute, exact: true, noon: named[1][1] && minute === 0, hForm: false, core },
+	];
 }
 
 /**
- * A stated clock: a marker ("at", "às", "a las") or a meridiem is needed for a plain number; `9:30`, `9h` and the
- * noon and midnight words stand alone. Hours past 23, minutes past 59 and Spanish "menos" refuse.
+ * A stated clock: `9:30`, `9h` and the noon and midnight words ("12 noon", "meio-dia e meia") stand alone. A plain
+ * number needs a strong marker ("at", "às", "a las"), a meridiem, "o'clock" or a following part of the day; after a
+ * weak marker (Portuguese "a", Spanish "la"/"las") it also takes an hour word or minutes. A decimal ("9.30") needs a
+ * strong marker or a meridiem. Hours past 23, minutes past 59, another number before a named time and Spanish
+ * "menos" refuse.
  */
 function readClock(reader: TokenReader, index: number): Hit | undefined {
 	const language = reader.language;
-	const marked = reader.phrase(index, language.clockMarkers);
+	const strong = reader.phrase(index, language.clockMarkers);
+	const weak = strong === undefined ? reader.phrase(index, language.weakClockMarkers) : undefined;
+	const marked = strong ?? weak;
 	const core = marked ?? index;
-	const named = reader.entry(core, language.namedClocks);
-	if (named) return [named[0], { type: "clock", hour: named[1][0], minute: 0, exact: true, noon: named[1][1], core }];
 	const token = reader.token(core);
 	if (!token) return undefined;
+	const twelve = token.kind === "number" ? reader.entry(core + 1, language.namedClocks) : undefined;
+	if (twelve) return Number(token.text) === 12 ? namedClock(reader, twelve, core) : [twelve[0], REFUSAL];
+	const named = reader.entry(core, language.namedClocks);
+	if (named) return namedClock(reader, named, core);
 	let hour: number;
 	let minute = 0;
 	let end = core + 1;
 	let exact = false;
-	let needsMarker = false;
+	let hForm = false;
+	let plain = false;
+	let decimal = false;
+	let confirmed = false;
 	if (token.kind === "clock" || token.kind === "hclock") {
 		const [hours = "", minutes = ""] = token.text.split(/[:h]/u);
 		hour = Number(hours);
 		minute = minutes === "" ? 0 : Number(minutes);
 		exact = token.kind === "hclock" || hours.startsWith("0");
+		hForm = token.kind === "hclock" && !hours.startsWith("0") && hour >= 1 && hour <= 12;
+	} else if (token.kind === "decimal") {
+		const parts = /^(\d{1,2})[.,](\d{2})$/u.exec(token.text);
+		if (!parts) return undefined;
+		hour = Number(parts[1]);
+		minute = Number(parts[2]);
+		exact = parts[1]!.startsWith("0");
+		decimal = true;
 	} else {
 		const count = reader.number(core);
 		if (!count) return undefined;
 		[end, hour] = count;
-		needsMarker = true;
+		plain = true;
 		exact = token.kind === "number" && token.text.length === 2 && token.text.startsWith("0");
 		const namedMinute = reader.entry(end, language.namedMinutes);
 		const joined = language.minuteJoin.includes(reader.word(end) ?? "") ? reader.number(end + 1) : undefined;
 		if (namedMinute) [end, minute] = namedMinute;
 		else if (joined) [end, minute] = joined;
+		confirmed = namedMinute !== undefined || joined !== undefined;
 		const hours = reader.phrase(end, language.hourWords);
-		if (hours !== undefined && marked !== undefined) end = hours;
+		if (hours !== undefined && marked !== undefined) {
+			end = hours;
+			confirmed = true;
+		}
 	}
 	const suffix = reader.phrase(end, language.clockSuffixes);
 	if (suffix !== undefined) end = suffix;
 	const meridiem = reader.word(end);
 	const stated = meridiem === "am" || meridiem === "pm";
 	if (stated) end++;
-	if (needsMarker && marked === undefined && !stated && suffix === undefined) return undefined;
+	if (decimal && strong === undefined && !stated) return undefined;
+	if (
+		plain &&
+		strong === undefined &&
+		!stated &&
+		suffix === undefined &&
+		!partFollows(reader, end) &&
+		!(weak !== undefined && confirmed)
+	)
+		return undefined;
 	if (language.clockMinus.includes(reader.word(end) ?? ""))
 		return [end + 2 <= reader.end ? end + 2 : end + 1, REFUSAL];
 	if (minute > 59) return [end, REFUSAL];
@@ -1027,12 +1585,20 @@ function readClock(reader: TokenReader, index: number): Hit | undefined {
 		if (hour < 1 || hour > 12) return [end, REFUSAL];
 		return [
 			end,
-			{ type: "clock", hour: (hour % 12) + (meridiem === "pm" ? 12 : 0), minute, exact: true, noon: false, core },
+			{
+				type: "clock",
+				hour: (hour % 12) + (meridiem === "pm" ? 12 : 0),
+				minute,
+				exact: true,
+				noon: false,
+				hForm: false,
+				core,
+			},
 		];
 	}
 	if (hour > 23) return [end, REFUSAL];
 	exact ||= hour === 0 || hour >= 13;
-	return [end, { type: "clock", hour, minute, exact, noon: false, core }];
+	return [end, { type: "clock", hour, minute, exact, noon: false, hForm, core }];
 }
 
 /** today, tomorrow, a day of the month with or without its month. */
@@ -1105,7 +1671,22 @@ const TIMING_READERS: readonly ConstructReader[] = [
 	readClock,
 	readDate,
 ];
-const CONSTRUCT_READERS: readonly ConstructReader[] = [readZone, readEvent, readRefusal, ...TIMING_READERS];
+/** What a negation refuses when it stands right before it. */
+const NEGATED_READERS: readonly ConstructReader[] = [readEvent, readListedRefusal, ...TIMING_READERS];
+const CONSTRUCT_READERS: readonly ConstructReader[] = [
+	readZone,
+	readStepInterval,
+	readEvent,
+	readListedRefusal,
+	readWindow,
+	readDuration,
+	readStart,
+	readNegation,
+	readNumericDate,
+	readRefusal,
+	readUntil,
+	...TIMING_READERS,
+];
 
 // ---------------------------------------------------------------------------------------------------------------
 // Derivation
@@ -1113,23 +1694,25 @@ const CONSTRUCT_READERS: readonly ConstructReader[] = [readZone, readEvent, read
 interface Timed {
 	readonly clock?: ClockValue & { readonly end: number };
 	readonly part?: PartOfDay;
-	readonly lunch: boolean;
 }
 
 type Derived =
 	| { readonly kind: "interval"; readonly every: number; readonly unit: IntervalUnit }
 	| (Timed & { readonly kind: "monthly"; readonly day: number })
-	| (Timed & { readonly kind: "daily"; readonly days: readonly number[] | "loose" })
+	| (Timed & { readonly kind: "daily"; readonly days: readonly number[] })
 	| (Timed & { readonly kind: "once"; readonly date: DateRef });
 
-const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6] as const;
+const EVERY_DAY: readonly number[] = [0, 1, 2, 3, 4, 5, 6];
 
-/** The schedule the excerpt's constructs state, each slot from exactly one construct; any conflict refuses. */
+/**
+ * The schedule the excerpt's constructs state, each slot from exactly one construct; any conflict refuses. Daily
+ * wording, a recurring part of the day and the whole week run on all seven days; named recurring days narrow daily
+ * wording to them.
+ */
 function derive(constructs: readonly Construct[]): Derived | undefined {
 	let interval: Extract<Construct, { type: "interval" }> | undefined;
 	let clock: Extract<Construct, { type: "clock" }> | undefined;
 	let part: PartOfDay | undefined;
-	let lunch = false;
 	let days: Extract<Construct, { type: "days" }> | undefined;
 	let date: DateRef | undefined;
 	let monthDay: number | undefined;
@@ -1143,6 +1726,7 @@ function derive(constructs: readonly Construct[]): Derived | undefined {
 			case "refusal":
 			case "event":
 			case "zone":
+			case "until":
 				return undefined;
 			case "interval":
 				if (interval) return undefined;
@@ -1158,7 +1742,6 @@ function derive(constructs: readonly Construct[]): Derived | undefined {
 				if (part !== undefined && part !== construct.part) return undefined;
 				part = construct.part;
 				recurring ||= construct.type === "partCadence" || (construct.type === "part" && construct.recurring);
-				lunch ||= construct.type === "part" && construct.lunch;
 				if (construct.type === "todayPart") {
 					if (date) return undefined;
 					date = { kind: "today" };
@@ -1190,7 +1773,7 @@ function derive(constructs: readonly Construct[]): Derived | undefined {
 				break;
 		}
 	}
-	const timed: Timed = { ...(clock ? { clock } : {}), ...(part === undefined ? {} : { part }), lunch };
+	const timed: Timed = { ...(clock ? { clock } : {}), ...(part === undefined ? {} : { part }) };
 	if (interval)
 		return constructs.length === 1 ? { kind: "interval", every: interval.every, unit: interval.unit } : undefined;
 	if (monthly || monthDay !== undefined) {
@@ -1201,8 +1784,8 @@ function derive(constructs: readonly Construct[]): Derived | undefined {
 			: undefined;
 	}
 	if (daily || allWeek || recurring || days?.recurring || (weekly && days)) {
-		if (date || (days && (daily || allWeek)) || (weekly && !days)) return undefined;
-		return { ...timed, kind: "daily", days: allWeek ? EVERY_DAY : (days?.days ?? "loose") };
+		if (date || (weekly && !days) || (allWeek && days) || (days && !days.recurring && !weekly)) return undefined;
+		return { ...timed, kind: "daily", days: days?.days ?? EVERY_DAY };
 	}
 	if (weekly) return constructs.length === 1 ? { kind: "interval", every: 1, unit: "week" } : undefined;
 	if (days)
@@ -1222,9 +1805,9 @@ interface ResolvedClock {
 }
 
 /**
- * The hour: an exact clock as stated (a part of the day that contradicts it refuses); an hour without am or pm read
- * through a stated part of the day, else on a 24-hour clock with the choice announced; a part of the day alone at its
- * fixed hour; nothing at 09:00, announced.
+ * The hour: an exact clock as stated (a part of the day that contradicts it refuses); an hour without am or pm, or an
+ * `8h` hour with a part of the day, read through the stated part, else on a 24-hour clock with the choice announced
+ * (an `8h` hour alone is already 24-hour); a part of the day alone at its fixed hour; nothing at 09:00, announced.
  */
 function resolveClock(
 	derived: Exclude<Derived, { kind: "interval" }>,
@@ -1235,12 +1818,12 @@ function resolveClock(
 	const stamp = (hour: number, minute: number) => `${pad(hour)}:${pad(minute)}`;
 	if (clock) {
 		const { hour, minute } = clock;
-		if (clock.exact) {
+		if (clock.exact && !(clock.hForm && part !== undefined)) {
 			if (part !== undefined && !partHolds(part, hour)) return undefined;
 			return { hour, minute, readings: [stamp(hour, minute)], defaults: [] };
 		}
 		if (part !== undefined) {
-			const read = derived.lunch ? undefined : partReading(part, hour);
+			const read = partReading(part, hour);
 			return read === undefined ? undefined : { hour: read, minute, readings: [stamp(read, minute)], defaults: [] };
 		}
 		const words = text.slice(tokens[clock.core]!.start, tokens[clock.end - 1]!.end);
@@ -1289,51 +1872,41 @@ function partHolds(part: PartOfDay, hour: number): boolean {
 	}
 }
 
-/**
- * The cron day-of-week field of a daily request: the stated days (the model's days must match them), every day when
- * the words include the whole week, and weekdays only, announced, for a plain daily request.
- */
+/** The cron day-of-week field of a daily request: the stated days, which the model's days must match when given. */
 function intakeDays(
-	stated: readonly number[] | "loose",
+	stated: readonly number[],
 	model: readonly (typeof WEEKDAYS)[number][] | undefined,
-): { field: string; label: string; defaults: readonly string[] } | undefined {
+): { field: string; label: string } | undefined {
 	const indices = model?.map((day) => WEEKDAYS.indexOf(day)).sort((left, right) => left - right);
-	if (stated === "loose") {
-		if (indices !== undefined && indices.length !== 7) return undefined;
-		return { field: "1-5", label: "weekdays", defaults: ["weekdays only, as no days were stated"] };
-	}
-	if (indices !== undefined && indices.join(",") !== stated.join(",")) return undefined;
 	const key = stated.join(",");
-	if (key === "0,1,2,3,4,5,6") return { field: "*", label: "every day", defaults: [] };
-	if (key === "1,2,3,4,5") return { field: "1-5", label: "weekdays", defaults: [] };
-	if (key === "0,6") return { field: "0,6", label: "weekends", defaults: [] };
-	return { field: key, label: `every ${stated.map((day) => WEEKDAY_NAMES[day]).join(", ")}`, defaults: [] };
+	if (indices !== undefined && indices.join(",") !== key) return undefined;
+	if (key === "0,1,2,3,4,5,6") return { field: "*", label: "every day" };
+	if (key === "1,2,3,4,5") return { field: "1-5", label: "weekdays" };
+	if (key === "0,6") return { field: "0,6", label: "weekends" };
+	return { field: key, label: `every ${stated.map((day) => WEEKDAY_NAMES[day]).join(", ")}` };
 }
 
 /**
- * The routine's zone: a zone the words state ("UTC", "Lisbon time") must be the model's, which may also name a zone
- * whose city the excerpt carries; otherwise the host's zone.
+ * The routine's zone: the zone the excerpt states ("UTC", "Lisbon time", a city) must be exactly the model's, and the
+ * model names none when the excerpt states none; then it is the host's zone.
  */
 function intakeZone(
 	stated: string | undefined,
 	zones: readonly Construct[],
-	tokens: readonly Token[],
-	span: TokenSpan,
 	hostZone: string,
-): string | undefined {
+	when: string,
+): string | IntakeTimingRefusal {
 	const named = new Set(zones.flatMap((construct) => (construct.type === "zone" ? [construct.zone] : [])));
-	if (named.size > 1) return undefined;
+	if (named.size > 1) return { refused: exactReason(when) };
 	const [word] = named;
-	if (stated === undefined) return word ?? hostZone;
+	if (stated === undefined) return word === undefined ? hostZone : { refused: differsReason(when) };
 	let zone: string;
 	try {
 		zone = canonicalCalendarTimeZone(stated);
 	} catch {
-		return undefined;
+		return { refused: `the host cannot use the time zone of ${quoted(when)}` };
 	}
-	if (word !== undefined) return zone === word ? zone : undefined;
-	const names = [zone, zone.split("/").at(-1)!].map((name) => foldedWords(name.replace(/_/gu, " ")).join(" "));
-	return names.some((name) => name.length > 0 && spanHas(tokens, span, name)) ? zone : undefined;
+	return zone === word ? zone : { refused: differsReason(when) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1426,8 +1999,8 @@ function pad(value: number): string {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Language tables (accents removed, lowercase). Each construct is read with one language's table only; digits, clock
-// forms, am/pm and zones are shared.
+// Language tables (accents removed, lowercase): the closed vocabulary. Each construct is read with one language's
+// table only; digits, clock forms, am/pm, zones and zone abbreviations are shared.
 
 type CiOutcome = Exclude<CiTerminalConclusion, "startup_failure"> | "finish";
 
@@ -1442,9 +2015,10 @@ interface Language {
 	readonly listJoin: readonly string[];
 	readonly dayMarkers: readonly string[];
 	readonly parts: readonly (readonly [string, readonly [PartOfDay, plural: boolean]])[];
-	readonly lunch: readonly string[];
 	readonly partCadence: readonly (readonly [string, PartOfDay])[];
 	readonly todayParts: readonly (readonly [string, PartOfDay])[];
+	/** Words between a number and a part of the day that make the number an hour ("9 in the morning"). */
+	readonly partSuffixes: readonly string[];
 	readonly allWeek: readonly string[];
 	readonly daily: readonly string[];
 	readonly weekly: readonly string[];
@@ -1456,6 +2030,8 @@ interface Language {
 	readonly fractions: readonly (readonly [string, number])[];
 	/** Intervals without a marker, in minutes ("hourly"). */
 	readonly bareIntervals: readonly (readonly [string, number])[];
+	/** "de N em N <unit>": the step interval's two words. */
+	readonly step?: readonly [from: string, by: string];
 	readonly monthDayMarkers: readonly string[];
 	/** Whether a month-day marker takes a plain number ("todo dia 15"), not only an ordinal ("every 15th"). */
 	readonly bareMonthDay: boolean;
@@ -1467,7 +2043,10 @@ interface Language {
 	readonly months: ReadonlyMap<string, number>;
 	readonly today: readonly string[];
 	readonly tomorrow: readonly string[];
+	/** Markers that make any number an hour ("at", "às", "a las"). */
 	readonly clockMarkers: readonly string[];
+	/** Markers that are also ordinary words (Portuguese "a", Spanish "la"): an hour needs more words after the number. */
+	readonly weakClockMarkers: readonly string[];
 	/** Words that make a plain number a clock without a marker ("o'clock"). */
 	readonly clockSuffixes: readonly string[];
 	/** Hour words after a marked number ("às 9 horas"). */
@@ -1478,6 +2057,23 @@ interface Language {
 	readonly clockMinus: readonly string[];
 	readonly refusalWords: readonly string[];
 	readonly everyOther: readonly string[];
+	/** Working hours: no fixed hour the host can schedule. */
+	readonly businessHours: readonly string[];
+	/** Meals, ends of day, meetings and the sun: events, not hours. */
+	readonly eventWords: readonly string[];
+	readonly whileWords: readonly string[];
+	readonly negations: readonly string[];
+	/** Openers of a time window ("between", "from", "das"); "to"-words and "and"-words close it. */
+	readonly windowFrom: readonly string[];
+	readonly windowTo: readonly string[];
+	readonly windowAnd: readonly string[];
+	/** Openers of a duration before a unit ("for", "durante"). */
+	readonly durations: readonly string[];
+	/** Openers that are a duration only with a count or an upcoming-word ("in 10 minutes", "nos próximos dias"). */
+	readonly countedDurations: readonly string[];
+	readonly upcoming: readonly string[];
+	/** Openers of a stated start ("starting", "a partir de"). */
+	readonly starts: readonly string[];
 	/** Before a weekday: an ordinal or relative week ("first Monday", "next Friday"), which refuses. */
 	readonly ordinals: readonly string[];
 	readonly nth: readonly string[];
@@ -1490,11 +2086,24 @@ interface Language {
 	readonly fractionWords: readonly string[];
 	readonly pastTo: readonly string[];
 	readonly connectors: readonly string[];
-	readonly eventMarkers: readonly string[];
+	readonly eventStanding: readonly string[];
+	readonly eventNext: readonly string[];
+	/** Bare words that make a CI watch one-time ("when", "quando", "cuando"). */
+	readonly nextWords: readonly string[];
+	/** Conditions that state no lifetime ("if", "se", "si"). */
+	readonly ifWords: readonly string[];
+	/** Words a CI watch's excerpt may hold around its subject and outcome ("is", "the", "der", "se"). */
+	readonly eventFillers: readonly string[];
+	/** Closed fillers a timing excerpt may hold around its constructs. */
+	readonly fillers: readonly string[];
 	readonly zoneBefore: readonly string[];
 	readonly zoneAfter: readonly string[];
+	/** Zone names without a city the runtime knows ("Pacific time"), which refuse. */
+	readonly zoneWords: readonly string[];
 	/** Timing words beyond the number, weekday, unit, month and date tables. */
 	readonly anchors: readonly string[];
+	/** Weekday and month abbreviations: never read, always timing. */
+	readonly abbreviations: readonly string[];
 	readonly ciSubjects: readonly string[];
 	readonly outcomes: Readonly<Record<CiOutcome, readonly string[]>>;
 }
@@ -1502,6 +2111,20 @@ interface Language {
 const list = (phrases: string): readonly string[] => phrases.split("|");
 const WORKWEEK = [1, 2, 3, 4, 5] as const;
 const WEEKEND = [0, 6] as const;
+
+/** Zone abbreviations a zone name could stand for in several ways; written in capitals, each refuses. */
+const ZONE_ABBREVIATIONS: ReadonlySet<string> = new Set(
+	list(
+		"est|edt|cst|cdt|mst|mdt|pst|pdt|et|ct|mt|pt|akst|akdt|hst|cet|cest|eet|eest|wet|west|bst|ist|jst|kst|aest|aedt|acst|acdt|awst|nzst|nzdt|brt|brst|art|clt|clst|cot|pet|msk|sgt|hkt|pht|wib|ict",
+	),
+);
+
+/** Zone cities whose names are also ordinary words or names: a zone only when capitalized and marked as one. */
+const ORDINARY_CITIES: ReadonlySet<string> = new Set(
+	list(
+		"christmas|easter|wake|midway|center|resolute|oral|nome|lima|fortaleza|bahia|boa vista|phoenix|regina|stanley|casey|davis|palmer|troll|darwin|sydney|adelaide|sofia|santiago|jersey|guernsey|canary|madeira|reunion|cayenne|chihuahua|salta|cordoba|asuncion|antigua|cocos|lagos|anchorage|whitehorse|buenos aires|la paz|la rioja|el salvador|costa rica|puerto rico|santo domingo|los angeles|san juan|san luis|casablanca|recife|campo grande|porto velho|rio branco|porto novo|punta arenas|belem|grand turk|glace bay|goose bay|swift current|rankin inlet|cambridge bay|coral harbour|tell city|new salem|broken hill|lord howe|lower princes|beulah|creston|knox|marengo|monticello|vevay|winamac|petersburg|vincennes|chita|kirov|samara|mendoza|merida|norfolk|dawson|wallis|bermuda|bougainville|monaco|malta|truk",
+	),
+);
 
 function weekdayTable(...days: readonly string[]): ReadonlyMap<string, readonly [number, boolean]> {
 	const table = new Map<string, readonly [number, boolean]>();
@@ -1608,7 +2231,6 @@ const ENGLISH: Language = {
 			true,
 		),
 	],
-	lunch: list("lunchtime|lunch time"),
 	partCadence: partList({
 		morning: "every morning|each morning",
 		afternoon: "every afternoon|each afternoon",
@@ -1621,7 +2243,10 @@ const ENGLISH: Language = {
 		evening: "this evening",
 		night: "tonight",
 	}),
-	allWeek: list("every single day|including weekends|including the weekend|7 days a week|seven days a week|all week"),
+	partSuffixes: list("in the|at"),
+	allWeek: list(
+		"every single day|including weekends|including the weekend|7 days a week|seven days a week|all week|every day of the week|each day of the week",
+	),
 	daily: list("every day|each day|daily|everyday|once a day|once per day|once daily"),
 	weekly: list("every week|each week|weekly|once a week|once per week"),
 	monthly: list(
@@ -1672,6 +2297,7 @@ const ENGLISH: Language = {
 	today: list("today"),
 	tomorrow: list("tomorrow"),
 	clockMarkers: list("at"),
+	weakClockMarkers: [],
 	clockSuffixes: list("o clock"),
 	hourWords: [],
 	namedClocks: [
@@ -1686,6 +2312,19 @@ const ENGLISH: Language = {
 		"except|excluding|twice|thrice|yearly|annually|quarterly|biweekly|fortnightly|bimonthly|semiannually|semimonthly|day after tomorrow",
 	),
 	everyOther: list("every other|each other"),
+	businessHours: list("business hours|working hours|work hours|office hours|opening hours|core hours|after hours"),
+	eventWords: list(
+		"lunch|lunchtime|lunch time|lunch break|breakfast|brunch|dinner|supper|eod|eob|cob|end of day|end of the day|end of business|close of business|end of the month|end of month|end of the week|end of week|start of the week|start of the month|beginning of the week|beginning of the month|standup|stand up|sunrise|sunset|dawn|dusk|bedtime",
+	),
+	whileWords: list("while|whilst|as long as|so long as"),
+	negations: list("not|never|no|don t|dont|do not|doesn t|does not|won t|without"),
+	windowFrom: list("between|from"),
+	windowTo: list("to|through|thru|till|until"),
+	windowAnd: list("and"),
+	durations: list("for|during|over|within|throughout"),
+	countedDurations: list("in"),
+	upcoming: list("next|following|coming|few|couple|rest"),
+	starts: list("starting|beginning|effective|as of|commencing|starting from|beginning from|starting on|beginning on"),
 	ordinals: list("first|second|third|fourth|fifth|last|next|this|coming|following"),
 	nth: list("first|second|third|fourth|fifth"),
 	nthNouns: list("week|month"),
@@ -1697,12 +2336,23 @@ const ENGLISH: Language = {
 	fractionWords: list("half|quarter"),
 	pastTo: list("past|to"),
 	connectors: list("the|of|on"),
-	eventMarkers: list("every time|each time|whenever|next time"),
+	eventStanding: list("every time|each time|whenever|any time|anytime|every single time"),
+	eventNext: list("next time|the next time"),
+	nextWords: list("when|once|as soon as"),
+	ifWords: list("if|in case"),
+	eventFillers: list(
+		"is|are|was|were|be|gets|get|got|goes|go|went|turns|turn|turned|has|have|had|comes|come|back|run|runs|running|attempt|attempts|any|my|our|its|it|ever|again|whether|either|for|status|result|results",
+	),
+	fillers: list("a|an|the|at|on|in|of|and|or|please|pls|also|too|then|but|though|only|just|me|us|sharp"),
 	zoneBefore: [],
-	zoneAfter: list("time|timezone"),
+	zoneAfter: list("time|timezone|time zone|standard time|daylight time"),
+	zoneWords: list(
+		"pacific|eastern|central|mountain|atlantic|alaska|alaskan|hawaii|hawaiian|arizona|brasilia|brazil|brazilian|british|european|india|indian|china|chinese|japan|japanese|korea|korean|australian|israel|greenwich|universal|zulu|coordinated|standard|daylight|summer|winter",
+	),
 	anchors: list(
 		"every|each|daily|everyday|hourly|weekly|monthly|nightly|tonight|noon|midday|midnight|lunchtime|am|pm|clock|past|half|quarter|other|first|second|third|fourth|fifth|last|next|except|excluding|twice|thrice|yearly|annually|quarterly|biweekly|fortnightly|weekday|weekdays|weekend|weekends|workday|workdays|business|working|morning|mornings|afternoon|afternoons|evening|evenings|night|nights|utc|gmt",
 	),
+	abbreviations: list("mon|tue|tues|wed|weds|thu|thur|thurs|fri|jan|feb|apr|jun|jul|aug|sep|sept|oct|nov"),
 	ciSubjects: list("ci|build|builds|pipeline|pipelines|workflow|workflows|job|jobs|checks|actions|test|tests"),
 	outcomes: {
 		failure: list("fail|fails|failed|failing|failure|failures|break|breaks|broke|broken|red"),
@@ -1782,7 +2432,6 @@ const PORTUGUESE: Language = {
 		),
 		...partTable({ morning: "manhas", afternoon: "tardes", night: "noites" }, true),
 	],
-	lunch: list("hora do almoco"),
 	partCadence: partList({
 		morning: "toda manha|todas as manhas|cada manha|a cada manha",
 		afternoon: "toda tarde|todas as tardes|cada tarde|a cada tarde",
@@ -1794,8 +2443,9 @@ const PORTUGUESE: Language = {
 		afternoon: "esta tarde|hoje a tarde|hoje de tarde",
 		night: "esta noite|hoje a noite|hoje de noite",
 	}),
+	partSuffixes: list("da|de|pela|a"),
 	allWeek: list(
-		"todo santo dia|7 dias por semana|sete dias por semana|7 dias na semana|sete dias na semana|toda a semana|a semana toda|a semana inteira|inclusive fins de semana|inclusive nos fins de semana|incluindo fins de semana|incluindo os fins de semana|inclusive fim de semana|incluindo o fim de semana",
+		"todo santo dia|7 dias por semana|sete dias por semana|7 dias na semana|sete dias na semana|toda a semana|a semana toda|a semana inteira|inclusive fins de semana|inclusive nos fins de semana|incluindo fins de semana|incluindo os fins de semana|inclusive fim de semana|incluindo o fim de semana|todos os dias da semana|todo dia da semana|cada dia da semana",
 	),
 	daily: list("todo dia|todos os dias|a cada dia|cada dia|diariamente|diario|diaria|uma vez por dia|uma vez ao dia"),
 	weekly: list("toda semana|todas as semanas|a cada semana|cada semana|semanal|semanalmente|uma vez por semana"),
@@ -1819,6 +2469,7 @@ const PORTUGUESE: Language = {
 		["de hora em hora", 60],
 		["de meia em meia hora", 30],
 	],
+	step: ["de", "em"],
 	monthDayMarkers: list("todo dia|todos os dias"),
 	bareMonthDay: true,
 	ordinalSuffixes: list("º|ª"),
@@ -1842,7 +2493,8 @@ const PORTUGUESE: Language = {
 	),
 	today: list("hoje"),
 	tomorrow: list("amanha"),
-	clockMarkers: list("as|a|pelas|ao"),
+	clockMarkers: list("as|pelas|ao"),
+	weakClockMarkers: list("a"),
 	clockSuffixes: [],
 	hourWords: list("horas|hora|h"),
 	namedClocks: [
@@ -1850,12 +2502,31 @@ const PORTUGUESE: Language = {
 		["meia noite", [0, false]],
 	],
 	minuteJoin: list("e"),
-	namedMinutes: [["e meia", 30]],
+	namedMinutes: [
+		["e meia", 30],
+		["e um quarto", 15],
+		["e quarto", 15],
+	],
 	clockMinus: [],
 	refusalWords: list(
 		"exceto|excluindo|salvo|menos|anual|anualmente|quinzenal|quinzenalmente|bimestral|trimestral|semestral|depois de amanha",
 	),
 	everyOther: list("dia sim dia nao|dia sim e dia nao|semana sim semana nao"),
+	businessHours: list(
+		"horario comercial|horario de trabalho|horario de expediente|horario de servico|horario util|horas uteis|expediente",
+	),
+	eventWords: list(
+		"almoco|hora do almoco|cafe da manha|jantar|janta|fim do dia|final do dia|fim do expediente|final do expediente|fim do mes|final do mes|inicio do mes|comeco do mes|fim da semana|final da semana|inicio da semana|reuniao|nascer do sol|por do sol|amanhecer|anoitecer",
+	),
+	whileWords: list("enquanto|contanto que"),
+	negations: list("nao|nunca|nem|jamais|sem"),
+	windowFrom: list("entre|de|da|das|desde"),
+	windowTo: list("a|as|ate"),
+	windowAnd: list("e"),
+	durations: list("durante|por|daqui a|dentro de|ao longo de"),
+	countedDurations: list("em|nos|nas|pelos|pelas"),
+	upcoming: list("proximos|proximas|seguintes"),
+	starts: list("a partir de|a partir do|a partir da|a partir das|a partir dos|comecando|iniciando"),
 	ordinals: list(
 		"primeira|primeiro|terceira|ultima|ultimo|proxima|proximo|esta|este|nesta|neste|essa|esse|nessa|nesse",
 	),
@@ -1869,26 +2540,41 @@ const PORTUGUESE: Language = {
 	fractionWords: [],
 	pastTo: list("para"),
 	connectors: list("o|a|os|as|de|da|do|das|dos|ao|aos|no|na|nos|nas|pela|pelas"),
-	eventMarkers: list("toda vez|sempre que|a proxima vez|proxima vez|cada vez"),
-	zoneBefore: list("hora|horario"),
-	zoneAfter: [],
-	anchors: list(
-		"todo|toda|todos|todas|cada|diariamente|diario|diaria|semanal|semanalmente|mensal|mensalmente|anual|anualmente|quinzenal|quinzenalmente|bimestral|trimestral|semestral|meio|meia|util|uteis|fim|fins|final|finais|exceto|excluindo|salvo|menos|vez|vezes|primeiro|primeira|ultimo|ultima|proximo|proxima|feira|feiras|manha|manhas|tarde|tardes|noite|noites|utc|gmt",
+	eventStanding: list(
+		"toda vez|toda vez que|sempre que|cada vez|cada vez que|todas as vezes|todas as vezes que|qualquer vez que",
 	),
+	eventNext: list(
+		"proxima vez|proxima vez que|a proxima vez|a proxima vez que|na proxima vez|na proxima vez que|da proxima vez|da proxima vez que",
+	),
+	nextWords: list("quando|assim que|logo que"),
+	ifWords: list("se|caso"),
+	eventFillers: list(
+		"der|derem|fica|ficar|ficou|ficarem|estiver|estiverem|esta|estao|for|forem|seja|meu|minha|nosso|nossa|algum|alguma|que|execucao|execucoes|rodada|resultado|rodar|rodarem|voltar|novamente|de novo",
+	),
+	fillers: list(
+		"o|a|os|as|de|da|do|das|dos|em|no|na|nos|nas|e|ou|ao|aos|pela|pelo|pelas|pelos|por favor|favor|tambem|me|so|somente|apenas|entao|mas",
+	),
+	zoneBefore: list("hora|horario|fuso|fuso horario|hora oficial"),
+	zoneAfter: [],
+	zoneWords: [],
+	anchors: list(
+		"todo|toda|todos|todas|cada|diariamente|diario|diaria|semanal|semanalmente|mensal|mensalmente|anual|anualmente|quinzenal|quinzenalmente|bimestral|trimestral|semestral|meio|meia|quarto|util|uteis|fim|fins|final|finais|exceto|excluindo|salvo|menos|vez|vezes|primeiro|primeira|ultimo|ultima|proximo|proxima|feira|feiras|manha|manhas|tarde|tardes|noite|noites|utc|gmt",
+	),
+	abbreviations: list("seg|qua|qui|sab|jan|fev|abr|mai|jun|jul|dez"),
 	ciSubjects: list("ci|build|builds|pipeline|pipelines|workflow|workflows|job|jobs|teste|testes|checks|actions"),
 	outcomes: {
 		failure: list(
-			"falha|falhas|falhar|falhou|falharem|falhando|falho|quebra|quebrar|quebrou|quebrado|quebrada|vermelho|vermelha",
+			"falha|falhas|falhar|falhou|falharem|falhando|falho|falhe|falhem|der erro|deu erro|der falha|derem erro|quebra|quebrar|quebrou|quebrado|quebrada|vermelho|vermelha",
 		),
-		success: list("passa|passar|passou|passarem|passando|sucesso|aprovado|aprovada|aprovar|verde"),
-		cancelled: list("cancelado|cancelada|cancelar|cancelou|cancelamento"),
+		success: list("passa|passar|passou|passarem|passando|passe|passem|sucesso|aprovado|aprovada|aprovar|verde"),
+		cancelled: list("cancelado|cancelada|cancelar|cancelou|cancele|cancelamento"),
 		timed_out: list("expira|expirar|expirou|tempo esgotado|timeout"),
 		skipped: list("pulado|pulada|pular|pulou|ignorado|ignorada"),
 		neutral: list("neutro|neutra"),
 		action_required: list("requer acao|exige acao|acao necessaria"),
 		stale: [],
 		finish: list(
-			"termina|terminar|terminou|terminarem|conclui|concluir|concluiu|acaba|acabar|acabou|finaliza|finalizar|finalizou",
+			"termina|terminar|terminou|terminarem|termine|terminem|conclui|concluir|concluiu|conclua|acaba|acabar|acabou|acabe|acabem|finaliza|finalizar|finalizou|finalize",
 		),
 	},
 };
@@ -1950,15 +2636,15 @@ const SPANISH: Language = {
 		...partTable({ morning: "la manana", afternoon: "tarde", night: "noche" }, false),
 		...partTable({ morning: "mananas", afternoon: "tardes", night: "noches" }, true),
 	],
-	lunch: [],
 	partCadence: partList({
 		morning: "cada manana|todas las mananas",
 		afternoon: "cada tarde|todas las tardes",
 		night: "cada noche|todas las noches",
 	}),
 	todayParts: partList({ morning: "esta manana", afternoon: "esta tarde", night: "esta noche" }),
+	partSuffixes: list("de|de la|por|por la"),
 	allWeek: list(
-		"toda la semana|7 dias a la semana|siete dias a la semana|incluidos los fines de semana|incluidos fines de semana|incluyendo los fines de semana|incluyendo fines de semana",
+		"toda la semana|7 dias a la semana|siete dias a la semana|incluidos los fines de semana|incluidos fines de semana|incluyendo los fines de semana|incluyendo fines de semana|todos los dias de la semana|cada dia de la semana",
 	),
 	daily: list("todos los dias|cada dia|diariamente|a diario|diario|diaria|una vez al dia|una vez por dia"),
 	weekly: list("cada semana|todas las semanas|semanal|semanalmente|una vez por semana|una vez a la semana"),
@@ -2000,7 +2686,8 @@ const SPANISH: Language = {
 	),
 	today: list("hoy"),
 	tomorrow: list("manana"),
-	clockMarkers: list("a las|a la|las|la"),
+	clockMarkers: list("a las|a la"),
+	weakClockMarkers: list("las|la"),
 	clockSuffixes: list("en punto"),
 	hourWords: list("horas|hora|h"),
 	namedClocks: [
@@ -2017,6 +2704,21 @@ const SPANISH: Language = {
 		"excepto|salvo|excluyendo|menos|anual|anualmente|quincenal|quincenalmente|bimestral|trimestral|semestral|pasado manana",
 	),
 	everyOther: list("dia por medio|dia si dia no|dia si y dia no"),
+	businessHours: list(
+		"horario laboral|horario de oficina|horario comercial|horario de trabajo|horas de oficina|horas laborales|horas habiles|jornada laboral",
+	),
+	eventWords: list(
+		"almuerzo|hora del almuerzo|hora de comer|comida|comer|desayuno|cena|fin del dia|final del dia|fin de la jornada|final de la jornada|fin de mes|fin del mes|final del mes|inicio del mes|principio de mes|reunion|amanecer|atardecer|anochecer",
+	),
+	whileWords: list("mientras|mientras que"),
+	negations: list("no|nunca|jamas|ni|sin"),
+	windowFrom: list("entre|de|del|desde"),
+	windowTo: list("a|al|hasta|a las"),
+	windowAnd: list("y"),
+	durations: list("durante|por|dentro de|a lo largo de"),
+	countedDurations: list("en|los|las"),
+	upcoming: list("proximos|proximas|siguientes"),
+	starts: list("a partir de|a partir del|empezando|comenzando|iniciando"),
 	ordinals: list("primer|primero|primera|segundo|tercer|ultimo|ultima|proximo|proxima|este|esta"),
 	nth: list("primera|segunda|tercera|cuarta|quinta|ultima|primer|segundo|tercer|cuarto|quinto|ultimo"),
 	nthNouns: list("semana|mes"),
@@ -2028,26 +2730,37 @@ const SPANISH: Language = {
 	fractionWords: [],
 	pastTo: [],
 	connectors: list("el|la|los|las|de|del|al|a"),
-	eventMarkers: list("cada vez|siempre que|la proxima vez|proxima vez"),
-	zoneBefore: list("hora|horario"),
+	eventStanding: list("cada vez|cada vez que|siempre que|todas las veces|todas las veces que"),
+	eventNext: list("proxima vez|proxima vez que|la proxima vez|la proxima vez que"),
+	nextWords: list("cuando|en cuanto|apenas|tan pronto como"),
+	ifWords: list("si|en caso de que"),
+	eventFillers: list(
+		"se|este|esten|quede|queda|quedan|ponga|pone|ponen|mi|mis|nuestro|nuestra|algun|alguna|que|ejecucion|ejecuciones|resultado|sea|esta|estan|vuelva|de nuevo|otra vez",
+	),
+	fillers: list("el|la|los|las|de|del|a|al|en|y|e|o|u|por|por favor|favor|tambien|me|solo|solamente|pero|entonces"),
+	zoneBefore: list("hora|horario|huso horario|hora oficial"),
 	zoneAfter: [],
+	zoneWords: [],
 	anchors: list(
 		"todos|todas|cada|diario|diaria|diariamente|semanal|semanalmente|mensual|mensualmente|anual|anualmente|quincenal|quincenalmente|bimestral|trimestral|semestral|mediodia|medianoche|media|cuarto|laborables|laborable|habiles|habil|fin|fines|excepto|salvo|excluyendo|menos|vez|veces|primer|primero|primera|ultimo|ultima|proximo|proxima|manana|mananas|tarde|tardes|noche|noches|utc|gmt",
 	),
-	ciSubjects: list("ci|build|builds|pipeline|pipelines|workflow|workflows|job|jobs|prueba|pruebas|checks|actions"),
+	abbreviations: list("lun|mie|jue|vie|ene|abr|dic"),
+	ciSubjects: list(
+		"ci|build|builds|pipeline|pipelines|workflow|workflows|job|jobs|prueba|pruebas|test|tests|checks|actions",
+	),
 	outcomes: {
 		failure: list(
-			"falla|fallas|fallar|fallo|fallan|fallido|fallida|fallando|rompe|romper|rompio|roto|rota|rojo|roja",
+			"falla|fallas|fallar|fallo|fallan|falle|fallen|fallido|fallida|fallando|rompe|romper|rompio|rompa|rompan|roto|rota|rojo|roja",
 		),
-		success: list("pasa|pasar|paso|pasan|exito|exitoso|exitosa|verde"),
-		cancelled: list("cancelado|cancelada|cancelar|cancelo"),
+		success: list("pasa|pasar|paso|pasan|pase|pasen|exito|exitoso|exitosa|verde"),
+		cancelled: list("cancelado|cancelada|cancelar|cancelo|cancele|cancelen"),
 		timed_out: list("expira|expirar|expiro|tiempo agotado|timeout"),
 		skipped: list("omitido|omitida|saltado|saltada"),
 		neutral: list("neutro|neutra"),
 		action_required: list("requiere accion|accion requerida"),
 		stale: [],
 		finish: list(
-			"termina|terminar|termino|terminen|concluye|concluir|concluyo|acaba|acabar|acabo|finaliza|finalizar|finalizo",
+			"termina|terminar|termino|terminen|termine|concluye|concluir|concluyo|concluya|acaba|acabar|acabo|acabe|acaben|finaliza|finalizar|finalizo|finalice",
 		),
 	},
 };
@@ -2068,10 +2781,11 @@ const ANCHORS: ReadonlySet<string> = new Set(
 		...language.today,
 		...language.tomorrow,
 		...language.anchors,
+		...language.abbreviations,
 	]).filter((word) => !NOT_ANCHORS.has(word)),
 );
 
-/** Digits and clock forms always carry timing; words do when any table lists them as timing words. */
+/** Digits, clock forms and other digits always carry timing; words do when any table lists them as timing words. */
 function isAnchor(token: Token): boolean {
 	return token.kind !== "word" || ANCHORS.has(token.text);
 }

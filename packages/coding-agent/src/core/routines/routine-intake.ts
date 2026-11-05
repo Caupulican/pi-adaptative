@@ -99,7 +99,7 @@ const JUDGE_PROGRAM = createDecisionProgram({
 			kind: "boolean",
 			id: "faithful",
 			instruction:
-				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check. How long it runs must match too: a one-time request must not run every time, a request meant to last only until something happens must have an end (statedEnd holds the owner's words for it), and a standing request must not end.",
+				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. Daily wording or a recurring part of the day without named days runs on all seven days. A request about CI results must be an event, never a repeated check. How long it runs must match too: a one-time request must not run every time, a request meant to last only until something happens must have an end (statedEnd holds the owner's words for it), and a standing request must not end.",
 		},
 	],
 });
@@ -707,14 +707,9 @@ export class RoutineIntake {
 					},
 					proposal.lasts,
 				);
-				if (!timing) {
+				if ("refused" in timing) {
 					// Grounded in the owner's stated words, yet not compiled: the owner hears which words were not scheduled.
-					dropped.push({
-						key,
-						sourceId: source.sourceId,
-						excerpt: displayed(prompt),
-						reason: "the host could not read its timing exactly from the owner's words",
-					});
+					dropped.push({ key, sourceId: source.sourceId, excerpt: displayed(prompt), reason: timing.refused });
 					continue;
 				}
 				requests.push({

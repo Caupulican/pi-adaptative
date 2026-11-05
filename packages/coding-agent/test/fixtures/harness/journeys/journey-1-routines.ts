@@ -1267,6 +1267,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 	const pastedRequest = "Rotate the deploy keys every hour.";
 	const secondOwner = `${unstatedHour}\n${pastedRequest}`;
 	const pasted = { start: unstatedHour.length + 1, end: secondOwner.length };
+	// Negative controls of the timing grammar: an event word is no hour, and a one-time CI watch needs a one-time slot.
+	const controls = "Every day at lunch, list the stale branches.\nSummarize the failing jobs the next time CI fails.";
 	try {
 		world.systemOne.enterPhase("routine-intake-owner", {});
 		world.provider.enqueue("root", text("routine-intake-owner-reply", "Noted."));
@@ -1287,6 +1289,13 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		const second = latestSource();
 		expect(second.text).toBe(secondOwner);
 		expect(second.pasted, "the owner evidence keeps which words were pasted").toEqual([pasted]);
+		world.systemOne.enterPhase("routine-intake-control-owner", {
+			...ICM_INTAKE_JUDGMENTS,
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue("root", text("routine-intake-control-owner-reply", "Noted."));
+		await withDeadline(world.trace, "routine intake control owner words", root.session.prompt(controls));
+		expect(latestSource().text).toBe(controls);
 		// Words with no timing at all: the pass reads past them without a gate or an extraction.
 		const noTiming = "Thanks, that covers it.";
 		world.systemOne.enterPhase("routine-intake-third-owner", {
@@ -1315,6 +1324,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 					).toHaveLength(1);
 					expect(JSON.stringify(request.context.messages)).toContain(instruction);
 					expect(JSON.stringify(request.context.messages)).toContain(unstatedHour);
+					expect(JSON.stringify(request.context.messages)).toContain("list the stale branches");
 					expect(JSON.stringify(request.context.messages), "pasted words are not sent").not.toContain(
 						pastedRequest,
 					);
@@ -1339,7 +1349,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 												when: "every hour",
 												timing: { kind: "interval", every: 1, unit: "hour" },
 											},
-											// A part of the day without a time: the host chooses the hour and the days, and says so.
+											// A part of the day without a time: the host chooses the hour, runs it every day, and says so.
 											{
 												instruction,
 												when: "Every morning",
@@ -1362,6 +1372,23 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 												instruction: "Rotate the deploy keys",
 												when: "every hour",
 												timing: { kind: "interval", every: 1, unit: "hour" },
+											},
+										],
+									},
+									{
+										id: "m3",
+										requests: [
+											// "lunch" is an event, not an hour: the host refuses it although the daily slot fits "Every day".
+											{
+												instruction: "list the stale branches",
+												when: "Every day at lunch",
+												timing: { kind: "daily" },
+											},
+											// The words watch only the next failure; a slot without lasts would watch every one.
+											{
+												instruction: "Summarize the failing jobs",
+												when: "the next time CI fails",
+												timing: { kind: "event" },
 											},
 										],
 									},
@@ -1394,8 +1421,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		});
 		const beforePass = rootRequests();
 		const decodedBeforePass = world.systemOne.decoded.length;
-		// The pass owes two notices: the routine it created and the request it dropped.
-		const created = passEnded(2);
+		// The pass owes four notices: the routine it created and the three requests it dropped.
+		const created = passEnded(4);
 		try {
 			expect(
 				await withDeadline(world.trace, "routine intake idle delay", world.timers.whenArmed("routine-intake")),
@@ -1413,11 +1440,11 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		const routine = automatic[0]!;
 		expect(routine.origin?.sourceId).toBe(source.sourceId);
 		expect(routine.prompt, "the routine runs the owner's own words").toBe(instruction);
-		const hostDefaults = ['09:00 for "morning"', "weekdays only, as no days were stated"];
+		const hostDefaults = ['09:00 for "morning"'];
 		expect(
 			routineScheduleInputOf(routine.schedule),
-			"the host compiles the stated part of the day to its fixed hour on weekdays, with a start window",
-		).toMatchObject({ kind: "calendar", cron: "0 9 * * 1-5", maxLatenessMs: 1_800_000 });
+			"the host compiles the stated part of the day to its fixed hour on every day, with a start window",
+		).toMatchObject({ kind: "calendar", cron: "0 9 * * *", maxLatenessMs: 1_800_000 });
 		expect(routine.origin?.defaults, "the origin records what the host chose").toEqual(hostDefaults);
 		expect(
 			routine.executionSnapshot?.savedIntent.executionContract.worker.profile.readOnly,
@@ -1429,8 +1456,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		).toEqual([instruction]);
 		expect(
 			retained.batch?.dropped?.map((drop) => drop.excerpt),
-			"the request whose timing the host could not read is kept as dropped",
-		).toEqual(["Post the build summary"]);
+			"every request whose timing the host could not compile is kept as dropped",
+		).toEqual(["Post the build summary", "list the stale branches", "Summarize the failing jobs"]);
 		expect(store().hasRoutineIntakeOrigin(retained.batch!.requests![0]!.key)).toBe(true);
 		expect(intakeState()?.through, "the pass ends past the words without timing it skipped").toBe(
 			Date.parse(third.createdAt),
@@ -1439,16 +1466,28 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			entry?.type === "custom_message" && typeof entry.content === "string" ? entry.content : "";
 		const notice = notices().find((entry) => contentOf(entry).startsWith("Scheduled (read-only): "))!;
 		const content = contentOf(notice);
-		expect(content).toContain("Scheduled (read-only): weekdays at 09:00 (");
+		expect(content).toContain("Scheduled (read-only): every day at 09:00 (");
 		expect(content).toContain(` - ${JSON.stringify(instruction)}\nRoutine ${routine.routineId} was created`);
 		expect(content, "the notice names every host choice").toContain(`so the host chose: ${hostDefaults.join("; ")}.`);
 		const droppedNotices = notices().filter((entry) => contentOf(entry).startsWith("Could not schedule "));
-		expect(droppedNotices, "the dropped request is noticed once").toHaveLength(1);
-		const droppedNotice = droppedNotices[0];
-		expect(contentOf(droppedNotice), "the owner hears which stated request was not scheduled, and why").toBe(
-			'Could not schedule what reads as a request: the host could not read its timing exactly from the owner\'s words - "Post the build summary"\nNo routine was created. If it was meant, the owner can restate it.',
+		expect(droppedNotices, "each dropped request is noticed once").toHaveLength(3);
+		const dropReasons = [
+			'the host reads "every evening at 7" differently from the proposed timing - "Post the build summary"',
+			'the host cannot schedule "lunch" exactly - "list the stale branches"',
+			'the host reads "the next time CI fails" differently from the proposed timing - "Summarize the failing jobs"',
+		];
+		expect(
+			droppedNotices.map(contentOf).sort(),
+			"the owner hears which stated request was not scheduled, and which of its words why",
+		).toEqual(
+			dropReasons
+				.map(
+					(reason) =>
+						`Could not schedule what reads as a request: ${reason}\nNo routine was created. If it was meant, the owner can restate it.`,
+				)
+				.sort(),
 		);
-		for (const entry of [notice, droppedNotice])
+		for (const entry of [notice, ...droppedNotices])
 			expect(parentInputOf(entry!)?.metadata.mode, "each notice waits for the owner's next turn").toBe(
 				"next-owner-turn",
 			);
@@ -1459,8 +1498,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		);
 		expect(
 			world.systemOne.decoded.length - decodedBeforePass,
-			"System One gates both timed sources, not the words without timing, and judges only the grounded request",
-		).toBe(world.systemOne.enabled ? 3 : 0);
+			"System One gates the three timed sources, not the words without timing, and judges only the grounded request",
+		).toBe(world.systemOne.enabled ? 4 : 0);
 		const receipts = root.sessionManager.getEntries().flatMap((entry) => {
 			const report = resolveSemanticUsageEntry(entry)?.report;
 			return report?.route === "routine_intake" ? [report] : [];
@@ -1470,10 +1509,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		expect(root.session.backgroundLanes.getRoutineIntakeStatus()).toMatchObject({
 			state: "active",
 			...(world.systemOne.enabled ? {} : { judge: `structured-llm (${HARNESS_PROVIDER}/root)` }),
-			last: { status: "completed", sources: 2, created: 1, refused: 0 },
+			last: { status: "completed", sources: 3, created: 1, refused: 0 },
 		});
 
-		// The owner states a request the model only acknowledges, so nothing answers it. Both notices of the first pass
+		// The owner states a request the model only acknowledges, so nothing answers it. The four notices of the first pass
 		// reach this turn, are saved once and buy no request of their own.
 		const unanswered = "Every evening, summarize the failing builds.";
 		const unansweredInstruction = "summarize the failing builds";
@@ -1496,7 +1535,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		await withDeadline(world.trace, "routine intake unanswered request", root.session.prompt(unanswered));
 		expect(latestSource().text).toBe(unanswered);
 		expect(rootRequests() - beforeUnansweredTurn, "the notices ride the owner's turn without a request").toBe(1);
-		expect(notices(), "each notice is saved once").toHaveLength(2);
+		expect(notices(), "each notice is saved once").toHaveLength(4);
 		expect(intakeState()?.unannounced, "every notice the first pass owed was accepted").toBeUndefined();
 
 		// The model answers the next request with a routine save while the owner steers another request into the same run:
@@ -1690,11 +1729,11 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 				.map((entry) => entry.routineId);
 		expect(automaticIds(), "the words the owner moved away from create no routine").toEqual([routine.routineId]);
 		world.systemOne.enterPhase("routine-intake-moved-away", {});
-		const passedOver = passEnded(2);
+		const passedOver = passEnded(4);
 		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
 		await withDeadline(world.trace, "routine intake passed the words the owner moved away from", passedOver);
 		expect(automaticIds(), "steered, answered and abandoned words create no routine").toEqual([routine.routineId]);
-		expect(notices(), "a request passed for a move is not noticed").toHaveLength(2);
+		expect(notices(), "a request passed for a move is not noticed").toHaveLength(4);
 		expect(
 			rootRequests() - beforeUnansweredPass,
 			"one extraction of the unanswered words; the session model judges only with System One off",
@@ -1732,18 +1771,18 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			settings,
 		});
 		open = true;
-		const replayed = passEnded(2);
+		const replayed = passEnded(4);
 		expect(await withDeadline(world.trace, "replayed routine intake", world.timers.whenArmed("routine-intake"))).toBe(
 			2_000,
 		);
 		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
 		await withDeadline(world.trace, "replayed routine intake pass ended", replayed);
 		expect(store().getRoutine(routine.routineId), "a removed routine is never recreated").toBeUndefined();
-		expect(notices(), "a replay saves no notice twice").toHaveLength(2);
+		expect(notices(), "a replay saves no notice twice").toHaveLength(4);
 		expect(rootRequests(), "a decided request is not extracted or judged again").toBe(beforeReplay);
 		expect(root.session.backgroundLanes.getRoutineIntakeStatus()?.last).toEqual({
 			status: "completed",
-			sources: 2,
+			sources: 3,
 			created: 0,
 			refused: 0,
 		});
