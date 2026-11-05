@@ -1034,7 +1034,7 @@ const rows: readonly FaultMatrixRow[] = [
 		phase: "routines parent-write import",
 		fault: "a routine run away finished while its parent was closed: its result is pending while its claim waits in the attempt's outbox",
 		witness:
-			"the parent file is unchanged by the run away; on reopen the claim lands once through the outbox before the result, which is delivered once, and a second import pass lands nothing",
+			"the parent file is unchanged by the run away; its settled spend is saved on the run, so after the daemon stopped the day bound charges it that spend, not the run bound; on reopen the claim lands once through the outbox before the result, which is delivered once, and a second import pass lands nothing",
 		control: "an attempt without recorded writes publishes its terminal at once",
 		estSeconds: 2,
 		status: "covered",
@@ -1086,6 +1086,63 @@ const rows: readonly FaultMatrixRow[] = [
 				kind: "witness",
 				detail:
 					"the stop between a run away's terminal and its claim record needs an IO fault on the orchestration event append of that record",
+			},
+		],
+	},
+	{
+		id: "R55",
+		owner: "core/routines/routine-scheduler-controller.ts",
+		journey: 1,
+		phase: "routines away admission",
+		fault: "the parent's session opens between the away claim's dispatching write and the worker start",
+		witness:
+			"the admission guard refuses, the claim returns to pending without executor or dispatch key, the away host closes, and the reopened parent runs the slot exactly once with no uncertain occurrence",
+		control: "a closed parent's run away starts and finishes away (R52)",
+		estSeconds: 2,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"a store subscriber that takes the parent's session lease at the occurrence's dispatching write, before the away worker starts; needs new leg design in the away block",
+			},
+		],
+	},
+	{
+		id: "R56",
+		owner: "core/delegation/persistent-bot-team-store.ts",
+		journey: 1,
+		phase: "routines away admission",
+		fault: "two closed parents have due runs away while the day bound has room for one",
+		witness:
+			"one parent's run is claimed; the other records the spend refusal, claims nothing and leaves no away host open, and runs once the first run's settled charge leaves room",
+		control: "a single parent with room runs its due slot away (R52)",
+		estSeconds: 3,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"a second closed parent session with its own due routine and a day bound of one run; needs new leg design",
+			},
+		],
+	},
+	{
+		id: "R57",
+		owner: "core/routines/routine-contract.ts",
+		journey: 1,
+		phase: "routines away admission",
+		fault: "an interval routine comes due several times while its run away's result waits for the closed parent",
+		witness:
+			"exactly one away occurrence exists, the later slots record the held reason and stay due, and the reopened parent's claim counts them as missed",
+		control: "a once routine's single slot runs away (R52)",
+		estSeconds: 2,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"an interval routine run away followed by timer advances past several intervals before reopen; it adds a routine result to the parent's delivered inputs, so the leg's input counts need redesign",
 			},
 		],
 	},

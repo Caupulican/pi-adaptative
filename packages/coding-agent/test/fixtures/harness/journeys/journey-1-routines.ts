@@ -29,6 +29,7 @@ import {
 	MAX_ROUTINE_INSTANT_MS,
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	type RoutineIntakeBatch,
+	routineAwaySpendRoom,
 	routineScheduleInputOf,
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
@@ -891,6 +892,18 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			const ranOccurrences = awayStore.listRoutineOccurrences({ routineId: awayRoutineId });
 			expect(ranOccurrences).toHaveLength(1);
 			expect(ranOccurrences[0]?.executor).toBe("away");
+			// The run's settled spend is saved on the run (zero on the scripted zero-price track), so a store read after
+			// the daemon stopped, with nothing left in its memory, charges the run what it spent instead of the run bound:
+			// four more runs fit the $1 day bound again and a fifth does not.
+			expect(ranOccurrences[0]?.awaySettlement?.costUsd, "the run's settled spend is saved on the run").toBe(0);
+			const roomAfterStop = routineAwaySpendRoom(
+				awayStore.listRoutineOccurrences(),
+				{ maxUsdPerRun: 0.25, maxUsdPerDay: 1 },
+				world.timers.port("routines").now(),
+			);
+			expect(roomAfterStop.chargedMicros, "the stopped daemon's run is charged its settled spend").toBe(0);
+			expect(roomAfterStop.fits(3), "four runs fit the day bound after the daemon stopped").toBe(true);
+			expect(roomAfterStop.fits(4), "a fifth run does not").toBe(false);
 			expect(ranOccurrences[0]?.result?.outcome).toBe("succeeded");
 			expect(ranOccurrences[0]?.result?.delivery, "a run away leaves its result for the parent").toBe("pending");
 			expect(
