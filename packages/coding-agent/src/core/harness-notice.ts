@@ -40,7 +40,7 @@ interface KindState {
 	observed?: string;
 	/** The reason whose notice is saved, in flight or already carried for the current episode. */
 	covered?: string;
-	/** The current episode's own notice found no durable channel yet; the next signal tries it as a recurrence. */
+	/** The current episode's own notice is not saved (no durable channel yet, or its save failed); retried as a recurrence. */
 	unsaved?: boolean;
 }
 
@@ -177,8 +177,13 @@ export class HarnessNoticeController {
 				() => this.inFlight.delete(deliveryId),
 				(error: unknown) => {
 					this.inFlight.delete(deliveryId);
-					// A failed save is reported once and stays covered for this episode: the attempt itself held and released
-					// the foreground, and that idle signal must not start another attempt. The next episode tries again.
+					// An unsaved notice leaves its episode open: the capability's next signal tries it again. The attempt's own
+					// foreground release notifies synchronously, while this attempt still covers the reason, so that echo
+					// starts nothing; a branch navigation during a busy turn is the usual cause.
+					if (state.covered === reason && state.observed === reason) {
+						state.covered = undefined;
+						state.unsaved = true;
+					}
 					if (!this.closed) this.report(kind, error);
 				},
 			);
