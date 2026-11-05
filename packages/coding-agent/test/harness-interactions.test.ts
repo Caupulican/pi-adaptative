@@ -8,15 +8,19 @@
 
 import "./fixtures/harness/builtin-install.ts";
 import { describe, it } from "vitest";
-import { runJourney1 } from "./fixtures/harness/journeys/journey-1.ts";
+import { JOURNEY_1_BUDGET_MS, runJourney1 } from "./fixtures/harness/journeys/journey-1.ts";
 import { runJourney2 } from "./fixtures/harness/journeys/journey-2.ts";
 import { runJourney3 } from "./fixtures/harness/journeys/journey-3.ts";
 import { runJourney4 } from "./fixtures/harness/journeys/journey-4.ts";
 
 describe("Adaptive harness composed journeys", () => {
-	it("standalone root conversation: greeting, task with tools and memory, compaction, queued input, continuation", async () => {
-		await runJourney1();
-	}, 300_000);
+	it(
+		"standalone root conversation: greeting, task with tools and memory, compaction, queued input, continuation",
+		async () => {
+			await runJourney1();
+		},
+		JOURNEY_1_BUDGET_MS + 15_000,
+	);
 
 	it("orchestration: goal, three delegated agents, blocked report, follow-up reply, goal completion", async () => {
 		await runJourney2();

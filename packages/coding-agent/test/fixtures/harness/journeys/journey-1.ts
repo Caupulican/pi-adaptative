@@ -22,6 +22,13 @@ import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservation
  */
 import { LIMITS_PATH, runJourney } from "./shared.ts";
 
+/**
+ * Journey 1 composes every long-lived owner (memory, knowledge, proactivity, routines, host events, shutdown), and a CI
+ * runner spends 270-320 s on both modes. The budget leaves headroom for the slower runner and for added phases; the test's
+ * own timeout must stay above it so a stall still fails with the trace's last step.
+ */
+export const JOURNEY_1_BUDGET_MS = 540_000;
+
 export async function runJourney1(): Promise<void> {
 	await runJourney(
 		{
@@ -121,5 +128,6 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},
+		JOURNEY_1_BUDGET_MS,
 	);
 }

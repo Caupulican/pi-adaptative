@@ -58,8 +58,9 @@ for (const name of ["lock", "lockSync", "unlock", "unlockSync", "check", "checkS
 }
 
 /**
- * The time both modes of one journey share, kept under the test runner's own timeout: a stall then fails with the trace's last
- * step instead of an anonymous timeout.
+ * The default time both modes of one journey share, kept under the test runner's own timeout: a stall then fails with the
+ * trace's last step instead of an anonymous timeout. A journey whose phases need longer passes its own budget and a runner
+ * timeout above it.
  */
 const JOURNEY_BUDGET_MS = 285_000;
 
@@ -67,8 +68,9 @@ const JOURNEY_BUDGET_MS = 285_000;
 export async function runJourney(
 	options: Omit<HarnessWorldOptions, "systemOneEnabled">,
 	body: (world: HarnessWorld) => Promise<void>,
+	budgetMs: number = JOURNEY_BUDGET_MS,
 ): Promise<void> {
-	const budgetEnd = Date.now() + JOURNEY_BUDGET_MS;
+	const budgetEnd = Date.now() + budgetMs;
 	for (const systemOneEnabled of [true, false]) {
 		try {
 			await runHarnessWorld(
@@ -78,7 +80,7 @@ export async function runJourney(
 					try {
 						await withDeadline(
 							world.trace,
-							`the journey's time budget (${JOURNEY_BUDGET_MS}ms across both modes)`,
+							`the journey's time budget (${budgetMs}ms across both modes)`,
 							body(world),
 							Math.max(1, budgetEnd - Date.now()),
 						);
