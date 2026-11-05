@@ -9,6 +9,11 @@ import {
 	type HostEventSink,
 } from "../../../../src/core/events/host-event-contract.ts";
 import { readHostEventPage } from "../../../../src/core/events/host-event-control.ts";
+import {
+	ORCHESTRATION_SCHEMA_VERSION,
+	type OrchestrationProfile,
+} from "../../../../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { createCiHostRuntime } from "../../../../src/host/ci/ci-host-event-source.ts";
 import type { CiProvider, CiProviderCollection, CiRepository } from "../../../../src/host/ci/ci-provider.ts";
 import { CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
@@ -55,6 +60,32 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				},
 			);
 		}
+	// The worker an event routine runs; its saved authority is captured when the routine is saved.
+	const routineProfile: OrchestrationProfile = {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		profileId: "ci-routine-reader",
+		description: "Read-only CI event routine worker.",
+		role: "explorer",
+		modelPolicy: {
+			mode: "fixed",
+			candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
+		},
+		capabilityCeiling: ["filesystem.read"],
+		readOnly: true,
+		toolNames: ["read"],
+		resourceProfileNames: [],
+		dispatchProfileIds: [],
+		budget: {},
+		maxConcurrent: 1,
+		leaseTtlMs: 60_000,
+		requireIndependentVerification: false,
+		createdAt: "2026-11-05T00:00:00.000Z",
+		updatedAt: "2026-11-05T00:00:00.000Z",
+	};
+	new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
+		routineProfile,
+		"global",
+	);
 	const owner = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
@@ -220,9 +251,45 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			const off = manager.onEntriesPersisted(check);
 			check();
 		});
+	// Event routines are saved through the session's own routine tool; no parent turn is spent on authoring.
+	const routineTool = owner.session.backgroundLanes.createRoutineToolDefinition();
+	if (!routineTool) throw new Error("The host-events session offers no routine tool.");
+	const routineStore = () => owner.session.backgroundLanes.getBotTeamStore();
+	const routineRuns = (routineId: string) => routineStore().listRoutineOccurrences({ routineId });
+	const routinePrompt = "Check the failing CI attempt and report whether the owner needs to act.";
+	const routineSummary = "ci-event-routine completed.";
+	const routineDelivered = "It ran for a CI failure result.";
+	const saveEventRoutine = async (routineId: string, schedule: Record<string, unknown>) => {
+		const result = await routineTool.execute(
+			`host-events-${routineId}`,
+			{ action: "create", routineId, prompt: routinePrompt, schedule, profileId: routineProfile.profileId } as never,
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const first = result.content[0];
+		expect(result.isError, first?.type === "text" ? first.text : undefined).toBeUndefined();
+	};
+	const routineSettled = (routineId: string) =>
+		new Promise<void>((resolve) => {
+			const check = () => {
+				const runs = routineRuns(routineId);
+				if (runs.length !== 1 || runs[0]!.result?.delivery !== "acknowledged") return;
+				off();
+				resolve();
+			};
+			const off = routineStore().subscribe(check);
+			check();
+		});
 	const initialRequests = rootRequests();
 	try {
 		await runJourney1CiCommandPhase(world, subject);
+		// Saved before any CI evidence: the attempt a rerun supersedes is counted, never run on its own.
+		await saveEventRoutine("ci-failure-watch", {
+			kind: "event",
+			source: "ci",
+			workflowPath: repository.workflowPath,
+		});
 		// Replay is held until a complete current observation proves whether an old failure still applies.
 		const initial = expectSeal();
 		await runtime.source.start(observeSink());
@@ -255,8 +322,37 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			...owner.settingsManager.getProactivitySettings(),
 			enabled: false,
 		});
+		// The routine is the owner's standing request, independent of the proactivity switch and of the root note.
+		world.provider.enqueue("worker-a", {
+			...calls("ci-event-routine-report", [
+				{
+					id: "ci-event-routine-report",
+					name: "submit_report",
+					arguments: { status: "completed", summary: routineSummary, ownerUpdate: "none" },
+				},
+			]),
+			check: (request) => {
+				const messages = JSON.stringify(request.context.messages);
+				expect(messages).toContain(routinePrompt);
+				expect(messages, "the run carries the sealed attempt as data").toContain(currentFailure.eventId);
+				expect(messages).not.toContain(oldFailure.eventId);
+				expect(messages).toContain("1 earlier matching attempt was superseded or coalesced into this run.");
+			},
+		});
+		const routineRan = routineSettled("ci-failure-watch");
 		failed.release.release();
 		await withDeadline(world.trace, "CI failure retained while delivery disabled", failed.done.promise);
+		await withDeadline(world.trace, "CI event routine runs once for the sealed failure", routineRan);
+		const [eventRun] = routineRuns("ci-failure-watch");
+		if (!eventRun) throw new Error("The CI event routine has no occurrence.");
+		expect(eventRun.trigger).toMatchObject({ kind: "event", missedCount: 1, event: currentFailure });
+		expect(eventRun.trigger, "no source replay gap was observed").not.toHaveProperty("historyGap");
+		expect(eventRun.result).toMatchObject({ outcome: "succeeded", ownerUpdate: "none", delivery: "acknowledged" });
+		expect(rootRequests(), "a quiet routine result starts no parent turn").toBe(initialRequests);
+		expect(owner.sessionManager.getPendingParentInputs("next-owner-turn")).toHaveLength(1);
+		expect(entries(), "the routine leaves the retained root note undelivered").toEqual([]);
+		// Saved after the current failure was accepted: that failure can never start it.
+		await saveEventRoutine("ci-failure-anchor", { kind: "event", source: "ci" });
 		await runtime.source.stop();
 		await binding.close();
 		owner.settingsManager.setProactivitySettings({
@@ -266,7 +362,11 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		binding = owner.session.backgroundLanes.openHostEventSession(abort.signal);
 		world.provider.enqueue("root", {
 			...text("host-event-before-source-recovery", "Independent work can continue while the CI source reconnects."),
-			check: (request) => expect(JSON.stringify(request.context.messages)).not.toContain(currentFailure.eventId),
+			check: (request) => {
+				const messages = JSON.stringify(request.context.messages);
+				expect(messages).not.toContain(currentFailure.eventId);
+				expect(messages, "the quiet routine result rides with the owner's next turn").toContain(routineSummary);
+			},
 		});
 		await withDeadline(
 			world.trace,
@@ -309,10 +409,24 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await withDeadline(world.trace, "CI failure parent turn settles", failedParent);
 		expect(parentInputOf(entries()[0]!)).toBeDefined();
 		expect(rootRequests() - initialRequests).toBe(3);
-		await icmWaitForChatIdle(world, agentDir, 6);
-		const rememberedFailure = icmReadContinuousRecords(world, icmContinuousStore(agentDir)).filter((record) =>
-			record.text.includes(currentFailure.eventId),
+		// One complete scheduler pass over the re-sealed, ready and current failure.
+		await owner.session.backgroundLanes.tickPersistentRoutines();
+		expect(
+			routineRuns("ci-failure-watch").map((run) => run.occurrenceId),
+			"a re-sealed attempt never runs twice",
+		).toEqual([eventRun.occurrenceId]);
+		expect(routineRuns("ci-failure-anchor"), "an attempt accepted before the routine was saved").toEqual([]);
+		await icmWaitForChatIdle(world, agentDir, 6, (records) =>
+			[currentFailure.eventId, routineDelivered].every((needle) =>
+				records.some((record) => record.kind === "work" && record.text.includes(needle)),
+			),
 		);
+		const remembered = icmReadContinuousRecords(world, icmContinuousStore(agentDir));
+		expect(
+			remembered.filter((record) => record.text.includes(routineDelivered)).map((record) => record.kind),
+			"the consumed routine result enters continuous chat once, as work",
+		).toEqual(["work"]);
+		const rememberedFailure = remembered.filter((record) => record.text.includes(currentFailure.eventId));
 		expect(
 			rememberedFailure.filter((record) => record.kind === "work"),
 			"one consumed event enters continuous chat once",
@@ -414,10 +528,18 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await runtime.source.start(observeSink());
 		await withDeadline(world.trace, "CI correction sealed", corrected.done.promise);
 		await withDeadline(world.trace, "CI correction parent turn settles", correctedParent);
+		await owner.session.backgroundLanes.tickPersistentRoutines();
+		expect(
+			routineRuns("ci-failure-watch").map((run) => run.occurrenceId),
+			"a successful attempt never starts a failure routine",
+		).toEqual([eventRun.occurrenceId]);
+		expect(routineRuns("ci-failure-anchor")).toEqual([]);
 		await runtime.source.stop();
 		expect(entries()).toHaveLength(2);
 		expect(rootRequests() - initialRequests).toBe(6);
-		await icmWaitForChatIdle(world, agentDir, 8);
+		await icmWaitForChatIdle(world, agentDir, 8, (records) =>
+			records.some((record) => record.kind === "work" && record.text.includes(success.eventId)),
+		);
 		const rememberedEvents = icmReadContinuousRecords(world, icmContinuousStore(agentDir)).filter(
 			(record) => record.text.includes(currentFailure.eventId) || record.text.includes(success.eventId),
 		);
@@ -435,7 +557,12 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		expect(recovered.hostEvents[success.eventId].envelope.sourceSequence).toBe(accepted.envelope.sourceSequence + 1);
 		expect(recoveredSource.lastReplayGap, "nothing was retired while the consumer was offline").toBeUndefined();
 		expect(recoveredSource.replayFloor).toBe(1);
-		expect(Object.values(owner.session.backgroundLanes.getTaskRuntimeSnapshot()!.tasks)).toEqual([]);
+		expect(
+			Object.keys(owner.session.backgroundLanes.getTaskRuntimeSnapshot()!.tasks).filter(
+				(taskId) => taskId !== eventRun.executionRef?.taskId,
+			),
+			"host events start no task; only the event routine's own run has one",
+		).toEqual([]);
 		const workerFailure = terminal(4, "failure");
 		collection = {
 			subject,

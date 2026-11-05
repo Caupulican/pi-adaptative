@@ -18,7 +18,7 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
 	let missed = "";
 	if (missedCount > 0 && trigger.kind === "event")
-		missed = ` It also covers ${missedCount} earlier matching CI ${missedCount === 1 ? "attempt" : "attempts"} that did not start a run of their own.`;
+		missed = ` It also covers ${missedCount} earlier matching CI ${missedCount === 1 ? "attempt that did not start a run of its own" : "attempts that did not start a run of their own"}.`;
 	else if (missedCount > 0)
 		missed = ` It also covers ${missedCount} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
 	if (trigger.kind === "event") {

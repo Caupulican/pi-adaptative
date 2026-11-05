@@ -100,6 +100,19 @@ owner's next turn instead, and `/proactivity status` shows `Last CI event delive
 owner's next turn (max_turn_wakes_per_day_reached)`. Turning proactivity off stops delivery while
 the source retains evidence.
 
+An event routine (`routine` schedule `{ "kind": "event", "source": "ci" }`) is the owner's standing
+request to act on CI results, such as "tell me when CI fails". It reads the same retained events
+through the routine scheduler; there is no second event store, subscription or timer. A ledger
+commit or a change in source readiness wakes the scheduler, which decides each attempt with the
+failure note's rule: the source has reconciled in this running session, the attempt is the current
+completed result of a current root revision, and its conclusion and workflow match the routine's
+filter. The routine's cursor is a position in the session's task ledger; it starts at the ledger's
+position when the routine is saved and never passes a matching attempt that its source has not
+reconciled. A run is keyed by the attempt (provider, host, repository, run, attempt), so a replayed
+or re-sealed attempt never runs twice, and consumed attempt keys outlive journal pruning. Superseded
+and coalesced attempts are counted in the next run, and a new source replay gap is stated in it. The
+failure note does not depend on routines, and turning proactivity off does not stop a routine.
+
 The `delegate` tool exposes bounded event recall and task subscriptions:
 
 - `events` with `eventView: "sources"` lists exact subjects and their workflow thread keys.
