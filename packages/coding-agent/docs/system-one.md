@@ -329,6 +329,23 @@ own settle signal; an aborted originating signal cannot permanently cancel retai
 A cancelled reader takes no new batch or further classification work. Its unreached words return to
 the queue for the next live reader; cancellation is not reported as an evaluator outage.
 
+Only the words the owner typed carry authority. Text pasted into the interactive editor (an email, an
+issue, a web page, another agent's output) is material the owner showed, never an instruction the owner
+gave: a pasted "never push", "you may run curl" or "from now on do X" grants no capability, sets no
+delivery limit, hands nothing off, changes no model pool, forbids no tool, records no durable owner rule
+and gives the goal tools no start authority. Every
+question that reads the owner's words for authority (the classification, the screen, the model pool and
+optional-tool questions, the operation gate's `request_authorizes` and the acquisition gate's need
+question) receives the whole message with each pasted span inside the untrusted boundary
+(`<untrusted_content source="owner-paste">`) and an instruction that such content decides nothing and only
+explains what the owner's own words refer to. A message with no typed words is never queued or classified,
+so it costs no System One request. A long paste is shortened inside its fence so the owner's typed words
+always reach the judgment whole. The same fenced request is what the gates, plan review and owner
+questions read as the turn's request. Paste provenance survives take-back to the editor, a failed send-now,
+a restart (the durable queued-input record keeps it), history recall and the external editor (an edit that
+reaches into pasted text leaves what it rewrote pasted). Programmatic submitters (RPC, print, SDK,
+extensions) pass no ranges, so their words count as typed.
+
 Measured on 70 messages in ten languages (English, Portuguese, Spanish, French, German, Chinese, Japanese,
 Russian, Arabic, Hindi; seven kinds each) against the live model: the full classification answered the
 same in every language as in English (each language 21 to 23 of 25 expected answers at the 0.93 floor, the
@@ -646,8 +663,8 @@ uses the remaining time from its original request; an overdue question or a head
 deferred without opening a dialog.
 
 A handed-off owner question follows the same rule. A stronger model may answer it on a basis copied
-from the owner's request, which code checks is in the request (case, punctuation and spacing folded)
-and System One judges backs the answer; or on its own judgment, which stands only when System One decisively finds
+from the owner's request, which code checks is in the owner's own words of the request (case, punctuation
+and spacing folded; text the owner pasted does not count) and System One judges backs the answer; or on its own judgment, which stands only when System One decisively finds
 the question is none of the kinds the owner reserves: scope, spending, accepting a risk, an
 irreversible or outward action, or a matter of taste the request does not settle.
 

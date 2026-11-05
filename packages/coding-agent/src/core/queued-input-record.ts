@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
+import { normalizeOwnerRanges, type OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import { isImagePinClaimId, type SessionImageStore } from "./session-image-store.ts";
 import { isMissingFileError, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
@@ -48,6 +49,8 @@ export interface RecordableQueuedInput {
 	images?: readonly ImageContent[];
 	origin?: QueuedInputOrigin;
 	preservedImages?: PreservedQueuedImages;
+	/** Ranges of `text` the owner pasted rather than typed, so a restored input keeps its provenance. */
+	pasted?: readonly OwnerTextRange[];
 }
 
 interface RecordedImage {
@@ -98,6 +101,8 @@ interface RecordedInput {
 	text: string;
 	images?: RecordedImage[];
 	origin?: QueuedInputOrigin;
+	/** Canonical (`normalizeOwnerRanges`) and non-empty; absent when nothing was pasted. */
+	pasted?: OwnerTextRange[];
 }
 
 /**
@@ -253,12 +258,14 @@ function writeRecord(
 				image.name = reference.name;
 				images.push(reference);
 			}
+			const pasted = normalizeOwnerRanges(input.pasted, input.text.length);
 			recorded.push({
 				id: input.id,
 				kind: input.kind,
 				text: input.text,
 				...(images.length > 0 ? { images } : {}),
 				...(input.origin ? { origin: input.origin } : {}),
+				...(pasted.length > 0 ? { pasted } : {}),
 			});
 			textBytes += bytes;
 		}
@@ -370,6 +377,20 @@ function isRecordedInput(value: unknown): value is RecordedInput {
 	) {
 		return false;
 	}
+	// Stored ranges are already canonical for their text: a record is never repaired on load.
+	if (
+		value.pasted !== undefined &&
+		!(
+			Array.isArray(value.pasted) &&
+			value.pasted.length > 0 &&
+			value.pasted.every(
+				(range): range is OwnerTextRange =>
+					isPlainRecord(range) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end),
+			) &&
+			JSON.stringify(value.pasted) === JSON.stringify(normalizeOwnerRanges(value.pasted, value.text.length))
+		)
+	)
+		return false;
 	return (
 		value.images === undefined ||
 		(Array.isArray(value.images) &&
@@ -391,6 +412,7 @@ export interface RestoredQueuedInputs {
 		images?: ImageContent[];
 		origin?: QueuedInputOrigin;
 		preservedImages?: PreservedQueuedImages;
+		pasted?: readonly OwnerTextRange[];
 	}>;
 	/**
 	 * Inputs the record names whose user entry is on the branch (in the session, for the own-turn record): delivered, by a
@@ -522,6 +544,7 @@ function restoreRecordedInputs(
 			text: input.text,
 			...(images.length > 0 ? { images } : {}),
 			...(input.origin ? { origin: input.origin } : {}),
+			...(input.pasted ? { pasted: input.pasted } : {}),
 			...(readFailed
 				? { preservedImages: { images: preserved, ...(payload.pinClaim ? { pinClaim: payload.pinClaim } : {}) } }
 				: {}),

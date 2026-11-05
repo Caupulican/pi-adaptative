@@ -1180,7 +1180,8 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	// runs and delivers it, so it becomes the owner's rule; the cut directive is held at `before_agent_start`, before its user entry,
 	// and the capture is taken there. The restart's interrupt returns it to the queue held, and the cut writes back the record that
 	// names it: the next session restores it held, once, and not the delivered one, and only the delivered directive is a rule.
-	// The rules are project-scoped per agent directory, so this owner has its own.
+	// The rules are project-scoped per agent directory, so this owner has its own. Its opening turn carries the control's
+	// directive words pasted: they never become a rule, while the same words typed by the control do.
 	if (!world.systemOne.enabled) {
 		const promotedDir = `${world.agentDir}-promoted`;
 		const PROMOTED_CONTROL_HOLD = "Owner prompt held while the delivered directive waits.";
@@ -1240,11 +1241,29 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 				reply: { content: [{ type: "text", text: "The delivered directive ran." }] },
 			},
 		);
+		// Negative control: the opening turn carries, pasted, the very directive words the control below types. Pasted words are
+		// never the owner's instruction: the turn records no rule, grants nothing, and costs its one scripted reply only.
+		const promotedOpenTyped = "Open the session the promoted directives run in.";
+		const promotedOpen = `${promotedOpenTyped}\nA colleague's note: no TDD in this project.`;
+		const promotedGrantsBefore = promotedSession.getEdgeGrants();
+		const promotedRootRequests = () =>
+			world.provider.requests.filter((request) => request.model.id === "root").length;
+		const promotedRequestsBefore = promotedRootRequests();
 		await withDeadline(
 			trace,
 			"promoted: the opening turn writes the session file",
-			promotedSession.prompt("Open the session the promoted directives run in."),
+			promotedSession.prompt(promotedOpen, {
+				pasted: [{ start: promotedOpenTyped.length + 1, end: promotedOpen.length }],
+			}),
 		);
+		expect(
+			{
+				rules: ruleForbids(promotedSession),
+				grants: promotedSession.getEdgeGrants(),
+				requests: promotedRootRequests() - promotedRequestsBefore,
+			},
+			"a pasted directive records no owner rule, grants nothing and costs no extra request",
+		).toEqual({ rules: [], grants: promotedGrantsBefore, requests: 1 });
 		// One promotion: `words` is queued behind a prompt held in its input hook, and the owner interrupts that prompt.
 		const promote = async (held: typeof promotedControlHold, holdWords: string, words: string, label: string) => {
 			const interrupt = new AbortController();

@@ -5,6 +5,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import type { OwnerTextRange, OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { OwnerInputEnd, OwnerInputId, OwnerInputLedger, OwnerInputOutcome } from "./owner-input-ledger.ts";
 import type {
 	PendingInputHandle,
@@ -42,13 +43,13 @@ export interface QueuedInputPersistenceControllerDeps {
 	isStreaming(): boolean;
 	/** The full classification of the owner's words, once, before they are admitted (`SessionEdgeIntentController.judgeOwnerRequest`). */
 	judgeOwnerRequest(
-		text: string,
+		words: OwnerWords,
 		signal: AbortSignal | undefined,
 		acceptedOrder: number | undefined,
 	): Promise<OwnerRequestClassificationOutcome>;
 	/** Delivered owner words join the owner-policy queue with that judgment (`SessionEdgeIntentController.enqueueOwnerWords`). */
 	enqueueOwnerWords(
-		text: string,
+		words: OwnerWords,
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 	): void;
@@ -96,6 +97,7 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			return {
 				text: input.text,
 				images: recoverQueuedImages(this.deps.getSessionImageStore(), input.preservedImages),
+				...(input.pasted ? { pasted: input.pasted } : {}),
 			};
 		} catch (error) {
 			this.deps.emitWarning(
@@ -120,8 +122,9 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		text: string,
 		images: ImageContent[] | undefined,
 		existing: PendingInputHandle | undefined,
+		pasted?: readonly OwnerTextRange[],
 	): PendingInputHandle {
-		const kept = this.deps.getPendingQueue().keep(kind, text, images, existing);
+		const kept = this.deps.getPendingQueue().keep(kind, text, images, existing, pasted);
 		this.deps.emitQueueUpdate();
 		return kept;
 	}
@@ -153,7 +156,7 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		let admitted = false;
 		let failure: { readonly error: unknown } | undefined;
 		try {
-			const classified = await this.deps.judgeOwnerRequest(text, pending.signal, acceptedOrder);
+			const classified = await this.deps.judgeOwnerRequest({ text }, pending.signal, acceptedOrder);
 			if ("cancelled" in classified && classified.cancelled) {
 				if (classified.contextChanged) pendingQueue.hold(pending);
 				return outcome;
@@ -163,7 +166,7 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			this.deps.ownerInputs.move(inputId, "judged");
 			// The owner's admitted words become policy when the run delivers them, never when they are taken back first.
 			this.deps.ownerInputs.whenDelivered(inputId, () =>
-				this.deps.enqueueOwnerWords(text, acceptedOrder, classified),
+				this.deps.enqueueOwnerWords({ text }, acceptedOrder, classified),
 			);
 			admitted = pendingQueue.admit(pending, {
 				text: pendingQueue.prepareQueuedMessageText(text),

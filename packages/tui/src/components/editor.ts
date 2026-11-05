@@ -14,6 +14,7 @@ import {
 	type EditorTextRange,
 	firstNonWhitespaceCharacter,
 	mergeTextRanges,
+	replaceTextRanges,
 } from "../editor-component.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, isLegacyMultilineNewline, matchesKey } from "../keys.ts";
@@ -256,31 +257,6 @@ type ProvenanceEdit =
 	| { readonly kind: "paste"; readonly at: number; readonly length: number }
 	| { readonly kind: "restore"; readonly ranges: EditorTextRange[] };
 
-/**
- * `ranges` after `[start, end)` of their text was replaced by `inserted` code units: ranges before it stay, ranges after
- * it shift, a range overlapping it keeps only its parts outside it. The inserted text is added as a range when `pasted`.
- */
-function replaceRanges(
-	ranges: readonly EditorTextRange[],
-	start: number,
-	end: number,
-	inserted: number,
-	pasted: boolean,
-): EditorTextRange[] {
-	const delta = inserted - (end - start);
-	const result: EditorTextRange[] = [];
-	for (const range of ranges) {
-		if (range.end <= start) result.push(range);
-		else if (range.start >= end) result.push({ start: range.start + delta, end: range.end + delta });
-		else {
-			if (range.start < start) result.push({ start: range.start, end: start });
-			if (range.end > end) result.push({ start: start + inserted, end: range.end + delta });
-		}
-	}
-	if (pasted) result.push({ start, end: start + inserted });
-	return mergeTextRanges(result);
-}
-
 function piecesLength(pieces: readonly string[]): number {
 	let length = 0;
 	for (const piece of pieces) length += piece.length;
@@ -477,7 +453,7 @@ export class Editor implements Component, Focusable {
 	private bracketedPaste = new BracketedPasteBuffer();
 
 	// Prompt history for up/down navigation
-	private history: string[] = [];
+	private history: Array<{ readonly text: string; readonly pasted: readonly EditorTextRange[] }> = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 
 	/**
@@ -557,14 +533,14 @@ export class Editor implements Component, Focusable {
 		if (edit?.kind === "restore") this.pastedRanges = edit.ranges;
 		const next = this.expandedPieces(this.state.lines);
 		if (edit?.kind === "paste") {
-			this.pastedRanges = replaceRanges(this.pastedRanges, edit.at, edit.at, edit.length, true);
+			this.pastedRanges = replaceTextRanges(this.pastedRanges, edit.at, edit.at, edit.length, true);
 		} else if (!edit && this.provenanceBaseline) {
 			const previous = this.provenanceBaseline;
 			const previousLength = piecesLength(previous);
 			const nextLength = piecesLength(next);
 			const prefix = commonPrefixLength(previous, next);
 			const suffix = commonSuffixLength(previous, next, Math.min(previousLength, nextLength) - prefix);
-			this.pastedRanges = replaceRanges(
+			this.pastedRanges = replaceTextRanges(
 				this.pastedRanges,
 				prefix,
 				previousLength - suffix,
@@ -650,13 +626,24 @@ export class Editor implements Component, Focusable {
 	 * Add a prompt to history for up/down arrow navigation.
 	 * Called after successful submission.
 	 */
-	addToHistory(text: string): void {
+	addToHistory(text: string, pasted?: readonly EditorTextRange[]): void {
 		if (this.privateContent) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Don't add consecutive duplicates
-		if (this.history.length > 0 && this.history[0] === trimmed) return;
-		this.history.unshift(trimmed);
+		// The ranges of the trimmed text the user pasted, so recalling it restores them.
+		const from = text.length - text.trimStart().length;
+		const ranges = mergeTextRanges(
+			(pasted ?? []).map((range) => ({
+				start: Math.max(0, range.start - from),
+				end: Math.min(trimmed.length, range.end - from),
+			})),
+		);
+		// Don't add consecutive duplicates; the newest submission's provenance is the one recalled.
+		if (this.history.length > 0 && this.history[0]!.text === trimmed) {
+			this.history[0] = { text: trimmed, pasted: ranges };
+			return;
+		}
+		this.history.unshift({ text: trimmed, pasted: ranges });
 		// Limit history size
 		if (this.history.length > 100) {
 			this.history.pop();
@@ -704,12 +691,11 @@ export class Editor implements Component, Focusable {
 
 		this.historyIndex = newIndex;
 
-		if (this.historyIndex === -1) {
-			// Returned to "current" state - clear editor
-			this.setTextInternal("");
-		} else {
-			this.setTextInternal(this.history[this.historyIndex] || "");
-		}
+		// A recalled entry is restored with the ranges of it the user pasted, never re-derived from the text it replaces.
+		const entry = this.historyIndex === -1 ? undefined : this.history[this.historyIndex];
+		this.provenanceEdit = { kind: "restore", ranges: entry ? [...entry.pasted] : [] };
+		// Returned to "current" state (-1): clear editor
+		this.setTextInternal(entry?.text ?? "");
 	}
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -1278,7 +1264,8 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
-	setText(text: string): void {
+	/** Replace the text; `pasted` are the ranges of `text` the user pasted (restored text keeps them), else it is typed. */
+	setText(text: string, pasted?: readonly EditorTextRange[]): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.historyIndex = -1; // Exit history browsing mode
@@ -1289,8 +1276,28 @@ export class Editor implements Component, Focusable {
 		}
 		this.pastes.clear();
 		this.pasteCounter = 0;
-		this.provenanceEdit = { kind: "restore", ranges: [] };
+		this.provenanceEdit = { kind: "restore", ranges: pasted?.length ? this.normalizeRanges(text, pasted) : [] };
 		this.setTextInternal(normalized);
+	}
+
+	/** `ranges` of `text` as offsets of `normalizeText(text)`: a line ending or tab it rewrites moves what follows it. */
+	private normalizeRanges(text: string, ranges: readonly EditorTextRange[]): EditorTextRange[] {
+		const expandTabs = !(this.privateContent || this.exactText);
+		const at: number[] = [];
+		let offset = 0;
+		for (let index = 0; index < text.length; index++) {
+			at.push(offset);
+			// "\r\n" becomes one "\n": both of its offsets map to that line break.
+			if (text[index] === "\r" && text[index + 1] === "\n") continue;
+			offset += expandTabs && text[index] === "\t" ? 4 : 1;
+		}
+		at.push(offset);
+		const clamp = (value: number): number => at[Math.min(Math.max(0, value), text.length)]!;
+		return mergeTextRanges(
+			ranges
+				.filter((range) => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end))
+				.map((range) => ({ start: clamp(range.start), end: clamp(range.end) })),
+		);
 	}
 
 	private resetState(preserveHistory: boolean): void {

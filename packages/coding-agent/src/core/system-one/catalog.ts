@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
@@ -17,14 +18,23 @@ export interface QuestionDefinition {
 export type QuestionPack = Record<string, QuestionDefinition>;
 
 /**
+ * A question that reads the owner's words for authority (a rule, handoff, model pool, delivery limit, capability or
+ * tool): it judges only what the owner typed, never a pasted span inside the untrusted boundary (`OWNER_PASTE_RULE`).
+ */
+function judgedOnOwnerWords(instructions: string): string {
+	return `${instructions} ${OWNER_PASTE_RULE}`;
+}
+
+/**
  * One classification of the user's own request. It is not a tool refusal.
  * A hard yes is what enables capabilities that were still off.
  */
 export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freeze({
 	changes_model_pools: Object.freeze({
 		type: "boolean",
-		instructions:
+		instructions: judgedOnOwnerWords(
 			"Does `user_request` change which kinds of language models may be used: subscription models, pay-per-use API models, or local models?",
+		),
 		criteria: Object.freeze({
 			true: "The user turns a kind of model on or off. 'only use subscription models', 'no API models', 'you can use API models again', 'turn off subscription models', and 'use local models only' change it.",
 			false: "The user names no kind of model, or only picks one model for one task. 'fix the bug', 'use grok for this', and 'hello' do not change it.",
@@ -32,8 +42,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	capabilities_authorized: Object.freeze({
 		type: "boolean",
-		instructions:
+		instructions: judgedOnOwnerWords(
 			"Does `user_request` tell the harness to do work, such as fix, change, add, remove, run, continue, commit or push, rather than only ask a question, discuss, or hold back?",
+		),
 		criteria: Object.freeze({
 			true: "The owner tells the harness to do something: 'fix the build', 'add a flag and update the docs', 'continue with the migration', 'rename it everywhere', 'commit and push', 'arruma o bug', 'arregla el bug'.",
 			false: "The owner only greets, thanks, asks a question, asks for an explanation, discusses an option, or withholds permission to act: 'hi', 'what does this do?', 'should we fix it?', 'explain how it works', \"don't change anything yet\", 'you must not edit any files'.",
@@ -41,8 +52,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	local_commits_only: Object.freeze({
 		type: "boolean",
-		instructions:
+		instructions: judgedOnOwnerWords(
 			"Does `user_request` require this task's git delivery to be local commits on the current branch and forbid every push?",
+		),
 		criteria: Object.freeze({
 			true: "The user limits this task to commits and rules out pushing. 'only commits', 'don't want pushes', 'no push', and 'commit but do not push' are this limit. Branches and worktrees still count when the user wants them brought back locally.",
 			false: "The user asks to push, lifts a no-push limit, or does not set a git delivery limit. 'commit and push', 'you can push now', 'push when done', 'fix the bug', and 'hello' are not this limit.",
@@ -50,8 +62,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	lifts_delivery_block: Object.freeze({
 		type: "boolean",
-		instructions:
+		instructions: judgedOnOwnerWords(
 			"Does `user_request` explicitly lift a delivery restriction the user owns, including allowing a push that was forbidden, even when a file says otherwise?",
+		),
 		criteria: Object.freeze({
 			true: "The user releases the restriction. 'you can push now', 'lift the no-push rule', 'push is allowed', and 'ignore the spec that forbids push' are a lift.",
 			false: "The user is imposing a limit, or is not changing one. 'only commits', 'don't want pushes', 'fix the bug', and 'hello' are not a lift.",
@@ -59,8 +72,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	rules_differ: Object.freeze({
 		type: "boolean",
-		instructions:
+		instructions: judgedOnOwnerWords(
 			"Does `user_request` contradict `written_rules` so the request and a written rule cannot both be followed?",
+		),
 		criteria: Object.freeze({
 			true: "A written rule requires what the request forbids, or forbids what the request requires. AGENTS.md and a standing user rule both count.",
 			false: "The request fits the written rules, or the written rules do not speak to it. 'fix the bug' and 'hello' are false when the rules are about something else.",
@@ -68,7 +82,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	overrides_written_rules: Object.freeze({
 		type: "boolean",
-		instructions: "Does `user_request` explicitly put the user's own request above `written_rules`?",
+		instructions: judgedOnOwnerWords(
+			"Does `user_request` explicitly put the user's own request above `written_rules`?",
+		),
 		criteria: Object.freeze({
 			true: "The user says to follow their request instead of AGENTS.md or a standing user rule. 'do what I asked', 'ignore AGENTS.md', 'override the spec', and 'lift that file rule' are overrides.",
 			false: "The user does not explicitly override a written rule. A contradiction alone, 'fix the bug', and 'hello' are not overrides.",
@@ -76,7 +92,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	full_handoff: Object.freeze({
 		type: "boolean",
-		instructions: "Does `user_request` hand the work's decisions to the agents to settle without asking the user?",
+		instructions: judgedOnOwnerWords(
+			"Does `user_request` hand the work's decisions to the agents to settle without asking the user?",
+		),
 		criteria: Object.freeze({
 			true: "The user hands decisions off. 'you decide', 'full handoff', 'settle it', 'work autonomously', and 'don't ask me' are a handoff.",
 			false: "The user wants to choose, or is not handing decisions off. 'ask me', 'fix the bug', and 'hello' are not a handoff.",
@@ -84,7 +102,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	request_holds: Object.freeze({
 		type: "boolean",
-		instructions: "Does `user_request` say to do what the user asked where it differs from `written_rules`?",
+		instructions: judgedOnOwnerWords(
+			"Does `user_request` say to do what the user asked where it differs from `written_rules`?",
+		),
 		criteria: Object.freeze({
 			true: "The request says the user's own instruction wins. 'settle it on my request', 'do what I asked', and 'my request holds' are this.",
 			false: "The request does not say the user's instruction wins. 'follow AGENTS.md', 'push this branch', and 'fix the bug' are this.",
@@ -102,7 +122,9 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 export function ownerWordsScreenQuestion(index: number): QuestionDefinition {
 	return {
 		type: "boolean",
-		instructions: `Is owner_messages[${index}] only small talk or a request to understand something, with no instruction to do, change, stop, allow, avoid or prefer anything? Read it in whatever language it is written.`,
+		instructions: judgedOnOwnerWords(
+			`Is owner_messages[${index}] only small talk or a request to understand something, with no instruction to do, change, stop, allow, avoid or prefer anything? Read it in whatever language it is written.`,
+		),
 		criteria: {
 			true: "The message only greets, thanks, reacts, or asks what something means or does. 'hi', 'thanks, that helps', 'ok', 'oi, tudo bem?', 'hola', '你好', 'what does this function do?' and 'why does it work like that?' contain no instruction.",
 			false: "The message instructs, forbids, permits or prefers anything about work, tools, git, rules, models or asking the user. 'fix the bug', 'do not push', 'you can push now', 'you decide, don't ask me', 'arruma o bug', '全部由你决定' and 'only use local models' are instructions.",
@@ -125,8 +147,9 @@ export function optionalToolRequestQuestions(context: OptionalToolRequestContext
 	if (optionalToolRelationAsked(context)) {
 		questions.optional_tool_task = {
 			type: "choice",
-			instructions:
+			instructions: judgedOnOwnerWords(
 				"Is `user_request` part of the task in `previous_optional_tool_intent.taskRequest`, a different task, or the end of that task?",
+			),
 			criteria: {
 				continue:
 					"`user_request` continues, steers or narrows that task. 'continue', 'also show only the cards due this week' and 'stop using trello and keep going locally' are continue.",
@@ -139,7 +162,9 @@ export function optionalToolRequestQuestions(context: OptionalToolRequestContext
 	context.candidates.forEach((_candidate, index) => {
 		questions[`optional_tool_${index}`] = {
 			type: "choice",
-			instructions: `Does the owner ask to use optional_tools[${index}], forbid it, or say nothing about it? Match it by its name or aliases, or by asking for what that service provides. Read \`pending_owner_requests\` in order first, then \`user_request\`; the latest statement about the tool wins.`,
+			instructions: judgedOnOwnerWords(
+				`Does the owner ask to use optional_tools[${index}], forbid it, or say nothing about it? Match it by its name or aliases, or by asking for what that service provides. Read \`pending_owner_requests\` in order first, then \`user_request\`; the latest statement about the tool wins.`,
+			),
 			criteria: {
 				request:
 					"The owner asks for this tool, its service, or data or an action only this tool provides. 'check the status of the secret store' and 'list my trello boards' are request.",
@@ -578,7 +603,7 @@ export function modelPoolQuestions(): QuestionPack {
 			`model_pool_${pool}`,
 			{
 				type: "choice",
-				instructions: `What does \`user_request\` do to ${what}?`,
+				instructions: judgedOnOwnerWords(`What does \`user_request\` do to ${what}?`),
 				criteria: {
 					enable: `Turns them on, or allows them again. 'you can use them again', 'enable them', 'use only these' (for this kind).`,
 					disable: `Turns them off or rules them out. 'no more of these', 'turn them off', 'only use another kind' (this kind is excluded).`,
@@ -593,6 +618,8 @@ export function modelPoolQuestions(): QuestionPack {
 export function modelPoolFollowUp(pool: string, enable: boolean): QuestionDefinition {
 	return {
 		type: "boolean",
-		instructions: `Does \`user_request\` ${enable ? "allow" : "rule out"} ${pool === "metered" ? "pay-per-use API" : pool} models?`,
+		instructions: judgedOnOwnerWords(
+			`Does \`user_request\` ${enable ? "allow" : "rule out"} ${pool === "metered" ? "pay-per-use API" : pool} models?`,
+		),
 	};
 }

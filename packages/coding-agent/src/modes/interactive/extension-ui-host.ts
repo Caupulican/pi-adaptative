@@ -731,8 +731,11 @@ export class ExtensionUiHost {
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
 		this.editorComponentFactory = factory;
 
-		// Save text from current editor before switching
-		const currentText = this.ui.getEditor().getText();
+		// Save the current editor's words before switching: expanded (a collapsed paste is its content, which the next
+		// editor does not hold) and with the ranges the owner pasted, which stay pasted in the next editor.
+		const previousEditor = this.ui.getEditor();
+		const currentText = previousEditor.getExpandedText?.() ?? previousEditor.getText();
+		const currentPasted = previousEditor.getPastedRanges?.();
 
 		if (factory) {
 			// Create the custom editor with tui, theme, and keybindings
@@ -753,7 +756,7 @@ export class ExtensionUiHost {
 			}
 
 			// Copy text from previous editor
-			newEditor.setText(currentText);
+			newEditor.setText(currentText, currentPasted);
 
 			// Copy appearance settings if supported
 			if (newEditor.borderColor !== undefined) {
@@ -794,7 +797,7 @@ export class ExtensionUiHost {
 			this.ui.setEditor(newEditor);
 		} else {
 			// Restore default editor with text from custom editor
-			this.ui.defaultEditor.setText(currentText);
+			this.ui.defaultEditor.setText(currentText, currentPasted);
 			this.ui.setEditor(this.ui.defaultEditor);
 		}
 
@@ -829,7 +832,9 @@ export class ExtensionUiHost {
 		},
 	): Promise<T> {
 		this.activeExtensionDialogCancel?.();
-		const savedText = this.ui.getEditor().getText();
+		const savedEditor = this.ui.getEditor();
+		const savedText = savedEditor.getExpandedText?.() ?? savedEditor.getText();
+		const savedPasted = savedEditor.getPastedRanges?.();
 		const isOverlay = options?.overlay ?? false;
 
 		return new Promise((resolve, reject) => {
@@ -850,7 +855,7 @@ export class ExtensionUiHost {
 				if (isOverlay) {
 					overlayHandle?.hide();
 				} else if (restoreEditor) {
-					this.ui.getEditor().setText(savedText);
+					this.ui.getEditor().setText(savedText, savedPasted);
 					this.ui.overlayHost.swap(this.ui.getEditor(), { focusMode: "restore" });
 				}
 			};

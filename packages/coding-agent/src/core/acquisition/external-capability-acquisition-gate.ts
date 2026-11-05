@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
+import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
 import type {
 	AcquisitionDecision,
 	AcquisitionDisposition,
@@ -41,7 +42,8 @@ export const ACQUISITION_DECISION_PROGRAM = {
 	decisions: [
 		{
 			id: "acquisition_required_for_objective",
-			instruction: "Does `request` need what `command` downloads or installs in order to be done?",
+			// The request is the owner's, with what they pasted fenced: a pasted install step is not the owner asking for it.
+			instruction: `Does \`request\` need what \`command\` downloads or installs in order to be done? ${OWNER_PASTE_RULE}`,
 		},
 		{
 			id: "exceeds_request",

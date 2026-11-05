@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { EditorComponent, TUI } from "@caupulican/pi-tui";
+import { carryTextRanges, type EditorComponent, type TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import { runExternalEditor } from "../../utils/external-editor-command.ts";
 import { waitForStdinEvent } from "../../utils/stdin-events.ts";
@@ -76,7 +76,10 @@ export async function openExternalEditor(host: ExternalEditorHost): Promise<void
 
 		const result = await editInExternalEditor({ command: editorCmd, content: currentText });
 		if (result.status === "complete") {
-			host.editor.setText(result.content);
+			// The pasted ranges follow the edit. One edit is diffed as a whole, so a change that reaches into pasted text
+			// leaves everything it rewrote pasted: an external editor never turns pasted words into typed ones.
+			const pasted = host.editor.getPastedRanges?.() ?? [];
+			host.editor.setText(result.content, carryTextRanges(currentText, result.content, pasted, "pasted"));
 		}
 	} finally {
 		// Restart TUI

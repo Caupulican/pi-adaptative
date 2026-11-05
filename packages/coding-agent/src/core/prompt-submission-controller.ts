@@ -27,6 +27,7 @@ import {
 } from "./goals/goal-continuation-prompt.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import type { LocalRuntimeController } from "./local-runtime-controller.ts";
 import type { MemoryController } from "./memory-controller.ts";
@@ -51,6 +52,7 @@ import type { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE } from "./reply-route.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
 import type { RuntimeWorkLease } from "./runtime-generation-admission.ts";
+import { carryOwnerWords, fenceOwnerPaste, ownerTypedText } from "./security/owner-paste-boundary.ts";
 import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import { isSessionSettled, type SessionSettlementState } from "./session-settlement.ts";
 import type { SessionWorkState } from "./session-work-state.ts";
@@ -136,13 +138,13 @@ export interface PromptSubmissionControllerDeps {
 	readonly ownerPolicy: Pick<OwnerPolicyQueue<OwnerRequestClassificationOutcome>, "settle">;
 	/** Owner words join the owner-policy queue, with the judgment they received at submission if any (`SessionEdgeIntentController.enqueueOwnerWords`). */
 	enqueueOwnerWords(
-		text: string,
+		words: OwnerWords,
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 		signal?: AbortSignal,
 	): void;
 	/** Owner words accepted with their submission order wait for an optional-tool judgment to carry them (`SessionEdgeIntentController.registerOwnerWords`). */
-	registerOwnerWords(acceptedOrder: number, text: string): void;
+	registerOwnerWords(acceptedOrder: number, words: OwnerWords): void;
 	/** Accepted owner words that never became owner input are carried by no judgment (`SessionEdgeIntentController.releaseOwnerWords`). */
 	releaseOwnerWords(acceptedOrder: number | undefined): void;
 	readonly accountModels: Pick<AccountModelCatalog, "ready">;
@@ -171,7 +173,7 @@ export interface PromptSubmissionControllerDeps {
 	 * queue settles it (see `SessionEdgeIntentController.judgeOwnerRequest`).
 	 */
 	judgeQueuedOwnerRequest(
-		request: string,
+		words: OwnerWords,
 		signal: AbortSignal | undefined,
 		acceptedOrder: number | undefined,
 	): Promise<OwnerRequestClassificationOutcome>;
@@ -206,7 +208,7 @@ export interface PromptSubmissionControllerDeps {
 	noteSystemOneTaskDirectoryUnavailable(error: unknown): void;
 	getSystemOneController(): SystemOneController | undefined;
 	enableCapabilitiesAuthorizedByUser(
-		userRequest: string,
+		words: OwnerWords,
 		signal?: AbortSignal,
 		trustedOwner?: boolean,
 		acceptedOrder?: number,
@@ -242,6 +244,10 @@ export class PromptSubmissionController {
 		return this.foregroundPromptLeaseValue;
 	}
 
+	/**
+	 * The request the latest turn ran on, as models and System One read it: the expanded words with every span the owner
+	 * pasted inside the untrusted boundary (`fenceOwnerPaste`), so no reader takes pasted text for the owner's instruction.
+	 */
 	get lastUserRequest(): string {
 		return this.lastUserRequestValue;
 	}
@@ -259,7 +265,7 @@ export class PromptSubmissionController {
 		text: string,
 	): { readonly inputId: OwnerInputId; readonly acceptedOrder: number } {
 		const acceptedOrder = ++this.ownerSubmissionOrder;
-		return { inputId: this.acceptInput(kind, text, acceptedOrder).inputId, acceptedOrder };
+		return { inputId: this.acceptInput(kind, { text }, acceptedOrder).inputId, acceptedOrder };
 	}
 
 	/**
@@ -267,16 +273,16 @@ export class PromptSubmissionController {
 	 * words (`acceptedOrder` defined; an extension's message or a host-authored turn is not the owner speaking) wait,
 	 * registered, for a judgment to carry them, and become owner policy and the answer to an operator blocker when the input
 	 * is delivered, never before: an input taken back, held or cancelled first decides nothing. However the input ends
-	 * undelivered, its words are released.
+	 * undelivered, its words are released. `words.pasted` marks what the owner pasted: only typed words decide anything.
 	 */
-	private acceptInput(source: OwnerInputSource, text: string, acceptedOrder: number | undefined): AcceptedInput {
+	private acceptInput(source: OwnerInputSource, words: OwnerWords, acceptedOrder: number | undefined): AcceptedInput {
 		const input: AcceptedInput = {
 			inputId: this.deps.ownerInputs.accept(source),
 			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
 		};
 		if (acceptedOrder !== undefined) {
-			this.deps.registerOwnerWords(acceptedOrder, text);
-			this.deps.ownerInputs.whenDelivered(input.inputId, ({ entryId }) => this.noteOwnerSpoke(text, entryId));
+			this.deps.registerOwnerWords(acceptedOrder, words);
+			this.deps.ownerInputs.whenDelivered(input.inputId, ({ entryId }) => this.noteOwnerSpoke(words, entryId));
 		}
 		this.deps.ownerInputs.whenUndelivered(input.inputId, (end) => {
 			input.ended = end;
@@ -286,10 +292,10 @@ export class PromptSubmissionController {
 	}
 
 	/** The owner's delivered words, persisted as `entryId`. */
-	private noteOwnerSpoke(text: string, entryId: string): void {
+	private noteOwnerSpoke(words: OwnerWords, entryId: string): void {
 		// An owner development directive is policy, not prompt text: it is captured durably here, with the entry that carried
-		// it, before that turn can be compacted away.
-		this.deps.ownerRules.record(text, entryId);
+		// it, before that turn can be compacted away. Only typed words state one: a pasted directive is never the owner's.
+		this.deps.ownerRules.record(ownerTypedText(words), entryId);
 		// The owner's words reached the session: an operator blocker waited for exactly that.
 		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
 	}
@@ -369,9 +375,10 @@ export class PromptSubmissionController {
 		// becomes carries it, and its persistence delivers it. A hidden internal turn is no one's input and has none. Its
 		// words are judged only where their outcome is read (a fresh turn's at its first tool call), so a queued input judged
 		// before then carries them; until something judges, carries or releases them, they wait registered.
+		const ownerWords: OwnerWords = { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
 		const input = options?.internalContextType
 			? undefined
-			: this.acceptInput(options?.source === "extension" ? "extension" : "prompt", text, acceptedOrder);
+			: this.acceptInput(options?.source === "extension" ? "extension" : "prompt", ownerWords, acceptedOrder);
 		const inputId = input?.inputId;
 		const busyAtSubmission = this.deps.getSessionWorkState().busy;
 		const queuedBehavior = options?.internalContextType ? undefined : options?.streamingBehavior;
@@ -384,8 +391,23 @@ export class PromptSubmissionController {
 		const queuedOwnerInput =
 			queuedBehavior && (kept !== undefined || busyAtSubmission)
 				? kept
-					? this.deps.pendingQueue.resubmit(kept, queuedBehavior, text, options?.images, options?.origin, inputId)
-					: this.deps.pendingQueue.register(queuedBehavior, text, options?.images, options?.origin, inputId)
+					? this.deps.pendingQueue.resubmit(
+							kept,
+							queuedBehavior,
+							text,
+							options?.images,
+							options?.origin,
+							inputId,
+							options?.pasted,
+						)
+					: this.deps.pendingQueue.register(
+							queuedBehavior,
+							text,
+							options?.images,
+							options?.origin,
+							inputId,
+							options?.pasted,
+						)
 				: undefined;
 		// An input that does not queue here runs as its own turn: it is recorded from now until it is delivered or ends, so a
 		// crash or a restart while its turn is prepared restores it held. One that queues later is the queued record's then.
@@ -397,6 +419,7 @@ export class PromptSubmissionController {
 				text,
 				options?.images,
 				options?.origin,
+				options?.pasted,
 			);
 		const keptTaken = kept !== undefined && !queuedBehavior && this.deps.pendingQueue.takeKept(kept);
 		if (queuedOwnerInput || kept) this.deps.emitQueueUpdate();
@@ -410,7 +433,7 @@ export class PromptSubmissionController {
 		const queuedOwnerClassification =
 			queuedOwnerInput && busyAtSubmission && acceptedOrder !== undefined
 				? this.deps.judgeQueuedOwnerRequest(
-						text,
+						ownerWords,
 						options?.signal
 							? AbortSignal.any([options.signal, queuedOwnerInput.signal])
 							: queuedOwnerInput.signal,
@@ -447,7 +470,14 @@ export class PromptSubmissionController {
 			const lateQueuedInput =
 				queuedOwnerInput ??
 				(input && queuedBehavior
-					? this.deps.pendingQueue.register(queuedBehavior, text, options.images, options.origin, inputId)
+					? this.deps.pendingQueue.register(
+							queuedBehavior,
+							text,
+							options.images,
+							options.origin,
+							inputId,
+							options.pasted,
+						)
 					: undefined);
 			if (lateQueuedInput !== queuedOwnerInput) this.deps.emitQueueUpdate();
 			const { promise: preparedGate, resolve: prepared } = Promise.withResolvers<void>();
@@ -641,7 +671,9 @@ export class PromptSubmissionController {
 		// it is delivered.
 		const admittedGoalId = options?.goalExecutionId;
 		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
-		let userRequest = text;
+		// The submitted words with the ranges the owner pasted, carried through an input extension's rewrite and expansion.
+		const submittedWords: OwnerWords = { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
+		let userRequest = submittedWords;
 		// The judgment this queued owner input's words already received, if they did: they are never judged again.
 		let ownerJudgment: OwnerRequestClassificationOutcome | undefined;
 
@@ -707,8 +739,10 @@ export class PromptSubmissionController {
 				expandedText = expandPromptTemplate(expandedText, [...this.deps.getPromptTemplates()]);
 			}
 
-			if (!options?.internalContextType) goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
-			userRequest = expandedText;
+			userRequest = carryOwnerWords(submittedWords, expandedText);
+			// Starting a goal is the owner's call: pasted words never state it.
+			if (!options?.internalContextType)
+				goalToolStartAuthority = parseExplicitGoalStartAuthority(ownerTypedText(userRequest));
 
 			// If streaming — or waiting out a retry backoff, which is still an active
 			// operation — queue via steer() or followUp() instead of starting a
@@ -763,6 +797,7 @@ export class PromptSubmissionController {
 						options.images,
 						options.origin,
 						lifecycle.input?.inputId,
+						options.pasted,
 					);
 				lifecycle.queued = pending;
 				let admitted = false;
@@ -773,7 +808,7 @@ export class PromptSubmissionController {
 					if (ownerOriginalText !== undefined) {
 						const classified = await (queuedOwnerClassification ??
 							this.deps.judgeQueuedOwnerRequest(
-								ownerOriginalText,
+								submittedWords,
 								submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
 								lifecycle.input?.acceptedOrder,
 							));
@@ -810,7 +845,7 @@ export class PromptSubmissionController {
 						// cleared or held first: their judgment is applied where it is read.
 						if (ownerOriginalText !== undefined && judged !== undefined)
 							this.deps.ownerInputs.whenDelivered(pending.inputId, () =>
-								this.deps.enqueueOwnerWords(ownerOriginalText, judgedOrder, judged),
+								this.deps.enqueueOwnerWords(submittedWords, judgedOrder, judged),
 							);
 						admitted = this.deps.pendingQueue.admit(pending, {
 							text: expandedText,
@@ -1184,7 +1219,7 @@ export class PromptSubmissionController {
 			};
 			let requestNote: string | undefined;
 			if (!options?.internalContextType) {
-				this.lastUserRequestValue = userRequest;
+				this.lastUserRequestValue = fenceOwnerPaste(userRequest);
 				if (options?.source !== "extension") {
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
@@ -1197,7 +1232,7 @@ export class PromptSubmissionController {
 					const input = lifecycle.input;
 					if (input)
 						this.deps.ownerInputs.whenDelivered(input.inputId, () =>
-							this.deps.enqueueOwnerWords(text, input.acceptedOrder, ownerJudgment, submissionSignal),
+							this.deps.enqueueOwnerWords(submittedWords, input.acceptedOrder, ownerJudgment, submissionSignal),
 						);
 				} else if (this.deps.getSystemOneController()) {
 					requestNote = await this.deps.runtimeBuilder.withTaskDirectoryContext(

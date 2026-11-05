@@ -14,8 +14,13 @@
  * dependent. The newest message is always classified in full: it is the one the work serves.
  */
 
-export interface OwnerWords<Judgment = never> {
-	readonly text: string;
+/**
+ * One delivered owner message waiting for its owner policy. `request` is the owner's words as the judgment reads them
+ * (`ownerRequestForJudge`: pasted spans inside the untrusted boundary), never the ledger's `OwnerWords` with its ranges:
+ * a message with no typed words never reaches this queue.
+ */
+export interface PendingOwnerRequest<Judgment = never> {
+	readonly request: string;
 	/** Submission order, so a stale judgment never overwrites newer owner policy. */
 	readonly acceptedOrder?: number;
 	/** Originating submission cancellation; a later settle supplies its own classification lifetime. */
@@ -30,9 +35,9 @@ export interface OwnerWords<Judgment = never> {
 
 export interface OwnerPolicyQueueDeps<Judgment = never> {
 	/** Classify one message in full (or apply the judgment it carries) and apply its outcome. */
-	classify(words: OwnerWords<Judgment>): Promise<void>;
+	classify(words: PendingOwnerRequest<Judgment>): Promise<void>;
 	/** Which of these messages may carry an instruction; undefined when the screen could not run. */
-	screen(texts: readonly string[], signal?: AbortSignal): Promise<readonly boolean[] | undefined>;
+	screen(requests: readonly string[], signal?: AbortSignal): Promise<readonly boolean[] | undefined>;
 	/**
 	 * A settle failed (the screen or a classification threw). The words it did not reach are kept, in order, and are
 	 * settled again once the cause can have cleared (`wake`: the owner's next message, or the evaluator's next success);
@@ -40,7 +45,7 @@ export interface OwnerPolicyQueueDeps<Judgment = never> {
 	 */
 	reportFailure(error: unknown): void;
 	/** The screen confidently set these words aside: they carry no instruction and are not classified. */
-	setAside(words: OwnerWords<Judgment>): void;
+	setAside(words: PendingOwnerRequest<Judgment>): void;
 }
 
 /** How a settle treats the queue: `backlog` screens every queued message, `latest` classifies the newest in full. */
@@ -66,12 +71,12 @@ function settledOrAborted(promise: Promise<void>, signal: AbortSignal): Promise<
 }
 
 export class OwnerPolicyQueue<Judgment = never> {
-	private pending: OwnerWords<Judgment>[] = [];
+	private pending: PendingOwnerRequest<Judgment>[] = [];
 	/**
 	 * Words a failed settle did not reach, oldest first. They wait for an event that can have cleared the failure (`wake`)
 	 * instead of being retried by every settle: a failure that persists would otherwise be paid for at every tool batch.
 	 */
-	private parked: OwnerWords<Judgment>[] = [];
+	private parked: PendingOwnerRequest<Judgment>[] = [];
 	private tail: Promise<void> = Promise.resolve();
 	private readonly deps: OwnerPolicyQueueDeps<Judgment>;
 
@@ -79,7 +84,7 @@ export class OwnerPolicyQueue<Judgment = never> {
 		this.deps = deps;
 	}
 
-	enqueue(words: OwnerWords<Judgment>): void {
+	enqueue(words: PendingOwnerRequest<Judgment>): void {
 		// The owner spoke again: words a failed settle kept are settled with these, ahead of them, in owner order.
 		this.wake();
 		this.pending.push(words);
@@ -125,7 +130,7 @@ export class OwnerPolicyQueue<Judgment = never> {
 			const carries =
 				screened.length > 0
 					? await this.deps.screen(
-							screened.map((words) => words.text),
+							screened.map((words) => words.request),
 							signal,
 						)
 					: undefined;

@@ -55,6 +55,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import {
 	joinOwnerWords,
 	type OwnerTextRange,
+	type OwnerWords,
 	sliceOwnerRanges,
 	trimOwnerWords,
 } from "../../core/learning/owner-evidence-ledger.ts";
@@ -1727,7 +1728,7 @@ export class InteractiveMode {
 						(command) => text === `/${command.name}` || text.startsWith(`/${command.name} `),
 					);
 			if (builtin && foregroundTurnLive && builtin.duringWork !== "local") {
-				this.editor.setText(text);
+				this.editor.setText(text, pasted);
 				this.showWarning(
 					`/${builtin.name} requires the foreground to be idle. ${keyText("app.interrupt")} interrupts it; your command stays in the editor.`,
 				);
@@ -1735,7 +1736,7 @@ export class InteractiveMode {
 			}
 			if (!builtin && workState.busy && (!isCommandText || foregroundTurnLive)) {
 				const images = this.takeClipboardImagesForText(text);
-				this.editor.addToHistory?.(text);
+				this.editor.addToHistory?.(text, pasted);
 				this.editor.setText("");
 				if (this.session.isCompacting) {
 					this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images, pasted);
@@ -2074,10 +2075,10 @@ export class InteractiveMode {
 				if (command) {
 					if (this.session.isBashRunning) {
 						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
-						this.editor.setText(text);
+						this.editor.setText(text, pasted);
 						return;
 					}
-					this.editor.addToHistory?.(text);
+					this.editor.addToHistory?.(text, pasted);
 					await this.handleBashCommand(command, isExcluded);
 					this.isBashMode = false;
 					this.updateEditorBorderColor();
@@ -2095,7 +2096,7 @@ export class InteractiveMode {
 			} else {
 				this.pendingUserInputs.push(submission);
 			}
-			this.editor.addToHistory?.(text);
+			this.editor.addToHistory?.(text, pasted);
 		};
 	}
 
@@ -2852,7 +2853,7 @@ export class InteractiveMode {
 		// This handles extension commands (execute immediately), prompt template expansion, and queueing
 		if (this.session.isStreaming) {
 			const images = this.takeClipboardImagesForText(text);
-			this.editor.addToHistory?.(text);
+			this.editor.addToHistory?.(text, pasted);
 			this.editor.setText("");
 			try {
 				await this.session.prompt(text, { streamingBehavior: "followUp", images, pasted });
@@ -3040,18 +3041,26 @@ export class InteractiveMode {
 	/**
 	 * Take recoverable queued messages and return their contents. Inputs with unreadable image references stay queued.
 	 */
-	private clearAllQueues(): { steering: string[]; followUp: string[] } {
+	private clearAllQueues(): { steering: OwnerWords[]; followUp: OwnerWords[] } {
 		const { steering, followUp, commands } = this.session.takeAllQueuedInput();
 		this.compactionQueuedMessages = [];
-		// The text returns to the editor and the images to the pending clipboard queue, so a resubmit
-		// sends the complete input again.
+		// The text returns to the editor, with the ranges the owner pasted, and the images to the pending clipboard queue,
+		// so a resubmit sends the complete input again, as pasted as it was.
 		return {
 			steering: this.restoreInputImages(steering),
-			followUp: [...this.restoreInputImages(followUp), ...commands],
+			followUp: [...this.restoreInputImages(followUp), ...commands.map((text) => ({ text }))],
 		};
 	}
 
-	private restoreInputImages(inputs: readonly clipboardInput.UserInputSubmission[]): string[] {
+	/** The editor's words, expanded (a collapsed paste is its content), with the ranges the owner pasted. */
+	private editorWords(): OwnerWords {
+		return {
+			text: this.editor.getExpandedText?.() ?? this.editor.getText(),
+			pasted: this.editor.getPastedRanges?.(),
+		};
+	}
+
+	private restoreInputImages(inputs: readonly UserInputSubmission[]): OwnerWords[] {
 		return clipboardInput.restoreClipboardImages(
 			clipboardInput.bindClipboardQueue(this.clipboardQueue, { clipboardImageStore: this.clipboardImageStore }),
 			inputs,
@@ -3096,9 +3105,11 @@ export class InteractiveMode {
 			});
 		} catch (error) {
 			// Failed submission returns the complete input through the same clipboard owner as take-back.
-			const current = this.editor.getText();
-			const restored = this.restoreInputImages(entries).join("\n\n");
-			this.editor.setText([restored, current].filter((part) => part.trim()).join("\n\n"));
+			const back = joinOwnerWords(
+				[...this.restoreInputImages(entries), this.editorWords()].filter((part) => part.text.trim()),
+				"\n\n",
+			);
+			this.editor.setText(back.text, back.pasted);
 			const detail = error instanceof Error ? error.message : String(error);
 			this.showError(
 				`Send now failed: ${detail}. The queued input is back in the editor${images.length ? " with its images" : ""}.`,
@@ -3154,10 +3165,12 @@ export class InteractiveMode {
 			this.updatePendingMessagesDisplay();
 			return 0;
 		}
-		const queuedText = allQueued.join("\n\n");
-		const currentText = options?.currentText ?? this.editor.getText();
-		const combinedText = [queuedText, currentText].filter((t) => t.trim()).join("\n\n");
-		this.editor.setText(combinedText);
+		const current = options?.currentText !== undefined ? { text: options.currentText } : this.editorWords();
+		const combined = joinOwnerWords(
+			[...allQueued, current].filter((part) => part.text.trim()),
+			"\n\n",
+		);
+		this.editor.setText(combined.text, combined.pasted);
 		this.updatePendingMessagesDisplay();
 		return allQueued.length;
 	}
@@ -3169,9 +3182,9 @@ export class InteractiveMode {
 		pasted?: readonly OwnerTextRange[],
 	): void {
 		// Kept by the session from now: shown in its queue, takeable, and restored held after a restart.
-		const input = this.session.keepQueuedInput(mode, text, images);
+		const input = this.session.keepQueuedInput(mode, text, images, undefined, pasted);
 		this.compactionQueuedMessages.push({ text, mode, images, pasted, input });
-		this.editor.addToHistory?.(text);
+		this.editor.addToHistory?.(text, pasted);
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();
 		this.showStatus("Queued message for after compaction");

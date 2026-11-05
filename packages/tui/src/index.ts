@@ -33,6 +33,7 @@ export { TruncatedText } from "./components/truncated-text.ts";
 export { VisibilityContainer } from "./components/visibility-container.ts";
 // Editor component interface (for custom editors)
 export {
+	carryTextRanges,
 	type EditorChangeSummary,
 	type EditorComponent,
 	type EditorTextRange,

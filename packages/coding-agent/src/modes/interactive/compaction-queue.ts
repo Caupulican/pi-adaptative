@@ -88,7 +88,13 @@ export async function flushCompactionQueue(
 	// Submitted, its verdict not yet given: its kept input is the submission's, so it is kept again only once refused.
 	const inFlight = new Set<CompactionQueuedMessage>();
 	const keepAgain = (message: CompactionQueuedMessage) => {
-		message.input = host.session.keepQueuedInput(message.mode, message.text, message.images, message.input);
+		message.input = host.session.keepQueuedInput(
+			message.mode,
+			message.text,
+			message.images,
+			message.input,
+			message.pasted,
+		);
 	};
 	const submit = (message: CompactionQueuedMessage) => {
 		inFlight.add(message);

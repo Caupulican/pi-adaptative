@@ -97,6 +97,7 @@ function recordableInput(entry: PendingEntry): RecordableQueuedInput {
 		text: entry.origin ? entry.origin.text : entry.original.text,
 		...(entry.original.images ? { images: entry.original.images } : {}),
 		...(entry.original.preservedImages ? { preservedImages: entry.original.preservedImages } : {}),
+		...(!entry.origin && entry.original.pasted?.length ? { pasted: entry.original.pasted } : {}),
 		...(entry.origin
 			? {
 					origin: {
@@ -630,7 +631,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	/**
 	 * Accept a queued input now, as submitted, before anything decides its admission. It is pending
 	 * from here: counted, projected, takeable and clearable. Its place in its kind's order is fixed.
-	 * `inputId` is the identity its submission was accepted under; a queued input accepted here is minted one now.
+	 * `inputId` is the identity its submission was accepted under; a queued input accepted here is minted one now. `pasted`
+	 * are the ranges of `text` the owner pasted: taking the input back or restoring it after a restart keeps them.
 	 */
 	register(
 		kind: "steer" | "followUp",
@@ -638,6 +640,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		images?: ImageContent[],
 		origin?: SendUserMessageOrigin,
 		inputId?: OwnerInputId,
+		pasted?: readonly OwnerTextRange[],
 	): PendingInputHandle {
 		if (inputId !== undefined && this.deps.ownerInputs.stateOf(inputId) === "uncertain")
 			throw new Error("An unresolved owner input cannot be queued again.");
@@ -647,7 +650,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			: this._newEntry(
 					inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
 					kind,
-					{ text, images },
+					{ text, images, ...(pasted?.length ? { pasted } : {}) },
 					origin,
 					new AbortController(),
 				);
@@ -668,9 +671,11 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		text: string,
 		images: ImageContent[] | undefined,
 		origin: SendUserMessageOrigin | undefined,
+		pasted?: readonly OwnerTextRange[],
 	): void {
 		if (this._closed) return;
-		this._preparing.push(this._newEntry(inputId, kind, { text, images }, origin, new AbortController()));
+		const submitted = { text, images, ...(pasted?.length ? { pasted } : {}) };
+		this._preparing.push(this._newEntry(inputId, kind, submitted, origin, new AbortController()));
 		this.deps.ownerInputs.whenUndelivered(inputId, (end) => this._leavePreparing(inputId, end.state !== "held"));
 		this._ownTurnChanged();
 	}
@@ -737,13 +742,21 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		text: string,
 		images?: ImageContent[],
 		existing?: PendingInputHandle,
+		pasted?: readonly OwnerTextRange[],
 	): PendingInputHandle {
 		if (existing && this._keptEntry(existing)) return existing;
 		const inputId = this.deps.ownerInputs.accept(kind);
 		this.deps.ownerInputs.end(inputId, { state: "held", reason: "kept until it can be submitted" });
 		const abort = new AbortController();
 		abort.abort(PENDING_INPUT_WITHDRAWN);
-		const entry = this._newEntry(inputId, kind, { text, images }, undefined, abort, true);
+		const entry = this._newEntry(
+			inputId,
+			kind,
+			{ text, images, ...(pasted?.length ? { pasted } : {}) },
+			undefined,
+			abort,
+			true,
+		);
 		(kind === "steer" ? this._steering : this._followUp).push(entry);
 		this._changed();
 		return { id: entry.id, inputId, signal: abort.signal };
@@ -761,8 +774,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		images: ImageContent[] | undefined,
 		origin: SendUserMessageOrigin | undefined,
 		inputId: OwnerInputId | undefined,
+		pasted?: readonly OwnerTextRange[],
 	): PendingInputHandle | undefined {
-		return this._dropKept(kept) ? this.register(kind, text, images, origin, inputId) : undefined;
+		return this._dropKept(kept) ? this.register(kind, text, images, origin, inputId, pasted) : undefined;
 	}
 
 	/** A kept input (`keep`) is submitted as something that does not queue (an extension command): it leaves the queue. */
@@ -829,6 +843,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			images?: ImageContent[];
 			origin?: QueuedInputOrigin;
 			preservedImages?: PreservedQueuedImages;
+			pasted?: readonly OwnerTextRange[];
 		}>,
 		recordChanged = false,
 	): void {
@@ -843,6 +858,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					text: input.text,
 					images: input.images,
 					...(input.preservedImages ? { preservedImages: input.preservedImages } : {}),
+					...(input.pasted ? { pasted: input.pasted } : {}),
 				},
 				input.origin ? { ...input.origin, text: input.text } : undefined,
 				abort,
@@ -1279,8 +1295,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			this._removeEntry(entry);
 			this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason });
 			this._leavePreparing(entry.inputId, true);
-			// Pasted ranges are offsets into the owner's original words: they hold only while the taken text is those words.
-			const pasted = entry.admission?.ownerOriginalText === input.text ? entry.admission.ownerPasted : undefined;
+			// Pasted ranges are offsets into the owner's original words: they hold only while the taken text is those words
+			// (held, restored and not yet admitted inputs included).
+			const pasted = entry.original.text === input.text ? entry.original.pasted : undefined;
 			taken.push(pasted ? { ...input, pasted } : input);
 		}
 		return taken;

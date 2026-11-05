@@ -25,6 +25,7 @@ import {
 } from "./autonomy/edge-policy.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { ToolInfo } from "./extensions/index.ts";
+import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { RouterCandidatePool } from "./model-router/candidate-pool.ts";
 import {
@@ -54,6 +55,7 @@ import {
 } from "./project-rules/durable-owner-rules.ts";
 import type { SessionProjectRules } from "./project-rules/session-project-rules.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
+import { ownerRequestForJudge } from "./security/owner-paste-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import {
 	normalizeUserRequest,
@@ -64,7 +66,7 @@ import {
 import { DelegationGate } from "./system-one/delegation-gate.ts";
 import type { OperationGate } from "./system-one/operation-gate.ts";
 import { createSessionOperationGate } from "./system-one/operation-gate-wiring.ts";
-import { OwnerPolicyQueue, type OwnerWords } from "./system-one/owner-policy-queue.ts";
+import { OwnerPolicyQueue, type PendingOwnerRequest } from "./system-one/owner-policy-queue.ts";
 import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
 import {
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
@@ -118,7 +120,10 @@ function continuedIntent(intent: OptionalToolIntent | undefined): {
 	return { previous: intent.resumeIntent, pending: intent.pendingRequests ?? [] };
 }
 
-/** Owner words accepted with a submission order: their text, the session that accepted them, and whether they were delivered. */
+/**
+ * Owner words accepted with a submission order: their text as the judgment reads it (`ownerRequestForJudge`, pasted spans
+ * fenced), the session that accepted them, and whether they were delivered.
+ */
 interface RegisteredOwnerWords {
 	readonly text: string;
 	readonly sessionId: string;
@@ -253,8 +258,10 @@ export class SessionEdgeIntentController {
 				this.lastOwnerPolicyFailure = undefined;
 				if (note) this.pushRequestAuthorityNote(note);
 			},
-			screen: async (texts, signal) => {
-				const outcome = await this.deps.getSystemOneController()?.screenOwnerWords(texts, signal ? { signal } : {});
+			screen: async (requests, signal) => {
+				const outcome = await this.deps
+					.getSystemOneController()
+					?.screenOwnerWords(requests, signal ? { signal } : {});
 				return outcome?.status === "screened" ? outcome.carriesInstruction : undefined;
 			},
 			reportFailure: (error) => this.noteOwnerPolicyFailure(error),
@@ -439,10 +446,11 @@ export class SessionEdgeIntentController {
 	 * the newer request took only the optional-tool chain from it, and the queue judges these words' owner policy alone, once,
 	 * where it settles them. Words with no judgment, or one the evaluator could not give (an outage), are screened and
 	 * classified at the queue. Delivered words are owner input: a staged optional-tool intent that waited for them is
-	 * appended to the chain now (`promoteDeliveredIntents`).
+	 * appended to the chain now (`promoteDeliveredIntents`). Words the owner did not type (pasted spans) are judged as
+	 * quoted data only (`ownerRequestForJudge`); a message with no typed words decides nothing and never joins the queue.
 	 */
 	enqueueOwnerWords(
-		text: string,
+		words: OwnerWords,
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 		signal?: AbortSignal,
@@ -453,11 +461,17 @@ export class SessionEdgeIntentController {
 			if (registered) registered.delivered = true;
 			this.promoteDeliveredIntents();
 		}
+		const request = ownerRequestForJudge(words);
+		if (request === undefined) {
+			// The owner still spoke: words a failed settle kept are settled at the next read, as after any owner message.
+			this.ownerPolicy.wake();
+			return;
+		}
 		const carried =
 			judgment !== undefined &&
 			(judgment.status === "classified" || ("superseded" in judgment && judgment.superseded === true));
 		this.ownerPolicy.enqueue({
-			text,
+			request,
 			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
 			...(signal ? { signal } : {}),
 			...(carried ? { judgment } : {}),
@@ -467,12 +481,14 @@ export class SessionEdgeIntentController {
 	/**
 	 * Owner words accepted with this submission order: they wait here until a committed optional-tool entry holds them.
 	 * Called where the order is assigned, before anything can await, so no judgment of newer words can start without seeing
-	 * them. With no evaluator nothing is ever judged, so nothing is recorded; blank words decide nothing, so none reads them.
+	 * them. With no evaluator nothing is ever judged, so nothing is recorded; words with nothing typed (blank, or only pasted)
+	 * decide nothing, so none reads them. They are kept as the judgment reads them (`ownerRequestForJudge`).
 	 */
-	registerOwnerWords(acceptedOrder: number, text: string): void {
-		if (!this.deps.getSystemOneController() || normalizeUserRequest(text) === undefined) return;
+	registerOwnerWords(acceptedOrder: number, words: OwnerWords): void {
+		const request = ownerRequestForJudge(words);
+		if (!this.deps.getSystemOneController() || request === undefined) return;
 		this.ownerWords.set(acceptedOrder, {
-			text,
+			text: request,
 			sessionId: this.deps.getSessionManager().getSessionId(),
 			delivered: false,
 		});
@@ -681,24 +697,26 @@ export class SessionEdgeIntentController {
 	 * (`applyOwnerRequestOutcome`), never asked again. Its optional-tool intent is staged, never written: it continues the
 	 * newest staged intent of older words (superseding that one's judgment if it is still in flight), else the committed
 	 * chain, reads every older registered word neither holds, and is appended only when the input is delivered
-	 * (`promoteDeliveredIntents`). A taken back, cleared or held input appends nothing.
+	 * (`promoteDeliveredIntents`). A taken back, cleared or held input appends nothing. The words are judged as
+	 * `ownerRequestForJudge` renders them; words with nothing typed are skipped.
 	 */
 	async judgeOwnerRequest(
-		request: string,
+		words: OwnerWords,
 		signal?: AbortSignal,
 		acceptedOrder?: number,
 	): Promise<OwnerRequestClassificationOutcome> {
 		const rules = this.writtenRuleText();
 		const capabilitiesPending = this.capabilitiesPending();
 		if (signal?.aborted || this.deps.isDisposed()) return cancelledOutcome(false);
+		// A message with nothing typed (blank, or only pasted) carries no owner request, so nothing is judged or staged for it.
+		const request = ownerRequestForJudge(words);
+		if (request === undefined) return { status: "skipped" };
 		// Without a submission order the words cannot be staged against the owner's other words: their optional-tool intent
 		// is judged where they are delivered (the owner-policy queue), and only their owner policy is judged now.
 		if (acceptedOrder === undefined) return this.judgeOwnerPolicy(request, rules, capabilitiesPending, signal);
 		// Normal-off: no evaluator means no semantic intent is staged, aborted, scanned or warned about.
 		const controller = this.deps.getSystemOneController();
 		if (!controller) return { status: "skipped" };
-		// A blank message carries no request to classify, so no intent is staged for it.
-		if (normalizeUserRequest(request) === undefined) return { status: "skipped" };
 		const manager = this.deps.getSessionManager();
 		const sessionId = manager.getSessionId();
 		const head = manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE);
@@ -794,16 +812,22 @@ export class SessionEdgeIntentController {
 		return outcome;
 	}
 
+	/**
+	 * Classifies `words` now and applies what they authorize. The owner's (`trustedOwner`) are settled as delivered owner
+	 * words are; anything else (an extension's message) is classified and applied once. Pasted spans are judged as quoted data
+	 * (`ownerRequestForJudge`), and words with nothing typed decide nothing.
+	 */
 	async enableCapabilitiesAuthorizedByUser(
-		request: string,
+		words: OwnerWords,
 		signal?: AbortSignal,
 		trustedOwner = true,
 		acceptedOrder?: number,
 	): Promise<string | undefined> {
 		const controller = this.deps.getSystemOneController();
-		if (!controller) return undefined;
+		const request = ownerRequestForJudge(words);
+		if (!controller || request === undefined) return undefined;
 		// The owner's words are settled as delivered words are: their optional-tool intent is committed now.
-		if (trustedOwner) return this.settleOwnerWords({ text: request, acceptedOrder, ...(signal ? { signal } : {}) });
+		if (trustedOwner) return this.settleOwnerWords({ request, acceptedOrder, ...(signal ? { signal } : {}) });
 		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), {
 			capabilitiesPending: this.capabilitiesPending(),
 			...(signal ? { signal } : {}),
@@ -817,7 +841,9 @@ export class SessionEdgeIntentController {
 	 * judgment they carry, or one asked for it alone. Otherwise their optional-tool intent is judged into the committed chain
 	 * now, with their owner policy when they carry none (`judgeCommittedIntent`).
 	 */
-	private async settleOwnerWords(words: OwnerWords<OwnerRequestClassificationOutcome>): Promise<string | undefined> {
+	private async settleOwnerWords(
+		words: PendingOwnerRequest<OwnerRequestClassificationOutcome>,
+	): Promise<string | undefined> {
 		if (!this.deps.getSystemOneController()) return undefined;
 		this.promoteDeliveredIntents();
 		const carried = words.judgment;
@@ -828,25 +854,25 @@ export class SessionEdgeIntentController {
 		const capabilitiesPending = this.capabilitiesPending();
 		if (order !== undefined && this.chain().covered.has(order)) {
 			return this.applyOwnerRequestOutcome(
-				words.text,
-				judgment ?? (await this.judgeOwnerPolicy(words.text, rules, capabilitiesPending, words.signal)),
+				words.request,
+				judgment ?? (await this.judgeOwnerPolicy(words.request, rules, capabilitiesPending, words.signal)),
 				order,
 			);
 		}
 		const committed = await this.judgeCommittedIntent(
-			words.text,
+			words.request,
 			order,
 			judgment === undefined ? { rules, capabilitiesPending } : undefined,
 			words.signal,
 		);
-		if (committed.ownPolicy) return this.applyOwnerRequestOutcome(words.text, committed.outcome, order);
-		if (judgment !== undefined) return this.applyOwnerRequestOutcome(words.text, judgment, order);
+		if (committed.ownPolicy) return this.applyOwnerRequestOutcome(words.request, committed.outcome, order);
+		if (judgment !== undefined) return this.applyOwnerRequestOutcome(words.request, judgment, order);
 		// A cancelled judgment is reported as such; otherwise the words' owner policy is judged alone.
 		if ("cancelled" in committed.outcome && committed.outcome.cancelled)
-			return this.applyOwnerRequestOutcome(words.text, committed.outcome, order);
+			return this.applyOwnerRequestOutcome(words.request, committed.outcome, order);
 		return this.applyOwnerRequestOutcome(
-			words.text,
-			await this.judgeOwnerPolicy(words.text, rules, capabilitiesPending, words.signal),
+			words.request,
+			await this.judgeOwnerPolicy(words.request, rules, capabilitiesPending, words.signal),
 			order,
 		);
 	}

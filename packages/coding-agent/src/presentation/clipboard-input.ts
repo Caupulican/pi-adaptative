@@ -10,7 +10,8 @@
  */
 
 import type { ImageContent } from "@caupulican/pi-ai";
-import { type EditorComponent, pasteIntoEditor, type TUI } from "@caupulican/pi-tui";
+import { carryTextRanges, type EditorComponent, pasteIntoEditor, type TUI } from "@caupulican/pi-tui";
+import type { OwnerWords } from "../core/learning/owner-evidence-ledger.ts";
 import type { SessionImageStore } from "../core/session-image-store.ts";
 import { readClipboardText } from "../utils/clipboard.ts";
 import { readClipboardImage } from "../utils/clipboard-image.ts";
@@ -187,13 +188,31 @@ export interface ClipboardRestoreHost extends ClipboardQueueState {
 }
 
 /**
+ * `words` with every `from` replaced by `to`, one occurrence at a time so the pasted ranges follow each rename: a label
+ * renamed inside pasted text stays pasted, one renamed in typed text stays typed.
+ */
+function renameCarrying(words: OwnerWords, from: string, to: string): OwnerWords {
+	let { text, pasted } = words;
+	for (let at = text.indexOf(from); at !== -1; at = text.indexOf(from, at + to.length)) {
+		const next = `${text.slice(0, at)}${to}${text.slice(at + from.length)}`;
+		if (pasted?.length) pasted = carryTextRanges(text, next, pasted, "pasted");
+		text = next;
+	}
+	return pasted?.length ? { text, pasted } : { text };
+}
+
+/**
  * Hand restored inputs' images back to the pending clipboard queue, ahead of the editor's own
  * images (the restored text precedes the editor's text), under labels that resolve to exactly
  * those images when the text is submitted again. A label is kept when it already names these bytes
  * in the session image store, or names nothing yet; otherwise the store's own allocator gives the
- * image a sequence, and every reference to the old label in that input's text is renamed.
+ * image a sequence, and every reference to the old label in that input's text is renamed. The words
+ * returned keep the ranges the owner pasted (`pasted`), carried through every rename.
  */
-export function restoreClipboardImages(host: ClipboardRestoreHost, inputs: readonly UserInputSubmission[]): string[] {
+export function restoreClipboardImages(
+	host: ClipboardRestoreHost,
+	inputs: readonly (UserInputSubmission & Pick<OwnerWords, "pasted">)[],
+): OwnerWords[] {
 	const store = host.clipboardImageStore;
 	const restored: PendingClipboardImage[] = [];
 	let storageUnavailable = false;
@@ -221,9 +240,9 @@ export function restoreClipboardImages(host: ClipboardRestoreHost, inputs: reado
 				...[...restored, ...host.pendingClipboardImages].map((pending) => imageLabelNumber(pending.label)),
 			) + 1
 		}]`;
-	const texts = inputs.map((input) => {
-		let text = input.text;
-		const available = [...new Set([...text.matchAll(IMAGE_LABEL)].map((match) => match[0]))];
+	const restoredWords = inputs.map((input) => {
+		let words: OwnerWords = input.pasted?.length ? { text: input.text, pasted: input.pasted } : { text: input.text };
+		const available = [...new Set([...words.text.matchAll(IMAGE_LABEL)].map((match) => match[0]))];
 		for (const image of input.images ?? []) {
 			let label =
 				available.find((candidate) => sameImage(readStored(candidate), image) && !labelTaken(candidate, image)) ??
@@ -242,15 +261,16 @@ export function restoreClipboardImages(host: ClipboardRestoreHost, inputs: reado
 				// Local labels never alias the store's numeric references, even if storage is unavailable.
 				label ??= localLabel();
 				const replaced = available.shift();
-				text = replaced ? text.split(replaced).join(label) : `${text} ${label}`;
+				// A label appended after the text extends no pasted range: it is the host's, never pasted words.
+				words = replaced ? renameCarrying(words, replaced, label) : { ...words, text: `${words.text} ${label}` };
 			}
 			restored.push({ label, content: image });
 			host.clipboardImageCounter = Math.max(host.clipboardImageCounter, imageLabelNumber(label));
 		}
-		return text;
+		return words;
 	});
 	host.pendingClipboardImages = [...restored, ...host.pendingClipboardImages];
-	return texts;
+	return restoredWords;
 }
 
 export function buildUserInputSubmission(host: BuildSubmissionHost, text: string): UserInputSubmission {

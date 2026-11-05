@@ -721,10 +721,10 @@ export class AgentSession {
 			getSessionImageStore: () => this._getSessionImageStore(),
 			isDisposed: () => this._disposed,
 			isStreaming: () => this.isStreaming,
-			judgeOwnerRequest: (text, signal, acceptedOrder) =>
-				this._edgeIntent.judgeOwnerRequest(text, signal, acceptedOrder),
-			enqueueOwnerWords: (text, acceptedOrder, judgment) =>
-				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment),
+			judgeOwnerRequest: (words, signal, acceptedOrder) =>
+				this._edgeIntent.judgeOwnerRequest(words, signal, acceptedOrder),
+			enqueueOwnerWords: (words, acceptedOrder, judgment) =>
+				this._edgeIntent.enqueueOwnerWords(words, acceptedOrder, judgment),
 			ownerInputs: this._ownerInputs,
 			acceptQueuedOwnerWords: (kind, text) => this._promptSubmission.acceptQueuedOwnerWords(kind, text),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
@@ -2385,9 +2385,9 @@ export class AgentSession {
 			reflection: this._reflection,
 			earlyDisplayedUserMessages: this._earlyDisplayedUserMessages,
 			ownerPolicy: this._edgeIntent.ownerPolicy,
-			enqueueOwnerWords: (text, acceptedOrder, judgment, signal) =>
-				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment, signal),
-			registerOwnerWords: (acceptedOrder, text) => this._edgeIntent.registerOwnerWords(acceptedOrder, text),
+			enqueueOwnerWords: (words, acceptedOrder, judgment, signal) =>
+				this._edgeIntent.enqueueOwnerWords(words, acceptedOrder, judgment, signal),
+			registerOwnerWords: (acceptedOrder, words) => this._edgeIntent.registerOwnerWords(acceptedOrder, words),
 			releaseOwnerWords: (acceptedOrder) => this._edgeIntent.releaseOwnerWords(acceptedOrder),
 			accountModels: this._accountModels,
 			custody: this._cache.custody,
@@ -2403,8 +2403,8 @@ export class AgentSession {
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
 			getSessionWorkState: () => this.getSessionWorkState(),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
-			judgeQueuedOwnerRequest: (request, signal, acceptedOrder) =>
-				this._edgeIntent.judgeOwnerRequest(request, signal, acceptedOrder),
+			judgeQueuedOwnerRequest: (words, signal, acceptedOrder) =>
+				this._edgeIntent.judgeOwnerRequest(words, signal, acceptedOrder),
 			getOperatorBlocker: () => this._operatorBlocker,
 			setOperatorBlocker: (blocker) => {
 				this._operatorBlocker = blocker;
@@ -2437,8 +2437,8 @@ export class AgentSession {
 			atColdMoment: (reason) => this._cache.atColdMoment(reason),
 			noteSystemOneTaskDirectoryUnavailable: (error) => this._noteSystemOneTaskDirectoryUnavailable(error),
 			getSystemOneController: () => this._semanticPlane.controller,
-			enableCapabilitiesAuthorizedByUser: (userRequest, signal, trustedOwner, acceptedOrder) =>
-				this._enableCapabilitiesAuthorizedByUser(userRequest, signal, trustedOwner, acceptedOrder),
+			enableCapabilitiesAuthorizedByUser: (words, signal, trustedOwner, acceptedOrder) =>
+				this._edgeIntent.enableCapabilitiesAuthorizedByUser(words, signal, trustedOwner, acceptedOrder),
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
 			claimCorrection: (turnOpening) => this._unsettledLadder.claimCorrection(turnOpening),
@@ -3138,20 +3138,6 @@ export class AgentSession {
 	 */
 	private writtenRuleText(): string {
 		return this._edgeIntent.writtenRuleText();
-	}
-
-	/**
-	 * System One classifies the request. A hard yes enables edge capabilities that are still off.
-	 * The user is above AGENTS.md: an explicit override follows the request, a contradiction asks.
-	 * Returns the one line the model should see, and nothing when there is nothing to say.
-	 */
-	private async _enableCapabilitiesAuthorizedByUser(
-		request: string,
-		signal?: AbortSignal,
-		trustedOwner = true,
-		acceptedOrder?: number,
-	): Promise<string | undefined> {
-		return this._edgeIntent.enableCapabilitiesAuthorizedByUser(request, signal, trustedOwner, acceptedOrder);
 	}
 
 	/** The owner's current model pool policy. */
@@ -4646,11 +4632,17 @@ export class AgentSession {
 
 	/**
 	 * Keep owner input that cannot be submitted yet (the interactive queue while compaction runs) as held pending input:
-	 * shown, takeable and recorded, so a restart restores it held. `prompt()` with `heldInput` sends it; `existing` is
-	 * returned while it is still kept.
+	 * shown, takeable and recorded with the ranges of it the owner pasted, so a restart restores it held. `prompt()` with
+	 * `heldInput` sends it; `existing` is returned while it is still kept.
 	 */
-	keepQueuedInput(kind: "steer" | "followUp", text: string, images?: ImageContent[], existing?: PendingInputHandle) {
-		return this._queuedInputPersistence.keepQueuedInput(kind, text, images, existing);
+	keepQueuedInput(
+		kind: "steer" | "followUp",
+		text: string,
+		images?: ImageContent[],
+		existing?: PendingInputHandle,
+		pasted?: QueuedInput["pasted"],
+	) {
+		return this._queuedInputPersistence.keepQueuedInput(kind, text, images, existing, pasted);
 	}
 
 	/**

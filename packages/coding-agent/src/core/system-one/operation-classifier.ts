@@ -18,6 +18,7 @@ import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
 import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
 
 /** Why System One is asked: the operation runs code, or writes outside the task. */
@@ -270,7 +271,7 @@ export const OPERATION_EFFECT_PROGRAM = {
 		},
 		{
 			id: "request_authorizes",
-			instruction: "Does `request` ask for, or directly require, the effect of `operation.command`?",
+			instruction: `Does \`request\` ask for, or directly require, the effect of \`operation.command\`? ${OWNER_PASTE_RULE}`,
 		},
 	],
 } as const;
