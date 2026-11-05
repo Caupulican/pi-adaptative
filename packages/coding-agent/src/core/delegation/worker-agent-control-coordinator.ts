@@ -670,6 +670,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				? undefined
 				: {
 						...(options.newTask.goal ? { goalId: options.newTask.goal.goalId } : {}),
+						...(options.newTask.knowledgeReferences
+							? { knowledgeReferences: options.newTask.knowledgeReferences }
+							: {}),
 						...(options.newTask.controlForkMode ? { controlForkMode: options.newTask.controlForkMode } : {}),
 						...(options.newTask.requirementIds ? { requirementIds: options.newTask.requirementIds } : {}),
 						...(options.newTask.acceptanceCriterionIds
@@ -958,7 +961,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])]) &&
 			// The selected resources are part of the same declaration; a different selection is
 			// different work even when goal and requirements match.
-			isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...(newTask.resourcePointerIds ?? [])])
+			isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...(newTask.resourcePointerIds ?? [])]) &&
+			isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], newTask.knowledgeReferences ?? [])
 		);
 	}
 
@@ -2338,6 +2342,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 								? {
 										...(newTask.goalId ? { goalId: newTask.goalId } : {}),
 										...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
+										...(newTask.knowledgeReferences
+											? { knowledgeReferences: newTask.knowledgeReferences }
+											: {}),
 										taskContext: {
 											...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
 											...(newTask.acceptanceCriterionIds

@@ -5,6 +5,7 @@ import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1KnowledgePhase } from "./journey-1-knowledge.ts";
+import { runJourney1KnowledgeWorkersPhase } from "./journey-1-knowledge-workers.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
 import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
 import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
@@ -108,6 +109,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1ContinuousChatPhase(world);
 			await runJourney1KnowledgePhase(world);
 			await runJourney1CollectionPhase(world);
+			await runJourney1KnowledgeWorkersPhase(world);
 			await runJourney1WorkerBudgetsPhase(world);
 			await runJourney1WriteReservationsPhase(world);
 			await runJourney1PiChatPhase(world);

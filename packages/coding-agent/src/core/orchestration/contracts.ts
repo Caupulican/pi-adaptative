@@ -1,4 +1,5 @@
 import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
+import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { WorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import type { WorkerResultReceipts } from "./worker-result-receipts.ts";
 
@@ -319,6 +320,8 @@ export type WorkerModelRouteSource = (typeof WORKER_MODEL_ROUTE_SOURCES)[number]
 
 export interface OrchestrationDispatchRequest {
 	taskId: string;
+	/** Owner-selected exact canonical references, scoped to this task rather than the persistent worker. */
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** Parent lineage captured for this dispatch, never inherited from worker birth identity. */
 	receiptOrigin?: WorkerReceiptOrigin;
 	profileId: string;

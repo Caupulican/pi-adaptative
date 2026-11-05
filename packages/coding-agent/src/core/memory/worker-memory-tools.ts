@@ -1,4 +1,6 @@
+import type { MemoryPromptBudget } from "../context/memory-prompt-budget.ts";
 import type { AgentToolResult } from "../extensions/types.ts";
+import type { KnowledgeProjection } from "./knowledge-projection.ts";
 
 /** Root memory owns mutation and lifecycle: the root `memory` tool is never a worker's. */
 export const ROOT_MEMORY_TOOL_NAME = "memory";
@@ -76,6 +78,8 @@ export type WorkerMemorySourceAnswer = { ok: true; text: string } | { ok: false;
  * rejects instead.
  */
 export interface WorkerMemoryBroker {
+	/** Current exact task-selected facts, sized against the complete request being prepared. */
+	projectKnowledge?(budget: MemoryPromptBudget): KnowledgeProjection;
 	read(query: string): Promise<string>;
 	readSource(ref: string, cursor?: number): Promise<WorkerMemorySourceAnswer>;
 	navigate(

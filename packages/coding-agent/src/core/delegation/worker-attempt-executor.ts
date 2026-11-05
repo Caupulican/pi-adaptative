@@ -1,7 +1,7 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
-import { compact } from "../../kernel/compaction/compaction.ts";
+import { compact, estimateContextTokens } from "../../kernel/compaction/compaction.ts";
 import type { AgentContextPlan, AgentContextPlanRequest, AgentContextWire } from "../../kernel/index.ts";
 import type { FollowUpState } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
@@ -23,6 +23,7 @@ import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
 import { frozenPrefixLength } from "../context/prefix-stability.ts";
+import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
@@ -45,6 +46,7 @@ import type {
 	WorkerTranscriptMessage,
 } from "./worker-conversation-store.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
+import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
 import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
@@ -265,6 +267,9 @@ export interface WorkerAttemptExecutorOptions {
 		signal?: AbortSignal,
 		wire?: AgentContextWire,
 	): Promise<AgentContextPlan>;
+	/** Task-bound canonical knowledge; its projection is request-only and independently revocable. */
+	knowledgeBroker?: Pick<WorkerMemoryBroker, "projectKnowledge">;
+	knowledgeCompactionReserveTokens?: number;
 	/**
 	 * The cache guard: each accepted provider request of this worker, as its recorded snapshot, with the
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
@@ -1403,16 +1408,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										// The same per-request projection root gets: the conversation's own retention
 										// compaction, then context GC packing what went stale, priced on this lane.
-										...(retentionPolicy || options.planRequest
+										...(retentionPolicy || options.planRequest || options.knowledgeBroker?.projectKnowledge
 											? {
 													planContext: async ({
+														model: requestModel,
 														messages,
 														sentPrefixCount,
 														wire,
+														measureRequest,
 													}: AgentContextPlanRequest) => {
 														planningMessages = messages;
 														const retain = async (
 															policy: WorkerConversationRetentionPolicy,
+															fallback: AgentMessage[],
 														): Promise<AgentMessage[]> => {
 															try {
 																signal.throwIfAborted();
@@ -1427,14 +1435,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 																) {
 																	retentionWarningEmitted = true;
 																	options.warn(
-																		`Worker ${options.laneId} has one retained turn larger than its context policy; provider overflow recovery may be required.`,
+																		`Worker ${options.laneId} has one retained turn larger than its context policy; the complete request still needs a capacity check.`,
 																	);
 																}
 																if (
 																	retained.status !== "compacted_verified" &&
 																	retained.status !== "compacted_deterministic"
 																) {
-																	return messages;
+																	return fallback;
 																}
 																if (retained.compacted) {
 																	options.recordCompactionOutcome?.({
@@ -1460,16 +1468,74 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 																		`Worker context retention failed: ${error instanceof Error ? error.message : String(error)}`,
 																	);
 																}
-																return messages;
+																return fallback;
 															}
 														};
-														const retained = retentionPolicy ? await retain(retentionPolicy) : messages;
-														signal.throwIfAborted();
-														// The sent mark indexes `messages`; re-anchor it by reference on what retention left.
-														const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, retained);
-														return options.planRequest
-															? options.planRequest(retained, frozenBelow, signal, wire)
-															: { messages: retained };
+														let retained = retentionPolicy
+															? await retain(retentionPolicy, messages)
+															: messages;
+														let capacityPolicy = retentionPolicy;
+														let previousTokens = Number.POSITIVE_INFINITY;
+														for (let recovery = 0; ; recovery++) {
+															signal.throwIfAborted();
+															// The sent mark indexes the original request; re-anchor after every retained projection.
+															const frozenBelow = frozenPrefixLength(
+																messages,
+																sentPrefixCount,
+																retained,
+															);
+															const plan: AgentContextPlan = options.planRequest
+																? await options.planRequest(retained, frozenBelow, signal, wire)
+																: { messages: retained };
+															const projectKnowledge = options.knowledgeBroker?.projectKnowledge;
+															if (!projectKnowledge) return plan;
+															if (!measureRequest) {
+																plan.discard?.();
+																throw new Error(
+																	"Worker knowledge requires current request measurement.",
+																);
+															}
+															const fitted = await appendWorkerKnowledgeContext({
+																plan,
+																model: requestModel ?? options.model,
+																measureRequest,
+																projectKnowledge,
+																compactionReserveTokens: options.knowledgeCompactionReserveTokens ?? 0,
+																maxOutputTokens: workerOutputTokenCeiling,
+																remainingTokenAllowance: () =>
+																	options.toolSurface.gateway?.remainingTokenBudget(),
+																signal,
+															});
+															if (fitted.kind === "ready") return fitted.plan;
+															plan.discard?.();
+															if (
+																!capacityPolicy ||
+																recovery >= 3 ||
+																fitted.promptTokens >= previousTokens
+															)
+																throw new Error(
+																	`Worker context capacity exhausted: current status requires ${fitted.promptTokens} estimated tokens, limit ${fitted.limitTokens}, after ${recovery} retention retries.`,
+																);
+															previousTokens = fitted.promptTokens;
+															const deficit = fitted.promptTokens - fitted.limitTokens;
+															const target = Math.max(
+																2,
+																Math.min(
+																	capacityPolicy.maxContextTokens - 1,
+																	estimateContextTokens(retained).tokens - deficit,
+																),
+															);
+															capacityPolicy = {
+																...capacityPolicy,
+																maxContextTokens: target,
+																keepRecentTokens: Math.min(
+																	capacityPolicy.keepRecentTokens,
+																	Math.floor(target / 2),
+																),
+															};
+															planningMessages = retained;
+															retained = await retain(capacityPolicy, retained);
+														}
 													},
 												}
 											: {}),

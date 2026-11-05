@@ -50,6 +50,7 @@ import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { WorkerTaskSessionView } from "../delegation/worker-task-view.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { MAX_KNOWLEDGE_GRANT_REFERENCES, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -209,6 +210,22 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				),
 			),
 			toolNames,
+			knowledge: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							id: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+							revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+						},
+						{ additionalProperties: false },
+					),
+					{
+						maxItems: MAX_KNOWLEDGE_GRANT_REFERENCES,
+						description:
+							"Exact accepted knowledge IDs and revisions selected for this task only. Omit to grant none; read knowledge first to obtain current references.",
+					},
+				),
+			),
 			readOnly: Type.Optional(
 				Type.Boolean({
 					description:
@@ -488,6 +505,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 		"path",
 		"writePaths",
 		"toolNames",
+		"knowledge",
 		"readOnly",
 		"instructions",
 		"goal",
@@ -1433,6 +1451,7 @@ function buildDelegateStartRequest(input: {
 		tool.readOnly !== undefined;
 	return {
 		instructions: input.instructions,
+		...(tool.knowledge !== undefined ? { knowledge: parseKnowledgeGrantReferences(tool.knowledge) } : {}),
 		...(input.brief ? { brief: input.brief } : {}),
 		...(input.messageReplayKey ? { messageReplayKey: input.messageReplayKey } : {}),
 		...(input.reuseAgentId ? { reuseAgentId: input.reuseAgentId } : {}),
@@ -2657,6 +2676,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							["readOnly", input.readOnly],
 							["profileId", input.profileId],
 							["forkTurns", input.forkTurns],
+							["knowledge", input.knowledge],
 						] as const
 					)
 						.filter((entry) => entry[1] !== undefined)

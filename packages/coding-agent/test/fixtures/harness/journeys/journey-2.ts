@@ -1,4 +1,5 @@
 import "../builtin-install.ts";
+import { expect } from "vitest";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { runJourney2BackgroundAndStallPhase } from "./journey-2-background-and-stall.ts";
 import { runJourney2ContinuousChatPhase } from "./journey-2-continuous-chat.ts";
@@ -23,6 +24,10 @@ export async function runJourney2(): Promise<void> {
 			modelOptions: { root: { contextWindow: 131_072 } },
 			// Exact expected refusal of the E7 negative control: the busy, dead-owner A is never resumed, and nothing else is allowed.
 			warningAllowances: [
+				// The continuous-chat lease takeover (wTakeover) and later activation (wRecovering) use in-memory sessions.
+				// Their collector refuses to start without durable evidence. The phase boundary below counts both exact warnings;
+				// the strict provider script also rejects any unplanned collection request.
+				/^Automatic knowledge collection requires a persisted session; no collection requests will start\.$/,
 				// The prompt-prefix monitor's intentional rewrite of an already-sent request, reported once per rewrite: a halted
 				// worker's closing turn adds its HALT CLOSING TURN section to the system prompt (and the next request drops it).
 				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. The provider re-bills the prompt from that point at full price\.$/,
@@ -74,7 +79,18 @@ export async function runJourney2(): Promise<void> {
 			await verifyGoalReplacementDuringRoute(world);
 			await runJourney2BackgroundAndStallPhase(world);
 			await runJourney2QueuedRecoveryPhase(world);
+			const collectionWarnings = () =>
+				world.warnings.filter(
+					(message) =>
+						message ===
+						"Automatic knowledge collection requires a persisted session; no collection requests will start.",
+				);
+			expect(collectionWarnings(), "no earlier phase loses persisted collection evidence").toEqual([]);
 			await runJourney2ContinuousChatPhase(world);
+			expect(
+				collectionWarnings(),
+				"the lease takeover and recovered in-memory roots each refuse automatic collection once",
+			).toHaveLength(2);
 		},
 	);
 }

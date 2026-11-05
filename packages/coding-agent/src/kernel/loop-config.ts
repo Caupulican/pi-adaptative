@@ -361,6 +361,12 @@ export interface AgentContextPlanRequest {
 	sentPrefixCount: number;
 	/** What the request carries to the model outside `messages` and outside the plan's own transients. */
 	wire?: AgentContextWire;
+	/**
+	 * Pure estimate of a candidate's complete materialized request in this planning attempt.
+	 * Uses the same conversion, protocol and image-budget path as dispatch; never invokes plan
+	 * callbacks, admission, persistence or transport. The result is an estimate, not provider tokenization.
+	 */
+	measureRequest?: (plan: AgentContextPlanPayload) => Promise<number>;
 }
 
 /**
@@ -415,6 +421,12 @@ export interface AgentContextPlan {
 	/** Release request-local planning resources when a plan is not accepted. */
 	discard?: () => void;
 }
+
+/** The data a request measurement may inspect, with no lifecycle callbacks or authority. */
+export type AgentContextPlanPayload = Pick<
+	AgentContextPlan,
+	"messages" | "transientMessages" | "transientSystemPrompt" | "transientReconciliationBase" | "nonCompactableHead"
+>;
 
 /** A replay-safe planning hook as installed on an agent. */
 export type AgentContextPlanFn = NonNullable<AgentLoopConfig["planContext"]>;

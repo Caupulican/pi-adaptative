@@ -127,7 +127,11 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 
 	const configuredMaxResults = Math.max(1, Math.trunc(input.configuredMaxResults ?? DEFAULT_MAX_RESULTS));
 	if (compact) {
-		const maxEstimatedTokens = Math.min(COMPACT_MAX_TOKENS, Math.max(0, availableTokens));
+		const maxEstimatedTokens = Math.min(
+			COMPACT_MAX_TOKENS,
+			input.ceilingTokens ?? COMPACT_MAX_TOKENS,
+			Math.max(0, availableTokens),
+		);
 		if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS)) {
 			return disabled("memory_block_cannot_fit_minimum_line", true);
 		}

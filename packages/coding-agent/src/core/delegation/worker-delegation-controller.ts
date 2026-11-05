@@ -72,6 +72,11 @@ import {
 	type WorkerTaskFitnessFailure,
 } from "../expert-routing/worker-task-fitness.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import {
+	type KnowledgeGrant,
+	type KnowledgeGrantReference,
+	parseKnowledgeGrantReferences,
+} from "../memory/knowledge-grant.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import {
 	deriveModelCapabilityProfile,
@@ -551,7 +556,12 @@ export interface WorkerDelegationControllerDeps {
 	 * A fresh read-only memory port for one lane; the handles it admits never reach another lane. Reads are
 	 * sized against `capacity`: the receiving lane's own request, never the root model's.
 	 */
-	createLaneMemoryBroker(capacity: LaneMemoryCapacitySource): WorkerMemoryBroker;
+	createLaneMemoryBroker(
+		capacity: LaneMemoryCapacitySource,
+		knowledgeReferences?: () => readonly KnowledgeGrantReference[],
+	): WorkerMemoryBroker;
+	/** Validate root-selected canonical versions without transferring owner-wide memory authority. */
+	captureKnowledgeGrant?(references: readonly KnowledgeGrantReference[]): KnowledgeGrant;
 	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
 	getHandoffPersonaGuidance?(): string | undefined;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
@@ -631,6 +641,9 @@ type WorkerAdmission =
 			resourcePointerIds: readonly string[];
 			executionContract: WorkerExecutionContract;
 			executionPlan: WorkerExecutionPlan;
+			knowledgeGrant?: KnowledgeGrant;
+			/** Existing task identity, revalidated after asynchronous fitness admission. */
+			admittedAttemptId?: string;
 			/** Who chose the admitted model (never the router): recorded on the dispatch for the operator. */
 			modelRouteSource: WorkerModelRouteSource;
 			modelPinSource?: string;
@@ -766,6 +779,7 @@ function boundedReleaseCause(cause: string): string {
 
 export class WorkerDelegationController {
 	private readonly taskFitness = new WorkerTaskFitness();
+	private readonly knowledgeGrants = new WeakMap<readonly KnowledgeGrantReference[], KnowledgeGrant>();
 	private readonly schedulerPreflight = Symbol("worker scheduler preflight");
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
@@ -1998,6 +2012,7 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 		selectedBinding?: OrchestrationModelBinding,
+		admittedAttempt?: AttemptRuntimeState,
 	): WorkerAdmission {
 		if (this.deps.isDisposed() || this.workerAbort.signal.aborted)
 			return { ok: false, skipReason: "session_disposed" };
@@ -2192,6 +2207,42 @@ export class WorkerDelegationController {
 			inheritedAuthority && this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
 				? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 				: currentExecutionPlan;
+		const retainedAttempt = admittedAttempt ?? this.replayedWorkerAttempt(request.messageReplayKey);
+		if (
+			retainedAttempt &&
+			(this.lifecycle.getTaskRuntimeSnapshot().attempts[retainedAttempt.attemptId]?.taskId !==
+				retainedAttempt.taskId ||
+				(admittedAttempt !== undefined &&
+					this.lifecycle.getActiveAttempt(retainedAttempt.taskId)?.attemptId !== retainedAttempt.attemptId) ||
+				retainedAttempt.dispatch.instructions !== request.instructions ||
+				!isDeepStrictEqual(retainedAttempt.dispatch.knowledgeReferences ?? [], request.knowledge ?? []))
+		)
+			return { ok: false, skipReason: "worker_knowledge_task_mismatch" };
+		let knowledgeGrant: KnowledgeGrant | undefined;
+		try {
+			const references = parseKnowledgeGrantReferences(request.knowledge ?? []);
+			if (references.length > 0) {
+				if (
+					!executionPlan.readMemory ||
+					!executionPlan.requiredCapabilities.includes("memory.query") ||
+					!executionPlan.toolManifests.some((tool) => tool.toolName === "memory_read")
+				)
+					return { ok: false, skipReason: "worker_knowledge_capability_required" };
+				// Retained tasks keep exact references; the broker projects unavailable records as cleared.
+				// Only fresh tasks re-admit current record content.
+				if (!retainedAttempt) {
+					knowledgeGrant = request.knowledge ? this.knowledgeGrants.get(request.knowledge) : undefined;
+					if (!knowledgeGrant) {
+						knowledgeGrant = this.deps.captureKnowledgeGrant?.(references);
+						if (!knowledgeGrant) return { ok: false, skipReason: "worker_knowledge_unavailable" };
+						this.knowledgeGrants.set(request.knowledge!, knowledgeGrant);
+					}
+					if (!knowledgeGrant.isCurrent()) return { ok: false, skipReason: "worker_knowledge_stale" };
+				}
+			}
+		} catch {
+			return { ok: false, skipReason: "worker_knowledge_invalid" };
+		}
 		const verifierExecutionPlan = verifierShipment
 			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings, executionCwd)
 			: undefined;
@@ -2244,6 +2295,8 @@ export class WorkerDelegationController {
 			shipment,
 			...(verifierShipment ? { verifierShipment } : {}),
 			resourcePointerIds: selectedResources.pointers.map((pointer) => pointer.id),
+			...(knowledgeGrant ? { knowledgeGrant } : {}),
+			...(retainedAttempt ? { admittedAttemptId: retainedAttempt.attemptId } : {}),
 			executionContract,
 			executionPlan,
 			// Same precedence as selectModelBinding: a pin wins, then the caller's explicit model, then
@@ -2758,7 +2811,7 @@ export class WorkerDelegationController {
 			if (readiness.state === "blocked") return { action: "cancel", reasonCode: readiness.reasonCode };
 		}
 		const contract = attempt.dispatch.executionContract;
-		const admission = this.resolveWorkerAdmission(request, contract);
+		const admission = this.resolveWorkerAdmission(request, contract, undefined, attempt);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
 		if (isEmergencyStopEngaged(this.deps.getAgentDir())) {
 			return {
@@ -3134,6 +3187,7 @@ export class WorkerDelegationController {
 		if (admitted.dispatch.instructions !== request.instructions) return false;
 		// The rendered text can read the same for different fields, so a structured task is compared field for field.
 		if (!sameTaskBrief(admitted.dispatch.brief, request.brief)) return false;
+		if (!isDeepStrictEqual(admitted.dispatch.knowledgeReferences ?? [], request.knowledge ?? [])) return false;
 		const admittedContract = admitted.dispatch.executionContract;
 		if (!admittedContract) return false;
 		const admittedSpecialization = describeWorkerSpecialization(
@@ -3256,6 +3310,8 @@ export class WorkerDelegationController {
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
 			assertWorkerReceiptAdmission(request.receiptOrigin);
+			if (admission.knowledgeGrant && !admission.knowledgeGrant.isCurrent())
+				throw new Error("worker_knowledge_stale");
 			const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
 			const controlMessageId =
 				this.controlMessageIdFor(request.messageReplayKey) ??
@@ -3265,6 +3321,7 @@ export class WorkerDelegationController {
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,
+					knowledgeReferences: admission.knowledgeGrant?.references ?? [],
 					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
@@ -3372,6 +3429,10 @@ export class WorkerDelegationController {
 					(attempt) =>
 						attempt !== undefined &&
 						attempt.dispatch.instructions === admission.instructions &&
+						isDeepStrictEqual(
+							attempt.dispatch.knowledgeReferences ?? [],
+							admission.knowledgeGrant?.references ?? [],
+						) &&
 						sameTaskBrief(attempt.dispatch.brief, request.brief) &&
 						attempt.dispatch.parentAgentId === request.parentAgentId &&
 						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
@@ -4005,6 +4066,7 @@ export class WorkerDelegationController {
 		agentId: string,
 		request: WorkerDelegationRequest,
 		contract: WorkerExecutionContract,
+		knowledgeGrant?: KnowledgeGrant,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const agent = this.lifecycle.getAgent(agentId);
 		if (!agent) return { started: false, skipReason: "unknown_agent" };
@@ -4012,6 +4074,7 @@ export class WorkerDelegationController {
 		try {
 			return this.withProjectContextAdmission(agent, () => {
 				assertWorkerReceiptAdmission(request.receiptOrigin);
+				if (knowledgeGrant && !knowledgeGrant.isCurrent()) throw new Error("worker_knowledge_stale");
 				admittedClaim = true;
 				const goal = this.goalForWorkerRequest(request);
 				const taskContext = request.taskContext;
@@ -4020,6 +4083,7 @@ export class WorkerDelegationController {
 					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
 					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 					newTask: {
+						knowledgeReferences: knowledgeGrant?.references ?? [],
 						controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
 						...(goal ? { goal } : {}),
 						...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
@@ -4071,9 +4135,10 @@ export class WorkerDelegationController {
 	private workerTaskFitnessInput(
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
+		fitnessInstructions = request.instructions,
 	): WorkerTaskFitInput {
 		return {
-			instructions: workerFitnessInstructions(request.instructions),
+			instructions: workerFitnessInstructions(fitnessInstructions),
 			objective: this.goalForWorkerRequest(request)?.userGoal ?? "",
 			model: describeModelCard(
 				buildCapabilityCard(admission.shipment.model, { subscription: false, evidence: "unprobed" }),
@@ -4086,7 +4151,7 @@ export class WorkerDelegationController {
 	private existingWorkerFitnessAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerAdmission {
 		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
 		return attempt
-			? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract)
+			? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract, undefined, attempt)
 			: { ok: false, skipReason: "worker_task_fitness_binding_unavailable" };
 	}
 
@@ -4135,6 +4200,7 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
 		signal?: AbortSignal,
+		fitnessInstructions = request.instructions,
 	): Promise<WorkerTaskFitnessFailure | undefined> {
 		if (!this.workerTaskFitnessEnabled()) return;
 		const judge = this.deps.getRouteChoiceJudge?.();
@@ -4147,7 +4213,7 @@ export class WorkerDelegationController {
 		try {
 			failure = await this.taskFitness.check(
 				judge,
-				this.workerTaskFitnessInput(request, admission),
+				this.workerTaskFitnessInput(request, admission, fitnessInstructions),
 				signal ?? this.workerAbort.signal,
 			);
 		} catch (error) {
@@ -4160,8 +4226,15 @@ export class WorkerDelegationController {
 		const current = this.resolveWorkerAdmission(
 			{ ...request, profileId: admission.executionContract.worker.profile.profileId },
 			admission.executionContract,
+			undefined,
+			admission.admittedAttemptId
+				? this.lifecycle.getTaskRuntimeSnapshot().attempts[admission.admittedAttemptId]
+				: undefined,
 		);
 		if (
+			(admission.admittedAttemptId !== undefined &&
+				current.ok &&
+				current.admittedAttemptId !== admission.admittedAttemptId) ||
 			this.deps.isDisposed() ||
 			this.deps.getSessionId() !== sessionId ||
 			this.deps.getCwd() !== cwd ||
@@ -4479,7 +4552,12 @@ export class WorkerDelegationController {
 				shared.executionContract,
 			);
 			if (!current.ok) return { kind: "refused", skipReason: current.skipReason };
-			const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
+			const accepted = this.startReusedSpecialistTask(
+				reuse.agentId,
+				request,
+				shared.executionContract,
+				shared.knowledgeGrant,
+			);
 			return accepted.started
 				? { kind: "existing", record: accepted.record, replayed: false }
 				: { kind: "refused", skipReason: accepted.skipReason };
@@ -4549,6 +4627,17 @@ export class WorkerDelegationController {
 	private captureWorkerRequest(request: WorkerDelegationRequest, existing = false): WorkerDelegationRequest {
 		const { assertReceiptAdmission, ...cloneable } = request;
 		const capturedRequest = structuredClone(cloneable);
+		if (capturedRequest.knowledge !== undefined) {
+			capturedRequest.knowledge = parseKnowledgeGrantReferences(capturedRequest.knowledge);
+			if (
+				capturedRequest.knowledge.length > 0 &&
+				!existing &&
+				!this.replayedWorkerAttempt(request.messageReplayKey)
+			) {
+				const grant = this.deps.captureKnowledgeGrant?.(capturedRequest.knowledge);
+				if (grant) this.knowledgeGrants.set(capturedRequest.knowledge, grant);
+			}
+		}
 		inheritWorkerReceiptAdmission(request.receiptOrigin, capturedRequest.receiptOrigin);
 		if (existing) return capturedRequest;
 		const replay = this.replayedWorkerAttempt(request.messageReplayKey);
@@ -4687,6 +4776,8 @@ export class WorkerDelegationController {
 		const admission = this.resolveWorkerAdmission(
 			this.recovery.recoveredRequest(attempt),
 			attempt.dispatch.executionContract,
+			undefined,
+			attempt,
 		);
 		return admission.ok && this.holdsForLocalForeground(admission.shipment.model);
 	}
@@ -4870,7 +4961,12 @@ export class WorkerDelegationController {
 			const contract = attempt?.dispatch.executionContract;
 			let legacyCwd: string | undefined;
 			if (attempt && contract && !contract.worker.executionContext) {
-				const admission = this.resolveWorkerAdmission(this.recovery.recoveredRequest(attempt), contract);
+				const admission = this.resolveWorkerAdmission(
+					this.recovery.recoveredRequest(attempt),
+					contract,
+					undefined,
+					attempt,
+				);
 				if (!admission.ok) return admission.skipReason;
 				legacyCwd = admission.executionPlan.cwd;
 				this.safeWarn(
@@ -4950,11 +5046,13 @@ export class WorkerDelegationController {
 	): PreparedWorkerRun {
 		if (this.workerAbort.signal.aborted || this.deps.isDisposed())
 			return { started: false, skipReason: "session_disposed" };
-		const pinnedContract = existingRecord
-			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)?.dispatch.executionContract
+		const existingAttempt = existingRecord
+			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)
 			: undefined;
+		if (existingRecord && !existingAttempt) return { started: false, skipReason: "orchestration_attempt_missing" };
+		const pinnedContract = existingAttempt?.dispatch.executionContract;
 		const admission = existingRecord
-			? this.resolveWorkerAdmission(request, pinnedContract)
+			? this.resolveWorkerAdmission(request, pinnedContract, undefined, existingAttempt)
 			: preparedAdmission && newWorkerAdmissionChecked
 				? preparedAdmission
 				: this.admitNewWorkerRequest(request, pinnedContract);
@@ -5286,19 +5384,32 @@ export class WorkerDelegationController {
 		// The run-wide baseline is the state at the worker's start, not at its first command.
 		protectedPathWatch?.start();
 		const compactionSettings = this.deps.getSettingsManager().getCompactionSettings();
+		const compactionReserveFor = (activeModel: Model<Api>) =>
+			compactionSettings.enabled
+				? laneCompactionReserveTokens(Math.floor(activeModel.contextWindow ?? 0), compactionSettings.reserveTokens)
+				: 0;
 		const buildLaneMemoryCapacity = (activeModel: Model<Api>) =>
 			new LaneMemoryCapacityTracker({
 				model: activeModel,
-				compactionReserveTokens: compactionSettings.enabled
-					? laneCompactionReserveTokens(
-							Math.floor(activeModel.contextWindow ?? 0),
-							compactionSettings.reserveTokens,
-						)
-					: 0,
+				compactionReserveTokens: compactionReserveFor(activeModel),
 				maxOutputTokens: resolveWorkerOutputTokenCeiling(activeModel),
 				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
 			});
 		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
+		const memoryBroker = executionPlan.readMemory
+			? this.deps.createLaneMemoryBroker(
+					() => laneMemoryCapacity.source(),
+					() => {
+						const current = lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId];
+						return current &&
+							(current.status === "running" || current.status === "leased") &&
+							current.lease?.leaseId === durableHandle.leaseId &&
+							current.lease?.fencingToken === durableHandle.fencingToken
+							? (current.dispatch.knowledgeReferences ?? [])
+							: [];
+					},
+				)
+			: undefined;
 		const toolSurface = createLaneToolSurface({
 			workerLabel: agentId,
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
@@ -5312,9 +5423,7 @@ export class WorkerDelegationController {
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
 			writeProtectedPaths: getHarnessWriteProtectedPaths(executionPlan.cwd, this.deps.getAgentDir()),
-			memoryBroker: executionPlan.readMemory
-				? this.deps.createLaneMemoryBroker(() => laneMemoryCapacity.source())
-				: undefined,
+			memoryBroker,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
@@ -5448,7 +5557,13 @@ export class WorkerDelegationController {
 				reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
 				request: workerRequest,
 				assertTaskFitness: async (instructions, signal) => {
-					const failure = await this.checkWorkerTaskFitness({ ...request, instructions }, admission, signal);
+					// Continuations change the judgment text, never the immutable dispatch being revalidated.
+					const failure = await this.checkWorkerTaskFitness(
+						request,
+						{ ...admission, admittedAttemptId: durableHandle.attemptId },
+						signal,
+						instructions,
+					);
 					if (failure)
 						throw new BoundedCompletionFailureError(
 							"failed",
@@ -5459,6 +5574,9 @@ export class WorkerDelegationController {
 				grant,
 				executionPlan,
 				toolSurface,
+				...(memoryBroker
+					? { knowledgeBroker: memoryBroker, knowledgeCompactionReserveTokens: compactionReserveFor(model) }
+					: {}),
 				conversation,
 				lifecycle,
 				laneId: startedRecord.laneId,

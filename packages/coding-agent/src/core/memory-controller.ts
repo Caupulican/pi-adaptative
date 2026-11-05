@@ -100,6 +100,12 @@ import { memoryFailure } from "./memory/history-tool.ts";
 import { KnowledgeAdmission, type KnowledgeAdmissionPort } from "./memory/knowledge-admission.ts";
 import type { KnowledgeCollectionHost, KnowledgeCollector } from "./memory/knowledge-collector.ts";
 import {
+	type KnowledgeGrant,
+	type KnowledgeGrantReference,
+	matchesKnowledgeGrant,
+	parseKnowledgeGrantReferences,
+} from "./memory/knowledge-grant.ts";
+import {
 	KNOWLEDGE_CONTEXT_CLEARED,
 	KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
 	type KnowledgeProjection,
@@ -568,6 +574,8 @@ export interface LaneMemoryReadSnapshot {
 	readonly sourceGeneration: number;
 	readonly sourceRevision: number;
 	readonly content: string;
+	/** Rechecked by the receiving broker after its await, before exposing text or admitting source handles. */
+	isCurrent(): boolean;
 }
 
 /** A memory mutation or lifecycle transition invalidated a delegated read before it could be used. */
@@ -1491,11 +1499,8 @@ export class MemoryController {
 
 	/** Current facts ride the existing versioned memory plan in ordinary requests and continuous chat alike. */
 	private _appendKnowledgePrompt(messages: AgentMessage[], wireMessages: readonly AgentMessage[]): MemoryPromptPlan {
-		const generation = this._memoryGeneration;
-		const reader = this._currentKnowledgeReader();
-		const scope = this._knowledgeScope();
-		const policy = this._retrievalPolicyKey();
-		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		const context = this._captureKnowledgeReadContext();
+		const { reader, scope, settings } = context;
 		const visible = [...wireMessages, ...messages];
 		const budget = this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(visible));
 		let projection: KnowledgeProjection | undefined;
@@ -1523,13 +1528,10 @@ export class MemoryController {
 				),
 			],
 			isCurrent: () =>
-				generation === this._memoryGeneration &&
+				context.isCurrent() &&
 				!this.deps.isChildSession() &&
 				this.deps.getSettingsManager().getMemorySystem() === "icm" &&
 				!this._legacyMemoryEnabled() &&
-				reader === this._currentKnowledgeReader() &&
-				policy === this._retrievalPolicyKey() &&
-				isDeepStrictEqual(scope, this._knowledgeScope()) &&
 				isDeepStrictEqual(
 					budget,
 					this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(visible)),
@@ -1560,6 +1562,77 @@ export class MemoryController {
 
 	private _knowledgeScope(): KnowledgeScope {
 		return { project: this._projectId(), role: "", audience: "owner" };
+	}
+
+	/** One lifecycle/scope fence for every request-only projection of canonical knowledge. */
+	private _captureKnowledgeReadContext() {
+		const generation = this._memoryGeneration;
+		const reader = this._currentKnowledgeReader();
+		const scope = this._knowledgeScope();
+		const policy = this._retrievalPolicyKey();
+		return {
+			reader,
+			scope,
+			settings: this.deps.getSettingsManager().getMemoryRetrievalSettings(),
+			isCurrent: () =>
+				generation === this._memoryGeneration &&
+				reader === this._currentKnowledgeReader() &&
+				policy === this._retrievalPolicyKey() &&
+				isDeepStrictEqual(scope, this._knowledgeScope()),
+		};
+	}
+
+	/** Capture only the owner's exact selected versions; a grant never widens their private scope. */
+	captureKnowledgeGrant(input: readonly KnowledgeGrantReference[]): KnowledgeGrant {
+		const references = parseKnowledgeGrantReferences(input);
+		if (references.length === 0) return { references, isCurrent: () => true };
+		const generation = this._memoryGeneration;
+		const store = this._knowledgeStore;
+		const scope = this._knowledgeScope();
+		const capturedAt = new Date().toISOString();
+		const isCurrent = (): boolean => {
+			try {
+				const at = new Date().toISOString();
+				if (
+					!store ||
+					generation !== this._memoryGeneration ||
+					store !== this._knowledgeStore ||
+					!this._currentKnowledgeReader() ||
+					!isDeepStrictEqual(scope, this._knowledgeScope()) ||
+					at < capturedAt
+				)
+					return false;
+				const revision = store.revision();
+				return (
+					references.every((reference) => matchesKnowledgeGrant(store.get(reference.id), reference, scope, at)) &&
+					store.revision() === revision
+				);
+			} catch {
+				return false;
+			}
+		};
+		if (!isCurrent())
+			throw new Error("Selected knowledge is absent, changed, expired or outside the owner's current scope.");
+		return { references, isCurrent };
+	}
+
+	private _projectKnowledgeForLane(
+		references: readonly KnowledgeGrantReference[],
+		budget: MemoryPromptBudget,
+		purpose: "prompt" | "read",
+	): KnowledgeProjection {
+		const context = this._captureKnowledgeReadContext();
+		const { reader, scope, settings } = context;
+		const enabled = settings.enabled && (purpose === "read" || settings.includeInPrompt);
+		const projection =
+			enabled && references.length > 0 ? reader?.previewSelected(scope, references, budget) : undefined;
+		return {
+			revision: projection?.revision ?? 0,
+			text: projection?.text ?? "",
+			includedCount: projection?.includedCount ?? 0,
+			omittedCount: projection?.omittedCount ?? references.length,
+			isCurrent: () => context.isCurrent() && (projection?.isCurrent() ?? true),
+		};
 	}
 
 	/** Shared mutation authority for the root tool and the original-owner collection coordinator. */
@@ -2014,11 +2087,8 @@ export class MemoryController {
 
 	/** Current owner-facing knowledge for an isolated review, with whole-record framing and freshness. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean } {
-		const generation = this._memoryGeneration;
-		const policy = this._retrievalPolicyKey();
-		const scope = this._knowledgeScope();
-		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
-		const reader = this._currentKnowledgeReader();
+		const context = this._captureKnowledgeReadContext();
+		const { reader, scope, settings } = context;
 		const projection =
 			settings.enabled && settings.includeInPrompt
 				? reader?.preview(scope, charBoundedMemoryPromptBudget(maxChars))
@@ -2029,10 +2099,7 @@ export class MemoryController {
 				projection?.text ??
 				(legacy.length <= maxChars ? legacy : "Owner guidance omitted: exceeds review allowance."),
 			isCurrent: () =>
-				generation === this._memoryGeneration &&
-				policy === this._retrievalPolicyKey() &&
-				reader === this._currentKnowledgeReader() &&
-				isDeepStrictEqual(scope, this._knowledgeScope()) &&
+				context.isCurrent() &&
 				(projection?.isCurrent() ?? true) &&
 				(reader !== undefined || legacy === (this.getHandoffPersonaGuidance() ?? "")),
 		};
@@ -2052,6 +2119,7 @@ export class MemoryController {
 		query: string,
 		capacity: LaneMemoryCapacitySource,
 		deadlineAt: number,
+		knowledgeReferences: readonly KnowledgeGrantReference[] = [],
 	): Promise<LaneMemoryReadSnapshot> {
 		const generation = this._memoryGeneration;
 		const revision = this._memoryContentRevision;
@@ -2060,11 +2128,25 @@ export class MemoryController {
 			if (this._transitioning && this._shutdownPromise === undefined) {
 				return Promise.reject(new LaneMemorySnapshotStaleError());
 			}
-			return Promise.resolve(this._laneMemorySnapshot(generation, revision, LANE_MEMORY_UNAVAILABLE_TEXT));
+			return Promise.resolve(
+				this._laneMemorySnapshot(
+					generation,
+					revision,
+					LANE_MEMORY_UNAVAILABLE_TEXT,
+					() => !this._historyAvailable(generation),
+				),
+			);
 		}
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		if (!settings.enabled) {
-			return Promise.resolve(this._laneMemorySnapshot(generation, revision, MEMORY_RETRIEVAL_DISABLED_REASON));
+			return Promise.resolve(
+				this._laneMemorySnapshot(
+					generation,
+					revision,
+					MEMORY_RETRIEVAL_DISABLED_REASON,
+					() => !this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
+				),
+			);
 		}
 		const legacy = this._legacyMemoryEnabled();
 		const normalizedQuery = query.trim();
@@ -2072,7 +2154,15 @@ export class MemoryController {
 		const budget = this._laneMemoryBudget(settings.maxResults, lane);
 		if (!budget.enabled) {
 			return Promise.resolve(
-				this._laneMemorySnapshot(generation, revision, laneConstraintText(budget.reason, lane !== undefined)),
+				this._laneMemorySnapshot(
+					generation,
+					revision,
+					laneConstraintText(budget.reason, lane !== undefined),
+					() =>
+						this._historyAvailable(generation) &&
+						legacy === this._legacyMemoryEnabled() &&
+						isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, capacity()), budget),
+				),
 			);
 		}
 		const maxResults = Math.min(3, budget.maxResults);
@@ -2088,6 +2178,8 @@ export class MemoryController {
 			maxResults,
 			budget,
 			lane?.revision,
+			knowledgeReferences,
+			knowledgeReferences.length ? this._knowledgeStore?.revision() : undefined,
 		]);
 		const active = this._laneMemoryReads.get(key);
 		if (active) return active;
@@ -2103,6 +2195,7 @@ export class MemoryController {
 			capacity,
 			lifecycleTail: this._lifecycleTail,
 			deadlineAt,
+			knowledgeReferences,
 		});
 		this._laneMemoryReads.set(key, loading);
 		void loading
@@ -2137,7 +2230,10 @@ export class MemoryController {
 	 * over), and `readSource` opens only those, inside the memory generation and retrieval policy that issued
 	 * them; anything else that changed since is a stale read to repeat, never a delivery.
 	 */
-	createLaneMemoryBroker(capacity: LaneMemoryCapacitySource): WorkerMemoryBroker {
+	createLaneMemoryBroker(
+		capacity: LaneMemoryCapacitySource,
+		knowledgeReferences: () => readonly KnowledgeGrantReference[] = () => [],
+	): WorkerMemoryBroker {
 		interface Admission {
 			generation: number;
 			policy: string;
@@ -2157,14 +2253,32 @@ export class MemoryController {
 		const laneBudget = () =>
 			this._laneMemoryBudget(this.deps.getSettingsManager().getMemoryRetrievalSettings().maxResults, capacity());
 		return {
+			projectKnowledge: (budget) => {
+				const references = parseKnowledgeGrantReferences(knowledgeReferences());
+				const projection = this._projectKnowledgeForLane(references, budget, "prompt");
+				return {
+					...projection,
+					isCurrent: () => {
+						try {
+							return projection.isCurrent() && isDeepStrictEqual(references, knowledgeReferences());
+						} catch {
+							return false;
+						}
+					},
+				};
+			},
 			read: async (query) => {
 				const policy = this._retrievalPolicyKey();
+				const references = parseKnowledgeGrantReferences(knowledgeReferences());
 				// One deadline for the whole tool call, set once here and passed unchanged to every summary read.
 				const snapshot = await this.readMemorySnapshotForLane(
 					query,
 					capacity,
 					Date.now() + TRANSCRIPT_FOREGROUND_READ_MS,
+					references,
 				);
+				if (!snapshot.isCurrent() || !isDeepStrictEqual(references, knowledgeReferences()))
+					throw new LaneMemorySnapshotStaleError();
 				for (const handle of [
 					...extractTranscriptSourceHandles(snapshot.content, this._projectId()),
 					...extractTranscriptNodeHandles(snapshot.content),
@@ -2568,6 +2682,7 @@ export class MemoryController {
 		capacity: LaneMemoryCapacitySource;
 		lifecycleTail: Promise<void>;
 		deadlineAt: number;
+		knowledgeReferences: readonly KnowledgeGrantReference[];
 	}): Promise<LaneMemoryReadSnapshot> {
 		await input.lifecycleTail;
 		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
@@ -2618,7 +2733,9 @@ export class MemoryController {
 		const status = laneHistoryStatus(historyReport);
 		const hasHistoryCandidates = candidates.some(isHistoryRecord);
 		const constrained = (reason: string | undefined) =>
-			this._laneMemorySnapshot(input.generation, input.revision, laneConstraintText(reason, true));
+			this._laneMemorySnapshot(input.generation, input.revision, laneConstraintText(reason, true), () =>
+				this._laneReadCurrent(input),
+			);
 		// Reserved before any record competes: the wrapper and the short lines that state what is missing.
 		let remaining = reserveMemoryPromptBudget(input.budget, {
 			bytes: utf8ByteLength(LANE_WRAPPER),
@@ -2627,6 +2744,7 @@ export class MemoryController {
 		});
 		const worstOmissionNote = laneOmissionNote([
 			...(input.legacy ? ["standing memory"] : []),
+			...(input.knowledgeReferences.length ? ["selected knowledge"] : []),
 			`${candidates.length} retrieved record(s)`,
 		]);
 		for (const text of [status, summaries.status, hasHistoryCandidates ? LANE_HANDLE_HINT : "", worstOmissionNote]) {
@@ -2635,6 +2753,14 @@ export class MemoryController {
 		if (!remaining.enabled) return constrained(remaining.reason);
 
 		const omitted: string[] = [];
+		const knowledge = this._projectKnowledgeForLane(
+			input.knowledgeReferences,
+			shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE),
+			"read",
+		);
+		const knowledgeText = knowledge.text;
+		if (knowledgeText) remaining = reserveMemoryPromptBudget(remaining, laneRecordReserve(knowledgeText));
+		else if (input.knowledgeReferences.length > 0) omitted.push("selected knowledge");
 		// Standing memory takes at most half of the allowance, and only as the whole block the provider fitted.
 		const standingBudget = shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE);
 		const standingRaw = input.legacy
@@ -2674,6 +2800,7 @@ export class MemoryController {
 		}
 
 		const block = composeTieredMemoryPromptBlock(candidates, remaining);
+		if (!knowledge.isCurrent()) throw new LaneMemorySnapshotStaleError();
 		const admitted = new Set(block.includedIds);
 		const transcriptAdmitted = candidates.some(
 			(candidate) => admitted.has(candidate.id) && isHistoryRecord(candidate),
@@ -2684,6 +2811,7 @@ export class MemoryController {
 			: candidates.length;
 		if (notFitting > 0) omitted.push(`${notFitting} retrieved record(s)`);
 		const parts = [
+			knowledgeText,
 			standingText,
 			frontierText,
 			block.text ?? "",
@@ -2697,6 +2825,7 @@ export class MemoryController {
 				input.generation,
 				input.revision,
 				input.legacy ? LANE_NO_MEMORY_TEXT : LANE_NO_HISTORY_TEXT,
+				() => this._laneReadCurrent(input) && knowledge.isCurrent(),
 			);
 		}
 		const combined = parts.join(LANE_RECORD_SEPARATOR);
@@ -2706,6 +2835,7 @@ export class MemoryController {
 			input.generation,
 			input.revision,
 			wrapUntrustedText(combined, "worker-memory", { nonce }),
+			() => this._laneReadCurrent(input) && knowledge.isCurrent(),
 		);
 	}
 
@@ -2746,12 +2876,31 @@ export class MemoryController {
 		sourceGeneration: number,
 		sourceRevision: number,
 		content: string,
+		isCurrent: () => boolean,
 	): LaneMemoryReadSnapshot {
+		const policy = this._retrievalPolicyKey();
 		const snapshotId = createHash("sha256")
 			.update(JSON.stringify([sourceGeneration, sourceRevision, content]))
 			.digest("hex")
 			.slice(0, 32);
-		return Object.freeze({ snapshotId, sourceGeneration, sourceRevision, content });
+		return Object.freeze({
+			snapshotId,
+			sourceGeneration,
+			sourceRevision,
+			content,
+			isCurrent: () => {
+				try {
+					return (
+						sourceGeneration === this._memoryGeneration &&
+						sourceRevision === this._memoryContentRevision &&
+						policy === this._retrievalPolicyKey() &&
+						isCurrent()
+					);
+				} catch {
+					return false;
+				}
+			},
+		});
 	}
 
 	/** Parent reflection's only structured-memory mutation port. Workers never receive this capability. */

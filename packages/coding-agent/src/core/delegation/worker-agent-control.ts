@@ -3,6 +3,11 @@ import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import {
+	type KnowledgeGrantReference,
+	MAX_KNOWLEDGE_GRANT_REFERENCES,
+	parseKnowledgeGrantReferences,
+} from "../memory/knowledge-grant.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type AgentBindingStatus,
@@ -84,6 +89,10 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 				kind: "terminal_handoff",
 				sourceAttemptId: `a${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 				newTask: {
+					knowledgeReferences: Array.from({ length: MAX_KNOWLEDGE_GRANT_REFERENCES }, (_, index) => ({
+						id: index.toString(16).padStart(64, "0"),
+						revision: Number.MAX_SAFE_INTEGER,
+					})),
 					goalId: `g${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 					requirementIds: Array.from(
 						{ length: MAX_MAILBOX_CORRELATION_IDS },
@@ -142,6 +151,7 @@ export interface WorkerAgentMessageEnvelope {
  * before the message is enqueued, so recovery after a restart needs no copy of the goal state.
  */
 export interface WorkerAgentNewTaskCorrelation {
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** Host-admitted command declaration; never re-derived from a later parent snapshot. */
 	controlForkMode?: string;
 	goalId?: string;
@@ -362,6 +372,7 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	 * is bound to session scope, never to the goal this specialist happened to run first.
 	 */
 	newTask?: {
+		knowledgeReferences?: readonly KnowledgeGrantReference[];
 		controlForkMode?: string;
 		goal?: GoalState;
 		requirementIds?: readonly string[];
@@ -1132,7 +1143,8 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 				field === "controlForkMode" ||
 				field === "requirementIds" ||
 				field === "acceptanceCriterionIds" ||
-				field === "resourcePointerIds",
+				field === "resourcePointerIds" ||
+				field === "knowledgeReferences",
 		)
 	) {
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
@@ -1141,6 +1153,9 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
 	}
 	return normalizeWorkerAgentNewTaskCorrelation({
+		...(correlation.knowledgeReferences === undefined
+			? {}
+			: { knowledgeReferences: parseKnowledgeGrantReferences(correlation.knowledgeReferences) }),
 		...(correlation.controlForkMode === undefined ? {} : { controlForkMode: correlation.controlForkMode as string }),
 		...(correlation.goalId === undefined ? {} : { goalId: correlation.goalId as string }),
 		...(correlation.requirementIds === undefined
@@ -1196,7 +1211,9 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 		value.resourcePointerIds,
 		"new task resource pointer ids",
 	);
+	const knowledgeReferences = parseKnowledgeGrantReferences(value.knowledgeReferences ?? []);
 	return {
+		...(knowledgeReferences.length > 0 ? { knowledgeReferences } : {}),
 		...(goalId ? { goalId } : {}),
 		...(controlForkMode ? { controlForkMode } : {}),
 		...(requirementIds.length > 0 ? { requirementIds } : {}),

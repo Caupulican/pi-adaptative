@@ -4,6 +4,8 @@ import type { Context, Message } from "@caupulican/pi-ai/types";
 import type {
 	AgentContext,
 	AgentContextPlan,
+	AgentContextPlanPayload,
+	AgentContextPlanRequest,
 	AgentContextWire,
 	AgentLoopConfig,
 	ProviderRequestPrefixState,
@@ -13,6 +15,7 @@ import type {
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./loop-config.ts";
+import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
 import { renderToolFailureLedger, renderToolFailureLedgerHeader } from "./tool-failure-ledger-record.ts";
@@ -263,9 +266,13 @@ async function buildContextPlan(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	wire: AgentContextWire,
+	measureRequest: NonNullable<AgentContextPlanRequest["measureRequest"]>,
 ): Promise<AgentContextPlan> {
 	if (config.planContext)
-		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model, wire }, signal);
+		return await config.planContext(
+			{ messages, attempt, sentPrefixCount, model: config.model, wire, measureRequest },
+			signal,
+		);
 	return {
 		messages: config.transformContext ? await config.transformContext(messages, signal) : messages,
 	};
@@ -378,6 +385,113 @@ function adoptReplannedMessages(target: AgentContext, accepted: AgentContext): v
 	for (const message of messages) target.messages.push(message);
 }
 
+/** Materialize one candidate without admission, lifecycle callbacks or durable effects. */
+async function materializeContextPlan(
+	sourceContext: AgentContext,
+	sanitized: ReturnType<typeof sanitizeToolFailureContext>,
+	ledgerView: string | undefined,
+	plan: AgentContextPlanPayload,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+) {
+	// Append-on-change transients (turn-economics A1 extended - see transient-records.ts's
+	// module doc for the full mechanism and why it exists: the old approach rebuilt and
+	// re-appended every transient at the tail of every request, which the websocket delta cache
+	// measurably could never see past turn 1 as a stable prefix - see the Task 10 diagnosis).
+	//
+	// `sanitized.messages` (and so `plan.messages`, absent a host planContext/transformContext
+	// that reshapes it) already contains every PREVIOUSLY-recorded durable transient: once
+	// committed below, a transient record is an ordinary durable message like any other -
+	// `analyzeToolFailureContext` never touches a `role: "custom"` message (it only inspects
+	// "assistant"/"toolResult"), so dedup/erasure can never rewrite or displace one. The only
+	// work left here is deciding whether THIS turn's true content differs from the last
+	// durably-recorded instance of each kind this package owns, plus every host-contributed kind
+	// it can safely identify (see `adaptHostTransients`), OR - for the trailing (MUST-protocol)
+	// pair below - whether the trailing group has been displaced from the literal tail by
+	// ordinary turn growth since it was last written. Informational slots are typically
+	// unchanged, so `pendingTransientRecords` is typically empty FOR THEM; the trailing pair is
+	// not typically empty while active (measured: every turn, not just content-changing ones -
+	// see `reconcileTransientRecords`'s doc comment in transient-records.ts for the numbers).
+	const hostTransients = adaptHostTransients(plan.transientMessages ?? []);
+	// Precedence order matters here (see TransientRecordSlot.trailing's doc comment): host
+	// transients are informational and carry no `trailing` flag, so their position among
+	// themselves is irrelevant; obligation then ledger are the MUST-protocol pair, in the same
+	// order the pre-append-on-change design pushed them, so the ledger - not the obligation -
+	// reclaims the literal last position whenever both are active.
+	// A request whose tail is a host instruction (a halt report request) takes no trailing
+	// record: anything appended after the instruction would dilute it.
+	const trailingSlots: TransientRecordSlot[] = sourceContext.instructionTail
+		? []
+		: [
+				{
+					kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+					content: sourceContext.trailingInstruction,
+					clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+					header: VERIFICATION_OBLIGATIONS_HEADER,
+					trailing: true,
+				},
+				{
+					kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+					content: ledgerView,
+					...(sanitized.ledger
+						? { record: sanitized.ledger, header: renderToolFailureLedgerHeader(sanitized.ledger) }
+						: {}),
+					clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
+					trailing: true,
+				},
+			];
+	// A projected plan reconciles against the messages its wire carries, not the whole durable history: a record
+	// the projection no longer carries reads as absent and is appended again.
+	const reconcileBase = plan.transientReconciliationBase ?? sourceContext.messages;
+	const pendingTransientRecords = reconcileTransientRecords(reconcileBase, [
+		...hostTransients.slots,
+		...trailingSlots,
+	]);
+	const compactableMessages = await config.convertToLlm(plan.messages);
+	const nonCompactableHead = plan.nonCompactableHead ?? 0;
+	if (!Number.isInteger(nonCompactableHead) || nonCompactableHead < 0 || nonCompactableHead > plan.messages.length) {
+		throw new TypeError(
+			`Context plan nonCompactableHead must be an integer from 0 to ${plan.messages.length}, got ${nonCompactableHead}.`,
+		);
+	}
+	// `convertToLlm` converts message by message, so the head's own conversion is the wire prefix it occupies.
+	const headWireCount =
+		nonCompactableHead === 0 ? 0 : (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length;
+	// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty
+	// for informational slots most turns, but see the trailing-pair note above for why it is NOT
+	// typically empty overall) plus `hostTransients.passThrough` (any host transient this module
+	// has no safe durable identity for, appended fresh every request exactly as before this
+	// mechanism existed - see `adaptHostTransients`) are the ONLY things ever appended fresh here, so
+	// `nonCompactableProviderContext` below still slices correctly at `compactableMessages.length`
+	// without adjustment: everything durable, old transients included, is already inside
+	// `compactableMessages`, and everything after it is genuinely this request's own new,
+	// not-yet-committed tail. See that function's doc comment for the full boundary argument.
+	const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
+	const newTransientWireMessages =
+		newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
+	const llmMessages: Message[] = [...compactableMessages, ...newTransientWireMessages];
+	signal?.throwIfAborted();
+
+	const sourceProviderContext: Context = {
+		systemPrompt: composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt),
+		messages: llmMessages,
+		tools: projectToolsForProvider(sourceContext.tools),
+	};
+	const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config);
+	const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
+	const materialized =
+		budgeted.context === protocolMaterialized.context
+			? protocolMaterialized
+			: { ...protocolMaterialized, context: budgeted.context };
+	const nonCompactableContext = nonCompactableProviderContext(
+		materialized.context,
+		compactableMessages.length,
+		materialized.usesTextToolProtocol,
+		headWireCount,
+	);
+	return { materialized, nonCompactableContext, pendingTransientRecords };
+}
+
 /**
  * Canonical two-phase provider boundary: plan replay-safe context, materialize once, admit the exact
  * payload, commit only the accepted plan, then send the admitted object unchanged.
@@ -438,9 +552,27 @@ export async function startPlannedAgentProviderRequestWithId(
 		const trailingTexts = sourceContext.instructionTail
 			? []
 			: [sourceContext.trailingInstruction, ledgerView].filter((text): text is string => text !== undefined);
-		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, sentPrefixCount, config, signal, {
-			texts: trailingTexts,
-		});
+		const planningSource = sourceContext;
+		const plan = await buildContextPlan(
+			sanitized.messages,
+			admissionAttempt,
+			sentPrefixCount,
+			config,
+			signal,
+			{ texts: trailingTexts },
+			async (candidate) => {
+				signal?.throwIfAborted();
+				const { materialized } = await materializeContextPlan(
+					planningSource,
+					sanitized,
+					ledgerView,
+					candidate,
+					config,
+					signal,
+				);
+				return estimateProviderRequestTokens(materialized.context, config.model);
+			},
+		);
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees
 		// the full extent of what its own planContext/transformContext did - not just what survived
 		// into an accepted request. Gated on the hook being registered: skipped entirely otherwise.
@@ -456,106 +588,13 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			// Append-on-change transients (turn-economics A1 extended - see transient-records.ts's
-			// module doc for the full mechanism and why it exists: the old approach rebuilt and
-			// re-appended every transient at the tail of every request, which the websocket delta cache
-			// measurably could never see past turn 1 as a stable prefix - see the Task 10 diagnosis).
-			//
-			// `sanitized.messages` (and so `plan.messages`, absent a host planContext/transformContext
-			// that reshapes it) already contains every PREVIOUSLY-recorded durable transient: once
-			// committed below, a transient record is an ordinary durable message like any other -
-			// `analyzeToolFailureContext` never touches a `role: "custom"` message (it only inspects
-			// "assistant"/"toolResult"), so dedup/erasure can never rewrite or displace one. The only
-			// work left here is deciding whether THIS turn's true content differs from the last
-			// durably-recorded instance of each kind this package owns, plus every host-contributed kind
-			// it can safely identify (see `adaptHostTransients`), OR - for the trailing (MUST-protocol)
-			// pair below - whether the trailing group has been displaced from the literal tail by
-			// ordinary turn growth since it was last written. Informational slots are typically
-			// unchanged, so `pendingTransientRecords` is typically empty FOR THEM; the trailing pair is
-			// not typically empty while active (measured: every turn, not just content-changing ones -
-			// see `reconcileTransientRecords`'s doc comment in transient-records.ts for the numbers).
-			const hostTransients = adaptHostTransients(plan.transientMessages ?? []);
-			// Precedence order matters here (see TransientRecordSlot.trailing's doc comment): host
-			// transients are informational and carry no `trailing` flag, so their position among
-			// themselves is irrelevant; obligation then ledger are the MUST-protocol pair, in the same
-			// order the pre-append-on-change design pushed them, so the ledger - not the obligation -
-			// reclaims the literal last position whenever both are active.
-			// A request whose tail is a host instruction (a halt report request) takes no trailing
-			// record: anything appended after the instruction would dilute it.
-			const trailingSlots: TransientRecordSlot[] = sourceContext.instructionTail
-				? []
-				: [
-						{
-							kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
-							content: sourceContext.trailingInstruction,
-							clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
-							header: VERIFICATION_OBLIGATIONS_HEADER,
-							trailing: true,
-						},
-						{
-							kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
-							content: ledgerView,
-							...(sanitized.ledger
-								? { record: sanitized.ledger, header: renderToolFailureLedgerHeader(sanitized.ledger) }
-								: {}),
-							clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
-							trailing: true,
-						},
-					];
-			// A projected plan reconciles against the messages its wire carries, not the whole durable history: a record
-			// the projection no longer carries reads as absent and is appended again.
-			const reconcileBase = plan.transientReconciliationBase ?? sourceContext.messages;
-			const pendingTransientRecords = reconcileTransientRecords(reconcileBase, [
-				...hostTransients.slots,
-				...trailingSlots,
-			]);
-			const compactableMessages = await config.convertToLlm(plan.messages);
-			const nonCompactableHead = plan.nonCompactableHead ?? 0;
-			if (
-				!Number.isInteger(nonCompactableHead) ||
-				nonCompactableHead < 0 ||
-				nonCompactableHead > plan.messages.length
-			) {
-				throw new TypeError(
-					`Context plan nonCompactableHead must be an integer from 0 to ${plan.messages.length}, got ${nonCompactableHead}.`,
-				);
-			}
-			// `convertToLlm` converts message by message, so the head's own conversion is the wire prefix it occupies.
-			const headWireCount =
-				nonCompactableHead === 0
-					? 0
-					: (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length;
-			// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty
-			// for informational slots most turns, but see the trailing-pair note above for why it is NOT
-			// typically empty overall) plus `hostTransients.passThrough` (any host transient this module
-			// has no safe durable identity for, appended fresh every request exactly as before this
-			// mechanism existed - see `adaptHostTransients`) are the ONLY things ever appended fresh here, so
-			// `nonCompactableProviderContext` below still slices correctly at `compactableMessages.length`
-			// without adjustment: everything durable, old transients included, is already inside
-			// `compactableMessages`, and everything after it is genuinely this request's own new,
-			// not-yet-committed tail. See that function's doc comment for the full boundary argument.
-			const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
-			const newTransientWireMessages =
-				newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
-			const llmMessages: Message[] = [...compactableMessages, ...newTransientWireMessages];
-			signal?.throwIfAborted();
-
-			const sourceProviderContext: Context = {
-				systemPrompt: composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt),
-				messages: llmMessages,
-				tools: projectToolsForProvider(sourceContext.tools),
-			};
-			const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config);
-			const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
-			const materialized =
-				budgeted.context === protocolMaterialized.context
-					? protocolMaterialized
-					: { ...protocolMaterialized, context: budgeted.context };
-			const nonCompactableContext = nonCompactableProviderContext(
-				materialized.context,
-				compactableMessages.length,
-				materialized.usesTextToolProtocol,
-				headWireCount,
+			const { materialized, nonCompactableContext, pendingTransientRecords } = await materializeContextPlan(
+				sourceContext,
+				sanitized,
+				ledgerView,
+				plan,
+				config,
+				signal,
 			);
 
 			if (plan.isCurrent?.() === false) {

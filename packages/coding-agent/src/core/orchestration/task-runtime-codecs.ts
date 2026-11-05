@@ -1,5 +1,6 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
+import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
@@ -319,6 +320,7 @@ export function validateTaskDependencyIds(
 }
 
 const DISPATCH_FIELDS = new Set([
+	"knowledgeReferences",
 	"receiptOrigin",
 	"taskId",
 	"profileId",
@@ -383,7 +385,12 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	let executionContract: WorkerExecutionContract | undefined;
 	let birthContextForkReference: OrchestrationDispatchRequest["birthContextForkReference"];
 	let brief: TaskBrief | undefined;
+	let knowledgeReferences: OrchestrationDispatchRequest["knowledgeReferences"];
 	try {
+		knowledgeReferences =
+			dispatch.knowledgeReferences === undefined
+				? undefined
+				: parseKnowledgeGrantReferences(dispatch.knowledgeReferences);
 		brief = dispatch.brief === undefined ? undefined : parseTaskBrief(dispatch.brief);
 		executionContract =
 			dispatch.executionContract === undefined
@@ -409,6 +416,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	}
 	return {
 		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
+		...(knowledgeReferences !== undefined ? { knowledgeReferences } : {}),
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
 		instructions,
 		...(brief ? { brief } : {}),

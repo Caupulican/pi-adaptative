@@ -5,6 +5,7 @@ import type { WorkerDelegationTaskContext } from "../delegation/worker-delegatio
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
@@ -40,6 +41,7 @@ export interface DelegationLedgerOptions {
 }
 
 export interface PrepareDelegationInput {
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	laneId: string;
 	instructions: string;
@@ -86,6 +88,8 @@ export interface StartedDelegationAttempt {
 }
 
 export interface PrepareAgentTurnInput {
+	/** A new task starts empty; only an explicit current selection grants knowledge. */
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	agentId: string;
 	instructions: string;
@@ -173,6 +177,7 @@ export class DelegationOrchestrationLedger {
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
 		const profile = input.executionContract.worker.profile;
+		const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
 		return this.prepareNormalized({
 			laneId: input.laneId,
 			instructions: input.instructions,
@@ -191,6 +196,7 @@ export class DelegationOrchestrationLedger {
 				: {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
+				...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 				...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
 				logicalLaneId: input.laneId,
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
@@ -283,6 +289,7 @@ export class DelegationOrchestrationLedger {
 		const resourcePointerIds = declaresNewWork
 			? (input.taskContext?.resourcePointerIds ?? [])
 			: prior.dispatch.resourcePointerIds;
+		const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
 		const dependencyTaskIds = validateTaskDependencyIds(
 			snapshot.tasks,
 			existingTask?.objectiveId ?? objectiveId,
@@ -317,6 +324,7 @@ export class DelegationOrchestrationLedger {
 					attempt.dispatch.controlMessageId !== controlMessageId ||
 					attempt.dispatch.instructions !== instructions ||
 					attempt.dispatch.controlForkMode !== input.controlForkMode ||
+					!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], knowledgeReferences) ||
 					(declaresNewWork &&
 						!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds])) ||
 					(declaresNewWork &&
@@ -360,6 +368,7 @@ export class DelegationOrchestrationLedger {
 				},
 				executionContract: contract,
 				dispatchMetadata: {
+					...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 					...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
@@ -404,10 +413,13 @@ export class DelegationOrchestrationLedger {
 			| "birthContextForkReference"
 			| "modelRouteSource"
 			| "modelPinSource"
+			| "knowledgeReferences"
 		>;
 	}): AttemptRuntimeState {
 		let birthContextForkReference: WorkerContextForkReference | undefined;
 		try {
+			if (input.dispatchMetadata?.knowledgeReferences !== undefined)
+				parseKnowledgeGrantReferences(input.dispatchMetadata.knowledgeReferences);
 			birthContextForkReference =
 				input.dispatchMetadata?.birthContextForkReference === undefined
 					? undefined
