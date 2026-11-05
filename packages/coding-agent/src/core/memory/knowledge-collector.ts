@@ -33,6 +33,8 @@ const RETRY_DELAY_MS = 60_000;
 const MAX_SOURCE_RETRIES = 4;
 
 class CollectionDeadline extends Error {}
+/** The owner moved on. It stops the pass from starting requests and never aborts a request already sent. */
+class CollectionYield extends Error {}
 
 interface CollectionProgress {
 	sources: number;
@@ -142,13 +144,24 @@ interface Configuration {
 	readonly settings: Required<AutoLearnSettings>;
 }
 
-/** No timer or listener survives stop; asynchronous tails retain accounting, never a closed store. */
+/**
+ * No timer or listener survives stop; asynchronous tails retain accounting, never a closed store.
+ *
+ * Owner activity, new owner evidence and settings changes yield the pass:
+ * - it starts no further request and ends at its next boundary;
+ * - a request already sent finishes, and its result is retained exactly as if nothing had happened.
+ * Only stop() and the pass deadline abort a request in flight. Such a request's outcome is unknown, so it is never
+ * replayed.
+ */
 export class KnowledgeCollector {
 	private readonly deps: KnowledgeCollectorDeps;
 	private active = false;
 	private alarm: unknown;
 	private running: Promise<void> | undefined;
+	/** Hard cancellation of the running pass: shutdown and its deadline. The request signal. */
 	private abort: AbortController | undefined;
+	/** Cooperative stop of the running pass. Latched once raised; never reaches a provider. */
+	private yielding: AbortController | undefined;
 	private readonly subscriptions: Array<() => void> = [];
 	private cursor: string | undefined;
 	private revision = -1;
@@ -181,7 +194,7 @@ export class KnowledgeCollector {
 				this.schedule();
 			}),
 			this.deps.subscribeForegroundActivity(() => {
-				if (this.deps.isForegroundBusy()) this.cancel();
+				if (this.deps.isForegroundBusy()) this.yieldPass();
 				else this.schedule();
 			}),
 		);
@@ -191,7 +204,10 @@ export class KnowledgeCollector {
 	stop(): Promise<void> {
 		this.active = false;
 		for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
-		this.cancel();
+		this.yieldPass();
+		// Shutdown never waits on a paid request indefinitely. The aborted request's outcome is unknown, so its work
+		// cell keeps refusing replay.
+		this.abort?.abort(new Error("Knowledge collection stopped"));
 		return (this.running ?? Promise.resolve()).then(() => {
 			this.flushTerminal();
 			if (this.pendingTerminal)
@@ -245,15 +261,16 @@ export class KnowledgeCollector {
 		};
 	}
 
-	private cancel(): void {
+	/** Unarms a pending pass and yields a running one. Its next pass, after the idle delay, scans again from the start. */
+	private yieldPass(): void {
 		if (this.alarm !== undefined) this.deps.time.clearTimeout(this.alarm);
 		this.alarm = undefined;
-		this.abort?.abort(new Error("Knowledge collection context changed"));
+		this.yielding?.abort(new CollectionYield("Knowledge collection yielded to the owner"));
 		this.rescan = true;
 	}
 
 	private invalidate(): void {
-		this.cancel();
+		this.yieldPass();
 		this.schedule();
 	}
 
@@ -328,6 +345,7 @@ export class KnowledgeCollector {
 					this.running = this.run(config).finally(() => {
 						this.running = undefined;
 						this.abort = undefined;
+						this.yielding = undefined;
 						if (
 							this.active &&
 							this.accountingDirty &&
@@ -358,7 +376,9 @@ export class KnowledgeCollector {
 		this.more = false;
 		if (this.retryAt !== undefined && this.retryAt <= this.deps.time.now()) this.retryAt = undefined;
 		const controller = new AbortController();
+		const yielding = new AbortController();
 		this.abort = controller;
+		this.yielding = yielding;
 		const outcome = {
 			id: `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}${randomUUID()}`,
 			sources: 0,
@@ -379,15 +399,14 @@ export class KnowledgeCollector {
 			).unresolved;
 			const guard = this.deps.captureGuard();
 			const origin = this.deps.usageOwner.captureOrigin();
+			// The boundary before every step and every physical request. A busy foreground or a changed configuration
+			// latches the yield even if its event has not arrived yet, so the pass ends `cancelled`, never `failed`.
 			const assertCurrent = (): void => {
 				controller.signal.throwIfAborted();
-				if (
-					!this.active ||
-					!this.deps.isCurrent() ||
-					this.deps.isForegroundBusy() ||
-					guard() ||
-					this.configuration().key !== config.key
-				)
+				if (!yielding.signal.aborted && (this.deps.isForegroundBusy() || this.configuration().key !== config.key))
+					this.yieldPass();
+				yielding.signal.throwIfAborted();
+				if (!this.active || !this.deps.isCurrent() || guard())
 					throw new Error("Knowledge collection context changed");
 			};
 			let scanned = 0;
@@ -434,7 +453,7 @@ export class KnowledgeCollector {
 			this.revision = this.deps.store.revision();
 			if (outcome.held > 0) status = "held";
 		} catch {
-			status = controller.signal.aborted ? "cancelled" : "failed";
+			status = controller.signal.aborted || yielding.signal.aborted ? "cancelled" : "failed";
 			if (status === "failed" || controller.signal.reason instanceof CollectionDeadline) {
 				this.rescan = false;
 				this.more = false;
@@ -540,7 +559,9 @@ export class KnowledgeCollector {
 				return false;
 			}
 			if (remaining <= 0) throw new RequestSpendRefusal("Knowledge spending is held.");
-			const budget = new RequestSpendBudget(remaining);
+			// Every physical request of this source (extraction turns, window grounding, admission and identity judgments)
+			// passes the pass boundary at dispatch, before its work cell opens.
+			const budget = new RequestSpendBudget(remaining, assertCurrent);
 			const request = { budget, origin: { ...origin, operationId } };
 			const original = this.deps.evidence.findSource(source.sourceId);
 			if (!original || !source.complete) {
@@ -635,8 +656,9 @@ export class KnowledgeCollector {
 							throw error;
 						} finally {
 							unsubscribe();
-							// An extraction that ended in a received, measured failure releases its cell. An aborted one (owner
-							// typing, deadline, shutdown) may have produced a result nobody received, so it is never replayed.
+							// An extraction whose every sent request was received and measured (a failure, or a yield before its
+							// next turn) releases its cell. One aborted in flight (deadline, shutdown) may have produced a result
+							// nobody received, so it is never replayed.
 							if (begun && !signal.aborted) this.deps.store.work.settle(workId);
 						}
 					}
@@ -664,7 +686,16 @@ export class KnowledgeCollector {
 						hold("configuration:admission_unavailable");
 						return false;
 					}
-					const operation = journal.operation(claim, plan, index);
+					const claimed = journal.operation(claim, plan, index);
+					// Admission re-checks the pass boundary between its judgments and before it applies: a yielded pass applies
+					// nothing, and its next pass reuses the retained verdicts.
+					const operation = {
+						...claimed,
+						assertClaimCurrent: () => {
+							assertContext();
+							claimed.assertClaimCurrent();
+						},
+					};
 					const admitted = await admission.change(candidate.change!, signal, operation);
 					if (admitted.status === "applied") {
 						journal.acknowledge(claim, operation, "applied");
@@ -701,6 +732,7 @@ export class KnowledgeCollector {
 					);
 				throw error;
 			}
+			// A yield ends here, with no hold: the source is claimed again by the next pass.
 			assertCurrent();
 			// A paid attempt with an unknown outcome is never replayed: its work is keyed by model and engine, so only a
 			// configuration change can give the source new work.

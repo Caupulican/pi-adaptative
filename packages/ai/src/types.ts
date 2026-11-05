@@ -147,9 +147,10 @@ export interface ProviderResponseTicket {
 
 export interface ProviderResponseObserver {
 	/**
-	 * Called once immediately before transport. Recheck the request signal after synchronous
-	 * admission callbacks and retire any undispatched reservation before throwing. A returned
-	 * ticket owns the physical response; later cancellation does not settle it.
+	 * Called once immediately before transport. Run every refusal, including the request signal,
+	 * before synchronous admission checkpoints, so a checkpoint is written only for a request that
+	 * is dispatched; retire any undispatched reservation before throwing. A returned ticket owns the
+	 * physical response; later cancellation does not settle it.
 	 */
 	begin(model: Model<Api>, signal?: AbortSignal): ProviderResponseTicket;
 }

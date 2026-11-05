@@ -262,7 +262,8 @@ export class KnowledgeGrounding {
 				},
 			);
 		} catch (error) {
-			// A received, measured failure releases its cells for a later attempt; an aborted request is never replayed.
+			// A received, measured failure releases its cells for a later attempt; a request aborted in flight (deadline,
+			// shutdown) is never replayed.
 			if (begun && !signal?.aborted) for (const key of keys) this.deps.store.work.settle(key);
 			throw error;
 		}

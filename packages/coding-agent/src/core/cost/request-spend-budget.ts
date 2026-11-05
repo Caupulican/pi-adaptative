@@ -23,10 +23,17 @@ export class RequestSpendBudget {
 	private failure: RequestSpendRefusal | undefined;
 	private pending: string | undefined;
 	private readonly admissionListeners = new Set<(requestId: string) => void>();
+	private readonly gate: (() => void) | undefined;
 
-	constructor(maxUsd: number) {
+	/**
+	 * `gate` is the caller's cooperative stop. It runs when a physical request is admitted, before any admission
+	 * checkpoint. If it throws, only that request is withheld, before dispatch; the budget is never failed, and
+	 * requests already sent are not touched.
+	 */
+	constructor(maxUsd: number, gate?: () => void) {
 		if (!Number.isFinite(maxUsd) || maxUsd < 0) throw new Error("Request spending limit must be non-negative.");
 		this.maxUsd = maxUsd;
+		this.gate = gate;
 	}
 
 	/** Bounded synchronous work checkpoints at the physical request boundary; not another spend counter. */
@@ -49,9 +56,14 @@ export class RequestSpendBudget {
 			throw new RequestSpendRefusal("The remaining budget cannot cover the next projected request.");
 	}
 
-	/** A cancelled logical caller cannot start another request while billing is still unknown. */
+	/**
+	 * The last refusable step before transport: callers run every other refusal first, so a checkpoint written by an
+	 * admission listener always belongs to a dispatched request. A cancelled logical caller cannot start another
+	 * request while billing is still unknown.
+	 */
 	beginRequest(receiptId: string): void {
 		this.assertHealthy();
+		this.gate?.();
 		this.pending = receiptId;
 		try {
 			for (const listener of this.admissionListeners) listener(receiptId);

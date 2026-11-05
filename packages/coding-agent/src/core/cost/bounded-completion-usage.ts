@@ -59,9 +59,12 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 	}
 
 	/**
-	 * The loop hooks of a completion that ends in one structured submission: every request is priced and admitted
-	 * here, every dispatch and tool call re-checks the allowance and `assertCurrent`, and the submission must be the
-	 * only tool call of its message (`reason` tells the model so).
+	 * The loop hooks of a completion that ends in one structured submission:
+	 * - every request is priced and admitted here;
+	 * - every dispatch re-checks the allowance and `assertCurrent`;
+	 * - a tool call re-checks only `assertCurrent`: it runs on a response already received, so that response's own
+	 *   measured charge never blocks it (a failed allowance refuses the next dispatch instead);
+	 * - the submission must be the only tool call of its message (`reason` tells the model so).
 	 */
 	submissionHooks(
 		reason: string,
@@ -72,7 +75,6 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 		return {
 			beforeToolCall: async (context) => {
 				assertCurrent?.();
-				this.assertHealthy();
 				return context.assistantMessage.content.filter((part) => part.type === "toolCall").length === 1
 					? undefined
 					: { block: true, reason };

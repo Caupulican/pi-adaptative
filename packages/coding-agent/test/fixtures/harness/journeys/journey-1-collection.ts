@@ -25,10 +25,15 @@ const JUDGED_INFERRED = [
 	{ id: "basis", selected: "inferred", confidence: 0.98 },
 	{ id: "requested", value: false, confidence: 0.98 },
 ] as const;
+/** A new attribute of the owner is not the live home-city fact. */
+const JUDGED_DISTINCT_SLOT = [{ id: "same_0", value: false, confidence: 0.98 }] as const;
+/** Owner, pasted, yielded and busy turns: two records each. */
+const COLLECTION_RECORDS = 8;
 
 /**
  * Journey 1 follows automatic collection through the real root, idle lane, admission and restart. With System One
  * off the session model judges each candidate; inferred patterns and background forgetting wait for a calibrated engine.
+ * Owner input during an extraction yields the pass without aborting the paid request; its result is retained once.
  */
 export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<void> {
 	const agentDir = `${world.agentDir}-collection`;
@@ -41,8 +46,8 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 	});
 	const store = KnowledgeStore.open(agentDir);
 	const tracks: string[] = [];
-	for (let size = 1; size <= 4; size *= 2) {
-		for (let first = 0; first + size <= 4; first += size) {
+	for (let size = 1; size <= COLLECTION_RECORDS; size *= 2) {
+		for (let first = 0; first + size <= COLLECTION_RECORDS; first += size) {
 			const task =
 				size === 1
 					? `Compaction: compress message ${first} into`
@@ -75,6 +80,13 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 		});
 	let reopened: Awaited<ReturnType<HarnessWorld["createRootSession"]>> | undefined;
 	let disposed = false;
+	// Gates a failed assertion leaves closed are opened before the producers are joined.
+	const gates: Array<() => void> = [];
+	const gate = () => {
+		const barrier = createBarrier();
+		gates.push(barrier.release);
+		return barrier;
+	};
 	try {
 		world.systemOne.enterPhase("collection-owner", {});
 		world.provider.enqueue("root", text("collection-owner-reply", "Understood."));
@@ -316,6 +328,160 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			"no pasted, inferred or forgotten change reaches knowledge",
 		).toMatchObject([{ id: recife.id, text: "Lives in Recife.", revision: recife.revision }]);
 		expect(status(), "a restored allowance reactivates collection").toMatchObject({ state: "active" });
+
+		// Owner input while an extraction is in flight yields the pass: the paid request is not aborted, its result is
+		// retained, and the next pass admits it without buying the extraction again.
+		const ownerTurn = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
+		world.systemOne.enterPhase("collection-yield-owner", ownerTurn);
+		world.provider.enqueue("root", text("collection-yield-reply", "Understood."));
+		await withDeadline(world.trace, "collection yield input", root.session.prompt("I work in Lisbon."));
+		await icmWaitForChatIdle(world, agentDir, 6, (records) => records.length === 6);
+		const lisbon = getOwnerEvidenceSnapshots(
+			root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE]),
+		).at(-1)!;
+		expect(lisbon.text).toBe("I work in Lisbon.");
+		world.systemOne.enterPhase("collection-yield-extraction", {});
+		const extracting = gate();
+		const extractionReached = createBarrier();
+		let extractionSequence: number | undefined;
+		world.provider.enqueue("root", {
+			name: "collection-yield-submit",
+			gate: extracting.promise,
+			check: (request) => {
+				expect(JSON.stringify(request.context.messages)).toContain(lisbon.sourceId);
+				extractionSequence = request.sequence;
+				extractionReached.release();
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "collection-yield-submit",
+						name: "submit_knowledge_candidates",
+						arguments: {
+							complete: true,
+							candidates: [
+								{
+									action: "remember",
+									kind: "profile",
+									scope: "global",
+									subject: "owner",
+									key: "work-city",
+									text: "Works in Lisbon.",
+									evidence: [{ source: lisbon.sourceId, quote: "I work in Lisbon" }],
+								},
+							],
+						},
+					},
+				],
+				stopReason: "toolUse",
+			},
+		});
+		await withDeadline(world.trace, "yield collection armed", world.timers.whenArmed("knowledge-collection"));
+		const yielded = terminal(root.session);
+		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
+		await withDeadline(world.trace, "yield extraction in flight", extractionReached.promise);
+		world.systemOne.enterPhase("collection-yield-busy-owner", ownerTurn);
+		const replying = gate();
+		const replyReached = createBarrier();
+		world.provider.enqueue("root", {
+			...text("collection-yield-busy-reply", "Understood."),
+			gate: replying.promise,
+			check: () => replyReached.release(),
+		});
+		const busy = root.session.prompt("Thanks, carry on.");
+		await withDeadline(world.trace, "owner turn during extraction", replyReached.promise);
+		extracting.release();
+		expect(await withDeadline(world.trace, "yielded collection", yielded)).toMatchObject({
+			handoff: { retained: true },
+			status: "cancelled",
+			sources: 1,
+			applied: 0,
+			rejected: 0,
+			held: 0,
+		});
+		expect(
+			world.provider.terminals.find((entry) => entry.sequence === extractionSequence),
+			"owner input never aborts a paid extraction",
+		).toMatchObject({ stopReason: "toolUse", requestAborted: false });
+		expect(store.list({ project: "", role: "", audience: "owner" }), "a yielded pass applies nothing").toMatchObject([
+			{ id: recife.id },
+		]);
+		replying.release();
+		await withDeadline(world.trace, "owner turn after yield", busy);
+		await icmWaitForChatIdle(world, agentDir, COLLECTION_RECORDS, (records) => records.length === COLLECTION_RECORDS);
+		const thanks = getOwnerEvidenceSnapshots(
+			root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE]),
+		).at(-1)!;
+		expect(thanks.text).toBe("Thanks, carry on.");
+		world.systemOne.enterPhase("collection-yield-resumed", {
+			grounded: { kind: "noul", probability: 0.98 },
+			basis: { kind: "choice", choice: "explicit", confidence: 0.98 },
+			requested: { kind: "noul", probability: 0.02 },
+			same_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue(
+			"root",
+			// The retained extraction is admitted first: the live home-city fact is the one slot its identity is judged against.
+			...(world.systemOne.enabled
+				? []
+				: [
+						knowledgeJudgment(
+							"collection-yield-judgment",
+							"knowledge.admission",
+							JUDGED_STATED,
+							() => "I work in Lisbon",
+						),
+						knowledgeJudgment(
+							"collection-yield-identity",
+							"knowledge.identity",
+							JUDGED_DISTINCT_SLOT,
+							() => "I work in Lisbon",
+						),
+					]),
+			{
+				name: "collection-yield-busy-submit",
+				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(thanks.sourceId),
+				reply: {
+					content: [
+						{
+							type: "toolCall",
+							id: "collection-yield-busy-submit",
+							name: "submit_knowledge_candidates",
+							arguments: { complete: true, candidates: [] },
+						},
+					],
+					stopReason: "toolUse",
+				},
+			},
+		);
+		const beforeResumed = world.provider.requests.length;
+		await withDeadline(world.trace, "resumed collection armed", world.timers.whenArmed("knowledge-collection"));
+		const resumed = terminal(root.session);
+		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
+		expect(await withDeadline(world.trace, "resumed collection committed", resumed)).toMatchObject({
+			handoff: { retained: true },
+			status: "completed",
+			sources: 2,
+			applied: 1,
+			rejected: 0,
+			held: 0,
+		});
+		expect(
+			world.provider.requests.length - beforeResumed,
+			"the yielded extraction is reused: only its judgments and the new source's extraction are requested",
+		).toBe(world.systemOne.enabled ? 1 : 3);
+		expect(
+			world.provider.reached.filter((step) => step.endsWith(":collection-yield-submit")),
+			"the paid extraction is bought once",
+		).toHaveLength(1);
+		expect(
+			store
+				.list({ project: "", role: "", audience: "owner" })
+				.map((record) => record.text)
+				.sort(),
+		).toEqual(["Lives in Recife.", "Works in Lisbon."]);
+
 		const file = root.sessionManager.getSessionFile()!;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		disposed = true;
@@ -340,6 +506,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 		);
 		world.trace.mark("root", "knowledge.automatic-collection");
 	} finally {
+		for (const release of gates) release();
 		store.close();
 		if (!disposed) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		if (reopened) expect(await world.disposeSessionInBody(reopened.session)).toBeUndefined();

@@ -537,7 +537,8 @@ export class SystemOneReviewer {
 					} catch (error) {
 						throw new SystemOneObserverError(`${providerName} response observer failed`, error, receipts);
 					}
-					budget?.assertHealthy();
+					// A received answer is kept even if its measured charge failed the budget. The failed budget refuses the
+					// next attempt (`assertAffordable`), so a received response is never thrown away and bought again.
 					if (decoded.duplicateKeys)
 						throw new SystemOneInvalidResponseError(
 							`Invalid ${providerName} response: duplicate JSON member`,

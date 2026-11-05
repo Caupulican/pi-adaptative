@@ -63,10 +63,11 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 				startedAt: new Date().toISOString(),
 			});
 			reserved = true;
-			this.spending?.beginRequest(receiptId);
 			this.lease.assertCurrent();
 			if (this.released) throw new RequestSpendRefusal("Completion ended during request admission.");
 			signal?.throwIfAborted();
+			// The last refusable step: an admission checkpoint it writes always belongs to a request that is dispatched.
+			this.spending?.beginRequest(receiptId);
 			this.pending.add(receiptId);
 		} catch (error) {
 			try {

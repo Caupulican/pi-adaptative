@@ -47,8 +47,12 @@ export interface KnowledgeExtractionInput {
 	readonly budget: RequestSpendBudget;
 	readonly usageOwner: SessionSemanticUsageDelivery;
 	readonly origin: AccountingOrigin;
+	/** Hard cancellation (shutdown, a deadline for a hung request): the only signal that aborts a request in flight. */
 	readonly signal: AbortSignal;
-	/** Captures source, branch, policy and memory-generation freshness outside the extractor. */
+	/**
+	 * Whether another physical request may start: source, branch, policy and memory-generation freshness, and the
+	 * caller's cooperative stop. Checked only before each request, never against a response already received.
+	 */
 	assertCurrent(): void;
 	/** Current scoped library; its evidence reader must withhold secret-bearing sources. */
 	getKnowledge(): KnowledgeReadSource | undefined;
@@ -84,7 +88,10 @@ const SYSTEM_PROMPT = [
 	"You only propose changes. The host independently validates meaning, evidence, identity, scope and permission before storing anything.",
 ].join("\n");
 
-/** No proposal leaves this boundary unless the complete source and all accounting remain current. */
+/**
+ * Every physical request starts only while the source and context are current and the allowance is healthy. A
+ * response already received is processed and retained unless the extraction was aborted.
+ */
 export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput): Promise<readonly KnowledgeChange[]> {
 	const { source } = input;
 	input.signal.throwIfAborted();
@@ -118,10 +125,15 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 	);
 	let closed = false;
 	const capture: { submission?: KnowledgeExtractionSubmission } = {};
-	const assertCurrent = (): void => {
+	// A response already received is processed and retained unless the extraction was aborted or ended. A cooperative
+	// stop (the owner typing, new evidence, a settings change) only withholds the next request.
+	const assertOpen = (): void => {
 		input.signal.throwIfAborted();
-		input.assertCurrent();
 		if (closed) throw new Error("Knowledge extraction already ended.");
+	};
+	const assertMayRequest = (): void => {
+		assertOpen();
+		input.assertCurrent();
 	};
 	const submit: AgentTool<typeof submissionParameters> = {
 		name: KNOWLEDGE_SUBMISSION_TOOL_NAME,
@@ -130,7 +142,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		parameters: submissionParameters,
 		executionMode: "sequential",
 		execute: async (_id, params) => {
-			assertCurrent();
+			assertOpen();
 			if (capture.submission !== undefined)
 				throw new KnowledgeExtractionRefusal("invalid_submission", "Knowledge candidates were already submitted.");
 			if (params.candidates.length > MAX_COLLECTION_CANDIDATES || (!params.complete && params.candidates.length > 0))
@@ -159,7 +171,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 	};
 	const knowledge: AgentTool<ReturnType<typeof createKnowledgeTool>["parameters"]> = createKnowledgeTool(
 		() => {
-			assertCurrent();
+			assertOpen();
 			return input.getKnowledge();
 		},
 		{ readOnly: true },
@@ -192,9 +204,10 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 			cacheRetention: "short",
 			laneKind: "knowledge_collection",
 			tools: [knowledge, submit],
+			// A tool runs on a response already received: its own measured charge never blocks it, and the next
+			// request's preflight refuses a failed allowance.
 			beforeToolCall: async (context) => {
-				assertCurrent();
-				usage.assertHealthy();
+				assertOpen();
 				if (capture.submission !== undefined)
 					throw new KnowledgeExtractionRefusal(
 						"invalid_submission",
@@ -211,25 +224,28 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 				return undefined;
 			},
 			requestPreflight: (request) => {
-				assertCurrent();
+				assertMayRequest();
 				const decision = usage.preflight(request);
 				return decision;
 			},
 			requestGuard: () => {
-				assertCurrent();
+				assertMayRequest();
 				usage.assertHealthy();
 			},
 			providerResponseObserver: usage,
 		});
-		usage.assertHealthy();
-		assertCurrent();
-		if (result.stopReason === "error" || result.stopReason === "aborted")
-			throw new Error(result.errorMessage ?? `Knowledge extraction ${result.stopReason}.`);
-		if (capture.submission === undefined)
+		assertOpen();
+		// A received submission was retained by `onSubmission` and is the result even if its measured charge failed
+		// the allowance; the caller's next request is refused instead.
+		if (capture.submission === undefined) {
+			usage.assertHealthy();
+			if (result.stopReason === "error" || result.stopReason === "aborted")
+				throw new Error(result.errorMessage ?? `Knowledge extraction ${result.stopReason}.`);
 			throw new KnowledgeExtractionRefusal(
 				"missing_submission",
 				"Extraction ended without a complete candidate submission.",
 			);
+		}
 		if (!capture.submission.complete)
 			throw new KnowledgeExtractionRefusal("source_capacity", "Source core requires subdivision");
 		return capture.submission.candidates;

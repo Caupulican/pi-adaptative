@@ -103,12 +103,13 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 				tools: [submit],
 				...usage.submissionHooks("Submit the judgment as the only tool call in its message."),
 			});
+			// A received submission is the answer even if its measured charge failed the allowance. The failed
+			// allowance refuses the caller's next request, so a paid answer is never discarded and bought again.
+			if (capture.answers !== undefined) return capture.answers;
 			usage.assertHealthy();
 			if (result.stopReason === "error" || result.stopReason === "aborted")
 				throw new Error(result.errorMessage ?? `Session-model judgment ${result.stopReason}.`);
-			if (capture.answers === undefined)
-				throw new DecisionEngineProtocolError("The session-model judgment ended without a submission.");
-			return capture.answers;
+			throw new DecisionEngineProtocolError("The session-model judgment ended without a submission.");
 		} finally {
 			unsubscribe?.();
 			usage.release();

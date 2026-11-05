@@ -800,7 +800,8 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				},
 			});
 		} catch (error) {
-			// A received, measured failure releases the cell; an aborted request is never replayed.
+			// A received, measured failure releases the cell; a request aborted in flight (deadline, shutdown) is never
+			// replayed. A cooperative stop never aborts one: it withholds the next request at the budget's gate.
 			if (begun && !signal?.aborted) store.work.settle(key);
 			throw error;
 		}
