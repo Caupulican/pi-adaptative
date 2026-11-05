@@ -45,6 +45,8 @@ export interface KnowledgeSnapshot {
 export interface KnowledgeRecordSnapshot {
 	revision: number;
 	records: KnowledgeRecord[];
+	/** Earliest validity transition, including facts outside the bounded selected pages. */
+	refreshAt?: string;
 	/** These categories filled their page; callers must disclose that more records may exist. */
 	possiblyMore: KnowledgeKind[];
 }
@@ -184,7 +186,7 @@ export function knowledgeAppliesTo(record: KnowledgeScope, scope: KnowledgeScope
 export interface KnowledgeStorePort {
 	revision(): number;
 	version(id: string): number;
-	snapshot(scope: KnowledgeScope): KnowledgeRecordSnapshot;
+	snapshot(scope: KnowledgeScope, at: string): KnowledgeRecordSnapshot;
 	get(id: string): KnowledgeRecord | undefined;
 	list(
 		scope: KnowledgeScope,

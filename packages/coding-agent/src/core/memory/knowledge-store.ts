@@ -113,7 +113,9 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	}
 
 	/** Revision and all category pages describe one database snapshot, including concurrent writers. */
-	snapshot(scope: KnowledgeScope): KnowledgeRecordSnapshot {
+	snapshot(scope: KnowledgeScope, at: string): KnowledgeRecordSnapshot {
+		if (!isKnowledgeScope(scope) || !isKnowledgeTimestamp(at))
+			throw new TypeError("Invalid knowledge snapshot scope or time");
 		return withSqliteTransaction(
 			this.db,
 			() => {
@@ -121,11 +123,44 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				const records: KnowledgeRecord[] = [];
 				const possiblyMore: KnowledgeKind[] = [];
 				for (const kind of KNOWLEDGE_KINDS) {
-					const page = this.list(scope, { kind, limit: MAX_KNOWLEDGE_PAGE_SIZE });
+					// Select current, specific, explicit and recent facts before bounding the page. Hash order alone
+					// could permanently hide the useful records even if the projection ranked its subset afterward.
+					const page = this.db
+						.prepare(`
+						SELECT id,revision,body FROM entries
+						WHERE body IS NOT NULL AND audience=? AND (project='' OR project=?) AND (role='' OR role=?)
+						AND kind=? AND json_extract(body,'$.validFrom')<=?
+						AND (json_extract(body,'$.validUntil') IS NULL OR json_extract(body,'$.validUntil')>?)
+						ORDER BY (json_extract(body,'$.basis')='explicit') DESC, (project<>'') DESC, (role<>'') DESC,
+						json_extract(body,'$.lastEvidencedAt') DESC, id LIMIT ?
+					`)
+						.all(scope.audience, scope.project, scope.role, kind, at, at, MAX_KNOWLEDGE_PAGE_SIZE)
+						.map(decode);
 					records.push(...page);
+					if (
+						page.some(
+							(record) =>
+								!knowledgeAppliesTo(record.scope, scope) ||
+								record.kind !== kind ||
+								record.validFrom > at ||
+								(record.validUntil !== undefined && record.validUntil <= at),
+						)
+					)
+						throw new Error("Knowledge snapshot index does not match its records");
 					if (page.length === MAX_KNOWLEDGE_PAGE_SIZE) possiblyMore.push(kind);
 				}
-				return { revision, records, possiblyMore };
+				const refreshAt = this.db
+					.prepare(`
+					WITH scoped AS (
+						SELECT json_extract(body,'$.validFrom') AS start, json_extract(body,'$.validUntil') AS stop
+						FROM entries WHERE body IS NOT NULL AND audience=? AND (project='' OR project=?) AND (role='' OR role=?)
+					), boundaries AS (SELECT start AS at FROM scoped UNION ALL SELECT stop AS at FROM scoped)
+					SELECT min(at) AS at FROM boundaries WHERE at>?
+				`)
+					.get(scope.audience, scope.project, scope.role, at)?.at;
+				if (refreshAt !== null && !isKnowledgeTimestamp(refreshAt))
+					throw new Error("Invalid knowledge validity boundary");
+				return { revision, records, possiblyMore, ...(refreshAt === null ? {} : { refreshAt }) };
 			},
 			"Knowledge snapshot",
 			"read",

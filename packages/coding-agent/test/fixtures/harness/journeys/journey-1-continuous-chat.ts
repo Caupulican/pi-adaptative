@@ -4,6 +4,8 @@ import { expect } from "vitest";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
+import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
+import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { createBarrier, fail, type ScriptedRequest, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
@@ -159,6 +161,38 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 	const icmLongPath = projectPath("src", "icm-long-echo.txt");
 	const icmLongEcho = `HEAD-MARKER-${"x".repeat(31_000)}-TAIL-MARKER\n`;
 	world.io.writeFileSync(icmLongPath, icmLongEcho);
+	const knowledge = KnowledgeStore.open(icmAgentDir);
+	const seed = (key: string, changes: Partial<KnowledgeRecord> = {}): KnowledgeRecord => {
+		const record: KnowledgeRecord = {
+			id: "",
+			revision: 1,
+			kind: "profile",
+			scope: { project: "", role: "", audience: "owner" },
+			subject: "owner",
+			key,
+			text: key,
+			basis: "explicit",
+			firstEvidencedAt: "2020-01-01T00:00:00.000Z",
+			lastEvidencedAt: "2020-01-01T00:00:00.000Z",
+			validFrom: "2020-01-01T00:00:00.000Z",
+			citations: [
+				{ sessionId: "prior-owner", sourceId: `prior-owner/${key}`, quote: key, at: "2020-01-01T00:00:00.000Z" },
+			],
+			...changes,
+		};
+		record.id = knowledgeId(record);
+		knowledge.put(record, record.revision - 1, () => {});
+		return record;
+	};
+	const fact = seed("K-CURRENT", { text: "K-ORIGINAL-PREFERENCE" });
+	seed("K-FUTURE", { validFrom: "2099-01-01T00:00:00.000Z" });
+	seed("K-EXPIRED", { validUntil: "2021-01-01T00:00:00.000Z" });
+	seed("K-OTHER-AUDIENCE", { scope: { project: "", role: "", audience: "another-owner" } });
+	const currentKnowledge = (request: ScriptedRequest): string =>
+		request.context.messages
+			.map((message) => JSON.stringify(message))
+			.filter((message) => message.includes("Current accepted knowledge"))
+			.at(-1) ?? "";
 	try {
 		const icmRoot = await world.createRootSession("root", {
 			agentDir: icmAgentDir,
@@ -172,6 +206,9 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				name: "icm-leaf-2-oversized",
 				check: (request) => {
 					const text = JSON.stringify(request.context.messages);
+					expect(text, "derived knowledge never becomes a chat compaction source").not.toContain(
+						"K-ORIGINAL-PREFERENCE",
+					);
 					if (!text.includes("HEAD-MARKER-") || !text.includes("-TAIL-MARKER")) {
 						throw new Error("leaf 2 compaction did not receive the clipped 30,000-char tool output");
 					}
@@ -215,6 +252,29 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				check: (request) => {
 					turn1SystemPrompt = request.context.systemPrompt ?? "";
 					turn1ToolNames = (request.context.tools ?? []).map((tool) => tool.name);
+					const projected = currentKnowledge(request);
+					expect(projected, "the real ICM request receives canonical owner knowledge").toContain(
+						"K-ORIGINAL-PREFERENCE",
+					);
+					for (const excluded of ["K-FUTURE", "K-EXPIRED", "K-OTHER-AUDIENCE"])
+						expect(projected).not.toContain(excluded);
+					expect(turn1SystemPrompt, "mutable knowledge stays outside the cached system prompt").not.toContain(
+						"K-ORIGINAL-PREFERENCE",
+					);
+					seed(fact.key, {
+						...fact,
+						revision: 2,
+						text: "K-CORRECTED-PREFERENCE",
+						lastEvidencedAt: "2022-01-01T00:00:00.000Z",
+						citations: [
+							{
+								sessionId: "prior-owner",
+								sourceId: "prior-owner/correction",
+								quote: "K-CORRECTED-PREFERENCE",
+								at: "2022-01-01T00:00:00.000Z",
+							},
+						],
+					});
 				},
 				reply: {
 					content: [
@@ -226,6 +286,17 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			},
 			{
 				name: "icm-turn-1-reply",
+				check: (request) => {
+					const projected = currentKnowledge(request);
+					expect(projected, "a committed correction is visible within the same tool loop").toContain(
+						"K-CORRECTED-PREFERENCE",
+					);
+					expect(projected).not.toContain("K-ORIGINAL-PREFERENCE");
+					expect(
+						JSON.stringify(request.context.messages),
+						"the old projection is absent from the entire request",
+					).not.toContain("K-ORIGINAL-PREFERENCE");
+				},
 				reply: {
 					content: [{ type: "text", text: splitPiReply }],
 				},
@@ -260,6 +331,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			hasLegacyMemory: false,
 			hasLegacyMemorySearch: false,
 		});
+		expect(turn1ToolNames, "ICM exposes the canonical knowledge reader").toContain("knowledge");
 
 		// I3 (<chat> view projection + root zoom & date navigation):
 		// - Root calls zoom(0, 2) (tree children 0 and 1, <=512 B echo), zoom(2, 1, 0) (raw source of clipped record 2;
@@ -293,6 +365,10 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				name: "icm-turn-2-zoom-tree",
 				check: (request) => {
 					const raw = JSON.stringify(request.context.messages);
+					expect(currentKnowledge(request), "the corrected fact survives the turn boundary").toContain(
+						"K-CORRECTED-PREFERENCE",
+					);
+					knowledge.forget(fact.id, 2, () => {});
 					if (raw.includes("<chat>")) turn2ChatView = raw;
 					if (raw.includes("Current time: ")) turn2StateText = raw;
 				},
@@ -308,6 +384,16 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				name: "icm-turn-2-zoom-raw",
 				check: (request) => {
 					icmNavOutputs.tree = icmLatestResult(request, "zoom").text;
+					expect(currentKnowledge(request), "forgetting publishes an explicit empty current view").toContain(
+						"No applicable accepted facts.",
+					);
+					expect(currentKnowledge(request), "forgotten facts leave the next current projection").not.toContain(
+						"K-CORRECTED-PREFERENCE",
+					);
+					expect(
+						JSON.stringify(request.context.messages),
+						"the forgotten projection is absent from the entire request",
+					).not.toContain("K-CORRECTED-PREFERENCE");
 				},
 				reply: {
 					content: [
@@ -348,6 +434,9 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		await icmWaitForChatIdle(world, icmAgentDir, 13);
 
 		const icmRecords = icmReadContinuousRecords(world, icmStore);
+		expect(JSON.stringify(icmRecords), "knowledge projections are never re-ingested into chat history").not.toContain(
+			"K-CORRECTED-PREFERENCE",
+		);
 		const icmIdxBytes = Buffer.byteLength(world.io.readFileSync(icmStore.messagesIdx));
 		expect(
 			{
@@ -444,6 +533,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 
 		trace.mark("root", "icm.continuous-chat-core");
 	} finally {
+		knowledge.close();
 		world.io.rmSync(icmLongPath, { force: true });
 	}
 }

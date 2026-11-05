@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
+import { HOST_REQUEST_ONLY_DETAILS } from "../kernel/transient-records.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
 import { estimateLineCount, estimateTokensFromText } from "./context/context-item.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
@@ -94,6 +95,14 @@ import {
 import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { memoryFailure } from "./memory/history-tool.ts";
+import {
+	KNOWLEDGE_CONTEXT_CLEARED,
+	KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
+	type KnowledgeProjection,
+	KnowledgeProjectionReader,
+} from "./memory/knowledge-projection.ts";
+import type { KnowledgeScope } from "./memory/knowledge-record.ts";
+import { KnowledgeStore } from "./memory/knowledge-store.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
@@ -155,6 +164,7 @@ import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
 import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
 import { boundedTextPreview } from "./text-preview.ts";
+import { runAsyncReleaseSteps } from "./util/resource-release.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface MemoryControllerSettingsSource {
@@ -588,6 +598,9 @@ export class MemoryController {
 	private _continuousChat: ContinuousChatHost | undefined;
 	/** The ICM projection installed on the provider wire; written only by `_setContinuousChatWire`. */
 	private _continuousChatWire: ContinuousChatWire | undefined;
+	private _knowledgeStore: KnowledgeStore | undefined;
+	private _knowledgeReader: KnowledgeProjectionReader | undefined;
+	private _knowledgeReadFailure: string | undefined;
 	/** Summary hierarchy host, attached to the root history backend in either memory system; absent in narrow hosts. */
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
 	private readonly _activeBranch: ActiveBranchView | undefined;
@@ -948,11 +961,22 @@ export class MemoryController {
 			this._releaseTranscriptRecall();
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
-			await hierarchyStopped;
-			await continuousChatStopped;
-			await this._lifecycleTail;
-			if (legacy) await this._memoryManager.onSessionEnd();
-			await this._memoryManager.shutdownAll();
+			// Attach to all already-started stops immediately; one rejection must not leave another unobserved.
+			const draining = Promise.allSettled([hierarchyStopped, continuousChatStopped, this._lifecycleTail]);
+			await runAsyncReleaseSteps(
+				[
+					async () => {
+						const failures = (await draining).flatMap((result) =>
+							result.status === "rejected" ? [result.reason] : [],
+						);
+						if (failures.length) throw new AggregateError(failures, "Memory work failed to drain");
+					},
+					() => (legacy ? this._memoryManager.onSessionEnd() : undefined),
+					() => this._memoryManager.shutdownAll(),
+					() => this._releaseKnowledge(),
+				],
+				"Memory shutdown failures",
+			);
 		})();
 		return this._shutdownPromise;
 	}
@@ -1383,10 +1407,14 @@ export class MemoryController {
 	 * headroom are unchanged, so a request planned against a different memory state is planned again;
 	 * `commit` publishes the inclusion report and the admitted-recall record once the plan is accepted.
 	 */
-	appendPromptMemory(messages: AgentMessage[], report: MemoryRetrievalReport): MemoryPromptPlan {
+	appendPromptMemory(
+		messages: AgentMessage[],
+		report: MemoryRetrievalReport,
+		wireMessages: readonly AgentMessage[] = [],
+	): MemoryPromptPlan {
 		const generation = this._memoryGeneration;
 		if (!this._legacyMemoryEnabled()) {
-			return { messages, isCurrent: () => generation === this._memoryGeneration, commit: () => {} };
+			return this._appendKnowledgePrompt(messages, wireMessages);
 		}
 		const revision = this._memoryContentRevision;
 		const headroom = this.deps.getPromptHeadroom?.(messages);
@@ -1427,6 +1455,89 @@ export class MemoryController {
 				this._hierarchy?.noteFrontierState(composed.frontier.state);
 			},
 		};
+	}
+
+	/** Current facts ride the existing versioned memory plan in ordinary requests and continuous chat alike. */
+	private _appendKnowledgePrompt(messages: AgentMessage[], wireMessages: readonly AgentMessage[]): MemoryPromptPlan {
+		const generation = this._memoryGeneration;
+		const reader = this._currentKnowledgeReader();
+		const scope = this._knowledgeScope();
+		const policy = this._retrievalPolicyKey();
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		const visible = [...wireMessages, ...messages];
+		const budget = this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(visible));
+		let projection: KnowledgeProjection | undefined;
+		if (reader && settings.enabled && settings.includeInPrompt) {
+			try {
+				projection = reader.preview(scope, budget);
+				this._knowledgeReadFailure = undefined;
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				if (reason !== this._knowledgeReadFailure)
+					this.deps.emitWarning(`Current knowledge is unavailable: ${reason}`);
+				this._knowledgeReadFailure = reason;
+			}
+		}
+		const content = projection?.text || KNOWLEDGE_CONTEXT_CLEARED;
+		return {
+			messages: [
+				...messages,
+				createCustomMessage(
+					KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
+					content,
+					false,
+					HOST_REQUEST_ONLY_DETAILS,
+					"1970-01-01T00:00:00.000Z",
+				),
+			],
+			isCurrent: () =>
+				generation === this._memoryGeneration &&
+				reader === this._currentKnowledgeReader() &&
+				policy === this._retrievalPolicyKey() &&
+				isDeepStrictEqual(scope, this._knowledgeScope()) &&
+				isDeepStrictEqual(
+					budget,
+					this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(visible)),
+				) &&
+				(projection?.isCurrent() ?? true),
+			commit: () => {
+				this._latestMemoryPromptInclusionReport = {
+					enabled: settings.enabled,
+					includeInPrompt: settings.includeInPrompt,
+					selectedItemCount: (projection?.includedCount ?? 0) + (projection?.omittedCount ?? 0),
+					status: !settings.enabled
+						? "disabled"
+						: !settings.includeInPrompt
+							? "include_disabled"
+							: !projection
+								? "failed"
+								: projection.includedCount > 0
+									? "included"
+									: "empty_block",
+					includedCount: projection?.includedCount ?? 0,
+					omittedCount: projection?.omittedCount ?? 0,
+					blockChars: projection?.text.length ?? 0,
+					sourceLabel: "memory:knowledge",
+				};
+			},
+		};
+	}
+
+	private _knowledgeScope(): KnowledgeScope {
+		return { project: this._projectId(), role: "", audience: "owner" };
+	}
+
+	private _currentKnowledgeReader(): KnowledgeProjectionReader | undefined {
+		return this._historyAvailable(this._memoryGeneration) && this._activeMemorySystem === "icm"
+			? this._knowledgeReader
+			: undefined;
+	}
+
+	/** Keep a failed close owned so a later activation or shutdown can retry it. */
+	private _releaseKnowledge(): void {
+		this._knowledgeStore?.close();
+		this._knowledgeStore = undefined;
+		this._knowledgeReader = undefined;
 	}
 
 	/** Managed memory files against their managed revisions (operator recovery view). */
@@ -2554,6 +2665,7 @@ export class MemoryController {
 		const keptChat = system === "icm" ? this._continuousChat : undefined;
 		const hierarchyStopped = this._hierarchy?.detach();
 		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat() : undefined;
+		const stopping = Promise.allSettled([hierarchyStopped, continuousChatStopped]);
 		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
 		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
 			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
@@ -2582,9 +2694,13 @@ export class MemoryController {
 		this._lifecycleTail = this._lifecycleTail
 			.then(async () => {
 				try {
-					await hierarchyStopped;
-					await continuousChatStopped;
+					const stopFailures = (await stopping).flatMap((result) =>
+						result.status === "rejected" ? [result.reason] : [],
+					);
+					if (stopFailures.length)
+						throw new AggregateError(stopFailures, "Memory activation could not retire prior work");
 					await previous.shutdownAll();
+					this._releaseKnowledge();
 					if (generation !== this._memoryGeneration) return;
 					let writer: FileStoreProvider | undefined;
 					// One history backend per generation in either system, for a root session only: OKF keeps its
@@ -2609,6 +2725,12 @@ export class MemoryController {
 								history,
 								() => this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 								() => this.continuousChatHost()?.port,
+								() =>
+									this._currentKnowledgeReader() &&
+									this._knowledgeStore &&
+									this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled
+										? { store: this._knowledgeStore, scope: this._knowledgeScope() }
+										: undefined,
 							),
 						);
 					} else {
@@ -2662,6 +2784,10 @@ export class MemoryController {
 						return;
 					}
 					this._activeMemorySystem = system;
+					if (system === "icm" && !this.deps.isChildSession()) {
+						this._knowledgeStore = KnowledgeStore.open(this.deps.getAgentDir());
+						this._knowledgeReader = new KnowledgeProjectionReader(this._knowledgeStore);
+					}
 					this._fileStoreWriter = writer;
 					this._transcriptRecall = transcriptRecall;
 					if (system === "icm" && !this.deps.isChildSession()) {
@@ -2683,13 +2809,22 @@ export class MemoryController {
 					await manager.shutdownAll().catch(() => {});
 					if (generation === this._memoryGeneration) {
 						// A chat opened for this generation is released here, so its lease never outlives a failed activation.
-						await this._releaseContinuousChat();
-						this._memoryManager = new MemoryManager();
-						this._activeMemorySystem = undefined;
-						this._fileStoreWriter = undefined;
-						this._releaseTranscriptRecall();
-						this._initializationFailed = true;
-						if (system === "icm") this._setContinuousChatWire({ kind: "blocked", reason });
+						try {
+							await runAsyncReleaseSteps(
+								[() => this._releaseContinuousChat(), () => this._releaseKnowledge()],
+								"Memory activation cleanup failures",
+								{ error },
+							);
+						} finally {
+							if (generation === this._memoryGeneration) {
+								this._memoryManager = new MemoryManager();
+								this._activeMemorySystem = undefined;
+								this._fileStoreWriter = undefined;
+								this._initializationFailed = true;
+								this._releaseTranscriptRecall();
+								if (system === "icm") this._setContinuousChatWire({ kind: "blocked", reason });
+							}
+						}
 					}
 					// A session warning (live to a listener, else held for the first subscriber or the closing drain), never a stderr write
 					// from construction: the creating host may be running a terminal UI.

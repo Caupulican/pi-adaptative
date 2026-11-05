@@ -78,7 +78,11 @@ export interface ProviderRequestContextControllerDeps {
 	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration?(): void;
 	/** Add the memory records for this request; the returned plan joins the request plan's currency and commit. */
-	appendMemoryEvidence?(messages: AgentMessage[], report: MemoryRetrievalReport): MemoryPromptPlan;
+	appendMemoryEvidence?(
+		messages: AgentMessage[],
+		report: MemoryRetrievalReport,
+		wireMessages: readonly AgentMessage[],
+	): MemoryPromptPlan;
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
@@ -359,7 +363,11 @@ export class ProviderRequestContextController {
 		];
 		const memoryPlan =
 			memoryReport && this.deps.appendMemoryEvidence
-				? this.deps.appendMemoryEvidence([...compactableMessages, ...withExtensionTransients], memoryReport)
+				? this.deps.appendMemoryEvidence(
+						[...compactableMessages, ...withExtensionTransients],
+						memoryReport,
+						wire.messages ?? [],
+					)
 				: undefined;
 		const withMemory = memoryPlan?.messages ?? [...compactableMessages, ...withExtensionTransients];
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);

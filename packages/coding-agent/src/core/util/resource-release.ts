@@ -451,6 +451,27 @@ export function runReleaseSteps(
 			failures.push(error);
 		}
 	}
+	throwReleaseFailures(failures, message, primary);
+}
+
+/** Async owners drain and attempt every cleanup in order, even when another owned cleanup fails. */
+export async function runAsyncReleaseSteps(
+	steps: readonly (() => void | Promise<void>)[],
+	message: string,
+	primary?: { readonly error: unknown },
+): Promise<void> {
+	const failures: unknown[] = [];
+	for (const step of steps) {
+		await Promise.resolve()
+			.then(step)
+			.catch((error) => {
+				failures.push(error);
+			});
+	}
+	throwReleaseFailures(failures, message, primary);
+}
+
+function throwReleaseFailures(failures: unknown[], message: string, primary?: { readonly error: unknown }): void {
 	if (failures.length === 0) return;
 	const all = primary === undefined ? failures : [primary.error, ...failures];
 	throw all.length === 1 ? all[0] : new AggregateError(all, message);

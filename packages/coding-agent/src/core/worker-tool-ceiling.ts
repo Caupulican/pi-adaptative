@@ -5,6 +5,7 @@
 
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
+import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
@@ -24,6 +25,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"goal",
 	"secret_store",
 	ROOT_MEMORY_TOOL_NAME,
+	KNOWLEDGE_TOOL_NAME,
 	"delegate",
 	"improvement_loop",
 	"model_fitness",

@@ -1516,7 +1516,7 @@ export class AgentSession {
 				this._runPromptEnforcement(messages, report, sourceMessages, frozenBelow, gcReport),
 			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
 			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
-			appendMemoryEvidence: (messages, report) => this._memory.appendPromptMemory(messages, report),
+			appendMemoryEvidence: (messages, report, wire) => this._memory.appendPromptMemory(messages, report, wire),
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(this.sessionManager),
 			previewTaskAutomationContext: () => this._runtimeBuilder.previewTaskAutomationContext(),

@@ -37,6 +37,9 @@ export const TRANSIENT_RECORD_SUPERSEDING_NOTE =
  */
 export const HOST_TRANSIENT_CLEARED_DETAILS = { transientCleared: true } as const;
 
+/** A live projection belongs only to this request, never to durable history or later compactions. */
+export const HOST_REQUEST_ONLY_DETAILS = { requestOnly: true } as const;
+
 function isClearedHostTransient(message: AgentMessage): boolean {
 	return (
 		message.role === "custom" &&
@@ -472,7 +475,8 @@ export async function commitTransientRecords(
  * to dedupe against; a message array's POSITION is not safe (a host may contribute a variable number
  * of transients turn to turn as different extensions activate, shifting everything after them - see
  * the investigation note in `provider-request-planner.ts`). Anything not shaped as a `CustomMessage`
- * with string content is returned in `passThrough` instead: appended fresh to the WIRE payload every
+ * with string content, or explicitly marked `HOST_REQUEST_ONLY_DETAILS`, is returned in `passThrough`
+ * instead: appended fresh to the WIRE payload every
  * request exactly as before this module existed, never written into durable history. This is
  * correct-but-unoptimized for that shape rather than either dropping it (would silently lose content)
  * or guessing at a durable identity for it (would risk conflating two unrelated host transients that
@@ -493,6 +497,15 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 	const slots: TransientRecordSlot[] = [];
 	const passThrough: AgentMessage[] = [];
 	for (const message of transientMessages) {
+		if (
+			message.role === "custom" &&
+			typeof message.details === "object" &&
+			message.details !== null &&
+			(message.details as { requestOnly?: unknown }).requestOnly === true
+		) {
+			passThrough.push(message);
+			continue;
+		}
 		const text = customMessageText(message);
 		if (message.role === "custom" && text !== undefined) {
 			if (isClearedHostTransient(message)) {

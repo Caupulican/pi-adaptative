@@ -692,7 +692,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 					JSON.stringify(entry.message.content).includes("short functions"),
 			);
 		if (owner === undefined) throw new Error("Owner message with the cited words is not on the session branch");
-		return `${e4Manager.getSessionId().slice(0, 8)}/${owner.id}`;
+		return `${e4Manager.getSessionId()}/${owner.id}`;
 	};
 	const e4Count = (text: string): number => text.split(E4_PREFERENCE).length - 1;
 	const e4Judgments = {

@@ -215,7 +215,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 					JSON.stringify(entry.message.content).includes("prefer tabs"),
 			);
 		if (owner === undefined) throw new Error("Owner message with the cited words is not on the session branch");
-		return `${sessionManager.getSessionId().slice(0, 8)}/${owner.id}`;
+		return `${sessionManager.getSessionId()}/${owner.id}`;
 	};
 	const compactionGate = createBarrier();
 	world.provider.enqueue(
