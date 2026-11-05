@@ -32,6 +32,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 
 	capabilities(): DecisionEngineCapabilities {
 		return {
+			requestBudget: this.adapter.requestBudget === true,
 			boolean: true,
 			choice: true,
 			score: true,
@@ -44,6 +45,8 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 	}
 
 	async evaluate(program: DecisionProgram, state: unknown, options?: DecisionOptions): Promise<DecisionEvaluation> {
+		if (options?.budget && !this.adapter.requestBudget)
+			throw new RequestSpendRefusal("The selected semantic adapter cannot enforce a request budget.");
 		const questions: Record<string, unknown> = {};
 
 		for (const d of program.decisions) {
@@ -104,6 +107,8 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			{
 				signal: options?.signal,
 				timeoutMs: options?.timeoutMs,
+				budget: options?.budget,
+				origin: options?.origin,
 			},
 		);
 		const latencyMs = Date.now() - startTime;
@@ -340,3 +345,5 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 		return evaluation;
 	}
 }
+
+import { RequestSpendRefusal } from "../../cost/request-spend-budget.ts";

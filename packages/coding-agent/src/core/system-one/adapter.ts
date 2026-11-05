@@ -1,10 +1,13 @@
 import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
+import { isRequestSpendRefusal, type RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 import {
 	SystemOneInvalidResponseError,
 	SystemOneObserverError,
 	type SystemOneReceipt,
 	SystemOneReviewError,
+	type SystemOneReviewResponseObserver,
 	SystemOneUsageRefusal,
 } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
@@ -34,6 +37,8 @@ export interface JevEvaluationResponse {
 }
 
 export interface JevAdapterEvaluateOptions {
+	budget?: RequestSpendBudget;
+	origin?: AccountingOrigin;
 	signal?: AbortSignal;
 	impact?: ToolImpact;
 	timeoutMs?: number;
@@ -42,14 +47,19 @@ export interface JevAdapterEvaluateOptions {
 import type { ConfidenceProvenance } from "../decision/confidence.ts";
 
 export interface JevAdapter {
+	readonly requestBudget?: true;
 	readonly provenance?: ConfidenceProvenance;
 	evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse>;
 }
 
 export interface SystemOneReviewerLike {
+	readonly requestBudget?: true;
 	evaluate(
 		input: { model?: string; state: unknown; questions: Record<string, unknown> },
 		signal?: AbortSignal,
+		onResponse?: SystemOneReviewResponseObserver,
+		origin?: AccountingOrigin,
+		budget?: RequestSpendBudget,
 	): Promise<{
 		request: { model: string };
 		response: {
@@ -153,6 +163,9 @@ export interface SystemOneJevAdapterDeps {
  * R-067: Rate-limit retries MUST use bounded backoff.
  */
 export class SystemOneJevAdapter implements JevAdapter {
+	get requestBudget(): true | undefined {
+		return this.reviewer.requestBudget;
+	}
 	readonly provenance: ConfidenceProvenance = "native_calibrated";
 	private readonly reviewer: SystemOneReviewerLike;
 	private readonly config: SystemOneConfig;
@@ -175,6 +188,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 	}
 
 	async evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse> {
+		if (options?.budget && !this.requestBudget)
+			throw new RequestSpendRefusal("The selected semantic reviewer cannot enforce a request budget.");
 		const started = Date.now();
 		const impact = options?.impact ?? "read_only";
 
@@ -284,6 +299,9 @@ export class SystemOneJevAdapter implements JevAdapter {
 						questions: input.questions,
 					},
 					signal,
+					undefined,
+					options?.origin,
+					options?.budget,
 				);
 
 				const returnedModel = result.response.model;
@@ -325,6 +343,14 @@ export class SystemOneJevAdapter implements JevAdapter {
 				};
 			} catch (error) {
 				lastError = error;
+				if (isRequestSpendRefusal(error)) {
+					if (owedReceipts.length > 0)
+						throw new SystemOneObserverError("System One spending suspended", error, [
+							...owedReceipts,
+							...(error instanceof SystemOneObserverError ? error.receipts : []),
+						]);
+					throw error;
+				}
 				// A usage lease refused before payment is not an outage: nothing was sent, so it is neither classified nor retried.
 				if (error instanceof SystemOneUsageRefusal || error instanceof SystemOneDisabledError)
 					throw new SystemOnePreSendError(error.message);

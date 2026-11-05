@@ -26,4 +26,6 @@ The defaults allow one review after two idle minutes, require three new owner tu
 
 Before each provider request, the host estimates the complete request cost, including tools and long-context pricing, and reduces the output allowance to fit the remaining `maxUsd`. If even one output token cannot fit, it sends no request. This is an estimate, not a guarantee of the provider's eventual bill; measured overspend stops further requests and note delivery.
 
+Custom models need declared prices for these background reviews. An explicitly configured zero price is valid; omitted prices are unknown and prevent a review request. Tiered prices use the same rate selection as measured usage.
+
 The review reserves usage-journal capacity before starting. Every measured provider response is attributed to the starting session, including late responses after cancellation. Missing usage or failed receipt retention stops further spending. A restarted session starts a new per-session review count.

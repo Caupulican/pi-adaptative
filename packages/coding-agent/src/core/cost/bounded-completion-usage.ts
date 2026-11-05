@@ -1,4 +1,5 @@
 import type { Message } from "@caupulican/pi-ai";
+import { resolveModelCost } from "@caupulican/pi-ai/usage";
 import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import { captureUsageComponent } from "../../kernel/usage-components.ts";
@@ -7,6 +8,7 @@ import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { MaintenanceUsageRoute, SystemOneUsageLease } from "../review/system-one-review-port.ts";
 import { priceCompletedUsage } from "../review/typesafe-usage.ts";
 import type { AccountingOrigin } from "./accounting-evidence.ts";
+import { RequestSpendBudget, RequestSpendRefusal } from "./request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "./semantic-usage-delivery.ts";
 
 /** One isolated completion's projected spending limit and original-session response receipts. */
@@ -14,24 +16,23 @@ export class BoundedCompletionUsage {
 	private readonly lease: SystemOneUsageLease;
 	private readonly origin: AccountingOrigin;
 	private readonly route: MaintenanceUsageRoute;
-	private readonly maxUsd: number;
+	private readonly spending: RequestSpendBudget;
 	private readonly maxResponses: number;
 	private responses = 0;
 	private readonly seen = new WeakSet<Message>();
-	private spentUsd = 0;
+	private requestIdentity: { provider: string; model: string } | undefined;
 	private failure: unknown;
 
 	constructor(
 		owner: SessionSemanticUsageDelivery,
 		route: MaintenanceUsageRoute,
-		maxUsd: number,
+		budget: number | RequestSpendBudget,
 		maxResponses: number,
 	) {
-		if (!Number.isFinite(maxUsd) || maxUsd < 0) throw new Error("Completion spending limit must be non-negative.");
+		this.spending = typeof budget === "number" ? new RequestSpendBudget(budget) : budget;
 		this.origin = owner.captureOrigin();
 		this.lease = owner.beginMaintenance(route, maxResponses, this.origin);
 		this.route = route;
-		this.maxUsd = maxUsd;
 		this.maxResponses = maxResponses;
 	}
 
@@ -39,14 +40,18 @@ export class BoundedCompletionUsage {
 	preflight(request: RequestPreflightContext): { maxTokens: number } {
 		this.assertHealthy();
 		if (this.responses >= this.maxResponses) throw new Error("Completion response allowance is exhausted.");
+		if (request.model.costDefaulted)
+			throw new RequestSpendRefusal("The selected model has no declared price for a bounded completion.");
+		const inputTokens = estimateProviderRequestTokens(request.context, request.model);
 		const maxTokens = affordableOutputTokenLimit({
-			inputTokens: estimateProviderRequestTokens(request.context, request.model),
+			inputTokens,
 			maxOutputTokens: Math.min(request.maxTokens ?? request.model.maxTokens, request.model.maxTokens),
-			cost: request.model.cost,
-			longContextPricing: request.model.longContextPricing,
-			remainingUsd: this.maxUsd - this.spentUsd,
+			cost: resolveModelCost(request.model, inputTokens),
+			remainingUsd: this.spending.remainingUsd(),
 		});
-		if (maxTokens < 1) throw new Error("Completion's remaining budget cannot cover the next projected request.");
+		if (maxTokens < 1)
+			throw new RequestSpendRefusal("Completion's remaining budget cannot cover the next projected request.");
+		this.requestIdentity = { provider: request.model.provider, model: request.model.id };
 		return { maxTokens };
 	}
 
@@ -57,8 +62,10 @@ export class BoundedCompletionUsage {
 		this.responses++;
 		try {
 			const usage = validateProviderUsage(message.usage);
-			this.spentUsd += usage.cost.total;
 			const component = captureUsageComponent({ ...message, usage });
+			this.spending.record(component.sourceId, usage.cost.total, usage.totalTokens);
+			if (component.provider !== this.requestIdentity?.provider || component.model !== this.requestIdentity.model)
+				this.spending.fail("A response does not match the model whose price admitted the request.");
 			const outcome = this.lease.record({
 				...priceCompletedUsage(component.provider, component.model, usage),
 				receiptId: component.sourceId,
@@ -70,11 +77,9 @@ export class BoundedCompletionUsage {
 				origin: this.origin,
 			});
 			if (outcome.kind === "unretained") throw new Error(`Completion usage could not be retained: ${outcome.cause}`);
-			if (usage.totalTokens === 0)
-				throw new Error("Completion returned no measured token usage; further spending is suspended.");
-			if (!Number.isFinite(this.spentUsd) || this.spentUsd > this.maxUsd)
-				throw new Error("Completion's measured spending exceeded its projected limit.");
+			this.spending.assertHealthy();
 		} catch (error) {
+			this.spending.fail("Completion usage could not be measured and retained; further spending is suspended.");
 			this.failure = error;
 			throw error;
 		}
@@ -82,6 +87,7 @@ export class BoundedCompletionUsage {
 
 	assertHealthy(): void {
 		if (this.failure !== undefined) throw this.failure;
+		this.spending.assertHealthy();
 	}
 
 	release(): void {

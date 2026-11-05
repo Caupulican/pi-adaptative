@@ -12,6 +12,9 @@ export type SemanticEvaluationScope =
 export type SemanticEvaluationOccupancy = "foreground" | "background";
 
 export interface DecisionOptions {
+	/** Shared by serial extraction and admission requests; enforced before every transport attempt. */
+	readonly budget?: RequestSpendBudget;
+	readonly origin?: AccountingOrigin;
 	readonly signal?: AbortSignal;
 	readonly consequence?: Consequence;
 	readonly timeoutMs?: number;
@@ -26,3 +29,6 @@ export interface SemanticDecisionEngine {
 	capabilities(): DecisionEngineCapabilities;
 	evaluate(program: DecisionProgram, state: unknown, options?: DecisionOptions): Promise<DecisionEvaluation>;
 }
+
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
+import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";

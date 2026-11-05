@@ -3,6 +3,7 @@ import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
+import { isRequestSpendRefusal, type RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { redactCredentialContent } from "../secrets/credential-model-content.ts";
 import { type SystemOneAccessResolver, SystemOneDisabledError } from "../system-one/access.ts";
@@ -35,7 +36,7 @@ import {
 	validateTypeSafeInput,
 } from "./typesafe-contract.ts";
 import { encodeSystemOneImageRequest } from "./typesafe-image-transport.ts";
-import { priceTypeSafeUsage } from "./typesafe-usage.ts";
+import { priceTypeSafeUsage, projectTypeSafeRequestCost } from "./typesafe-usage.ts";
 
 export type { SystemOneReceipt, TypeSafeUsageReceipt } from "./system-one-review-port.ts";
 export type { ReviewInput } from "./typesafe-contract.ts";
@@ -150,6 +151,7 @@ interface ReviewerConnection {
 
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
 export class SystemOneReviewer {
+	readonly requestBudget = true;
 	private readonly deps: SystemOneReviewerDeps;
 	private readonly driver: SystemOneProviderDriver;
 	private verifiedKey?: string;
@@ -267,6 +269,7 @@ export class SystemOneReviewer {
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
+		budget?: RequestSpendBudget,
 	): Promise<SystemOneReviewRecord> {
 		signal?.throwIfAborted();
 		const snapshot: ReviewInput = JSON.parse(serializeEvaluation(input));
@@ -284,6 +287,7 @@ export class SystemOneReviewer {
 			signal,
 			onResponse,
 			origin,
+			budget,
 		);
 		const threshold = REVIEW_CONFIDENCE[snapshot.confidence ?? "high"];
 		const safeQuestionIds = Object.keys(result.request.questions);
@@ -311,6 +315,7 @@ export class SystemOneReviewer {
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
+		budget?: RequestSpendBudget,
 	): Promise<SystemOneEvaluationRecord> {
 		const evaluationId = randomUUID();
 		const initiatingOrigin = origin ?? this.captureUsageOrigin();
@@ -325,6 +330,8 @@ export class SystemOneReviewer {
 		if (disabled) throw new SystemOneDisabledError();
 		const vision =
 			snapshot.assets !== undefined || Object.values(snapshot.questions).some((question) => question.type === "box");
+		if (vision && budget)
+			throw new RequestSpendRefusal("Image decision requests have no supported spending projection.");
 		if (vision && !driver.visionModel)
 			throw new TypeSafeInputError(
 				`${driver.displayName} image evaluation is unsupported; configure TypeSafe explicitly for vision`,
@@ -403,6 +410,7 @@ export class SystemOneReviewer {
 		const transportAttempts: SystemOneTransportAttempt[] = [];
 		let raw: unknown;
 		let lease: SystemOneUsageLease | undefined;
+		let unmeasuredAttempt = false;
 		try {
 			// Before any provider call: a refused lease is a typed evaluation failure with nothing paid.
 			lease = this.deps.usage?.begin(undefined, capturedOrigin);
@@ -410,7 +418,11 @@ export class SystemOneReviewer {
 				async () => {
 					combined.signal?.throwIfAborted();
 					this.deps.access?.assertEnabled();
+					// This callback runs for every retry, using all charges from earlier attempts.
+					if (unmeasuredAttempt) budget?.fail("A previous semantic attempt has no valid priced usage.");
+					budget?.assertAffordable(projectTypeSafeRequestCost(driver.id, request.model, body));
 					attempts++;
+					unmeasuredAttempt = true;
 					raw = undefined;
 					const attempt: SystemOneTransportAttempt = { attempt: attempts };
 					transportAttempts.push(attempt);
@@ -465,23 +477,33 @@ export class SystemOneReviewer {
 					attempt.response = raw;
 					// Valid usage is priced and recorded even for a rejected body: the provider charged for it.
 					const reportedUsage = getEvaluationUsage(raw);
-					if (reportedUsage && lease) {
-						receipts.push(
-							recordReceipt(lease, {
-								...priceTypeSafeUsage(driver.id, request.model, reportedUsage),
-								receiptId: `${evaluationId}:${attempts}`,
+					if (reportedUsage) {
+						const priced = priceTypeSafeUsage(driver.id, request.model, reportedUsage);
+						const receiptId = `${evaluationId}:${attempts}`;
+						if (priced.costStatus === "catalog_priced") {
+							unmeasuredAttempt = false;
+							budget?.record(receiptId, priced.usage.cost.total, priced.usage.totalTokens);
+						}
+						if (lease) {
+							const receipt = recordReceipt(lease, {
+								...priced,
+								receiptId,
 								provider: driver.id,
 								model: request.model,
 								attempt: attempts,
 								...(capturedOrigin ? { origin: capturedOrigin } : {}),
-							}),
-						);
+							});
+							receipts.push(receipt);
+							if (receipt.status === "unrecorded") budget?.fail("Semantic usage persistence is not confirmed.");
+						}
 					}
+					if (unmeasuredAttempt) budget?.fail("A semantic response has no valid priced usage.");
 					try {
 						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
 					} catch (error) {
 						throw new SystemOneObserverError(`${providerName} response observer failed`, error, receipts);
 					}
+					budget?.assertHealthy();
 					if (decoded.duplicateKeys)
 						throw new SystemOneInvalidResponseError(
 							`Invalid ${providerName} response: duplicate JSON member`,
@@ -534,7 +556,19 @@ export class SystemOneReviewer {
 				elapsedMs: Date.now() - started,
 				receipts,
 			};
-		} catch (error) {
+		} catch (caught) {
+			let error = caught;
+			if (unmeasuredAttempt) budget?.fail("A dispatched semantic request has no valid priced usage.");
+			try {
+				budget?.assertHealthy();
+			} catch (refusal) {
+				error = refusal;
+			}
+			if (isRequestSpendRefusal(error)) {
+				if (receipts.length > 0)
+					throw new SystemOneObserverError("Semantic request spending suspended", error, receipts);
+				throw error;
+			}
 			// Typed contract failures and observer failures keep their class; their receipts are already attached.
 			if (error instanceof SystemOneInvalidResponseError || error instanceof SystemOneObserverError) throw error;
 			// A refused lease is a typed pre-payment failure: it passes through unwrapped so the adapter can classify it as not sent.

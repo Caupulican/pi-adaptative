@@ -203,13 +203,16 @@ export interface SystemOneReviewPort {
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
+		budget?: RequestSpendBudget,
 	): Promise<SystemOneEvaluationRecord>;
 	review(
 		input: ReviewInput,
 		signal?: AbortSignal,
 		onResponse?: SystemOneReviewResponseObserver,
 		origin?: AccountingOrigin,
+		budget?: RequestSpendBudget,
 	): Promise<SystemOneReviewRecord>;
 }
 
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
+import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";

@@ -296,7 +296,10 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	const budget = await world.createRootSession("root", {
 		agentDir: budgetDir,
 		sessionManager: world.createSessionManager(budgetDir),
-		model: { ...world.provider.model("root"), cost: { input: 0, output: 1_000, cacheRead: 0, cacheWrite: 0 } },
+		model: {
+			...world.provider.model("root"),
+			cost: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 0, output: 1_000 }] },
+		},
 		systemOneEnabled: false,
 		settings: {
 			memorySystem: "okf",
@@ -347,6 +350,35 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	});
 	await withDeadline(trace, "owner after exhausted review", budget.session.prompt("I have finished that task."));
 	expect(await world.disposeSessionInBody(budget.session)).toBeUndefined();
+
+	// Missing configured pricing is a placeholder, not permission to spend for free in the background.
+	const unknownDir = `${world.agentDir}-proactivity-unknown-price`;
+	const unknown = await world.createRootSession("root", {
+		agentDir: unknownDir,
+		sessionManager: world.createSessionManager(unknownDir),
+		model: { ...world.provider.model("root"), costDefaulted: true },
+		systemOneEnabled: false,
+		settings: {
+			memorySystem: "okf",
+			autoLearn: { enabled: false },
+			proactivity: { enabled: true, minOwnerTurnsBetweenRuns: 1 },
+		},
+	});
+	world.provider.enqueue("root", text("proactivity-unknown-owner", "Understood."));
+	await withDeadline(trace, "unknown price owner turn", unknown.session.prompt("Remind me about this task."));
+	unknown.session.backgroundLanes.clearResearchLaneTimer();
+	const beforeUnknown = world.provider.requests.length;
+	const unknownOutcomes: string[] = [];
+	const unsubscribeUnknown = unknown.session.subscribe((event) => {
+		if (event.type === "proactive_review") unknownOutcomes.push(event.outcome);
+	});
+	await expect(
+		withDeadline(trace, "unknown price review", unknown.session.backgroundLanes.runProactiveReviewOnce()),
+	).rejects.toThrow("no declared price");
+	unsubscribeUnknown();
+	expect(unknownOutcomes, "the attempted review reaches its terminal without a provider request").toEqual(["failed"]);
+	expect(world.provider.requests.length, "unknown pricing never reaches the review transport").toBe(beforeUnknown);
+	expect(await world.disposeSessionInBody(unknown.session)).toBeUndefined();
 
 	// The owner can turn it off: no timer, no review request.
 	const offDir = `${world.agentDir}-proactivity-off`;

@@ -9,7 +9,12 @@ import {
 import type { DecisionProgram } from "../program.ts";
 
 export interface LlmCompletionRunner {
-	complete(prompt: string, signal?: AbortSignal): Promise<string>;
+	readonly requestBudget?: true;
+	complete(
+		prompt: string,
+		signal?: AbortSignal,
+		options?: Pick<DecisionOptions, "budget" | "origin">,
+	): Promise<string>;
 }
 
 export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
@@ -24,6 +29,7 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 
 	capabilities(): DecisionEngineCapabilities {
 		return {
+			requestBudget: this.runner?.requestBudget === true,
 			boolean: true,
 			choice: true,
 			score: true,
@@ -36,14 +42,17 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 	}
 
 	async evaluate(program: DecisionProgram, state: unknown, options?: DecisionOptions): Promise<DecisionEvaluation> {
+		if (options?.budget && !this.runner?.requestBudget)
+			throw new RequestSpendRefusal("The selected semantic runner cannot enforce a request budget.");
 		let parsedAnswers: Record<string, unknown> | null = null;
 
 		if (this.runner) {
 			const prompt = `Evaluate the following decision program: ${JSON.stringify(program)}\nState: ${JSON.stringify(state)}\nProvide a JSON mapping decision ids to answers.`;
 			try {
-				const raw = await this.runner.complete(prompt, options?.signal);
+				const raw = await this.runner.complete(prompt, options?.signal, options);
 				parsedAnswers = JSON.parse(raw);
-			} catch {
+			} catch (error) {
+				if (isRequestSpendRefusal(error) || options?.signal?.aborted) throw error;
 				parsedAnswers = null;
 			}
 		}
@@ -204,3 +213,5 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 		});
 	}
 }
+
+import { isRequestSpendRefusal, RequestSpendRefusal } from "../../cost/request-spend-budget.ts";

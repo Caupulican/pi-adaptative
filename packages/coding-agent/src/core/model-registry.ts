@@ -240,6 +240,13 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 			cacheWrite: override.cost.cacheWrite ?? model.cost.cacheWrite,
 			tiers: override.cost.tiers ?? model.cost.tiers,
 		};
+		if (
+			override.cost.input !== undefined &&
+			override.cost.output !== undefined &&
+			override.cost.cacheRead !== undefined &&
+			override.cost.cacheWrite !== undefined
+		)
+			delete result.costDefaulted;
 	}
 
 	// Deep merge compat
@@ -665,6 +672,7 @@ export class ModelRegistry implements ModelRegistryContract {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
+					...(modelDef.cost === undefined ? { costDefaulted: true } : {}),
 					...resolveModelLimitsAndToolCalling(modelDef),
 					samplingParams: modelDef.samplingParams,
 					headers: undefined,

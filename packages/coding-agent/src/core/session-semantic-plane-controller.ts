@@ -6,6 +6,7 @@
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { decisionLedgerFile } from "./agent-paths.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
+import { isRequestSpendRefusal } from "./cost/request-spend-budget.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
@@ -129,7 +130,11 @@ export class SessionSemanticPlaneController {
 				} catch (error) {
 					// A cancelled evaluation is not a degraded plane: the abort came from the operator or
 					// the caller, and the plane never reported an outcome to judge it by.
-					if (options?.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+					if (
+						options?.signal?.aborted ||
+						(error instanceof Error && error.name === "AbortError") ||
+						isRequestSpendRefusal(error)
+					) {
 						this.health.settleCancelled(evaluationId);
 					} else {
 						this.health.settleFailed(evaluationId, error);

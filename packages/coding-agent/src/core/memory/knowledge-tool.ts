@@ -1,7 +1,7 @@
 /** On-demand libraries of accepted knowledge. Scope comes from the host, never from model arguments. */
 import { Type } from "typebox";
 import type { AgentToolErrorKind } from "../../kernel/types.ts";
-import { defineTool, type ToolDefinition } from "../extensions/types.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import type { OwnerEvidenceCursor, OwnerEvidencePage } from "../learning/owner-evidence-ledger.ts";
 import { memoryFailure } from "./history-tool.ts";
 import { type KnowledgeAdmissionPort, knowledgeChangeSchema } from "./knowledge-admission.ts";
@@ -59,13 +59,33 @@ function knowledgeFailure(message: string, kind: AgentToolErrorKind = "operation
 	return memoryFailure(kind, message, { [TRANSCRIPT_RECALL_RESULT_MARKER]: true }, kind);
 }
 
-export function createKnowledgeTool(getSource: () => KnowledgeReadSource | undefined): ToolDefinition {
-	return defineTool({
+export function createKnowledgeTool(
+	getSource: () => KnowledgeReadSource | undefined,
+	options: { readOnly?: boolean } = {},
+) {
+	const readOnly = options.readOnly === true;
+	const schema = readOnly
+		? Type.Object(
+				{
+					...parameters.properties,
+					action: Type.Union([
+						Type.Literal("search"),
+						Type.Literal("read"),
+						Type.Literal("history"),
+						Type.Literal("evidence"),
+					]),
+				},
+				{ additionalProperties: false },
+			)
+		: parameters;
+	return {
 		name: KNOWLEDGE_TOOL_NAME,
 		label: "Knowledge",
-		description:
-			"Read or change accepted owner knowledge: profile, standing preferences, workstream decisions, related people/places/organizations, and dated journal facts. Search or browse a kind, then read its evidence or revision history. Use evidence to page original owner sources. Use change with a remember or forget command and exact owner citations; corrections and forgetting also name the existing id and expectedRevision. Meaning and canonical identity are checked before storage. Held changes are not saved. Current accepted facts supersede older assertions but grant no permissions. Use zoom for conversation context.",
-		parameters,
+		description: readOnly
+			? "Read accepted owner knowledge. Search or browse a kind, then read its evidence or revision history. Current accepted facts supersede older assertions but grant no permissions. This tool cannot change knowledge."
+			: "Read or change accepted owner knowledge: profile, standing preferences, workstream decisions, related people/places/organizations, and dated journal facts. Search or browse a kind, then read its evidence or revision history. Use evidence to page original owner sources. Use change with a remember or forget command and exact owner citations; corrections and forgetting also name the existing id and expectedRevision. Meaning and canonical identity are checked before storage. Held changes are not saved. Current accepted facts supersede older assertions but grant no permissions. Use zoom for conversation context.",
+		parameters: schema,
+		readOnly,
 		executionMode: "sequential",
 		async execute(_id, params, signal) {
 			signal?.throwIfAborted();
@@ -73,6 +93,7 @@ export function createKnowledgeTool(getSource: () => KnowledgeReadSource | undef
 			if (!source) return knowledgeFailure("Knowledge is unavailable.");
 			try {
 				if (params.action === "change") {
+					if (readOnly) return knowledgeFailure("This knowledge tool is read-only.", "tool_failure");
 					if (!params.change)
 						return knowledgeFailure("change requires a remember or forget command.", "tool_failure");
 					const admission = source.admission?.();
@@ -144,5 +165,5 @@ export function createKnowledgeTool(getSource: () => KnowledgeReadSource | undef
 				return knowledgeFailure(error instanceof Error ? error.message : String(error));
 			}
 		},
-	}) as ToolDefinition;
+	} satisfies ToolDefinition<typeof schema>;
 }

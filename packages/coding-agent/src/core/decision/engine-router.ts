@@ -91,6 +91,7 @@ export class DecisionEngineRouter {
 
 				// disposition === "try_next_engine" -> continue to next compatible engine
 			} catch (err) {
+				if (isRequestSpendRefusal(err) || options?.signal?.aborted) throw err;
 				lastError = err;
 				// Cascade to next engine in fallback chain
 			}
@@ -116,3 +117,5 @@ export class DecisionEngineRouter {
 		throw lastError ?? new Error(`All decision engines failed for program ${program.id}`);
 	}
 }
+
+import { isRequestSpendRefusal } from "../cost/request-spend-budget.ts";

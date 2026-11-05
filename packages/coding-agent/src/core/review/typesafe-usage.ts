@@ -1,4 +1,6 @@
 import { calculateCost, createEmptyUsage, getModels, type KnownProvider, type Usage } from "@caupulican/pi-ai";
+import { estimateTokensFromChars } from "../context/context-item.ts";
+import { RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 
 export interface TypeSafeCostProvenance {
 	readonly provider: string;
@@ -51,4 +53,16 @@ export function priceTypeSafeUsage(
 	if (!catalogModel) return { usage, costStatus: "unpriced" };
 	calculateCost(catalogModel, usage);
 	return { usage, costStatus: "catalog_priced", costProvenance: { provider, model } };
+}
+
+/** Scalar decisions have no output-token request field; reserve the catalog's full reply allowance. */
+export function projectTypeSafeRequestCost(provider: string, model: string, serializedRequest: string): number {
+	const catalogModel = getModels(provider as KnownProvider).find((candidate) => candidate.id === model);
+	if (!catalogModel) throw new RequestSpendRefusal("The selected semantic model has no catalog price.");
+	const usage = createEmptyUsage();
+	usage.input = estimateTokensFromChars(serializedRequest.length);
+	usage.output = catalogModel.maxTokens;
+	usage.totalTokens = usage.input + usage.output;
+	calculateCost(catalogModel, usage);
+	return usage.cost.total;
 }

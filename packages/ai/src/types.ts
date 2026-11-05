@@ -807,6 +807,8 @@ export interface Model<TApi extends Api> {
 	 */
 	supportedImageMimeTypes?: string[];
 	cost: ModelCost;
+	/** True when missing configured prices were replaced by zero placeholders, not known free usage. */
+	costDefaulted?: boolean;
 	contextWindow: number;
 	/**
 	 * True when `contextWindow` was filled from a registry default because the model's own definition

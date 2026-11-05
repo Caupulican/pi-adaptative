@@ -61,6 +61,17 @@ export interface OwnerEvidencePage {
 	next?: OwnerEvidenceCursor;
 }
 
+/** A bounded collection cursor lists identities and full digests without copying original input. */
+export interface OwnerEvidenceDescriptor {
+	readonly recordId: string;
+	readonly sourceId: string;
+	readonly sessionId: string | undefined;
+	readonly digest: string;
+	readonly createdAt: string;
+	readonly chars: number;
+	readonly complete: boolean;
+}
+
 function evidenceTextDigest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
@@ -188,7 +199,7 @@ export class OwnerEvidenceLedger {
 	private ownerEvidence: OwnerEvidenceEntry[] | undefined;
 	/** Identity index follows the canonical branch; only the text projection is limited to 64 records. */
 	private sourceEntries: Set<string> | undefined;
-	private records: Array<{ recordId: string; record: OwnerEvidenceRecord }> = [];
+	private records: Array<{ recordId: string; record: OwnerEvidenceRecord; digest: string }> = [];
 	private readonly byRecord = new Map<string, number>();
 	private readonly bySource = new Map<string, number>();
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
@@ -307,10 +318,26 @@ export class OwnerEvidenceLedger {
 		return index === undefined ? undefined : { ...this.records[index]!.record };
 	}
 
+	/** Retain the last returned record id at the end; a later append is then visible without rescanning. */
+	readSources(after?: string): readonly OwnerEvidenceDescriptor[] {
+		this.loadOwnerEvidence();
+		const previous = after === undefined ? -1 : this.byRecord.get(after);
+		if (previous === undefined) throw new Error("Owner source cursor is no longer on the active branch");
+		return this.records.slice(previous + 1, previous + 33).map(({ recordId, record, digest }) => ({
+			recordId,
+			sourceId: record.sourceId,
+			sessionId: record.sessionId,
+			digest,
+			createdAt: record.createdAt,
+			chars: record.chars,
+			complete: record.chars === record.text.length,
+		}));
+	}
+
 	private indexRecord(recordId: string, record: OwnerEvidenceRecord): void {
 		this.byRecord.set(recordId, this.records.length);
 		this.bySource.set(record.sourceId, this.records.length);
-		this.records.push({ recordId, record });
+		this.records.push({ recordId, record, digest: createHash("sha256").update(record.text, "utf8").digest("hex") });
 	}
 
 	/**

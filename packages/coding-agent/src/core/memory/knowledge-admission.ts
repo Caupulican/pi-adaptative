@@ -3,7 +3,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { measureJsonLength } from "../../kernel/provider-request-estimator.ts";
 import { estimateTokensFromChars } from "../context/context-item.ts";
-import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
@@ -131,6 +131,7 @@ export interface KnowledgeAdmissionPort {
 }
 
 export interface KnowledgeAdmissionDeps {
+	readonly request?: Pick<DecisionOptions, "budget" | "origin">;
 	store: KnowledgeStorePort;
 	evidence: Pick<OwnerEvidenceLedger, "findSource">;
 	scope: KnowledgeScope;
@@ -276,7 +277,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				],
 			}),
 			state,
-			{ signal, consequence: "high", occupancy: "background" },
+			{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
 		);
 		assertCurrent();
 		const grounded = judged.results.grounded;
@@ -426,7 +427,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 							})),
 						}),
 						state,
-						{ signal, consequence: "high", occupancy: "background" },
+						{ ...this.deps.request, signal, consequence: "high", occupancy: "background" },
 					);
 					assertCurrent();
 					for (const [index, candidate] of batch.entries()) {
