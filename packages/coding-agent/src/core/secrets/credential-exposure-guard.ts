@@ -10,6 +10,7 @@ import {
 } from "../../kernel/index.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
+import { runWithPersistedOutputMask } from "../tools/persisted-output-mask.ts";
 import {
 	parseShellSearchInvocationScope,
 	type ShellContentSearchTool,
@@ -26,6 +27,8 @@ import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import {
+	type CredentialBlockMaskKind,
+	createCredentialBlockMask,
 	isCredentialSecretKey,
 	mockCredentialContent,
 	mockCredentialFields,
@@ -1008,14 +1011,15 @@ function redactStructuredDetails(
 	}
 }
 
+/** The mock of one tool call's result text, and the same mock for the output file the call saves, block by block. */
 function createExposureMock(
 	assessment: CredentialExposureAssessment,
 	cwd: string,
 	boundary: CredentialExposureBoundary | undefined,
 	executionContext: ExecutionContext | undefined,
 	pathAuthority: ExecutionPathAuthority | undefined,
-): (text: string) => string {
-	if (assessment.kind === "content") return mockCredentialContent;
+): { text: (text: string) => string; kind: CredentialBlockMaskKind } {
+	if (assessment.kind === "content") return { text: mockCredentialContent, kind: { kind: "content" } };
 	if (assessment.kind === "search") {
 		const paths = createCredentialPathPolicy(
 			cwd,
@@ -1024,9 +1028,13 @@ function createExposureMock(
 			boundary?.getPathProbe?.(executionContext),
 			pathAuthority,
 		);
-		return (text) => mockProtectedSearchLines(text, (path) => paths.isProtected(path));
+		const isProtectedPath = (path: string) => paths.isProtected(path);
+		return {
+			text: (text) => mockProtectedSearchLines(text, isProtectedPath),
+			kind: { kind: "search", isProtectedPath },
+		};
 	}
-	return mockCredentialFields;
+	return { text: mockCredentialFields, kind: { kind: "fields" } };
 }
 
 /**
@@ -1086,14 +1094,16 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 						"tool_failure",
 					);
 				}
-				mock = createExposureMock(assessment, cwd, boundary, executionContext, pathAuthority);
+				const exposureMock = createExposureMock(assessment, cwd, boundary, executionContext, pathAuthority);
+				mock = exposureMock.text;
 				signal?.throwIfAborted();
-				return redactResult(
-					await executor.execute(toolCallId, params, signal, safeUpdate),
-					boundary,
-					mock,
-					sensitiveValues,
+				// The output file a call saves (a shell's full output) is written through the same mock, block by
+				// block, so a later read of the file shows what the result would.
+				const result = await runWithPersistedOutputMask(
+					() => createOutputRedactor(boundary, createCredentialBlockMask(exposureMock.kind), sensitiveValues),
+					() => executor.execute(toolCallId, params, signal, safeUpdate),
 				);
+				return redactResult(result, boundary, mock, sensitiveValues);
 			} catch (error) {
 				// A cancellation is not this guard's to describe: the run's abort reason (a plain string for a
 				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes

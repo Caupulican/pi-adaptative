@@ -9,6 +9,7 @@ import {
 	truncateKnownHeadTail,
 } from "../../kernel/utils/truncate.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
+import { createScopedPersistedOutputMask, MaskedOutputStream } from "./persisted-output-mask.ts";
 import { createShellOutputDecoder, type ShellOutputDecoder } from "./shell-output-decoder.ts";
 
 export interface OutputAccumulatorOptions {
@@ -18,7 +19,7 @@ export interface OutputAccumulatorOptions {
 	tempDirectory?: string;
 	/** Stream the complete output to disk even when the bounded in-memory view is not truncated. */
 	persistAllOutput?: boolean;
-	/** Maximum raw bytes persisted to the managed output file. Defaults to no additional cap. */
+	/** Maximum bytes persisted to the managed output file (masked bytes when masked). Defaults to no additional cap. */
 	maxPersistedBytes?: number;
 	/** Decode valid UTF-8 plus isolated Windows-1252 bytes from native Windows programs. */
 	windowsCompatibleEncoding?: boolean;
@@ -82,7 +83,10 @@ function tailUtf8String(text: string, maxBytes: number): { text: string; bytes: 
  * Appends decode chunks with a streaming UTF-8 decoder, keeps a bounded tail of
  * logical lines, and opens a temp file when the full output needs preserving.
  * Snapshot and preview work is bounded by configured output limits, never by
- * total command history.
+ * total command history. Constructed inside a persisted-output mask scope (the
+ * credential guard runs every tool call in one), the file receives the masked
+ * text, UTF-8 encoded, instead of the raw bytes; the in-memory view stays raw
+ * for the guard to mask in the tool result.
  */
 export class OutputAccumulator {
 	private readonly maxLines: number;
@@ -93,6 +97,9 @@ export class OutputAccumulator {
 	private readonly maxPersistedBytes: number;
 	private readonly decoder: ShellOutputDecoder;
 	private readonly outputHash = createHash("sha256");
+	/** The file's own decoder and mask stream; absent outside a mask scope. */
+	private readonly persistedMask: { decoder: ShellOutputDecoder; stream: MaskedOutputStream } | undefined;
+	private persistedMaskEnded = false;
 
 	private rawChunks: Buffer[] = [];
 	private headLines: string[] = [];
@@ -128,6 +135,13 @@ export class OutputAccumulator {
 		this.persistAllOutput = options.persistAllOutput ?? false;
 		this.maxPersistedBytes = options.maxPersistedBytes ?? Number.POSITIVE_INFINITY;
 		this.decoder = createShellOutputDecoder(options.windowsCompatibleEncoding);
+		const mask = createScopedPersistedOutputMask();
+		this.persistedMask = mask
+			? {
+					decoder: createShellOutputDecoder(options.windowsCompatibleEncoding),
+					stream: new MaskedOutputStream(mask),
+				}
+			: undefined;
 	}
 
 	append(data: Buffer): void {
@@ -151,6 +165,7 @@ export class OutputAccumulator {
 		if (this.shouldUseTempFile()) {
 			this.tryEnsureTempFile();
 		}
+		this.endPersistedMask();
 	}
 
 	snapshot(options: { persistIfTruncated?: boolean; persistAlways?: boolean } = {}): OutputSnapshot {
@@ -230,7 +245,7 @@ export class OutputAccumulator {
 		if (this.tempFileFd !== undefined || this.shouldUseTempFile()) {
 			if (this.tryEnsureTempFile() && this.tempFileFd !== undefined) {
 				try {
-					this.writePersisted(data);
+					this.persist(data);
 				} catch (error) {
 					this.recordTempFileError(error);
 				}
@@ -458,13 +473,36 @@ export class OutputAccumulator {
 			this.tempFilePath ??= defaultTempFilePath(this.tempDirectory, this.tempFilePrefix);
 			this.tempFileFd = openSync(this.tempFilePath, "w");
 			for (const chunk of this.rawChunks) {
-				this.writePersisted(chunk);
+				this.persist(chunk);
 			}
 			this.rawChunks = [];
+			if (this.finished) this.endPersistedMask();
 			return true;
 		} catch (error) {
 			this.recordTempFileError(error);
 			return false;
+		}
+	}
+
+	/** Writes output bytes to the file: through the mask stream when masked, as they are otherwise. */
+	private persist(data: Buffer): void {
+		if (!this.persistedMask) {
+			this.writePersisted(data);
+			return;
+		}
+		const { decoder, stream } = this.persistedMask;
+		this.writePersisted(Buffer.from(stream.write(decoder.decode(data, { stream: true })), "utf-8"));
+	}
+
+	/** Once the output is complete and the file is open, writes what the mask stream still holds. */
+	private endPersistedMask(): void {
+		if (!this.persistedMask || this.persistedMaskEnded || this.tempFileFd === undefined) return;
+		this.persistedMaskEnded = true;
+		const { decoder, stream } = this.persistedMask;
+		try {
+			this.writePersisted(Buffer.from(stream.write(decoder.decode()) + stream.end(), "utf-8"));
+		} catch (error) {
+			this.recordTempFileError(error);
 		}
 	}
 

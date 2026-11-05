@@ -94,8 +94,12 @@ export interface SharedLaneToolOptions {
 		| "spawnHook"
 		| "operations"
 		| "managedToolResolver"
+		| "outputDirectory"
 	>;
-	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables" | "environment">;
+	readonly python?: Pick<
+		PythonToolOptions,
+		"outputReduction" | "omitEnvironmentVariables" | "environment" | "outputDirectory"
+	>;
 	readonly runProcess?: Pick<RunProcessToolOptions, "attributionEnvironment">;
 	readonly read?: ReadToolOptions;
 	readonly grep?: GrepToolOptions;
@@ -214,8 +218,6 @@ export interface LaneToolSurfaceOptions {
 	protectedPathWatch?: ProtectedPathWatch;
 	/** Told which processes were still running (and so ended) when the worker's tool surface was disposed. */
 	onWorkerProcessesReaped?: (processes: readonly string[]) => void;
-	/** Host-owned managed directory for complete shell output; never inferred from process-global config. */
-	shellOutputDirectory?: string;
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
 	grant?: ExecutionGrant;
 	toolManifests?: readonly ToolCapabilityManifest[];
@@ -283,7 +285,6 @@ function createLaneTools(
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 	shellSessionKey?: string,
-	shellOutputDirectory?: string,
 	workerToolAdapters?: WorkerToolAdapterRegistry,
 	bindTool?: (tool: AgentTool) => AgentTool,
 	shared: SharedLaneToolOptions = {},
@@ -346,7 +347,6 @@ function createLaneTools(
 				mutationAnnouncer: shellSessionKey,
 				forceCwd: true,
 				prewarmWindowsShell: true,
-				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
 			}),
 		);
 	}
@@ -641,12 +641,19 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		checkEdge: options.checkEdge,
 	});
 
+	// A process tool saves its full output in the worker's scratch directory, the one place its read-only shell may
+	// read besides its read roots; the file goes with the scratch directory when the surface is disposed.
 	const processToolOptions: SharedLaneToolOptions | undefined = runEnvironment
 		? {
 				...options.sharedToolOptions,
-				bash: { ...options.sharedToolOptions?.bash, spawnHook: runEnvironment.spawnHook },
+				bash: {
+					...options.sharedToolOptions?.bash,
+					spawnHook: runEnvironment.spawnHook,
+					outputDirectory: runEnvironment.scratchDirectory,
+				},
 				python: {
 					...options.sharedToolOptions?.python,
+					outputDirectory: runEnvironment.scratchDirectory,
 					environment: (cwd) => ({
 						...options.sharedToolOptions?.python?.environment?.(cwd),
 						...runEnvironment.attributionEnvironment,
@@ -686,7 +693,6 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.executionPolicy,
 		options.processMaxWallClockMs,
 		options.shellSessionKey,
-		options.shellOutputDirectory,
 		options.workerToolAdapters,
 		options.bindTool,
 		sharedToolOptions,

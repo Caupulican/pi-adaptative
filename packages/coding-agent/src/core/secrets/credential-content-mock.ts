@@ -125,16 +125,54 @@ function mockJsonCredentials(value: unknown, sensitive = false, depth = 0): unkn
 	return sensitive ? mockedValue("credential value") : typeof value === "string" ? redactKnownSecrets(value) : value;
 }
 
-/** Named secrets in ordinary consumer output, including partial compact JSON snapshots. */
-export function mockCredentialFields(text: string): string {
-	const fields = text.replace(
+/**
+ * A mask over the lines of one output, applied in order: it keeps what earlier lines opened (a PEM block, a search
+ * group). Undefined drops the line.
+ */
+type LineMask = (line: string) => string | undefined;
+
+function maskLines(text: string, mask: LineMask): string {
+	const out: string[] = [];
+	for (const line of text.split("\n")) {
+		const masked = mask(line);
+		if (masked !== undefined) out.push(masked);
+	}
+	return out.join("\n");
+}
+
+/** Quoted JSON pairs whose key names a secret, anywhere in the text (a pair may span a line break before its value). */
+function mockQuotedSecretFields(text: string): string {
+	return text.replace(
 		/"([A-Za-z_][A-Za-z0-9_.-]*)"(\s*:\s*)"(?:\\.|[^"\\\r\n])*(?:"|$)/gu,
 		(match, key: string, separator: string) =>
 			isCredentialSecretKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
 	);
-	const lines = fields.split("\n");
-	if (lines.length > MAX_MOCKED_LINES) return mockedValue("credential output exceeds line limit");
-	return lines.map((line) => mockLine(line, false)).join("\n");
+}
+
+const fieldLineMask: LineMask = (line) => mockLine(line, false);
+
+/** Named secrets in ordinary consumer output, including partial compact JSON snapshots. */
+export function mockCredentialFields(text: string): string {
+	const fields = mockQuotedSecretFields(text);
+	if (fields.split("\n").length > MAX_MOCKED_LINES) return mockedValue("credential output exceeds line limit");
+	return maskLines(fields, fieldLineMask);
+}
+
+/** Every line of credential content: a PEM block becomes one placeholder, every other line its mock. */
+function createContentLineMask(): LineMask {
+	let inPem = false;
+	return (line) => {
+		if (inPem) {
+			if (PEM_END_RE.test(line)) inPem = false;
+			return undefined;
+		}
+		const pem = PEM_BEGIN_RE.exec(line);
+		if (pem) {
+			inPem = true;
+			return mockedValue(`PEM ${pem[1]}`);
+		}
+		return mockLine(line, true);
+	};
 }
 
 /**
@@ -150,24 +188,8 @@ export function mockCredentialContent(text: string): string {
 			// Read tools also return numbered or mixed text; each incomplete JSON line is masked below.
 		}
 	}
-	const lines = text.split("\n");
-	if (lines.length > MAX_MOCKED_LINES) return mockedValue("credential content exceeds line limit");
-	let inPem = false;
-	const out: string[] = [];
-	for (const line of lines) {
-		if (inPem) {
-			if (PEM_END_RE.test(line)) inPem = false;
-			continue;
-		}
-		const pem = PEM_BEGIN_RE.exec(line);
-		if (pem) {
-			inPem = true;
-			out.push(mockedValue(`PEM ${pem[1]}`));
-			continue;
-		}
-		out.push(mockLine(line, true));
-	}
-	return out.join("\n");
+	if (text.split("\n").length > MAX_MOCKED_LINES) return mockedValue("credential content exceeds line limit");
+	return maskLines(text, createContentLineMask());
 }
 
 function splitSearchLine(line: string): { path: string; position: string; content: string } | undefined {
@@ -189,8 +211,11 @@ const SEARCH_GROUP_LINE_RE = /^( +\d+)([:-]) (.*)$/u;
  */
 export function mockProtectedSearchLines(text: string, isProtectedPath: (path: string) => boolean): string {
 	if (!text) return text;
-	const lines = text.split("\n");
-	if (lines.length > MAX_MOCKED_LINES) return redactKnownSecrets(text);
+	if (text.split("\n").length > MAX_MOCKED_LINES) return redactKnownSecrets(text);
+	return maskLines(text, createSearchLineMask(isProtectedPath));
+}
+
+function createSearchLineMask(isProtectedPath: (path: string) => boolean): LineMask {
 	const verdicts = new Map<string, boolean>();
 	const protectedPath = (path: string): boolean => {
 		const known = verdicts.get(path);
@@ -209,7 +234,7 @@ export function mockProtectedSearchLines(text: string, isProtectedPath: (path: s
 		return mocked === content && content.trim() ? mockedValue("credential line") : mocked;
 	};
 	let groupPath: string | undefined;
-	const out = lines.map((line) => {
+	return (line) => {
 		const grouped = groupPath === undefined ? null : SEARCH_GROUP_LINE_RE.exec(line);
 		if (grouped && groupPath !== undefined) {
 			if (!protectedPath(groupPath)) return redactKnownSecrets(line);
@@ -221,6 +246,35 @@ export function mockProtectedSearchLines(text: string, isProtectedPath: (path: s
 		if (!split || !protectedPath(split.path)) return redactKnownSecrets(line);
 		const separator = split.position.endsWith("-") ? "-" : ":";
 		return `${split.path}${separator}${split.position}${mockLineContent(split.content)}`;
-	});
-	return out.join("\n");
+	};
+}
+
+/** Which mask a saved output gets: the one the credential guard picks for the tool call's result. */
+export type CredentialBlockMaskKind =
+	| { readonly kind: "fields" }
+	| { readonly kind: "content" }
+	| { readonly kind: "search"; readonly isProtectedPath: (path: string) => boolean };
+
+/**
+ * The same masks for output that arrives in blocks of complete lines (a saved shell output): every block's lines pass
+ * in order through one line mask, so a PEM block or a search group opened in one block is still open in the next. A
+ * line's `\r\n` or `\n` ending is kept and not shown to the mask. Two rules of the whole-text forms apply within a
+ * block only: a quoted secret pair split over a line break, and whole-content JSON, which is masked line by line.
+ */
+export function createCredentialBlockMask(kind: CredentialBlockMaskKind): (block: string) => string {
+	const mask =
+		kind.kind === "content"
+			? createContentLineMask()
+			: kind.kind === "search"
+				? createSearchLineMask(kind.isProtectedPath)
+				: fieldLineMask;
+	return (block) => {
+		let out = "";
+		for (const line of (kind.kind === "fields" ? mockQuotedSecretFields(block) : block).split(/(?<=\n)/u)) {
+			const ending = /\r?\n$/u.exec(line)?.[0] ?? "";
+			const masked = mask(line.slice(0, line.length - ending.length));
+			if (masked !== undefined) out += `${masked}${ending}`;
+		}
+		return out;
+	};
 }
