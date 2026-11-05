@@ -295,28 +295,56 @@ export function readBoundedDirectoryNamesSync(directoryPath: string, maxEntries:
 }
 
 /** Async counterpart of {@link readBoundedTextFileSync}. */
-export async function readBoundedFile(
+export function readBoundedFile(
 	filePath: string,
 	maxBytes: number,
 	label: string,
 	options?: BoundedReadOptions,
 ): Promise<Buffer> {
+	return readFileSnapshot(filePath, maxBytes, label, "current-path", options);
+}
+
+/**
+ * Read one immutable publication through its descriptor. Its owner publishes by atomic rename;
+ * another publication may replace the pathname while this coherent, bounded snapshot is read.
+ */
+export function readBoundedPublishedFile(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	options?: BoundedReadOptions,
+): Promise<Buffer> {
+	return readFileSnapshot(filePath, maxBytes, label, "published-descriptor", options);
+}
+
+async function readFileSnapshot(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	consistency: "current-path" | "published-descriptor",
+	options?: BoundedReadOptions,
+): Promise<Buffer> {
 	validateByteLimit(maxBytes);
 	assertBoundedReadActive(options);
-	const pathBefore = await lstatAsync(filePath);
+	const pathBefore = consistency === "current-path" ? await lstatAsync(filePath) : undefined;
 	assertBoundedReadActive(options);
-	assertRegularFile(pathBefore, label);
+	if (pathBefore) assertRegularFile(pathBefore, label);
 	const fileHandle = await openAsync(filePath, READ_FLAGS);
 	try {
 		assertBoundedReadActive(options);
 		const before = await fileHandle.stat();
-		assertOpenedPathVersion(pathBefore, before, label);
+		if (pathBefore) assertOpenedPathVersion(pathBefore, before, label);
+		else assertRegularFile(before, label);
 		if (before.size > maxBytes) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
 		const content = await readFileHandleBounded(fileHandle, maxBytes, options);
 		if (!content) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
 		const after = await fileHandle.stat();
-		const pathAfter = await lstatAsync(filePath);
-		assertStableReadVersion(pathBefore, before, after, pathAfter, label);
+		if (pathBefore) {
+			assertStableReadVersion(pathBefore, before, after, await lstatAsync(filePath), label);
+		} else if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+			// Unlinking an old publication may change ctime; it cannot change the captured bytes.
+			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
+		}
 		assertBoundedReadActive(options);
 		if (content.byteLength !== before.size) {
 			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);

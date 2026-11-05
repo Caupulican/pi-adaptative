@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import {
 	assertBoundedReadActive,
 	type BoundedReadOptions,
-	readBoundedTextFile,
+	readBoundedPublishedFile,
 	sameFileVersion,
 } from "../../kernel/storage/bounded-file.ts";
 import { readFileRangeInto, writeFileRangeFrom } from "../../kernel/storage/positioned-file.ts";
@@ -53,7 +53,7 @@ export async function readJsonFile(
 		content =
 			options?.maxBytes === undefined
 				? await readFile(filePath, { encoding: "utf8", signal: options?.signal })
-				: await readBoundedTextFile(filePath, options.maxBytes, label, options);
+				: (await readBoundedPublishedFile(filePath, options.maxBytes, label, options)).toString("utf8");
 	} catch (error) {
 		if (isMissingFileError(error)) return undefined;
 		throw error;
@@ -283,7 +283,9 @@ export async function readRecordAt(
 		assertBoundedReadActive(options);
 		if (before !== undefined) {
 			const opened = await handle.stat();
-			if (!opened.isFile() || !sameFileVersion(before, opened))
+			// Published records are immutable prefixes. A concurrent append can change size and
+			// timestamps without changing this record; only replacement changes its file identity.
+			if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino)
 				throw new Error("Continuous-chat source changed while opening.");
 		}
 		const buffer = Buffer.alloc(bytes);

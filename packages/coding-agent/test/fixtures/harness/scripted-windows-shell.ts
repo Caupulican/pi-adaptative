@@ -4,6 +4,7 @@ import { PassThrough, type Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir, getBundledResourcesDir } from "../../../src/config.ts";
 import { cacheFile, runtimesDir } from "../../../src/core/agent-paths.ts";
+import { withoutHarnessLaunchEnv } from "../../../src/core/harness-environment.ts";
 import { isRecordObject } from "../../../src/core/util/value-guards.ts";
 import { getManagedToolBinaryPath } from "../../../src/utils/tools-manager.ts";
 import type { VirtualFileSystem } from "./virtual-io.ts";
@@ -25,6 +26,13 @@ import type { VirtualShell } from "./virtual-shell.ts";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{16}$/;
 const UV_FIND_ARGUMENTS = ["python", "find", ">=3.10", "--no-project"] as const;
+const PYTHON_VERSION_ARGUMENTS = [
+	"-I",
+	"-S",
+	"-B",
+	"-c",
+	"import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))",
+] as const;
 const TASKKILL_NOT_FOUND = 128;
 const UV_STDIO = ["ignore", "pipe", "pipe"] as const;
 const ENGINE_STDIO = ["pipe", "pipe", "pipe"] as const;
@@ -65,7 +73,7 @@ export interface WindowsShellRequestRecord {
 }
 
 export interface WindowsShellSpawnRecord {
-	readonly kind: "uv-python-find" | "engine-daemon";
+	readonly kind: "uv-python-find" | "python-version" | "engine-daemon";
 	readonly pid: number;
 	readonly cwd: string;
 }
@@ -303,15 +311,15 @@ class ScriptedChild extends EventEmitter {
 	}
 }
 
-/** `uv python find`: one-shot, prints the interpreter path and LF, exits 0. */
-class UvFindChild extends ScriptedChild {
-	respond(pythonPath: string): void {
+/** One-shot interpreter query: prints one response line and exits 0. */
+class InterpreterQueryChild extends ScriptedChild {
+	respond(value: string): void {
 		void this.track(
 			new Promise<void>((resolve, reject) => {
 				setImmediate(() => {
 					try {
 						if (!this.admissionClosed) {
-							this.stdout.write(`${pythonPath}\n`);
+							this.stdout.write(`${value}\n`);
 							void this.beginExit(0, null, false);
 						}
 						resolve();
@@ -634,6 +642,9 @@ export class ScriptedWindowsShellProcesses {
 		if (operation === "spawn" && this.runtime !== undefined) {
 			if (file === this.runtime.uvPath) return { handled: true, value: this.spawnUvFind(argumentsList, options) };
 			if (file === this.runtime.pythonPath) {
+				if (isDeepStrictEqual(argumentsList, [...PYTHON_VERSION_ARGUMENTS])) {
+					return { handled: true, value: this.spawnPythonVersion(file, options) };
+				}
 				return { handled: true, value: this.spawnEngine(file, argumentsList, options) };
 			}
 		}
@@ -656,7 +667,7 @@ export class ScriptedWindowsShellProcesses {
 		this.failures.push({ cause });
 	}
 
-	private spawnUvFind(argv: readonly unknown[], options: unknown): UvFindChild {
+	private spawnUvFind(argv: readonly unknown[], options: unknown): InterpreterQueryChild {
 		if (this.disposed) this.refuse("uv spawn after disposal");
 		const runtime = this.runtime;
 		if (runtime === undefined) throw new Error("unreachable: uv spawn without a runtime");
@@ -680,7 +691,7 @@ export class ScriptedWindowsShellProcesses {
 				`uv spawn is not the exact python-find protocol (arguments=${JSON.stringify(argv)}; mismatched environment names=${mismatchedEnvironment.map(([key]) => key).join(",")})`,
 			);
 		}
-		const child = new UvFindChild({
+		const child = new InterpreterQueryChild({
 			table: this.processTable,
 			spawnfile: runtime.uvPath,
 			spawnargs: [runtime.uvPath, ...UV_FIND_ARGUMENTS],
@@ -690,6 +701,32 @@ export class ScriptedWindowsShellProcesses {
 		});
 		this.adopt(child, { kind: "uv-python-find", pid: child.pid, cwd: agentDir });
 		child.respond(runtime.pythonPath);
+		return child;
+	}
+
+	private spawnPythonVersion(pythonPath: string, options: unknown): InterpreterQueryChild {
+		if (this.disposed) this.refuse("Python version query after disposal");
+		const agentDir = getAgentDir();
+		if (
+			!isRecordObject(options) ||
+			options.cwd !== agentDir ||
+			options.shell !== false ||
+			options.detached !== (process.platform !== "win32") ||
+			!isDeepStrictEqual(options.stdio, [...UV_STDIO]) ||
+			!isDeepStrictEqual(options.env, withoutHarnessLaunchEnv(process.env))
+		) {
+			this.refuse("Python version spawn is not the exact isolated interpreter-query protocol");
+		}
+		const child = new InterpreterQueryChild({
+			table: this.processTable,
+			spawnfile: pythonPath,
+			spawnargs: [pythonPath, ...PYTHON_VERSION_ARGUMENTS],
+			detached: options.detached === true,
+			withStdin: false,
+			onFailure: (cause) => this.recordFailure(cause),
+		});
+		this.adopt(child, { kind: "python-version", pid: child.pid, cwd: agentDir });
+		child.respond("3.13");
 		return child;
 	}
 

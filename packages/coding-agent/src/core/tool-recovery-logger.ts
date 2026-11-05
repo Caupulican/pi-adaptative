@@ -100,6 +100,7 @@ export class ToolRecoveryLogger {
 	private readonly failurePhases: Partial<Record<ToolFailurePhase, number>> = {};
 	private respawnAttempted = false;
 	private shuttingDown = false;
+	private shutdownPromise: Promise<void> | undefined;
 
 	constructor(options: ToolRecoveryLoggerOptions) {
 		this.enabled = options.enabled;
@@ -211,21 +212,30 @@ export class ToolRecoveryLogger {
 		});
 	}
 
-	async shutdown(timeoutMs: number = DEFAULT_FLUSH_TIMEOUT_MS): Promise<void> {
-		await this.flush(timeoutMs);
-		this.shuttingDown = true;
-		const worker = this.worker;
-		this.worker = undefined;
-		if (!worker) return;
-		const message: ToolRecoveryLogWorkerMessage = { type: "shutdown" };
-		try {
-			worker.postMessage(message);
-		} catch {}
-		void worker.terminate().catch(() => undefined);
+	shutdown(timeoutMs: number = DEFAULT_FLUSH_TIMEOUT_MS): Promise<void> {
+		this.shutdownPromise ??= (async () => {
+			await this.flush(timeoutMs);
+			this.shuttingDown = true;
+			const worker = this.worker;
+			if (!worker) return;
+			const message: ToolRecoveryLogWorkerMessage = { type: "shutdown" };
+			try {
+				worker.postMessage(message);
+			} catch {}
+			// The termination promise resolves at the thread's exit. Keep ownership until then,
+			// including when another disposer joins this same shutdown.
+			await worker.terminate();
+			this.worker = undefined;
+		})();
+		return this.shutdownPromise;
 	}
 
 	private enqueue(record: ToolRecoveryLogWorkerRecord): void {
 		if (!this.enabled || this.readOnly) return;
+		if (this.shutdownPromise) {
+			this.dropped++;
+			return;
+		}
 		this.queue.push(record);
 		while (this.queue.length > this.maxQueue) {
 			this.queue.shift();
