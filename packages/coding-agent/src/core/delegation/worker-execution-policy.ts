@@ -169,10 +169,11 @@ export function buildWorkerExecutionPlan(args: {
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
 	// Reads keep the host's machine scope unless an explicit workspace focuses them, or the host confines them (in YOLO
 	// too: YOLO removes permission prompts, never the host's scope). Writes never default to the machine: a worker
-	// writes inside its own cwd, plus only the extra roots the root's grant names.
+	// writes inside its own cwd, plus only the extra roots the root's grant names. A confined worker still reads its own
+	// cwd when its profile's workspace lies elsewhere.
 	const readScopes =
 		args.readRoot !== undefined
-			? [resolveWorkerWorkspacePath(parentCwd, args.readRoot)]
+			? [...new Set([resolveWorkerWorkspacePath(parentCwd, args.readRoot), cwd])]
 			: args.yolo || !args.profile.workspacePath
 				? workerMachinePathRoots(parentCwd)
 				: [cwd];

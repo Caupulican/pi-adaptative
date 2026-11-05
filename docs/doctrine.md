@@ -576,7 +576,8 @@ nested `bash -c`/`powershell -c`; they judge the command text, a policy gate rat
 isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
 credential prompt, pager and filesystem monitor. The machine's credential stores (SSH, GPG, cloud,
 cluster, registry and git credentials, keychains) are private paths for every worker, and a worker
-of a routine run away reads only its session's working directory and its scratch directory.
+of a routine run away reads only its session's working directory, its profile's workspace and
+its scratch directory.
 `readOnly` also drops write, interpreter, script, network and service
 tools, holds in YOLO, and defaults the worker's role to `explorer`. A profile that grants process
 execution without file writes keeps an unrestricted shell: only `readOnly` restricts commands. In guarded mode a worker's shell and code calls go through the same System One

@@ -5,7 +5,8 @@
  * git overrides) reaches it or the workers it runs. It keeps only:
  * - platform essentials (paths, user, locale, temp, Windows system variables), with PATH entries inside the starting
  *   session's project directory removed;
- * - pi's own `PI_*` configuration, minus the starting session's identity (the daemon is nobody's child);
+ * - pi's own `PI_*` configuration and launch variables, minus the starting session's identity (the daemon is nobody's
+ *   child);
  * - the provider credentials the model layer reads: every API key variable `findEnvKeys` reports for a known provider,
  *   the ambient provider families the provider clients read (AWS, Google Cloud, Azure OpenAI, Cloudflare, Fugu, Kimi),
  *   and every variable the owner's global `auth.json`/`models.json` reference as `$NAME`;
@@ -19,6 +20,7 @@ import { homedir } from "node:os";
 import { delimiter } from "node:path";
 import { findEnvKeys, getProviders } from "@caupulican/pi-ai";
 import { isPathWithinScope } from "./autonomy/path-scope.ts";
+import { HARNESS_LAUNCH_ENV_KEYS, RUNTIME_SUPERVISOR_ENV } from "./harness-environment.ts";
 import {
 	PI_ORCHESTRATION_AGENT_ID_ENV,
 	PI_PARENT_PID_ENV,
@@ -29,8 +31,12 @@ import { getConfigValueEnvVarNames } from "./resolve-config-value.ts";
 import { PI_SESSION_ROLE_ENV } from "./session-role.ts";
 import { PI_WORKTREE_LANE_ENV } from "./worktree-sync/lane-binding.ts";
 
-/** The starting process's session identity: the daemon serves the agent directory and is nobody's child. */
+/**
+ * The starting process's session identity: the daemon serves the agent directory and is nobody's child. A runtime
+ * supervisor marker is its generation's channel, which an inheriting process refuses at startup.
+ */
 const SESSION_IDENTITY = new Set<string>([
+	RUNTIME_SUPERVISOR_ENV,
 	PI_SESSION_ROLE_ENV,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
@@ -85,6 +91,8 @@ const PLATFORM_NAMES = new Set([
 	"NODE_EXTRA_CA_CERTS",
 	"SSL_CERT_FILE",
 	"SSL_CERT_DIR",
+	// How pi itself was launched (its package and TypeScript config); a supervised target sets them again.
+	...HARNESS_LAUNCH_ENV_KEYS.map((name) => name.toUpperCase()),
 ]);
 
 const KEPT_PREFIXES = [
