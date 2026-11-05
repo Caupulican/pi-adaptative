@@ -637,6 +637,7 @@ function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string
 const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveReason, string>> = {
 	disabled: "autoLearn.enabled is off; explicit knowledge changes are still judged",
 	invalid_settings: "the autoLearn knowledge limits are invalid",
+	configuration_unreadable: "the collection settings, model or judge could not be read",
 	no_model: "the autoLearn model does not resolve",
 	model_unpriced: "the collection model has no declared price, so no bounded request can be admitted",
 	no_engine: "no semantic judge is available",

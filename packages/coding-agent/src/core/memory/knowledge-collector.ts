@@ -76,6 +76,7 @@ export interface KnowledgeCollectionRuntime {
 export type KnowledgeCollectionInactiveReason =
 	| "disabled"
 	| "invalid_settings"
+	| "configuration_unreadable"
 	| "no_model"
 	| "model_unpriced"
 	| "no_engine"
@@ -195,7 +196,17 @@ export class KnowledgeCollector {
 
 	/** Reads configuration and the session spending projection only; never starts or schedules work. */
 	status(): KnowledgeCollectionStatus {
-		const config = this.configuration();
+		let config: Configuration;
+		try {
+			config = this.configuration();
+		} catch {
+			// schedule() starts no pass on the same failed read; the owner sees that cause instead of an audit failure.
+			return {
+				state: "inactive",
+				reason: "configuration_unreadable",
+				...(this.lastTerminal ? { last: this.lastTerminal } : {}),
+			};
+		}
 		const engine = config.engine
 			? {
 					id: config.engine.id,
