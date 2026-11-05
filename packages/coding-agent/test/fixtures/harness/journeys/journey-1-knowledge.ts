@@ -435,7 +435,9 @@ async function runOwnerKnowledgeCommands(
 	expect(rootRequests(), "a confirmed correction and forget make no model or judge request").toBe(requestsBound);
 	expect(world.systemOne.requests.length, "and no System One request").toBe(systemOneBound);
 
-	world.systemOne.enterPhase("knowledge-command-projection", ICM_INTAKE_JUDGMENTS);
+	// A text-only turn's owner words are settled (intake classified) by a later tool call or owner submission, and this is
+	// the session's last turn: it asks System One nothing, so any judgment request here fails the phase.
+	world.systemOne.enterPhase("knowledge-command-projection", {});
 	world.provider.enqueue("root", {
 		name: "knowledge-command-projection",
 		check: (request) => {
