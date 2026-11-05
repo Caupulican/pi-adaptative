@@ -40,7 +40,16 @@ export interface CollaborationCoordinatorDeps {
 	store: CollaborationJobStore;
 	/** Creation is allowed only for an already-admitted new job, never recovery or cleanup. */
 	backend: CollaborationBackendFactory;
-	launchTurn(job: CollaborationJob, agent: CollaborationAgent, answer?: CollaborationAnswer): Promise<void>;
+	/**
+	 * Starts one reserved turn. `knowledge` is the grant of the call that reserved this exact turn; a turn whose record
+	 * names granted references is answered from it (or told the knowledge is withdrawn when it is absent).
+	 */
+	launchTurn(
+		job: CollaborationJob,
+		agent: CollaborationAgent,
+		answer?: CollaborationAnswer,
+		knowledge?: CollaborationKnowledgeHandoff,
+	): Promise<void>;
 	report(event: ManagedLaneEvent): void;
 }
 
@@ -488,7 +497,6 @@ export class CollaborationCoordinator {
 				if (member) {
 					member.status = "failed";
 					member.evidence = `Launch cleanup uncertain: ${detail}; live work may remain active.`;
-					delete member.knowledgeContext;
 				}
 			});
 		}
@@ -549,9 +557,12 @@ export class CollaborationCoordinator {
 		// No asynchronous gap between ending preflight ownership and durable admission. Stops after
 		// this point use the store's acquisition/turn fences, never the transient launch intent.
 		this.pendingAdmissions.delete(input.id);
-		const admission = store.admit(peers.job, task, intent, knowledge);
-		if (admission.kind === "replay") return admission.job;
-		if (admission.kind === "reuse") return this.resumeTeam(admission.job, !!task, signal);
+		const admission = store.admit(peers.job, task, intent, knowledge?.references);
+		if (admission.kind === "replay") {
+			knowledge?.replayed();
+			return admission.job;
+		}
+		if (admission.kind === "reuse") return this.resumeTeam(admission.job, !!task, signal, knowledge);
 		let job = admission.job;
 		let workspaceId: string | undefined;
 		let backend: CollaborationBackend | undefined;
@@ -626,7 +637,7 @@ export class CollaborationCoordinator {
 						const agent = store.load(job.id).agents.find((candidate) => candidate.id === memberId)!;
 						if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
 						try {
-							await this.deps.launchTurn(job, agent);
+							await this.deps.launchTurn(job, agent, undefined, knowledge);
 							break;
 						} catch (error) {
 							if (signal.aborted || this.disposed) throw error;
@@ -714,7 +725,12 @@ export class CollaborationCoordinator {
 			throw error;
 		}
 	}
-	private async resumeTeam(job: CollaborationJob, hasTask: boolean, signal?: AbortSignal): Promise<CollaborationJob> {
+	private async resumeTeam(
+		job: CollaborationJob,
+		hasTask: boolean,
+		signal?: AbortSignal,
+		knowledge?: CollaborationKnowledgeHandoff,
+	): Promise<CollaborationJob> {
 		const submitted = new Set<string>();
 		try {
 			// Capture host ownership at acceptance, before any asynchronous readiness callback. The
@@ -735,7 +751,7 @@ export class CollaborationCoordinator {
 				for (const agent of job.agents) {
 					this.assertActive(signal);
 					submitted.add(agent.id);
-					await this.launchReservedTurn(job, agent);
+					await this.launchReservedTurn(job, agent, undefined, knowledge);
 				}
 			return this.deps.store.load(job.id);
 		} catch (error) {
@@ -834,19 +850,27 @@ export class CollaborationCoordinator {
 
 		this.assertActive();
 		this.refresh();
-		const agent = store.reserveTurn(jobId, target.id, text, !!answer, options?.newTask, options?.knowledge);
-		await this.launchReservedTurn(job, agent, answer);
+		const agent = store.reserveTurn(
+			jobId,
+			target.id,
+			text,
+			!!answer,
+			options?.newTask,
+			options?.knowledge?.references,
+		);
+		await this.launchReservedTurn(job, agent, answer, options?.knowledge);
 		return agent;
 	}
 	private async launchReservedTurn(
 		job: CollaborationJob,
 		agent: CollaborationAgent,
 		answer?: CollaborationAnswer,
+		knowledge?: CollaborationKnowledgeHandoff,
 	): Promise<void> {
 		try {
 			this.assertActive();
 			this.dispatch(job, agent);
-			await this.deps.launchTurn(job, agent, answer);
+			await this.deps.launchTurn(job, agent, answer, knowledge);
 		} catch (error) {
 			await this.stopAgent(job.id, agent.id, agent.turnId, {
 				kind: "failure",

@@ -281,16 +281,33 @@ export class HerdrBackend implements CollaborationBackend {
 				"Agent is not an idle, ready, matching pane occupant.",
 				"not-submitted",
 			);
-		const result = agent(
-			(
-				await this.request(
-					["agent", "prompt", before.paneId, input.text, "--wait", "--timeout", String(input.timeoutMs)],
-					"agent_prompted",
-					input.timeoutMs + 5000,
-					signal,
-				)
-			).agent,
+		if (!this.options.socketPath)
+			throw new CollaborationBackendError(
+				"event_channel_missing",
+				"Prompt submission requires a Herdr socket.",
+				"not-submitted",
+			);
+		// The prompt travels on the socket, never as a process argument other local users can list. The request is
+		// the CLI's `--wait --timeout`: the server waits for the first settled idle, done or blocked state.
+		const deadline = AbortSignal.timeout(input.timeoutMs + 5000);
+		const connection = await (this.options.connect ?? connectHerdrChannel)(
+			this.options.socketPath,
+			signal ? AbortSignal.any([deadline, signal]) : deadline,
 		);
+		let prompted: Record<string, unknown>;
+		try {
+			prompted = record(
+				await connection.request("agent.prompt", {
+					target: before.paneId,
+					text: input.text,
+					wait: { timeout_ms: input.timeoutMs },
+				}),
+			);
+		} finally {
+			connection.close();
+		}
+		if (prompted.type !== "agent_prompted") return malformed();
+		const result = agent(prompted.agent);
 		if (result.terminalId !== before.terminalId || result.paneId !== before.paneId)
 			throw new CollaborationBackendError(
 				"occupant_changed",

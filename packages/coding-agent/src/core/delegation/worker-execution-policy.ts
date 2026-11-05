@@ -3,7 +3,11 @@ import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
-import { WORKER_MEMORY_BROKER_TOOL_NAMES, WORKER_ROOT_MEMORY_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
+import {
+	WORKER_MEMORY_BROKER_TOOL_NAMES,
+	WORKER_MEMORY_READ_TOOL_NAME,
+	WORKER_ROOT_MEMORY_TOOL_NAMES,
+} from "../memory/worker-memory-tools.ts";
 import type {
 	ExecutionGrant,
 	HarnessCapability,
@@ -85,6 +89,15 @@ function intersectPathScopes(admittedPaths: readonly string[], currentPaths: rea
 		}),
 	);
 	return [...new Set(intersections.map((entry) => resolveWorkerWorkspacePath(entry, entry)))];
+}
+
+/** A knowledge grant needs a worker that may read memory: the memory read tool under a `memory.query` capability. */
+export function workerPlanReadsKnowledge(plan: WorkerExecutionPlan): boolean {
+	return (
+		plan.readMemory &&
+		plan.requiredCapabilities.includes("memory.query") &&
+		plan.toolManifests.some((tool) => tool.toolName === WORKER_MEMORY_READ_TOOL_NAME)
+	);
 }
 
 export function workerExecutionAuthorityFromPlan(plan: WorkerExecutionPlan): WorkerExecutionAuthorityContract {

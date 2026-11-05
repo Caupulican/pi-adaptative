@@ -7,7 +7,7 @@ import { judgeOwner, ownProcessOwner, type ProcessOwner } from "../../kernel/rel
 import { readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
 import type { SessionLeaseHolder } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
-import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
+import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import type { ProcessParentOwnership } from "../process-matrix/runtime.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -15,14 +15,12 @@ import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/
 import {
 	type CollaborationAgent,
 	type CollaborationJob,
-	type CollaborationKnowledgeHandoff,
 	type CollaborationSteeringRequest,
 	type CollaborationTaskCorrelation,
 	type CollaborationTerminal,
 	type CollaborationWorkerRefusal,
 	digestSchema,
 	jobSchema,
-	MAX_COLLABORATION_KNOWLEDGE_BYTES,
 	MAX_COLLABORATION_WORKER_NOTICE_LENGTH,
 	MAX_COLLABORATION_WORKER_NOTICES,
 	type NewCollaborationJob,
@@ -246,6 +244,24 @@ function upgradeLegacyRecord(raw: unknown): unknown {
 	return { ...record, controller: { ...rest, owner }, agents };
 }
 
+/**
+ * Drops the pre-release `knowledgeContext` key, which held a turn's rendered knowledge block. The block is now
+ * delivered from the parent's memory only, so the record still loads and its next write removes the value from disk.
+ */
+function dropStoredKnowledgeBlocks(raw: unknown): unknown {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+	const record = raw as RawJobRecord;
+	if (!Array.isArray(record.agents)) return raw;
+	return {
+		...record,
+		agents: record.agents.map((agent: unknown) => {
+			if (typeof agent !== "object" || agent === null || !("knowledgeContext" in agent)) return agent;
+			const { knowledgeContext: _retired, ...rest } = agent;
+			return rest;
+		}),
+	};
+}
+
 /** The persisted evidence and parent handoff share one UTF-8 byte ceiling. */
 export function boundCollaborationEvidence(text: string): string {
 	const bytes = Buffer.from(text);
@@ -377,29 +393,23 @@ function skipReason(error: unknown): string {
 	return error instanceof Error ? error.message.slice(0, 120) : "rejected";
 }
 
-/** Every turn settlement passes here, so a settled turn never keeps projected owner knowledge on disk. */
 function releaseTurnProcess(agent: CollaborationAgent): void {
 	delete agent.helperPid;
 	delete agent.helperStartTime;
 	delete agent.deadlineAt;
-	delete agent.knowledgeContext;
 }
 
-/** A new task's grant replaces the previous turn's; a continuation (answer or peer message) carries none. */
-function assignTurnKnowledge(agent: CollaborationAgent, knowledge: CollaborationKnowledgeHandoff | undefined): void {
+/**
+ * A new task's grant replaces the previous turn's; a continuation (answer or peer message) carries none. Only the
+ * exact references are recorded: the rendered block never enters a job record.
+ */
+function assignTurnKnowledge(
+	agent: CollaborationAgent,
+	knowledge: readonly KnowledgeGrantReference[] | undefined,
+): void {
 	delete agent.knowledgeReferences;
-	delete agent.knowledgeContext;
-	if (!knowledge) return;
-	const references = parseKnowledgeGrantReferences(knowledge.references);
-	if (
-		Buffer.byteLength(knowledge.context, "utf8") > MAX_COLLABORATION_KNOWLEDGE_BYTES ||
-		knowledge.context.includes("\0")
-	)
-		throw new Error(
-			`Collaboration knowledge exceeds ${MAX_COLLABORATION_KNOWLEDGE_BYTES} UTF-8 bytes or is not text.`,
-		);
+	const references = parseKnowledgeGrantReferences(knowledge ?? []);
 	if (references.length) agent.knowledgeReferences = references.map((reference) => ({ ...reference }));
-	if (knowledge.context) agent.knowledgeContext = knowledge.context;
 }
 
 function assertJobIntegrity(job: CollaborationJob): void {
@@ -601,7 +611,7 @@ export class CollaborationJobStore {
 		return this.parseRecord(id, JSON.parse(readBoundedTextFileSync(file, 1024 * 1024, "Collaboration state file")));
 	}
 	private parseRecord(id: string, raw: unknown): CollaborationJob {
-		const job = upgradeLegacyRecord(raw);
+		const job = dropStoredKnowledgeBlocks(upgradeLegacyRecord(raw));
 		if (!Value.Check(jobSchema, job) || job.id !== id) throw new Error("Invalid collaboration job.");
 		assertJobIntegrity(job);
 		return job as CollaborationJob;
@@ -734,7 +744,7 @@ export class CollaborationJobStore {
 		input: NewCollaborationJob,
 		task: string | undefined,
 		intent: CollaborationStartIntent,
-		knowledge?: CollaborationKnowledgeHandoff,
+		knowledge?: readonly KnowledgeGrantReference[],
 	): {
 		job: CollaborationJob;
 		kind: "fresh" | "reuse" | "replay";
@@ -820,7 +830,7 @@ export class CollaborationJobStore {
 		input: NewCollaborationJob,
 		task?: string,
 		digest?: string,
-		knowledge?: CollaborationKnowledgeHandoff,
+		knowledge?: readonly KnowledgeGrantReference[],
 	): CollaborationJob {
 		if (input.parentSessionId !== this.parentSessionId) throw new Error("Invalid collaboration creation parent.");
 		if (this.list().length >= 32)
@@ -1056,7 +1066,7 @@ export class CollaborationJobStore {
 		prompt: string,
 		answering: boolean,
 		newTask?: CollaborationTaskCorrelation,
-		knowledge?: CollaborationKnowledgeHandoff,
+		knowledge?: readonly KnowledgeGrantReference[],
 	): CollaborationAgent {
 		const agent = assertOperableAgent(current, agentId);
 		if (newTask !== undefined && (!Value.Check(taskCorrelationSchema, newTask) || answering))
@@ -1105,24 +1115,12 @@ export class CollaborationJobStore {
 		prompt: string,
 		answering = false,
 		newTask?: CollaborationTaskCorrelation,
-		knowledge?: CollaborationKnowledgeHandoff,
+		knowledge?: readonly KnowledgeGrantReference[],
 	): CollaborationAgent {
 		const job = this.update(id, (current) => {
 			this.reserve(current, agentId, prompt, answering, newTask, knowledge);
 		});
 		return job.agents.find((agent) => agent.id === agentId)!;
-	}
-	/**
-	 * Replace one reserved, not yet delivered turn's projected knowledge (a delivered version changed or was
-	 * forgotten after reservation). Fenced by the exact turn; a turn already claimed by its helper is untouched.
-	 */
-	replaceUndeliveredKnowledge(id: string, agentId: string, turnId: string, context: string): boolean {
-		return this.updateAgent(id, agentId, (agent) => {
-			if (!agent || agent.turnId !== turnId || agent.status !== "reserved" || agent.knowledgeContext === undefined)
-				return false;
-			assignTurnKnowledge(agent, { references: agent.knowledgeReferences ?? [], context });
-			return true;
-		});
 	}
 	private authenticatePeer(job: CollaborationJob, senderId: string, token: string): CollaborationAgent {
 		const sender = job.agents.find((agent) => agent.id === senderId);
@@ -1341,18 +1339,8 @@ export class CollaborationJobStore {
 			return result;
 		});
 	}
-	/**
-	 * `helperStartTime` is the claiming helper's own `readOwnProcessStartTime()`, recorded beside its pid. A claim
-	 * returns the turn's projected knowledge and removes it from the record in the same write: a claimed turn is
-	 * never re-sent, so the projection is read at most once and no longer kept on disk.
-	 */
-	claimTurn(
-		id: string,
-		agentId: string,
-		turnId: string,
-		helperPid: number,
-		helperStartTime?: string,
-	): false | { readonly knowledge?: string } {
+	/** `helperStartTime` is the claiming helper's own `readOwnProcessStartTime()`, recorded beside its pid. */
+	claimTurn(id: string, agentId: string, turnId: string, helperPid: number, helperStartTime?: string): boolean {
 		return this.updateAgent(id, agentId, (agent, job) => {
 			if (
 				!agent ||
@@ -1369,9 +1357,7 @@ export class CollaborationJobStore {
 			agent.helperPid = helperPid;
 			if (helperStartTime === undefined) delete agent.helperStartTime;
 			else agent.helperStartTime = helperStartTime;
-			const knowledge = agent.knowledgeContext;
-			delete agent.knowledgeContext;
-			return knowledge === undefined ? {} : { knowledge };
+			return true;
 		});
 	}
 	finishTurn(

@@ -1,17 +1,43 @@
+import type { ChildProcess } from "node:child_process";
 import { killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import { resolveCollaborationBackend } from "./backend-resolver.ts";
 import { type CollaborationAnswer, stopCollaborationAgent } from "./coordinator.ts";
-import type { CollaborationAgent, CollaborationJob } from "./job-record.ts";
+import type { CollaborationAgent, CollaborationJob, CollaborationKnowledgeHandoff } from "./job-record.ts";
 import type { CollaborationJobStore } from "./job-store.ts";
+import { answerTurnKnowledge, type KnowledgeChannelPort, turnExpectsKnowledge } from "./knowledge-delivery.ts";
 
-/** Detached finite control helper; native model CLIs remain interactive in the backend's PTYs. */
+function childKnowledgeChannel(child: ChildProcess): KnowledgeChannelPort {
+	return {
+		send: (message, onSent) => {
+			child.send(message, onSent);
+		},
+		onMessage: (listener) => {
+			child.on("message", listener);
+			return () => child.off("message", listener);
+		},
+		onClose: (listener) => {
+			child.once("disconnect", listener);
+			child.once("exit", listener);
+			return () => {
+				child.off("disconnect", listener);
+				child.off("exit", listener);
+			};
+		},
+	};
+}
+
+/**
+ * Detached finite control helper; native model CLIs remain interactive in the backend's PTYs. `knowledge` is the
+ * grant of the call that reserved this turn; its block reaches the helper over IPC only, never as an argument.
+ */
 export async function launchCollaborationTurnProcess(
 	store: CollaborationJobStore,
 	job: CollaborationJob,
 	agent: CollaborationAgent,
 	answer?: CollaborationAnswer,
+	knowledge?: CollaborationKnowledgeHandoff,
 ): Promise<void> {
 	const target = getSelfLaunchTarget();
 	if (!target) throw new Error("This host cannot launch a persistent collaboration turn controller.");
@@ -88,10 +114,24 @@ export async function launchCollaborationTurnProcess(
 			admitted = true;
 			clearTimeout(timer);
 			child.off("message", onMessage);
-			child.unref();
-			const channel = child.channel;
-			if (channel && typeof channel.unref === "function") channel.unref();
-			resolve();
+			void (async () => {
+				// A granted task's helper asks for its block right before it prompts; the launch (and so the tool call
+				// that reports withdrawals) waits for that answer, the helper's end, or the turn deadline.
+				if (turnExpectsKnowledge(agent, answer !== undefined)) {
+					const outcome = await answerTurnKnowledge(
+						childKnowledgeChannel(child),
+						agent.turnId,
+						() => knowledge?.deliver(agent.id),
+						AbortSignal.timeout(Math.max(1, (agent.deadlineAt ?? Date.now()) - Date.now())),
+					);
+					// Unanswered: close the channel so a still-waiting helper starts without knowledge.
+					if (outcome === "ended" && child.connected) child.disconnect();
+				}
+				child.unref();
+				const channel = child.channel;
+				if (channel && typeof channel.unref === "function") channel.unref();
+				resolve();
+			})();
 		};
 		child.on("message", onMessage);
 		child.once("exit", () => {

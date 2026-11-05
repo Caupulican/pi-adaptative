@@ -47,10 +47,21 @@ export type CollaborationTaskCorrelation = Static<typeof taskCorrelationSchema>;
 /** UTF-8 bound of one turn's projected knowledge; the delivered text stays inside the backend's prompt limit. */
 export const MAX_COLLABORATION_KNOWLEDGE_BYTES = 8 * 1024;
 
-/** One new task's knowledge grant: the exact references and their projection rendered by the host. */
+/**
+ * One tool call's knowledge grant while its reserved turns are delivered. The rendered block lives only in the
+ * parent's memory: no job record, process argument or environment ever holds it.
+ */
 export interface CollaborationKnowledgeHandoff {
+	/** Exact versions inside the block; the only part a job record keeps. Empty when nothing may be delivered. */
 	readonly references: readonly KnowledgeGrantReference[];
-	readonly context: string;
+	/**
+	 * The block for one member's reserved turn, re-checked against the owner's current knowledge and policy at the
+	 * moment its helper asks; undefined when a granted version changed, was forgotten or may no longer be read.
+	 * Every call re-checks, so a recycled launch of the same turn is answered by the state current at its own ask.
+	 */
+	deliver(agentId: string): string | undefined;
+	/** The start replayed an earlier admission: no turn was reserved and nothing is delivered. */
+	replayed(): void;
 }
 
 const terminalSchema = Type.Union([
@@ -126,15 +137,10 @@ const agentSchema = Type.Object(
 		prompt: Type.String({ maxLength: 32768 }),
 		/**
 		 * Exact owner-knowledge versions projected for this turn's task at reservation; replaced by every reservation.
-		 * They stay when the projection is withdrawn before delivery: they record the grant, not a delivery.
+		 * They record the grant, not a delivery: the block itself goes from the parent's memory to the turn's helper
+		 * over IPC immediately before the prompt, and the helper asks for it exactly when these are present.
 		 */
 		knowledgeReferences: Type.Optional(knowledgeGrantReferencesSchema("Granted knowledge versions of this turn.")),
-		/**
-		 * The rendered projection of those versions, delivered with this turn's task and never part of `prompt`
-		 * (which becomes durable dispatch history). Replaced by a withdrawal notice before delivery when a granted
-		 * version changed or was forgotten; removed by the helper's claim (read at most once) or by settlement.
-		 */
-		knowledgeContext: Type.Optional(Type.String({ maxLength: MAX_COLLABORATION_KNOWLEDGE_BYTES })),
 		/** Current task ownership; an empty object deliberately means no goal. */
 		taskCorrelation: Type.Optional(taskCorrelationSchema),
 		evidence: Type.String({ maxLength: 16000 }),

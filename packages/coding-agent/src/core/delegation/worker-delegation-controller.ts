@@ -51,6 +51,7 @@ import {
 	type KnowledgeGrantReference,
 	parseKnowledgeGrantReferences,
 } from "../memory/knowledge-grant.ts";
+import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import {
 	deriveModelCapabilityProfile,
 	type ModelCapabilityProfile,
@@ -202,6 +203,7 @@ import {
 	narrowWorkerExecutionPlan,
 	type WorkerExecutionPlan,
 	workerExecutionAuthorityFromPlan,
+	workerPlanReadsKnowledge,
 } from "./worker-execution-policy.ts";
 import {
 	deriveFanoutGroups,
@@ -1504,6 +1506,32 @@ export class WorkerDelegationController {
 	}
 
 	/**
+	 * Whether a fresh root `delegate` call granting knowledge would be admitted under the owner's current policy: the
+	 * shipment admission resolves now (the configured default profile, else the session-derived surface; YOLO
+	 * included) for a request naming the memory read tool, as a knowledge grant must, then the same plan predicate
+	 * admission applies. A lane with no profile of its own (an externally managed member) inherits this rule. A
+	 * policy that cannot be resolved grants nothing.
+	 */
+	previewWorkerReadsKnowledge(): boolean {
+		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		let base: ResolvedWorkerProfile | undefined;
+		if (settings.orchestrationProfile) {
+			const configured = this.resolveWorkerPreset({ instructions: "" }, settings);
+			if (!configured.ok) return false;
+			const bound = this.getWorkerProfileResolver().bindPreset(configured.preset);
+			if (!bound.ok) return false;
+			base = bound.resolved;
+		}
+		const adaptive = this.resolveWorkerAuthority({
+			...(base ? { base } : {}),
+			authority: { toolNames: [WORKER_MEMORY_READ_TOOL_NAME] },
+		});
+		return (
+			adaptive.ok && workerPlanReadsKnowledge(this.buildWorkerExecutionPlan(adaptive.shipment.profile, settings))
+		);
+	}
+
+	/**
 	 * A worker that ran its model's account out of quota: the model is marked exhausted where every
 	 * routing decision reads it (the same registry root's billing failover writes), and when the
 	 * attempt's contract routed it with fallbacks, whether its retry now resolves to another model.
@@ -2029,11 +2057,7 @@ export class WorkerDelegationController {
 		try {
 			const references = parseKnowledgeGrantReferences(request.knowledge ?? []);
 			if (references.length > 0) {
-				if (
-					!executionPlan.readMemory ||
-					!executionPlan.requiredCapabilities.includes("memory.query") ||
-					!executionPlan.toolManifests.some((tool) => tool.toolName === "memory_read")
-				)
+				if (!workerPlanReadsKnowledge(executionPlan))
 					return { ok: false, skipReason: "worker_knowledge_capability_required" };
 				// Retained tasks keep exact references; the broker projects unavailable records as cleared.
 				// Only fresh tasks re-admit current record content.

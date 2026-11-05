@@ -29,6 +29,7 @@ import { CollaborationDeadlines, reserveCollaborationCleanupAttempt } from "./de
 import { provisionHerdr } from "./herdr-provision.ts";
 import {
 	type CollaborationJob,
+	type CollaborationKnowledgeHandoff,
 	collaborationLaneId,
 	MAX_COLLABORATION_KNOWLEDGE_BYTES,
 	type NewCollaborationJob,
@@ -145,36 +146,37 @@ const parameters = Type.Object({
 });
 type Params = Static<typeof parameters>;
 
-/** Delivered instead of a reserved turn's projection whose granted versions changed or were forgotten before delivery. */
-const KNOWLEDGE_WITHDRAWN =
-	"The owner knowledge granted for this task changed or was forgotten before delivery; none is provided.";
-
-/** One tool call's knowledge grant while its turns are being delivered. */
-interface CollaborationKnowledgeGrant {
-	readonly projection: KnowledgeHandoffProjection;
-	/** Members whose reserved turn was given the withdrawal notice instead of the projection. */
-	readonly withdrawnFrom: string[];
-}
-
-function collaborationKnowledgeHandoff(grant: CollaborationKnowledgeGrant | undefined) {
-	return grant?.projection.text
-		? { references: grant.projection.references, context: grant.projection.text }
-		: undefined;
-}
-
 /**
- * The parent's diagnostic: references only, never the projected values. `projected` names what this call put on
- * its reserved turns, not proof of delivery (a replayed start reserves nothing; a member whose launch failed
- * received nothing).
+ * One tool call's knowledge grant. The block stays in this object (parent memory) and is handed to each reserved
+ * turn's helper at its ask, re-checked then; `report` is the parent's diagnostic, references only, never values.
  */
-function collaborationKnowledgeReport(grant: CollaborationKnowledgeGrant) {
-	const { projection } = grant;
+function collaborationKnowledgeGrant(projection: KnowledgeHandoffProjection) {
+	const deliveredTo = new Set<string>();
+	const withdrawnFrom = new Set<string>();
+	let replayed = false;
+	const handoff: CollaborationKnowledgeHandoff = {
+		references: projection.text ? projection.references : [],
+		deliver: (agentId) => {
+			const current = projection.text !== "" && projection.isCurrent();
+			(current ? deliveredTo : withdrawnFrom).add(agentId);
+			(current ? withdrawnFrom : deliveredTo).delete(agentId);
+			return current ? projection.text : undefined;
+		},
+		replayed: () => {
+			replayed = true;
+		},
+	};
 	return {
-		projected: projection.text ? projection.references : [],
-		unavailable: projection.unavailable,
-		omitted: projection.omitted,
-		...(projection.blocked ? { blocked: projection.blocked } : {}),
-		...(grant.withdrawnFrom.length ? { withdrawnBeforeDeliveryFrom: [...grant.withdrawnFrom] } : {}),
+		handoff,
+		/** `projected` names versions a member's helper was actually handed; a replayed start delivers nothing. */
+		report: () => ({
+			projected: deliveredTo.size ? projection.references : [],
+			unavailable: projection.unavailable,
+			omitted: projection.omitted,
+			...(projection.blocked ? { blocked: projection.blocked } : {}),
+			...(withdrawnFrom.size ? { withdrawnBeforeDeliveryFrom: [...withdrawnFrom] } : {}),
+			...(replayed ? { replayed: true } : {}),
+		}),
 	};
 }
 
@@ -218,18 +220,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 	// leave a job directory, lease and file watcher behind.
 	if (isWorkerSession()) return;
 	const providers = options.providers ?? new NativeProviderRegistry();
-	// Grants of the tool calls in flight. A turn's projection reaches its helper only while the granted versions
-	// are still current; a turn started later (recovery) has no grant here and is delivered the withdrawal notice.
-	const knowledgeGrants = new Set<CollaborationKnowledgeGrant>();
-	const grantKnowledge = (references: Params["knowledge"]): CollaborationKnowledgeGrant | undefined => {
-		if (references === undefined) return undefined;
-		const grant: CollaborationKnowledgeGrant = {
-			projection: pi.projectKnowledgeForHandoff(references, MAX_COLLABORATION_KNOWLEDGE_BYTES),
-			withdrawnFrom: [],
-		};
-		knowledgeGrants.add(grant);
-		return grant;
-	};
+	const grantKnowledge = (references: Params["knowledge"]) =>
+		references === undefined
+			? undefined
+			: collaborationKnowledgeGrant(pi.projectKnowledgeForHandoff(references, MAX_COLLABORATION_KNOWLEDGE_BYTES));
 	let binding:
 		| {
 				store: CollaborationJobStore;
@@ -304,19 +298,8 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 						reportId: `${event.laneId}:${event.dispatchSequence}`,
 					});
 			},
-			launchTurn: (job, agent, answer) => {
-				// The last check before the helper can read the turn: the store fences the replacement by this exact,
-				// still reserved turn, so a claimed turn is never rewritten.
-				if (agent.knowledgeContext !== undefined && agent.knowledgeContext !== KNOWLEDGE_WITHDRAWN) {
-					const grant = [...knowledgeGrants].find((entry) => entry.projection.text === agent.knowledgeContext);
-					if (
-						!grant?.projection.isCurrent() &&
-						store.replaceUndeliveredKnowledge(job.id, agent.id, agent.turnId, KNOWLEDGE_WITHDRAWN)
-					)
-						grant?.withdrawnFrom.push(agent.id);
-				}
-				return (options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer);
-			},
+			launchTurn: (job, agent, answer, knowledge) =>
+				(options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer, knowledge),
 		});
 		const deadlines = new CollaborationDeadlines(
 			(jobId, agentId, turnId) => coordinator.stopAgent(jobId, agentId, turnId, { kind: "deadline" }),
@@ -615,7 +598,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		label: "Persistent collaboration",
 		parameters,
 		description:
-			"Persistent native-CLI subagents (Pi, Codex, Claude, agy) in Herdr, for interactive environments that outlive a turn; use delegate for in-process workers. status discovers and authenticates providers; fire_task starts a team (workspace_plan or dryRun previews). Answer a stopped agent's question with answer_question on the same jobId/agentId; assign new tasks with send_followup. Agents receive no owner knowledge unless fire_task or send_followup passes knowledge (exact accepted IDs and revisions, as for delegate): the host then projects only those versions that are still current, bounded to 8 KiB and wrapped as untrusted data, into that task's prompt; references that are stale, forgotten or do not fit are not delivered, are listed in the result, and the task starts without them. Answers carry no grant, and delivered knowledge stays in the external CLI's own session history. stop_job and stop_session terminate exact owned agent panes (dryRun previews). release_acquisition (jobId + agentId) settles a member whose exited issuing process abandoned a pane request before any pane was recorded: it closes nothing, is refused while that process is alive, and any untracked pane its evidence names must be closed by hand. adopt_job (exact jobId) takes over an orphaned job (controller exited, no live process holds its session) after the host re-verifies it under the job lock; dryRun shows the standing. Only stopped-work and question handoffs reach the parent: never poll or read panes for progress, and never re-submit an uncertain prompt. Starts reuse a compatible idle team; busy or ambiguous ones are refused, so pass an exact jobId or justify parallelWork, and never change a grant merely to evade reuse. For external CLIs set reasoning effort through args (e.g. ['--effort','high']); thinkingLevel is Pi-only. Reported success is an untrusted claim until you review the evidence. Tasks, answers, environments and results may persist: never include secrets. status and list_jobs show other sessions' jobs read-only by standing: owned_by_live_session, awaiting_session, orphaned or unproven. External CLIs run unrestricted by explicit user policy (Claude/agy: --dangerously-skip-permissions; Codex: --dangerously-bypass-approvals-and-sandbox); Pi enforces neither their permissions nor their token budgets.",
+			"Persistent native-CLI subagents (Pi, Codex, Claude, agy) in Herdr, for interactive environments that outlive a turn; use delegate for in-process workers. status discovers and authenticates providers; fire_task starts a team (workspace_plan or dryRun previews). Answer a stopped agent's question with answer_question on the same jobId/agentId; assign new tasks with send_followup. Agents receive no owner knowledge unless fire_task or send_followup passes knowledge (exact accepted IDs and revisions; refused, as for delegate, unless the owner's default delegated worker may read memory): right before the agent is prompted the host re-checks those versions and puts only still-current ones, bounded to 8 KiB and wrapped as untrusted data, into that task's prompt, never into job files; references that are stale, forgotten or do not fit are not delivered, are listed in the result's leading knowledge block, and the task starts without them. Answers and peer messages carry no grant; delivered knowledge stays in the external CLI's own session history and the agent's own reports may quote it. stop_job and stop_session terminate exact owned agent panes (dryRun previews). release_acquisition (jobId + agentId) settles a member whose exited issuing process abandoned a pane request before any pane was recorded: it closes nothing, is refused while that process is alive, and any untracked pane its evidence names must be closed by hand. adopt_job (exact jobId) takes over an orphaned job (controller exited, no live process holds its session) after the host re-verifies it under the job lock; dryRun shows the standing. Only stopped-work and question handoffs reach the parent: never poll or read panes for progress, and never re-submit an uncertain prompt. Starts reuse a compatible idle team; busy or ambiguous ones are refused, so pass an exact jobId or justify parallelWork, and never change a grant merely to evade reuse. For external CLIs set reasoning effort through args (e.g. ['--effort','high']); thinkingLevel is Pi-only. Reported success is an untrusted claim until you review the evidence. Tasks, answers, environments and results may persist: never include secrets. status and list_jobs show other sessions' jobs read-only by standing: owned_by_live_session, awaiting_session, orphaned or unproven. External CLIs run unrestricted by explicit user policy (Claude/agy: --dangerously-skip-permissions; Codex: --dangerously-bypass-approvals-and-sandbox); Pi enforces neither their permissions nor their token budgets.",
 		promptSnippet: "Persistent native-CLI subagents",
 		async execute(_id, input, signal, _update, ctx) {
 			const params = input as Params;
@@ -628,6 +611,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			// A job of this session whose controller exited since the last refresh (no file changed) is taken back first.
 			store.reclaimSessionJobs();
 			let details: unknown;
+			let knowledgeReport: ReturnType<ReturnType<typeof collaborationKnowledgeGrant>["report"]> | undefined;
 			if (action === "status" || action === "setup_help") {
 				const overview = store.overview();
 				details = {
@@ -703,23 +687,20 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 						store.archive(plan.id);
 					}
 					const grant = action === "fire_task" ? grantKnowledge(params.knowledge) : undefined;
-					try {
-						const launched = await coordinator.launch(
-							plan,
-							action === "fire_task" ? task : undefined,
-							signal,
-							{
-								jobId: params.jobId,
-								parallelWork: params.parallelWork,
-								...(params.knowledge?.length ? { knowledge: params.knowledge } : {}),
-							},
-							collaborationKnowledgeHandoff(grant),
-						);
-						readyJobs.add(launched.id);
-						details = { job: launched, ...(grant ? { knowledge: collaborationKnowledgeReport(grant) } : {}) };
-					} finally {
-						if (grant) knowledgeGrants.delete(grant);
-					}
+					const launched = await coordinator.launch(
+						plan,
+						action === "fire_task" ? task : undefined,
+						signal,
+						{
+							jobId: params.jobId,
+							parallelWork: params.parallelWork,
+							...(params.knowledge?.length ? { knowledge: params.knowledge } : {}),
+						},
+						grant?.handoff,
+					);
+					readyJobs.add(launched.id);
+					details = { job: launched };
+					knowledgeReport = grant?.report();
 				}
 			} else if (
 				params.jobId &&
@@ -775,26 +756,20 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 							: undefined;
 					const followupTask = followupGuidance ? `${task}\n\n${followupGuidance}` : task;
 					const grant = params.dryRun || answering ? undefined : grantKnowledge(params.knowledge);
-					try {
-						details = params.dryRun
-							? { dryRun: true, jobId: job.id, task: followupTask }
-							: {
-									...(await coordinator.followup(
-										job.id,
-										params.agentId,
-										followupTask,
-										answering ? params.answer : undefined,
-										{
-											steer: params.steer,
-											...(!answering ? { newTask: { goalId: params.goalId } } : {}),
-											knowledge: collaborationKnowledgeHandoff(grant),
-										},
-									)),
-									...(grant ? { knowledge: collaborationKnowledgeReport(grant) } : {}),
-								};
-					} finally {
-						if (grant) knowledgeGrants.delete(grant);
-					}
+					details = params.dryRun
+						? { dryRun: true, jobId: job.id, task: followupTask }
+						: await coordinator.followup(
+								job.id,
+								params.agentId,
+								followupTask,
+								answering ? params.answer : undefined,
+								{
+									steer: params.steer,
+									...(!answering ? { newTask: { goalId: params.goalId } } : {}),
+									...(grant ? { knowledge: grant.handoff } : {}),
+								},
+							);
+					knowledgeReport = grant?.report();
 				} else if (["stop_job", "stop_session", "dismiss"].includes(action)) {
 					if (params.dryRun === true)
 						details = {
@@ -827,13 +802,13 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				} else throw new Error(`Unsupported collaboration action: ${action}`);
 			}
 			coordinator.refresh();
-			// A job record holds a reserved, unclaimed turn's projection; tool results show only its references.
-			details = JSON.parse(
-				JSON.stringify(details, (key, value) => (key === "knowledgeContext" ? undefined : value)),
-			);
 			const encoded = JSON.stringify(details);
 			return {
 				content: [
+					// The grant report is its own block, so the bound on the job dump below never cuts it.
+					...(knowledgeReport
+						? [{ type: "text" as const, text: JSON.stringify({ knowledge: knowledgeReport }) }]
+						: []),
 					{
 						type: "text",
 						text:
@@ -847,6 +822,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					...((action === "fire_task" || action === "launch_workspace") && details && typeof details === "object"
 						? details
 						: {}),
+					...(knowledgeReport ? { knowledge: knowledgeReport } : {}),
 					...(action === "guard" ? { guard: { allowed: true } } : {}),
 				},
 			};

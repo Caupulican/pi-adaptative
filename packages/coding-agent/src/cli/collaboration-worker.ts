@@ -7,6 +7,11 @@ import type { CollaborationBackend } from "../core/collaboration/backend.ts";
 import { resolveCollaborationBackend } from "../core/collaboration/backend-resolver.ts";
 import { stopCollaborationAgent } from "../core/collaboration/coordinator.ts";
 import { CollaborationJobStore } from "../core/collaboration/job-store.ts";
+import {
+	type KnowledgeChannelPort,
+	requestTurnKnowledge,
+	turnExpectsKnowledge,
+} from "../core/collaboration/knowledge-delivery.ts";
 import { memberPeerInvocation } from "../core/collaboration/peer-credential-store.ts";
 import { COLLABORATION_WORK_RUN } from "../core/collaboration/state-directory.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
@@ -47,6 +52,24 @@ function notifyParent(message: { type: string; turnId: string }, onDelivered?: (
 	}
 }
 
+/** The parent's IPC channel as the knowledge request port; absent when this helper was started without one. */
+function parentKnowledgeChannel(): KnowledgeChannelPort | undefined {
+	if (!process.send || !process.connected) return undefined;
+	return {
+		send: (message, onSent) => {
+			process.send?.(message, onSent);
+		},
+		onMessage: (listener) => {
+			process.on("message", listener);
+			return () => process.off("message", listener);
+		},
+		onClose: (listener) => {
+			process.once("disconnect", listener);
+			return () => process.off("disconnect", listener);
+		},
+	};
+}
+
 /** Internal CLI mode, never a model headless run. Its only model input is an already-admitted turn. */
 export async function runCollaborationWorker(args: readonly string[]): Promise<void> {
 	if (args.length !== 6 || args.some((arg) => arg.length > 8192 || arg.includes("\0")))
@@ -71,9 +94,8 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		// The turn role: this helper controls nothing; every write it makes is fenced by this exact turn, so the turn
 		// keeps reporting into its job even after another process took control of it (a take-back or an adoption).
 		store = new CollaborationJobStore(directory, parent, { role: "turn" });
-		const claim = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
-		claimed = claim !== false;
-		if (!claim) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
+		claimed = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
+		if (!claimed) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
 		notifyParent({ type: "ready", turnId });
 		const job = store.load(jobId);
 		const agent = job.agents.find((item) => item.id === agentId)!;
@@ -108,8 +130,13 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 				reportCommand: memberPeerInvocation(directory, job.id, job.peerCommand, agentId),
 				text: agent.prompt,
 				timeoutMs,
-				// The claim removed the projection from the record; this process holds the only copy.
-				...(claim.knowledge ? { knowledge: claim.knowledge } : {}),
+				// The block is asked from the parent's memory right before the prompt; it is never on disk.
+				...(turnExpectsKnowledge(agent, answer !== null)
+					? {
+							releaseKnowledge: () =>
+								requestTurnKnowledge(parentKnowledgeChannel(), turnId, cancellation.signal),
+						}
+					: {}),
 			},
 			cancellation.signal,
 			answer ?? undefined,

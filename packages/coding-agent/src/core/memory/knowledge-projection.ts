@@ -6,7 +6,11 @@ import {
 	memoryTextFitsBudget,
 	reserveMemoryPromptBudget,
 } from "../context/memory-prompt-budget.ts";
-import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "../context/memory-tier-composer.ts";
+import {
+	composeTieredMemoryPromptBlock,
+	type MemoryCandidateDropReason,
+	type MemoryTierCandidate,
+} from "../context/memory-tier-composer.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import {
 	type KnowledgeGrantReference,
@@ -26,7 +30,14 @@ export interface KnowledgeProjection {
 	readonly omittedCount: number;
 	/** Exact record versions admitted by the whole-record composer; omitted grants are not evidence. */
 	readonly references: readonly KnowledgeGrantReference[];
+	/** Why each current, selected record was left out of `text`, by record id. */
+	readonly dropped?: ReadonlyMap<string, MemoryCandidateDropReason>;
 	isCurrent(): boolean;
+}
+
+/** A current granted version left out of a handoff, with the composer's reason. */
+export interface OmittedKnowledgeGrant extends KnowledgeGrantReference {
+	readonly reason: MemoryCandidateDropReason;
 }
 
 /**
@@ -34,16 +45,23 @@ export interface KnowledgeProjection {
  * managed worker). Same renderer, matcher and parser as delegated lanes; never stored as owner evidence.
  */
 export interface KnowledgeHandoffProjection {
-	/** Bounded, source-labeled block wrapped as untrusted data; empty when nothing may be delivered. */
+	/** Bounded, source-labeled block wrapped as untrusted data; empty when no granted record is included. */
 	readonly text: string;
 	/** Exact versions inside `text`. */
 	readonly references: readonly KnowledgeGrantReference[];
 	/** Granted versions that are no longer current: corrected, forgotten, expired or outside the owner's scope. */
 	readonly unavailable: readonly KnowledgeGrantReference[];
-	/** Current granted versions that did not fit the size bound. */
-	readonly omitted: readonly KnowledgeGrantReference[];
-	/** Why no granted record could be projected at all, when that is a policy or availability fact. */
-	readonly blocked?: "memory_retrieval_disabled" | "memory_prompt_excluded" | "knowledge_unavailable";
+	/** Current granted versions the composer left out (secret-like, over the bound alone, or no budget left). */
+	readonly omitted: readonly OmittedKnowledgeGrant[];
+	/**
+	 * Why no granted record may be projected at all, when that is a policy or availability fact. A managed lane's
+	 * worker policy that would not let a delegated worker read memory is `worker_knowledge_capability_required`.
+	 */
+	readonly blocked?:
+		| "memory_retrieval_disabled"
+		| "memory_prompt_excluded"
+		| "knowledge_unavailable"
+		| "worker_knowledge_capability_required";
 	/** The included versions are all still current in the owner's scope. */
 	isCurrent(): boolean;
 }
@@ -187,6 +205,11 @@ export class KnowledgeProjectionReader {
 		const text = `${header}\n${wrapUntrustedText(body, "memory:knowledge", { nonce })}\n${omission(block.omittedCount)}`;
 		const fits = memoryTextFitsBudget(text, budget);
 		const included = new Set(fits ? block.includedIds : []);
+		const dropped = new Map(block.diagnostics.map((entry) => [entry.candidateId, entry.reason] as const));
+		// The framed view itself overflowing drops what the composer admitted: one record alone is oversized.
+		if (!fits)
+			for (const id of block.includedIds)
+				dropped.set(id, block.includedCount === 1 ? "oversized_item" : "budget_exhausted");
 		const value: KnowledgeProjection = {
 			revision: snapshot.revision,
 			text: fits ? text : "",
@@ -197,6 +220,7 @@ export class KnowledgeProjectionReader {
 					.filter((record) => included.has(record.id))
 					.map((record) => Object.freeze({ id: record.id, revision: record.revision })),
 			),
+			dropped,
 			isCurrent: () => {
 				const now = new Date().toISOString();
 				try {

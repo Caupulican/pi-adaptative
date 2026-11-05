@@ -125,6 +125,7 @@ import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
 	type ContinuousChatWorkReportEntry,
 } from "./memory/continuous-chat-ingest.ts";
+import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
@@ -344,6 +345,23 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The model a fresh worker would run on now (see WorkerDelegationController.previewWorkerModel). */
 	previewWorkerModel(): Model<Api> | undefined {
 		return this._getWorkerController().previewWorkerModel();
+	}
+
+	/**
+	 * The owner-memory port extensions hand knowledge from: a grant to a lane with no profile of its own (an
+	 * externally managed member) follows the `delegate` worker rule, checked at the grant and again at delivery.
+	 */
+	handoffKnowledge(memory: HandoffKnowledgePort): HandoffKnowledgePort {
+		const workerReadsKnowledge = () => this._getWorkerController().previewWorkerReadsKnowledge();
+		return {
+			getHandoffPersonaGuidance: () => memory.getHandoffPersonaGuidance(),
+			projectKnowledgeForHandoff: (references, maxBytes) => {
+				const projection = memory.projectKnowledgeForHandoff(references, maxBytes);
+				if (projection.blocked || projection.references.length === 0) return projection;
+				if (!workerReadsKnowledge()) return blockedKnowledgeHandoff("worker_knowledge_capability_required");
+				return { ...projection, isCurrent: () => projection.isCurrent() && workerReadsKnowledge() };
+			},
+		};
 	}
 
 	/** A worker agent's durable chat, for the ICM worker log; undefined when no such agent exists. */

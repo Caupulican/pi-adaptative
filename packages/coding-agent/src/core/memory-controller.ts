@@ -1685,6 +1685,7 @@ export class MemoryController {
 			includedCount: projection?.includedCount ?? 0,
 			omittedCount: projection?.omittedCount ?? references.length,
 			references: projection?.references ?? [],
+			...(projection?.dropped ? { dropped: projection.dropped } : {}),
 			isCurrent: () => context.isCurrent() && (projection?.isCurrent() ?? true),
 		};
 	}
@@ -2207,14 +2208,19 @@ export class MemoryController {
 		const scope = this._knowledgeScope();
 		const at = new Date().toISOString();
 		const excluded = references.filter((reference) => !included.has(reference.id));
-		const unavailable = excluded.filter(
-			(reference) => !matchesKnowledgeGrant(store.get(reference.id), reference, scope, at),
-		);
+		// A current record the composer saw carries its drop reason; one it never saw was not current when rendered.
+		const omitted = excluded.flatMap((reference) => {
+			const reason = projection.dropped?.get(reference.id);
+			return reason && matchesKnowledgeGrant(store.get(reference.id), reference, scope, at)
+				? [{ ...reference, reason }]
+				: [];
+		});
 		return {
-			text: projection.text,
+			// A view holding no granted record ("no applicable facts", a supersession header) is not delivered.
+			text: projection.references.length ? projection.text : "",
 			references: projection.references,
-			unavailable,
-			omitted: excluded.filter((reference) => !unavailable.includes(reference)),
+			unavailable: excluded.filter((reference) => !omitted.some((entry) => entry.id === reference.id)),
+			omitted,
 			// Only the delivered versions and the policy that admitted them matter; unrelated edits do not.
 			isCurrent: () => allowed() === undefined && grant.isCurrent(),
 		};
