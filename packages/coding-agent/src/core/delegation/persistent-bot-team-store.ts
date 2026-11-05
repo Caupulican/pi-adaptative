@@ -42,6 +42,8 @@ import {
 	routineOccurrenceId,
 	routineResultDigest,
 	routineScheduleInputOf,
+	routineSlotRule,
+	routineStartDeadline,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -744,7 +746,11 @@ export class PersistentBotTeamStore {
 			return {
 				kind: "schedule",
 				scheduledAt,
-				missedCount: countCalendarSlots(routine.schedule, firstDueAt, scheduledAt, MAX_CALENDAR_MISSED_COUNT),
+				missedCount: Math.min(
+					MAX_CALENDAR_MISSED_COUNT,
+					(routine.cursor.kind === "calendar" ? (routine.cursor.skipped ?? 0) : 0) +
+						countCalendarSlots(routine.schedule, firstDueAt, scheduledAt, MAX_CALENDAR_MISSED_COUNT),
+				),
 			};
 		}
 		const lastIndex = Math.floor((nowMs - routine.schedule.anchorAt) / routine.schedule.intervalMs);
@@ -1412,7 +1418,11 @@ export class PersistentBotTeamStore {
 			if (session !== (input.executionSnapshot !== undefined))
 				throw new Error("Session routines require a host-admitted execution snapshot.");
 			const scheduleChanged =
-				!existing || !isDeepStrictEqual(routineScheduleInputOf(existing.schedule), scheduleInput);
+				!existing ||
+				!isDeepStrictEqual(
+					routineSlotRule(routineScheduleInputOf(existing.schedule)),
+					routineSlotRule(scheduleInput),
+				);
 			const anchorAt =
 				!scheduleChanged && existing && "anchorAt" in existing.schedule
 					? existing.schedule.anchorAt
@@ -1420,9 +1430,9 @@ export class PersistentBotTeamStore {
 			let schedule: RoutineSchedule;
 			if (scheduleInput.kind === "interval")
 				schedule = { kind: "interval", intervalMs: scheduleInput.intervalMs, anchorAt };
-			else if (scheduleInput.kind === "once") schedule = { kind: "once", at: scheduleInput.at };
+			else if (scheduleInput.kind === "once") schedule = scheduleInput;
 			else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
-			else schedule = { kind: "calendar", cron: scheduleInput.cron, timeZone: scheduleInput.timeZone, anchorAt };
+			else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
 			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
 			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
 			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
@@ -1505,6 +1515,7 @@ export class PersistentBotTeamStore {
 			)
 				throw new Error("Routine claim requires a valid owner, bounded count and positive lease.");
 			const output: RoutineOccurrence[] = [];
+			let changed = false;
 			const limit = Math.min(input.limit, MAX_ROUTINE_OCCURRENCES);
 			const eligible = input.eligibleRoutineIds ? new Set(input.eligibleRoutineIds) : undefined;
 			const eligibleOccurrences = input.eligibleOccurrenceIds ? new Set(input.eligibleOccurrenceIds) : undefined;
@@ -1534,6 +1545,23 @@ export class PersistentBotTeamStore {
 					continue;
 				if (occurrence.dispatchKey || occurrence.executionRef || occurrence.result)
 					throw new Error("An undispatched routine occurrence contains execution state.");
+				const deadline =
+					occurrence.trigger.kind === "schedule"
+						? routineStartDeadline(occurrence.definition.schedule, occurrence.trigger.scheduledAt)
+						: undefined;
+				if (deadline !== undefined && input.nowMs > deadline) {
+					this.routineOccurrences.set(
+						occurrenceId,
+						this.withResult(
+							{ ...occurrence, phase: "terminal", updatedAt: input.nowMs },
+							"cancelled",
+							"Routine start window closed before dispatch; it was not run.",
+							occurrence.parentOrigin.sessionId,
+						),
+					);
+					changed = true;
+					continue;
+				}
 				const reclaimed: RoutineOccurrence = {
 					...occurrence,
 					phase: "claimed",
@@ -1558,9 +1586,23 @@ export class PersistentBotTeamStore {
 						? routine.executionSnapshot?.savedIntent.receiptOrigin
 						: input.receiptOrigin;
 				if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) continue;
+				const deadline = routineStartDeadline(routine.schedule, trigger.scheduledAt);
+				const late = deadline !== undefined && input.nowMs > deadline;
+				if (late && routine.schedule.kind === "calendar") {
+					// A slot past its lateness bound is passed over; the next run's missed count carries it.
+					const cursor: RoutineCursor = {
+						kind: "calendar",
+						nextAt: nextCalendarSlotAfter(routine.schedule, trigger.scheduledAt) ?? null,
+						skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
+					};
+					const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+					this.routines.set(id, { ...routine, cursor, nextRunAt });
+					changed = true;
+					continue;
+				}
 				// Return successful reclaims even when fresh admission has no journal space.
 				if (output.length > 0 && this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES) break;
-				const occurrence = this.createClaimedOccurrence(
+				const claimed = this.createClaimedOccurrence(
 					routine,
 					occurrenceId,
 					trigger,
@@ -1569,6 +1611,15 @@ export class PersistentBotTeamStore {
 					input.nowMs,
 					parentOrigin,
 				);
+				// A one-off whose start window closed is reported once instead of run late.
+				const occurrence = late
+					? this.withResult(
+							{ ...claimed, phase: "terminal" },
+							"cancelled",
+							"Routine start window closed before it could start; it was not run.",
+							parentOrigin.sessionId,
+						)
+					: claimed;
 				this.routineOccurrences.set(occurrenceId, occurrence);
 				const cursor: RoutineCursor =
 					routine.schedule.kind === "interval"
@@ -1585,6 +1636,11 @@ export class PersistentBotTeamStore {
 								}
 							: { kind: "once", consumed: true };
 				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+				if (late) {
+					this.routines.set(id, { ...routine, cursor, nextRunAt });
+					changed = true;
+					continue;
+				}
 				this.routines.set(id, {
 					...routine,
 					cursor,
@@ -1594,7 +1650,7 @@ export class PersistentBotTeamStore {
 				});
 				output.push(occurrence);
 			}
-			if (output.length) this.save();
+			if (output.length || changed) this.save();
 			return output.map((item) => structuredClone(item));
 		});
 	}

@@ -24,6 +24,9 @@ export const MAX_ROUTINE_MANUAL_TOMBSTONES = 2_048;
 export const MAX_ROUTINE_SUMMARY_CHARS = 1_000;
 export const MAX_ROUTINE_INSTANT_MS = 8_640_000_000_000_000;
 export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
+/** Shortest start window: timer and claim latency must never close a window by themselves. */
+export const MIN_ROUTINE_START_WINDOW_MS = 60_000;
+export const MAX_ROUTINE_LATENESS_MS = 366 * 86_400_000;
 
 const intervalSchema = Type.Object(
 	{
@@ -37,6 +40,14 @@ const onceSchema = Type.Object(
 		kind: Type.Literal("once"),
 		/** Absolute UTC instant in epoch milliseconds. */
 		at: Type.Integer({ minimum: 0, maximum: MAX_ROUTINE_INSTANT_MS }),
+		notAfter: Type.Optional(
+			Type.Integer({
+				minimum: 0,
+				maximum: MAX_ROUTINE_INSTANT_MS,
+				description:
+					"Optional UTC epoch-ms start deadline, at least one minute after at. If the routine has not started by then it is cancelled and reported instead of run late.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -55,6 +66,14 @@ const calendarSchema = Type.Object(
 				minLength: 1,
 				maxLength: MAX_CALENDAR_TIME_ZONE_CHARS,
 				description: "IANA time zone such as Europe/Lisbon. Omit to use this host's zone.",
+			}),
+		),
+		maxLatenessMs: Type.Optional(
+			Type.Integer({
+				minimum: MIN_ROUTINE_START_WINDOW_MS,
+				maximum: MAX_ROUTINE_LATENESS_MS,
+				description:
+					"Optional bound on how late a slot may start. A slot that cannot start within it is skipped and counted as missed by the next run.",
 			}),
 		),
 	},
@@ -79,8 +98,11 @@ export type RoutineAuthoringInput = Static<typeof routineAuthoringSchema>;
 export type RoutineCursor =
 	| { readonly kind: "interval"; readonly nextIndex: number }
 	| { readonly kind: "once"; readonly consumed: boolean }
-	/** Next slot computed when the previous one was claimed; null once no slot is representable. */
-	| { readonly kind: "calendar"; readonly nextAt: number | null };
+	/**
+	 * Next slot computed when the previous one was claimed; null once no slot is representable.
+	 * `skipped` counts slots passed over for lateness since the last run, carried into its missed count.
+	 */
+	| { readonly kind: "calendar"; readonly nextAt: number | null; readonly skipped?: number };
 
 export type PersistentRoutineTarget =
 	| { readonly kind: "bot"; readonly agentId: string }
@@ -99,9 +121,15 @@ export interface RoutineExecutionSnapshot {
 /** Explicit schedule. The cursor is mutable independently of immutable routine revision. */
 export type RoutineSchedule =
 	| { readonly kind: "interval"; readonly intervalMs: number; readonly anchorAt: number }
-	| { readonly kind: "once"; readonly at: number }
+	| { readonly kind: "once"; readonly at: number; readonly notAfter?: number }
 	/** Slots strictly after anchorAt (the authoring instant) in the stored zone. */
-	| { readonly kind: "calendar"; readonly cron: string; readonly timeZone: string; readonly anchorAt: number };
+	| {
+			readonly kind: "calendar";
+			readonly cron: string;
+			readonly timeZone: string;
+			readonly anchorAt: number;
+			readonly maxLatenessMs?: number;
+	  };
 
 export interface PersistentRoutineDefinition {
 	readonly routineId: string;
@@ -225,17 +253,27 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 		return { kind: "interval", intervalMs: value.intervalMs as number };
 	if (
 		value.kind === "once" &&
-		hasOnlyKeys(value, ["kind", "at"]) &&
-		Number.isSafeInteger(value.at) &&
-		(value.at as number) >= 0 &&
-		(value.at as number) <= MAX_ROUTINE_INSTANT_MS
+		hasOnlyKeys(value, ["kind", "at", "notAfter"]) &&
+		validInstant(value.at) &&
+		(value.notAfter === undefined ||
+			(validInstant(value.notAfter) && value.notAfter >= value.at + MIN_ROUTINE_START_WINDOW_MS))
 	)
-		return { kind: "once", at: value.at as number };
-	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone"])) {
+		return { kind: "once", at: value.at, ...(value.notAfter === undefined ? {} : { notAfter: value.notAfter }) };
+	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone", "maxLatenessMs"])) {
 		const cron = canonicalCalendarCron(value.cron);
-		return value.timeZone === undefined
-			? { kind: "calendar", cron }
-			: { kind: "calendar", cron, timeZone: canonicalCalendarTimeZone(value.timeZone) };
+		if (
+			value.maxLatenessMs !== undefined &&
+			(!Number.isSafeInteger(value.maxLatenessMs) ||
+				(value.maxLatenessMs as number) < MIN_ROUTINE_START_WINDOW_MS ||
+				(value.maxLatenessMs as number) > MAX_ROUTINE_LATENESS_MS)
+		)
+			throw new TypeError("Calendar lateness bound must be between one minute and 366 days.");
+		return {
+			kind: "calendar",
+			cron,
+			...(value.timeZone === undefined ? {} : { timeZone: canonicalCalendarTimeZone(value.timeZone) }),
+			...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
+		};
 	}
 	throw new TypeError("Routine schedule must be an executable interval, one-time UTC instant or calendar rule.");
 }
@@ -246,10 +284,43 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 		case "interval":
 			return { kind: "interval", intervalMs: schedule.intervalMs };
 		case "once":
+			return {
+				kind: "once",
+				at: schedule.at,
+				...(schedule.notAfter === undefined ? {} : { notAfter: schedule.notAfter }),
+			};
+		case "calendar":
+			return {
+				kind: "calendar",
+				cron: schedule.cron,
+				timeZone: schedule.timeZone,
+				...(schedule.maxLatenessMs === undefined ? {} : { maxLatenessMs: schedule.maxLatenessMs }),
+			};
+	}
+}
+
+/** Fields that place slots. Start windows are excluded: changing one must neither replay nor move a slot. */
+export function routineSlotRule(schedule: RoutineScheduleInput): RoutineScheduleInput {
+	switch (schedule.kind) {
+		case "interval":
+			return { kind: "interval", intervalMs: schedule.intervalMs };
+		case "once":
 			return { kind: "once", at: schedule.at };
 		case "calendar":
-			return { kind: "calendar", cron: schedule.cron, timeZone: schedule.timeZone };
+			return {
+				kind: "calendar",
+				cron: schedule.cron,
+				...(schedule.timeZone === undefined ? {} : { timeZone: schedule.timeZone }),
+			};
 	}
+}
+
+/** Latest instant a scheduled occurrence may start; undefined when its schedule sets no window. */
+export function routineStartDeadline(schedule: RoutineSchedule, scheduledAt: number): number | undefined {
+	if (schedule.kind === "once") return schedule.notAfter;
+	if (schedule.kind === "calendar" && schedule.maxLatenessMs !== undefined)
+		return scheduledAt + schedule.maxLatenessMs;
+	return undefined;
 }
 
 /** Cursor of a newly authored or changed schedule; a calendar rule with no slot in the search horizon gets null. */
@@ -645,13 +716,23 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 	if (value.kind === "calendar") {
 		// Stored zones are only checked for support: canonical spellings may differ across runtimes.
 		if (
-			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt"]) &&
+			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt", "maxLatenessMs"]) &&
 			typeof value.cron === "string" &&
 			canonicalCalendarCron(value.cron) === value.cron &&
 			isCalendarTimeZone(value.timeZone) &&
-			validInstant(value.anchorAt)
+			validInstant(value.anchorAt) &&
+			(value.maxLatenessMs === undefined ||
+				(Number.isSafeInteger(value.maxLatenessMs) &&
+					(value.maxLatenessMs as number) >= MIN_ROUTINE_START_WINDOW_MS &&
+					(value.maxLatenessMs as number) <= MAX_ROUTINE_LATENESS_MS))
 		)
-			return { kind: "calendar", cron: value.cron, timeZone: value.timeZone, anchorAt: value.anchorAt };
+			return {
+				kind: "calendar",
+				cron: value.cron,
+				timeZone: value.timeZone,
+				anchorAt: value.anchorAt,
+				...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
+			};
 		throw new TypeError("Persisted calendar schedule requires a canonical rule, a supported zone and an anchor.");
 	}
 	const authored = parseRoutineScheduleInput(
@@ -696,10 +777,18 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 		return { kind: "once", consumed: value.consumed };
 	if (
 		value.kind === "calendar" &&
-		hasOnlyKeys(value, ["kind", "nextAt"]) &&
-		(value.nextAt === null || validInstant(value.nextAt))
+		hasOnlyKeys(value, ["kind", "nextAt", "skipped"]) &&
+		(value.nextAt === null || validInstant(value.nextAt)) &&
+		(value.skipped === undefined ||
+			(Number.isSafeInteger(value.skipped) &&
+				(value.skipped as number) >= 1 &&
+				(value.skipped as number) <= MAX_CALENDAR_MISSED_COUNT))
 	)
-		return { kind: "calendar", nextAt: value.nextAt };
+		return {
+			kind: "calendar",
+			nextAt: value.nextAt,
+			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
+		};
 	throw new TypeError("Routine cursor is invalid.");
 }
 
