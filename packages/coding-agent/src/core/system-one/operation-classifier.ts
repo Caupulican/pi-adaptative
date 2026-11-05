@@ -18,7 +18,7 @@ import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
 import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
-import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
+import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
 
 /** Why System One is asked: the operation runs code, or writes outside the task. */
@@ -271,7 +271,7 @@ export const OPERATION_EFFECT_PROGRAM = {
 		},
 		{
 			id: "request_authorizes",
-			instruction: `Does \`request\` ask for, or directly require, the effect of \`operation.command\`? ${OWNER_PASTE_RULE}`,
+			instruction: "Does `request` ask for, or directly require, the effect of `operation.command`?",
 		},
 	],
 } as const;
@@ -346,6 +346,8 @@ export const OPERATION_EFFECT_IDS = [
 ] as const;
 export type OperationEffectId = (typeof OPERATION_EFFECT_IDS)[number];
 export const OPERATION_REQUEST_ID = "request_authorizes";
+/** Only `request_authorizes` reads the owner's `request`; the effect questions never do. */
+const OPERATION_REQUEST_QUESTIONS: ReadonlySet<string> = new Set([OPERATION_REQUEST_ID]);
 
 /** P(yes) per effect; absent when the answer was missing or malformed. */
 export type OperationEffectReading = Readonly<Record<OperationEffectId, number | undefined>>;
@@ -381,21 +383,35 @@ export async function askOperation(
 		readonly timeoutMs?: number;
 	},
 ): Promise<Record<string, unknown>> {
-	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
-		(signal): signal is AbortSignal => signal !== undefined,
-	);
+	const call = operationCall(input);
 	const program = {
-		...OPERATION_EFFECT_PROGRAM,
-		decisions: OPERATION_EFFECT_PROGRAM.decisions.filter((decision) =>
+		...call.program,
+		decisions: call.program.decisions.filter((decision) =>
 			(input.questions as readonly string[]).includes(decision.id),
 		),
 	};
-	const evaluation = await engine.evaluate(program, operationState(input.triage, input.toolName, input.request), {
-		consequence: "high",
-		signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined,
-	});
+	const evaluation = await engine.evaluate(
+		program,
+		operationState(input.triage, input.toolName, input.request),
+		call.options,
+	);
 	if (evaluation.model) input.onModel?.(evaluation.model);
 	return evaluation.answers ?? {};
+}
+
+/** One operation request: the program as asked over the owner's `request`, and its signal bounded by `timeoutMs`. */
+function operationCall(input: {
+	readonly request: string;
+	readonly signal?: AbortSignal;
+	readonly timeoutMs?: number;
+}) {
+	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	return {
+		program: programOverOwnerWords(OPERATION_EFFECT_PROGRAM, OPERATION_REQUEST_QUESTIONS, input.request),
+		options: { consequence: "high", signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined },
+	};
 }
 
 /**
@@ -417,11 +433,9 @@ export async function askOperationBatch(
 		readonly onModel?: (model: string) => void;
 	},
 ): Promise<Record<string, unknown>[]> {
-	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
-		(signal): signal is AbortSignal => signal !== undefined,
-	);
+	const call = operationCall(input);
 	const decisions = input.entries.flatMap((_entry, index) =>
-		OPERATION_EFFECT_PROGRAM.decisions.map((decision) => ({
+		call.program.decisions.map((decision) => ({
 			id: `c${index}_${decision.id}`,
 			instruction: decision.instruction.replaceAll("`operation.", `\`operations[${index}].`),
 		})),
@@ -430,10 +444,7 @@ export async function askOperationBatch(
 		operations: input.entries.map((entry) => operationState(entry.triage, entry.toolName, input.request).operation),
 		request: input.request || "(no request recorded)",
 	};
-	const evaluation = await engine.evaluate({ ...OPERATION_EFFECT_PROGRAM, decisions }, state, {
-		consequence: "high",
-		signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined,
-	});
+	const evaluation = await engine.evaluate({ ...call.program, decisions }, state, call.options);
 	if (evaluation.model) input.onModel?.(evaluation.model);
 	const answers = evaluation.answers ?? {};
 	return input.entries.map((_entry, index) =>

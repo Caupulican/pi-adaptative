@@ -11,6 +11,7 @@ import { workerTaskFitKey, workerTaskFitStatus } from "../expert-routing/worker-
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
 import { ObjectiveExecutionInterruptedError } from "../objective-execution/current-objective-execution.ts";
+import { carriesOwnerPaste } from "../security/owner-paste-boundary.ts";
 import {
 	MAX_OPTIONAL_TOOL_INTENT_TOOLS,
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
@@ -27,11 +28,12 @@ import {
 	hashQuestions,
 	modelPoolFollowUp,
 	modelPoolQuestions,
+	OWNER_PASTE_AUTHORIZATION_QUESTIONS,
 	optionalToolRequestQuestions,
 	ownerWordsScreenQuestion,
 	type QuestionDefinition,
 	type QuestionPack,
-	SYSTEM_ONE_CATALOG_VERSION,
+	questionCatalogVersion,
 	SYSTEM_ONE_PINNED_MODEL,
 	selectQuestions,
 	toTypeSafeEvaluationQuestions,
@@ -485,7 +487,7 @@ export class SystemOneController {
 				id: `DEC-${stage}-${Date.now()}`,
 				stage,
 				model: response.model,
-				question_catalog_version: SYSTEM_ONE_CATALOG_VERSION,
+				question_catalog_version: questionCatalogVersion(questions),
 				questions_hash: questionsHash,
 				state_hash: stateHash,
 				answers: response.answers,
@@ -567,8 +569,11 @@ export class SystemOneController {
 		if (userRequest === undefined) return { status: "skipped" };
 		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
 		const askCapabilities = options.capabilitiesPending !== false;
+		const judgedRequest = userRequest.slice(0, 4_000);
+		const pasted = carriesOwnerPaste(judgedRequest);
 		const asked: QuestionPack = {};
-		for (const [id, question] of options.optionalToolsOnly ? [] : Object.entries(USER_AUTHORIZATION_QUESTIONS)) {
+		const authorization = pasted ? OWNER_PASTE_AUTHORIZATION_QUESTIONS : USER_AUTHORIZATION_QUESTIONS;
+		for (const [id, question] of options.optionalToolsOnly ? [] : Object.entries(authorization)) {
 			if (id === "capabilities_authorized" && !askCapabilities) continue;
 			if (RULE_AUTHORITY_QUESTION_IDS.has(id) && !rules) continue;
 			asked[id] = question;
@@ -578,12 +583,19 @@ export class SystemOneController {
 			optionalTools !== undefined &&
 			userRequest.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
 			optionalTools.candidates.length <= MAX_OPTIONAL_TOOL_INTENT_TOOLS;
-		if (optionalToolsFit) Object.assign(asked, optionalToolRequestQuestions(optionalTools));
+		if (optionalToolsFit)
+			Object.assign(
+				asked,
+				optionalToolRequestQuestions(
+					optionalTools,
+					pasted || carriesOwnerPaste(...(optionalTools.pendingRequests ?? [])),
+				),
+			);
 		if (Object.keys(asked).length === 0) return { status: "skipped" };
 		const evaluated = await this.evaluateIntake(
 			"system-one:intake",
 			{
-				user_request: userRequest.slice(0, 4_000),
+				user_request: judgedRequest,
 				written_rules: rules || "(none)",
 				...(optionalToolsFit
 					? {
@@ -654,12 +666,13 @@ export class SystemOneController {
 	): Promise<{ status: "screened"; carriesInstruction: boolean[] } | { status: "unavailable"; reason: string }> {
 		if (messages.length === 0) return { status: "screened", carriesInstruction: [] };
 		const asked: QuestionPack = {};
-		messages.forEach((_message, index) => {
-			asked[`carries_${index}`] = ownerWordsScreenQuestion(index);
+		const judged = messages.map((message) => message.trim().slice(0, 1_000));
+		judged.forEach((message, index) => {
+			asked[`carries_${index}`] = ownerWordsScreenQuestion(index, carriesOwnerPaste(message));
 		});
 		const evaluated = await this.evaluateIntake(
 			"system-one:intake-screen",
-			{ owner_messages: messages.map((message) => message.trim().slice(0, 1_000)) },
+			{ owner_messages: judged },
 			asked,
 			options.signal,
 		);
@@ -687,7 +700,8 @@ export class SystemOneController {
 		signal?: AbortSignal,
 	): Promise<{ change: ModelPoolChange; doubts: string[] }> {
 		const state = { user_request: this.projector.redactText(request.trim().slice(0, 4_000)) };
-		const questions = modelPoolQuestions();
+		const pasted = carriesOwnerPaste(state.user_request);
+		const questions = modelPoolQuestions(pasted);
 		const first = await this.runStageValidation("intake", state, "read_only", [], questions, signal);
 		const change: ModelPoolChange = {};
 		const doubts: string[] = [];
@@ -724,7 +738,7 @@ export class SystemOneController {
 				reasons.push(`${questionId}: ${answer.choice} (${String(answer.confidence)})`);
 				questionStates.push({ question: questionId, uncertain: false });
 			} else if (gate === "ask_more") {
-				followUps[questionId] = modelPoolFollowUp(pool, enable);
+				followUps[questionId] = modelPoolFollowUp(pool, enable, pasted);
 				followUpDirections.set(pool, enable);
 				reasons.push(doubtReason(`${questionId}: ${answer.choice} awaits a follow-up`));
 				questionStates.push({ question: questionId, uncertain: true });

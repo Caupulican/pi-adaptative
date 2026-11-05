@@ -7,7 +7,7 @@
  * on System One).
  */
 
-import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
+import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 
 /**
@@ -23,8 +23,7 @@ export const PLAN_REVIEW_PROGRAM = {
 	decisions: [
 		{
 			id: "misses_request_part",
-			// A pasted directive is not a part of the request a plan must cover.
-			instruction: `Does \`request\` ask for something that no item of \`steps\` does? ${OWNER_PASTE_RULE}`,
+			instruction: "Does `request` ask for something that no item of `steps` does?",
 			criteria: {
 				true: "A part of the request (a feature, a change, a document) has no step that does it.",
 				false: "Every part of the request is done by at least one step.",
@@ -45,6 +44,9 @@ export const PLAN_REVIEW_PROGRAM = {
 		},
 	],
 } as const;
+
+/** The question that reads the owner's `request` for what the plan must cover. */
+const PLAN_REQUEST_QUESTIONS: ReadonlySet<string> = new Set(["misses_request_part"]);
 
 /** Plan actions that publish or change the plan; status updates do not. */
 const PLAN_CHANGING_ACTIONS: ReadonlySet<string> = new Set(["set", "intake", "add"]);
@@ -110,7 +112,8 @@ export async function reviewPlan(
 		answers =
 			(
 				await engine.evaluate(
-					PLAN_REVIEW_PROGRAM,
+					// A pasted directive is not a part of the request a plan must cover; a plan over unpasted words is asked as probed.
+					programOverOwnerWords(PLAN_REVIEW_PROGRAM, PLAN_REQUEST_QUESTIONS, input.request, ...input.steps),
 					{ request: input.request || "(no request recorded)", steps: input.steps },
 					{ consequence: "medium", signal: input.signal },
 				)

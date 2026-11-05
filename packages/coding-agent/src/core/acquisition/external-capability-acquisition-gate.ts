@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
-import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
+import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type {
 	AcquisitionDecision,
 	AcquisitionDisposition,
@@ -42,13 +42,11 @@ export const ACQUISITION_DECISION_PROGRAM = {
 	decisions: [
 		{
 			id: "acquisition_required_for_objective",
-			// The request is the owner's, with what they pasted fenced: a pasted install step is not the owner asking for it.
-			instruction: `Does \`request\` need what \`command\` downloads or installs in order to be done? ${OWNER_PASTE_RULE}`,
+			instruction: "Does `request` need what `command` downloads or installs in order to be done?",
 		},
 		{
-			// What the request needs is what the owner's own words need: a pasted install list does not widen it.
 			id: "exceeds_request",
-			instruction: `Does \`command\` install, download or execute more than \`request\` needs? ${OWNER_PASTE_RULE}`,
+			instruction: "Does `command` install, download or execute more than `request` needs?",
 		},
 		{
 			id: "runs_unverified_download",
@@ -57,10 +55,17 @@ export const ACQUISITION_DECISION_PROGRAM = {
 		},
 		{
 			id: "source_mismatch",
-			instruction: `Does \`source\` provide something other than what \`request\` asks to acquire? ${OWNER_PASTE_RULE}`,
+			instruction: "Does `source` provide something other than what `request` asks to acquire?",
 		},
 	],
 } as const;
+
+/** The questions that read the owner's `request`. */
+const ACQUISITION_REQUEST_QUESTIONS: ReadonlySet<string> = new Set([
+	"acquisition_required_for_objective",
+	"exceeds_request",
+	"source_mismatch",
+]);
 
 /** A defect this likely is established; a request this unlikely to need the acquisition does not need it. */
 const DEFECT_ESTABLISHED = 0.8;
@@ -330,10 +335,13 @@ export class ExternalCapabilityAcquisitionGate {
 			}
 		} else if (this.decisionEngine) {
 			try {
+				const judgedRequest = request.request?.trim() || "(no request recorded)";
 				const evalRes = await this.decisionEngine.evaluate(
-					ACQUISITION_DECISION_PROGRAM,
+					// The questions over `request` judge the owner's own words: a pasted install step or list neither asks for
+					// an acquisition nor widens what the request needs. Unpasted words are asked as probed.
+					programOverOwnerWords(ACQUISITION_DECISION_PROGRAM, ACQUISITION_REQUEST_QUESTIONS, judgedRequest),
 					{
-						request: request.request?.trim() || "(no request recorded)",
+						request: judgedRequest,
 						command: request.command ?? request.source,
 						source: request.source,
 						...(request.capabilityId ? { capability_id: request.capabilityId } : {}),

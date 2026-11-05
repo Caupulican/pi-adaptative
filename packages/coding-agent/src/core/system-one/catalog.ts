@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
-import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
+import { OWNER_PASTE_RULE, ownerPasteAware } from "../security/owner-paste-boundary.ts";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.6.0";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.5.1";
+/**
+ * The paste-aware owner-words pack: the same questions, each carrying `OWNER_PASTE_RULE`, asked only for owner words that
+ * carry an owner-paste fence (`carriesOwnerPaste`). Words with no pasted span are asked the 1.5.1 wording unchanged.
+ */
+export const SYSTEM_ONE_OWNER_PASTE_CATALOG_VERSION = "1.5.1+owner-paste.1";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 
@@ -18,23 +23,14 @@ export interface QuestionDefinition {
 export type QuestionPack = Record<string, QuestionDefinition>;
 
 /**
- * A question that reads the owner's words for authority (a rule, handoff, model pool, delivery limit, capability or
- * tool): it judges only what the owner typed, never a pasted span inside the untrusted boundary (`OWNER_PASTE_RULE`).
- */
-function judgedOnOwnerWords(instructions: string): string {
-	return `${instructions} ${OWNER_PASTE_RULE}`;
-}
-
-/**
  * One classification of the user's own request. It is not a tool refusal.
  * A hard yes is what enables capabilities that were still off.
  */
 export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freeze({
 	changes_model_pools: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions:
 			"Does `user_request` change which kinds of language models may be used: subscription models, pay-per-use API models, or local models?",
-		),
 		criteria: Object.freeze({
 			true: "The user turns a kind of model on or off. 'only use subscription models', 'no API models', 'you can use API models again', 'turn off subscription models', and 'use local models only' change it.",
 			false: "The user names no kind of model, or only picks one model for one task. 'fix the bug', 'use grok for this', and 'hello' do not change it.",
@@ -42,9 +38,8 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	capabilities_authorized: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions:
 			"Does `user_request` tell the harness to do work, such as fix, change, add, remove, run, continue, commit or push, rather than only ask a question, discuss, or hold back?",
-		),
 		criteria: Object.freeze({
 			true: "The owner tells the harness to do something: 'fix the build', 'add a flag and update the docs', 'continue with the migration', 'rename it everywhere', 'commit and push', 'arruma o bug', 'arregla el bug'.",
 			false: "The owner only greets, thanks, asks a question, asks for an explanation, discusses an option, or withholds permission to act: 'hi', 'what does this do?', 'should we fix it?', 'explain how it works', \"don't change anything yet\", 'you must not edit any files'.",
@@ -52,9 +47,8 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	local_commits_only: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions:
 			"Does `user_request` require this task's git delivery to be local commits on the current branch and forbid every push?",
-		),
 		criteria: Object.freeze({
 			true: "The user limits this task to commits and rules out pushing. 'only commits', 'don't want pushes', 'no push', and 'commit but do not push' are this limit. Branches and worktrees still count when the user wants them brought back locally.",
 			false: "The user asks to push, lifts a no-push limit, or does not set a git delivery limit. 'commit and push', 'you can push now', 'push when done', 'fix the bug', and 'hello' are not this limit.",
@@ -62,9 +56,8 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	lifts_delivery_block: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions:
 			"Does `user_request` explicitly lift a delivery restriction the user owns, including allowing a push that was forbidden, even when a file says otherwise?",
-		),
 		criteria: Object.freeze({
 			true: "The user releases the restriction. 'you can push now', 'lift the no-push rule', 'push is allowed', and 'ignore the spec that forbids push' are a lift.",
 			false: "The user is imposing a limit, or is not changing one. 'only commits', 'don't want pushes', 'fix the bug', and 'hello' are not a lift.",
@@ -72,9 +65,8 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	rules_differ: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions:
 			"Does `user_request` contradict `written_rules` so the request and a written rule cannot both be followed?",
-		),
 		criteria: Object.freeze({
 			true: "A written rule requires what the request forbids, or forbids what the request requires. AGENTS.md and a standing user rule both count.",
 			false: "The request fits the written rules, or the written rules do not speak to it. 'fix the bug' and 'hello' are false when the rules are about something else.",
@@ -82,9 +74,7 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	overrides_written_rules: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
-			"Does `user_request` explicitly put the user's own request above `written_rules`?",
-		),
+		instructions: "Does `user_request` explicitly put the user's own request above `written_rules`?",
 		criteria: Object.freeze({
 			true: "The user says to follow their request instead of AGENTS.md or a standing user rule. 'do what I asked', 'ignore AGENTS.md', 'override the spec', and 'lift that file rule' are overrides.",
 			false: "The user does not explicitly override a written rule. A contradiction alone, 'fix the bug', and 'hello' are not overrides.",
@@ -92,9 +82,7 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	full_handoff: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
-			"Does `user_request` hand the work's decisions to the agents to settle without asking the user?",
-		),
+		instructions: "Does `user_request` hand the work's decisions to the agents to settle without asking the user?",
 		criteria: Object.freeze({
 			true: "The user hands decisions off. 'you decide', 'full handoff', 'settle it', 'work autonomously', and 'don't ask me' are a handoff.",
 			false: "The user wants to choose, or is not handing decisions off. 'ask me', 'fix the bug', and 'hello' are not a handoff.",
@@ -102,9 +90,7 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	request_holds: Object.freeze({
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
-			"Does `user_request` say to do what the user asked where it differs from `written_rules`?",
-		),
+		instructions: "Does `user_request` say to do what the user asked where it differs from `written_rules`?",
 		criteria: Object.freeze({
 			true: "The request says the user's own instruction wins. 'settle it on my request', 'do what I asked', and 'my request holds' are this.",
 			false: "The request does not say the user's instruction wins. 'follow AGENTS.md', 'push this branch', and 'fix the bug' are this.",
@@ -112,18 +98,37 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 });
 
+/** `USER_AUTHORIZATION_QUESTIONS` for a `user_request` that carries an owner-paste fence (`SYSTEM_ONE_OWNER_PASTE_CATALOG_VERSION`). */
+export const OWNER_PASTE_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freeze(
+	Object.fromEntries(
+		Object.entries(USER_AUTHORIZATION_QUESTIONS).map(([id, question]) => [
+			id,
+			Object.freeze({ ...question, instructions: ownerPasteAware(question.instructions, true) }),
+		]),
+	),
+);
+
+/** The catalog version of a pack built here: the paste-aware variant when any of its questions carries the paste rule. */
+export function questionCatalogVersion(questions: Readonly<QuestionPack>): string {
+	return Object.values(questions).some((question) => question.instructions.endsWith(OWNER_PASTE_RULE))
+		? SYSTEM_ONE_OWNER_PASTE_CATALOG_VERSION
+		: SYSTEM_ONE_CATALOG_VERSION;
+}
+
 /**
  * Screens one owner message before it earns the full classification above. One question per message,
  * asked for every message queued since the last judgment in a single request. The question asks for the
  * safe-to-skip case (small talk or a request to understand something) and a message is set aside only
  * on a hard pass: an unsure answer or an outage classifies it in full, so the screen can cost a call
- * but never lose an instruction. Measured on 70 messages in ten languages (docs/system-one.md).
+ * but never lose an instruction. Measured on 70 messages in ten languages (docs/system-one.md), without pasted spans;
+ * `pasted` (the message carries an owner-paste fence) adds `OWNER_PASTE_RULE`.
  */
-export function ownerWordsScreenQuestion(index: number): QuestionDefinition {
+export function ownerWordsScreenQuestion(index: number, pasted: boolean): QuestionDefinition {
 	return {
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions: ownerPasteAware(
 			`Is owner_messages[${index}] only small talk or a request to understand something, with no instruction to do, change, stop, allow, avoid or prefer anything? Read it in whatever language it is written.`,
+			pasted,
 		),
 		criteria: {
 			true: "The message only greets, thanks, reacts, or asks what something means or does. 'hi', 'thanks, that helps', 'ok', 'oi, tudo bem?', 'hola', '你好', 'what does this function do?' and 'why does it work like that?' contain no instruction.",
@@ -140,15 +145,17 @@ export function ownerWordsScreenQuestion(index: number): QuestionDefinition {
  * scored `unchanged` at 0.40-0.49; one question per tool with plain use/forbid/neither criteria scores
  * the same asks `request` at 0.99-1.00 and unrelated requests `unchanged` at 0.98-0.99. The task
  * relation is asked only when a previous classified intent exists: with none it is `replace` by
- * definition, and asking scored 0.28 on such requests.
+ * definition, and asking scored 0.28 on such requests. Those measurements had no pasted spans; `pasted` (the owner's
+ * words carry an owner-paste fence) adds `OWNER_PASTE_RULE`.
  */
-export function optionalToolRequestQuestions(context: OptionalToolRequestContext): QuestionPack {
+export function optionalToolRequestQuestions(context: OptionalToolRequestContext, pasted: boolean): QuestionPack {
 	const questions: QuestionPack = {};
 	if (optionalToolRelationAsked(context)) {
 		questions.optional_tool_task = {
 			type: "choice",
-			instructions: judgedOnOwnerWords(
+			instructions: ownerPasteAware(
 				"Is `user_request` part of the task in `previous_optional_tool_intent.taskRequest`, a different task, or the end of that task?",
+				pasted,
 			),
 			criteria: {
 				continue:
@@ -162,8 +169,9 @@ export function optionalToolRequestQuestions(context: OptionalToolRequestContext
 	context.candidates.forEach((_candidate, index) => {
 		questions[`optional_tool_${index}`] = {
 			type: "choice",
-			instructions: judgedOnOwnerWords(
+			instructions: ownerPasteAware(
 				`Does the owner ask to use optional_tools[${index}], forbid it, or say nothing about it? Match it by its name or aliases, or by asking for what that service provides. Read \`pending_owner_requests\` in order first, then \`user_request\`; the latest statement about the tool wins.`,
+				pasted,
 			),
 			criteria: {
 				request:
@@ -590,9 +598,9 @@ export function toTypeSafeEvaluationQuestions(
 
 /**
  * Per pool, what the request does to it. Asked only after `changes_model_pools` did not come back a
- * clear no, so an ordinary turn pays one question for this, not three.
+ * clear no, so an ordinary turn pays one question for this, not three. `pasted`: the request carries an owner-paste fence.
  */
-export function modelPoolQuestions(): QuestionPack {
+export function modelPoolQuestions(pasted: boolean): QuestionPack {
 	const described = {
 		subscription: "models covered by a subscription plan (a flat monthly plan, not billed per request)",
 		metered: "pay-per-use API models billed per token through an API key",
@@ -603,7 +611,7 @@ export function modelPoolQuestions(): QuestionPack {
 			`model_pool_${pool}`,
 			{
 				type: "choice",
-				instructions: judgedOnOwnerWords(`What does \`user_request\` do to ${what}?`),
+				instructions: ownerPasteAware(`What does \`user_request\` do to ${what}?`, pasted),
 				criteria: {
 					enable: `Turns them on, or allows them again. 'you can use them again', 'enable them', 'use only these' (for this kind).`,
 					disable: `Turns them off or rules them out. 'no more of these', 'turn them off', 'only use another kind' (this kind is excluded).`,
@@ -615,11 +623,12 @@ export function modelPoolQuestions(): QuestionPack {
 }
 
 /** The narrower yes/no asked when a pool Choice lands between 0.80 and 0.90. */
-export function modelPoolFollowUp(pool: string, enable: boolean): QuestionDefinition {
+export function modelPoolFollowUp(pool: string, enable: boolean, pasted: boolean): QuestionDefinition {
 	return {
 		type: "boolean",
-		instructions: judgedOnOwnerWords(
+		instructions: ownerPasteAware(
 			`Does \`user_request\` ${enable ? "allow" : "rule out"} ${pool === "metered" ? "pay-per-use API" : pool} models?`,
+			pasted,
 		),
 	};
 }
