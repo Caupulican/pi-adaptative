@@ -294,6 +294,7 @@ export interface ProactivitySettings {
 	maxNotesPerRun?: number; // default: 2 notes a review may raise
 	delivery?: "note" | "turn"; // default: "turn" — wakes the parent; explicit "note" waits for the owner's next turn
 	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)
+	ciEvents?: boolean; // default: true — CI results of the checkout become host events (git reads, `gh` calls); false stops that discovery
 }
 
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model">> &

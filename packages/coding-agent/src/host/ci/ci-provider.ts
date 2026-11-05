@@ -17,6 +17,8 @@ export interface CiProviderCollection {
 	readonly subject: CiSubject;
 	readonly events: readonly CiAttemptTerminalEvent[];
 	readonly current?: CiCurrentObservation;
+	/** The newest run's custody was retired: no current attempt can be proven for this subject. */
+	readonly predatesRetention?: true;
 }
 
 export interface CiRetiredRunRange {
@@ -39,4 +41,6 @@ export interface CiProvider {
 
 export interface CiCommandPort {
 	run(executable: string, args: readonly string[], signal: AbortSignal): Promise<string>;
+	/** Long-lived commands: output is discarded, only the exit status and a bounded error tail count. */
+	wait(executable: string, args: readonly string[], signal: AbortSignal): Promise<void>;
 }

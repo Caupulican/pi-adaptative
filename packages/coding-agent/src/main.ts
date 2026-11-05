@@ -1292,9 +1292,10 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		runtime.registerSessionResource(nativePiRuntime);
 		await nativePiRuntime.start(session, runtime);
+		// CI diagnostics use the held warning channel: the interactive host owns the screen meanwhile.
 		const ciEvents =
 			getSessionRole() === "main"
-				? new CiSessionResource((message) => console.error(chalk.yellow(message)))
+				? new CiSessionResource((message) => terminalWarnings.write([message]))
 				: undefined;
 		if (ciEvents) runtime.registerSessionResource(ciEvents);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
@@ -1330,12 +1331,9 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		await interactiveMode.init();
-		// The registered resource retains and joins startup; remote discovery must not delay owner input.
-		void ciEvents?.start(session, runtime).catch((error: unknown) => {
-			console.error(
-				chalk.yellow(`CI event startup failed: ${error instanceof Error ? error.message : String(error)}`),
-			);
-		});
+		// The registered resource retains and joins startup in the background and reports through its
+		// diagnostic channel; remote discovery never delays owner input.
+		await ciEvents?.start(session, runtime);
 		printTimings();
 		if (!options?.extensionFactories?.length) {
 			await bindInteractiveRuntimeRestart(runtime, () => {

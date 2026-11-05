@@ -7,7 +7,7 @@ import { builtinBoundary } from "../builtin-boundary.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, settlementState, withDeadline } from "../session-fixture.ts";
 
-/** The OS can finish an exec callback before its process/pipes close. No production owner is replaced. */
+/** The OS can report a process exit before its pipes close. No production owner is replaced. */
 export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: CiSubject): Promise<void> {
 	const started = createBarrier();
 	const replacementStarted = createBarrier();
@@ -17,15 +17,15 @@ export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: Ci
 	const initialLive = world.processTable.liveChildren();
 	const initialSignals = world.processTable.delivered.length;
 	let terminalCount = 0;
-	let callbacks = 0;
-	const restore = builtinBoundary.replace("process", "execFile", (...args) => {
-		world.guard.effects.push({ kind: "process.execFile", arguments: args });
-		const [file, argv, options, callback] = args;
+	let exits = 0;
+	const restore = builtinBoundary.replace("process", "spawn", (...args) => {
+		world.guard.effects.push({ kind: "process.spawn", arguments: args });
+		const [file, argv, options] = args;
 		expect(file).toBe("gh");
 		expect(argv).toEqual(["run", "watch", String(801 + children.length), "--interval", "30"]);
-		expect(options).toMatchObject({ cwd: HARNESS_PROJECT_CWD, encoding: "utf8" });
+		// The watch output is never buffered: only its exit status and a bounded stderr tail are read.
+		expect(options).toMatchObject({ cwd: HARNESS_PROJECT_CWD, stdio: ["ignore", "ignore", "pipe"] });
 		expect(options).not.toHaveProperty("signal");
-		if (typeof callback !== "function") throw new Error("The CI command must supply an execFile callback.");
 		const child = Object.assign(new EventEmitter(), {
 			pid: 0,
 			exitCode: null as number | null,
@@ -40,8 +40,9 @@ export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: Ci
 				expect(signal).toBe("SIGTERM");
 				expect(cancelled).toBe(false);
 				cancelled = true;
-				callbacks++;
-				callback(new Error("CI callback ended before physical close"), "", "");
+				child.signalCode = "SIGTERM";
+				exits++;
+				child.emit("exit", null, "SIGTERM");
 			},
 		});
 		children.push({
@@ -49,12 +50,10 @@ export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: Ci
 			close: () => {
 				if (closed) return;
 				closed = true;
-				child.exitCode = cancelled ? null : 0;
-				child.signalCode = cancelled ? "SIGTERM" : null;
-				child.emit("exit", child.exitCode, child.signalCode);
 				if (!cancelled) {
-					callbacks++;
-					callback(null, "", "");
+					child.exitCode = 0;
+					exits++;
+					child.emit("exit", 0, null);
 				}
 				world.processTable.releaseChild(child.pid);
 				child.emit("close", child.exitCode, child.signalCode);
@@ -88,7 +87,7 @@ export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: Ci
 		monitor.reconcile(observations.slice(0, 4));
 		await withDeadline(world.trace, "four physical CI commands start", started.promise);
 		monitor.reconcile(observations.slice(4));
-		expect(callbacks, "cancelled exec callbacks end before physical close").toBe(4);
+		expect(exits, "cancelled processes exit before their pipes close").toBe(4);
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(children, "cancelled live children still occupy all four monitor slots").toHaveLength(4);
 		expect(world.processTable.liveChildren()).toEqual([...initialLive, ...children.map((child) => child.pid)]);
@@ -99,12 +98,12 @@ export async function runJourney1CiCommandPhase(world: HarnessWorld, subject: Ci
 		children[4].close();
 		await withDeadline(world.trace, "normal CI completion requests authoritative refresh", terminal.promise);
 		const stopping = monitor.stop();
-		expect(await settlementState(stopping), "shutdown joins cancelled processes despite ended callbacks").toBe(
+		expect(await settlementState(stopping), "shutdown joins cancelled processes until their pipes close").toBe(
 			"pending",
 		);
 		for (const child of children) child.close();
 		await withDeadline(world.trace, "CI command physical shutdown settles", stopping);
-		expect(callbacks).toBe(5);
+		expect(exits).toBe(5);
 		expect(terminalCount).toBe(1);
 		expect(failures).toEqual([]);
 		expect(world.processTable.delivered.slice(initialSignals)).toHaveLength(4);

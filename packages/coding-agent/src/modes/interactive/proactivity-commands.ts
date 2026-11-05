@@ -37,6 +37,7 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 		`Rolling 24 h across the sessions stored with this one: $${settings.maxUsdPerDay.toFixed(2)} review spend, ${settings.maxTurnWakesPerDay} parent-turn wake(s); past the wake bound, notes wait for the owner's next turn.`,
 		`Delivery: ${settings.delivery === "turn" ? "wakes a turn" : "a visible note with the next turn"}`,
 		`Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}`,
+		`CI events: ${settings.ciEvents ? "on" : "off"}`,
 		...(measured === undefined
 			? []
 			: [

@@ -1,34 +1,48 @@
 import { randomUUID } from "node:crypto";
-import { type FSWatcher, mkdirSync } from "node:fs";
-import { type CiStatusView, ciStatusViewFromRecord } from "../../core/ci-status-view.ts";
+import { existsSync, type FSWatcher, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
+	type CiAttemptTerminalEvent,
+	type CiCurrentObservation,
 	type CiSubject,
+	ciEventSubject,
 	ciSubjectKey,
+	HostEventError,
 	type HostEventSink,
 	type HostEventSource,
+	MAX_HOST_EVENT_SUBJECTS,
 } from "../../core/events/host-event-contract.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
-import type { CiProvider, CiProviderCollection } from "./ci-provider.ts";
+import type { CiProvider, CiRepository } from "./ci-provider.ts";
 import { CiRunMonitor } from "./ci-run-monitor.ts";
-import { CiSourceStore } from "./ci-source-store.ts";
 import {
+	type CiSourceSnapshot,
+	CiSourceStore,
+	CiSourceVersionError,
+	ciSourceRetainedAttempts,
+	ciSourceRetiredRuns,
+} from "./ci-source-store.ts";
+import {
+	CI_WORKFLOW,
 	type CiGitPaths,
-	ciStatusPath,
+	type CiStatusRecord,
+	completedCiStatus,
 	readCiHead,
-	readCiStatusFile,
 	readCiStatusRecords,
-	resolveCiGitPaths,
+	resolveCiGitPathsAsync,
 	writeCiStatus,
 } from "./ci-status-record.ts";
-import { createCiCommandPort, GithubActionsCiProvider } from "./github-actions-ci-provider.ts";
+import { createCiCommandPort, GithubActionsCiProvider, isCiCommandMissing } from "./github-actions-ci-provider.ts";
 
 // Discover upstream runs/reruns that have no local filesystem event. Known runs use terminal monitors.
 const CI_DISCOVERY_INTERVAL_MS = 2 * 60 * 1000;
+const COMMIT_SHA = /^(?:[a-f\d]{40}|[a-f\d]{64})$/;
+const ACCEPT_BATCH = 32;
 
 export interface CiHostRuntime {
 	readonly source: HostEventSource;
-	readStatus(): CiStatusView | undefined;
+	/** Fires when a watched local CI input changed; the footer re-reads its file projection. */
 	subscribeStatus(listener: () => void): () => void;
 }
 
@@ -43,7 +57,63 @@ export interface CiHostRuntimeOptions {
 	readonly subscribeSubjects?: (listener: () => void) => () => void;
 }
 
-/** This resource's owner must stop it before disposing its session's durable event sink. */
+interface CiLocalInputs {
+	readonly headSha?: string;
+	readonly headBranch?: string;
+	readonly refDirectory: string;
+	readonly records: readonly CiStatusRecord[];
+	/** Revisions whose watcher has not recorded an outcome (pending or watch_failed). */
+	readonly unsettled: readonly string[];
+	readonly subscribed: readonly CiSubject[];
+	readonly fingerprint: string;
+}
+
+function inputFingerprint(
+	head: Pick<CiLocalInputs, "headSha" | "headBranch" | "refDirectory">,
+	records: readonly CiStatusRecord[],
+	subscribed: readonly CiSubject[],
+): string {
+	return JSON.stringify([
+		head.headSha,
+		head.headBranch,
+		head.refDirectory,
+		records
+			.map((record) =>
+				JSON.stringify([
+					record.branch,
+					record.sha,
+					record.state,
+					record.runId,
+					record.runAttempt,
+					record.conclusion,
+				]),
+			)
+			.sort(),
+		subscribed.map(ciSubjectKey).sort(),
+	]);
+}
+
+function sameSubjects(left: readonly CiSubject[], right: readonly CiSubject[]): boolean {
+	return JSON.stringify(left.map(ciSubjectKey).sort()) === JSON.stringify(right.map(ciSubjectKey).sort());
+}
+
+function addSubject(list: CiSubject[], subject: CiSubject): void {
+	if (!list.some((existing) => ciSubjectKey(existing) === ciSubjectKey(subject))) list.push(subject);
+}
+
+function errorText(error: unknown): string {
+	return (
+		boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ?? "CI source unavailable"
+	);
+}
+
+/**
+ * This resource's owner must stop it before disposing its session's durable event sink.
+ *
+ * A reconcile commits a new catch-up generation only when its scope changed, retained events are
+ * pending, or the collected current observations differ from the last seal. A reconcile that
+ * observes nothing new commits nothing and leaves the sealed source ready.
+ */
 class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	readonly source: HostEventSource = this;
 	private readonly paths: CiGitPaths;
@@ -51,6 +121,11 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private readonly store: CiSourceStore;
 	private readonly diagnostic: (message: string) => void;
 	private readonly listeners = new Set<() => void>();
+	private readonly lifetimeSignal?: AbortSignal;
+	private readonly getSubscribedSubjects: () => readonly CiSubject[];
+	private readonly subscribeSubjects?: (listener: () => void) => () => void;
+	/** Last reported text per diagnostic key: a repeating failure is reported once until it changes. */
+	private readonly reported = new Map<string, string>();
 	private watchers: FSWatcher[] = [];
 	private watchDirectories = "";
 	private abort?: AbortController;
@@ -59,18 +134,25 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private unsubscribeSubjects?: () => void;
 	private subjectFingerprint = "";
 	private draining?: Promise<void>;
+	/** A watched file changed; reconcile only if the local inputs differ from the last reconcile. */
 	private dirty = false;
-	private blocked = false;
-	private readonly lifetimeSignal?: AbortSignal;
-	private readonly getSubscribedSubjects: () => readonly CiSubject[];
-	private readonly subscribeSubjects?: (listener: () => void) => () => void;
+	/** A trigger that needs remote discovery regardless of local inputs. */
+	private forced = false;
+	/** The sink refused for runtime replacement; its admission signal re-requests. */
+	private sinkBlocked = false;
+	/** The provider command is not installed or the journal belongs to a newer release. */
+	private dormant = false;
+	private lastInputs?: string;
 	private watchRetry?: ReturnType<typeof setTimeout>;
 	private discoveryTimer?: ReturnType<typeof setTimeout>;
 	private activationId?: string;
 	private sourceId?: string;
 	private monitor?: CiRunMonitor;
 	private claimed?: { consumerId: string; activationId: string };
-	private statusCache?: { at: number; view: CiStatusView | undefined };
+	/** This activation has begun a generation; the first reconcile of every activation begins one. */
+	private opened = false;
+	private sealed?: { generation: number; observed: string };
+	private retiredSent?: number;
 
 	constructor(
 		paths: CiGitPaths,
@@ -88,50 +170,37 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.subscribeSubjects = options.subscribeSubjects;
 	}
 
+	/** Local setup only: consumer activation, git reads and network discovery run in the reconcile. */
 	async start(sink: HostEventSink): Promise<void> {
 		await this.stop();
+		this.reported.clear();
 		this.sink = sink;
 		this.abort = new AbortController();
-		const signal = this.lifetimeSignal
-			? AbortSignal.any([this.abort.signal, this.lifetimeSignal])
-			: this.abort.signal;
-		const identity = this.store.identity();
-		const checkpoint = await sink.checkpoint(identity.sourceId, signal);
-		signal.throwIfAborted();
-		const activationId = randomUUID();
-		this.store.claim(sink.consumerId, activationId, checkpoint);
-		this.activationId = activationId;
-		this.sourceId = identity.sourceId;
-		this.claimed = { consumerId: sink.consumerId, activationId };
 		this.monitor = new CiRunMonitor(
 			this.provider,
-			signal,
-			() => this.request(),
-			(error) => this.report(error),
+			this.signal()!,
+			() => this.request(true),
+			(error) => this.report("monitor", `CI run watch ended without a result: ${errorText(error)}`),
 		);
 		this.unsubscribeWritable = sink.subscribeWritable(() => {
-			if (this.blocked) this.request();
+			if (this.sinkBlocked) this.request(true);
 		});
-		this.subjectFingerprint = JSON.stringify(this.getSubscribedSubjects().map(ciSubjectKey).sort());
+		this.subjectFingerprint = this.subscribedFingerprint();
 		this.unsubscribeSubjects = this.subscribeSubjects?.(() => {
-			const fingerprint = JSON.stringify(this.getSubscribedSubjects().map(ciSubjectKey).sort());
+			const fingerprint = this.subscribedFingerprint();
 			if (fingerprint === this.subjectFingerprint) return;
 			this.subjectFingerprint = fingerprint;
-			this.request();
+			this.request(true);
 		});
 		mkdirSync(this.paths.statusDir, { recursive: true });
 		this.armWatchers();
-		this.request();
+		this.request(true);
 	}
 
 	async stop(): Promise<void> {
 		const sink = this.sink;
-		const sourceId = this.sourceId;
-		const claimed = this.claimed;
 		const monitor = this.monitor;
 		this.monitor = undefined;
-		this.sourceId = undefined;
-		this.activationId = undefined;
 		this.abort?.abort(new Error("CI event source stopped."));
 		this.abort = undefined;
 		if (this.watchRetry) clearTimeout(this.watchRetry);
@@ -147,15 +216,27 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.watchers = [];
 		this.watchDirectories = "";
 		this.dirty = false;
+		this.forced = false;
+		this.sinkBlocked = false;
+		this.dormant = false;
+		this.lastInputs = undefined;
+		this.opened = false;
+		this.sealed = undefined;
+		this.retiredSent = undefined;
 		const errors: unknown[] = [];
-		try {
-			if (sink && sourceId) await sink.deactivate(sourceId);
-		} catch (error) {
-			errors.push(error);
-		}
 		try {
 			await monitor?.stop();
 			await this.draining;
+		} catch (error) {
+			errors.push(error);
+		}
+		// Activation happens inside the reconcile: read custody only after it has been joined.
+		const sourceId = this.sourceId;
+		const claimed = this.claimed;
+		this.sourceId = undefined;
+		this.activationId = undefined;
+		try {
+			if (sink && sourceId) await sink.deactivate(sourceId);
 		} catch (error) {
 			errors.push(error);
 		}
@@ -175,47 +256,37 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		return () => this.listeners.delete(listener);
 	}
 
-	readStatus(): CiStatusView | undefined {
-		const now = Date.now();
-		if (this.statusCache && now - this.statusCache.at < 1000) return this.statusCache.view;
-		this.statusCache = { at: now, view: this.readStatusSnapshot(now) };
-		return this.statusCache.view;
+	private signal(): AbortSignal | undefined {
+		if (!this.abort) return undefined;
+		return this.lifetimeSignal ? AbortSignal.any([this.abort.signal, this.lifetimeSignal]) : this.abort.signal;
 	}
 
-	private readStatusSnapshot(now: number): CiStatusView | undefined {
-		try {
-			const head = readCiHead(this.paths);
-			if (!head.branch) return undefined;
-			const record = readCiStatusFile(ciStatusPath(this.paths.statusDir, head.branch));
-			let watcherAlive: boolean | undefined;
-			if (record?.state === "pending" && Number.isInteger(record.pid) && record.pid! > 0) {
-				try {
-					process.kill(record.pid!, 0);
-					watcherAlive = true;
-				} catch (error) {
-					watcherAlive = (error as NodeJS.ErrnoException).code === "EPERM";
-				}
-			}
-			return ciStatusViewFromRecord(record, head.branch, now, watcherAlive);
-		} catch {
-			return undefined;
-		}
+	private subscribedFingerprint(): string {
+		return JSON.stringify(this.getSubscribedSubjects().map(ciSubjectKey).sort());
 	}
 
-	private report(error: unknown): void {
-		const message =
-			boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ??
-			"CI source unavailable";
+	private report(key: string, message: string): void {
+		const text = boundedRedactedDiagnosticText(message) ?? "CI source unavailable";
+		if (this.reported.get(key) === text) return;
+		this.reported.set(key, text);
 		try {
-			this.diagnostic(`CI events remain pending: ${message}`);
+			this.diagnostic(text);
 		} catch {
 			/* Diagnostics never consume custody. */
 		}
 	}
 
-	private armWatchers(): void {
-		const refDirectory = readCiHead(this.paths).refDirectory;
-		const directories = [...new Set([this.paths.statusDir, this.paths.gitDir, this.paths.commonDir, refDirectory])];
+	private armWatchers(refDirectory?: string): void {
+		let references = refDirectory;
+		if (references === undefined) {
+			try {
+				references = readCiHead(this.paths).refDirectory;
+			} catch {
+				// An unreadable HEAD is reported by the reconcile; its directories are still observed.
+				references = this.paths.commonDir;
+			}
+		}
+		const directories = [...new Set([this.paths.statusDir, this.paths.gitDir, this.paths.commonDir, references])];
 		const key = JSON.stringify(directories);
 		if (key === this.watchDirectories) return;
 		for (const watcher of this.watchers) closeWatcher(watcher);
@@ -225,36 +296,19 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			const watcher = watchWithErrorHandler(
 				directory,
 				(_event, filename) => {
-					if (
-						directory === this.paths.statusDir &&
-						filename &&
-						(!filename.endsWith(".json") || filename === "source-v1.json")
-					)
-						return;
-					if (
-						directory !== this.paths.statusDir &&
-						filename &&
-						(filename.includes(".lock") || filename.includes(".tmp"))
-					)
-						return;
-					if (
-						directory === this.paths.commonDir &&
-						directory !== refDirectory &&
-						filename &&
-						!["HEAD", "packed-refs", "refs"].includes(filename)
-					)
-						return;
-					this.request();
+					if (filename && !this.relevant(directory, references, filename)) return;
+					this.request(false);
 				},
 				() => {
 					this.watchDirectories = "";
 					this.report(
-						new Error("CI filesystem observation is unavailable; retained events will replay at recovery."),
+						"watch",
+						"CI filesystem observation is unavailable; retained events will replay at recovery.",
 					);
 					if (!this.watchRetry && this.abort) {
 						this.watchRetry = setTimeout(() => {
 							this.watchRetry = undefined;
-							this.request();
+							this.request(true);
 						}, FS_WATCH_RETRY_DELAY_MS);
 						this.watchRetry.unref();
 					}
@@ -264,12 +318,20 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		}
 	}
 
-	private request(): void {
-		if (!this.abort || !this.sink) return;
-		this.statusCache = undefined;
-		if (this.discoveryTimer) clearTimeout(this.discoveryTimer);
-		this.discoveryTimer = undefined;
-		this.dirty = true;
+	/** Only HEAD, branch references and status records are inputs; index and object writes are not. */
+	private relevant(directory: string, refDirectory: string, filename: string): boolean {
+		if (directory === this.paths.statusDir) return filename.endsWith(".json");
+		if (filename.includes(".lock") || filename.includes(".tmp")) return false;
+		if (directory === refDirectory) return true;
+		if (directory === this.paths.commonDir) return ["HEAD", "packed-refs", "refs"].includes(filename);
+		// A linked worktree's own git directory: only its HEAD names the checked-out revision.
+		return filename === "HEAD";
+	}
+
+	private request(forced: boolean): void {
+		if (!this.abort || !this.sink || this.dormant) return;
+		if (forced) this.forced = true;
+		else this.dirty = true;
 		for (const listener of this.listeners) {
 			try {
 				listener();
@@ -278,181 +340,241 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			}
 		}
 		if (this.draining) return;
-		const signal = this.lifetimeSignal
-			? AbortSignal.any([this.abort.signal, this.lifetimeSignal])
-			: this.abort.signal;
+		if (this.discoveryTimer) clearTimeout(this.discoveryTimer);
+		this.discoveryTimer = undefined;
+		const signal = this.signal()!;
 		const sink = this.sink;
-		this.draining = Promise.resolve()
-			.then(async () => {
-				while (this.dirty && !signal.aborted) {
-					this.dirty = false;
-					this.blocked = false;
-					try {
-						await this.reconcile(sink, signal);
-					} catch (error) {
-						if (!signal.aborted) {
-							this.blocked = true;
-							this.report(error);
-						}
-					}
-				}
-			})
-			.finally(() => {
-				this.draining = undefined;
-				if (this.dirty && !signal.aborted) this.request();
-				else if (!signal.aborted) {
-					this.discoveryTimer = setTimeout(() => {
-						this.discoveryTimer = undefined;
-						this.request();
-					}, CI_DISCOVERY_INTERVAL_MS);
-					this.discoveryTimer.unref();
-				}
-			});
+		this.draining = this.drain(sink, signal).finally(() => {
+			this.draining = undefined;
+			if (signal.aborted || this.dormant) return;
+			if (this.dirty || this.forced) this.request(this.forced);
+			else {
+				this.discoveryTimer = setTimeout(() => {
+					this.discoveryTimer = undefined;
+					this.request(true);
+				}, CI_DISCOVERY_INTERVAL_MS);
+				this.discoveryTimer.unref();
+			}
+		});
 	}
 
-	private inputs(): { headSha?: string; shas: string[]; subscribed: readonly CiSubject[]; fingerprint: string } {
+	private async drain(sink: HostEventSink, signal: AbortSignal): Promise<void> {
+		while ((this.dirty || this.forced) && !signal.aborted && !this.dormant) {
+			const forced = this.forced;
+			this.dirty = false;
+			this.forced = false;
+			// Own status writes and unrelated git activity leave the inputs unchanged: no network.
+			if (!forced && this.lastInputs !== undefined && this.fingerprint() === this.lastInputs) continue;
+			this.sinkBlocked = false;
+			try {
+				await this.reconcile(sink, signal);
+			} catch (error) {
+				if (signal.aborted) return;
+				// Any later input change or the discovery timer retries; foreground activity does not.
+				this.lastInputs = undefined;
+				if (isCiCommandMissing(error)) {
+					// Without the provider command there is no CI source; the footer still reads local records.
+					this.dormant = true;
+					return;
+				}
+				if (error instanceof CiSourceVersionError) {
+					this.dormant = true;
+					this.report("source", `CI event source inactive: ${errorText(error)}`);
+					return;
+				}
+				if (error instanceof HostEventError && error.code === "runtime_replacing") this.sinkBlocked = true;
+				this.report("reconcile", `CI events remain pending: ${errorText(error)}`);
+			}
+		}
+	}
+
+	private fingerprint(): string | undefined {
+		try {
+			return this.inputs().fingerprint;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private inputs(): CiLocalInputs {
 		const head = readCiHead(this.paths);
-		const shas = [
+		const records = readCiStatusRecords(this.paths.statusDir);
+		const unsettled = [
 			...new Set(
-				readCiStatusRecords(this.paths.statusDir).flatMap((record) =>
-					record.sha && /^(?:[a-f\d]{40}|[a-f\d]{64})$/.test(record.sha) ? [record.sha] : [],
+				records.flatMap((record) =>
+					(record.state === "pending" || record.state === "watch_failed") &&
+					record.sha &&
+					COMMIT_SHA.test(record.sha)
+						? [record.sha]
+						: [],
 				),
 			),
 		].sort();
-		if (head.sha && !shas.includes(head.sha)) shas.push(head.sha);
 		const subscribed = this.getSubscribedSubjects().map((subject) => ({ ...subject }));
-		return {
-			headSha: head.sha,
-			shas,
-			subscribed,
-			fingerprint: JSON.stringify([head.sha, shas, subscribed.map(ciSubjectKey).sort()]),
+		const local = {
+			...(head.sha ? { headSha: head.sha } : {}),
+			...(head.branch ? { headBranch: head.branch } : {}),
+			refDirectory: head.refDirectory,
 		};
+		return { ...local, records, unsettled, subscribed, fingerprint: inputFingerprint(local, records, subscribed) };
 	}
 
 	private async reconcile(sink: HostEventSink, signal: AbortSignal): Promise<void> {
-		const activationId = this.activationId;
-		if (!activationId) throw new Error("CI event source is not active.");
-		// Fence the preceding actionable seal before any fallible discovery or network read.
-		const previous = this.store.snapshot();
-		const previousConsumer = previous.consumers.find((consumer) => consumer.id === sink.consumerId);
-		let start = previousConsumer?.subjects.length
-			? this.store.begin(
-					sink.consumerId,
-					activationId,
-					previousConsumer.watchedSubjects,
-					previousConsumer.rootSubjects,
-				)
-			: undefined;
-		if (start) {
-			await this.admitStart(sink, activationId, start, signal);
-		}
-		this.armWatchers();
 		const inputs = this.inputs();
+		this.armWatchers(inputs.refDirectory);
+		const activationId = await this.activate(sink, signal);
 		const repository = await this.provider.repository(signal);
 		signal.throwIfAborted();
-		const subjects: CiSubject[] = [];
-		for (const headSha of inputs.shas) {
-			const subject: CiSubject = {
-				host: repository.host,
-				repositoryId: repository.repositoryId,
-				workflowId: repository.workflowId,
-				headSha,
-			};
-			if (!subjects.some((existing) => ciSubjectKey(existing) === ciSubjectKey(subject))) subjects.push(subject);
+		let snapshot = this.store.snapshot();
+		let consumer = this.consumer(snapshot, sink.consumerId, activationId);
+		if (!consumer) return;
+		const scope = this.scope(repository, inputs, snapshot, consumer.acknowledged);
+		if (!scope.length) {
+			// No revision to observe (unborn HEAD, nothing subscribed or unsettled) and nothing retained.
+			this.monitor?.reconcile([]);
+			this.lastInputs = inputs.fingerprint;
+			return;
 		}
-		for (const subject of inputs.subscribed) {
-			if (
-				subject.host !== repository.host ||
-				subject.repositoryId !== repository.repositoryId ||
-				subject.workflowId !== repository.workflowId
-			)
-				continue;
-			if (!subjects.some((existing) => ciSubjectKey(existing) === ciSubjectKey(subject))) subjects.push(subject);
-		}
-		if (!subjects.length) return;
-		const rootSubjects = subjects.filter((subject) => subject.headSha === inputs.headSha);
+		const roots = inputs.headSha ? [this.subjectOf(repository, inputs.headSha)] : [];
 		if (
-			!start ||
-			JSON.stringify(start.registration.subjects.map(ciSubjectKey).sort()) !==
-				JSON.stringify(subjects.map(ciSubjectKey).sort()) ||
-			JSON.stringify(start.registration.rootSubjects.map(ciSubjectKey).sort()) !==
-				JSON.stringify(rootSubjects.map(ciSubjectKey).sort())
-		) {
-			start = this.store.begin(sink.consumerId, activationId, subjects, rootSubjects);
-			await this.admitStart(sink, activationId, start, signal);
-		}
-		this.store.watchSubjects(sink.consumerId, activationId, subjects);
-		const collections: CiProviderCollection[] = [];
-		for (const subject of start.registration.subjects) {
-			const collection = await this.provider.collect(
-				subject.headSha,
-				signal,
-				this.store.retainedAttempts(),
-				this.store.retiredRunNumbers(subject),
-			);
-			if (ciSubjectKey(collection.subject) !== ciSubjectKey(subject))
-				throw new Error("CI provider returned a different subject.");
-			this.store.retain(collection.events);
-			collections.push(collection);
+			!this.opened ||
+			consumer.pendingStart ||
+			consumer.pendingGap ||
+			!sameSubjects(consumer.subjects, scope) ||
+			!sameSubjects(consumer.rootSubjects, roots)
+		)
+			await this.open(sink, activationId, scope, roots, signal);
+
+		// Collection is isolated per subject: one failing revision cannot discard another's evidence.
+		const retainedAttempts = ciSourceRetainedAttempts(snapshot);
+		const observations: CiCurrentObservation[] = [];
+		const events = new Map<string, CiAttemptTerminalEvent>();
+		const unresolved = new Set<string>();
+		const failures: string[] = [];
+		for (const subject of scope) {
+			if (!this.ownWorkflow(repository, subject)) continue;
+			const key = ciSubjectKey(subject);
+			try {
+				const collection = await this.provider.collect(
+					subject.headSha,
+					signal,
+					retainedAttempts,
+					ciSourceRetiredRuns(snapshot, subject),
+				);
+				if (ciSubjectKey(collection.subject) !== key) throw new Error("CI provider returned a different subject.");
+				this.store.retain(collection.events);
+				for (const event of collection.events) events.set(event.eventId, event);
+				if (collection.current) observations.push(collection.current);
+				if (collection.predatesRetention)
+					this.report(
+						`retention:${key}`,
+						`CI history of ${subject.headSha.slice(0, 9)} predates the retained replay horizon; its current result is not observed.`,
+					);
+			} catch (error) {
+				signal.throwIfAborted();
+				if (isCiCommandMissing(error)) throw error;
+				unresolved.add(key);
+				failures.push(`${subject.headSha.slice(0, 9)}: ${errorText(error)}`);
+			}
 		}
 		signal.throwIfAborted();
-		if (this.inputs().fingerprint !== inputs.fingerprint) {
-			this.dirty = true;
+		this.monitor?.reconcile(observations, unresolved);
+		if (failures.length) throw new Error(`CI collection failed for ${failures.join("; ")}`);
+		if (this.fingerprint() !== inputs.fingerprint) {
+			this.forced = true;
 			return;
 		}
-		const snapshot = this.store.snapshot();
+		observations.sort((a, b) => ciSubjectKey(a.subject).localeCompare(ciSubjectKey(b.subject)));
+		const observed = JSON.stringify(observations);
+		snapshot = this.store.snapshot();
+		consumer = this.consumer(snapshot, sink.consumerId, activationId);
+		if (!consumer) return;
+		let pending = snapshot.events.filter((event) => event.sourceSequence > consumer!.acknowledged);
 		if (
-			JSON.stringify(snapshot.subjects.map(ciSubjectKey).sort()) !==
-			JSON.stringify(start.registration.subjects.map(ciSubjectKey).sort())
+			this.sealed &&
+			this.sealed.generation === consumer.generation &&
+			this.sealed.observed === observed &&
+			pending.length === 0
 		) {
-			this.dirty = true;
+			await this.settle(sink, snapshot, inputs, observations, events, signal);
 			return;
 		}
-		const consumer = snapshot.consumers.find((entry) => entry.id === sink.consumerId)!;
-		if (consumer.generation !== start.catchUp.generation) throw new Error("CI source consumer generation changed.");
-		const pending = snapshot.events.filter((event) => event.sourceSequence > consumer.acknowledged);
-		for (let offset = 0; offset < pending.length; offset += 32) {
-			for (const event of pending.slice(offset, offset + 32)) {
+		if (this.sealed) {
+			// Fence the preceding seal only now that a change was observed.
+			await this.open(sink, activationId, scope, roots, signal);
+			snapshot = this.store.snapshot();
+			consumer = this.consumer(snapshot, sink.consumerId, activationId);
+			if (!consumer) return;
+			pending = snapshot.events.filter((event) => event.sourceSequence > consumer!.acknowledged);
+		}
+		const registered = new Set(consumer.subjects.map(ciSubjectKey));
+		if (pending.some((event) => !registered.has(ciSubjectKey(ciEventSubject(event.event))))) {
+			// Another writer retained a subject after the scope was read: widen it first.
+			this.forced = true;
+			return;
+		}
+		const generation = consumer.generation;
+		const catchUp = {
+			sourceId: snapshot.sourceId,
+			sourceEpoch: snapshot.sourceEpoch,
+			scopeVersion: consumer.scopeVersion,
+			generation,
+		};
+		for (let offset = 0; offset < pending.length; offset += ACCEPT_BATCH) {
+			for (const event of pending.slice(offset, offset + ACCEPT_BATCH)) {
 				const receipt = await sink.accept(event, signal);
-				this.store.acknowledge(sink.consumerId, activationId, receipt, start.catchUp.generation);
+				this.store.acknowledge(sink.consumerId, activationId, receipt, generation);
 			}
 			signal.throwIfAborted();
 		}
-		if (this.inputs().fingerprint !== inputs.fingerprint) {
-			this.dirty = true;
+		if (this.fingerprint() !== inputs.fingerprint) {
+			this.forced = true;
 			return;
 		}
+		const floor = consumer.replayFloor;
 		await sink.seal(
 			{
-				...start.catchUp,
+				...catchUp,
 				throughSequence: snapshot.nextSequence - 1,
-				observations: collections.flatMap((collection) => (collection.current ? [collection.current] : [])),
+				observations,
 				snapshots: snapshot.runs.flatMap((run) =>
-					run.latest.sourceSequence < consumer.replayFloor &&
-					collections.some((collection) => collection.current?.eventId === run.latest.event.eventId)
+					run.latest.sourceSequence < floor &&
+					observations.some((observation) => observation.eventId === run.latest.event.eventId)
 						? [run.latest]
 						: [],
 				),
 			},
 			signal,
 		);
-		this.store.recordSeal(
-			sink.consumerId,
-			activationId,
-			start.catchUp.generation,
-			collections.flatMap((collection) => (collection.current ? [collection.current] : [])),
-		);
-		this.monitor?.reconcile(collections.flatMap((collection) => (collection.current ? [collection.current] : [])));
+		this.store.recordSeal(sink.consumerId, activationId, generation, observations);
+		this.sealed = { generation, observed };
+		await this.settle(sink, snapshot, inputs, observations, events, signal);
+	}
+
+	/** Retirement, status write-back and the input baseline after a reconcile that completed. */
+	private async settle(
+		sink: HostEventSink,
+		snapshot: CiSourceSnapshot,
+		inputs: CiLocalInputs,
+		observations: readonly CiCurrentObservation[],
+		events: ReadonlyMap<string, CiAttemptTerminalEvent>,
+		signal: AbortSignal,
+	): Promise<void> {
 		const throughSequence = this.store.retireAcknowledged();
-		await sink.retireThrough(
-			{ sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, throughSequence },
-			signal,
-		);
-		for (const record of readCiStatusRecords(this.paths.statusDir)) {
-			const current = collections.find((collection) => collection.subject.headSha === record.sha)?.current;
+		if (throughSequence !== this.retiredSent) {
+			await sink.retireThrough(
+				{ sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, throughSequence },
+				signal,
+			);
+			this.retiredSent = throughSequence;
+		}
+		const written = new Map<string, CiStatusRecord>();
+		for (const record of inputs.records) {
+			const current = observations.find((observation) => observation.subject.headSha === record.sha);
 			if (
 				!record.branch ||
-				!current ||
+				!record.sha ||
+				!current?.eventId ||
 				current.status !== "completed" ||
 				(record.state === "completed" &&
 					record.runId === current.runId &&
@@ -460,58 +582,167 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 					record.conclusion === current.conclusion)
 			)
 				continue;
-			const event = collections
-				.flatMap((collection) => collection.events)
-				.find((event) => event.eventId === current.eventId);
-			writeCiStatus(this.paths, record.branch, {
-				...record,
-				state: "completed",
-				conclusion: current.conclusion,
-				runId: current.runId,
-				runAttempt: current.runAttempt,
-				runNumber: current.runNumber,
-				...(event ? { url: event.runUrl } : {}),
-				completedAt: new Date().toISOString(),
-				reconciledBy: "pi",
-			});
+			const event =
+				events.get(current.eventId) ??
+				snapshot.runs.find((run) => run.latest.event.eventId === current.eventId)?.latest.event;
+			if (!event) continue;
+			try {
+				const status = await completedCiStatus(
+					this.provider,
+					{ sha: record.sha, branch: record.branch },
+					current,
+					event,
+					signal,
+				);
+				// Compare-and-set: a record another writer moved to a newer revision is never overwritten.
+				const next = { ...status, reconciledBy: "pi" };
+				writeCiStatus(this.paths, record.branch, next, record.sha);
+				written.set(record.branch, next);
+			} catch (error) {
+				signal.throwIfAborted();
+				this.report(`status:${record.branch}`, `CI status record not updated: ${errorText(error)}`);
+			}
 		}
+		// The baseline is this reconcile's inputs plus its own record writes: those do not trigger another
+		// reconcile, while any other change made meanwhile (or a compare-and-set skip) does.
+		this.lastInputs = inputFingerprint(
+			inputs,
+			inputs.records.map((record) => (record.branch ? (written.get(record.branch) ?? record) : record)),
+			inputs.subscribed,
+		);
+		if (this.fingerprint() !== this.lastInputs) this.forced = true;
+		// Recovered failures report again if they recur; standing notices stay reported once.
+		for (const key of [...this.reported.keys()])
+			if (!key.startsWith("retention:") && key !== "scope") this.reported.delete(key);
 	}
 
-	private async admitStart(
+	private subjectOf(repository: CiRepository, headSha: string): CiSubject {
+		return {
+			host: repository.host,
+			repositoryId: repository.repositoryId,
+			workflowId: repository.workflowId,
+			headSha,
+		};
+	}
+
+	private ownWorkflow(repository: CiRepository, subject: CiSubject): boolean {
+		return (
+			subject.host === repository.host &&
+			subject.repositoryId === repository.repositoryId &&
+			subject.workflowId === repository.workflowId
+		);
+	}
+
+	/**
+	 * HEAD, unacknowledged retained events, live subscriptions and unsettled watcher records.
+	 * Settled historical records are never re-collected.
+	 */
+	private scope(
+		repository: CiRepository,
+		inputs: CiLocalInputs,
+		snapshot: CiSourceSnapshot,
+		acknowledged: number,
+	): CiSubject[] {
+		const scope: CiSubject[] = [];
+		if (inputs.headSha) addSubject(scope, this.subjectOf(repository, inputs.headSha));
+		for (const event of snapshot.events)
+			if (event.sourceSequence > acknowledged) addSubject(scope, ciEventSubject(event.event));
+		const required = scope.length;
+		for (const subject of inputs.subscribed) if (this.ownWorkflow(repository, subject)) addSubject(scope, subject);
+		for (const headSha of inputs.unsettled) addSubject(scope, this.subjectOf(repository, headSha));
+		if (scope.length <= MAX_HOST_EVENT_SUBJECTS) {
+			this.reported.delete("scope");
+			return scope;
+		}
+		if (required > MAX_HOST_EVENT_SUBJECTS)
+			throw new Error("Retained CI events exceed the registered subject bound; they remain retained.");
+		this.report(
+			"scope",
+			`CI events observe ${MAX_HOST_EVENT_SUBJECTS} of ${scope.length} subscribed or unsettled revisions; the rest wait for capacity.`,
+		);
+		return scope.slice(0, MAX_HOST_EVENT_SUBJECTS);
+	}
+
+	/** Claims custody on first use; `undefined` when another writer replaced it (re-claimed next round). */
+	private async activate(sink: HostEventSink, signal: AbortSignal): Promise<string> {
+		if (this.activationId) return this.activationId;
+		const identity = this.store.identity();
+		const checkpoint = await sink.checkpoint(identity.sourceId, signal);
+		signal.throwIfAborted();
+		const activationId = randomUUID();
+		this.store.claim(sink.consumerId, activationId, checkpoint);
+		this.activationId = activationId;
+		this.sourceId = identity.sourceId;
+		this.claimed = { consumerId: sink.consumerId, activationId };
+		this.opened = false;
+		this.sealed = undefined;
+		this.retiredSent = undefined;
+		return activationId;
+	}
+
+	private consumer(
+		snapshot: CiSourceSnapshot,
+		consumerId: string,
+		activationId: string,
+	): CiSourceSnapshot["consumers"][number] | undefined {
+		const consumer = snapshot.consumers.find((entry) => entry.id === consumerId);
+		if (consumer?.activation?.id === activationId && snapshot.sourceId === this.sourceId) return consumer;
+		// A quarantined journal or an expired claim: activate again against the current source.
+		this.report("custody", "CI source custody was replaced; this session registers the current source.");
+		const previous = this.sourceId;
+		this.activationId = undefined;
+		this.claimed = undefined;
+		this.sourceId = undefined;
+		this.forced = true;
+		if (previous && previous !== snapshot.sourceId)
+			void this.sink
+				?.deactivate(previous)
+				.catch((error: unknown) => this.report("custody", `CI source deactivation failed: ${errorText(error)}`));
+		return undefined;
+	}
+
+	private async open(
 		sink: HostEventSink,
 		activationId: string,
-		start: ReturnType<CiSourceStore["begin"]>,
+		scope: readonly CiSubject[],
+		roots: readonly CiSubject[],
 		signal: AbortSignal,
 	): Promise<void> {
-		await sink.register(start.registration, signal);
-		await sink.beginCatchUp(start.catchUp, signal);
-		const gap = this.store.snapshot().consumers.find((consumer) => consumer.id === sink.consumerId)?.pendingGap;
-		if (gap) {
-			await sink.resumeGap({ ...start.catchUp, ...gap, reason: "consumer_inactive" }, signal);
-			this.store.confirmGap(sink.consumerId, activationId, gap);
+		for (let round = 0; ; round++) {
+			const start = this.store.begin(sink.consumerId, activationId, scope, roots);
+			await sink.register(start.registration, signal);
+			await sink.beginCatchUp(start.catchUp, signal);
+			const gap = this.store.snapshot().consumers.find((consumer) => consumer.id === sink.consumerId)?.pendingGap;
+			if (gap) {
+				await sink.resumeGap({ ...start.catchUp, ...gap, reason: "consumer_inactive" }, signal);
+				this.store.confirmGap(sink.consumerId, activationId, gap);
+			}
+			this.store.confirmBegin(sink.consumerId, activationId, start);
+			this.opened = true;
+			this.sealed = undefined;
+			// A replayed pending handshake may carry an older scope; begin once more with the current one.
+			if (sameSubjects(start.registration.subjects, scope) && sameSubjects(start.registration.rootSubjects, roots))
+				return;
+			if (round > 0) throw new Error("CI source scope handshake did not converge.");
 		}
-		this.store.confirmBegin(sink.consumerId, activationId, start);
 	}
 }
 
-/** Non-Git and repositories without the configured workflow remain ordinary usable sessions. */
+/**
+ * Non-Git directories and repositories without the configured workflow remain ordinary sessions:
+ * no source, no diagnostic. Repository resolution and network discovery happen in the reconcile.
+ */
 export async function createCiHostRuntime(options: CiHostRuntimeOptions): Promise<CiHostRuntime | undefined> {
-	try {
-		const paths = options.paths ?? resolveCiGitPaths(options.cwd);
-		const provider = options.provider ?? new GithubActionsCiProvider(createCiCommandPort(paths.root));
-		await provider.repository(options.signal ?? new AbortController().signal);
-		return new CiHostEventSource(
-			paths,
-			provider,
-			options.store ?? new CiSourceStore(paths.statusDir),
-			options.onDiagnostic,
-			options,
-		);
-	} catch (error) {
-		if (options.signal?.aborted) throw error;
-		const message =
-			boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ?? "unavailable";
-		options.onDiagnostic(`CI event source inactive: ${message}`);
-		return undefined;
-	}
+	const signal = options.signal ?? new AbortController().signal;
+	const paths = options.paths ?? (await resolveCiGitPathsAsync(options.cwd, signal));
+	signal.throwIfAborted();
+	if (!paths) return undefined;
+	if (!options.provider && !existsSync(join(paths.root, ".github", "workflows", CI_WORKFLOW))) return undefined;
+	return new CiHostEventSource(
+		paths,
+		options.provider ?? new GithubActionsCiProvider(createCiCommandPort(paths.root)),
+		options.store ?? new CiSourceStore(paths.statusDir, { onDiagnostic: options.onDiagnostic }),
+		options.onDiagnostic,
+		options,
+	);
 }

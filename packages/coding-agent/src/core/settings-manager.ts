@@ -3560,6 +3560,7 @@ export class SettingsManager {
 				typeof configured.preferences === "string"
 					? configured.preferences.trim().slice(0, MAX_PROACTIVITY_PREFERENCES_CHARS)
 					: "",
+			ciEvents: typeof configured.ciEvents === "boolean" ? configured.ciEvents : true,
 		};
 		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
 			resolved.model = configured.model;

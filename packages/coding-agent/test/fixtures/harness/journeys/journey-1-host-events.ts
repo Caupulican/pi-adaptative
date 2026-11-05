@@ -12,7 +12,12 @@ import { readHostEventPage } from "../../../../src/core/events/host-event-contro
 import { createCiHostRuntime } from "../../../../src/host/ci/ci-host-event-source.ts";
 import type { CiProvider, CiProviderCollection, CiRepository } from "../../../../src/host/ci/ci-provider.ts";
 import { CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
-import type { CiGitPaths } from "../../../../src/host/ci/ci-status-record.ts";
+import {
+	type CiGitPaths,
+	ciStatusPath,
+	readCiStatusFile,
+	writeCiStatus,
+} from "../../../../src/host/ci/ci-status-record.ts";
 import { parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
@@ -117,8 +122,10 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			collections++;
 			return collection;
 		},
-		failedJobs: async () => {
-			throw new Error("Event collection must not fetch optional job logs.");
+		// Event collection never reads job details; only the display record of a red attempt does.
+		failedJobs: async (identity) => {
+			expect(identity).toMatchObject({ runId: 701, runAttempt: 4 });
+			return ["harness job"];
 		},
 		waitForRun: async (runId, signal) => {
 			expect(runId).toBe(701);
@@ -367,14 +374,26 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(success.eventId),
 			});
 			const freshCorrection = awaitParent(2, fresh.sessionManager);
-			world.io.writeFileSync(headPath, `${sha}\n`);
+			// The pre-push watcher records the finished run; that local write, not an unchanged HEAD, triggers discovery.
+			writeCiStatus(paths, "main", {
+				sha,
+				branch: "main",
+				workflow: "ci.yml",
+				state: "completed",
+				conclusion: "success",
+				runId: 701,
+				runAttempt: 3,
+				runNumber: 1,
+			});
 			await withDeadline(
 				world.trace,
 				"new session retires a result while the original consumer is offline",
 				freshCorrection,
 			);
 			await freshSource.source.stop();
-			expect(sourceStore.snapshot().retiredThrough).toBeGreaterThan(accepted.envelope.sourceSequence);
+			expect(sourceStore.snapshot().retiredThrough, "the offline consumer's unconsumed custody stays retained").toBe(
+				accepted.envelope.sourceSequence,
+			);
 		} finally {
 			await freshSource.source.stop();
 			await freshBinding.close();
@@ -405,14 +424,15 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		expect(collections, "source writes and unrelated runtime commits cannot drive a discovery loop").toBe(7);
 		expect(watchedRuns, "one pending run starts one physical monitor despite repeated source reconciliation").toBe(1);
 		expect(diagnostics).toEqual([handoffFailure]);
-		const recoveredSource =
-			owner.session.backgroundLanes.getTaskRuntimeSnapshot()!.eventSources[accepted.envelope.sourceId];
-		expect(recoveredSource.lastReplayGap, "unavailable offline history is recorded explicitly").toMatchObject({
-			afterSequence: accepted.envelope.sourceSequence,
-			throughSequence: accepted.envelope.sourceSequence + 1,
-			reason: "consumer_inactive",
-		});
-		expect(recoveredSource.replayFloor).toBe(accepted.envelope.sourceSequence + 2);
+		const recovered = owner.session.backgroundLanes.getTaskRuntimeSnapshot()!;
+		const recoveredSource = recovered.eventSources[accepted.envelope.sourceId];
+		expect(
+			recovered.hostEvents[success.eventId].receipt.consumerId,
+			"the parked consumer receives the offline result from its own retained custody",
+		).toBe(accepted.receipt.consumerId);
+		expect(recovered.hostEvents[success.eventId].envelope.sourceSequence).toBe(accepted.envelope.sourceSequence + 1);
+		expect(recoveredSource.lastReplayGap, "nothing was retired while the consumer was offline").toBeUndefined();
+		expect(recoveredSource.replayFloor).toBe(1);
 		expect(Object.values(owner.session.backgroundLanes.getTaskRuntimeSnapshot()!.tasks)).toEqual([]);
 		const workerFailure = terminal(4, "failure");
 		collection = {
@@ -427,6 +447,18 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			provider,
 			store: sourceStore,
 		});
+		expect(
+			readCiStatusFile(ciStatusPath(paths.statusDir, "main")),
+			"the display record is rebuilt from the red attempt alone",
+		).toMatchObject({
+			sha,
+			state: "completed",
+			conclusion: "failure",
+			runAttempt: 4,
+			failedJobs: ["harness job"],
+			reconciledBy: "pi",
+		});
+		expect(readCiStatusFile(ciStatusPath(paths.statusDir, "main"))).not.toHaveProperty("error");
 	} finally {
 		expectedSeal?.release.release();
 		abort.abort();

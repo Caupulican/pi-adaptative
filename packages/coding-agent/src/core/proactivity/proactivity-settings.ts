@@ -16,6 +16,7 @@ export function withProactivityChange(
 		maxNotesPerRun: settings.maxNotesPerRun,
 		delivery: settings.delivery,
 		preferences: settings.preferences,
+		ciEvents: settings.ciEvents,
 		...(settings.model === undefined ? {} : { model: settings.model }),
 		...change,
 	};

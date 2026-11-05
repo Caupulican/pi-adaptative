@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getStableSelfLaunchTarget } from "../../core/process-matrix/self-launch-target.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
-import { CiSourceStore } from "./ci-source-store.ts";
+import { CiSourceStore, ciSourceRetainedAttempts, ciSourceRetiredRuns } from "./ci-source-store.ts";
 import {
 	CI_WORKFLOW,
 	type CiGitPaths,
 	type CiStatusRecord,
 	ciStatusPath,
+	completedCiStatus,
 	describeStatus,
 	readCiHead,
 	readCiStatusFile,
@@ -44,45 +45,34 @@ async function collectStatus(
 	signal: AbortSignal,
 ): Promise<CiStatusRecord | undefined> {
 	const provider = new GithubActionsCiProvider(createCiCommandPort(paths.root));
-	const store = new CiSourceStore(paths.statusDir);
+	const store = new CiSourceStore(paths.statusDir, {
+		onDiagnostic: (message) => process.stderr.write(`ci-status: ${message}\n`),
+	});
 	const repository = await provider.repository(signal);
+	const retained = store.snapshot();
 	const collection = await provider.collect(
 		sha,
 		signal,
-		store.retainedAttempts(),
-		store.retiredRunNumbers(repository),
+		ciSourceRetainedAttempts(retained),
+		ciSourceRetiredRuns(retained, repository),
 	);
 	store.retain(collection.events);
 	const current = collection.current;
 	if (!current) return undefined;
-	const base = {
-		sha,
-		branch,
-		workflow: CI_WORKFLOW,
-		runId: current.runId,
-		runAttempt: current.runAttempt,
-		runNumber: current.runNumber,
-	};
 	if (current.status !== "completed")
-		return { ...base, state: "pending", pid: process.pid, startedAt: new Date().toISOString() };
+		return {
+			sha,
+			branch,
+			workflow: CI_WORKFLOW,
+			runId: current.runId,
+			runAttempt: current.runAttempt,
+			runNumber: current.runNumber,
+			state: "pending",
+			pid: process.pid,
+			startedAt: new Date().toISOString(),
+		};
 	const event = collection.events.find((entry) => entry.eventId === current.eventId)!;
-	let failedJobs: readonly string[] = [];
-	let error: string | undefined;
-	try {
-		failedJobs = await provider.failedJobs(event.identity, signal);
-	} catch (failure) {
-		signal.throwIfAborted();
-		error = `CI outcome retained; job detail unavailable: ${boundedRedactedDiagnosticText(failure instanceof Error ? failure.message : String(failure)) ?? "unavailable"}`;
-	}
-	return {
-		...base,
-		state: "completed",
-		conclusion: current.conclusion,
-		url: event.runUrl,
-		failedJobs,
-		...(error ? { error } : {}),
-		completedAt: new Date().toISOString(),
-	};
+	return completedCiStatus(provider, { sha, branch }, current, event, signal);
 }
 
 export async function watch(sha: string, branch: string, root = process.cwd()): Promise<void> {
@@ -97,10 +87,11 @@ export async function watch(sha: string, branch: string, root = process.cwd()): 
 			const status = await collectStatus(paths, sha, branch, signal);
 			if (!status) {
 				if (Date.now() - started > REGISTRATION_GRACE_MS) {
+					// A rejected push or an untriggered workflow has no CI outcome: unknown, never red.
 					writeCiStatus(paths, branch, {
 						...base,
-						state: "completed",
-						conclusion: "missing",
+						state: "no_run",
+						error: `no ${CI_WORKFLOW} run appeared for this revision`,
 						completedAt: new Date().toISOString(),
 					});
 					return;

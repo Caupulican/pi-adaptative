@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
 	CI_TERMINAL_CONCLUSIONS,
 	type CiAttemptIdentity,
@@ -38,15 +38,22 @@ function text(value: unknown, limit = 2048): string {
 	return value;
 }
 
+/** A command that could not start is reported as unavailable, not as a CI outcome. */
+export function isCiCommandMissing(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
 export function createCiCommandPort(cwd: string): CiCommandPort {
 	return {
 		run: (executable, args, signal) =>
 			new Promise<string>((resolve, reject) => {
 				signal.throwIfAborted();
+				let spawned = false;
 				let closed = false;
 				let outcome: { error: Error | null; stdout: string } | undefined;
 				const finish = () => {
-					if (!closed || !outcome) return;
+					// A process that never spawned owns no pipes and emits no close.
+					if (!outcome || (spawned && !closed)) return;
 					if (signal.aborted) reject(signal.reason);
 					else if (outcome.error) reject(outcome.error);
 					else resolve(outcome.stdout);
@@ -54,24 +61,57 @@ export function createCiCommandPort(cwd: string): CiCommandPort {
 				const child = execFile(
 					executable,
 					[...args],
-					{
-						cwd,
-						encoding: "utf8",
-						windowsHide: true,
-						maxBuffer: 4 * 1024 * 1024,
-						...(args[0] === "run" && args[1] === "watch" ? {} : { timeout: 60_000 }),
-					},
+					{ cwd, encoding: "utf8", windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 },
 					(error, stdout) => {
 						outcome = { error, stdout };
 						finish();
 					},
 				);
+				child.once("spawn", () => {
+					spawned = true;
+				});
 				// An execFile error callback can precede physical close. Retain command
 				// capacity and source custody until the process and its pipes have ended.
 				child.once("close", () => {
 					closed = true;
 					finish();
 				});
+				bindChildProcessAbort(child, signal);
+			}),
+		wait: (executable, args, signal) =>
+			new Promise<void>((resolve, reject) => {
+				signal.throwIfAborted();
+				let spawned = false;
+				let settled = false;
+				let failure: Error | undefined;
+				let stderr = "";
+				const settle = (code: number | null, signalCode: NodeJS.Signals | null) => {
+					if (settled) return;
+					settled = true;
+					if (signal.aborted) reject(signal.reason);
+					else if (failure) reject(failure);
+					else if (code === 0) resolve();
+					else
+						reject(
+							new Error(
+								`${executable} ${args.slice(0, 2).join(" ")} ended with ${code ?? signalCode}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+							),
+						);
+				};
+				// Output is never buffered: a long watch cannot exhaust memory or a buffer bound.
+				const child = spawn(executable, [...args], { cwd, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+				child.stderr?.setEncoding("utf8");
+				child.stderr?.on("data", (chunk: string) => {
+					stderr = `${stderr}${chunk}`.slice(-2048);
+				});
+				child.once("spawn", () => {
+					spawned = true;
+				});
+				child.once("error", (error) => {
+					failure = error;
+					if (!spawned) settle(null, null);
+				});
+				child.once("close", (code, signalCode) => settle(code, signalCode));
 				bindChildProcessAbort(child, signal);
 			}),
 	};
@@ -163,13 +203,10 @@ export class GithubActionsCiProvider implements CiProvider {
 		const events: CiAttemptTerminalEvent[] = [];
 		const retired = (runNumber: number): boolean =>
 			retiredRuns.some((range) => runNumber >= range.from && runNumber <= range.through);
-		if (
-			listing.workflow_runs.length &&
-			listing.workflow_runs.every((value) => retired(positive(record(value).run_number)))
-		)
-			throw new Error(
-				"Current CI run is outside the retained replay horizon; historical custody cannot be recreated.",
-			);
+		// Only dropped custody is retired. When the newest run is among it, no current attempt can be
+		// proven: the subject is reported as predating retention instead of selecting an older run.
+		const newest = Math.max(0, ...listing.workflow_runs.map((value) => positive(record(value).run_number)));
+		const predatesRetention = newest > 0 && retired(newest);
 		let current: CiCurrentObservation | undefined;
 		for (const value of listing.workflow_runs) {
 			const listed = record(value);
@@ -258,6 +295,7 @@ export class GithubActionsCiProvider implements CiProvider {
 			frontier(after.workflow_runs) !== frontier(listing.workflow_runs)
 		)
 			throw new CiSnapshotChangedError("CI run frontier changed during collection; catch-up remains pending.");
+		if (predatesRetention) return { subject, events, predatesRetention: true };
 		return { subject, events, ...(current ? { current } : {}) };
 	}
 
@@ -279,6 +317,6 @@ export class GithubActionsCiProvider implements CiProvider {
 	}
 
 	async waitForRun(runId: number, signal: AbortSignal): Promise<void> {
-		await this.port.run("gh", ["run", "watch", String(runId), "--interval", "30"], signal);
+		await this.port.wait("gh", ["run", "watch", String(runId), "--interval", "30"], signal);
 	}
 }

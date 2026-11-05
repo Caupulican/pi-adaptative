@@ -6,11 +6,14 @@ import {
 import type { CiProvider } from "./ci-provider.ts";
 
 const MAX_ACTIVE_RUN_WATCHERS = 4;
+/** A watch that ended while its run still looks pending is re-armed after this delay, never in a tight loop. */
+export const CI_RUN_WATCH_RETRY_MS = 30_000;
 
 interface WatchedRun {
 	readonly observation: CiCurrentObservation;
 	started: boolean;
 	abort?: AbortController;
+	retry?: ReturnType<typeof setTimeout>;
 }
 
 /** Observed pending runs are the restart handoff; process completion requests a fresh authoritative seal. */
@@ -30,7 +33,8 @@ export class CiRunMonitor {
 		this.onFailure = onFailure;
 	}
 
-	reconcile(observations: readonly CiCurrentObservation[]): void {
+	/** Watches exactly the pending observations; runs of subjects in `unresolved` keep their watch. */
+	reconcile(observations: readonly CiCurrentObservation[], unresolved: ReadonlySet<string> = new Set()): void {
 		if (this.stopped || this.signal.aborted) return;
 		if (observations.length > MAX_HOST_EVENT_SUBJECTS) throw new Error("CI run monitor subject capacity reached.");
 		const desired = new Map(
@@ -42,9 +46,8 @@ export class CiRunMonitor {
 				]),
 		);
 		for (const [key, watched] of this.pending) {
-			if (desired.has(key)) continue;
-			watched.abort?.abort(new Error("CI run is no longer pending in the watched scope."));
-			this.pending.delete(key);
+			if (desired.has(key) || unresolved.has(ciSubjectKey(watched.observation.subject))) continue;
+			this.discard(key, watched, "CI run is no longer pending in the watched scope.");
 		}
 		for (const [key, observation] of desired) {
 			if (!this.pending.has(key)) this.pending.set(key, { observation, started: false });
@@ -54,19 +57,26 @@ export class CiRunMonitor {
 
 	async stop(): Promise<void> {
 		this.stopped = true;
-		for (const watched of this.pending.values()) watched.abort?.abort(new Error("CI run monitor stopped."));
-		this.pending.clear();
+		for (const [key, watched] of this.pending) this.discard(key, watched, "CI run monitor stopped.");
 		await Promise.allSettled([...this.running]);
+	}
+
+	private discard(key: string, watched: WatchedRun, reason: string): void {
+		watched.abort?.abort(new Error(reason));
+		if (watched.retry) clearTimeout(watched.retry);
+		watched.retry = undefined;
+		this.pending.delete(key);
 	}
 
 	private pump(): void {
 		if (this.stopped || this.signal.aborted) return;
-		for (const watched of this.pending.values()) {
+		for (const [key, watched] of this.pending) {
 			if (this.running.size >= MAX_ACTIVE_RUN_WATCHERS) break;
-			if (watched.started) continue;
+			if (watched.started || watched.retry) continue;
 			watched.started = true;
 			watched.abort = new AbortController();
 			const signal = AbortSignal.any([this.signal, watched.abort.signal]);
+			let completed = false;
 			const work = Promise.resolve()
 				.then(() => {
 					signal.throwIfAborted();
@@ -74,13 +84,10 @@ export class CiRunMonitor {
 				})
 				.then(
 					() => {
-						if (!signal.aborted) this.onTerminal();
+						completed = true;
 					},
 					(error: unknown) => {
-						if (!signal.aborted) {
-							this.onFailure(error);
-							this.onTerminal();
-						}
+						if (!signal.aborted) this.onFailure(error);
 					},
 				)
 				.catch((error: unknown) => {
@@ -92,6 +99,25 @@ export class CiRunMonitor {
 				})
 				.finally(() => {
 					this.running.delete(work);
+					// A watch that ended keeps its entry, so the run is re-armed (after a bounded delay)
+					// unless the next authoritative observation shows it completed. Provider lag after a
+					// normal exit cannot spin a watch/reconcile loop.
+					if (this.pending.get(key) === watched && !this.stopped && !this.signal.aborted) {
+						watched.started = false;
+						watched.abort = undefined;
+						watched.retry = setTimeout(() => {
+							watched.retry = undefined;
+							this.pump();
+						}, CI_RUN_WATCH_RETRY_MS);
+						watched.retry.unref();
+					}
+					if (completed && !signal.aborted) {
+						try {
+							this.onTerminal();
+						} catch (error) {
+							this.onFailure(error);
+						}
+					}
 					this.pump();
 				});
 			this.running.add(work);

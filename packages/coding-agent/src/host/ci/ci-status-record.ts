@@ -1,8 +1,12 @@
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { type CiStatusView, ciStatusViewFromRecord } from "../../core/ci-status-view.ts";
+import type { CiAttemptTerminalEvent, CiCurrentObservation } from "../../core/events/host-event-contract.ts";
+import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../../core/util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
+import type { CiProvider } from "./ci-provider.ts";
 
 export const CI_WORKFLOW = "ci.yml";
 export interface CiGitPaths {
@@ -31,16 +35,10 @@ export interface CiStatusRecord {
 	readonly reconciledBy?: string;
 }
 
-export function resolveCiGitPaths(cwd: string): CiGitPaths {
-	const parts = execFileSync("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		timeout: 10_000,
-		maxBuffer: 32_768,
-	})
-		.trim()
-		.split(/\r?\n/);
+const GIT_PATHS_ARGS = ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"];
+
+function ciGitPathsFrom(cwd: string, output: string): CiGitPaths {
+	const parts = output.trim().split(/\r?\n/);
 	if (parts.length !== 3) throw new Error("Cannot resolve CI repository directories.");
 	return {
 		root: resolve(cwd, parts[0]),
@@ -48,6 +46,63 @@ export function resolveCiGitPaths(cwd: string): CiGitPaths {
 		commonDir: resolve(cwd, parts[2]),
 		statusDir: join(resolve(cwd, parts[2]), "pi-ci"),
 	};
+}
+
+export function resolveCiGitPaths(cwd: string): CiGitPaths {
+	return ciGitPathsFrom(
+		cwd,
+		execFileSync("git", GIT_PATHS_ARGS, {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: 10_000,
+			maxBuffer: 32_768,
+		}),
+	);
+}
+
+/** Session hosts resolve without blocking the event loop; `undefined` outside a Git work tree. */
+export function resolveCiGitPathsAsync(cwd: string, signal: AbortSignal): Promise<CiGitPaths | undefined> {
+	return new Promise((resolvePaths, reject) => {
+		signal.throwIfAborted();
+		execFile(
+			"git",
+			GIT_PATHS_ARGS,
+			{ cwd, encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 32_768, signal },
+			(error, stdout) => {
+				if (signal.aborted) reject(signal.reason);
+				else if (error) resolvePaths(undefined);
+				else {
+					try {
+						resolvePaths(ciGitPathsFrom(cwd, stdout));
+					} catch (failure) {
+						reject(failure);
+					}
+				}
+			},
+		);
+	});
+}
+
+/** File-only footer projection: no provider, network or source activation is needed. */
+export function readCiStatusView(paths: CiGitPaths, now = Date.now()): CiStatusView | undefined {
+	try {
+		const head = readCiHead(paths);
+		if (!head.branch) return undefined;
+		const record = readCiStatusFile(ciStatusPath(paths.statusDir, head.branch));
+		let watcherAlive: boolean | undefined;
+		if (record?.state === "pending" && record.pid !== undefined) {
+			try {
+				process.kill(record.pid, 0);
+				watcherAlive = true;
+			} catch (error) {
+				watcherAlive = (error as NodeJS.ErrnoException).code === "EPERM";
+			}
+		}
+		return ciStatusViewFromRecord(record, head.branch, now, watcherAlive);
+	} catch {
+		return undefined;
+	}
 }
 
 export function statusDirectory(root = process.cwd()): string {
@@ -116,22 +171,48 @@ export function readCiStatus(branch: string, root = process.cwd()): CiStatusReco
 	return readCiStatusFile(statusFile(branch, root));
 }
 
+const MAX_CI_STATUS_RECORDS = 64;
+
+/** The most recently written branch records; older branches' verdicts stay on disk but are not read. */
 export function readCiStatusRecords(directory: string): CiStatusRecord[] {
 	if (!existsSync(directory)) return [];
-	const files = readBoundedDirectoryNamesSync(directory, 512, "CI status directory").filter(
-		(file) => file.endsWith(".json") && file !== "source-v1.json",
+	let files = readBoundedDirectoryNamesSync(directory, 512, "CI status directory").filter((file) =>
+		file.endsWith(".json"),
 	);
-	if (files.length > 64) throw new Error("CI status discovery exceeds its branch bound.");
+	if (files.length > MAX_CI_STATUS_RECORDS) {
+		const modified = (file: string): number => {
+			try {
+				return statSync(join(directory, file)).mtimeMs;
+			} catch {
+				return 0;
+			}
+		};
+		files = files
+			.map((file) => ({ file, at: modified(file) }))
+			.sort((a, b) => b.at - a.at)
+			.slice(0, MAX_CI_STATUS_RECORDS)
+			.map((entry) => entry.file);
+	}
 	return files.flatMap((file) => {
 		const record = readCiStatusFile(join(directory, file));
 		return record ? [record] : [];
 	});
 }
 
-export function writeCiStatus(paths: CiGitPaths, branch: string, requested: CiStatusRecord): void {
+/**
+ * `expectedSha` makes the write a compare-and-set: a reconciliation never replaces a record
+ * another writer moved to a different revision after it was read.
+ */
+export function writeCiStatus(
+	paths: CiGitPaths,
+	branch: string,
+	requested: CiStatusRecord,
+	expectedSha?: string,
+): void {
 	const path = ciStatusPath(paths.statusDir, branch);
 	withFileLockSync(path, () => {
 		const current = readCiStatusFile(path);
+		if (expectedSha !== undefined && current?.sha !== expectedSha) return;
 		if (current?.sha && requested.sha && current.sha !== requested.sha) {
 			try {
 				execFileSync("git", ["merge-base", "--is-ancestor", requested.sha, current.sha], {
@@ -158,9 +239,45 @@ export function commitObligation(
 	| { kind: "red"; status: CiStatusRecord; failedJobs: readonly string[] } {
 	if (!status?.sha || !isAncestorOfHead(status.sha)) return { kind: "none" };
 	if (status.state === "pending") return { kind: "pending", status };
-	if (status.state === "watch_failed" || status.state === "unreadable") return { kind: "unknown", status };
-	if (status.state !== "completed" || status.conclusion === "success") return { kind: "none" };
+	// watch_failed, unreadable and no_run (no run appeared: a rejected push or an untriggered
+	// workflow) carry no CI outcome. They are unknown, never red.
+	if (status.state !== "completed") return { kind: "unknown", status };
+	if (status.conclusion === "success") return { kind: "none" };
 	return { kind: "red", status, failedJobs: status.failedJobs ?? [] };
+}
+
+/** The display record for one terminal attempt, rebuilt from that attempt only (no prior fields). */
+export async function completedCiStatus(
+	provider: CiProvider,
+	target: { readonly sha: string; readonly branch: string },
+	current: CiCurrentObservation,
+	event: CiAttemptTerminalEvent,
+	signal: AbortSignal,
+): Promise<CiStatusRecord> {
+	let failedJobs: readonly string[] = [];
+	let error: string | undefined;
+	if (event.conclusion !== "success") {
+		try {
+			failedJobs = await provider.failedJobs(event.identity, signal);
+		} catch (failure) {
+			signal.throwIfAborted();
+			error = `CI outcome retained; job detail unavailable: ${boundedRedactedDiagnosticText(failure instanceof Error ? failure.message : String(failure)) ?? "unavailable"}`;
+		}
+	}
+	return {
+		sha: target.sha,
+		branch: target.branch,
+		workflow: CI_WORKFLOW,
+		state: "completed",
+		conclusion: event.conclusion,
+		runId: current.runId,
+		runAttempt: current.runAttempt,
+		runNumber: current.runNumber,
+		url: event.runUrl,
+		failedJobs,
+		...(error ? { error } : {}),
+		completedAt: new Date().toISOString(),
+	};
 }
 
 export function describeStatus(status: CiStatusRecord | undefined): string {

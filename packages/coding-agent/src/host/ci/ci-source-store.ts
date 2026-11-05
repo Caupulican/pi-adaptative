@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdirSync, renameSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
 	type CiAttemptTerminalEvent,
 	type CiCurrentObservation,
@@ -29,13 +30,21 @@ import {
 	ownProcessOwner,
 	type ProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
-import { readBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
+import { BoundedReadError, readBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
 import type { CiRetiredRunRange } from "./ci-provider.ts";
 
 export const CI_SOURCE_MAX_EVENTS = 2_048;
 export const CI_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
+/** A parked consumer keeps its custody this long; later it resumes through an explicit replay gap. */
+export const CI_PARKED_CONSUMER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CI_SOURCE_VERSION = 2;
 const MAX_CONSUMERS = 64;
 const MAX_RUNS = 128;
+const MAX_RETIRED_RANGES = MAX_RUNS + 1;
+const MAX_WORKFLOWS = 32;
+
+/** A journal written by a newer release is never rewritten or quarantined by an older reader. */
+export class CiSourceVersionError extends Error {}
 
 interface ConsumerStart {
 	registration: HostEventSourceRegistration;
@@ -50,12 +59,14 @@ interface Consumer {
 	scopeVersion: number;
 	subjects: CiSubject[];
 	rootSubjects: CiSubject[];
-	watchedSubjects: CiSubject[];
+	/** The last sealed current attempts; they pin their runs while the consumer is active or parked. */
 	observations: CiCurrentObservation[];
 	/** Persisted before the sink call; exact replay bridges either side of a crash. */
 	pendingStart?: ConsumerStart;
 	replayFloor: number;
 	activation?: { id: string; owner: ProcessOwner };
+	/** Set exactly when no live host owns the consumer. Custody stays retained until expiry. */
+	parkedAt?: number;
 	pendingGap?: { afterSequence: number; throughSequence: number };
 }
 
@@ -68,16 +79,27 @@ interface RetainedRun {
 }
 
 interface SourceState {
-	version: 1;
+	version: typeof CI_SOURCE_VERSION;
 	sourceId: string;
 	sourceEpoch: string;
 	nextSequence: number;
 	retiredThrough: number;
 	events: HostEventEnvelope[];
 	runs: RetainedRun[];
-	subjects: CiSubject[];
 	consumers: Consumer[];
+	/** Run numbers whose custody was dropped. Never-seen and pending run numbers are never retired. */
 	retiredRuns: { key: string; ranges: CiRetiredRunRange[] }[];
+}
+
+export interface CiSourceSnapshot {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly nextSequence: number;
+	readonly retiredThrough: number;
+	readonly events: readonly HostEventEnvelope[];
+	readonly runs: readonly Readonly<RetainedRun>[];
+	readonly consumers: readonly Readonly<Consumer>[];
+	readonly retiredRuns: readonly { readonly key: string; readonly ranges: readonly CiRetiredRunRange[] }[];
 }
 
 function workflowKey(subject: Pick<CiSubject, "host" | "repositoryId" | "workflowId">): string {
@@ -95,16 +117,16 @@ function parseConsumer(value: unknown): Consumer {
 			"scopeVersion",
 			"subjects",
 			"rootSubjects",
-			"watchedSubjects",
 			"observations",
 			"pendingStart",
 			"replayFloor",
 			"activation",
+			"parkedAt",
 			"pendingGap",
 		],
 		"CI consumer",
 	);
-	return {
+	const consumer: Consumer = {
 		id: hostEventString(entry.id, "consumer id"),
 		startingSequence: hostEventInteger(entry.startingSequence, "starting sequence"),
 		acknowledged: hostEventInteger(entry.acknowledged, "acknowledged", 0),
@@ -112,12 +134,6 @@ function parseConsumer(value: unknown): Consumer {
 		scopeVersion: hostEventInteger(entry.scopeVersion, "scopeVersion", 0),
 		subjects: hostEventArray(entry.subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "consumer subjects"),
 		rootSubjects: hostEventArray(entry.rootSubjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "root subjects"),
-		watchedSubjects: hostEventArray(
-			entry.watchedSubjects,
-			MAX_HOST_EVENT_SUBJECTS,
-			parseCiSubject,
-			"watched subjects",
-		),
 		observations: hostEventArray(
 			entry.observations,
 			MAX_HOST_EVENT_SUBJECTS,
@@ -127,8 +143,12 @@ function parseConsumer(value: unknown): Consumer {
 		...(entry.pendingStart === undefined ? {} : { pendingStart: parseConsumerStart(entry.pendingStart) }),
 		replayFloor: hostEventInteger(entry.replayFloor, "consumer replay floor"),
 		...(entry.activation === undefined ? {} : { activation: parseConsumerActivation(entry.activation) }),
+		...(entry.parkedAt === undefined ? {} : { parkedAt: hostEventInteger(entry.parkedAt, "parkedAt", 0) }),
 		...(entry.pendingGap === undefined ? {} : { pendingGap: parseConsumerGap(entry.pendingGap) }),
 	};
+	if ((consumer.activation === undefined) === (consumer.parkedAt === undefined))
+		throw new Error("CI consumer must be either active or parked.");
+	return consumer;
 }
 
 function parseConsumerActivation(value: unknown): NonNullable<Consumer["activation"]> {
@@ -159,6 +179,14 @@ function parseConsumerStart(value: unknown): ConsumerStart {
 	return { registration, catchUp };
 }
 
+function parseRetiredRange(value: unknown): CiRetiredRunRange {
+	const range = hostEventRecord(value, ["from", "through"], "retired run range");
+	const from = hostEventInteger(range.from, "from");
+	const through = hostEventInteger(range.through, "through");
+	if (through < from) throw new Error("CI retired run range is reversed.");
+	return { from, through };
+}
+
 function parseState(value: unknown): SourceState {
 	const entry = hostEventRecord(
 		value,
@@ -170,15 +198,14 @@ function parseState(value: unknown): SourceState {
 			"retiredThrough",
 			"events",
 			"runs",
-			"subjects",
 			"consumers",
 			"retiredRuns",
 		],
 		"CI source",
 	);
-	if (entry.version !== 1) throw new Error("Unknown CI source version.");
+	if (entry.version !== CI_SOURCE_VERSION) throw new Error("Unknown CI source version.");
 	const state: SourceState = {
-		version: 1,
+		version: CI_SOURCE_VERSION,
 		sourceId: hostEventString(entry.sourceId, "sourceId"),
 		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
 		nextSequence: hostEventInteger(entry.nextSequence, "nextSequence"),
@@ -203,27 +230,15 @@ function parseState(value: unknown): SourceState {
 			},
 			"retained CI runs",
 		),
-		subjects: hostEventArray(entry.subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "CI subjects"),
 		consumers: hostEventArray(entry.consumers, MAX_CONSUMERS, parseConsumer, "CI consumers"),
 		retiredRuns: hostEventArray(
 			entry.retiredRuns,
-			32,
+			MAX_WORKFLOWS,
 			(value) => {
 				const frontier = hostEventRecord(value, ["key", "ranges"], "retired CI run frontier");
 				return {
 					key: hostEventString(frontier.key, "workflow key", 512),
-					ranges: hostEventArray(
-						frontier.ranges,
-						MAX_RUNS + 1,
-						(value) => {
-							const range = hostEventRecord(value, ["from", "through"], "retired run range");
-							return {
-								from: hostEventInteger(range.from, "from"),
-								through: hostEventInteger(range.through, "through"),
-							};
-						},
-						"retired run ranges",
-					),
+					ranges: hostEventArray(frontier.ranges, MAX_RETIRED_RANGES, parseRetiredRange, "retired run ranges"),
 				};
 			},
 			"retired CI workflows",
@@ -254,7 +269,6 @@ function parseState(value: unknown): SourceState {
 	if (
 		new Set(state.consumers.map((consumer) => consumer.id)).size !== state.consumers.length ||
 		new Set(state.runs.map((run) => run.key)).size !== state.runs.length ||
-		new Set(state.subjects.map(ciSubjectKey)).size !== state.subjects.length ||
 		state.consumers.some(
 			(consumer) =>
 				consumer.acknowledged < state.retiredThrough ||
@@ -282,56 +296,127 @@ function activeConsumer(state: SourceState, consumerId: string, activationId: st
 	return consumer;
 }
 
-function parkConsumer(consumer: Consumer): void {
+/** Parking keeps acknowledged custody and the sealed observations that pin current runs. */
+function parkConsumer(consumer: Consumer, now: number): void {
 	delete consumer.activation;
-	consumer.watchedSubjects = [];
-	consumer.observations = [];
+	consumer.parkedAt = now;
 }
 
-function reclaimDeadConsumers(state: SourceState): void {
+function reclaimDeadConsumers(state: SourceState, now: number): void {
 	for (const consumer of state.consumers)
-		if (consumer.activation && judgeOwner(consumer.activation.owner) === "dead") parkConsumer(consumer);
-	state.consumers = state.consumers.filter(
-		(consumer) => consumer.activation || consumer.pendingGap || consumer.acknowledged < state.nextSequence - 1,
-	);
+		if (consumer.activation && judgeOwner(consumer.activation.owner) === "dead") parkConsumer(consumer, now);
+}
+
+/**
+ * The parked consumer whose custody pins the most history. Removing it is an explicit disposition:
+ * its next claim records a replay gap from the session's durable checkpoint.
+ */
+function oldestParkedConsumer(state: SourceState): Consumer | undefined {
+	return state.consumers
+		.filter((consumer) => consumer.parkedAt !== undefined)
+		.sort((a, b) => a.acknowledged - b.acknowledged || a.parkedAt! - b.parkedAt!)[0];
+}
+
+function addRetiredRun(state: SourceState, key: string, runNumber: number): void {
+	let frontier = state.retiredRuns.find((entry) => entry.key === key);
+	if (!frontier) {
+		if (state.retiredRuns.length >= MAX_WORKFLOWS) throw new Error("CI retired workflow capacity reached.");
+		frontier = { key, ranges: [] };
+		state.retiredRuns.push(frontier);
+	}
+	const ranges = [...frontier.ranges, { from: runNumber, through: runNumber }].sort((a, b) => a.from - b.from);
+	const merged: CiRetiredRunRange[] = [];
+	for (const range of ranges) {
+		const last = merged.at(-1);
+		if (last && range.from <= last.through + 1)
+			merged[merged.length - 1] = { from: last.from, through: Math.max(last.through, range.through) };
+		else merged.push(range);
+	}
+	// Past the bound, the two oldest ranges coalesce. Only the oldest history between them
+	// becomes unobservable; recent never-seen or pending run numbers stay admissible.
+	while (merged.length > MAX_RETIRED_RANGES) {
+		const [first, second] = merged;
+		merged.splice(0, 2, { from: first!.from, through: second!.through });
+	}
+	frontier.ranges = merged;
 }
 
 /** One locked, bounded source journal owns occurrence identity and every consumer's custody. */
 export class CiSourceStore {
 	readonly path: string;
+	private readonly onDiagnostic: (message: string) => void;
+	private readonly now: () => number;
 
-	constructor(directory: string) {
-		this.path = join(directory, "source-v1.json");
+	constructor(directory: string, options: { onDiagnostic?: (message: string) => void; now?: () => number } = {}) {
+		this.path = join(directory, "source", `journal-v${CI_SOURCE_VERSION}.json`);
+		this.onDiagnostic = options.onDiagnostic ?? (() => {});
+		this.now = options.now ?? Date.now;
 	}
 
-	private read(): SourceState {
+	private fresh(): SourceState {
+		return {
+			version: CI_SOURCE_VERSION,
+			sourceId: `ci-source-${randomUUID()}`,
+			sourceEpoch: randomUUID(),
+			nextSequence: 1,
+			retiredThrough: 0,
+			events: [],
+			runs: [],
+			consumers: [],
+			retiredRuns: [],
+		};
+	}
+
+	/**
+	 * Only called under the source lock: an unreadable journal of this version is moved aside (one bounded
+	 * copy) and a new epoch starts; consumers then register the new source explicitly.
+	 */
+	private read(): { state: SourceState; text?: string } {
+		let text: string;
 		try {
-			return parseState(JSON.parse(readBoundedTextFileSync(this.path, CI_SOURCE_MAX_BYTES, "CI source")));
+			text = readBoundedTextFileSync(this.path, CI_SOURCE_MAX_BYTES, "CI source");
 		} catch (error) {
-			if (!isMissingFileError(error)) throw error;
-			return {
-				version: 1,
-				sourceId: `ci-source-${randomUUID()}`,
-				sourceEpoch: randomUUID(),
-				nextSequence: 1,
-				retiredThrough: 0,
-				events: [],
-				runs: [],
-				subjects: [],
-				consumers: [],
-				retiredRuns: [],
-			};
+			if (isMissingFileError(error)) return { state: this.fresh() };
+			if (!(error instanceof BoundedReadError) || error.reason !== "limit") throw error;
+			return { state: this.quarantine(error) };
+		}
+		let value: unknown;
+		try {
+			value = JSON.parse(text);
+		} catch (error) {
+			return { state: this.quarantine(error) };
+		}
+		const version =
+			value && typeof value === "object" && !Array.isArray(value)
+				? (value as { version?: unknown }).version
+				: undefined;
+		if (typeof version === "number" && Number.isSafeInteger(version) && version > CI_SOURCE_VERSION)
+			throw new CiSourceVersionError("CI source journal belongs to a newer release; CI events stay inactive here.");
+		try {
+			return { state: parseState(value), text };
+		} catch (error) {
+			return { state: this.quarantine(error) };
 		}
 	}
 
+	private quarantine(error: unknown): SourceState {
+		renameSync(this.path, `${this.path}.unreadable`);
+		this.onDiagnostic(
+			`CI source journal was unreadable (${error instanceof Error ? error.message : String(error)}); it was moved aside and a new source epoch started. Its unacknowledged events are not replayed.`,
+		);
+		return this.fresh();
+	}
+
 	private change<T>(operation: (state: SourceState) => T): T {
+		mkdirSync(dirname(this.path), { recursive: true });
 		return withFileLockSync(this.path, () => {
-			const state = this.read();
+			const { state, text } = this.read();
 			const result = operation(state);
-			const encoded = JSON.stringify(state);
+			// The parser's canonical field order makes an unchanged journal byte-identical: no rewrite.
+			const encoded = JSON.stringify(parseState(state));
+			if (encoded === text) return result;
 			if (Buffer.byteLength(encoded) > CI_SOURCE_MAX_BYTES)
 				throw new Error("CI source is full; unacknowledged events remain retained.");
-			parseState(state);
 			writeFileAtomicSync(this.path, encoded, { mode: 0o600 });
 			return result;
 		});
@@ -343,13 +428,19 @@ export class CiSourceStore {
 
 	claim(consumerId: string, activationId: string, checkpoint: HostEventConsumerCheckpoint | undefined): void {
 		this.change((state) => {
-			reclaimDeadConsumers(state);
+			const now = this.now();
+			reclaimDeadConsumers(state, now);
+			this.expire(state, now);
 			let consumer = state.consumers.find((entry) => entry.id === consumerId);
 			if (consumer?.activation && consumer.activation.id !== activationId)
 				throw new Error("CI source consumer is already active in another host resource.");
 			if (!consumer) {
-				if (state.consumers.length >= MAX_CONSUMERS)
-					throw new Error("CI source consumer capacity reached; offline custody remains retained.");
+				while (state.consumers.length >= MAX_CONSUMERS) {
+					const evicted = oldestParkedConsumer(state);
+					if (!evicted) throw new Error("CI source consumer capacity reached; offline custody remains retained.");
+					state.consumers = state.consumers.filter((entry) => entry !== evicted);
+				}
+				this.compact(state);
 				if (
 					checkpoint &&
 					(checkpoint.registration.sourceId !== state.sourceId ||
@@ -367,7 +458,6 @@ export class CiSourceStore {
 					scopeVersion: checkpoint?.registration.scopeVersion ?? 0,
 					subjects: checkpoint ? [...checkpoint.registration.subjects] : [],
 					rootSubjects: checkpoint ? [...checkpoint.registration.rootSubjects] : [],
-					watchedSubjects: [],
 					observations: [],
 					replayFloor:
 						checkpoint && acknowledged >= state.retiredThrough
@@ -379,18 +469,17 @@ export class CiSourceStore {
 				};
 				state.consumers.push(consumer);
 			}
+			delete consumer.parkedAt;
 			consumer.activation = { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() };
 		});
 	}
 
+	/** Stop suspends custody; only expiry or capacity disposition removes a parked consumer. */
 	release(consumerId: string, activationId: string): void {
 		this.change((state) => {
 			const consumer = state.consumers.find((entry) => entry.id === consumerId);
 			if (consumer?.activation?.id !== activationId) return;
-			parkConsumer(consumer);
-			state.consumers = state.consumers.filter(
-				(entry) => entry !== consumer || entry.pendingGap || entry.acknowledged < state.nextSequence - 1,
-			);
+			parkConsumer(consumer, this.now());
 		});
 	}
 
@@ -404,15 +493,15 @@ export class CiSourceStore {
 			const consumer = activeConsumer(state, consumerId, activationId);
 			const pending = consumer.pendingStart;
 			if (pending) return pending;
-			for (const subject of [...subjects, ...rootSubjects])
-				if (!state.subjects.some((existing) => ciSubjectKey(existing) === ciSubjectKey(subject)))
-					state.subjects.push(parseCiSubject(subject));
-			if (state.subjects.length > MAX_HOST_EVENT_SUBJECTS) throw new Error("CI source subject capacity reached.");
-			consumer.watchedSubjects = subjects.map(parseCiSubject);
-			if (!sameSubjects(consumer.subjects, state.subjects) || !sameSubjects(consumer.rootSubjects, rootSubjects)) {
+			const scope = hostEventArray(subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "CI source scope");
+			const roots = hostEventArray(rootSubjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "CI root scope");
+			const allowed = new Set(scope.map(ciSubjectKey));
+			if (roots.some((subject) => !allowed.has(ciSubjectKey(subject))))
+				throw new Error("CI root subject is outside its registered scope.");
+			if (!sameSubjects(consumer.subjects, scope) || !sameSubjects(consumer.rootSubjects, roots)) {
 				consumer.scopeVersion++;
-				consumer.subjects = [...state.subjects];
-				consumer.rootSubjects = rootSubjects.map(parseCiSubject);
+				consumer.subjects = scope;
+				consumer.rootSubjects = roots;
 			}
 			consumer.generation++;
 			const start: ConsumerStart = {
@@ -454,18 +543,8 @@ export class CiSourceStore {
 		});
 	}
 
-	watchSubjects(consumerId: string, activationId: string, subjects: readonly CiSubject[]): void {
-		this.change((state) => {
-			const consumer = activeConsumer(state, consumerId, activationId);
-			const allowed = new Set(consumer.subjects.map(ciSubjectKey));
-			const watched = hostEventArray(subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "watched subjects");
-			if (watched.some((subject) => !allowed.has(ciSubjectKey(subject))))
-				throw new Error("CI watched subject is outside this consumer's registered scope.");
-			consumer.watchedSubjects = watched;
-		});
-	}
-
 	retain(events: readonly CiAttemptTerminalEvent[]): void {
+		if (!events.length) return;
 		this.change((state) => {
 			this.compact(state);
 			for (const event of [...events].sort(
@@ -498,8 +577,7 @@ export class CiSourceStore {
 				if (run && identity.runAttempt <= run.throughAttempt) continue;
 				if (identity.runAttempt !== (run?.throughAttempt ?? 0) + 1)
 					throw new Error("CI terminal attempt history has a gap.");
-				if (state.events.length >= CI_SOURCE_MAX_EVENTS || (!run && state.runs.length >= MAX_RUNS))
-					throw new Error("CI source capacity reached; cursor was retained.");
+				this.makeRoom(state, !run);
 				const envelope = parseHostEventEnvelope({
 					sourceId: state.sourceId,
 					sourceEpoch: state.sourceEpoch,
@@ -518,25 +596,50 @@ export class CiSourceStore {
 				}
 				run.throughAttempt = identity.runAttempt;
 				run.latest = envelope;
-				const subject = ciEventSubject(event);
-				if (!state.subjects.some((existing) => ciSubjectKey(existing) === ciSubjectKey(subject)))
-					state.subjects.push(subject);
 				state.events.push(envelope);
-				this.compact(state);
 			}
 		});
 	}
 
-	snapshot(): Readonly<SourceState> {
-		return this.read();
+	/**
+	 * Admission at capacity first drops an unpinned run cursor, then expires the parked consumer
+	 * pinning the most history. Live consumers' custody is never evicted: that is backpressure.
+	 */
+	private makeRoom(state: SourceState, newRun: boolean): void {
+		for (;;) {
+			this.compact(state);
+			const eventsFull = state.events.length >= CI_SOURCE_MAX_EVENTS;
+			if (!eventsFull && (!newRun || state.runs.length < MAX_RUNS)) return;
+			if (!eventsFull && this.dropUnpinnedRun(state)) return;
+			const evicted = oldestParkedConsumer(state);
+			if (!evicted) throw new Error("CI source capacity reached; cursor was retained.");
+			state.consumers = state.consumers.filter((entry) => entry !== evicted);
+		}
 	}
 
-	retainedAttempts(): ReadonlyMap<number, number> {
-		return new Map(this.read().runs.map((run) => [Number(run.key.split("/").at(-1)), run.throughAttempt]));
+	/** Drops the oldest run cursor no retained event or consumer observation still needs. */
+	private dropUnpinnedRun(state: SourceState): boolean {
+		const observed = new Set(
+			state.consumers.flatMap((consumer) =>
+				consumer.observations.map((observation) => `${ciSubjectKey(observation.subject)}#${observation.runId}`),
+			),
+		);
+		const candidate = state.runs
+			.filter(
+				(run) =>
+					!state.events.some((entry) => entry.event.identity.runId === run.latest.event.identity.runId) &&
+					!observed.has(`${ciSubjectKey(ciEventSubject(run.latest.event))}#${run.latest.event.identity.runId}`),
+			)
+			.sort((a, b) => a.latest.sourceSequence - b.latest.sourceSequence)[0];
+		if (!candidate) return false;
+		addRetiredRun(state, workflowKey(candidate.latest.event.identity), candidate.runNumber);
+		state.runs = state.runs.filter((run) => run !== candidate);
+		return true;
 	}
 
-	retiredRunNumbers(subject: Pick<CiSubject, "host" | "repositoryId" | "workflowId">): readonly CiRetiredRunRange[] {
-		return this.read().retiredRuns.find((frontier) => frontier.key === workflowKey(subject))?.ranges ?? [];
+	/** Read under the source lock, so an unreadable journal is quarantined rather than rethrown. */
+	snapshot(): CiSourceSnapshot {
+		return this.change((state) => structuredClone(state));
 	}
 
 	acknowledge(consumerId: string, activationId: string, receipt: HostEventReceipt, generation: number): void {
@@ -561,74 +664,26 @@ export class CiSourceStore {
 	}
 
 	retireAcknowledged(): number {
-		return this.change((state) => this.compact(state));
+		return this.change((state) => {
+			const now = this.now();
+			reclaimDeadConsumers(state, now);
+			this.expire(state, now);
+			return this.compact(state);
+		});
 	}
 
+	private expire(state: SourceState, now: number): void {
+		state.consumers = state.consumers.filter(
+			(consumer) => consumer.parkedAt === undefined || now - consumer.parkedAt < CI_PARKED_CONSUMER_TTL_MS,
+		);
+	}
+
+	/** Events retire once every registered consumer, live or parked, has acknowledged them. */
 	private compact(state: SourceState): number {
-		reclaimDeadConsumers(state);
 		state.retiredThrough = state.consumers.length
 			? Math.min(...state.consumers.map((consumer) => consumer.acknowledged))
 			: state.nextSequence - 1;
 		state.events = state.events.filter((event) => event.sourceSequence > state.retiredThrough);
-		for (const key of new Set(state.runs.map((run) => workflowKey(run.latest.event.identity)))) {
-			// A registered push may not have its run number yet. Do not retire across an
-			// unknown position until its complete provider observation establishes one.
-			if (
-				state.consumers.some((consumer) =>
-					consumer.watchedSubjects.some(
-						(subject) =>
-							workflowKey(subject) === key &&
-							!consumer.observations.some(
-								(observation) => ciSubjectKey(observation.subject) === ciSubjectKey(subject),
-							),
-					),
-				)
-			)
-				continue;
-			const runs = state.runs.filter((run) => workflowKey(run.latest.event.identity) === key);
-			const latestRunNumber = Math.max(...runs.map((run) => run.runNumber));
-			const pinned = runs.filter(
-				(run) =>
-					run.runNumber === latestRunNumber ||
-					state.events.some((entry) => entry.event.identity.runId === run.latest.event.identity.runId) ||
-					state.consumers.some((consumer) =>
-						consumer.watchedSubjects.some((subject) => {
-							if (ciSubjectKey(subject) !== ciSubjectKey(ciEventSubject(run.latest.event))) return false;
-							const current = consumer.observations.find(
-								(entry) => ciSubjectKey(entry.subject) === ciSubjectKey(subject),
-							);
-							return !current || current.runNumber === run.runNumber;
-						}),
-					),
-			);
-			let frontier = state.retiredRuns.find((entry) => entry.key === key);
-			if (!frontier) {
-				frontier = { key, ranges: [] };
-				state.retiredRuns.push(frontier);
-			}
-			const ceiling = Math.max(
-				...runs.map((run) => run.runNumber),
-				...frontier.ranges.map((range) => range.through),
-			);
-			const pins = [...new Set(pinned.map((run) => run.runNumber))].sort((a, b) => a - b);
-			const ranges: CiRetiredRunRange[] = [];
-			let from = 1;
-			for (const pin of pins) {
-				if (from < pin) ranges.push({ from, through: pin - 1 });
-				from = pin + 1;
-			}
-			if (from <= ceiling) ranges.push({ from, through: ceiling });
-			frontier.ranges = ranges;
-			state.runs = state.runs.filter(
-				(run) => workflowKey(run.latest.event.identity) !== key || pins.includes(run.runNumber),
-			);
-		}
-		const retainedSubjects = [
-			...state.consumers.flatMap((consumer) => consumer.watchedSubjects),
-			...state.events.map((entry) => ciEventSubject(entry.event)),
-			...state.runs.map((run) => ciEventSubject(run.latest.event)),
-		];
-		state.subjects = [...new Map(retainedSubjects.map((subject) => [ciSubjectKey(subject), subject])).values()];
 		return state.retiredThrough;
 	}
 
@@ -644,9 +699,20 @@ export class CiSourceStore {
 				throw new Error("CI source seal belongs to a superseded consumer generation.");
 			consumer.observations = observations
 				.filter((observation) =>
-					consumer.watchedSubjects.some((subject) => ciSubjectKey(subject) === ciSubjectKey(observation.subject)),
+					consumer.subjects.some((subject) => ciSubjectKey(subject) === ciSubjectKey(observation.subject)),
 				)
 				.map(parseCiCurrentObservation);
 		});
 	}
+}
+
+export function ciSourceRetiredRuns(
+	snapshot: CiSourceSnapshot,
+	subject: Pick<CiSubject, "host" | "repositoryId" | "workflowId">,
+): readonly CiRetiredRunRange[] {
+	return snapshot.retiredRuns.find((frontier) => frontier.key === workflowKey(subject))?.ranges ?? [];
+}
+
+export function ciSourceRetainedAttempts(snapshot: CiSourceSnapshot): ReadonlyMap<number, number> {
+	return new Map(snapshot.runs.map((run) => [run.latest.event.identity.runId, run.throughAttempt]));
 }
