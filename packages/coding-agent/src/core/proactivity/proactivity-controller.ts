@@ -8,7 +8,7 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-resolver.ts";
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
-import type { AutonomySettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
+import type { ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	buildReviewPrompt,
@@ -24,7 +24,6 @@ import {
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ProactivityControllerSettingsSource {
-	getAutonomySettings(): Required<AutonomySettings>;
 	getProactivitySettings(): ResolvedProactivitySettings;
 }
 
@@ -64,7 +63,7 @@ export interface ProactivityControllerDeps {
 
 /**
  * Owns the idle review that raises notes the owner would want to hear. The host decides everything that has a cost or a
- * consequence: whether a review may start (opt-in, autonomy mode, per-session cap, enough new owner turns, an idle
+ * consequence: whether a review may start (opt-in, per-session cap, enough new owner turns, an idle
  * foreground), what it may do (one tool that records a note; no files, commands or messages), and what is delivered
  * (well-formed, new, within the limit). The model only judges whether the conversation shows a need, so the path is the
  * same for every model that can call a tool.
@@ -130,10 +129,8 @@ export class ProactivityController {
 	}
 
 	private gate(): string | undefined {
-		const settingsManager = this.deps.getSettingsManager();
-		const settings = settingsManager.getProactivitySettings();
+		const settings = this.deps.getSettingsManager().getProactivitySettings();
 		if (!settings.enabled) return "proactivity_disabled";
-		if (settingsManager.getAutonomySettings().mode === "off") return "autonomy_mode_off";
 		if (this._runs >= settings.maxRunsPerSession) return "max_runs_reached";
 		const entries = getActiveSessionBranchEntries(this.deps.getSessionManager());
 		if (countOwnerTurns(entries) - this._ownerTurnsAtLastRun < settings.minOwnerTurnsBetweenRuns) {
