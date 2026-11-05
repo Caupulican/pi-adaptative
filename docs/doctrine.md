@@ -572,12 +572,16 @@ commands that edit nothing that exists, create files only inside the worker's ow
 `readOnly` never keeps) and read no private harness or credential path; every command the shared
 read/write line calls mutating, including a listed reader whose options or program text run another
 program or write a file, is refused with the reason. The rules hold through wrappers, chains,
-line continuations and nested `bash -c`/`powershell -c`: one tokenizer walk judges a command for
-every caller, an assignment must be on a short allowlist (locale, time zone, terminal and colour),
-and a path is judged where the shell would land, through symbolic links and `..`. A worker may
-search its project recursively without a file filter; a search whose root holds harness storage
-or a credential store, or a descent that may read dotenv files, is refused. These rules judge the
-command text, a policy gate rather than OS isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
+line continuations, nested `bash -c`/`powershell -c`, loops, conditionals, `case`, groups and
+subshells: one tokenizer walk judges every command in every body for every caller, and a refusal
+names the command that breaks the rule. An assignment or loop variable must be on a short allowlist
+(locale, time zone, terminal and colour; a loop variable may also be a lowercase name), and a path
+is judged where the shell would land, through symbolic links and `..`, including every link a
+link-following search (`rg -L`, `grep -R`) meets below its roots. A worker may search its project
+recursively without a file filter, through its shell or its grep tool, which skips credential files
+itself; a search whose root holds harness storage or a credential store, or a descent that may read
+dotenv files, is refused. A shell's saved full output lands in the worker's scratch directory,
+masked as its result is. These rules judge the command text, a policy gate rather than OS isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
 credential prompt, pager and filesystem monitor. The machine's credential stores (SSH, GPG, cloud,
 cluster, registry and git credentials, keychains) are private paths for every worker, and a worker
 of a routine run away reads only its session's working directory, its profile's workspace and
