@@ -479,6 +479,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			world.provider.requests.filter((request) => request.model.id === "root"),
 			"no parent turn ran for the quiet results",
 		).toHaveLength(rootRequestsBeforeQuiet);
+		expect(store().getRoutine(routineId)?.lastStatus, "a finished run is not reported as running").toBe("succeeded");
 		const recycledId = "recreated-review";
 		const recycledInput = {
 			routineId: recycledId,
@@ -564,6 +565,9 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(recovered[0]?.claim?.token).not.toBe(interrupted.claim?.token);
 		expect(recovered[0]?.result?.delivery).toBe("acknowledged");
 		expect(store().getRoutine(recycledId)?.enabled).toBe(false);
+		expect(store().getRoutine(recycledId)?.lastStatus, "the routine reports its last run's outcome").toBe(
+			"succeeded",
+		);
 		expect(occurrences(), "reopening cannot repeat a consumed one-off").toHaveLength(6);
 		expect(parentInputs(), "only the recovered manual run adds a new parent input").toHaveLength(7);
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 2);

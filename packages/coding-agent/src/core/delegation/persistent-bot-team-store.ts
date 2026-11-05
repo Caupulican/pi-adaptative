@@ -44,6 +44,7 @@ import {
 	routineScheduleInputOf,
 	routineSlotRule,
 	routineStartDeadline,
+	routineTriggerAt,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -854,6 +855,13 @@ export class PersistentBotTeamStore {
 		if (ownerUpdate !== undefined && outcome !== "succeeded")
 			throw new Error("Only a succeeded routine run can skip the owner update.");
 		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none");
+		// The routine's last status follows the result of its most recently claimed occurrence.
+		const routine = this.routines.get(occurrence.routineId);
+		if (
+			routine?.incarnationId === occurrence.definition.incarnationId &&
+			routine.lastRunAt === routineTriggerAt(occurrence.trigger)
+		)
+			this.routines.set(routine.routineId, { ...routine, lastStatus: outcome });
 		return {
 			...occurrence,
 			result: { outcome, summary, digest, delivery: "pending", recipient, ...(ownerUpdate ? { ownerUpdate } : {}) },
@@ -1635,6 +1643,7 @@ export class PersistentBotTeamStore {
 						)
 					: claimed;
 				this.routineOccurrences.set(occurrenceId, occurrence);
+				const lastStatus = occurrence.result?.outcome ?? "running";
 				const cursor: RoutineCursor =
 					routine.schedule.kind === "interval"
 						? {
@@ -1650,19 +1659,9 @@ export class PersistentBotTeamStore {
 								}
 							: { kind: "once", consumed: true };
 				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
-				if (late) {
-					this.routines.set(id, { ...routine, cursor, nextRunAt });
-					changed = true;
-					continue;
-				}
-				this.routines.set(id, {
-					...routine,
-					cursor,
-					nextRunAt,
-					lastRunAt: trigger.scheduledAt,
-					lastStatus: "running",
-				});
-				output.push(occurrence);
+				this.routines.set(id, { ...routine, cursor, nextRunAt, lastRunAt: trigger.scheduledAt, lastStatus });
+				if (late) changed = true;
+				else output.push(occurrence);
 			}
 			if (output.length || changed) this.save();
 			return output.map((item) => structuredClone(item));
@@ -1731,6 +1730,7 @@ export class PersistentBotTeamStore {
 				origin,
 			);
 			this.routineOccurrences.set(id, occurrence);
+			this.routines.set(routine.routineId, { ...routine, lastRunAt: trigger.requestedAt, lastStatus: "running" });
 			this.save();
 			return structuredClone(occurrence);
 		});

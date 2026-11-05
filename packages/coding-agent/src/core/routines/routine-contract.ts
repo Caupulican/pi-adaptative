@@ -205,8 +205,16 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	readonly cursor: RoutineCursor;
 	readonly nextRunAt: number;
 	readonly lastRunAt?: number;
-	readonly lastStatus?: "queued" | "running" | "succeeded" | "failed" | "uncertain";
+	/** The most recently claimed occurrence's state: running until its result, then that result's outcome. */
+	readonly lastStatus?: (typeof ROUTINE_LAST_STATUSES)[number];
 	readonly lastSummary?: string;
+}
+
+export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled", "uncertain"] as const;
+
+/** The instant a claim is attributed to: its scheduled slot, or the manual request time. */
+export function routineTriggerAt(trigger: RoutineOccurrenceTrigger): number {
+	return trigger.kind === "schedule" ? trigger.scheduledAt : trigger.requestedAt;
 }
 
 export interface RoutineOccurrenceClaimInput {
@@ -440,8 +448,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			rawNextRunAt !== nextRunAt ||
 			(lastRunAt !== undefined && !validInstant(lastRunAt)) ||
 			(lastStatus !== undefined &&
-				(typeof lastStatus !== "string" ||
-					!["queued", "running", "succeeded", "failed", "uncertain"].includes(lastStatus))) ||
+				(typeof lastStatus !== "string" || !(ROUTINE_LAST_STATUSES as readonly string[]).includes(lastStatus))) ||
 			(lastSummary !== undefined &&
 				(typeof lastSummary !== "string" || lastSummary.length > MAX_ROUTINE_SUMMARY_CHARS))
 		)
