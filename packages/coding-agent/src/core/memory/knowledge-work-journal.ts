@@ -1,9 +1,9 @@
 /**
  * Retained semantic work on the canonical knowledge connection; never a separate spend ledger.
  *
- * `started`: a physical request was admitted and no usable result was retained yet; automatic replay is refused. The
- * caller that began it releases it when its request ends without a result, and a request left by an earlier process
- * is released once this session holds its measured usage receipt; until then the cell refuses replay.
+ * `started`: a physical request was admitted and no usable result was retained yet; automatic replay is refused. A
+ * cell whose request ended without a result (failure, abort, an earlier process) is released once this session holds
+ * that request's measured usage receipt; while its charge is unknown the cell keeps refusing replay.
  * `complete`: the typed result is retained and reused without another request.
  * `retired`: a content-free identity whose value is no longer retained (its owner finished with it, or forgetting
  * erased it). Work that is needed again is new paid work, bounded by the caller's existing spending owner.
@@ -46,13 +46,20 @@ export function eraseKnowledgeWorkValues(db: SqliteDatabase): void {
 	).run();
 }
 
+/** A paid attempt whose charge is not known yet: replaying it could pay twice, so it waits on spending evidence. */
+export class KnowledgeWorkUnresolved extends Error {}
+
 export interface KnowledgeWorkCache {
 	read(id: string): unknown;
 	beginBatch(work: readonly KnowledgeWorkIdentity[], requestId: string): void;
 	complete(id: string, result: unknown, outcome?: "complete" | "subdivide" | "judged"): void;
+	/** The request of a begun cell ended without a retained result: release it if its charge is measured. */
+	settle(id: string): void;
 	/** Resolves a started request whose result must not be retained; it can be requested again later. */
 	discard(id: string, outcome?: "forgotten" | null): void;
 	barrier(): string | null;
+	/** Results this process retained so far; a caller compares two readings to learn whether its work progressed. */
+	retainedCount(): number;
 }
 
 export class KnowledgeWorkJournal implements KnowledgeWorkCache {
@@ -60,6 +67,7 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 	private readonly hasUsageReceipt: (requestId: string) => boolean;
 	/** Cells begun by this process whose request has not ended: their receipt may precede their result. */
 	private readonly live = new Set<string>();
+	private retained = 0;
 	constructor(db: SqliteDatabase, hasUsageReceipt: (requestId: string) => boolean = () => false) {
 		this.db = db;
 		this.hasUsageReceipt = hasUsageReceipt;
@@ -70,15 +78,18 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			.get(id);
 		if (!row || row.state === "retired") return undefined;
 		if (row.state === "started" && !this.live.has(id) && typeof row.request_id === "string") {
-			// An earlier process ended after this request was measured but before its result was retained: the answer is
-			// lost and its charge is known, so the work may be requested again under the caller's spending limits.
+			// The request ended (here or in an earlier process) after it was measured but without a retained result: the
+			// answer is lost and its charge is known, so the work may be requested again under the caller's spending limits.
 			if (this.hasUsageReceipt(row.request_id)) {
 				this.discard(id);
 				return undefined;
 			}
 		}
-		if (row.state !== "complete" || typeof row.result !== "string")
-			throw new Error("Knowledge work has an unresolved paid attempt; automatic replay is refused");
+		if (row.state === "started")
+			throw new KnowledgeWorkUnresolved(
+				"Knowledge work has an unresolved paid attempt; automatic replay is refused",
+			);
+		if (typeof row.result !== "string") throw new Error("Knowledge work result is missing");
 		const result: unknown = JSON.parse(row.result);
 		if (canonicalDigest(result) !== row.result_digest) throw new Error("Knowledge work result integrity failed");
 		return result;
@@ -136,9 +147,17 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 						"UPDATE knowledge_work SET state='complete',result=?,result_digest=?,outcome=? WHERE id=? AND state='started'",
 					)
 					.run(text, canonicalDigest(result), outcome, id);
+				// The started row was read in this transaction, so the update retained this result.
+				this.retained++;
 			},
 			"Knowledge work result",
 		);
+	}
+	settle(id: string): void {
+		this.live.delete(id);
+		const row = this.db.prepare("SELECT state,request_id FROM knowledge_work WHERE id=?").get(id);
+		if (row?.state === "started" && typeof row.request_id === "string" && this.hasUsageReceipt(row.request_id))
+			this.discard(id);
 	}
 	/** Retires a started cell: `forgotten` when a forget fenced its result, no outcome when its request ended without one. */
 	discard(id: string, outcome: "forgotten" | null = null): void {
@@ -148,6 +167,9 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 				"UPDATE knowledge_work SET state='retired',result=NULL,result_digest=NULL,outcome=? WHERE id=? AND state='started'",
 			)
 			.run(outcome, id);
+	}
+	retainedCount(): number {
+		return this.retained;
 	}
 	barrier(): string | null {
 		const value = this.db.prepare("SELECT forget_barrier FROM collection_meta WHERE id=1").get()?.forget_barrier;

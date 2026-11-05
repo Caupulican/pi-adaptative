@@ -800,7 +800,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				},
 			});
 		} catch (error) {
-			if (begun) store.work.discard(key);
+			if (begun) store.work.settle(key);
 			throw error;
 		}
 		const judgment = judgmentOf(evaluation);

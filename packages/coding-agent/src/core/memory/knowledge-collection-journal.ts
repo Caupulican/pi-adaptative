@@ -173,10 +173,10 @@ export class KnowledgeCollectionJournal {
 					this.db.prepare("UPDATE collection_sources SET manifest=NULL,manifest_digest=NULL WHERE id=?").run(id);
 				}
 				// A configuration change starts the count again. A hold before any request (spending accounting) bought
-				// nothing, and a pass deadline resumes from the windows it already retained, so neither counts.
+				// nothing, and a pass deadline that retained new work resumes from it, so neither counts.
 				const previous = timestamp(row.attempts);
 				const retries =
-					row.status !== "held" || code?.startsWith("accounting:") || code?.startsWith("time:")
+					row.status !== "held" || code?.startsWith("accounting:") || code === "time:deadline"
 						? previous
 						: code?.startsWith("configuration:")
 							? 0

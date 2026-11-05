@@ -22,6 +22,7 @@ import { extractKnowledgeCandidates, KnowledgeExtractionRefusal } from "./knowle
 import type { KnowledgeScope } from "./knowledge-record.ts";
 import type { KnowledgeStore } from "./knowledge-store.ts";
 import type { KnowledgeReadSource } from "./knowledge-tool.ts";
+import { KnowledgeWorkUnresolved } from "./knowledge-work-journal.ts";
 
 const EXTRACTOR_VERSION = "owner-knowledge-v1";
 export const KNOWLEDGE_COLLECTION_OPERATION_PREFIX = "knowledge-collection:";
@@ -508,13 +509,14 @@ export class KnowledgeCollector {
 			journal.assertCurrent(claim);
 		};
 		// A source that keeps returning to a paying hold stops at a bound, whatever the model's price, until the
-		// configuration changes; configuration, accounting and deadline holds are not counted.
+		// configuration changes; configuration, accounting and progressing deadline holds are not counted.
+		const retainedAtClaim = this.deps.store.work.retainedCount();
 		const hold = (code: string, retryAt?: number): void => {
 			const limited =
 				claim.retries >= MAX_SOURCE_RETRIES &&
 				!code.startsWith("configuration:") &&
 				!code.startsWith("accounting:") &&
-				!code.startsWith("time:");
+				code !== "time:deadline";
 			const held = limited ? "configuration:retry_limit" : code;
 			journal.hold(claim, {
 				code: held,
@@ -634,8 +636,8 @@ export class KnowledgeCollector {
 						} finally {
 							unsubscribe();
 							// An extraction that ended without a retained submission (failure, abort, owner typing) releases its
-							// cell; the usage owner's unresolved spending refuses a retry until that request's charge is known.
-							if (begun) this.deps.store.work.discard(workId);
+							// cell once its charge is measured; a request whose charge is unknown keeps refusing replay.
+							if (begun) this.deps.store.work.settle(workId);
 						}
 					}
 					assertCurrent();
@@ -690,12 +692,19 @@ export class KnowledgeCollector {
 			}
 		} catch (error) {
 			if (signal.aborted) {
+				// A deadline that retained new work resumes from it; one that retained nothing re-pays the same work, so it
+				// counts toward the source's retry bound.
 				if (signal.reason instanceof CollectionDeadline)
-					hold("time:deadline", this.deps.time.now() + RETRY_DELAY_MS);
+					hold(
+						this.deps.store.work.retainedCount() > retainedAtClaim ? "time:deadline" : "time:stalled",
+						this.deps.time.now() + RETRY_DELAY_MS,
+					);
 				throw error;
 			}
 			assertCurrent();
-			if (isRequestSpendRefusal(error)) hold("configuration:spending");
+			// A paid attempt whose charge is unknown is not replayed; the source waits on the spending evidence.
+			if (error instanceof KnowledgeWorkUnresolved) hold("accounting:unresolved");
+			else if (isRequestSpendRefusal(error)) hold("configuration:spending");
 			else if (error instanceof KnowledgeExtractionRefusal) hold(`configuration:${error.code}`);
 			// A failed request may be transient: it is tried again after a delay, within the retry bound.
 			else hold("context:collection_failed", this.deps.time.now() + RETRY_DELAY_MS);

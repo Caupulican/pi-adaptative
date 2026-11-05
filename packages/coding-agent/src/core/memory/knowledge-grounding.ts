@@ -262,9 +262,9 @@ export class KnowledgeGrounding {
 				},
 			);
 		} catch (error) {
-			// The request ended without a verdict: its cells are released for a later attempt. Its usage stays with the
-			// usage owner, whose unresolved spending refuses that attempt until the charge is known.
-			if (begun) for (const key of keys) this.deps.store.work.discard(key);
+			// The request ended without a verdict: its cells are released for a later attempt once its charge is measured;
+			// while the charge is unknown they keep refusing replay.
+			if (begun) for (const key of keys) this.deps.store.work.settle(key);
 			throw error;
 		}
 		if (!begun) throw new Error("Semantic engine omitted request admission checkpoint");
