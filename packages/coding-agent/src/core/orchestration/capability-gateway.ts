@@ -329,10 +329,10 @@ export class CapabilityGateway {
 		return await invoke();
 	}
 
-	/** Immediate pre-execution authorization for runtimes that expose a before-tool-call hook. */
+	/** Immediate execution authorization; validates again before charging the one admitted call. */
 	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
-		const now = this.currentTime();
-		this.authorize(manifest, toolName, params, now);
+		this.checkToolCallEligibility(manifest, toolName, params);
+		this.assertBudgetAvailable(toolName);
 		const toolCalls = this.toolCalls + 1;
 		if (!Number.isSafeInteger(toolCalls)) {
 			throw new Error("CapabilityGateway: tool-call count would exceed safe cumulative usage bounds.");
@@ -448,7 +448,9 @@ export class CapabilityGateway {
 		};
 	}
 
-	private authorize(manifest: ToolCapabilityManifest, toolName: string, params: unknown, now: number): void {
+	/** Non-metering eligibility check before a caller crosses an asynchronous policy boundary. */
+	checkToolCallEligibility(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
+		const now = this.currentTime();
 		if (this.grant.expiresAt && Date.parse(this.grant.expiresAt) <= now) {
 			this.deny(toolName, "grant_expired", `Execution grant '${this.grant.grantId}' expired.`);
 		}
@@ -471,10 +473,6 @@ export class CapabilityGateway {
 				`Tool '${toolName}' action requires a capability outside its compiled manifest.`,
 			);
 		}
-		this.flushUsage();
-		this.enforceBudget(toolName);
-		this.sharedBudget?.assertBudgetAvailable(toolName);
-
 		const canonicalPolicy = getToolCapabilityPolicy(toolName);
 		const hasDeclaredPathScope = manifest.enforcements.includes("path-scope");
 		const pathAccess = canonicalPolicy

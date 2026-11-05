@@ -34,15 +34,22 @@ export function searchLocalMemoryItems(
 	items: readonly MemoryItem[],
 	request: MemorySearchRequest,
 	strategy: LocalMemorySearchStrategy,
+	context?: MemoryReadContext,
 ): MemorySearchResult[] {
+	assertMemoryReadActive(context);
 	const queryTokens = tokenizeMemorySearch(request.query);
-	return items
+	const found = items
 		.filter((item) => matchesMemorySearchRequest(item, request))
-		.map((item) => ({ item, score: strategy.score(queryTokens, item) }))
+		.map((item) => {
+			assertMemoryReadActive(context);
+			return { item, score: strategy.score(queryTokens, item) };
+		})
 		.filter((result) => result.score > 0)
 		.sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id))
 		.slice(0, request.maxResults)
 		.map((result) => ({ ...result, reason: strategy.reason(result.score, result.item) }));
+	assertMemoryReadActive(context);
+	return found;
 }
 
 export function fetchLocalMemoryItem(
@@ -53,3 +60,5 @@ export function fetchLocalMemoryItem(
 	if (ref.providerId !== providerId) return undefined;
 	return items.find((item) => item.id === ref.itemId && item.scope === ref.scope && item.kind === ref.kind);
 }
+
+import { assertMemoryReadActive, type MemoryReadContext } from "../memory/memory-read-context.ts";

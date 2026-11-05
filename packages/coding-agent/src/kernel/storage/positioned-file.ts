@@ -1,4 +1,5 @@
 import type { FileHandle } from "node:fs/promises";
+import { assertBoundedReadActive } from "./bounded-file.ts";
 
 /** Complete a positioned transfer without treating a short read or write as completion. */
 async function transferExactly(
@@ -7,12 +8,13 @@ async function transferExactly(
 	label: string,
 	signal?: AbortSignal,
 	allowEof = false,
+	deadlineAt?: number,
 ): Promise<boolean> {
 	let offset = 0;
 	while (offset < length) {
-		signal?.throwIfAborted();
+		assertBoundedReadActive({ signal, deadlineAt });
 		const transferred = await transfer(offset, length - offset);
-		signal?.throwIfAborted();
+		assertBoundedReadActive({ signal, deadlineAt });
 		if (transferred === 0 && allowEof) return false;
 		if (!Number.isSafeInteger(transferred) || transferred <= 0 || transferred > length - offset)
 			throw new Error(`Incomplete positioned I/O: ${label}`);
@@ -29,6 +31,7 @@ export function readFileRangeInto(
 	label: string,
 	signal?: AbortSignal,
 	allowEof = false,
+	deadlineAt?: number,
 ): Promise<boolean> {
 	return transferExactly(
 		buffer.length,
@@ -39,6 +42,7 @@ export function readFileRangeInto(
 		label,
 		signal,
 		allowEof,
+		deadlineAt,
 	);
 }
 

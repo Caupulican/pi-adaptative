@@ -166,7 +166,12 @@ function messageUnits(message: unknown, uncaptured: Record<string, number>): Cap
  * (lifecycle, model changes, labels, ...). Spans start labelled `selected`; the owning
  * {@link SessionCaptureState} relabels them from ancestry.
  */
-export function captureEntry(entry: SessionEntry, projectId: string, sessionId: string): EntryCapture | undefined {
+export function captureEntry(
+	entry: SessionEntry,
+	projectId: string,
+	sessionId: string,
+	checkpoint?: () => void,
+): EntryCapture | undefined {
 	const uncaptured: Record<string, number> = {};
 	let reason: string | undefined;
 	const note = (why: TranscriptUncapturedReason, amount = 1): void => {
@@ -209,6 +214,7 @@ export function captureEntry(entry: SessionEntry, projectId: string, sessionId: 
 
 	const parts: CapturedSpan[] = [];
 	for (const unit of units) {
+		checkpoint?.();
 		const text = unit.text.trim();
 		if (!text) {
 			note("empty");
@@ -222,8 +228,9 @@ export function captureEntry(entry: SessionEntry, projectId: string, sessionId: 
 			note("secret_like");
 			continue;
 		}
-		const chunks = splitUtf8(text, TRANSCRIPT_PART_MAX_BYTES);
+		const chunks = splitUtf8(text, TRANSCRIPT_PART_MAX_BYTES, checkpoint);
 		for (let index = 0; index < chunks.length; index++) {
+			checkpoint?.();
 			if (parts.length >= TRANSCRIPT_MAX_PARTS_PER_ENTRY) {
 				note("part_limit", chunks.length - index);
 				break;
@@ -296,14 +303,14 @@ export class SessionCaptureState {
 		bump(this.uncapturedTotals, reason);
 	}
 
-	add(entry: SessionEntry): void {
+	add(entry: SessionEntry, checkpoint?: () => void): void {
 		if (this.ids.has(entry.id)) {
 			bump(this.uncapturedTotals, "duplicate_entry_id");
 			return;
 		}
 		this.ids.add(entry.id);
 		this.lite.push({ id: entry.id, parentId: entry.parentId });
-		const capture = captureEntry(entry, this.projectId, this.sessionId);
+		const capture = captureEntry(entry, this.projectId, this.sessionId, checkpoint);
 		if (!capture) return;
 		this.entries.set(entry.id, capture);
 		for (const [reason, amount] of Object.entries(capture.uncaptured)) bump(this.uncapturedTotals, reason, amount);
@@ -338,9 +345,9 @@ export class SessionCaptureState {
 	 * new lineage only grew at the leaf, just the new entries are appended and hashed; any other change
 	 * (branch switch, first call) rebuilds. Throws when the entry graph has a parent cycle.
 	 */
-	finalize(): void {
+	finalize(checkpoint?: () => void): void {
 		const previousIds = this.branchIds;
-		const ids = collectSessionBranch(this.lite).map((entry) => entry.id);
+		const ids = collectSessionBranch(this.lite, undefined, checkpoint).map((entry) => entry.id);
 		const grew = this.lineageHash !== undefined && ids.length >= previousIds.length && startsWith(ids, previousIds);
 		this.branchIds = ids;
 		let hash = this.lineageHash;
@@ -352,9 +359,11 @@ export class SessionCaptureState {
 			from = 0;
 		}
 		for (let position = from; position < ids.length; position++) {
+			checkpoint?.();
 			const capture = this.entries.get(ids[position] ?? "");
 			if (!capture) continue;
 			for (const part of capture.parts) {
+				checkpoint?.();
 				// Identical bytes to `transcriptDigest(handles.join("\n"))`, hashed as the lineage grows.
 				if (this.selectedList.length > 0) hash.update("\n");
 				hash.update(formatTranscriptSourceHandle(part.span.ref));
@@ -365,8 +374,10 @@ export class SessionCaptureState {
 		this.digestValue = hash.copy().digest("hex").slice(0, 16);
 		const selected = new Set(this.branchIds);
 		for (const [entryId, capture] of this.entries) {
+			checkpoint?.();
 			const lineage: TranscriptLineage = selected.has(entryId) ? "selected" : "alternate";
 			for (const part of capture.parts) {
+				checkpoint?.();
 				if (part.span.lineage !== lineage) part.span = { ...part.span, lineage };
 			}
 		}
@@ -377,9 +388,10 @@ export class SessionCaptureState {
 	 * session): positions before it hold the same sources. When one list is a prefix of the other it is the shorter
 	 * length. The lowest position a lineage change can have affected.
 	 */
-	firstChangedPosition(previous: readonly CapturedSpan[]): number {
+	firstChangedPosition(previous: readonly CapturedSpan[], checkpoint?: () => void): number {
 		const shared = Math.min(previous.length, this.selectedList.length);
 		for (let position = 0; position < shared; position++) {
+			checkpoint?.();
 			const before = previous[position];
 			const after = this.selectedList[position];
 			if (!before || !after || !sameTranscriptSource(before.span.ref, after.span.ref)) return position;
@@ -392,16 +404,54 @@ export class SessionCaptureState {
 	 * `transcriptLineageRangeDigest(fromIndex, refs)` of the parts there, read from prefix sums, so a check costs
 	 * O(1) once the prefix reaches the range. Undefined when the lineage is shorter than the range.
 	 */
-	rangeDigest(fromIndex: number, count: number): string | undefined {
+	rangeDigest(fromIndex: number, count: number, checkpoint?: () => void): string | undefined {
 		const to = fromIndex + count;
 		if (to > this.selectedList.length) return undefined;
 		for (let position = this.termPrefix.length - 1; position < to; position++) {
+			checkpoint?.();
 			const part = this.selectedList[position];
 			if (!part) return undefined;
 			const sum = (this.termPrefix[position] ?? 0n) + transcriptLineageTerm(position, part.span.ref);
 			this.termPrefix.push(sum % TRANSCRIPT_LINEAGE_DIGEST_MODULUS);
 		}
 		return formatTranscriptLineageDigest((this.termPrefix[to] ?? 0n) - (this.termPrefix[fromIndex] ?? 0n));
+	}
+
+	/** Isolate an interruptible append from the published capture until the new lineage is complete. */
+	fork(checkpoint: () => void): SessionCaptureState {
+		const copy = new SessionCaptureState(this.projectId, this.sessionId);
+		for (const entry of this.lite) {
+			checkpoint();
+			copy.lite.push(entry);
+			copy.ids.add(entry.id);
+		}
+		for (const [id, capture] of this.entries) {
+			checkpoint();
+			copy.entries.set(id, {
+				...capture,
+				parts: capture.parts.map((part) => {
+					checkpoint();
+					return { ...part };
+				}),
+			});
+		}
+		Object.assign(copy.uncapturedTotals, this.uncapturedTotals);
+		copy.bytes = this.bytes;
+		copy.count = this.count;
+		copy.branchIds = this.branchIds;
+		copy.selectedList = this.selectedList.map((part) => {
+			checkpoint();
+			const copied = copy.entries.get(part.span.ref.entryId)?.parts[part.span.ref.part];
+			if (!copied) throw new Error("Captured lineage part is missing from its entry.");
+			return copied;
+		});
+		copy.termPrefix = this.termPrefix.map((term) => {
+			checkpoint();
+			return term;
+		});
+		copy.lineageHash = this.lineageHash?.copy();
+		copy.digestValue = this.digestValue;
+		return copy;
 	}
 
 	spans(): CapturedSpan[] {

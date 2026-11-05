@@ -22,6 +22,7 @@ import type { PathInputOptions } from "../../utils/paths.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { readBoundedLocalText } from "./bounded-local-text.ts";
 import { buildCodeOutline, renderCodeOutline } from "./code-outline.ts";
 import {
 	describeFileEncodingSource,
@@ -40,8 +41,10 @@ import {
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
 import { decodeReadText, decodeTextChunks } from "./file-text-decoder.ts";
+import { LocalReadSession } from "./local-read-io.ts";
 import { formatMissingPathLocateEvidence, resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { type ReadLine, readLineWindow } from "./read-line-window.ts";
+import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { type ReadToolDetails, readSchema } from "./schemas/read.ts";
 import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
@@ -309,6 +312,7 @@ const OUTLINE_MAX_SOURCE_CHARS = 8 * 1024 * 1024;
 const DEFAULT_MAX_IMAGE_READ_BYTES = 128 * 1024 * 1024;
 
 export interface ReadToolOptions {
+	readOperation?: ReadOperationFactory;
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
@@ -500,7 +504,7 @@ export function createReadToolDefinition(
 		parameters: readSchema,
 		failureRecovery: {
 			getFailureEvidence: (params, failure) =>
-				localFileSystem && failure.failureCode === "file_not_found"
+				localFileSystem && !options?.readOperation && failure.failureCode === "file_not_found"
 					? formatMissingPathLocateEvidence(params.path, cwd, pathOptions)
 					: undefined,
 			getFailureTargets: (params, failure) =>
@@ -554,6 +558,54 @@ export function createReadToolDefinition(
 			_onUpdate?,
 			ctx?,
 		) {
+			let readOperations = ops;
+			let boundedIo: LocalReadSession | undefined;
+			let boundedEncoding: ResolvedFileEncoding | undefined;
+			let boundedDetected: string | undefined;
+			let boundedPath: string | undefined;
+			if (options?.readOperation) {
+				if (options.operations) throw new Error("Bounded local reads cannot use a foreign filesystem adapter");
+				const operation = options.readOperation("read", _toolCallId, signal);
+				const io = new LocalReadSession(operation);
+				const absolute = resolveToCwd(path, cwd, pathOptions);
+				boundedIo = io;
+				boundedPath = absolute;
+				const stats = await io.stat(absolute);
+				if (!stats) throw new Error(`Path not found: ${path}`);
+				if (stats.isDirectory()) {
+					if (column !== undefined || offset !== undefined || tail !== undefined || mode !== undefined)
+						throw new Error("Directory reads do not accept text windows");
+					const listing = renderDirectoryListing(path, await io.list(absolute));
+					const bounded = boundReadResult(
+						listing.text + (io.partial ? "\n[Partial directory enumeration: work limit reached]" : ""),
+					);
+					const text = bounded.text;
+					io.publish(
+						absolute,
+						JSON.stringify({ path }),
+						text,
+						bounded.truncated || listing.details.shown < listing.details.entries ? "partial" : "complete",
+					);
+					return { content: [{ type: "text" as const, text }], details: { directory: listing.details } };
+				}
+				const source = await readBoundedLocalText(io, absolute, cwd, {
+					encoding,
+					fileEncodings: options.fileEncodings,
+				});
+				boundedEncoding = source.declared;
+				boundedDetected = source.detected;
+				const captured = Buffer.from(source.text, "utf8");
+				readOperations = {
+					access: async (candidate) => {
+						operation.assertCurrent();
+						if (candidate !== absolute) throw new Error("Captured read path changed");
+					},
+					readFile: async () => captured,
+					stat: async () => ({ size: captured.length }),
+				};
+				signal = operation.signal;
+			}
+			const localAccess = localFileSystem && boundedIo === undefined;
 			if (
 				column !== undefined &&
 				(!Number.isSafeInteger(column) ||
@@ -566,445 +618,459 @@ export function createReadToolDefinition(
 					"column requires a positive integer and a single-line read using offset; omit outline/tail and use limit=1.",
 				);
 			}
-			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
-				(resolve, reject) => {
-					if (signal?.aborted) {
-						reject(new Error("Operation aborted"));
-						return;
-					}
-					let aborted = false;
-					const onAbort = () => {
-						aborted = true;
-						reject(new Error("Operation aborted"));
-					};
-					signal?.addEventListener("abort", onAbort, { once: true });
+			const result = await new Promise<{
+				content: (TextContent | ImageContent)[];
+				details: ReadToolDetails | undefined;
+			}>((resolve, reject) => {
+				if (signal?.aborted) {
+					reject(new Error("Operation aborted"));
+					return;
+				}
+				let aborted = false;
+				const onAbort = () => {
+					aborted = true;
+					reject(new Error("Operation aborted"));
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
 
-					(async () => {
-						try {
-							const absolutePath = await resolveReadPathAsync(
-								path,
-								cwd,
-								(candidate) => ops.access(candidate),
-								pathOptions,
-								signal,
+				(async () => {
+					try {
+						const absolutePath = await resolveReadPathAsync(
+							path,
+							cwd,
+							(candidate) => readOperations.access(candidate),
+							pathOptions,
+							signal,
+						);
+						if (aborted) return;
+						const projectSessionTranscript = isPiSessionJsonlPath(absolutePath, configuredSessionDirectory);
+						if (column !== undefined && projectSessionTranscript)
+							throw new Error(
+								"Session transcripts expose projected labels, not raw character windows. Use read with offset and limit, without column.",
 							);
-							if (aborted) return;
-							const projectSessionTranscript = isPiSessionJsonlPath(absolutePath, configuredSessionDirectory);
-							if (column !== undefined && projectSessionTranscript)
-								throw new Error(
-									"Session transcripts expose projected labels, not raw character windows. Use read with offset and limit, without column.",
-								);
-							let content: (TextContent | ImageContent)[];
-							let details: ReadToolDetails | undefined;
-							const directoryEntries = ops.listDirectory ? await ops.listDirectory(absolutePath) : undefined;
-							if (aborted) return;
-							if (directoryEntries) {
-								// A directory has no bytes to page; the useful read is its bounded listing.
-								if (column !== undefined || offset !== undefined || tail !== undefined || mode !== undefined) {
-									throw new Error(`${path} is a directory: read it without offset, tail, column, or mode.`);
-								}
-								const listing = renderDirectoryListing(path, directoryEntries);
+						let content: (TextContent | ImageContent)[];
+						let details: ReadToolDetails | undefined;
+						const directoryEntries = readOperations.listDirectory
+							? await readOperations.listDirectory(absolutePath)
+							: undefined;
+						if (aborted) return;
+						if (directoryEntries) {
+							// A directory has no bytes to page; the useful read is its bounded listing.
+							if (column !== undefined || offset !== undefined || tail !== undefined || mode !== undefined) {
+								throw new Error(`${path} is a directory: read it without offset, tail, column, or mode.`);
+							}
+							const listing = renderDirectoryListing(path, directoryEntries);
+							signal?.removeEventListener("abort", onAbort);
+							resolve({
+								content: [{ type: "text", text: listing.text }],
+								details: { directory: listing.details },
+							});
+							return;
+						}
+						const mimeType = readOperations.detectImageMimeType
+							? await readOperations.detectImageMimeType(absolutePath)
+							: undefined;
+						const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
+						const fileSize = readOperations.stat ? (await readOperations.stat(absolutePath)).size : undefined;
+						if (aborted) return;
+						// The single resolution point: the call's own argument, then the user's
+						// fileEncodings rules, then the project's .editorconfig. A file none of them
+						// names is resolved from its own bytes by the managed codec while decoding, so
+						// legacy sources read on the first try instead of asking the model for a charset.
+						// A foreign backend's metadata does not live on this filesystem, so only local
+						// reads consult declarations or remember what detection found.
+						const declaredEncoding: ResolvedFileEncoding | undefined =
+							boundedEncoding ??
+							(encoding === undefined && !mimeType && localAccess
+								? await resolveFileEncoding(absolutePath, cwd, {
+										fileEncodings: options?.fileEncodings,
+										signal,
+									})
+								: undefined);
+						if (aborted) return;
+						// The modification time keys what detection found, so the edit that follows this
+						// read resolves the same file to the same charset without detecting it again.
+						const sourceMtimeMs =
+							encoding === undefined && !declaredEncoding && !mimeType && localAccess
+								? await fsStat(absolutePath).then(
+										(stats) => stats.mtimeMs,
+										() => undefined,
+									)
+								: undefined;
+						if (aborted) return;
+						const cachedDetection =
+							sourceMtimeMs === undefined ? undefined : recallDetectedFileEncoding(absolutePath, sourceMtimeMs);
+						const sourceEncoding = boundedIo
+							? undefined
+							: (encoding ?? declaredEncoding?.encoding ?? cachedDetection);
+						let detectedEncoding: string | undefined = boundedDetected;
+						const onEncodingDetected = (name: string): void => {
+							detectedEncoding ??= name;
+							if (sourceMtimeMs !== undefined) rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, name);
+						};
+						/** Name the evidence in the result: a silent charset switch is a guess to the reader. */
+						const withDeclaredEncoding = (
+							parts: (TextContent | ImageContent)[],
+							current: ReadToolDetails | undefined,
+						): { content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined } => {
+							const resolved = declaredEncoding
+								? {
+										name: declaredEncoding.encoding,
+										source:
+											declaredEncoding.source === "editorconfig"
+												? (declaredEncoding.declaredIn ?? "")
+												: declaredEncoding.source === "argument"
+													? "encoding argument"
+													: "settings fileEncodings",
+										label: describeFileEncodingSource(declaredEncoding, cwd),
+									}
+								: (detectedEncoding ?? cachedDetection) !== undefined
+									? {
+											name: (detectedEncoding ?? cachedDetection) as string,
+											source: PYTHON_DETECTION_SOURCE,
+											label: PYTHON_DETECTION_SOURCE,
+										}
+									: undefined;
+							if (!resolved) return { content: parts, details: current };
+							const note = `[decoded as ${resolved.name} per ${resolved.label}]`;
+							const last = parts[parts.length - 1];
+							return {
+								content:
+									last?.type === "text"
+										? [...parts.slice(0, -1), { ...last, text: `${last.text}\n${note}` }]
+										: [...parts, { type: "text", text: note }],
+								details: {
+									...current,
+									encoding: { name: resolved.name, source: resolved.source },
+								},
+							};
+						};
+						if (mimeType) {
+							if (fileSize !== undefined && fileSize > maxImageReadBytes) {
 								signal?.removeEventListener("abort", onAbort);
 								resolve({
-									content: [{ type: "text", text: listing.text }],
-									details: { directory: listing.details },
+									content: [
+										{
+											type: "text",
+											text: `Image file is ${formatSize(fileSize)} (${formatSize(maxImageReadBytes)} inline decode limit). Downscale it first, e.g. with bash (ImageMagick: magick "${path}" -resize 2000x2000 "${join(getProcessWorkRun(getAgentDir(), "images", "previews").path, "preview.png")}") and read the result.`,
+										},
+									],
+									details: undefined,
 								});
 								return;
 							}
-							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
-							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
-							const fileSize = ops.stat ? (await ops.stat(absolutePath)).size : undefined;
-							if (aborted) return;
-							// The single resolution point: the call's own argument, then the user's
-							// fileEncodings rules, then the project's .editorconfig. A file none of them
-							// names is resolved from its own bytes by the managed codec while decoding, so
-							// legacy sources read on the first try instead of asking the model for a charset.
-							// A foreign backend's metadata does not live on this filesystem, so only local
-							// reads consult declarations or remember what detection found.
-							const declaredEncoding: ResolvedFileEncoding | undefined =
-								encoding === undefined && !mimeType && localFileSystem
-									? await resolveFileEncoding(absolutePath, cwd, {
-											fileEncodings: options?.fileEncodings,
-											signal,
-										})
-									: undefined;
-							if (aborted) return;
-							// The modification time keys what detection found, so the edit that follows this
-							// read resolves the same file to the same charset without detecting it again.
-							const sourceMtimeMs =
-								encoding === undefined && !declaredEncoding && !mimeType && localFileSystem
-									? await fsStat(absolutePath).then(
-											(stats) => stats.mtimeMs,
-											() => undefined,
-										)
-									: undefined;
-							if (aborted) return;
-							const cachedDetection =
-								sourceMtimeMs === undefined
-									? undefined
-									: recallDetectedFileEncoding(absolutePath, sourceMtimeMs);
-							const sourceEncoding = encoding ?? declaredEncoding?.encoding ?? cachedDetection;
-							let detectedEncoding: string | undefined;
-							const onEncodingDetected = (name: string): void => {
-								detectedEncoding ??= name;
-								if (sourceMtimeMs !== undefined)
-									rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, name);
-							};
-							/** Name the evidence in the result: a silent charset switch is a guess to the reader. */
-							const withDeclaredEncoding = (
-								parts: (TextContent | ImageContent)[],
-								current: ReadToolDetails | undefined,
-							): { content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined } => {
-								const resolved = declaredEncoding
-									? {
-											name: declaredEncoding.encoding,
-											source:
-												declaredEncoding.source === "editorconfig"
-													? (declaredEncoding.declaredIn ?? "")
-													: "settings fileEncodings",
-											label: describeFileEncodingSource(declaredEncoding, cwd),
-										}
-									: (detectedEncoding ?? cachedDetection) !== undefined
-										? {
-												name: (detectedEncoding ?? cachedDetection) as string,
-												source: PYTHON_DETECTION_SOURCE,
-												label: PYTHON_DETECTION_SOURCE,
-											}
-										: undefined;
-								if (!resolved) return { content: parts, details: current };
-								const note = `[decoded as ${resolved.name} per ${resolved.label}]`;
-								const last = parts[parts.length - 1];
-								return {
-									content:
-										last?.type === "text"
-											? [...parts.slice(0, -1), { ...last, text: `${last.text}\n${note}` }]
-											: [...parts, { type: "text", text: note }],
-									details: {
-										...current,
-										encoding: { name: resolved.name, source: resolved.source },
-									},
-								};
-							};
-							if (mimeType) {
-								if (fileSize !== undefined && fileSize > maxImageReadBytes) {
-									signal?.removeEventListener("abort", onAbort);
-									resolve({
-										content: [
-											{
-												type: "text",
-												text: `Image file is ${formatSize(fileSize)} (${formatSize(maxImageReadBytes)} inline decode limit). Downscale it first, e.g. with bash (ImageMagick: magick "${path}" -resize 2000x2000 "${join(getProcessWorkRun(getAgentDir(), "images", "previews").path, "preview.png")}") and read the result.`,
-											},
-										],
-										details: undefined,
-									});
-									return;
-								}
-								// Read image as binary.
-								const buffer = await ops.readFile(absolutePath);
-								if (autoResizeImages) {
-									// Resize image if needed before sending it back to the model.
-									const resized = await resizeImage(buffer, mimeType);
-									if (!resized) {
-										let textNote = `Read image file [${mimeType}]\n[Image omitted: could not be resized below the inline image size limit.]`;
-										if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-										content = [{ type: "text", text: textNote }];
-									} else {
-										const dimensionNote = formatDimensionNote(resized);
-										let textNote = `Read image file [${resized.mimeType}]`;
-										if (dimensionNote) textNote += `\n${dimensionNote}`;
-										if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-										content = [
-											{ type: "text", text: textNote },
-											{ type: "image", data: resized.data, mimeType: resized.mimeType },
-										];
-									}
+							// Read image as binary.
+							const buffer = await readOperations.readFile(absolutePath);
+							if (autoResizeImages) {
+								// Resize image if needed before sending it back to the model.
+								const resized = await resizeImage(buffer, mimeType);
+								if (!resized) {
+									let textNote = `Read image file [${mimeType}]\n[Image omitted: could not be resized below the inline image size limit.]`;
+									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
+									content = [{ type: "text", text: textNote }];
 								} else {
-									let textNote = `Read image file [${mimeType}]`;
+									const dimensionNote = formatDimensionNote(resized);
+									let textNote = `Read image file [${resized.mimeType}]`;
+									if (dimensionNote) textNote += `\n${dimensionNote}`;
 									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
 									content = [
 										{ type: "text", text: textNote },
-										{ type: "image", data: buffer.toString("base64"), mimeType },
+										{ type: "image", data: resized.data, mimeType: resized.mimeType },
 									];
 								}
-							} else if (mode === "outline" && !projectSessionTranscript) {
-								// Orientation instead of paging: the declarations with their line numbers, so the
-								// next read is the range the model needs. Verbatim reads are untouched.
-								const outlineSlice =
-									fileSize !== undefined && fileSize > maxTextReadBytes && ops.readLineSlice !== undefined
-										? await ops.readLineSlice(absolutePath, {
-												startLine: 0,
-												maxLines: OUTLINE_MAX_SOURCE_LINES,
-												maxChars: OUTLINE_MAX_SOURCE_CHARS,
-												encoding: sourceEncoding,
-												onEncodingDetected,
-												signal,
-											})
-										: undefined;
-								const outlineText = outlineSlice
-									? outlineSlice.lines.map((item) => (item.window ? "" : item.text)).join("\n")
-									: await decodeReadText(
-											await ops.readFile(absolutePath),
-											absolutePath,
-											sourceEncoding,
-											signal,
-											onEncodingDetected,
-										);
-								const outline = buildCodeOutline(path, outlineText);
-								content = [{ type: "text", text: renderCodeOutline(path, outline) }];
-								const omittedLine = outlineSlice?.lines.find((item) => item.window);
-								if (omittedLine)
-									content.push({
-										type: "text",
-										text: `[Oversized source lines omitted from outline. Use read offset=${omittedLine.originalIndex} column=1 to inspect the first omitted line.]`,
-									});
-								details = {
-									outline: {
-										language: outline.language,
-										entries: outline.entries.length,
-										totalLines: outline.totalLines,
-										headFallback: outline.headFallback,
-									},
-								};
 							} else {
-								// Read text content. Oversized files are streamed as line slices so
-								// any region stays reachable in batches without loading the whole file.
-								const useSlicedRead =
-									ops.readLineSlice !== undefined &&
-									(column !== undefined || (fileSize !== undefined && fileSize > maxTextReadBytes));
-								let startLine = 0;
-								let userLimitedLines = column !== undefined ? 1 : limit;
-								let totalFileLines: number | undefined;
-								let moreContentRemains = false;
-								let textContentForJsonCheck: string | undefined;
-								let slicedLines: ReadLine[];
-								if (useSlicedRead && ops.readLineSlice) {
-									if (offset !== undefined) {
-										startLine = Math.max(0, offset - 1);
-									} else if (tail !== undefined) {
-										const counted = ops.countLines
-											? await ops.countLines(absolutePath, {
-													encoding: sourceEncoding,
-													onEncodingDetected,
-													signal,
-												})
-											: undefined;
-										if (counted !== undefined) {
-											totalFileLines = counted;
-											startLine = Math.max(0, counted - tail);
-										}
-										if (limit === undefined) {
-											userLimitedLines = tail;
-										}
-									}
-									const slice = await ops.readLineSlice(absolutePath, {
-										startColumn: column !== undefined ? column - 1 : undefined,
-										maxLineChars: projectSessionTranscript ? DEFAULT_MAX_TEXT_READ_BYTES : undefined,
-										startLine,
-										maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
-										maxChars: DEFAULT_MAX_BYTES * 4,
-										encoding: sourceEncoding,
-										onEncodingDetected,
-										signal,
-									});
-									if (slice.lines.length === 0 && startLine > 0) {
-										throw new Error(`Offset ${startLine + 1} is beyond end of file`);
-									}
-									slicedLines = slice.lines;
-									moreContentRemains = !slice.reachedEnd;
-								} else {
-									const buffer = await ops.readFile(absolutePath);
-									const textContent = await decodeReadText(
-										buffer,
+								let textNote = `Read image file [${mimeType}]`;
+								if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
+								content = [
+									{ type: "text", text: textNote },
+									{ type: "image", data: buffer.toString("base64"), mimeType },
+								];
+							}
+						} else if (mode === "outline" && !projectSessionTranscript) {
+							// Orientation instead of paging: the declarations with their line numbers, so the
+							// next read is the range the model needs. Verbatim reads are untouched.
+							const outlineSlice =
+								fileSize !== undefined &&
+								fileSize > maxTextReadBytes &&
+								readOperations.readLineSlice !== undefined
+									? await readOperations.readLineSlice(absolutePath, {
+											startLine: 0,
+											maxLines: OUTLINE_MAX_SOURCE_LINES,
+											maxChars: OUTLINE_MAX_SOURCE_CHARS,
+											encoding: sourceEncoding,
+											onEncodingDetected,
+											signal,
+										})
+									: undefined;
+							const outlineText = outlineSlice
+								? outlineSlice.lines.map((item) => (item.window ? "" : item.text)).join("\n")
+								: await decodeReadText(
+										await readOperations.readFile(absolutePath),
 										absolutePath,
 										sourceEncoding,
 										signal,
 										onEncodingDetected,
 									);
-									textContentForJsonCheck = textContent;
-									const allLines = splitContentLines(textContent);
-									totalFileLines = allLines.length;
-									// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
-									if (offset !== undefined) {
-										startLine = Math.max(0, offset - 1);
-									} else if (tail !== undefined) {
-										startLine = Math.max(0, totalFileLines - tail);
-										if (limit === undefined) {
-											userLimitedLines = tail;
-										}
+							const outline = buildCodeOutline(path, outlineText);
+							content = [{ type: "text", text: renderCodeOutline(path, outline) }];
+							const omittedLine = outlineSlice?.lines.find((item) => item.window);
+							if (omittedLine)
+								content.push({
+									type: "text",
+									text: `[Oversized source lines omitted from outline. Use read offset=${omittedLine.originalIndex} column=1 to inspect the first omitted line.]`,
+								});
+							details = {
+								outline: {
+									language: outline.language,
+									entries: outline.entries.length,
+									totalLines: outline.totalLines,
+									headFallback: outline.headFallback,
+								},
+							};
+						} else {
+							// Read text content. Oversized files are streamed as line slices so
+							// any region stays reachable in batches without loading the whole file.
+							const useSlicedRead =
+								readOperations.readLineSlice !== undefined &&
+								(column !== undefined || (fileSize !== undefined && fileSize > maxTextReadBytes));
+							let startLine = 0;
+							let userLimitedLines = column !== undefined ? 1 : limit;
+							let totalFileLines: number | undefined;
+							let moreContentRemains = false;
+							let textContentForJsonCheck: string | undefined;
+							let slicedLines: ReadLine[];
+							if (useSlicedRead && readOperations.readLineSlice) {
+								if (offset !== undefined) {
+									startLine = Math.max(0, offset - 1);
+								} else if (tail !== undefined) {
+									const counted = readOperations.countLines
+										? await readOperations.countLines(absolutePath, {
+												encoding: sourceEncoding,
+												onEncodingDetected,
+												signal,
+											})
+										: undefined;
+									if (counted !== undefined) {
+										totalFileLines = counted;
+										startLine = Math.max(0, counted - tail);
 									}
-									// Check if offset is out of bounds.
-									if (startLine >= allLines.length && allLines.length > 0) {
-										throw new Error(
-											`Offset ${startLine + 1} is beyond end of file (${allLines.length} lines total)`,
-										);
+									if (limit === undefined) {
+										userLimitedLines = tail;
 									}
-									slicedLines =
-										userLimitedLines !== undefined
-											? allLines
-													.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
-													.slice(startLine, startLine + userLimitedLines)
-											: allLines
-													.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
-													.slice(startLine);
-									moreContentRemains =
-										userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
 								}
-								const startLineDisplay = startLine + 1;
-								if (projectSessionTranscript) {
-									slicedLines = slicedLines.map((item) => ({
-										text: item.window
-											? "[Oversized session record omitted from bounded projection; raw payload withheld.]"
-											: projectPiSessionJsonlLine(item.text),
-										originalIndex: item.originalIndex,
-									}));
+								const slice = await readOperations.readLineSlice(absolutePath, {
+									startColumn: column !== undefined ? column - 1 : undefined,
+									maxLineChars: projectSessionTranscript ? DEFAULT_MAX_TEXT_READ_BYTES : undefined,
+									startLine,
+									maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
+									maxChars: DEFAULT_MAX_BYTES * 4,
+									encoding: sourceEncoding,
+									onEncodingDetected,
+									signal,
+								});
+								if (slice.lines.length === 0 && startLine > 0) {
+									throw new Error(`Offset ${startLine + 1} is beyond end of file`);
 								}
-								const firstSelectedLine = slicedLines[0];
-								if (
-									!projectSessionTranscript &&
-									firstSelectedLine &&
-									(column !== undefined ||
-										firstSelectedLine.window ||
-										Buffer.byteLength(firstSelectedLine.text) > DEFAULT_MAX_BYTES - 64)
-								) {
-									const window = readLineWindow(firstSelectedLine, column);
-									signal?.removeEventListener("abort", onAbort);
-									if (!aborted)
-										resolve(
-											withDeclaredEncoding([{ type: "text", text: window.text }], {
-												lineWindow: window.lineWindow,
-											}),
-										);
-									return;
+								slicedLines = slice.lines;
+								moreContentRemains = !slice.reachedEnd;
+							} else {
+								const buffer = await readOperations.readFile(absolutePath);
+								const textContent = await decodeReadText(
+									buffer,
+									absolutePath,
+									sourceEncoding,
+									signal,
+									onEncodingDetected,
+								);
+								textContentForJsonCheck = textContent;
+								const allLines = splitContentLines(textContent);
+								totalFileLines = allLines.length;
+								// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
+								if (offset !== undefined) {
+									startLine = Math.max(0, offset - 1);
+								} else if (tail !== undefined) {
+									startLine = Math.max(0, totalFileLines - tail);
+									if (limit === undefined) {
+										userLimitedLines = tail;
+									}
 								}
+								// Check if offset is out of bounds.
+								if (startLine >= allLines.length && allLines.length > 0) {
+									throw new Error(
+										`Offset ${startLine + 1} is beyond end of file (${allLines.length} lines total)`,
+									);
+								}
+								slicedLines =
+									userLimitedLines !== undefined
+										? allLines
+												.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
+												.slice(startLine, startLine + userLimitedLines)
+										: allLines.map((line, idx) => ({ text: line, originalIndex: idx + 1 })).slice(startLine);
+								moreContentRemains =
+									userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
+							}
+							const startLineDisplay = startLine + 1;
+							if (projectSessionTranscript) {
+								slicedLines = slicedLines.map((item) => ({
+									text: item.window
+										? "[Oversized session record omitted from bounded projection; raw payload withheld.]"
+										: projectPiSessionJsonlLine(item.text),
+									originalIndex: item.originalIndex,
+								}));
+							}
+							const firstSelectedLine = slicedLines[0];
+							if (
+								!projectSessionTranscript &&
+								firstSelectedLine &&
+								(column !== undefined ||
+									firstSelectedLine.window ||
+									Buffer.byteLength(firstSelectedLine.text) > DEFAULT_MAX_BYTES - 64)
+							) {
+								const window = readLineWindow(firstSelectedLine, column);
+								signal?.removeEventListener("abort", onAbort);
+								if (!aborted)
+									resolve(
+										withDeclaredEncoding([{ type: "text", text: window.text }], {
+											lineWindow: window.lineWindow,
+										}),
+									);
+								return;
+							}
 
-								// Safe text filtering
-								let canFilter = !projectSessionTranscript;
-								if (mimeType) {
+							// Safe text filtering
+							let canFilter = !projectSessionTranscript;
+							if (mimeType) {
+								canFilter = false;
+							} else {
+								const fileNameLower = path.toLowerCase();
+								const unsafeExtensions = [".json", ".jsonl", ".yml", ".yaml", ".toml", ".xml", ".csv", ".tsv"];
+								if (unsafeExtensions.some((ext) => fileNameLower.endsWith(ext))) {
 									canFilter = false;
-								} else {
-									const fileNameLower = path.toLowerCase();
-									const unsafeExtensions = [
-										".json",
-										".jsonl",
-										".yml",
-										".yaml",
-										".toml",
-										".xml",
-										".csv",
-										".tsv",
-									];
-									if (unsafeExtensions.some((ext) => fileNameLower.endsWith(ext))) {
+								} else if (textContentForJsonCheck !== undefined) {
+									try {
+										JSON.parse(textContentForJsonCheck);
 										canFilter = false;
-									} else if (textContentForJsonCheck !== undefined) {
-										try {
-											JSON.parse(textContentForJsonCheck);
-											canFilter = false;
-										} catch {}
-									}
+									} catch {}
 								}
+							}
 
-								if (canFilter && filter && filter !== "none") {
-									const filtered: typeof slicedLines = [];
-									if (filter === "minimal") {
-										let consecutiveBlank = 0;
-										for (const item of slicedLines) {
-											const trimmed = item.text.trimEnd();
-											if (trimmed === "") {
-												consecutiveBlank++;
-												if (consecutiveBlank <= 1) {
-													filtered.push({ text: "", originalIndex: item.originalIndex });
-												}
-											} else {
-												consecutiveBlank = 0;
-												filtered.push({ text: trimmed, originalIndex: item.originalIndex });
+							if (canFilter && filter && filter !== "none") {
+								const filtered: typeof slicedLines = [];
+								if (filter === "minimal") {
+									let consecutiveBlank = 0;
+									for (const item of slicedLines) {
+										const trimmed = item.text.trimEnd();
+										if (trimmed === "") {
+											consecutiveBlank++;
+											if (consecutiveBlank <= 1) {
+												filtered.push({ text: "", originalIndex: item.originalIndex });
 											}
-										}
-										while (filtered.length > 0 && filtered[filtered.length - 1].text === "") {
-											filtered.pop();
-										}
-									} else if (filter === "aggressive") {
-										for (const item of slicedLines) {
-											const trimmed = item.text.trimEnd();
-											const trimmedStart = trimmed.trimStart();
-											if (trimmedStart === "") {
-												continue;
-											}
-											if (
-												trimmedStart.startsWith("//") ||
-												trimmedStart.startsWith("#") ||
-												(trimmedStart.startsWith("/*") && trimmedStart.endsWith("*/"))
-											) {
-												continue;
-											}
+										} else {
+											consecutiveBlank = 0;
 											filtered.push({ text: trimmed, originalIndex: item.originalIndex });
 										}
 									}
-
-									// If filtering would empty a non-empty list, keep original
-									const isOriginalNotEmpty = slicedLines.some((item) => item.text.trim().length > 0);
-									const isFilteredEmpty = filtered.every((item) => item.text.trim().length === 0);
-									if (isOriginalNotEmpty && isFilteredEmpty) {
-										// Fallback to slicedLines
-									} else {
-										slicedLines = filtered;
+									while (filtered.length > 0 && filtered[filtered.length - 1].text === "") {
+										filtered.pop();
+									}
+								} else if (filter === "aggressive") {
+									for (const item of slicedLines) {
+										const trimmed = item.text.trimEnd();
+										const trimmedStart = trimmed.trimStart();
+										if (trimmedStart === "") {
+											continue;
+										}
+										if (
+											trimmedStart.startsWith("//") ||
+											trimmedStart.startsWith("#") ||
+											(trimmedStart.startsWith("/*") && trimmedStart.endsWith("*/"))
+										) {
+											continue;
+										}
+										filtered.push({ text: trimmed, originalIndex: item.originalIndex });
 									}
 								}
 
-								const finalLines = slicedLines.map((item) =>
-									lineNumbers ? `${item.originalIndex}: ${item.text}` : item.text,
-								);
-								const selectedContent = finalLines.join("\n");
-
-								// Apply truncation, respecting both line and byte limits.
-								const truncation = truncateHead(selectedContent);
-								let outputText: string;
-								const totalDisplay =
-									totalFileLines !== undefined
-										? String(totalFileLines)
-										: `a ${fileSize !== undefined ? formatSize(fileSize) : "large"} file`;
-								if (truncation.firstLineExceedsLimit) {
-									const window = readLineWindow(slicedLines[0]);
-									outputText = window.text;
-									details = { lineWindow: window.lineWindow };
-								} else if (truncation.truncated) {
-									// Truncation occurred. Build an actionable continuation notice.
-									const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
-									const nextOffset = endLineDisplay + 1;
-									outputText = truncation.content;
-									if (truncation.truncatedBy === "lines") {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay}. Use offset=${nextOffset} to continue.]`;
-									} else {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
-									}
-									details = { truncation };
-								} else if (moreContentRemains) {
-									// More content exists beyond this slice; hand the model a continuation pointer.
-									const nextOffset = startLine + slicedLines.length + 1;
-									const remaining =
-										totalFileLines !== undefined && userLimitedLines !== undefined
-											? `${totalFileLines - (startLine + userLimitedLines)} more lines in file`
-											: "More content remains";
-									outputText = `${truncation.content}\n\n[${remaining}. Use offset=${nextOffset} to continue.]`;
+								// If filtering would empty a non-empty list, keep original
+								const isOriginalNotEmpty = slicedLines.some((item) => item.text.trim().length > 0);
+								const isFilteredEmpty = filtered.every((item) => item.text.trim().length === 0);
+								if (isOriginalNotEmpty && isFilteredEmpty) {
+									// Fallback to slicedLines
 								} else {
-									// No truncation and no remaining content.
-									outputText = truncation.content;
+									slicedLines = filtered;
 								}
-								if (projectSessionTranscript) {
-									outputText = `Pi session transcript (user/assistant/summary/tool labels only; thinking and payloads omitted).\n${outputText}`;
-								}
-								content = [{ type: "text", text: outputText }];
 							}
 
-							if (aborted) return;
-							signal?.removeEventListener("abort", onAbort);
-							resolve(withDeclaredEncoding(content, details));
-						} catch (error: unknown) {
-							signal?.removeEventListener("abort", onAbort);
-							if (!aborted) reject(error);
+							const finalLines = slicedLines.map((item) =>
+								lineNumbers ? `${item.originalIndex}: ${item.text}` : item.text,
+							);
+							const selectedContent = finalLines.join("\n");
+
+							// Apply truncation, respecting both line and byte limits.
+							const truncation = truncateHead(selectedContent);
+							let outputText: string;
+							const totalDisplay =
+								totalFileLines !== undefined
+									? String(totalFileLines)
+									: `a ${fileSize !== undefined ? formatSize(fileSize) : "large"} file`;
+							if (truncation.firstLineExceedsLimit) {
+								const window = readLineWindow(slicedLines[0]);
+								outputText = window.text;
+								details = { lineWindow: window.lineWindow };
+							} else if (truncation.truncated) {
+								// Truncation occurred. Build an actionable continuation notice.
+								const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
+								const nextOffset = endLineDisplay + 1;
+								outputText = truncation.content;
+								if (truncation.truncatedBy === "lines") {
+									outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay}. Use offset=${nextOffset} to continue.]`;
+								} else {
+									outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+								}
+								details = { truncation };
+							} else if (moreContentRemains) {
+								// More content exists beyond this slice; hand the model a continuation pointer.
+								const nextOffset = startLine + slicedLines.length + 1;
+								const remaining =
+									totalFileLines !== undefined && userLimitedLines !== undefined
+										? `${totalFileLines - (startLine + userLimitedLines)} more lines in file`
+										: "More content remains";
+								outputText = `${truncation.content}\n\n[${remaining}. Use offset=${nextOffset} to continue.]`;
+							} else {
+								// No truncation and no remaining content.
+								outputText = truncation.content;
+							}
+							if (projectSessionTranscript) {
+								outputText = `Pi session transcript (user/assistant/summary/tool labels only; thinking and payloads omitted).\n${outputText}`;
+							}
+							content = [{ type: "text", text: outputText }];
 						}
-					})();
-				},
-			);
+
+						if (aborted) return;
+						signal?.removeEventListener("abort", onAbort);
+						resolve(withDeclaredEncoding(content, details));
+					} catch (error: unknown) {
+						signal?.removeEventListener("abort", onAbort);
+						if (!aborted) reject(error);
+					}
+				})();
+			});
+			if (boundedIo && boundedPath) {
+				const bounded = boundReadResult(
+					result.content
+						.filter((item) => item.type === "text")
+						.map((item) => item.text)
+						.join("\n"),
+				);
+				boundedIo.publish(
+					boundedPath,
+					JSON.stringify({ path, encoding, offset, column, limit, mode, lineNumbers, tail, filter }),
+					bounded.text,
+					bounded.truncated ? "partial" : "window",
+				);
+				return { ...result, content: [{ type: "text" as const, text: bounded.text }] };
+			}
+			return result;
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);

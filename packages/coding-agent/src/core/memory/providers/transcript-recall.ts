@@ -44,6 +44,7 @@ import {
 	TRANSCRIPT_RECALL_MAX_SOURCE_PAGE_BYTES,
 	TRANSCRIPT_RECALL_MIN_SOURCE_PAGE_BYTES,
 	type TranscriptRecallLineageBump,
+	type TranscriptRecallReadControl,
 	type TranscriptRecallSessionsResult,
 	type TranscriptRecallWorkerRequest,
 	type TranscriptRecallWorkerResponse,
@@ -67,6 +68,7 @@ const TOO_MANY_READS_REASON = "Too many transcript reads are already in flight."
 const MAX_LINEAGE_BUMP_HISTORY = 64;
 /** A genuine timeout of the caller's whole operation (`deadlineAt`); worded for the timeout retry class. */
 const OPERATION_TIMEOUT_REASON = "The history operation timed out: its deadline passed before the read completed.";
+const CANCELLED_REASON = "The transcript read was cancelled.";
 
 type PendingKind = "result" | "source" | "sessions" | "lineage" | "verify";
 type PendingResponse = Extract<TranscriptRecallWorkerResponse, { type: PendingKind }>;
@@ -77,6 +79,9 @@ interface PendingRequest {
 	expect: PendingKind;
 	resolve: (outcome: PendingResponse | TranscriptReadUnavailable) => void;
 	timeout: NodeJS.Timeout;
+	control: TranscriptRecallReadControl;
+	cancelled?: TranscriptReadUnavailable;
+	removeAbortListener: () => void;
 }
 
 interface QueuedIngest {
@@ -102,6 +107,7 @@ interface ReadBudget {
 	timeoutMs: number;
 	deadline: number;
 	operation: boolean;
+	signal?: AbortSignal;
 }
 
 /** Bumps of one session's lineage revision this generation: the latest revision and a bounded recent history. */
@@ -202,6 +208,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	private readonly lastIngestSeq = new Map<string, number>();
 	/** Lineage revision bumps learned from this generation's coverage messages, per session id. */
 	private readonly lineageBumps = new Map<string, SessionLineageBumps>();
+	private indexRevision = 0;
+	private readonly captureRevisions = new Map<string, number>();
+	private readonly retirements = new Map<Worker, Promise<void>>();
 
 	constructor(options: TranscriptRecallProviderOptions = {}) {
 		this.workerSpecifier = options.workerSpecifier ?? createDefaultWorkerSpecifier();
@@ -352,12 +361,12 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	async search(request: TranscriptSearchRequest): Promise<TranscriptSearchResult> {
 		const query = request.query.trim().slice(0, TRANSCRIPT_RECALL_MAX_QUERY_CHARS);
 		const maxResults = clampInteger(request.maxResults, 1, TRANSCRIPT_RECALL_MAX_HITS, TRANSCRIPT_RECALL_MAX_HITS);
-		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt);
+		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt, request.signal);
 		if ("status" in budget) return budget;
-		if (!query) return { status: "ok", hits: [], coverage: this.latestCoverage ?? emptyCoverage() };
 
-		const outcome = await this.request("result", budget, (generation, requestId) => ({
+		const outcome = await this.request("result", budget, (generation, requestId, control) => ({
 			type: "query",
+			control,
 			generation,
 			requestId,
 			query,
@@ -366,14 +375,14 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			includeCurrentSession: request.includeCurrentSession === true,
 		}));
 		if ("status" in outcome) return outcome;
-		return { status: "ok", hits: outcome.hits, coverage: this.latestCoverage ?? emptyCoverage() };
+		return { status: "ok", hits: outcome.hits, coverage: outcome.coverage, observation: outcome.observation };
 	}
 
 	async readSource(request: TranscriptSourcePageRequest): Promise<TranscriptSourcePageResult> {
 		if (this.projectId !== undefined && request.ref.projectId !== this.projectId) {
 			return { status: "forbidden", reason: "The source handle belongs to another project." };
 		}
-		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt);
+		const budget = await this.admit(TRANSCRIPT_FOREGROUND_READ_MS, request.deadlineAt, request.signal);
 		if ("status" in budget) return budget;
 
 		const maxBytes = clampInteger(
@@ -383,8 +392,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			TRANSCRIPT_RECALL_MAX_SOURCE_PAGE_BYTES,
 		);
 		const cursor = clampInteger(request.cursor ?? 0, 0, Number.MAX_SAFE_INTEGER, 0);
-		const outcome = await this.request("source", budget, (generation, requestId) => ({
+		const outcome = await this.request("source", budget, (generation, requestId, control) => ({
 			type: "source",
+			control,
 			generation,
 			requestId,
 			sessionId: request.ref.sessionId,
@@ -400,8 +410,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	async listSessions(): Promise<TranscriptRecallSessionsResult> {
 		const budget = await this.admit(BACKGROUND_READ_TIMEOUT_MS);
 		if ("status" in budget) return budget;
-		const outcome = await this.request("sessions", budget, (generation, requestId) => ({
+		const outcome = await this.request("sessions", budget, (generation, requestId, control) => ({
 			type: "sessions",
+			control,
 			generation,
 			requestId,
 		}));
@@ -413,6 +424,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const budget = await this.admit(
 			request.priority === "foreground" ? TRANSCRIPT_FOREGROUND_READ_MS : BACKGROUND_READ_TIMEOUT_MS,
 			request.deadlineAt,
+			request.signal,
 		);
 		if ("status" in budget) return budget;
 		const fromIndex = clampInteger(request.fromIndex, 0, Number.MAX_SAFE_INTEGER, 0);
@@ -422,8 +434,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			TRANSCRIPT_RECALL_MAX_LINEAGE_SPANS,
 			TRANSCRIPT_RECALL_MAX_LINEAGE_SPANS,
 		);
-		const outcome = await this.request("lineage", budget, (generation, requestId) => ({
+		const outcome = await this.request("lineage", budget, (generation, requestId, control) => ({
 			type: "lineage",
+			control,
 			generation,
 			requestId,
 			sessionId: request.sessionId,
@@ -453,6 +466,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const budget = await this.admit(
 			request.priority === "foreground" ? TRANSCRIPT_FOREGROUND_READ_MS : BACKGROUND_READ_TIMEOUT_MS,
 			request.deadlineAt,
+			request.signal,
 		);
 		if ("status" in budget) return budget;
 		const checks = request.checks.map(({ sessionId, fromIndex, count, digest }) => ({
@@ -461,8 +475,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			count,
 			digest,
 		}));
-		const outcome = await this.request("verify", budget, (generation, requestId) => ({
+		const outcome = await this.request("verify", budget, (generation, requestId, control) => ({
 			type: "verify",
+			control,
 			generation,
 			requestId,
 			checks,
@@ -496,7 +511,17 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			};
 		}
 		if (!this.worker) return { status: "unavailable", reason: this.failure ?? SHUT_DOWN_REASON };
+		if (
+			observation.indexRevision !== undefined &&
+			(observation.indexRevision !== this.indexRevision || observation.ingestSeq !== this.ingestSeq)
+		)
+			return { status: "changed", reason: "The transcript search index changed after the answer." };
 		for (const session of observation.sessions) {
+			if (
+				session.captureRevision !== undefined &&
+				session.captureRevision !== (this.captureRevisions.get(session.sessionId) ?? 0)
+			)
+				return { status: "changed", reason: `Session ${session.sessionId}'s captured source changed.` };
 			if ((this.lastIngestSeq.get(session.sessionId) ?? 0) > observation.ingestSeq) {
 				return {
 					status: "changed",
@@ -570,7 +595,11 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	 * is the operation's timeout, never `pending`. The generation fence (shutdown, re-initialization) is the
 	 * cancellation fence for every admitted read.
 	 */
-	private async admit(timeoutMs: number, deadlineAt?: number): Promise<ReadBudget | TranscriptReadUnavailable> {
+	private async admit(
+		timeoutMs: number,
+		deadlineAt?: number,
+		signal?: AbortSignal,
+	): Promise<ReadBudget | TranscriptReadUnavailable> {
 		const now = Date.now();
 		const operation = deadlineAt !== undefined && Number.isFinite(deadlineAt) && deadlineAt < now + timeoutMs;
 		const budget: ReadBudget = {
@@ -578,7 +607,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			timeoutMs,
 			deadline: operation ? deadlineAt : now + timeoutMs,
 			operation,
+			signal,
 		};
+		if (signal?.aborted) return { status: "unavailable", reason: CANCELLED_REASON };
 		if (budget.deadline <= now) return { status: "unavailable", reason: OPERATION_TIMEOUT_REASON };
 		this.start();
 		if (this.worker && !this.ready) {
@@ -590,6 +621,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			// Ready settled this generation's wait; a generation that replaced it never serves this read.
 			if (this.generation !== budget.generation) return { status: "unavailable", reason: SHUT_DOWN_REASON };
 		}
+		if (signal?.aborted) return { status: "unavailable", reason: CANCELLED_REASON };
 		if (!this.worker) return { status: "unavailable", reason: this.failure ?? NOT_INITIALIZED_REASON };
 		if (!this.ready) return { status: "pending", reason: LOADING_REASON };
 		return budget;
@@ -602,14 +634,24 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	private awaitReady(budget: ReadBudget): Promise<TranscriptReadUnavailable | undefined> {
 		return new Promise((resolve) => {
 			let timeout: NodeJS.Timeout | undefined;
+			let settled = false;
+			const abort = () => waiter.settle({ status: "unavailable", reason: CANCELLED_REASON });
 			const waiter: ReadinessWaiter = {
 				settle: (outcome) => {
+					if (settled) return;
+					settled = true;
 					clearTimeout(timeout);
+					budget.signal?.removeEventListener("abort", abort);
 					this.readinessWaiters.delete(waiter);
 					resolve(outcome);
 				},
 			};
 			this.readinessWaiters.add(waiter);
+			budget.signal?.addEventListener("abort", abort, { once: true });
+			if (budget.signal?.aborted) {
+				abort();
+				return;
+			}
 			timeout = setTimeout(
 				() =>
 					waiter.settle(
@@ -626,8 +668,15 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	private request<K extends PendingKind>(
 		expect: K,
 		budget: ReadBudget,
-		build: (generation: number, requestId: number) => TranscriptRecallWorkerRequest,
+		build: (
+			generation: number,
+			requestId: number,
+			control: TranscriptRecallReadControl,
+		) => TranscriptRecallWorkerRequest,
 	): Promise<Extract<PendingResponse, { type: K }> | TranscriptReadUnavailable> {
+		if (budget.signal?.aborted) return Promise.resolve({ status: "unavailable", reason: CANCELLED_REASON });
+		if (Date.now() >= budget.deadline)
+			return Promise.resolve({ status: "unavailable", reason: OPERATION_TIMEOUT_REASON });
 		// The read was admitted for its generation; a generation that replaced it never serves the read.
 		if (this.generation !== budget.generation) {
 			return Promise.resolve({ status: "unavailable", reason: SHUT_DOWN_REASON });
@@ -644,6 +693,11 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const generation = budget.generation;
 		const requestId = this.requestId++;
 		return new Promise((resolve) => {
+			const control: TranscriptRecallReadControl = {
+				deadlineAt: budget.deadline,
+				cancelled: new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)),
+			};
+			const abort = () => this.cancelRequest(requestId, { status: "unavailable", reason: CANCELLED_REASON });
 			const timeout = setTimeout(
 				() => {
 					if (!this.pending.has(requestId)) return;
@@ -651,7 +705,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 						count: (this.readTimeouts?.count ?? 0) + 1,
 						lastAt: new Date().toISOString(),
 					};
-					this.finishRequest(requestId, {
+					this.cancelRequest(requestId, {
 						status: "unavailable",
 						// A genuine timeout of a posted read, worded for the timeout retry class either way.
 						reason: budget.operation
@@ -665,9 +719,32 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			// `handleWorkerMessage` resolves a pending request only with a response of the kind it expects.
 			const settle = (outcome: PendingResponse | TranscriptReadUnavailable): void =>
 				resolve(outcome as Extract<PendingResponse, { type: K }> | TranscriptReadUnavailable);
-			this.pending.set(requestId, { worker, generation, expect, resolve: settle, timeout });
-			this.post(worker, generation, build(generation, requestId));
+			this.pending.set(requestId, {
+				worker,
+				generation,
+				expect,
+				resolve: settle,
+				timeout,
+				control,
+				removeAbortListener: () => budget.signal?.removeEventListener("abort", abort),
+			});
+			budget.signal?.addEventListener("abort", abort, { once: true });
+			if (budget.signal?.aborted) {
+				this.finishRequest(requestId, { status: "unavailable", reason: CANCELLED_REASON });
+				return;
+			}
+			this.post(worker, generation, build(generation, requestId, control));
 		});
+	}
+
+	/** Stop physical work now; its terminal response owns settlement of the dispatched read. */
+	private cancelRequest(requestId: number, outcome: TranscriptReadUnavailable): void {
+		const pending = this.pending.get(requestId);
+		if (!pending || pending.cancelled) return;
+		pending.cancelled = outcome;
+		Atomics.store(pending.control.cancelled, 0, 1);
+		clearTimeout(pending.timeout);
+		pending.removeAbortListener();
 	}
 
 	/** Post to the worker; a post that throws is a worker failure with its real cause. */
@@ -710,6 +787,11 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 				break;
 			case "coverage":
 				this.latestCoverage = message.coverage;
+				if (message.change) {
+					this.indexRevision++;
+					for (const id of message.change.sessionIds)
+						this.captureRevisions.set(id, (this.captureRevisions.get(id) ?? 0) + 1);
+				}
 				for (const bump of message.bumps ?? []) this.noteLineageBump(bump);
 				if (message.change) this.emitIndexChange(message.change);
 				break;
@@ -750,8 +832,32 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		this.stoppedAt = new Date().toISOString();
 		this.queuedIngests.clear();
 		this.finishReady({ status: "unavailable", reason });
-		this.finishRequestsFor(worker, { status: "unavailable", reason });
-		void worker.terminate().catch(() => undefined);
+		void this.retireWorker(worker, { status: "unavailable", reason });
+	}
+
+	/** Retain worker termination until both the thread and all its physical reads have settled. */
+	private retireWorker(worker: Worker, outcome: TranscriptReadUnavailable): Promise<void> {
+		const existing = this.retirements.get(worker);
+		if (existing) return existing;
+		for (const [id, pending] of this.pending) {
+			if (pending.worker === worker) this.cancelRequest(id, outcome);
+		}
+		const exited = new Promise<void>((resolve) => {
+			if (worker.threadId === -1) resolve();
+			else worker.once("exit", () => resolve());
+		});
+		const retirement = Promise.resolve()
+			.then(() => worker.terminate())
+			.catch((error: unknown) => {
+				if (!this.worker) this.failure = `Transcript worker termination failed: ${describeError(error)}`;
+			})
+			.then(() => exited)
+			.then(() => {
+				this.finishRequestsFor(worker, outcome);
+				this.retirements.delete(worker);
+			});
+		this.retirements.set(worker, retirement);
+		return retirement;
 	}
 
 	/**
@@ -770,7 +876,13 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		if (!pending) return;
 		this.pending.delete(requestId);
 		clearTimeout(pending.timeout);
-		pending.resolve(outcome);
+		pending.removeAbortListener();
+		pending.resolve(
+			pending.cancelled ??
+				(Date.now() >= pending.control.deadlineAt
+					? { status: "unavailable", reason: OPERATION_TIMEOUT_REASON }
+					: outcome),
+		);
 	}
 
 	private finishRequestsFor(worker: Worker, outcome: TranscriptReadUnavailable): void {
@@ -790,29 +902,16 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		this.ingestSeq = 0;
 		this.lastIngestSeq.clear();
 		this.lineageBumps.clear();
+		this.indexRevision = 0;
+		this.captureRevisions.clear();
 		this.finishReady({ status: "unavailable", reason: SHUT_DOWN_REASON });
-		if (worker) this.finishRequestsFor(worker, { status: "unavailable", reason: SHUT_DOWN_REASON });
 		this.readyPromise = undefined;
-		if (!worker) return;
-		try {
-			worker.postMessage({ type: "shutdown", generation: this.generation });
-		} catch {}
-		await worker.terminate().catch(() => undefined);
+		if (worker) {
+			try {
+				worker.postMessage({ type: "shutdown", generation: this.generation });
+			} catch {}
+			await this.retireWorker(worker, { status: "unavailable", reason: SHUT_DOWN_REASON });
+		}
+		await Promise.all(this.retirements.values());
 	}
-}
-
-function emptyCoverage(): TranscriptCoverage {
-	return {
-		sessionsEligible: 0,
-		sessionsIndexed: 0,
-		sessionsUnsupported: 0,
-		sessionsSkipped: 0,
-		spansIndexed: 0,
-		spansUncaptured: 0,
-		skipped: {},
-		unsupported: {},
-		uncaptured: {},
-		activeFailures: 0,
-		truncated: false,
-	};
 }

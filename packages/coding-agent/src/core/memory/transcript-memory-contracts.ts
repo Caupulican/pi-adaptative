@@ -235,13 +235,14 @@ export function utf8ByteLength(text: string): number {
  * Split `text` into consecutive chunks of at most `maxBytes` UTF-8 bytes each, never splitting a code
  * point. Concatenating the chunks reconstructs `text` exactly.
  */
-export function splitUtf8(text: string, maxBytes: number): string[] {
+export function splitUtf8(text: string, maxBytes: number, checkpoint?: () => void): string[] {
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 4) throw new RangeError("UTF-8 chunk size must be at least 4.");
 	const chunks: string[] = [];
 	let start = 0;
 	let bytes = 0;
 	let index = 0;
 	while (index < text.length) {
+		if (index % 4096 === 0) checkpoint?.();
 		const codePoint = text.codePointAt(index) ?? 0;
 		const units = codePoint > 0xffff ? 2 : 1;
 		const width = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
@@ -334,10 +335,16 @@ export interface TranscriptSearchRequest {
 	includeCurrentSession?: boolean;
 	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
 	deadlineAt?: number;
+	signal?: AbortSignal;
 }
 
 export type TranscriptSearchResult =
-	| { status: "ok"; hits: TranscriptSearchHit[]; coverage: TranscriptCoverage }
+	| {
+			status: "ok";
+			hits: TranscriptSearchHit[];
+			coverage: TranscriptCoverage;
+			observation: TranscriptIndexObservation;
+	  }
 	| TranscriptReadUnavailable;
 
 export interface TranscriptSourcePageRequest {
@@ -347,10 +354,12 @@ export interface TranscriptSourcePageRequest {
 	maxBytes: number;
 	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
 	deadlineAt?: number;
+	signal?: AbortSignal;
 }
 
 export interface TranscriptSourcePage {
 	status: "ok";
+	observation: TranscriptIndexObservation;
 	span: TranscriptSourceSpan;
 	text: string;
 	cursor: number;
@@ -391,6 +400,7 @@ export interface TranscriptLineageSpansRequest {
 	 * passed unchanged to every read it makes; the read's own bound still applies when it is sooner.
 	 */
 	deadlineAt?: number;
+	signal?: AbortSignal;
 }
 
 export type TranscriptLineageSpansResult =
@@ -491,6 +501,7 @@ export interface TranscriptLineageVerifyRequest {
 	priority?: "foreground" | "background";
 	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
 	deadlineAt?: number;
+	signal?: AbortSignal;
 }
 
 /** One verdict per check, in request order. */
@@ -513,12 +524,20 @@ export interface TranscriptIndexObservation {
 	generation: number;
 	/** Highest parent ingest sequence the index had received (and so applied) when it answered. */
 	ingestSeq: number;
+	/** Present for searches: any indexed content change can change the ranked answer, including an append. */
+	indexRevision?: number;
 	/**
 	 * Each session the answer depended on: its lineage revision (monotone per session for the generation, bumped
 	 * whenever positions of its selected lineage may have changed, never on a pure append) and the exclusive end
 	 * position the answer depended on.
 	 */
-	sessions: readonly { sessionId: string; lineageRevision: number; dependsThrough: number }[];
+	sessions: readonly {
+		sessionId: string;
+		lineageRevision: number;
+		dependsThrough: number;
+		/** Exact source reads also depend on alternate-branch content, which lineage revisions do not describe. */
+		captureRevision?: number;
+	}[];
 }
 
 /**
@@ -543,6 +562,8 @@ export interface TranscriptSourceReader {
 	search(request: TranscriptSearchRequest): Promise<TranscriptSearchResult>;
 	readSource(request: TranscriptSourcePageRequest): Promise<TranscriptSourcePageResult>;
 	coverage(): TranscriptCoverage | undefined;
+	/** Judge source evidence against the backend's currently notified and indexed state, without I/O. */
+	observationCurrent(observation: TranscriptIndexObservation): TranscriptObservationVerdict;
 }
 
 /** The reader surface the summary hierarchy needs in addition to search and source reads. */
@@ -560,11 +581,6 @@ export interface TranscriptLineageReader extends TranscriptSourceReader {
 	 * span transfer, O(1) per check in the index. At most {@link TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS} checks.
 	 */
 	verifyLineageRanges(request: TranscriptLineageVerifyRequest): Promise<TranscriptLineageVerifyResult>;
-	/**
-	 * Judge an observation against what the parent knows now: synchronous, no I/O, so it can run after a read's
-	 * last await with nothing in between it and the delivery. See {@link TranscriptIndexObservation}.
-	 */
-	observationCurrent(observation: TranscriptIndexObservation): TranscriptObservationVerdict;
 	/** Event-driven change signal; the returned function unsubscribes. */
 	onIndexChanged(listener: (event: TranscriptIndexChangeEvent) => void): () => void;
 	/**

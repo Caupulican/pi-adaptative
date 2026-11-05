@@ -1,84 +1,95 @@
-/**
- * The one bounded-read owner for summary store reads: a ticketed single flight over ONE whole operation, with
- * every caller settled by its own deadline. The read-only view loads through it, and the running coordinator's
- * delivery fence reads its manifest through it.
- *
- * - `join` shares any flight running now (a read that has observed nothing yet may use any of them).
- * - `fence` must observe storage after the moment it was called: it never uses a flight that started before it,
- *   and waits for the ONE follow-up queued behind the running flight instead.
- * - Each caller waits only until its own `deadlineAt`, then gets a typed `unavailable` in the registry's timedOut
- *   wording; the race's timer is cleared when the caller settles. No caller deadline reaches the flight.
- * - The owner caches nothing. `work` receives the flight's start ticket (a later ticket observed storage at least as
- *   current), and adopting a result, or not, is the client's decision.
- *
- * Bound: one running plus one queued flight per client (one instance per client, dropped with it). A dropped client
- * leaves at most those two to settle, and nothing adopts their results. Work already started is not cancelled: a
- * file read in progress settles when the OS returns it.
- */
-
-import type { TranscriptReadUnavailable } from "./transcript-memory-contracts.ts";
-
-/** What a caller gets once its deadline passes first; timedOut wording, never a changed-in-flight one. */
-const TIMED_OUT: TranscriptReadUnavailable = {
-	status: "unavailable",
-	reason: "the summary store read operation timed out before its deadline; exact history recall is unaffected",
-};
+/** Ordered summary-store reads. Fences start after the physical read already in flight. */
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
+import { MemoryReadFlights } from "./memory-read-flight.ts";
+import { TRANSCRIPT_FOREGROUND_READ_MS, type TranscriptReadUnavailable } from "./transcript-memory-contracts.ts";
 
 type Settled<T> = T | TranscriptReadUnavailable;
 
-/** `pending`, or the typed timeout once `deadlineAt` passes first; the timer is cleared either way. */
-function withinDeadline<T>(pending: Promise<Settled<T>>, deadlineAt: number | undefined): Promise<Settled<T>> {
-	if (deadlineAt === undefined) return pending;
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timedOut = new Promise<Settled<T>>((resolve) => {
-		timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadlineAt - Date.now()));
-		timer.unref();
-	});
-	return Promise.race([pending, timedOut]).finally(() => clearTimeout(timer));
+interface OrderedRead {
+	readonly ticket: number;
+	signal?: AbortSignal;
+	done?: Promise<unknown>;
+	predecessor?: Promise<unknown>;
 }
 
+/** One running plus one queued read; cancellation and independent consumer waits have one shared owner. */
 export class TranscriptBoundedRead<T> {
-	private readonly work: (ticket: number) => Promise<Settled<T>>;
+	private readonly work: (ticket: number, context: MemoryReadContext) => Promise<Settled<T>>;
+	private readonly reads = new MemoryReadFlights(TRANSCRIPT_FOREGROUND_READ_MS);
 	private tickets = 0;
-	/** The one flight running now. */
-	private flight: { ticket: number; done: Promise<Settled<T>> } | undefined;
-	/** The one follow-up queued behind {@link flight} for fences that must not use it. */
-	private followUp: Promise<Settled<T>> | undefined;
+	private flight: OrderedRead | undefined;
+	private followUp: OrderedRead | undefined;
+	private closed = false;
 
-	constructor(work: (ticket: number) => Promise<Settled<T>>) {
+	constructor(work: (ticket: number, context: MemoryReadContext) => Promise<Settled<T>>) {
 		this.work = work;
 	}
 
-	/** Any running flight, else a new one; settled by `deadlineAt`. */
-	join(deadlineAt?: number): Promise<Settled<T>> {
-		return withinDeadline((this.flight ?? this.start()).done, deadlineAt);
+	join(context: MemoryReadContext = {}): Promise<Settled<T>> {
+		return this.read(false, context);
 	}
 
-	/**
-	 * A flight that starts after this call: a new one when nothing runs, else the one follow-up queued behind the
-	 * running flight (it starts once that flight settles, however it settles). Settled by `deadlineAt`.
-	 */
-	fence(deadlineAt?: number): Promise<Settled<T>> {
-		const running = this.flight;
-		if (!running) return withinDeadline(this.start().done, deadlineAt);
-		this.followUp ??= running.done.then(
-			() => this.startFollowUp(),
-			() => this.startFollowUp(),
-		);
-		return withinDeadline(this.followUp, deadlineAt);
+	fence(context: MemoryReadContext = {}): Promise<Settled<T>> {
+		return this.read(true, context);
 	}
 
-	private startFollowUp(): Promise<Settled<T>> {
-		this.followUp = undefined;
-		return (this.flight ?? this.start()).done;
+	/** Abort consumers promptly, then join all physical I/O before its store can be released. */
+	close(): Promise<void> {
+		this.closed = true;
+		return this.reads.abort(new Error("The summary store reader was closed."));
 	}
 
-	private start(): { ticket: number; done: Promise<Settled<T>> } {
-		const ticket = ++this.tickets;
-		const done = this.work(ticket).finally(() => {
-			if (this.flight?.ticket === ticket) this.flight = undefined;
-		});
-		this.flight = { ticket, done };
-		return this.flight;
+	private async read(fence: boolean, context: MemoryReadContext): Promise<Settled<T>> {
+		if (this.closed) return { status: "unavailable", reason: "The summary store reader was closed." };
+		try {
+			assertMemoryReadActive(context);
+		} catch (error) {
+			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+		}
+		let selected = this.flight;
+		if (selected && (fence || selected.signal?.aborted)) {
+			selected = this.followUp ??= { ticket: ++this.tickets, predecessor: selected.done };
+		} else if (!selected) {
+			selected = this.flight = { ticket: ++this.tickets };
+		}
+		if (selected.signal?.aborted) {
+			return { status: "unavailable", reason: "The previous summary store read is still settling." };
+		}
+		const owned = selected;
+		try {
+			return await this.reads.read(
+				String(owned.ticket),
+				async (signal, deadlineAt) => {
+					await owned.predecessor?.catch(() => undefined);
+					signal.throwIfAborted();
+					if (this.followUp === owned) {
+						this.followUp = undefined;
+						this.flight = owned;
+					}
+					return this.work(owned.ticket, { signal, deadlineAt });
+				},
+				context.signal,
+				context.deadlineAt,
+				({ done, signal }) => {
+					owned.signal = signal;
+					owned.done = done;
+					void done
+						.finally(() => {
+							if (this.flight === owned) {
+								this.flight = this.followUp;
+								this.followUp = undefined;
+							}
+							if (this.followUp === owned) this.followUp = undefined;
+						})
+						.catch(() => {});
+				},
+			);
+		} catch (error) {
+			if (!owned.done) {
+				if (this.flight === owned) this.flight = undefined;
+				if (this.followUp === owned) this.followUp = undefined;
+			}
+			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+		}
 	}
 }

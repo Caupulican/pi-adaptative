@@ -48,6 +48,14 @@ import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { FileLockDeadlineError, isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
+import {
+	assertBoundedReadActive,
+	BoundedReadError,
+	type BoundedReadOptions,
+	FileSnapshotChangedError,
+	readBoundedTextFile,
+} from "../util/bounded-file.ts";
+
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { TranscriptFrontierSelection } from "./transcript-frontier.ts";
 import {
@@ -94,6 +102,8 @@ import {
 } from "./transcript-summary-scheduler.ts";
 
 export const TRANSCRIPT_SUMMARY_MAX_TOMBSTONES = 10_000;
+/** Physical allocation ceiling per persisted JSON file, independent of consumer output limits. */
+const MAX_STORE_READ_BYTES = 64 * 1024 * 1024;
 /**
  * Forgotten sessions the permanent forget file holds. Past it a new forget is refused (`capacity`); nothing is ever evicted,
  * because an evicted forget would let a summary of that session be built again.
@@ -1130,15 +1140,8 @@ export interface TranscriptSummaryStoreUnavailable {
 	reason: string;
 }
 
-/** A bounded load that reached its deadline between file reads: it stops there, and its lock is released. */
-class StoreReadDeadlineError extends Error {}
-
 /** The root kept being replaced while a read walked the pages it named: nothing was learned about damage. */
 class StoreRootChangedError extends Error {}
-
-function pastDeadline(deadlineAt: number | undefined): void {
-	if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new StoreReadDeadlineError();
-}
 
 /** A system I/O error (it names its syscall) or a lock that is held or compromised. */
 function isStoreIoError(error: unknown): error is Error {
@@ -1157,8 +1160,12 @@ export function storeUnavailable(what: string, error: unknown): TranscriptSummar
 	if (error instanceof FileLockDeadlineError) {
 		return { status: "unavailable", reason: `the summary store is busy: ${what} ${withErrorCode(error)}` };
 	}
-	if (error instanceof StoreReadDeadlineError) {
-		return { status: "unavailable", reason: `${what} did not finish before the operation deadline` };
+	if (
+		error instanceof BoundedReadError ||
+		error instanceof FileSnapshotChangedError ||
+		(error instanceof Error && error.name === "AbortError")
+	) {
+		return { status: "unavailable", reason: `${what}: ${error.message}` };
 	}
 	if (error instanceof StoreRootChangedError) {
 		return { status: "unavailable", reason: `${what} kept racing a newer summary root; retry` };
@@ -1356,13 +1363,13 @@ export class TranscriptSummaryStore {
 	 * Read and verify everything: the manifest schema, every accepted node file (parse, identity, agreement
 	 * with its manifest entry), parent/child links, frontier references and the job list. Damage is returned
 	 * as `issues`; nothing is repaired or dropped silently. Typed at the store's read boundary ({@link readBoundary}).
-	 * With `deadlineAt`, waiting for the lock is bounded and the load stops between file reads once it has passed,
-	 * releasing the lock; a file read already started is not preemptible, so it can settle one read past the deadline.
+	 * The physical deadline and signal cover lock admission and every bounded file-read step. Cleanup waits for
+	 * an already submitted OS operation to settle before releasing its descriptor or lock.
 	 * `lockAdmissionDeadlineAt` bounds only the wait for the lock (the earlier of the two applies there); a load that
 	 * was admitted runs its reads under `deadlineAt` alone. A wait past either is the typed `unavailable`.
 	 */
 	async load(
-		options: { deadlineAt?: number; lockAdmissionDeadlineAt?: number } = {},
+		options: BoundedReadOptions & { lockAdmissionDeadlineAt?: number } = {},
 	): Promise<TranscriptSummaryStoreState | TranscriptSummaryStoreUnavailable> {
 		const { deadlineAt, lockAdmissionDeadlineAt } = options;
 		const admissionBy =
@@ -1372,29 +1379,29 @@ export class TranscriptSummaryStore {
 					? deadlineAt
 					: Math.min(deadlineAt, lockAdmissionDeadlineAt);
 		return readBoundary("loading the summary store", () =>
-			this.locked(() => this.loadLocked(deadlineAt), admissionBy),
+			this.locked(() => this.loadLocked(options), admissionBy, options.signal),
 		);
 	}
 
 	/** Caller holds the lock. */
-	private async loadLocked(deadlineAt: number | undefined): Promise<TranscriptSummaryStoreState> {
+	private async loadLocked(options: BoundedReadOptions): Promise<TranscriptSummaryStoreState> {
 		const issues: TranscriptSummaryRecoveryIssue[] = [];
 		const nodes = new Map<string, TranscriptSummaryNode>();
 		const dormant = new Map<string, TranscriptSummaryNode>();
-		pastDeadline(deadlineAt);
-		const read = await this.readManifestFile();
+		assertBoundedReadActive(options);
+		const read = await this.readManifestFile(options);
 		let manifest: TranscriptSummaryManifest | undefined;
 		if (read.status === "corrupt") issues.push({ kind: "manifest_corrupt", detail: read.detail });
 		// The state handed to callers carries the scalars as of this read; the writer's mirror may move on under them.
 		if (read.status === "ok") manifest = { ...read.manifest };
 		// Read after the manifest, so its applied revision is never checked against an older file than the one it was written with.
-		pastDeadline(deadlineAt);
-		const forgetView = await this.forgetView(read);
+		assertBoundedReadActive(options);
+		const forgetView = await this.forgetView(read, options);
 		if (forgetView.status === "unknown") issues.push({ kind: "forgotten_unknown", detail: forgetView.reason });
 		if (manifest) {
 			for (const [id, entry] of Object.entries(manifest.acceptedNodes)) {
-				pastDeadline(deadlineAt);
-				const result = await this.readNode(id);
+				assertBoundedReadActive(options);
+				const result = await this.readNode(id, options);
 				if (result.status === "missing") {
 					issues.push({ kind: "node_missing", nodeId: id });
 					continue;
@@ -1415,6 +1422,7 @@ export class TranscriptSummaryStore {
 				nodes.set(id, node);
 			}
 			for (const [id, node] of nodes) {
+				assertBoundedReadActive(options);
 				if (!node.children) continue;
 				const [leftId, rightId] = node.children;
 				const left = nodes.get(leftId);
@@ -1427,6 +1435,7 @@ export class TranscriptSummaryStore {
 				if (!check.ok) issues.push({ kind: "node_mismatch", nodeId: id, detail: check.reason });
 			}
 			for (const [name, frontier] of Object.entries(manifest.frontiers)) {
+				assertBoundedReadActive(options);
 				for (const nodeId of frontier.nodeIds) {
 					if (!manifest.acceptedNodes[nodeId] || !nodes.has(nodeId)) {
 						issues.push({ kind: "frontier_dangling", frontier: name, nodeId });
@@ -1436,8 +1445,8 @@ export class TranscriptSummaryStore {
 			}
 		}
 		for (const [id, entry] of Object.entries(manifest?.dormant ?? {})) {
-			pastDeadline(deadlineAt);
-			const result = await this.readNode(id);
+			assertBoundedReadActive(options);
+			const result = await this.readNode(id, options);
 			const detail =
 				result.status === "missing"
 					? "file missing"
@@ -1450,17 +1459,17 @@ export class TranscriptSummaryStore {
 			if (detail !== undefined) issues.push({ kind: "dormant_damaged", nodeId: id, detail });
 			else if (result.status === "ok") dormant.set(id, result.node);
 		}
-		// No new file read starts once the deadline has passed; one already started cannot be preempted.
-		pastDeadline(deadlineAt);
-		const jobs = await this.readJobs(issues);
-		pastDeadline(deadlineAt);
-		const retentionAnchors = await this.readAnchors(issues);
-		pastDeadline(deadlineAt);
-		const ledger = await this.readProof(issues);
-		pastDeadline(deadlineAt);
-		const terminals = await this.readTerminals(issues);
-		pastDeadline(deadlineAt);
-		const owedReceipts = await this.readOwedReceipts(issues);
+		// Every descriptor read checks the same physical deadline and cancellation signal.
+		assertBoundedReadActive(options);
+		const jobs = await this.readJobs(issues, options);
+		assertBoundedReadActive(options);
+		const retentionAnchors = await this.readAnchors(issues, options);
+		assertBoundedReadActive(options);
+		const ledger = await this.readProof(issues, options);
+		assertBoundedReadActive(options);
+		const terminals = await this.readTerminals(issues, options);
+		assertBoundedReadActive(options);
+		const owedReceipts = await this.readOwedReceipts(issues, options);
 		const proof = { records: ledger.records, status: proofStatus(ledger) };
 		return {
 			manifest,
@@ -1478,11 +1487,16 @@ export class TranscriptSummaryStore {
 	}
 
 	/** Read one node file, fully validated. */
-	async readNode(id: string): Promise<TranscriptSummaryNodeRead> {
+	async readNode(id: string, options?: BoundedReadOptions): Promise<TranscriptSummaryNodeRead> {
 		if (!NODE_ID_PATTERN.test(id)) return { status: "corrupt", reason: "node id is not a SHA-256 hex digest" };
 		let raw: string;
 		try {
-			raw = await fs.readFile(join(this.nodesDir, `${id}.json`), "utf8");
+			raw = await readBoundedTextFile(
+				join(this.nodesDir, `${id}.json`),
+				MAX_STORE_READ_BYTES,
+				"Transcript summary node",
+				options,
+			);
 		} catch (error) {
 			if (isMissingFileError(error)) return { status: "missing" };
 			throw error;
@@ -1585,9 +1599,12 @@ export class TranscriptSummaryStore {
 	 * prune whole subtrees). `reload` says a full {@link load} is the way to catch up: nothing to follow from, a legacy or
 	 * damaged root, pages the writer's cleanup already removed, or more changes than a reload would cost.
 	 */
-	async follow(since: TranscriptSummaryMetadataRoot | undefined): Promise<TranscriptSummaryFollow> {
+	async follow(
+		since: TranscriptSummaryMetadataRoot | undefined,
+		options?: BoundedReadOptions,
+	): Promise<TranscriptSummaryFollow> {
 		return readBoundary("following the summary store", async () => {
-			const text = await this.readRootText();
+			const text = await this.readRootText(options);
 			if (text === undefined) return { status: "reload", reason: "the summary root does not exist" };
 			if (text.paged.status !== "ok") {
 				return { status: "reload", reason: "the summary root is not a readable paged root" };
@@ -1601,12 +1618,14 @@ export class TranscriptSummaryStore {
 					since.tables.acceptedNodes,
 					root.tables.acceptedNodes,
 					MAX_FOLLOWED_CHANGES,
+					options,
 				);
 				const tombstones = await this.metadataPages.diff(
 					"tombstones",
 					since.tables.tombstones,
 					root.tables.tombstones,
 					MAX_FOLLOWED_CHANGES,
+					options,
 				);
 				if (!accepted || !tombstones) return { status: "reload", reason: "more changed than a reload would read" };
 				const entries = new Map<string, TranscriptSummaryAcceptedNode | undefined>();
@@ -1639,15 +1658,19 @@ export class TranscriptSummaryStore {
 	async readForgottenSessionsAt(
 		root: TranscriptSummaryMetadataRoot,
 		legacy: ReadonlyMap<string, TranscriptSummaryTombstone>,
+		options?: BoundedReadOptions,
 	): Promise<ForgetStateRead> {
 		return readBoundary("reading the forgotten-session state", async () =>
 			publicForgetState(
-				await this.forgetViewOf({
-					writerFence: root.writerFence,
-					applied: root.forgetRevisionApplied,
-					legacy,
-					legacyDamaged: [],
-				}),
+				await this.forgetViewOf(
+					{
+						writerFence: root.writerFence,
+						applied: root.forgetRevisionApplied,
+						legacy,
+						legacyDamaged: [],
+					},
+					options,
+				),
 			),
 		);
 	}
@@ -1657,12 +1680,11 @@ export class TranscriptSummaryStore {
 	 * written after the manifest read is never judged against an older manifest's applied revision. A failed read or the
 	 * deadline is the typed `unavailable`; damage is `unknown` with its cause (see {@link forgetView}), never thrown.
 	 */
-	async readForgottenSessions(options: { deadlineAt?: number } = {}): Promise<ForgetStateRead> {
+	async readForgottenSessions(options: BoundedReadOptions = {}): Promise<ForgetStateRead> {
 		return readBoundary("reading the forgotten-session state", async () => {
-			pastDeadline(options.deadlineAt);
-			const read = this.snapshotRead(await this.readManifestFile());
-			pastDeadline(options.deadlineAt);
-			return publicForgetState(await this.forgetView(read));
+			assertBoundedReadActive(options);
+			const read = this.snapshotRead(await this.readManifestFile(options));
+			return publicForgetState(await this.forgetView(read, options));
 		});
 	}
 
@@ -1768,15 +1790,15 @@ export class TranscriptSummaryStore {
 	 * or one below the manifest's applied revision, is unknown. The legacy markers of a known manifest are part of the denial set
 	 * while they exist, so they stay effective until the file holds them. An I/O failure is the typed `unavailable`.
 	 */
-	async forgetView(read: ManifestRead): Promise<ForgetView> {
-		return this.forgetViewOf(manifestKnowledge(read));
+	async forgetView(read: ManifestRead, options?: BoundedReadOptions): Promise<ForgetView> {
+		return this.forgetViewOf(manifestKnowledge(read), options);
 	}
 
 	/** {@link forgetView} from the manifest facts it rests on, for a reader that follows the tables without loading them. */
-	private async forgetViewOf(knowledge: ManifestKnowledge): Promise<ForgetView> {
+	private async forgetViewOf(knowledge: ManifestKnowledge, options?: BoundedReadOptions): Promise<ForgetView> {
 		let file: ForgetFileRead;
 		try {
-			file = await this.readForgetFile();
+			file = await this.readForgetFile(options);
 		} catch (error) {
 			const unavailable = storeUnavailable("reading the forgotten-session file", error);
 			if (unavailable) return unavailable;
@@ -1843,10 +1865,15 @@ export class TranscriptSummaryStore {
 	}
 
 	/** Read and parse the forget file. Missing is a state; an I/O failure throws (the callers classify it). */
-	private async readForgetFile(): Promise<ForgetFileRead> {
+	private async readForgetFile(options?: BoundedReadOptions): Promise<ForgetFileRead> {
 		let raw: string;
 		try {
-			raw = await fs.readFile(this.forgetPath, "utf8");
+			raw = await readBoundedTextFile(
+				this.forgetPath,
+				MAX_STORE_READ_BYTES,
+				"Transcript forgotten-session state",
+				options,
+			);
 		} catch (error) {
 			if (isMissingFileError(error)) return { status: "missing" };
 			throw error;
@@ -1872,23 +1899,21 @@ export class TranscriptSummaryStore {
 	// ---- internals shared with the writer ------------------------------------------------------
 
 	/** @internal With `deadlineAt`, waiting for the lock is bounded (`FileLockDeadlineError`); the section is not. */
-	locked<T>(fn: () => Promise<T>, deadlineAt?: number): Promise<T> {
-		return withFileLock(this.lockPath, fn, deadlineAt !== undefined ? { deadlineAt } : undefined);
+	locked<T>(fn: () => Promise<T>, deadlineAt?: number, signal?: AbortSignal): Promise<T> {
+		return withFileLock(this.lockPath, fn, { deadlineAt, signal });
 	}
 
 	/**
 	 * One whole read of the manifest, for readers: typed at the store's read boundary ({@link readBoundary}), and not
 	 * started once `deadlineAt` has passed. Correct without the lock: the manifest is only ever replaced by
 	 * the root file, an atomic temporary-file-then-rename (`writeFileAtomic`), so a reader sees the previous or the
-	 * next root, never a torn one, and a read-only owner may compare its revision unlocked. One started file read is
-	 * not preemptible: it can settle after the deadline.
+	 * next root, never a torn one, and a read-only owner may compare its revision unlocked. Each bounded read
+	 * checks cancellation and the physical deadline, and closes its descriptor before it settles.
 	 */
-	async readManifest(
-		options: { deadlineAt?: number } = {},
-	): Promise<ManifestRead | TranscriptSummaryStoreUnavailable> {
+	async readManifest(options: BoundedReadOptions = {}): Promise<ManifestRead | TranscriptSummaryStoreUnavailable> {
 		return readBoundary("reading the summary manifest", async () => {
-			pastDeadline(options.deadlineAt);
-			return this.snapshotRead(await this.readManifestFile());
+			assertBoundedReadActive(options);
+			return this.snapshotRead(await this.readManifestFile(options));
 		});
 	}
 
@@ -1896,15 +1921,22 @@ export class TranscriptSummaryStore {
 	 * @internal The raw manifest read the writer's fenced sections, writer acquisition and recovery use under the lock;
 	 * an I/O failure rejects there, where it ends the transaction.
 	 */
-	async readManifestFile(): Promise<ManifestRead> {
-		return this.readManifestAttempt(MANIFEST_READ_ATTEMPTS);
+	async readManifestFile(options?: BoundedReadOptions): Promise<ManifestRead> {
+		return this.readManifestAttempt(MANIFEST_READ_ATTEMPTS, options);
 	}
 
 	/** The root file's text and what the paged-root parser makes of it; undefined when the file does not exist. */
-	private async readRootText(): Promise<{ raw: string; paged: TranscriptSummaryMetadataRootParse } | undefined> {
+	private async readRootText(
+		options?: BoundedReadOptions,
+	): Promise<{ raw: string; paged: TranscriptSummaryMetadataRootParse } | undefined> {
 		let raw: string;
 		try {
-			raw = await fs.readFile(this.manifestPath, "utf8");
+			raw = await readBoundedTextFile(
+				this.manifestPath,
+				MAX_STORE_READ_BYTES,
+				"Transcript summary manifest",
+				options,
+			);
 		} catch (error) {
 			if (isMissingFileError(error)) return undefined;
 			throw error;
@@ -1912,8 +1944,8 @@ export class TranscriptSummaryStore {
 		return { raw, paged: parseTranscriptSummaryMetadataRoot(raw) };
 	}
 
-	private async readManifestAttempt(attemptsLeft: number): Promise<ManifestRead> {
-		const text = await this.readRootText();
+	private async readManifestAttempt(attemptsLeft: number, options?: BoundedReadOptions): Promise<ManifestRead> {
+		const text = await this.readRootText(options);
 		if (text === undefined) return { status: "missing" };
 		const { raw, paged } = text;
 		if (paged.status === "corrupt") return { status: "corrupt", detail: paged.reason, raw };
@@ -1923,12 +1955,23 @@ export class TranscriptSummaryStore {
 			}
 			try {
 				const tables: Record<TranscriptSummaryMetadataTable, Record<string, unknown>> = {
-					sessions: await this.metadataPages.load("sessions", paged.root.tables.sessions),
-					acceptedNodes: await this.metadataPages.load("acceptedNodes", paged.root.tables.acceptedNodes),
-					frontiers: await this.metadataPages.load("frontiers", paged.root.tables.frontiers),
-					tombstones: await this.metadataPages.load("tombstones", paged.root.tables.tombstones),
-					dormant: await this.metadataPages.load("dormant", paged.root.tables.dormant),
+					sessions: await this.metadataPages.load("sessions", paged.root.tables.sessions, undefined, options),
+					acceptedNodes: await this.metadataPages.load(
+						"acceptedNodes",
+						paged.root.tables.acceptedNodes,
+						undefined,
+						options,
+					),
+					frontiers: await this.metadataPages.load("frontiers", paged.root.tables.frontiers, undefined, options),
+					tombstones: await this.metadataPages.load(
+						"tombstones",
+						paged.root.tables.tombstones,
+						undefined,
+						options,
+					),
+					dormant: await this.metadataPages.load("dormant", paged.root.tables.dormant, undefined, options),
 				};
+				assertBoundedReadActive(options);
 				const parsed = parseManifest(
 					JSON.stringify({
 						schemaVersion: paged.root.schemaVersion,
@@ -1956,8 +1999,8 @@ export class TranscriptSummaryStore {
 				// A page the root named can be gone because a newer root replaced it and its cleanup ran while this read walked the
 				// older one. That is not damage: only a missing page under a root that is still current is.
 				if (error instanceof TranscriptSummaryMetadataPageError && error.missing) {
-					if ((await this.readRootText())?.raw !== raw) {
-						if (attemptsLeft > 1) return this.readManifestAttempt(attemptsLeft - 1);
+					if ((await this.readRootText(options))?.raw !== raw) {
+						if (attemptsLeft > 1) return this.readManifestAttempt(attemptsLeft - 1, options);
 						throw new StoreRootChangedError("the summary root changed on every read attempt");
 					}
 				}
@@ -2144,8 +2187,17 @@ export class TranscriptSummaryStore {
 	 * live jobs (`saveJobs` refuses with `jobs_overflow`), so a live entry past that bound is damage like any other: it is
 	 * reported as `jobs_corrupt` and left out, and recovery rewrites the bounded list and records possibly lost proof.
 	 */
-	async readJobs(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryJob[]> {
-		const value = await this.readJsonFile(this.jobsPath, "jobs_corrupt", "jobs.json is not valid JSON", issues);
+	async readJobs(
+		issues: TranscriptSummaryRecoveryIssue[],
+		options?: BoundedReadOptions,
+	): Promise<TranscriptSummaryJob[]> {
+		const value = await this.readJsonFile(
+			this.jobsPath,
+			"jobs_corrupt",
+			"jobs.json is not valid JSON",
+			issues,
+			options,
+		);
 		if (value === undefined) return [];
 		if (
 			!isPlainRecord(value) ||
@@ -2160,6 +2212,7 @@ export class TranscriptSummaryStore {
 		let live = 0;
 		let overLive = 0;
 		for (const entry of value.jobs) {
+			assertBoundedReadActive(options);
 			const parsed = parseSummaryJob(entry);
 			if (!parsed.ok) {
 				issues.push({ kind: "jobs_corrupt", detail: parsed.reason });
@@ -2193,9 +2246,12 @@ export class TranscriptSummaryStore {
 	 * earlier shape (one `{at, basis}` record per source under `anchors`) is read too: its session-timestamp
 	 * records fold into one record per session, so no valid anchor is lost by the change of shape.
 	 */
-	async readAnchors(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptRetentionAnchors> {
+	async readAnchors(
+		issues: TranscriptSummaryRecoveryIssue[],
+		options?: BoundedReadOptions,
+	): Promise<TranscriptRetentionAnchors> {
 		const anchors: TranscriptRetentionAnchors = { sources: {}, sessions: {} };
-		const raw = await this.readOptional(this.anchorsPath);
+		const raw = await this.readOptional(this.anchorsPath, options);
 		if (raw === undefined) return anchors;
 		let value: unknown;
 		try {
@@ -2225,12 +2281,14 @@ export class TranscriptSummaryStore {
 		};
 		if (isPlainRecord(value.sources)) {
 			for (const [handle, entry] of Object.entries(value.sources)) {
+				assertBoundedReadActive(options);
 				if (validAt(entry)) anchors.sources[handle] = { at: entry.at };
 				else damaged += 1;
 			}
 		}
 		if (isPlainRecord(value.sessions)) {
 			for (const [sessionId, entry] of Object.entries(value.sessions)) {
+				assertBoundedReadActive(options);
 				if (
 					validAt(entry) &&
 					Array.isArray(entry.sources) &&
@@ -2242,6 +2300,7 @@ export class TranscriptSummaryStore {
 		}
 		if (isPlainRecord(value.anchors)) {
 			for (const [handle, entry] of Object.entries(value.anchors)) {
+				assertBoundedReadActive(options);
 				if (!validAt(entry) || (entry.basis !== "session_timestamp" && entry.basis !== "first_capture")) {
 					damaged += 1;
 				} else if (entry.basis === "first_capture") {
@@ -2273,9 +2332,9 @@ export class TranscriptSummaryStore {
 	 * counted the refusals only in memory, so proof may have been lost: `lostProofSince` is set to now and
 	 * persisted by the next ledger write.
 	 */
-	async readProof(issues: TranscriptSummaryRecoveryIssue[]): Promise<ProofLedger> {
+	async readProof(issues: TranscriptSummaryRecoveryIssue[], options?: BoundedReadOptions): Promise<ProofLedger> {
 		const ledger: ProofLedger = { records: {}, current: false };
-		const raw = await this.readOptional(this.spentPath);
+		const raw = await this.readOptional(this.spentPath, options);
 		if (raw === undefined) return ledger;
 		let value: unknown;
 		try {
@@ -2297,6 +2356,7 @@ export class TranscriptSummaryStore {
 		}
 		let damaged = 0;
 		for (const [id, entry] of Object.entries(value.jobs)) {
+			assertBoundedReadActive(options);
 			const record = parseProofRecord(entry);
 			if (record) ledger.records[id] = record;
 			else damaged += 1;
@@ -2441,8 +2501,8 @@ export class TranscriptSummaryStore {
 	}
 
 	/** @internal Caller holds the lock. Missing is no receipts; damage is read here, not thrown, so the caller decides what to keep. */
-	async readOwedFile(): Promise<OwedFileRead> {
-		const raw = await this.readOptional(this.owedPath);
+	async readOwedFile(options?: BoundedReadOptions): Promise<OwedFileRead> {
+		const raw = await this.readOptional(this.owedPath, options);
 		if (raw === undefined) return { status: "missing" };
 		const parsed = parseOwedReceipts(raw);
 		return parsed.ok ? { status: "ok", entries: parsed.entries } : { status: "corrupt", detail: parsed.reason };
@@ -2452,8 +2512,11 @@ export class TranscriptSummaryStore {
 	 * @internal Caller holds the lock. Damage is reported as `owed_receipts_corrupt` and read as no receipts. The bytes are kept
 	 * only by the writer, before it replaces the file (see `saveOwedReceipts` and `applyRecovery`).
 	 */
-	async readOwedReceipts(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryOwedReceipt[]> {
-		const read = await this.readOwedFile();
+	async readOwedReceipts(
+		issues: TranscriptSummaryRecoveryIssue[],
+		options?: BoundedReadOptions,
+	): Promise<TranscriptSummaryOwedReceipt[]> {
+		const read = await this.readOwedFile(options);
 		if (read.status === "corrupt") {
 			issues.push({ kind: "owed_receipts_corrupt", detail: read.detail });
 			return [];
@@ -2470,9 +2533,9 @@ export class TranscriptSummaryStore {
 		);
 	}
 
-	private async readOptional(path: string): Promise<string | undefined> {
+	private async readOptional(path: string, options?: BoundedReadOptions): Promise<string | undefined> {
 		try {
-			return await fs.readFile(path, "utf8");
+			return await readBoundedTextFile(path, MAX_STORE_READ_BYTES, "Transcript summary state", options);
 		} catch (error) {
 			if (isMissingFileError(error)) return undefined;
 			throw error;
@@ -2488,10 +2551,11 @@ export class TranscriptSummaryStore {
 		kind: "jobs_corrupt" | "terminals_corrupt",
 		damage: string,
 		issues: TranscriptSummaryRecoveryIssue[],
+		options?: BoundedReadOptions,
 	): Promise<unknown> {
 		let raw: string;
 		try {
-			raw = await fs.readFile(path, "utf8");
+			raw = await readBoundedTextFile(path, MAX_STORE_READ_BYTES, "Transcript summary state", options);
 		} catch (error) {
 			if (isMissingFileError(error)) return undefined;
 			throw error;
@@ -2505,12 +2569,16 @@ export class TranscriptSummaryStore {
 	}
 
 	/** @internal Caller holds the lock. */
-	async readTerminals(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryTerminalRecord[]> {
+	async readTerminals(
+		issues: TranscriptSummaryRecoveryIssue[],
+		options?: BoundedReadOptions,
+	): Promise<TranscriptSummaryTerminalRecord[]> {
 		const value = await this.readJsonFile(
 			this.terminalsPath,
 			"terminals_corrupt",
 			"terminals.json is unreadable",
 			issues,
+			options,
 		);
 		if (value === undefined) return [];
 		if (
@@ -2524,6 +2592,7 @@ export class TranscriptSummaryStore {
 		const events: TranscriptSummaryTerminalRecord[] = [];
 		let invalid = 0;
 		for (const entry of value.events) {
+			assertBoundedReadActive(options);
 			if (isTerminalRecord(entry)) events.push(entry);
 			else invalid += 1;
 		}
@@ -2548,7 +2617,7 @@ export class TranscriptSummaryStore {
 	/** @internal Caller holds the lock. */
 	async readNodeFileRaw(id: string): Promise<string | undefined> {
 		try {
-			return await fs.readFile(join(this.nodesDir, `${id}.json`), "utf8");
+			return this.readOptional(join(this.nodesDir, `${id}.json`));
 		} catch (error) {
 			if (isMissingFileError(error)) return undefined;
 			throw error;

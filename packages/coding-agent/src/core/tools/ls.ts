@@ -9,7 +9,9 @@ import {
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
+import { LocalReadSession } from "./local-read-io.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
 	renderTextComponent,
@@ -29,6 +31,7 @@ const defaultLsOperations: LsOperations = {
 };
 
 export interface LsToolOptions {
+	readOperation?: ReadOperationFactory;
 	/** Custom operations for directory listing. Default: local filesystem */
 	operations?: LsOperations;
 	/** Shared backend identity for exact cross-tool recovery with custom operations. */
@@ -116,7 +119,36 @@ export function createLsToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
-			return new Promise((resolve, reject) => {
+			let operations = ops;
+			let boundedIo: LocalReadSession | undefined;
+			let boundedPath: string | undefined;
+			if (options?.readOperation) {
+				if (options.operations) throw new Error("Bounded listings require the local filesystem adapter");
+				const io = new LocalReadSession(options.readOperation("ls", _toolCallId, signal));
+				const absolute = resolveToCwd(path || ".", cwd);
+				const entries = await io.list(absolute);
+				const byName = new Map(entries.map((entry) => [entry.name, entry]));
+				boundedIo = io;
+				boundedPath = absolute;
+				operations = {
+					exists: () => true,
+					readdir: () => entries.map((entry) => entry.name),
+					stat: (candidate) => {
+						io.operation.assertCurrent();
+						const entry = byName.get(nodePath.basename(candidate));
+						return {
+							isDirectory: () => candidate === absolute || entry?.kind === "dir",
+							size: entry?.size,
+							mode: entry?.mode,
+						};
+					},
+				};
+				signal = io.operation.signal;
+			}
+			const result = await new Promise<{
+				content: Array<{ type: "text"; text: string }>;
+				details: LsToolDetails | undefined;
+			}>((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(new Error("Operation aborted"));
 					return;
@@ -131,13 +163,13 @@ export function createLsToolDefinition(
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
 						// Check if path exists.
-						if (!(await ops.exists(dirPath))) {
+						if (!(await operations.exists(dirPath))) {
 							reject(new Error(`Path not found: ${dirPath}`));
 							return;
 						}
 
 						// Check if path is a directory.
-						const stat = await ops.stat(dirPath);
+						const stat = await operations.stat(dirPath);
 						if (!stat.isDirectory()) {
 							reject(new Error(`Not a directory: ${dirPath}`));
 							return;
@@ -146,7 +178,7 @@ export function createLsToolDefinition(
 						// Read directory entries.
 						let entries: string[];
 						try {
-							entries = await ops.readdir(dirPath);
+							entries = await operations.readdir(dirPath);
 						} catch (e: any) {
 							reject(new Error(`Cannot read directory: ${e.message}`));
 							return;
@@ -169,7 +201,7 @@ export function createLsToolDefinition(
 							let sizeStr = "";
 							let modeStr = "";
 							try {
-								const entryStat = await ops.stat(fullPath);
+								const entryStat = await operations.stat(fullPath);
 								const isDir = entryStat.isDirectory();
 								if (isDir) suffix = "/";
 
@@ -232,6 +264,23 @@ export function createLsToolDefinition(
 					}
 				})();
 			});
+			if (boundedIo && boundedPath) {
+				const bounded = boundReadResult(
+					result.content.map((item) => item.text).join("\n") +
+						(boundedIo.partial ? "\n[Partial directory enumeration: work limit reached]" : ""),
+				);
+				const text = bounded.text;
+				boundedIo.publish(
+					boundedPath,
+					JSON.stringify({ path, limit, metadata }),
+					text,
+					bounded.truncated || result.details?.entryLimitReached || result.details?.truncation?.truncated
+						? "partial"
+						: "complete",
+				);
+				return { ...result, content: [{ type: "text" as const, text }] };
+			}
+			return result;
 		},
 		renderCall(args, theme, context) {
 			return renderTextComponent(context.lastComponent, formatLsCall(args, theme, context.cwd));

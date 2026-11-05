@@ -6,8 +6,10 @@ import { formatOkfMemoryDocument, parseOkfMemoryDocument } from "../../context/o
 import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/context-threat-scanner.ts";
 import { isMissingFileError, writeFileAtomic } from "../../util/atomic-file.ts";
 import { readBoundedTextFile } from "../../util/bounded-file.ts";
+import { observeMemoryDirectory, readObservedMemoryFile } from "../memory-file-read.ts";
 import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
 import { type MemoryMutationEvidence, MemoryMutationOutcomeError } from "../memory-mutation-outcome.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "../memory-read-context.ts";
 import { collectUserPreferenceEntries } from "../user-preference-metadata.ts";
 
 const ARCHIVE_DIR_NAME = "user-preferences";
@@ -204,9 +206,13 @@ export class UserMemoryArchive {
 	 * Preference lines held by the archive shards, in shard order, bounded, each with the heading
 	 * path it was archived under (headings travel with the body into the shard). Blanks skipped.
 	 */
-	async archivedEntries(limit = USER_ARCHIVE_PROJECTION_LIMIT): Promise<Array<{ line: string; section?: string }>> {
+	async archivedEntries(
+		limit = USER_ARCHIVE_PROJECTION_LIMIT,
+		context?: MemoryReadContext,
+	): Promise<Array<{ line: string; section?: string }>> {
 		const entries: Array<{ line: string; section?: string }> = [];
-		for (const shard of (await this.readArchive()).shards) {
+		for (const shard of (await this.readArchive(context)).shards) {
+			assertMemoryReadActive(context);
 			for (const entry of collectUserPreferenceEntries(shard.body)) {
 				entries.push(entry);
 				if (entries.length >= limit) return entries;
@@ -236,7 +242,9 @@ export class UserMemoryArchive {
 		}
 	}
 
-	private async readArchive(): Promise<ArchiveSnapshot> {
+	private async readArchive(context?: MemoryReadContext): Promise<ArchiveSnapshot> {
+		assertMemoryReadActive(context);
+		observeMemoryDirectory(this.archiveDir, context);
 		// Missing archive is empty. All other failures are unknown storage, never empty storage.
 		try {
 			const stat = await fs.lstat(this.archiveDir);
@@ -251,6 +259,7 @@ export class UserMemoryArchive {
 		let count = 0;
 		const directory = await fs.opendir(this.archiveDir);
 		for await (const entry of directory) {
+			assertMemoryReadActive(context);
 			if (++count > MAX_ARCHIVE_DIRECTORY_ENTRIES)
 				throw new Error("User preference archive directory is too large.");
 			if (!SHARD_NAME_RE.test(entry.name)) continue;
@@ -262,12 +271,15 @@ export class UserMemoryArchive {
 		const shards: UserPreferenceShard[] = [];
 		let scannedBytes = 0;
 		for (const name of names) {
+			assertMemoryReadActive(context);
 			const path = join(this.archiveDir, name);
-			const content = await readBoundedTextFile(
+			const content = await readObservedMemoryFile(
 				path,
 				Math.min(MAX_ARCHIVE_SHARD_BYTES, MAX_ARCHIVE_SCAN_BYTES - scannedBytes),
 				`User preference shard ${name}`,
+				context,
 			);
+			if (content === undefined) throw new Error(`User preference shard disappeared: ${name}.`);
 			scannedBytes += Buffer.byteLength(content, "utf8");
 			const parsed = parseOkfMemoryDocument(content, { uri: `okf:${ARCHIVE_DIR_NAME}/${name}` });
 			if (parsed.diagnostics.length > 0 || parsed.item?.kind !== "user_preference" || parsed.item.scope !== "user") {

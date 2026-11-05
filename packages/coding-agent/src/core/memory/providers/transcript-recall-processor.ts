@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readdirSync, readSync, type Stats, statSync } from "node:fs";
+import { opendirSync, readSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
@@ -17,6 +17,7 @@ import {
 	resolvePath,
 	type SessionEntry,
 } from "../../../kernel/node.ts";
+import { withRegularFileDescriptorSync } from "../../../kernel/storage/bounded-file.ts";
 import { TranscriptIndex } from "../transcript-index.ts";
 import {
 	formatTranscriptSourceHandle,
@@ -44,6 +45,7 @@ import {
 	type TranscriptRecallLineageBump,
 	type TranscriptRecallLineageRequest,
 	type TranscriptRecallQueryRequest,
+	type TranscriptRecallReadControl,
 	type TranscriptRecallSessionsResult,
 	type TranscriptRecallSourceRequest,
 	type TranscriptRecallVerifyRequest,
@@ -70,6 +72,8 @@ const UNSUPPORTED_PRE_ID_FORMAT = "unsupported_format:pre_id_v1";
 const UNSUPPORTED_INVALID_SESSION_ID = "unsupported_format:invalid_session_id";
 /** A skip or failure reason produced by `failureReason`: the source is not indexed because reading it failed. */
 const FAILURE_REASON = /^(read|ingest|source|query|sessions|lineage|verify)_error:/;
+
+class TranscriptReadInterrupted extends Error {}
 
 /** The processor's only channel to its parent. */
 export interface TranscriptRecallProcessorPort {
@@ -199,10 +203,13 @@ function readCompleteLines(
 	onLine: (line: string) => boolean,
 	onTail: (line: string) => boolean,
 	expectedProbe?: string,
+	checkpoint?: () => void,
 ): CaptureExtent {
-	const fd = openSync(path, "r");
-	try {
-		const end = fstatSync(fd).size;
+	checkpoint?.();
+	return withRegularFileDescriptorSync(path, "Transcript source", (fd, opened) => {
+		const end = opened.size;
+		if (end > MAX_FILE_BYTES) throw new Error(`Session file exceeds the ${MAX_FILE_BYTES} byte capture limit.`);
+		checkpoint?.();
 		// An append continues the prefix the held state was captured from. Checked on this very descriptor, so the bytes read
 		// next belong to the file instance the check describes; a replaced or migrated file reads nothing and reloads.
 		if (
@@ -218,6 +225,7 @@ function readCompleteLines(
 		let pending: Buffer[] = [];
 		let pendingBytes = 0;
 		while (position < end) {
+			checkpoint?.();
 			const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, end - position), position);
 			if (bytesRead === 0) break;
 			const chunkStart = position;
@@ -225,6 +233,7 @@ function readCompleteLines(
 			const view = buffer.subarray(0, bytesRead);
 			let segmentStart = 0;
 			while (segmentStart < bytesRead) {
+				checkpoint?.();
 				const newline = view.indexOf(0x0a, segmentStart);
 				if (newline === -1) {
 					const rest = Buffer.from(view.subarray(segmentStart));
@@ -242,11 +251,10 @@ function readCompleteLines(
 					return { offset: consumed, size: position, probe: probePrefixAt(fd, consumed) };
 			}
 		}
+		checkpoint?.();
 		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = position;
 		return { offset: consumed, size: position, probe: probePrefixAt(fd, consumed) };
-	} finally {
-		closeSync(fd);
-	}
+	});
 }
 
 /** The probe of a read that failed: it never vouches for a later append, so the next append reloads. */
@@ -289,9 +297,11 @@ function consumeSession(
 	startOffset: number,
 	limitBytes: number,
 	expectedProbe?: string,
+	checkpoint?: () => void,
 ): ConsumeOutcome {
 	let exceeded = false;
 	const accept = (line: string, complete: boolean): boolean => {
+		checkpoint?.();
 		if (line.trim() === "") return true;
 		let parsed: unknown;
 		try {
@@ -311,7 +321,7 @@ function consumeSession(
 			state.noteUncapturedLine("missing_entry_id");
 			return true;
 		}
-		state.add(parsed as unknown as SessionEntry);
+		state.add(parsed as unknown as SessionEntry, checkpoint);
 		if (complete && state.retainedBytes > limitBytes) {
 			exceeded = true;
 			return false;
@@ -324,6 +334,7 @@ function consumeSession(
 		(line) => accept(line, true),
 		(line) => accept(line, false),
 		expectedProbe,
+		checkpoint,
 	);
 	if (!exceeded && state.retainedBytes > limitBytes) exceeded = true;
 	return { ...extent, exceeded };
@@ -349,28 +360,20 @@ function readSessionHeader(path: string): SessionHeaderInfo | undefined {
 }
 
 /** Whether two files hold byte-identical content of the given size. Stops at the first difference. */
-function haveEqualBytes(left: string, right: string, size: number): boolean {
-	const leftFd = openSync(left, "r");
-	try {
-		const rightFd = openSync(right, "r");
-		try {
-			const leftBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
-			const rightBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
-			for (let position = 0; position < size; ) {
-				const length = Math.min(READ_CHUNK_BYTES, size - position);
-				const leftRead = readSync(leftFd, leftBuffer, 0, length, position);
-				const rightRead = readSync(rightFd, rightBuffer, 0, length, position);
-				if (leftRead !== length || rightRead !== length) return false;
-				if (!leftBuffer.subarray(0, length).equals(rightBuffer.subarray(0, length))) return false;
-				position += length;
-			}
-			return true;
-		} finally {
-			closeSync(rightFd);
-		}
-	} finally {
-		closeSync(leftFd);
+function haveEqualBytes(leftFd: number, rightFd: number, size: number, checkpoint?: () => void): boolean {
+	checkpoint?.();
+	const leftBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+	const rightBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+	for (let position = 0; position < size; ) {
+		checkpoint?.();
+		const length = Math.min(READ_CHUNK_BYTES, size - position);
+		const leftRead = readSync(leftFd, leftBuffer, 0, length, position);
+		const rightRead = readSync(rightFd, rightBuffer, 0, length, position);
+		if (leftRead !== length || rightRead !== length) return false;
+		if (!leftBuffer.subarray(0, length).equals(rightBuffer.subarray(0, length))) return false;
+		position += length;
 	}
+	return true;
 }
 
 /**
@@ -378,12 +381,17 @@ function haveEqualBytes(left: string, right: string, size: number): boolean {
  * session that exists in both the current and the legacy directory). Anything else with one session id
  * is a contradictory identity.
  */
-function isSameSessionFile(left: string, right: string): boolean {
-	const leftStat = statSync(left);
-	const rightStat = statSync(right);
-	if (leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) return true;
-	if (leftStat.size !== rightStat.size || leftStat.size > MAX_FILE_BYTES) return false;
-	return haveEqualBytes(left, right, leftStat.size);
+function isSameSessionFile(left: string, right: string, checkpoint?: () => void): boolean {
+	checkpoint?.();
+	return withRegularFileDescriptorSync(left, "Transcript identity", (leftFd, leftStat) => {
+		checkpoint?.();
+		return withRegularFileDescriptorSync(right, "Transcript identity", (rightFd, rightStat) => {
+			checkpoint?.();
+			if (leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) return true;
+			if (leftStat.size !== rightStat.size || leftStat.size > MAX_FILE_BYTES) return false;
+			return haveEqualBytes(leftFd, rightFd, leftStat.size, checkpoint);
+		});
+	});
 }
 
 /** Keep the most frequent reasons and fold the rest into `other`, so a coverage record stays bounded. */
@@ -454,6 +462,16 @@ export class TranscriptRecallProcessor {
 	/** Sessions the current request already brought to their file state (see refreshSession). */
 	private sessionsRefreshed = new Set<string>();
 	private transientLoad: TransientLoad | undefined;
+	private activeRead: TranscriptRecallReadControl | undefined;
+	private indexRevision = 0;
+	private captureRevisions = new Map<string, number>();
+	private readonly checkpoint = (): void => {
+		const read = this.activeRead;
+		if (!read) return;
+		if (Atomics.load(read.cancelled, 0) !== 0)
+			throw new TranscriptReadInterrupted("The transcript read was cancelled.");
+		if (Date.now() >= read.deadlineAt) throw new TranscriptReadInterrupted("The transcript read deadline expired.");
+	};
 
 	constructor(port: TranscriptRecallProcessorPort) {
 		this.port = port;
@@ -463,9 +481,26 @@ export class TranscriptRecallProcessor {
 	receive(value: unknown): void {
 		if (this.transportFailure || !isTranscriptRecallWorkerRequest(value)) return;
 		try {
+			if ("control" in value) {
+				// Announced ingestion belongs to the shared index, independently of this read's cancellation.
+				this.flushIngests();
+				this.activeRead = value.control;
+				this.checkpoint();
+			}
 			this.handle(value);
 		} catch (error) {
-			this.post({ type: "failed", generation: value.generation, error: errorMessage(error) });
+			if ("requestId" in value) {
+				this.post({
+					type: "queryFailed",
+					generation: value.generation,
+					requestId: value.requestId,
+					error: errorMessage(error),
+				});
+			} else this.post({ type: "failed", generation: value.generation, error: errorMessage(error) });
+		} finally {
+			this.activeRead = undefined;
+			// A cancelled refresh can have completed earlier sessions; preserve their change notification.
+			if (this.changedSessionIds.size > 0 || this.invalidatedSessionIds.size > 0) this.postCoverage();
 		}
 	}
 
@@ -493,6 +528,7 @@ export class TranscriptRecallProcessor {
 	 * reason (`read_error:<code>`, `ingest_error:<code>`) naming the phase and the error class.
 	 */
 	private failureReason(phase: FailurePhase, error: unknown): string {
+		if (error instanceof TranscriptReadInterrupted) throw error;
 		const reason = `${phase}_error:${errorCode(error)}`;
 		this.lastError = {
 			at: new Date().toISOString(),
@@ -518,6 +554,8 @@ export class TranscriptRecallProcessor {
 		this.invalidatedSessionIds = new Map();
 		this.lineageRevisions = new Map();
 		this.receivedIngestSeq = 0;
+		this.indexRevision = 0;
+		this.captureRevisions = new Map();
 	}
 
 	// -----------------------------------------------------------------------------------------
@@ -537,7 +575,7 @@ export class TranscriptRecallProcessor {
 	private resolveDuplicate(existing: SessionRecord, path: string, key: string, phase: FailurePhase): undefined {
 		let same: boolean;
 		try {
-			same = isSameSessionFile(existing.path, path);
+			same = isSameSessionFile(existing.path, path, this.checkpoint);
 		} catch (error) {
 			this.skipSource(path, this.failureReason(phase, error));
 			return undefined;
@@ -566,10 +604,12 @@ export class TranscriptRecallProcessor {
 	 * Eligible files whose format cannot carry stable handles are unsupported, never captured with invented ids.
 	 */
 	private describeFile(path: string, mtimeMs: number, phase: FailurePhase): SessionRecord | undefined {
+		this.checkpoint();
 		const key = pathKey(path);
 		let header: ReturnType<typeof readSessionHeader>;
 		try {
 			header = readSessionHeader(path);
+			this.checkpoint();
 		} catch (error) {
 			this.skipSource(path, this.failureReason(phase, error));
 			return undefined;
@@ -666,8 +706,12 @@ export class TranscriptRecallProcessor {
 	): CaptureExtent | undefined {
 		let outcome: ConsumeOutcome;
 		try {
-			outcome = consumeSession(record.path, state, startOffset, limitBytes, expectedProbe);
+			outcome = consumeSession(record.path, state, startOffset, limitBytes, expectedProbe, this.checkpoint);
 		} catch (error) {
+			if (error instanceof TranscriptReadInterrupted) {
+				if (!record.state) record.skip = "read_interrupted";
+				throw error;
+			}
 			this.unloadRecord(record, this.failureReason(phase, error));
 			return undefined;
 		}
@@ -677,8 +721,12 @@ export class TranscriptRecallProcessor {
 			return undefined;
 		}
 		try {
-			state.finalize();
-		} catch {
+			state.finalize(this.checkpoint);
+		} catch (error) {
+			if (error instanceof TranscriptReadInterrupted) {
+				if (!record.state) record.skip = "read_interrupted";
+				throw error;
+			}
 			this.unloadRecord(record, "invalid_entry_graph");
 			return undefined;
 		}
@@ -691,7 +739,8 @@ export class TranscriptRecallProcessor {
 		const capture = this.captureInto(record, state, 0, limitBytes, phase);
 		if (capture === undefined) return;
 		// Replacing a held state is a whole-file reload: earlier spans may differ.
-		if (record.state) this.invalidate(record.sessionId, state.firstChangedPosition(record.state.selectedSpans()));
+		if (record.state)
+			this.invalidate(record.sessionId, state.firstChangedPosition(record.state.selectedSpans(), this.checkpoint));
 		this.adoptState(record, state, capture);
 	}
 
@@ -785,15 +834,22 @@ export class TranscriptRecallProcessor {
 		const files: SessionFile[] = [];
 		const directories = getDefaultSessionDirCandidates(this.workingDirectory, this.agentDirectory);
 		for (const [position, dir] of directories.entries()) {
+			this.checkpoint();
 			try {
-				files.push(...this.listSessionFiles(dir));
+				for (const file of this.listSessionFiles(dir)) {
+					this.checkpoint();
+					files.push(file);
+				}
 			} catch (error) {
 				if (errorCode(error) === "ENOENT") continue;
 				if (position === 0) throw error;
 				this.skipSource(dir, this.failureReason("read", error));
 			}
 		}
-		return files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+		return files.sort((left, right) => {
+			this.checkpoint();
+			return right.mtimeMs - left.mtimeMs;
+		});
 	}
 
 	/**
@@ -802,22 +858,37 @@ export class TranscriptRecallProcessor {
 	 */
 	private listSessionFiles(dir: string): SessionFile[] {
 		const files: SessionFile[] = [];
-		for (const name of readdirSync(dir)) {
-			if (!name.endsWith(".jsonl")) continue;
-			const path = join(dir, name);
-			try {
-				const metadata = statSync(path);
-				if (metadata.isFile() && metadata.size > 0)
-					files.push({ path, mtimeMs: metadata.mtimeMs, size: metadata.size });
-			} catch (error) {
-				this.skipSource(path, this.failureReason("read", error));
+		this.checkpoint();
+		const directory = opendirSync(dir);
+		try {
+			while (true) {
+				this.checkpoint();
+				const entry = directory.readSync();
+				this.checkpoint();
+				if (entry === null) break;
+				if (!entry.name.endsWith(".jsonl")) continue;
+				const path = join(dir, entry.name);
+				try {
+					const metadata = statSync(path);
+					if (metadata.isFile() && metadata.size > 0)
+						files.push({ path, mtimeMs: metadata.mtimeMs, size: metadata.size });
+				} catch (error) {
+					this.skipSource(path, this.failureReason("read", error));
+				}
 			}
+		} finally {
+			directory.closeSync();
 		}
-		return files;
+		// Keep a deterministic name order for equal timestamps regardless of the directory's iteration order.
+		return files.sort((left, right) => {
+			this.checkpoint();
+			return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+		});
 	}
 
 	private buildIndex(): void {
 		for (const file of this.discoverSessionFiles()) {
+			this.checkpoint();
 			const record = this.describeFile(file.path, file.mtimeMs, "read");
 			if (!record) continue;
 			if (file.size > MAX_FILE_BYTES) {
@@ -834,6 +905,7 @@ export class TranscriptRecallProcessor {
 	 * observed size is not read. The recorded mtime moves only with content that was actually captured.
 	 */
 	private applyIngest(path: string, rewritten: boolean, metadata: Stats): void {
+		this.checkpoint();
 		let record = this.recordsByPath.get(pathKey(path));
 		if (!record) {
 			record = this.describeFile(path, metadata.mtimeMs, "ingest");
@@ -843,11 +915,15 @@ export class TranscriptRecallProcessor {
 			this.unloadRecord(record, SKIP_FILE_TOO_LARGE);
 			return;
 		}
-		const state = record.state;
-		if (state && !rewritten && metadata.size === record.observedSize) return;
-		record.mtimeMs = metadata.mtimeMs;
+		const previousState = record.state;
+		if (previousState && !rewritten && metadata.size === record.observedSize) return;
+		const state =
+			this.activeRead && !rewritten && metadata.size > record.observedSize
+				? previousState?.fork(this.checkpoint)
+				: previousState;
 		if (!state || rewritten || metadata.size < record.observedSize) {
 			this.loadRecord(record, MAX_RETAINED_BYTES, "ingest");
+			record.mtimeMs = metadata.mtimeMs;
 			this.evictFor(record);
 			return;
 		}
@@ -860,14 +936,16 @@ export class TranscriptRecallProcessor {
 		if (capture.diverged) {
 			// The held offset no longer means the same prefix (a rewrite or migration followed by an append): reload whole.
 			this.loadRecord(record, MAX_RETAINED_BYTES, "ingest");
+			record.mtimeMs = metadata.mtimeMs;
 			this.evictFor(record);
 			return;
 		}
 		// A selected lineage that is no longer a prefix extension of the previous one is a branch switch.
 		if (!state.lineageExtends(previousBranch)) {
-			this.invalidate(record.sessionId, state.firstChangedPosition(previousSelected));
+			this.invalidate(record.sessionId, state.firstChangedPosition(previousSelected, this.checkpoint));
 		}
 		this.adoptState(record, state, capture);
+		record.mtimeMs = metadata.mtimeMs;
 		this.evictFor(record);
 	}
 
@@ -937,9 +1015,8 @@ export class TranscriptRecallProcessor {
 	 * failed source once: a file or directory that no longer exists drops its entry; one that reads now is
 	 * catalogued (and its files ingested) exactly as a scan or ingest would; one that still fails keeps a fresh
 	 * failure. The work list is the entries recorded when the refresh begins, and a request runs it at most once
-	 * (`failuresRefreshed`); no timer or polling is involved. It runs synchronously on the worker: the parent's read
-	 * deadline bounds only that read, so a slow refresh can continue after the read has timed out, and later
-	 * requests wait behind it. Returns whether anything was re-read.
+	 * (`failuresRefreshed`); no timer or polling is involved. File scans and captures check the read's shared
+	 * cancellation flag and fixed deadline. Returns whether anything was re-read.
 	 */
 	private refreshFailedSources(): boolean {
 		if (this.failuresRefreshed) return false;
@@ -947,6 +1024,7 @@ export class TranscriptRecallProcessor {
 		const failed = [...this.skippedPaths].filter(([, source]) => FAILURE_REASON.test(source.reason));
 		// Re-read through the path as it was tried: the normalized key need not name the file on disk.
 		for (const [key, { path }] of failed) {
+			this.checkpoint();
 			let isDirectory: boolean;
 			try {
 				isDirectory = statSync(path).isDirectory();
@@ -971,6 +1049,7 @@ export class TranscriptRecallProcessor {
 			}
 			this.skippedPaths.delete(key);
 			for (const file of files) {
+				this.checkpoint();
 				const fileKey = pathKey(file.path);
 				if (this.recordsByPath.has(fileKey) || this.mergedPaths.has(fileKey) || this.skippedPaths.has(fileKey)) {
 					continue;
@@ -1003,6 +1082,7 @@ export class TranscriptRecallProcessor {
 			return false;
 		}
 		for (const file of files) {
+			this.checkpoint();
 			const key = pathKey(file.path);
 			if (this.recordsByPath.has(key) || this.mergedPaths.has(key) || this.skippedPaths.has(key)) continue;
 			this.ingestFile(file.path, false);
@@ -1035,7 +1115,9 @@ export class TranscriptRecallProcessor {
 	 * failure that repeats unchanged is not a change.
 	 */
 	private refreshSession(record: SessionRecord): boolean {
-		const failed = record.skip !== undefined && FAILURE_REASON.test(record.skip);
+		this.checkpoint();
+		const failed =
+			record.skip === "read_interrupted" || (record.skip !== undefined && FAILURE_REASON.test(record.skip));
 		if (record.state === undefined && !failed) return false;
 		if (this.sessionsRefreshed.has(record.sessionId)) return false;
 		this.sessionsRefreshed.add(record.sessionId);
@@ -1079,6 +1161,8 @@ export class TranscriptRecallProcessor {
 	 */
 	private takeIndexChange(): { change: TranscriptIndexChangeEvent; bumps: TranscriptRecallLineageBump[] } | undefined {
 		if (this.changedSessionIds.size === 0 && this.invalidatedSessionIds.size === 0) return undefined;
+		this.indexRevision++;
+		for (const id of this.changedSessionIds) this.captureRevisions.set(id, (this.captureRevisions.get(id) ?? 0) + 1);
 		const bumps: TranscriptRecallLineageBump[] = [];
 		for (const [sessionId, lowestChanged] of this.invalidatedSessionIds) {
 			const lineageRevision = (this.lineageRevisions.get(sessionId) ?? 0) + 1;
@@ -1098,7 +1182,7 @@ export class TranscriptRecallProcessor {
 	 * What an answer depended on: this generation, the highest received ingest (all applied, since every read
 	 * flushes first), and per session its lineage revision and the exclusive end position the answer relied on.
 	 */
-	private observe(dependsThrough: ReadonlyMap<string, number>): TranscriptIndexObservation {
+	private observe(dependsThrough: ReadonlyMap<string, number>, capture = false): TranscriptIndexObservation {
 		return {
 			generation: this.generation,
 			ingestSeq: this.receivedIngestSeq,
@@ -1106,6 +1190,7 @@ export class TranscriptRecallProcessor {
 				sessionId,
 				lineageRevision: this.lineageRevisions.get(sessionId) ?? 0,
 				dependsThrough: through,
+				...(capture ? { captureRevision: this.captureRevisions.get(sessionId) ?? 0 } : {}),
 			})),
 		};
 	}
@@ -1134,6 +1219,7 @@ export class TranscriptRecallProcessor {
 
 	/** Capture one session that is not held in memory, for a single source read. Keeps the last one. */
 	private loadSessionForRead(record: SessionRecord): SessionCaptureState | TranscriptReadUnavailable {
+		this.checkpoint();
 		let metadata: ReturnType<typeof statSync>;
 		try {
 			metadata = statSync(record.path);
@@ -1155,12 +1241,15 @@ export class TranscriptRecallProcessor {
 		}
 		const state = new SessionCaptureState(this.projectId, record.sessionId);
 		try {
-			consumeSession(record.path, state, 0, Number.POSITIVE_INFINITY);
-			state.finalize();
+			consumeSession(record.path, state, 0, Number.POSITIVE_INFINITY, undefined, this.checkpoint);
+			state.finalize(this.checkpoint);
 		} catch (error) {
+			if (error instanceof TranscriptReadInterrupted) throw error;
 			return unavailable("unavailable", `Session file could not be captured: ${errorMessage(error)}`);
 		}
 		this.transientLoad = { path: record.path, mtimeMs: metadata.mtimeMs, size: metadata.size, state };
+		this.changedSessionIds.add(record.sessionId);
+		this.postCoverage();
 		return state;
 	}
 
@@ -1239,6 +1328,7 @@ export class TranscriptRecallProcessor {
 		const page = pageUtf8(found.part.text, request.cursor, request.maxBytes);
 		const result: TranscriptSourcePage = {
 			status: "ok",
+			observation: this.observe(new Map([[request.sessionId, 0]]), true),
 			span: found.part.span,
 			text: page.text,
 			cursor: page.cursor,
@@ -1251,8 +1341,11 @@ export class TranscriptRecallProcessor {
 	/** Run a read that answers with a typed result; a throw becomes `unavailable` with its real cause. */
 	private guarded<T>(phase: FailurePhase, read: () => T): T | TranscriptReadUnavailable {
 		try {
-			return read();
+			const result = read();
+			this.checkpoint();
+			return result;
 		} catch (error) {
+			if (error instanceof TranscriptReadInterrupted) return unavailable("unavailable", error.message);
 			return unavailable("unavailable", `${this.failureReason(phase, error)}: ${errorMessage(error)}`);
 		}
 	}
@@ -1273,6 +1366,7 @@ export class TranscriptRecallProcessor {
 		}
 		let changed = false;
 		for (const record of held) {
+			this.checkpoint();
 			if (this.refreshSession(record)) changed = true;
 		}
 		if (changed) this.postCoverage();
@@ -1286,6 +1380,7 @@ export class TranscriptRecallProcessor {
 		});
 		const sessions: TranscriptSessionSummary[] = [];
 		for (const record of indexed) {
+			this.checkpoint();
 			const state = record.state;
 			if (!state) continue;
 			const summary: TranscriptSessionSummary = {
@@ -1342,6 +1437,7 @@ export class TranscriptRecallProcessor {
 	private verifyRanges(request: TranscriptRecallVerifyRequest): TranscriptLineageVerifyResult {
 		const dependsThrough = new Map<string, number>();
 		for (const check of request.checks) {
+			this.checkpoint();
 			const end = check.fromIndex + check.count;
 			dependsThrough.set(check.sessionId, Math.max(dependsThrough.get(check.sessionId) ?? 0, end));
 		}
@@ -1353,15 +1449,19 @@ export class TranscriptRecallProcessor {
 		// verdict and observed revision comes from that state; one coverage post carries the refresh's lineage bumps.
 		let changed = false;
 		for (const sessionId of dependsThrough.keys()) {
+			this.checkpoint();
 			const record = this.recordsById.get(sessionId);
 			if (record && this.refreshSession(record)) changed = true;
 		}
 		if (changed) this.postCoverage();
 		const verdicts: TranscriptLineageRangeVerdict[] = [];
 		for (const check of request.checks) {
+			this.checkpoint();
 			const state = this.heldLineage(check.sessionId);
 			if (state instanceof SessionCaptureState) {
-				verdicts.push(state.rangeDigest(check.fromIndex, check.count) === check.digest ? "live" : "moved");
+				verdicts.push(
+					state.rangeDigest(check.fromIndex, check.count, this.checkpoint) === check.digest ? "live" : "moved",
+				);
 			} else if (state.status === "not_found") {
 				verdicts.push("session_gone");
 			} else {
@@ -1410,7 +1510,7 @@ export class TranscriptRecallProcessor {
 		try {
 			this.runQuery(request);
 		} catch (error) {
-			this.failureReason("query", error);
+			if (!(error instanceof TranscriptReadInterrupted)) this.failureReason("query", error);
 			this.post({
 				type: "queryFailed",
 				generation: this.generation,
@@ -1427,9 +1527,9 @@ export class TranscriptRecallProcessor {
 	 * delivered snippet and its span lineage describe the file as of this request.
 	 */
 	private runQuery(request: TranscriptRecallQueryRequest): void {
-		this.flushIngests();
 		const run = () =>
 			this.index.query(request.query, {
+				checkpoint: this.checkpoint,
 				k: request.maxResults,
 				minScore: MIN_SCORE,
 				maxSnippetChars: TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
@@ -1440,8 +1540,10 @@ export class TranscriptRecallProcessor {
 		// remove a hit and surface another session's, so the query is answered again until a pass changes nothing.
 		let hits = run();
 		for (;;) {
+			this.checkpoint();
 			let changed = false;
 			for (const sessionId of new Set(hits.map((hit) => hit.span.ref.sessionId))) {
+				this.checkpoint();
 				const record = this.recordsById.get(sessionId);
 				if (record && this.refreshSession(record)) changed = true;
 			}
@@ -1449,7 +1551,15 @@ export class TranscriptRecallProcessor {
 			this.postCoverage();
 			hits = run();
 		}
-		this.post({ type: "result", generation: this.generation, requestId: request.requestId, hits });
+		this.checkpoint();
+		this.post({
+			type: "result",
+			generation: this.generation,
+			requestId: request.requestId,
+			hits,
+			observation: { ...this.observe(new Map()), indexRevision: this.indexRevision },
+			coverage: this.computeCoverage(),
+		});
 	}
 
 	private handle(request: TranscriptRecallWorkerRequest): void {
@@ -1476,7 +1586,6 @@ export class TranscriptRecallProcessor {
 				this.query(request);
 				break;
 			case "sessions":
-				this.flushIngests();
 				this.post({
 					type: "sessions",
 					generation: this.generation,
@@ -1485,7 +1594,6 @@ export class TranscriptRecallProcessor {
 				});
 				break;
 			case "lineage":
-				this.flushIngests();
 				this.post({
 					type: "lineage",
 					generation: this.generation,
@@ -1494,7 +1602,6 @@ export class TranscriptRecallProcessor {
 				});
 				break;
 			case "verify":
-				this.flushIngests();
 				this.post({
 					type: "verify",
 					generation: this.generation,
@@ -1503,7 +1610,6 @@ export class TranscriptRecallProcessor {
 				});
 				break;
 			case "source":
-				this.flushIngests();
 				this.post({
 					type: "source",
 					generation: this.generation,

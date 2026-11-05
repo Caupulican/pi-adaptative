@@ -53,6 +53,8 @@ interface NumericRange {
  * reading and comparing it costs what the stat did and cannot miss a change.
  */
 const parsedFiles = new Map<string, { bytes: Buffer; parsed: ParsedEditorConfig }>();
+const MAX_PARSED_ENCODING_FILES = 128;
+const MAX_PARSED_ENCODING_BYTES = 1024 * 1024;
 
 /**
  * EditorConfig's charset vocabulary is `latin1`, `utf-8`, `utf-8-bom`, `utf-16be`, `utf-16le`.
@@ -257,10 +259,13 @@ function parseEditorConfig(text: string): ParsedEditorConfig {
 	return { root, sections };
 }
 
-async function loadEditorConfig(path: string): Promise<ParsedEditorConfig | undefined> {
+async function loadEditorConfig(
+	path: string,
+	read: (path: string) => Promise<Buffer> = readFile,
+): Promise<ParsedEditorConfig | undefined> {
 	let bytes: Buffer;
 	try {
-		bytes = await readFile(path);
+		bytes = await read(path);
 	} catch (error) {
 		// A directory without an .editorconfig is the normal case, not a failure; anything else is.
 		const code = (error as NodeJS.ErrnoException).code;
@@ -269,8 +274,18 @@ async function loadEditorConfig(path: string): Promise<ParsedEditorConfig | unde
 	}
 	const cached = parsedFiles.get(path);
 	if (cached?.bytes.equals(bytes)) return cached.parsed;
-	const parsed = parseEditorConfig(stripBom(bytes.toString("utf-8")));
-	parsedFiles.set(path, { bytes, parsed });
+	const parsed = parseEditorConfig(stripBom(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+	if (bytes.length <= MAX_PARSED_ENCODING_BYTES) {
+		parsedFiles.delete(path);
+		parsedFiles.set(path, { bytes, parsed });
+		let retained = 0;
+		for (const entry of parsedFiles.values()) retained += entry.bytes.length;
+		for (const [key, entry] of parsedFiles) {
+			if (parsedFiles.size <= MAX_PARSED_ENCODING_FILES && retained <= MAX_PARSED_ENCODING_BYTES) break;
+			parsedFiles.delete(key);
+			retained -= entry.bytes.length;
+		}
+	}
 	return parsed;
 }
 
@@ -281,16 +296,20 @@ async function loadEditorConfig(path: string): Promise<ParsedEditorConfig | unde
  */
 export async function resolveDeclaredEncoding(
 	absolutePath: string,
-	options?: { stopAt?: string; signal?: AbortSignal },
+	options?: { stopAt?: string; signal?: AbortSignal; readFile?: (path: string) => Promise<Buffer> },
 ): Promise<DeclaredEncoding | undefined> {
 	options?.signal?.throwIfAborted();
 	const target = resolvePath(absolutePath);
 	const stopAt = options?.stopAt === undefined ? undefined : resolvePath(options.stopAt);
 	let directory = dirname(target);
+	if (stopAt !== undefined) {
+		const scope = relative(stopAt, directory);
+		if (scope === ".." || scope.startsWith(`..${sep}`) || isAbsolute(scope)) return undefined;
+	}
 	for (;;) {
 		options?.signal?.throwIfAborted();
 		const configPath = join(directory, ".editorconfig");
-		const parsed = await loadEditorConfig(configPath);
+		const parsed = await loadEditorConfig(configPath, options?.readFile);
 		if (parsed) {
 			for (let index = parsed.sections.length - 1; index >= 0; index--) {
 				const section = parsed.sections[index];
@@ -339,6 +358,7 @@ export async function resolveFileEncoding(
 		argument?: string;
 		fileEncodings?: readonly FileEncodingRule[];
 		stopAt?: string;
+		readFile?: (path: string) => Promise<Buffer>;
 		signal?: AbortSignal;
 	},
 ): Promise<ResolvedFileEncoding | undefined> {
@@ -351,6 +371,7 @@ export async function resolveFileEncoding(
 	}
 	const declared = await resolveDeclaredEncoding(absolutePath, {
 		stopAt: settings?.stopAt,
+		readFile: settings?.readFile,
 		signal: settings?.signal,
 	});
 	return declared ? { encoding: declared.encoding, source: "editorconfig", declaredIn: declared.source } : undefined;

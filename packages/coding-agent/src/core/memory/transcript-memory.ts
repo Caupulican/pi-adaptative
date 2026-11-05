@@ -20,6 +20,7 @@
 import { createHash } from "node:crypto";
 import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadEvidence } from "./memory-read-context.ts";
 import {
 	selectFrontier,
 	type TranscriptFrontierGap,
@@ -39,6 +40,7 @@ import {
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 	TRANSCRIPT_SUMMARY_TARGET_BYTES,
 	type TranscriptCoverage,
+	type TranscriptIndexObservation,
 	type TranscriptLineageReader,
 	type TranscriptLineageSpansResult,
 	type TranscriptReadUnavailable,
@@ -77,6 +79,7 @@ import {
 	namesForgottenSession,
 	TranscriptSummaryCatalog,
 	type TranscriptSummaryReadContext,
+	type TranscriptSummaryReadFence,
 	transcriptRetentionCutoff,
 } from "./transcript-summary-catalog.ts";
 import {
@@ -108,6 +111,7 @@ import {
 	type TranscriptSummarySchedulerOptions,
 } from "./transcript-summary-scheduler.ts";
 import {
+	type ForgetStateRead,
 	forgetRefusalCause,
 	type ManifestRead,
 	SESSION_TOMBSTONE_KEY_PREFIX,
@@ -926,9 +930,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private readonly durableReplies = new Map<string, string>();
 	/**
 	 * The delivery fence's manifest reads: one bounded-read owner per run, created at start and dropped on stop. A
-	 * caller is settled by its own deadline; the flight runs under none (the owner races it).
+	 * caller owns its wait; the physical flight has one fixed deadline and ends when its last consumer leaves.
 	 */
-	private manifestReads: TranscriptBoundedRead<ManifestRead> | undefined;
+	private manifestReads: TranscriptBoundedRead<{ manifest: ManifestRead; forgotten: ForgetStateRead }> | undefined;
+	private readsStopped: Promise<void> | undefined;
+	private frontierRead:
+		| {
+				fence: TranscriptSummaryReadFence;
+				observation?: TranscriptIndexObservation;
+				context: TranscriptSummaryReadContext;
+				selection: TranscriptFrontierSelection;
+		  }
+		| undefined;
 	/**
 	 * Start-up order: `convert` (the first save turns stale version 1 jobs into durable carried budgets), then
 	 * `reconcile` (every recovered job adopts its version 1 budget), then `reconciled` (the save of that), then `open`:
@@ -1097,7 +1110,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.readmissionState.clear();
 		this.durableAttempts.clear();
 		this.durableReplies.clear();
-		this.manifestReads = new TranscriptBoundedRead<ManifestRead>(() => this.ports.store.readManifest());
+		this.manifestReads = new TranscriptBoundedRead<{ manifest: ManifestRead; forgotten: ForgetStateRead }>(
+			async (_ticket, context) => {
+				const manifest = await this.ports.store.readManifest(context);
+				if (manifest.status === "unavailable") return manifest;
+				const forgotten = await this.ports.store.readForgottenSessions(context);
+				assertMemoryReadActive(context);
+				return { manifest, forgotten };
+			},
+		);
 		this.startPhase = "convert";
 		this.discoveryHeld = false;
 		this.saveFailure = undefined;
@@ -1346,6 +1367,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	async stop(): Promise<void> {
 		if (!this.started && !this.scheduler) return;
 		const running = this.haltBackground();
+		await this.readsStopped;
 		// Settled, never thrown past: the stop must reach its terminal signal. An unexpected rejection keeps its cause.
 		const settled = await Promise.allSettled([...running.map((entry) => entry.done)]);
 		for (const result of settled) {
@@ -1909,11 +1931,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 */
 	private catalogReadContext(options: TranscriptSummaryReadOptions): TranscriptSummaryReadContext {
 		return {
+			...options,
 			reader: this.ports.reader,
 			cutoff: () => this.retentionCutoff(),
 			priority: "foreground",
 			...(options.deadlineAt !== undefined ? { deadlineAt: options.deadlineAt } : {}),
-			confirm: () => this.confirmMirror(options.deadlineAt),
+			confirm: (context = options) => this.confirmMirror(context),
 		};
 	}
 
@@ -1926,8 +1949,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * changed-in-flight wording the retry policy classifies.
 	 */
 	private async confirmMirror(
-		deadlineAt: number | undefined,
-	): Promise<{ catalog: TranscriptSummaryCatalog } | TranscriptReadUnavailable> {
+		context: MemoryReadContext,
+	): Promise<TranscriptSummaryReadFence | TranscriptReadUnavailable> {
 		const reads = this.manifestReads;
 		const epoch = this.epoch;
 		// The bounded reads exist exactly while a run is started (created by its start, dropped by its stop).
@@ -1935,22 +1958,27 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return this.readUnavailable() ?? { status: "unavailable", reason: "the summary hierarchy is not running" };
 		// A fence: only a manifest read that starts after this call can confirm the mirror, and this caller is settled
 		// by its own deadline whatever the read does.
-		const read = await reads.fence(deadlineAt);
+		const confirmed = await reads.fence(context);
+		assertMemoryReadActive(context);
+		if ("status" in confirmed) return confirmed;
+		const { manifest: read, forgotten: forget } = confirmed;
 		const unavailable = this.readUnavailable();
 		if (unavailable) return unavailable;
 		// The coordinator was replaced while the read was out: nothing from the earlier run is adopted.
 		if (epoch !== this.epoch) {
 			return { status: "stale_snapshot", reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.` };
 		}
-		// An I/O or lock failure, or the caller's deadline, with its real cause: the reader keeps its exact hits.
-		if (read.status !== "ok" && read.status !== "missing" && read.status !== "corrupt") return read;
 		if (read.status === "corrupt") {
 			return {
 				status: "unavailable",
 				reason: `the summary store manifest is damaged (${read.detail}); exact history recall is unaffected`,
 			};
 		}
-		if (read.status === "missing" || read.manifest.revision !== this.manifestRevision) {
+		if (
+			read.status === "missing" ||
+			read.manifest.revision !== this.manifestRevision ||
+			read.manifest.writerFence !== this.writer?.fence
+		) {
 			return {
 				status: "stale_snapshot",
 				reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.`,
@@ -1958,12 +1986,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		// The permanent forget state is confirmed with the manifest: a session another root forgot since this mirror
 		// loaded is never served, and the mirror then removes its derived data.
-		const forget = await this.ports.store.readForgottenSessions(
-			deadlineAt !== undefined ? { deadlineAt } : undefined,
-		);
-		if (epoch !== this.epoch) {
-			return { status: "stale_snapshot", reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.` };
-		}
 		if (forget.status === "unknown") {
 			return {
 				status: "unavailable",
@@ -1978,7 +2000,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.`,
 			};
 		}
-		return { catalog: this.catalog };
+		const revision = this.manifestRevision;
+		const forgetRevision = this.forgetRevision;
+		const writerFence = read.manifest.writerFence;
+		return {
+			catalog: this.catalog,
+			revision: `${writerFence}:${revision}:${forgetRevision}`,
+			isCurrent: () =>
+				this.live(epoch) &&
+				this.writer?.fence === writerFence &&
+				this.manifestRevision === revision &&
+				this.forgetRevision === forgetRevision,
+		};
 	}
 
 	/** Why node reads cannot be served now: `pending` while the store loads, `unavailable` while off or stopped. */
@@ -2029,8 +2062,55 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * described to a model only while it does: another controller that revoked or forgot since, or a store that cannot be
 	 * read, leaves the request without one (a cleared record), never with derived text the store no longer stands behind.
 	 */
-	async confirmFrontier(deadlineAt?: number): Promise<boolean> {
-		return "catalog" in (await this.confirmMirror(deadlineAt));
+	async confirmFrontier(deadlineAt?: number, read: MemoryReadContext = {}): Promise<boolean> {
+		const context = this.catalogReadContext({ ...read, deadlineAt });
+		this.frontierRead = undefined;
+		const selection = this.frontiers.get(this.ports.ownerSessionId());
+		if (!selection || selection.nodeIds.length === 0) return "catalog" in (await this.confirmMirror(context));
+		const checks = [];
+		for (const id of selection.nodeIds) {
+			const node = this.catalog.get(id);
+			const dependency = node && this.catalog.dependency(node);
+			if (dependency?.kind !== "range") return false;
+			checks.push(dependency.check);
+		}
+		const verified = await this.ports.reader.verifyLineageRanges({
+			checks,
+			priority: "foreground",
+			signal: context.signal,
+			deadlineAt,
+		});
+		if (verified.status !== "ok" || verified.verdicts.some((verdict) => verdict !== "live")) return false;
+		const fence = await this.confirmMirror(context);
+		assertMemoryReadActive(context);
+		if (
+			"status" in fence ||
+			this.frontiers.get(this.ports.ownerSessionId()) !== selection ||
+			this.ports.reader.observationCurrent(verified.observation).status !== "current"
+		)
+			return false;
+		this.frontierRead = { fence, observation: verified.observation, context, selection };
+		return true;
+	}
+
+	/** Evidence for exactly the nodes the frontier renderer retained, without parsing its prose. */
+	frontierEvidence(
+		nodeIds: readonly string[],
+		selection: TranscriptFrontierSelection,
+		sourceHandles: readonly string[],
+	): MemoryReadEvidence | undefined {
+		const held = this.frontierRead;
+		if (!held || held.selection !== selection) return undefined;
+		const nodes = nodeIds.map((id) => this.catalog.get(id));
+		if (nodes.some((node) => node === undefined)) return undefined;
+		const evidence = this.catalog.evidence(
+			nodes as TranscriptSummaryNode[],
+			held.observation,
+			held.context,
+			held.fence,
+			{ sourceHandles: sourceHandles.filter((ref) => ref.startsWith("tx:")) },
+		);
+		return evidence.isCurrent() ? evidence : undefined;
 	}
 
 	/** An owner outside the coordinator (the prompt planner) records a cause on the same diagnostics slot. */
@@ -2088,6 +2168,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private haltBackground(): { controller: AbortController; done: Promise<void> }[] {
 		this.started = false;
 		this.epoch += 1;
+		this.frontierRead = undefined;
+		this.readsStopped = this.manifestReads?.close() ?? this.readsStopped;
 		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
 		this.timer = undefined;
 		// Store work deferred by an unavailable write, and verdicts kept across one, are dropped: the next start derives

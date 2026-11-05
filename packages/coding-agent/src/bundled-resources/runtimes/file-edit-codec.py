@@ -46,6 +46,7 @@ CP1252_UNDEFINED_BYTES = bytes(CP1252_UNDEFINED)
 MIN_UTF16_NUL_SHARE = 0.30
 MIN_UTF16_NUL_ALIGNMENT = 0.90
 MAX_BOM_BYTES = max(len(marker) for marker, _ in BOMS)
+ALLOW_EXTERNAL_CODECS = True
 
 
 class EncodingEvidenceRequired(ValueError):
@@ -208,7 +209,7 @@ class IconvCodec:
         # Labels are data, not command options or iconv //IGNORE / //TRANSLIT directives.
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}", name):
             raise LookupError("unsupported codec label")
-        executable = shutil.which("iconv")
+        executable = shutil.which("iconv") if ALLOW_EXTERNAL_CODECS else None
         self.name = name
         self.executable = os.path.abspath(executable) if executable else None
         self.native = None if executable else NativeIconv()
@@ -624,9 +625,15 @@ def serve_read_stream():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--read-stream"]:
+    arguments = sys.argv[1:]
+    if "--no-external-codecs" in arguments:
+        ALLOW_EXTERNAL_CODECS = False
+        arguments.remove("--no-external-codecs")
+    if arguments == ["--read-stream"]:
         sys.exit(serve_read_stream())
     try:
+        if arguments:
+            raise ValueError("unknown codec arguments")
         payload = sys.stdin.buffer.read(MAX_PROTOCOL + 1)
         if len(payload) > MAX_PROTOCOL:
             raise ValueError("protocol bound")

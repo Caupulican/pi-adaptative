@@ -12,6 +12,8 @@ import type { MemoryLifecycleContext } from "./memory-provider.ts";
 
 export interface MemoryPrefetchOptions {
 	externalEgressPolicy?: MemoryEgressPolicy;
+	/** Host-owned provider identities only; names and self-declared local egress do not grant admission. */
+	admittedProviders?: ReadonlySet<MemoryProvider>;
 }
 
 export interface MemoryManagerOptions {
@@ -318,14 +320,24 @@ export class MemoryManager {
 	 * (including writes made earlier in the same session) without churning the prefix-cache-stable
 	 * system prompt block.
 	 */
-	public buildSystemPromptBlockFresh(budget?: MemoryPromptBudget): string {
-		return this._composeSystemPromptBlock(budget);
+	public buildSystemPromptBlockFresh(
+		budget?: MemoryPromptBudget,
+		admittedProviders?: ReadonlySet<MemoryProvider>,
+	): string {
+		return this._composeSystemPromptBlock(budget, admittedProviders);
 	}
 
-	private _composeSystemPromptBlock(budget?: MemoryPromptBudget): string {
+	private _composeSystemPromptBlock(
+		budget?: MemoryPromptBudget,
+		admittedProviders?: ReadonlySet<MemoryProvider>,
+	): string {
 		const blocks: string[] = [];
 		for (const p of this.providers) {
-			if (!this.activeProviders.has(p.name) || !p.systemPromptBlock) {
+			if (
+				!this.activeProviders.has(p.name) ||
+				!p.systemPromptBlock ||
+				(admittedProviders !== undefined && !admittedProviders.has(p))
+			) {
 				continue;
 			}
 			try {
@@ -345,7 +357,11 @@ export class MemoryManager {
 	public async prefetch(query: string, options: MemoryPrefetchOptions = {}): Promise<string> {
 		const results: string[] = [];
 		for (const p of this.providers) {
-			if (!this.activeProviders.has(p.name) || !p.prefetch) {
+			if (
+				!this.activeProviders.has(p.name) ||
+				!p.prefetch ||
+				(options.admittedProviders !== undefined && !options.admittedProviders.has(p))
+			) {
 				continue;
 			}
 			if (p.egress !== "local") {

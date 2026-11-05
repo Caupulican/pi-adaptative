@@ -38,9 +38,11 @@ import {
 	type HistoryToolBackends,
 	memoryFailure,
 } from "../history-tool.ts";
+import { readObservedMemoryFile } from "../memory-file-read.ts";
 import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
 import { MemoryMutationOutcomeError, memoryMutationFailureDetails } from "../memory-mutation-outcome.ts";
 import type { MemoryLifecycleContext } from "../memory-provider.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "../memory-read-context.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
 import {
 	collectUserPreferenceEntries,
@@ -383,6 +385,16 @@ export interface UserPersonaProjection {
 /** How much of USER.md the installed static block renders: everything, a truncated head, or nothing. */
 type FrozenUserCoverage = "full" | "partial" | "omitted";
 
+interface UserPromptSnapshot {
+	active: string | undefined;
+	archived: { entries: Array<{ line: string; section?: string }>; truncated: boolean } | undefined;
+}
+
+export interface FileStoreReadSnapshot {
+	/** Pure composition from the captured files, with the same scope and rendering rules as the root prompt. */
+	render(budget?: MemoryPromptBudget): string;
+}
+
 export const USER_PERSONA_CUSTOM_TYPE = "user_persona";
 const USER_SECTION_HEADER = "## USER.md:";
 
@@ -612,10 +624,7 @@ export class FileStoreProvider implements MemoryProvider {
 	/** Trimmed MEMORY.md lines from the installed frozen static prompt block; undefined before freeze/reset. */
 	private frozenPromptLines: ReadonlySet<string> | undefined;
 	/** Undefined means unreadable, never empty. Active and archive views publish as one snapshot. */
-	private userSnapshot: {
-		active: string | undefined;
-		archived: { entries: Array<{ line: string; section?: string }>; truncated: boolean } | undefined;
-	} = { active: undefined, archived: undefined };
+	private userSnapshot: UserPromptSnapshot = { active: undefined, archived: undefined };
 	private userArchive?: UserMemoryArchive;
 	private userTransaction?: UserMemoryTransaction;
 	private okfStore?: OkfProjectMemoryStore;
@@ -761,14 +770,14 @@ export class FileStoreProvider implements MemoryProvider {
 		}
 	}
 
-	private userSnapshotNotice(): string | undefined {
+	private userSnapshotNotice(snapshot = this.userSnapshot): string | undefined {
 		const missing = [
-			...(this.userSnapshot.active === undefined ? ["USER.md"] : []),
-			...(this.userSnapshot.archived === undefined ? ["its archive"] : []),
+			...(snapshot.active === undefined ? ["USER.md"] : []),
+			...(snapshot.archived === undefined ? ["its archive"] : []),
 		];
 		if (missing.length > 0)
 			return `${missing.join(" and ")} could not be read. Available preferences are incomplete; do not infer removals from unavailable sources.`;
-		if (this.userSnapshot.archived?.truncated)
+		if (snapshot.archived?.truncated)
 			return "Additional archived preferences are outside this snapshot; absent lines do not establish removals.";
 		return undefined;
 	}
@@ -1078,10 +1087,10 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	/** Every preference this session can see (active file plus archive shards), parsed, in file order. */
-	private allPreferences(): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
+	private allPreferences(snapshot = this.userSnapshot): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
 		return [
-			...FileStoreProvider.activePreferenceEntries(this.userSnapshot.active ?? ""),
-			...(this.userSnapshot.archived?.entries ?? []),
+			...FileStoreProvider.activePreferenceEntries(snapshot.active ?? ""),
+			...(snapshot.archived?.entries ?? []),
 		].map((entry) => ({
 			parsed: parseUserPreferenceLine(entry.line),
 			...(entry.section ? { section: entry.section } : {}),
@@ -1089,8 +1098,10 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	/** Host-checked applicability: global lines plus the lines scoped to this project's key. */
-	private applicablePreferences(): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
-		return this.allPreferences().filter((entry) =>
+	private applicablePreferences(
+		snapshot = this.userSnapshot,
+	): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
+		return this.allPreferences(snapshot).filter((entry) =>
 			isUserPreferenceApplicable(entry.parsed.metadata, this.projectKey),
 		);
 	}
@@ -1128,8 +1139,12 @@ export class FileStoreProvider implements MemoryProvider {
 	 * record): applicable preferences as sanitized prompt lines with an honest strength label,
 	 * trailers removed, whole lines within the write budget, the rest counted.
 	 */
-	private selectApplicablePreferenceLines(): { kept: string[]; omitted: number; text: string } {
-		const rendered = this.applicablePreferences()
+	private selectApplicablePreferenceLines(snapshot = this.userSnapshot): {
+		kept: string[];
+		omitted: number;
+		text: string;
+	} {
+		const rendered = this.applicablePreferences(snapshot)
 			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section))
 			.join("\n");
 		const lines = rendered.length === 0 ? [] : FileStoreProvider.sanitizeMemory(rendered).split("\n");
@@ -1139,8 +1154,10 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
-	private renderUserMemory(): string {
-		return [this.selectApplicablePreferenceLines().text, this.userSnapshotNotice()].filter(Boolean).join("\n");
+	private renderUserMemory(snapshot = this.userSnapshot): string {
+		return [this.selectApplicablePreferenceLines(snapshot).text, this.userSnapshotNotice(snapshot)]
+			.filter(Boolean)
+			.join("\n");
 	}
 
 	/**
@@ -1386,8 +1403,69 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	public systemPromptBlock(budget?: MemoryPromptBudget): string {
+		return this.composeSystemPromptBlock(
+			this.lastWrittenMemory,
+			this.lastWrittenProjectMemory,
+			this.userSnapshot,
+			budget,
+		);
+	}
+
+	/** Fresh read-only files and archive; it never publishes a new root prompt or reconciles managed writes. */
+	public async readSystemPromptSnapshot(context: MemoryReadContext): Promise<FileStoreReadSnapshot> {
+		assertMemoryReadActive(context);
+		const memory = await readObservedMemoryFile(
+			this.memoryFilePath,
+			FileStoreProvider.RESOURCE_CEILING,
+			"MEMORY.md",
+			context,
+		);
+		const project = await readObservedMemoryFile(
+			this.projectMemoryFilePath,
+			FileStoreProvider.RESOURCE_CEILING,
+			"Project MEMORY.md",
+			context,
+		);
+		const user = await withFileLock(
+			this.userFilePath,
+			async (): Promise<UserPromptSnapshot> => {
+				assertMemoryReadActive(context);
+				const active = await readObservedMemoryFile(
+					this.userFilePath,
+					FileStoreProvider.RESOURCE_CEILING,
+					"USER.md",
+					context,
+				);
+				const entries = await this.userArchive?.archivedEntries(USER_ARCHIVE_PROJECTION_LIMIT + 1, context);
+				assertMemoryReadActive(context);
+				return {
+					active,
+					archived:
+						entries === undefined
+							? undefined
+							: {
+									entries: entries.slice(0, USER_ARCHIVE_PROJECTION_LIMIT),
+									truncated: entries.length > USER_ARCHIVE_PROJECTION_LIMIT,
+								},
+				};
+			},
+			{ deadlineAt: context.deadlineAt, signal: context.signal, createParentDirectories: false },
+		);
+		assertMemoryReadActive(context);
+		return Object.freeze({
+			render: (budget?: MemoryPromptBudget) =>
+				this.composeSystemPromptBlock(memory ?? "", project ?? "", user, budget),
+		});
+	}
+
+	private composeSystemPromptBlock(
+		memory: string,
+		project: string,
+		user: UserPromptSnapshot,
+		budget?: MemoryPromptBudget,
+	): string {
 		if (this.ctx?.isChildSession) return "";
-		const mem = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(this.lastWrittenMemory), {
+		const mem = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(memory), {
 			enabled: true,
 			compact: false,
 			maxLines: 20,
@@ -1395,7 +1473,7 @@ export class FileStoreProvider implements MemoryProvider {
 			maxChars: FileStoreProvider.RESOURCE_CEILING,
 			maxResults: 10,
 		});
-		const proj = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(this.lastWrittenProjectMemory), {
+		const proj = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(project), {
 			enabled: true,
 			compact: false,
 			maxLines: 20,
@@ -1403,7 +1481,7 @@ export class FileStoreProvider implements MemoryProvider {
 			maxChars: FileStoreProvider.RESOURCE_CEILING,
 			maxResults: 10,
 		});
-		const usr = this.renderUserMemory();
+		const usr = this.renderUserMemory(user);
 
 		const blocks: string[] = [];
 		if (mem.trim()) {

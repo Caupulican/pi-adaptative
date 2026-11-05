@@ -81,10 +81,12 @@ import type {
 	ToolCallRepairInfo,
 } from "./types.ts";
 import {
+	AgentToolPolicyDeniedError,
 	DEFAULT_MAX_PROVIDER_TURNS,
 	DEFAULT_MAX_REPEATED_FAILURES,
 	DEFAULT_MAX_STALL_TURNS,
 	describeThrownToolError,
+	readAgentToolPolicyDeniedError,
 	safeErrorMessage,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
@@ -1218,23 +1220,13 @@ async function prepareAndStartToolCall(
 		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
 		await emitToolExecutionStart(toolCall, execCtx.emit);
 		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
-		const finalized = finalizeRejectedToolCall(
+		const finalized = finalizeUnstartedToolCall(
 			toolCall,
 			execCtx.context.tools?.find((tool) => tool.name === toolCall.name),
 			preparation,
 			execCtx.toolFailureMemory,
+			execCtx.requestId,
 		);
-		finalized.result = {
-			...finalized.result,
-			details: stampToolInvocation(finalized.result.details, {
-				version: 1,
-				requestId: execCtx.requestId,
-				...(preparation.executionScope ? { executionScope: preparation.executionScope } : {}),
-				execution: "not_started",
-				...(preparation.phase === "cancelled" ? { failureCode: "aborted" as const } : {}),
-				postprocessingFailures: [],
-			}),
-		};
 		if (preparation.phase === "preflight") {
 			await execCtx.config.onToolCallPreflightRejected?.(
 				{
@@ -1679,17 +1671,21 @@ type ImmediateToolCallOutcome = {
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
-type ExecutedToolCallOutcome = {
-	result: AgentToolResult<any>;
-	operationCompleted: boolean;
+type ExecutedToolCallOutcome = (
+	| {
+			result: AgentToolResult<any>;
+			operationCompleted: boolean;
+			isError: boolean;
+			errorClass?: string;
+			failureMessage?: string;
+			failureCode?: string;
+			outputSignature?: string;
+			errorKind?: AgentToolErrorKind;
+			timeoutMs?: number | null;
+	  }
+	| { rejection: ImmediateToolCallOutcome }
+) & {
 	progressDeliveryFailed?: boolean;
-	isError: boolean;
-	errorClass?: string;
-	failureMessage?: string;
-	failureCode?: string;
-	outputSignature?: string;
-	errorKind?: AgentToolErrorKind;
-	timeoutMs?: number | null;
 };
 
 type FinalizedToolCallOutcome = {
@@ -1772,15 +1768,33 @@ function abortedToolCallText(abortReason?: unknown, toolMessage?: string): strin
 
 function createAbortedToolCallOutcome(
 	validationEvent: ToolArgumentValidationTelemetryEvent | undefined,
+	abortReason?: unknown,
+	toolMessage?: string,
 ): ImmediateToolCallOutcome {
 	return {
 		kind: "immediate",
-		result: createErrorToolResult(abortedToolCallText()),
+		result: createErrorToolResult(abortedToolCallText(abortReason, toolMessage)),
 		isError: true,
 		phase: "cancelled",
 		failureCode: "aborted",
 		correction: "Retry only if the operation is still required.",
 		validationEvent,
+	};
+}
+
+function createPolicyDeniedToolCallOutcome(denial: AgentToolPolicyDeniedError): ImmediateToolCallOutcome {
+	const diagnostic = denial.message;
+	return {
+		kind: "immediate",
+		result: {
+			...createErrorToolResult(diagnostic),
+			...(denial.terminate !== undefined ? { terminate: denial.terminate } : {}),
+		},
+		isError: true,
+		phase: "policy",
+		failureCode: "blocked",
+		correction: "Choose an allowed approach or request the required authority before retrying.",
+		diagnostic,
 	};
 }
 
@@ -2237,19 +2251,11 @@ async function prepareToolCall(
 				return { ...createAbortedToolCallOutcome(validationEvent), executionScope: binding?.executionScope };
 			}
 			if (beforeResult?.block) {
-				const reason = beforeResult.reason || "Tool execution was blocked";
 				return {
-					kind: "immediate",
-					result: {
-						...createErrorToolResult(reason),
-						...(beforeResult.terminate !== undefined ? { terminate: beforeResult.terminate } : {}),
-					},
-					isError: true,
-					phase: "policy",
-					failureCode: "blocked",
+					...createPolicyDeniedToolCallOutcome(
+						new AgentToolPolicyDeniedError(beforeResult.reason, beforeResult.terminate),
+					),
 					executionScope: binding?.executionScope,
-					correction: "Choose an allowed approach or request the required authority before retrying.",
-					diagnostic: reason,
 					validationEvent,
 				};
 			}
@@ -2299,6 +2305,30 @@ async function prepareToolCall(
 	} finally {
 		if (!admitted) release();
 	}
+}
+
+function finalizeUnstartedToolCall(
+	toolCall: AgentToolCall,
+	tool: AgentTool<any> | undefined,
+	outcome: ImmediateToolCallOutcome,
+	tracker: ToolFailureMemoryTracker,
+	requestId: AgentRequestId,
+): FinalizedToolCallOutcome {
+	const finalized = finalizeRejectedToolCall(toolCall, tool, outcome, tracker);
+	return {
+		...finalized,
+		result: {
+			...finalized.result,
+			details: stampToolInvocation(finalized.result.details, {
+				version: 1,
+				requestId,
+				...(outcome.executionScope ? { executionScope: outcome.executionScope } : {}),
+				execution: "not_started",
+				...(outcome.phase === "cancelled" ? { failureCode: "aborted" as const } : {}),
+				postprocessingFailures: [],
+			}),
+		},
+	};
 }
 
 function finalizeRejectedToolCall(
@@ -2395,13 +2425,16 @@ function getBackgroundToolCallDelay(config: AgentLoopConfig): number | undefined
 	return delay;
 }
 
-/** Cleanup faults describe harness delivery, never a reason to repeat the completed operation. */
-function retainToolCleanupFailure(finalized: FinalizedToolCallOutcome): FinalizedToolCallOutcome {
+/** Delivery faults do not change whether the underlying operation started or completed. */
+function retainToolDeliveryFailure(
+	finalized: FinalizedToolCallOutcome,
+	phase: "cleanup" | "progress",
+): FinalizedToolCallOutcome {
 	const receipt = retainedToolInvocation(finalized.result.details);
-	if (!receipt || (receipt.execution !== "completed" && receipt.execution !== "unknown")) {
+	if (!receipt || receipt.execution === "running") {
 		throw new Error("Missing finalized tool invocation receipt");
 	}
-	if (receipt.postprocessingFailures.includes("cleanup")) return finalized;
+	if (receipt.postprocessingFailures.includes(phase)) return finalized;
 	return {
 		...finalized,
 		result: {
@@ -2410,15 +2443,23 @@ function retainToolCleanupFailure(finalized: FinalizedToolCallOutcome): Finalize
 				...finalized.result.content,
 				{
 					type: "text",
-					text: "[harness] Tool cleanup failed. The operation result is retained; inspect it rather than rerunning the operation to recover cleanup.",
+					text:
+						phase === "cleanup"
+							? "[harness] Tool cleanup failed. The operation result is retained; inspect it rather than rerunning the operation to recover cleanup."
+							: "[harness] Progress delivery failed. The operation result is retained; inspect it rather than rerunning the operation to recover progress updates.",
 				},
 			],
 			details: stampToolInvocation(finalized.result.details, {
 				...receipt,
-				postprocessingFailures: [...receipt.postprocessingFailures, "cleanup"],
+				postprocessingFailures:
+					phase === "progress"
+						? [phase, ...receipt.postprocessingFailures]
+						: [...receipt.postprocessingFailures, phase],
 			}),
 		},
-		deliveryFailure: finalized.deliveryFailure ?? new Error("tool_cleanup_failed"),
+		deliveryFailure:
+			finalized.deliveryFailure ??
+			new Error(phase === "cleanup" ? "tool_cleanup_failed" : "tool_progress_delivery_failed"),
 	};
 }
 
@@ -2487,7 +2528,7 @@ async function executeAndFinalizePreparedToolCall(
 				throw new AggregateError([settled.failure, ...cleanupErrors], "Tool finalization and cleanup failed");
 			throw settled.failure;
 		}
-		return cleanupErrors.length > 0 ? retainToolCleanupFailure(settled.value) : settled.value;
+		return cleanupErrors.length > 0 ? retainToolDeliveryFailure(settled.value, "cleanup") : settled.value;
 	})();
 	if (!executionAbort || !config.handoffToolCall) return completion;
 
@@ -2528,7 +2569,7 @@ async function executeAndFinalizePreparedToolCall(
 	}
 	// Failed subscription teardown cannot discard the running body or admit a new handoff. Keep
 	// foreground ownership until its actual completion and publish that outcome before ending.
-	if (unsubscribeFailed) return retainToolCleanupFailure(await completion);
+	if (unsubscribeFailed) return retainToolDeliveryFailure(await completion, "cleanup");
 	if (outcome.kind === "completed") return outcome.value;
 	if (executionAbort.signal.aborted) return completion;
 
@@ -2595,8 +2636,8 @@ async function executePreparedToolCall(
 		}),
 	);
 	let executed: ExecutedToolCallOutcome;
+	let rejectedBeforeExecution = false;
 	try {
-		prepared.recoveryReservation.commit();
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
@@ -2615,6 +2656,7 @@ async function executePreparedToolCall(
 				: {}),
 		};
 	} catch (error) {
+		const policyDenial = readAgentToolPolicyDeniedError(error);
 		const described = describeThrownToolError(error);
 		const toolFailure = described.structured;
 		const message = described.message;
@@ -2622,7 +2664,17 @@ async function executePreparedToolCall(
 		// not a mistake the model made. Classifying it as one cost a ledger entry, a kind-mistake count
 		// and a correction the model could not act on, for an operation nobody asked it to finish.
 		const cancelled = signal?.aborted === true || (signal?.reason !== undefined && error === signal.reason);
-		if (cancelled) {
+		if (policyDenial) {
+			rejectedBeforeExecution = true;
+			executed = {
+				rejection: {
+					...(cancelled
+						? createAbortedToolCallOutcome(prepared.validationEvent, signal?.reason, policyDenial.message)
+						: createPolicyDeniedToolCallOutcome(policyDenial)),
+					executionScope: prepared.binding?.executionScope,
+				},
+			};
+		} else if (cancelled) {
 			const cancellationText = abortedToolCallText(signal?.reason, message);
 			executed = {
 				result: createErrorToolResult(cancellationText),
@@ -2646,10 +2698,16 @@ async function executePreparedToolCall(
 					: {}),
 			};
 		}
+	} finally {
+		// Reservation already debits retry credit and constrains concurrent siblings. Retain it
+		// through admission so a proved pre-dispatch refusal can refund it without recording an
+		// executed timeout bound. Every ordinary return or throw commits the attempted execution.
+		if (rejectedBeforeExecution) prepared.recoveryReservation.cancel();
+		else prepared.recoveryReservation.commit();
 	}
 	return {
 		...executed,
-		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		...("rejection" in executed || timeoutMs === undefined ? {} : { timeoutMs }),
 		progressDeliveryFailed: await progress.finish(),
 	};
 }
@@ -2696,6 +2754,17 @@ async function finalizeExecutedToolCall(
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
+	if ("rejection" in executed) {
+		emitToolArgumentValidationTelemetry(config, prepared.validationEvent, "not_run", "none");
+		const finalized = finalizeUnstartedToolCall(
+			prepared.toolCall,
+			prepared.tool,
+			executed.rejection,
+			toolFailureMemory,
+			requestId,
+		);
+		return executed.progressDeliveryFailed ? retainToolDeliveryFailure(finalized, "progress") : finalized;
+	}
 	let result = executed.result;
 	// Capture the executor's validated receipt before a hook can mutate or replace its details.
 	// Presentation/policy failures must not erase a completed check or invent a different pass.
@@ -2873,10 +2942,7 @@ async function finalizeExecutedToolCall(
 				? { execution: "completed", operationStatus: "error", ...executorFailureIdentity }
 				: { execution: "completed", operationStatus: "success" }
 			: { execution: "unknown", ...executorFailureIdentity }),
-		postprocessingFailures: [
-			...(executed.progressDeliveryFailed ? ["progress" as const] : []),
-			...(afterHookFailed ? ["after_hook" as const] : []),
-		],
+		postprocessingFailures: [...(afterHookFailed ? ["after_hook" as const] : [])],
 	});
 	if (verificationDetails) {
 		Object.defineProperty(invocationDetails, "piVerification", {
@@ -2907,15 +2973,6 @@ async function finalizeExecutedToolCall(
 			},
 		];
 	}
-	if (executed.progressDeliveryFailed) {
-		resultWithVerification.content = [
-			...resultWithVerification.content,
-			{
-				type: "text",
-				text: "[harness] Progress delivery failed. The operation result is retained; inspect it rather than rerunning the operation to recover progress updates.",
-			},
-		];
-	}
 	emitToolArgumentValidationTelemetry(
 		config,
 		prepared.validationEvent,
@@ -2923,13 +2980,13 @@ async function finalizeExecutedToolCall(
 		repaired.taught ? "note" : "none",
 	);
 
-	return {
+	const finalized: FinalizedToolCallOutcome = {
 		toolCall: prepared.toolCall,
 		result: resultWithVerification,
 		isError,
-		...(executed.progressDeliveryFailed ? { deliveryFailure: new Error("tool_progress_delivery_failed") } : {}),
 		executionGateEffect,
 	};
+	return executed.progressDeliveryFailed ? retainToolDeliveryFailure(finalized, "progress") : finalized;
 }
 
 function detailsWithoutVerification(details: unknown): unknown {

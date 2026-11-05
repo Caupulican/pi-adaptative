@@ -32,6 +32,7 @@ import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
@@ -518,7 +519,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		writeCapable: options.executionPlan.writeEnabled,
 		verifier: options.verificationSubjectTaskId !== undefined,
 	};
-	const submitReportTool = createSubmitReportTool(reportCapture);
+	const submitReportTool = wrapToolExecution(createSubmitReportTool(reportCapture), (executor) => ({
+		...executor,
+		execute: (...args) => {
+			options.toolSurface.assertHealthy();
+			return executor.execute(...args);
+		},
+	}));
 	let reportRequests = 0;
 	let emptyReplyRequests = 0;
 	let needsMoreRounds = 0;
@@ -546,6 +553,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 * lets the run end: the host never forces a report and never fails a worker for not giving one.
 	 */
 	const reportFollowUp = (state: FollowUpState): AgentMessage[] => {
+		options.toolSurface.assertHealthy();
 		const budgetLeft = state.providerTurnLimit <= 0 || state.providerTurns < state.providerTurnLimit;
 		const message = (content: string): AgentMessage[] => [{ role: "user", content, timestamp: Date.now() }];
 		const submitted = reportCapture.submitted;
@@ -720,6 +728,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			})
 		: undefined;
 	const projectCompletion = (text: string, stopReason: string, costUsd: number): WorkerCompletion => {
+		options.toolSurface.assertHealthy();
 		terminalOutput = text;
 		const finalChangedFiles = sealChangedFiles();
 		const submittedReport = reportCapture.submitted ?? lastSubmittedReport;
@@ -787,6 +796,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		subject: string,
 		signal?: AbortSignal,
 	): Promise<ProviderBudgetReservation> => {
+		options.toolSurface.assertHealthy();
 		if (options.toolSurface.gateway) {
 			return options.toolSurface.gateway.reserveProviderBudget(requestedMaxTokens, subject, signal);
 		}
@@ -1121,6 +1131,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								providerTurn.consumeToolAssistantAndRelease();
 								durableCallbackMessages.push(message);
 							};
+							const preparedTools = new Map<string, { requestId: string; name: string; args: unknown }>();
+							const admittedCalls = new Set<string>();
+							let stopAdmission: (() => void) | undefined;
 							let committed = false;
 							const abortTranscriptCursor = (): void => {
 								providerTurn.close();
@@ -1129,6 +1142,26 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							signal.addEventListener("abort", abortTranscriptCursor, { once: true });
 							try {
 								signal.throwIfAborted();
+								stopAdmission = options.toolSurface.onToolAdmitted(({ toolCallId, toolName, args }) => {
+									signal.throwIfAborted();
+									if (callbackBoundarySealed)
+										throw new WorkerCompletionProtocolError(
+											"Worker tool admission arrived after execution closed.",
+										);
+									const prepared = preparedTools.get(toolCallId);
+									if (!prepared || prepared.name !== toolName || !isDeepStrictEqual(prepared.args, args))
+										throw new WorkerCompletionProtocolError(
+											"Worker execution does not match its prepared tool request.",
+										);
+									requireRequest(prepared.requestId);
+									preparedTools.delete(toolCallId);
+									checkpointUsage(`Authorized worker tool '${toolName}' under its durable grant.`);
+									options.toolSelection?.begin(toolCallId, toolName, args);
+									if (options.toolSelection) admittedToolSelectionIds.add(toolCallId);
+									const target = mutationTarget(toolName, args);
+									if (target) admittedMutationTargets.set(toolCallId, target);
+									admittedCalls.add(toolCallId);
+								});
 								let result: IsolatedCompletionResult;
 								// The conversation's sent-prefix marks, carried across its runs like root's.
 								const requestPrefix = options.conversation.requestPrefix(history);
@@ -1201,34 +1234,32 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											try {
 												signal.throwIfAborted();
 												persistToolRequest(context.assistantMessage, context.requestId);
+												options.toolSurface.assertHealthy();
 												// The report tool records arguments and ends the run; it is not a granted tool.
 												if (context.toolCall.name === SUBMIT_REPORT_TOOL_NAME) return undefined;
 												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 												signal.throwIfAborted();
 												requireRequest(context.requestId);
 												if (!decision?.block) {
-													checkpointUsage(
-														`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
-													);
-													options.toolSelection?.begin(
-														context.toolCall.id,
-														context.toolCall.name,
-														context.args,
-													);
-													if (options.toolSelection) {
-														admittedToolSelectionIds.add(context.toolCall.id);
-														context.registerCleanup?.(() => {
-															admittedToolSelectionIds.delete(context.toolCall.id);
-															options.toolSelection?.discard(context.toolCall.id);
-														});
-													}
-													const target = mutationTarget(context.toolCall.name, context.args);
-													if (target) {
-														admittedMutationTargets.set(context.toolCall.id, target);
-														context.registerCleanup?.(() =>
-															admittedMutationTargets.delete(context.toolCall.id),
+													if (
+														preparedTools.has(context.toolCall.id) ||
+														admittedCalls.has(context.toolCall.id)
+													)
+														throw new WorkerCompletionProtocolError(
+															"Worker tool request is already prepared or executing.",
 														);
-													}
+													preparedTools.set(context.toolCall.id, {
+														requestId: requireRequest(context.requestId).requestId,
+														name: context.toolCall.name,
+														args: structuredClone(context.args),
+													});
+													context.registerCleanup?.(() => {
+														preparedTools.delete(context.toolCall.id);
+														admittedCalls.delete(context.toolCall.id);
+														admittedMutationTargets.delete(context.toolCall.id);
+														if (admittedToolSelectionIds.delete(context.toolCall.id))
+															options.toolSelection?.discard(context.toolCall.id);
+													});
 												}
 												return decision;
 											} catch (error) {
@@ -1245,6 +1276,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														"Worker tool completion arrived after its changed-file boundary was sealed.",
 													);
 												}
+												options.toolSurface.assertHealthy();
+												if (!admittedCalls.delete(toolCall.id)) return undefined;
 												let duplicateNote: string | undefined;
 												const admittedTarget = admittedMutationTargets.get(toolCall.id);
 												if (admittedTarget) {
@@ -1551,6 +1584,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									throw error;
 								}
 								try {
+									options.toolSurface.assertHealthy();
 									providerTurn.assertEverySuccessfulPreflightConsumed();
 								} catch (error) {
 									retainCallbackFailure(error);
@@ -1584,6 +1618,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								committed = true;
 								return evidenced.completion;
 							} finally {
+								stopAdmission?.();
 								signal.removeEventListener("abort", abortTranscriptCursor);
 								providerTurn.close();
 								if (activeProviderTurn === providerTurn) activeProviderTurn = undefined;

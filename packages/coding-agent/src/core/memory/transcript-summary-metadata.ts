@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
+import { assertBoundedReadActive, type BoundedReadOptions, readBoundedTextFile } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const TRANSCRIPT_SUMMARY_METADATA_STORAGE_VERSION = 1;
@@ -269,7 +270,12 @@ export class TranscriptSummaryMetadataPages {
 		return { written: this.writtenSinceSweep, live: this.livePages };
 	}
 
-	private async readPage(id: string, table: TranscriptSummaryMetadataTable): Promise<MetadataPage> {
+	private async readPage(
+		id: string,
+		table: TranscriptSummaryMetadataTable,
+		options?: BoundedReadOptions,
+	): Promise<MetadataPage> {
+		assertBoundedReadActive(options);
 		const cached = this.cache.get(id);
 		if (cached) {
 			if (cached.page.table !== table) {
@@ -281,7 +287,7 @@ export class TranscriptSummaryMetadataPages {
 		const path = this.pagePath(id);
 		let raw: string;
 		try {
-			raw = await fs.readFile(path, "utf8");
+			raw = await readBoundedTextFile(path, MAX_CACHED_PAGE_BYTES, "Transcript summary metadata page", options);
 		} catch (error) {
 			if (isMissingFileError(error))
 				throw new TranscriptSummaryMetadataPageError(`metadata page ${id} is missing`, path);
@@ -433,9 +439,10 @@ export class TranscriptSummaryMetadataPages {
 	private async loadBounded(
 		table: TranscriptSummaryMetadataTable,
 		root: string | null,
+		options?: BoundedReadOptions,
 	): Promise<Map<string, unknown> | undefined> {
 		try {
-			return new Map(Object.entries(await this.load(table, root, MAX_DIFF_SUBTREE_ENTRIES)));
+			return new Map(Object.entries(await this.load(table, root, MAX_DIFF_SUBTREE_ENTRIES, options)));
 		} catch (error) {
 			if (error instanceof TranscriptSummaryMetadataSubtreeTooLarge) return undefined;
 			throw error;
@@ -446,6 +453,7 @@ export class TranscriptSummaryMetadataPages {
 		table: TranscriptSummaryMetadataTable,
 		root: string | null,
 		maxEntries = Number.POSITIVE_INFINITY,
+		options?: BoundedReadOptions,
 	): Promise<Record<string, unknown>> {
 		const result: Record<string, unknown> = {};
 		const seen = new Set<string>();
@@ -456,6 +464,7 @@ export class TranscriptSummaryMetadataPages {
 			parent: MetadataPage | undefined,
 			depth: number,
 		): Promise<void> => {
+			assertBoundedReadActive(options);
 			if (id === null) return;
 			if (depth > MAX_TREE_DEPTH)
 				throw new TranscriptSummaryMetadataStructureError(`metadata table ${table} exceeds its depth bound`);
@@ -464,7 +473,7 @@ export class TranscriptSummaryMetadataPages {
 					`metadata table ${table} contains a cycle or shared page`,
 				);
 			seen.add(id);
-			const page = await this.readPage(id, table);
+			const page = await this.readPage(id, table, options);
 			if ((minimum !== undefined && page.key <= minimum) || (maximum !== undefined && page.key >= maximum)) {
 				throw new TranscriptSummaryMetadataStructureError(`metadata table ${table} violates key ordering`);
 			}
@@ -490,19 +499,22 @@ export class TranscriptSummaryMetadataPages {
 		before: string | null,
 		after: string | null,
 		limit: number,
+		options?: BoundedReadOptions,
 	): Promise<Map<string, { before: unknown; after: unknown }> | undefined> {
 		const changes = new Map<string, { before: unknown; after: unknown }>();
 		const record = (key: string, left: unknown, right: unknown): boolean => {
+			assertBoundedReadActive(options);
 			if (JSON.stringify(left) === JSON.stringify(right)) return true;
 			changes.set(key, { before: left, after: right });
 			return changes.size <= limit;
 		};
 		const walk = async (left: string | null, right: string | null, depth: number): Promise<boolean> => {
+			assertBoundedReadActive(options);
 			if (left === right) return true;
 			if (depth > MAX_TREE_DEPTH)
 				throw new TranscriptSummaryMetadataStructureError(`metadata table ${table} exceeds its depth bound`);
-			const leftPage = left === null ? undefined : await this.readPage(left, table);
-			const rightPage = right === null ? undefined : await this.readPage(right, table);
+			const leftPage = left === null ? undefined : await this.readPage(left, table, options);
+			const rightPage = right === null ? undefined : await this.readPage(right, table, options);
 			if (leftPage && rightPage && leftPage.key === rightPage.key) {
 				// Equal roots split both key ranges at the same key: each side recurses on its own range.
 				return (
@@ -513,8 +525,8 @@ export class TranscriptSummaryMetadataPages {
 			}
 			// A key of higher priority sits on one side only: compare the two subtrees entry by entry, unless they are so
 			// large that a full load is the cheaper way to catch up.
-			const leftEntries = await this.loadBounded(table, left);
-			const rightEntries = leftEntries && (await this.loadBounded(table, right));
+			const leftEntries = await this.loadBounded(table, left, options);
+			const rightEntries = leftEntries && (await this.loadBounded(table, right, options));
 			if (!leftEntries || !rightEntries) return false;
 			for (const [key, value] of leftEntries) if (!record(key, value, rightEntries.get(key))) return false;
 			for (const [key, value] of rightEntries) {

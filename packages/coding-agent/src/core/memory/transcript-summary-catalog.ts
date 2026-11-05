@@ -29,6 +29,7 @@
  */
 
 import { MinHeap } from "../util/min-heap.ts";
+import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadEvidence } from "./memory-read-context.ts";
 import { FrontierNodeIndex, type TranscriptFrontierNodeIndex } from "./transcript-frontier.ts";
 import {
 	formatTranscriptNodeHandle,
@@ -41,6 +42,7 @@ import {
 	type TranscriptLineageRangeCheck,
 	type TranscriptLineageReader,
 	type TranscriptLineageSpansResult,
+	type TranscriptObservationVerdict,
 	type TranscriptReadUnavailable,
 	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
@@ -51,7 +53,12 @@ import type {
 	TranscriptNodeSummaryView,
 	TranscriptSummaryLookupResult,
 } from "./transcript-source-tools.ts";
-import { needsReadmission, summaryApproval, type TranscriptSummaryApproval } from "./transcript-summary-admission.ts";
+import {
+	needsReadmission,
+	summaryApproval,
+	summaryTextDigest,
+	type TranscriptSummaryApproval,
+} from "./transcript-summary-admission.ts";
 import { coveredSourceRefs, isCurrentCaptureNode, type TranscriptSummaryNode } from "./transcript-summary-node.ts";
 import {
 	sourceKeyOfHandle,
@@ -66,7 +73,14 @@ const MAX_CACHED_DEPENDENCY_REFS = 4096;
 const REFUSAL_SOURCE_POINTERS = 8;
 
 /** What one read through the catalog depends on besides the mirror. */
-export interface TranscriptSummaryReadContext {
+export interface TranscriptSummaryReadFence {
+	catalog: TranscriptSummaryCatalog;
+	/** Manifest and permanent-forget revisions of the confirmed source. */
+	revision: string;
+	isCurrent(): boolean;
+}
+
+export interface TranscriptSummaryReadContext extends MemoryReadContext {
 	reader: Pick<TranscriptLineageReader, "listLineageSpans" | "verifyLineageRanges" | "observationCurrent">;
 	/** The retention cutoff (epoch ms) in force now, undefined when retention is off; asked at every judgment. */
 	cutoff(): number | undefined;
@@ -82,7 +96,7 @@ export interface TranscriptSummaryReadContext {
 	 * vouched for. Awaited once, last; the node and every shown child are then re-resolved by id in it and
 	 * judged again under a fresh {@link cutoff}, with no further wait before the answer is returned.
 	 */
-	confirm(): Promise<{ catalog: TranscriptSummaryCatalog } | TranscriptReadUnavailable>;
+	confirm(context?: MemoryReadContext): Promise<TranscriptSummaryReadFence | TranscriptReadUnavailable>;
 }
 
 export interface TranscriptSummaryExpansionContext extends TranscriptSummaryReadContext {
@@ -188,11 +202,17 @@ export type TranscriptNodeDependency =
 	  }
 	| { kind: "unverifiable" | "inconsistent" };
 
-/** The operation deadline passed; never a partial answer. */
-const TIMED_OUT: TranscriptReadUnavailable = {
-	status: "unavailable",
-	reason: "the summary read operation timed out before its deadline; the hits and exact sources are unaffected",
-};
+/** The synchronous delivery fence, after the read's final await; no observation crosses another wait. */
+function currentSummaryRead(
+	fence: TranscriptSummaryReadFence | TranscriptReadUnavailable,
+	context: TranscriptSummaryReadContext,
+	observation: TranscriptIndexObservation,
+): TranscriptSummaryReadFence | Exclude<TranscriptObservationVerdict, { status: "current" }> {
+	assertMemoryReadActive(context);
+	if ("status" in fence) return fence;
+	const observed = context.reader.observationCurrent(observation);
+	return observed.status === "current" ? fence : observed;
+}
 
 /**
  * The dependency range of `node`, built from its descendant leaves: positions in its coverage take its covered
@@ -264,35 +284,41 @@ function validityReply(
 	node: TranscriptSummaryNode,
 	refusal: ValidityRefusal,
 ): TranscriptNodeExpansion {
-	const pointers = catalog.sourcePointers(node);
+	const { text: pointers, sourceHandles } = catalog.sourcePointers(node);
 	switch (refusal) {
 		case "moved":
 			return {
+				sourceHandles,
 				status: "stale_snapshot",
 				reason: `this summary's sources or context are no longer the live history; ${pointers}`,
 			};
 		case "session_gone":
 			return {
+				sourceHandles,
 				status: "stale_snapshot",
 				reason: `this summary's session is no longer in the history index; ${pointers}`,
 			};
 		case "unverifiable":
 			return {
+				sourceHandles,
 				status: "unavailable",
 				reason: `this summary depends on history that cannot be checked against the live index; ${pointers}`,
 			};
 		case "inconsistent":
 			return {
+				sourceHandles,
 				status: "stale_snapshot",
 				reason: `this summary's stored dependencies disagree with each other; ${pointers}`,
 			};
 		case "descendant_revoked":
 			return {
+				sourceHandles,
 				status: "stale_snapshot",
 				reason: `a summary this node is built on is no longer accepted; ${pointers}`,
 			};
 		case "changed_in_flight":
 			return {
+				sourceHandles,
 				status: "stale_snapshot",
 				reason: `this summary ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}, or ${pointers}`,
 			};
@@ -322,8 +348,9 @@ function refusalReply(
 				"this derived summary is past the retention window (retentionDays) and is being revoked; exact source recall is unaffected",
 		};
 	}
-	const pointers = catalog.sourcePointers(node);
+	const { text: pointers, sourceHandles } = catalog.sourcePointers(node);
 	return {
+		sourceHandles,
 		status: "unavailable",
 		reason:
 			refusal === "age_unknown"
@@ -472,11 +499,16 @@ export class TranscriptSummaryCatalog {
 	}
 
 	/** `open its exact sources instead: ...`, the pointer every refusal of a node's text carries. */
-	sourcePointers(node: TranscriptSummaryNode): string {
+	sourcePointers(node: TranscriptSummaryNode): { text: string; sourceHandles: readonly string[] } {
 		const refs = coveredSourceRefs(node, (id) => this.nodes.get(id), REFUSAL_SOURCE_POINTERS + 1) ?? [];
 		const shown = refs.slice(0, REFUSAL_SOURCE_POINTERS).map(formatTranscriptSourceHandle);
-		if (shown.length === 0) return "open its exact sources through history search instead";
-		return `open its exact sources instead: ${shown.join(", ")}${refs.length > shown.length ? ", ..." : ""}`;
+		return {
+			sourceHandles: shown,
+			text:
+				shown.length === 0
+					? "open its exact sources through history search instead"
+					: `open its exact sources instead: ${shown.join(", ")}${refs.length > shown.length ? ", ..." : ""}`,
+		};
 	}
 
 	/** The accepted nodes of one session; a session that ever held one keeps its (possibly empty) map. */
@@ -909,6 +941,7 @@ export class TranscriptSummaryCatalog {
 	 * dependency range, a leaf with one listing of its context and covered parts; then the delivery fence.
 	 */
 	async expand(handle: string, context: TranscriptSummaryExpansionContext): Promise<TranscriptNodeExpansion> {
+		assertMemoryReadActive(context);
 		const prefix = parseTranscriptNodeHandle(handle);
 		if (prefix === undefined) {
 			return { status: "invalid_handle", reason: "ref is not a summary node handle (expected txn:<16 hex>)." };
@@ -937,6 +970,7 @@ export class TranscriptSummaryCatalog {
 		let observation: TranscriptIndexObservation;
 		if (node.children) {
 			const verified = await context.reader.verifyLineageRanges({
+				signal: context.signal,
 				checks: [dependency.check],
 				priority: context.priority,
 				...(context.deadlineAt !== undefined ? { deadlineAt: context.deadlineAt } : {}),
@@ -949,6 +983,7 @@ export class TranscriptSummaryCatalog {
 		} else {
 			// One listing of the whole dependency range: the check and the listed metadata come from one answer.
 			const live = await context.reader.listLineageSpans({
+				signal: context.signal,
 				sessionId: node.sessionId,
 				fromIndex: dependency.fromIndex,
 				maxSpans: dependency.refs.length,
@@ -961,15 +996,9 @@ export class TranscriptSummaryCatalog {
 			observation = live.observation;
 			sources = live.spans.slice(dependency.contextCount);
 		}
-		const fence = await context.confirm();
-		// Linearization point: from here to the return there is no further wait.
-		if ("status" in fence) return fence;
-		if (context.deadlineAt !== undefined && Date.now() > context.deadlineAt) return TIMED_OUT;
-		// The index state the range check saw must still be current: a rewrite or branch change it has learnt of
-		// since (applied or only notified) refuses, retryably.
-		const observed = context.reader.observationCurrent(observation);
-		if (observed.status === "changed") return validityReply(this, node, "changed_in_flight");
-		if (observed.status !== "current") return observed;
+		const confirmed = await context.confirm(context);
+		const fence = currentSummaryRead(confirmed, context, observation);
+		if ("status" in fence) return fence.status === "changed" ? validityReply(this, node, "changed_in_flight") : fence;
 		const current = fence.catalog;
 		const nodeNow = current.nodes.get(node.id);
 		const childrenNow = node.children?.map((id) => current.nodes.get(id));
@@ -979,6 +1008,11 @@ export class TranscriptSummaryCatalog {
 		const shown = (childrenNow ?? []) as TranscriptSummaryNode[];
 		const refusedNow = current.refuseAny([nodeNow, ...shown], context.cutoff(), context);
 		if (refusedNow) return refusedNow;
+		context.observe?.(
+			current.evidence([nodeNow, ...shown], observation, context, fence, {
+				sourceHandles: sources?.map((span) => formatTranscriptSourceHandle(span.ref)),
+			}),
+		);
 		if (!sources) return { status: "ok", node: summaryView(nodeNow), children: shown.map(summaryView) };
 		return {
 			status: "ok",
@@ -1012,6 +1046,7 @@ export class TranscriptSummaryCatalog {
 		limits: { maxNodes: number },
 		context: TranscriptSummaryReadContext,
 	): Promise<TranscriptSummaryLookupResult> {
+		assertMemoryReadActive(context);
 		const cutoff = context.cutoff();
 		const candidates: { leaf: TranscriptSummaryNode; check: TranscriptLineageRangeCheck }[] = [];
 		const judged = new Set<string>();
@@ -1022,25 +1057,33 @@ export class TranscriptSummaryCatalog {
 			const dependency = this.dependency(leaf);
 			if (dependency?.kind === "range") candidates.push({ leaf, check: dependency.check });
 		}
-		if (candidates.length === 0) return { status: "ok", summaries: [] };
+		if (candidates.length === 0) {
+			const fence = await context.confirm(context);
+			assertMemoryReadActive(context);
+			if ("status" in fence) return fence;
+			const evidence = fence.catalog.evidence([], undefined, context, fence, { absentRefs: refs });
+			if (!evidence.isCurrent()) {
+				return { status: "stale_snapshot", reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.` };
+			}
+			context.observe?.(evidence);
+			return { status: "ok", summaries: [] };
+		}
 		const verified = await context.reader.verifyLineageRanges({
+			signal: context.signal,
 			checks: candidates.map((candidate) => candidate.check),
 			priority: context.priority,
 			...(context.deadlineAt !== undefined ? { deadlineAt: context.deadlineAt } : {}),
 		});
 		if (verified.status !== "ok") return verified;
-		const fence = await context.confirm();
-		// Linearization point: from here to the return there is no further wait.
-		if ("status" in fence) return fence;
-		if (context.deadlineAt !== undefined && Date.now() > context.deadlineAt) return TIMED_OUT;
-		const observed = context.reader.observationCurrent(verified.observation);
-		if (observed.status === "changed") {
+		const confirmed = await context.confirm(context);
+		const fence = currentSummaryRead(confirmed, context, verified.observation);
+		if ("status" in fence && fence.status === "changed") {
 			return {
 				status: "stale_snapshot",
 				reason: `history this summary lookup depended on ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}`,
 			};
 		}
-		if (observed.status !== "current") return observed;
+		if ("status" in fence) return fence;
 		const current = fence.catalog;
 		const cutoffNow = context.cutoff();
 		const delivered: TranscriptSummaryNode[] = [];
@@ -1051,6 +1094,7 @@ export class TranscriptSummaryCatalog {
 			if (!leafNow || current.readRefusal(leafNow, cutoffNow) !== undefined) continue;
 			delivered.push(leafNow);
 		}
+		context.observe?.(current.evidence(delivered, verified.observation, context, fence));
 		return {
 			status: "ok",
 			summaries: delivered.map((node) => ({
@@ -1068,6 +1112,88 @@ export class TranscriptSummaryCatalog {
 					),
 				],
 			})),
+		};
+	}
+
+	/** Immutable accepted-source facts, revalidated through the same catalog and lineage owners as a new read. */
+	evidence(
+		nodes: readonly TranscriptSummaryNode[],
+		observation: TranscriptIndexObservation | undefined,
+		context: TranscriptSummaryReadContext,
+		fence: TranscriptSummaryReadFence,
+		options: { sourceHandles?: readonly string[]; absentRefs?: readonly TranscriptSourceRef[] } = {},
+	): MemoryReadEvidence {
+		const facts = nodes.map((node) => ({ id: node.id, digest: summaryTextDigest(node.text) }));
+		const absentRefs = options.absentRefs?.map((ref) => ({ ...ref })) ?? [];
+		const checks = nodes.flatMap((node) => {
+			const dependency = this.dependency(node);
+			return dependency?.kind === "range" ? [dependency.check] : [];
+		});
+		const current = (confirmed: TranscriptSummaryReadFence): boolean =>
+			confirmed.revision === fence.revision &&
+			confirmed.isCurrent() &&
+			absentRefs.every((ref) => {
+				const leaf = confirmed.catalog.coveringLeaf(ref, context.cutoff());
+				return !leaf || confirmed.catalog.dependency(leaf)?.kind !== "range";
+			}) &&
+			facts.every((fact) => {
+				const node = confirmed.catalog.get(fact.id);
+				return (
+					node !== undefined &&
+					summaryTextDigest(node.text) === fact.digest &&
+					confirmed.catalog.readRefusal(node, context.cutoff()) === undefined
+				);
+			});
+		return {
+			sources: Object.freeze([
+				...facts.map((fact) =>
+					Object.freeze({
+						kind: "summary" as const,
+						ref: formatTranscriptNodeHandle(fact.id),
+						revision: `${fence.revision}:${fact.digest}`,
+					}),
+				),
+				...(options.sourceHandles ?? []).map((ref) =>
+					Object.freeze({
+						kind: "transcript" as const,
+						ref,
+						revision: fence.revision,
+					}),
+				),
+			]),
+			complete: checks.length === nodes.length,
+			isCurrent: () =>
+				current(fence) &&
+				(observation === undefined || context.reader.observationCurrent(observation).status === "current"),
+			revalidate: async (read) => {
+				assertMemoryReadActive(read);
+				if (
+					checks.length === 0 &&
+					observation !== undefined &&
+					context.reader.observationCurrent(observation).status !== "current"
+				)
+					return false;
+				const verified =
+					checks.length > 0
+						? await context.reader.verifyLineageRanges({
+								checks,
+								priority: "foreground",
+								signal: read.signal,
+								deadlineAt: read.deadlineAt,
+							})
+						: undefined;
+				if (verified && (verified.status !== "ok" || verified.verdicts.some((verdict) => verdict !== "live")))
+					return false;
+				const confirmed = await context.confirm(read);
+				assertMemoryReadActive(read);
+				return (
+					!("status" in confirmed) &&
+					current(confirmed) &&
+					(verified === undefined ||
+						(verified.status === "ok" &&
+							context.reader.observationCurrent(verified.observation).status === "current"))
+				);
+			},
 		};
 	}
 

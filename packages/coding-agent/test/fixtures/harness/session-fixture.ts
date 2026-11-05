@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { hostname } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage } from "@caupulican/pi-ai";
@@ -679,6 +679,8 @@ function gitRelative(from: string, to: string): string {
  */
 export class VirtualGit {
 	readonly unscripted: string[] = [];
+	/** One installed executable, discovered through the same PATH metadata reads as a native tool. */
+	readonly executable: string;
 	private readonly io: VirtualFileSystem;
 	private readonly root: string;
 	private readonly commonDir: string;
@@ -695,6 +697,15 @@ export class VirtualGit {
 		this.io = io;
 		this.root = resolve(root);
 		this.commonDir = join(this.root, ".git");
+		const directory = (process.env.PATH ?? "").split(delimiter).find(isAbsolute);
+		if (directory === undefined) throw new Error("The Git fixture requires an absolute PATH directory");
+		this.executable = join(directory, process.platform === "win32" ? "git.exe" : "git");
+	}
+
+	/** Provisioned after the effect guard: no executable is created on the real filesystem. */
+	provisionInstalledExecutable(): void {
+		this.io.mkdirSync(dirname(this.executable), { recursive: true });
+		this.io.writeFileSync(this.executable, "virtual Git executable\n", { mode: 0o755 });
 	}
 
 	/** Creates the repository with one commit of `committed` on `branch`, checked out at the root. */
@@ -724,7 +735,7 @@ export class VirtualGit {
 		args: readonly string[],
 		options: { readonly cwd: string; readonly env?: NodeJS.ProcessEnv },
 	): Promise<ExecResult> {
-		if (command !== "git") {
+		if (command !== "git" && command !== this.executable) {
 			this.unscripted.push(`${command} ${args.join(" ")} @ ${options.cwd}`);
 			throw new Error(`Unscripted command: ${command}`);
 		}
@@ -745,17 +756,21 @@ export class VirtualGit {
 		env: Readonly<Record<string, string | undefined>> = {},
 		input?: string,
 	): GitOutcome {
-		const args = [...argv];
-		// Engine-injected `-c key=value` configuration does not change the state transitions modelled here.
-		while (args[0] === "-c") args.splice(0, 2);
-		// Outside any repository every git command fails the way real git fails.
-		if (this.worktreeFor(cwd) === undefined) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 		try {
+			const args = [...argv];
+			// These native global options affect presentation/path parsing, not the repository's state transitions.
+			while (args[0]?.startsWith("-")) {
+				if (args[0] === "--no-pager" || args[0] === "--literal-pathspecs") args.shift();
+				else if (args[0] === "-c" && args[1]?.includes("=")) args.splice(0, 2);
+				else throw new Error(`Unscripted Git global option: ${args[0]}`);
+			}
+			// Outside any repository every git command fails the way real git fails.
+			if (this.worktreeFor(cwd) === undefined) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 			return this.dispatch(args, cwd, env, input);
 		} catch (error) {
 			// Every throw is an unscripted command: it is recorded here so the close check cannot miss it.
 			this.unscripted.push(
-				`git ${args.join(" ")} @ ${cwd}: ${error instanceof Error ? error.message : String(error)}`,
+				`git ${argv.join(" ")} @ ${cwd}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			throw error;
 		}
@@ -804,6 +819,8 @@ export class VirtualGit {
 				return this.commitCommand(rest, cwd);
 			case "diff":
 				return this.diffCommand(rest, cwd);
+			case "show":
+				return this.showCommand(rest, cwd);
 			case "ls-files":
 				return this.lsFilesCommand(rest, cwd);
 			case "merge-base":
@@ -860,8 +877,9 @@ export class VirtualGit {
 	}
 
 	private resolveCommit(ref: string, cwd: string): string | undefined {
+		if (ref.endsWith("^{commit}")) return this.resolveCommit(ref.slice(0, -9), cwd);
 		if (this.commits.has(ref)) return ref;
-		const branch = this.refs.get(`refs/heads/${ref}`);
+		const branch = this.refs.get(ref) ?? this.refs.get(`refs/heads/${ref}`);
 		if (branch) return branch;
 		if (ref === "HEAD") {
 			const worktree = this.worktreeFor(cwd);
@@ -981,7 +999,12 @@ export class VirtualGit {
 		let verify = false;
 		for (let index = 0; index < args.length; index++) {
 			const arg = args[index] ?? "";
-			if (arg === "--verify" || arg === "--quiet" || arg === "--path-format=absolute") {
+			if (
+				arg === "--verify" ||
+				arg === "--quiet" ||
+				arg === "--path-format=absolute" ||
+				arg === "--end-of-options"
+			) {
 				if (arg === "--verify") verify = true;
 				continue;
 			}
@@ -1023,7 +1046,7 @@ export class VirtualGit {
 				continue;
 			}
 			if (arg.startsWith("refs/heads/")) {
-				const sha = this.refs.get(arg);
+				const sha = this.resolveCommit(arg, cwd);
 				if (sha === undefined) {
 					return verify
 						? { code: 1, stdout: "", stderr: "" }
@@ -1032,6 +1055,13 @@ export class VirtualGit {
 				out.push(sha);
 				continue;
 			}
+			const commit = this.resolveCommit(arg, cwd);
+			if (commit !== undefined) {
+				out.push(commit);
+				continue;
+			}
+			if (verify && (arg.endsWith("^{commit}") || arg.startsWith("refs/") || /^[a-f0-9]{40,64}$/.test(arg)))
+				return { code: 128, stdout: "", stderr: "fatal: Needed a single revision\n" };
 			this.unscripted.push(`git rev-parse ${arg} @ ${cwd}`);
 			throw new Error(`Unscripted rev-parse argument: ${arg}`);
 		}
@@ -1390,7 +1420,6 @@ export class VirtualGit {
 		const dashes = args.indexOf("--");
 		const options = args.slice(0, dashes < 0 ? args.length : dashes);
 		const operands = options.filter((arg) => !arg.startsWith("-"));
-		const pathspecs = dashes < 0 ? [] : args.slice(dashes + 1).map((spec) => spec.replace(":(literal)", ""));
 		const range = operands.find((arg) => arg.includes(".."));
 		const ambiguous = (ref: string): GitOutcome => ({
 			code: 128,
@@ -1420,14 +1449,58 @@ export class VirtualGit {
 			if (left === undefined) return ambiguous(operands[0] ?? "");
 			before = left;
 		} else {
-			throw new Error(`Unscripted diff: ${args.join(" ")}`);
+			before =
+				args.includes("--cached") || args.includes("--staged")
+					? this.treeOf(this.headSha(worktree))
+					: worktree.index;
 		}
+		if (after === undefined && (args.includes("--cached") || args.includes("--staged"))) after = worktree.index;
+		return this.renderDiff(before, after, args, cwd);
+	}
+
+	/** `show <commit> -- <literal paths>` displays that commit's change, including files absent from the worktree. */
+	private showCommand(args: readonly string[], cwd: string): GitOutcome {
+		const separator = args.indexOf("--");
+		const options = args.slice(0, separator < 0 ? args.length : separator);
+		const operands = options.filter((arg) => !arg.startsWith("-"));
+		if (operands.length !== 1) throw new Error(`Unscripted show: ${args.join(" ")}`);
+		const revision = operands[0] ?? "";
+		const commit = this.commits.get(this.resolveCommit(revision, cwd) ?? "");
+		if (commit === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${revision}'\n` };
+		const change = this.renderDiff(this.treeOf(commit.parent), commit.tree, args, cwd);
+		const heading = options.includes("--oneline")
+			? `${commit.sha.slice(0, 7)} ${commit.subject}\n`
+			: `commit ${commit.sha}\n\n    ${commit.subject}\n\n`;
+		return { ...change, stdout: heading + change.stdout };
+	}
+
+	/** One literal path selection and patch renderer for working-tree diffs and committed changes. */
+	private renderDiff(
+		before: ReadonlyMap<string, string>,
+		after: ReadonlyMap<string, string> | undefined,
+		args: readonly string[],
+		cwd: string,
+	): GitOutcome {
+		const worktree = this.worktreeFor(cwd);
+		if (worktree === undefined) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
+		const dashes = args.indexOf("--");
+		const options = args.slice(0, dashes < 0 ? args.length : dashes);
+		const pathspecs =
+			dashes < 0
+				? []
+				: args
+						.slice(dashes + 1)
+						.map((spec) => gitRelative(worktree.path, resolve(cwd, spec.replace(/^:\(literal\)/, ""))));
 		const readAfter = (path: string): string | undefined =>
 			after ? after.get(path) : this.readWorking(worktree, path);
 		const candidates = new Set([...before.keys(), ...(after ? after.keys() : worktree.index.keys())]);
 		const added = args.includes("--diff-filter=A");
 		const changed = [...candidates]
-			.filter((path) => pathspecs.length === 0 || pathspecs.includes(path))
+			.filter(
+				(path) =>
+					pathspecs.length === 0 ||
+					pathspecs.some((spec) => spec === "" || path === spec || path.startsWith(`${spec}/`)),
+			)
 			.sort()
 			.map((path) => ({ path, old: before.get(path), next: readAfter(path) }))
 			.filter(({ old, next }) => old !== next)
@@ -1435,6 +1508,19 @@ export class VirtualGit {
 		if (args.includes("--name-only")) {
 			const terminator = args.includes("-z") ? "\0" : "\n";
 			return { code: 0, stdout: changed.map(({ path }) => `${path}${terminator}`).join(""), stderr: "" };
+		}
+		if (args.includes("--name-status")) {
+			const terminator = args.includes("-z") ? "\0" : "\n";
+			return {
+				code: 0,
+				stdout: changed
+					.map(
+						({ path, old, next }) =>
+							`${old === undefined ? "A" : next === undefined ? "D" : "M"}\t${path}${terminator}`,
+					)
+					.join(""),
+				stderr: "",
+			};
 		}
 		const sourcePrefix = options.findLast((arg) => arg.startsWith("--src-prefix="))?.slice(13) ?? "a/";
 		const destinationPrefix = options.findLast((arg) => arg.startsWith("--dst-prefix="))?.slice(13) ?? "b/";
@@ -2037,6 +2123,14 @@ function assertResourcesSettled(snapshot: ReturnType<AgentSession["getResourceSn
 
 export class HarnessProcesses {
 	readonly unscripted: string[] = [];
+	/** Exact native process inputs; journeys inspect these without replacing a tool or its invocation owner. */
+	readonly gitCalls: Array<{
+		readonly operation: string;
+		readonly file: string;
+		readonly args: readonly string[];
+		readonly cwd: string;
+		readonly env: Readonly<Record<string, string | undefined>>;
+	}> = [];
 	private readonly settling = new Set<Promise<void>>();
 	/** Child causes retained after their spawn leaves `settling`, so every later drain still reports them. */
 	private readonly causes: unknown[] = [];
@@ -2060,7 +2154,21 @@ export class HarnessProcesses {
 		const windowsResult = this.windows.tryRun(operation, args);
 		if (windowsResult?.handled) return windowsResult.value;
 		const [file, argv, options] = args;
-		const isGit = file === "git" || file === "git.exe";
+		const isGit = file === "git" || file === "git.exe" || file === this.git.executable;
+		if (isGit && Array.isArray(argv)) {
+			if (!argv.every((arg): arg is string => typeof arg === "string"))
+				throw new TypeError("Git process arguments must be strings");
+			const invocation = options as { cwd?: string; env?: Record<string, string | undefined> } | undefined;
+			this.gitCalls.push(
+				Object.freeze({
+					operation,
+					file,
+					args: Object.freeze([...argv]),
+					cwd: invocation?.cwd ?? "",
+					env: Object.freeze({ ...invocation?.env }),
+				}),
+			);
+		}
 		if (operation === "spawn" && isGit && Array.isArray(argv)) {
 			const spawnOptions = (options ?? {}) as {
 				cwd?: string;
@@ -2456,6 +2564,7 @@ export class HarnessWorld {
 		let provider: ScriptedProvider | undefined;
 		// A failure while building the world must not leave the process-wide guard or the provider registration installed.
 		try {
+			this.git.provisionInstalledExecutable();
 			// Process table of the fixture: an explicit empty /proc. Worker run environments list it to reap marked
 			// processes during disposal; the fixture starts no processes, so the listing is genuinely empty.
 			this.io.mkdirSync("/proc", { recursive: true });

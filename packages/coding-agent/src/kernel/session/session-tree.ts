@@ -26,14 +26,19 @@ export function visitSessionAncestry<T extends SessionTreeEntryLike>(
 export function collectSessionBranch<T extends SessionTreeEntryLike>(
 	entries: readonly T[],
 	leafId?: string | null,
+	checkpoint?: () => void,
 ): T[] {
 	if (entries.length === 0 || leafId === null) return [];
 	const byId = new Map<string, T>();
-	for (const entry of entries) byId.set(entry.id, entry);
+	for (const entry of entries) {
+		checkpoint?.();
+		byId.set(entry.id, entry);
+	}
 	const leaf = leafId === undefined ? entries[entries.length - 1] : byId.get(leafId);
 	if (!leaf) return [];
 	const branch: T[] = [];
 	visitSessionAncestry(leaf, byId, (entry) => {
+		checkpoint?.();
 		branch.push(entry);
 	});
 	branch.reverse();

@@ -1,8 +1,41 @@
-import { closeSync, fstatSync, lstatSync, opendirSync, openSync, readSync, type Stats } from "node:fs";
+import {
+	type BigIntStats,
+	closeSync,
+	constants,
+	fstatSync,
+	lstatSync,
+	opendirSync,
+	openSync,
+	readSync,
+	type Stats,
+} from "node:fs";
 import { type FileHandle, lstat as lstatAsync, open as openAsync } from "node:fs/promises";
 import { isMissingFileError } from "./atomic-file.ts";
 
 const READ_CHUNK_BYTES = 64 * 1024;
+const READ_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
+
+/** Cooperative cancellation at each bounded I/O step; an in-flight OS read settles before returning. */
+export interface BoundedReadOptions {
+	readonly signal?: AbortSignal;
+	readonly deadlineAt?: number;
+}
+
+/** Expected inability to complete a bounded read; never evidence that stored content is corrupt. */
+export class BoundedReadError extends Error {
+	readonly reason: "deadline" | "limit" | "not_regular";
+	constructor(message: string, reason: "deadline" | "limit" | "not_regular") {
+		super(message);
+		this.name = "BoundedReadError";
+		this.reason = reason;
+	}
+}
+
+export function assertBoundedReadActive(options?: BoundedReadOptions): void {
+	options?.signal?.throwIfAborted();
+	if (options?.deadlineAt !== undefined && (!Number.isFinite(options.deadlineAt) || Date.now() >= options.deadlineAt))
+		throw new BoundedReadError("Bounded read deadline expired.", "deadline");
+}
 
 /** The source changed during an optimistic read; retry against a later settled revision. */
 export class FileSnapshotChangedError extends Error {
@@ -19,7 +52,7 @@ function validateByteLimit(maxBytes: number): void {
 }
 
 /** Compare the filesystem identity and mutation-sensitive metadata captured around a bounded read. */
-export function sameFileVersion(left: Stats, right: Stats): boolean {
+export function sameFileVersion(left: Stats | BigIntStats, right: Stats | BigIntStats): boolean {
 	return (
 		left.dev === right.dev &&
 		left.ino === right.ino &&
@@ -31,7 +64,7 @@ export function sameFileVersion(left: Stats, right: Stats): boolean {
 
 function assertRegularFile(version: Stats, label: string): void {
 	if (!version.isFile() || version.isSymbolicLink()) {
-		throw new Error(`${label} is not a regular file.`);
+		throw new BoundedReadError(`${label} is not a regular file.`, "not_regular");
 	}
 }
 
@@ -54,75 +87,130 @@ function assertStableReadVersion(
 	}
 }
 
-export function withStableFileDescriptorSync<T>(
+/** Safe regular-file acquisition, including a replacement between lstat and open; callers own read consistency. */
+export function withRegularFileDescriptorSync<T>(
 	filePath: string,
 	label: string,
 	read: (fileDescriptor: number, openedVersion: Stats) => T,
+	options?: BoundedReadOptions,
 ): T {
+	assertBoundedReadActive(options);
 	const pathBefore = lstatSync(filePath);
 	// Opening a FIFO can wait forever before fstat is reached. Reject non-files before acquisition.
 	assertRegularFile(pathBefore, label);
-	const fileDescriptor = openSync(filePath, "r");
+	const fileDescriptor = openSync(filePath, READ_FLAGS);
 	try {
 		const openedBefore = fstatSync(fileDescriptor);
 		assertOpenedPathVersion(pathBefore, openedBefore, label);
-		const result = read(fileDescriptor, openedBefore);
-		assertStableReadVersion(pathBefore, openedBefore, fstatSync(fileDescriptor), lstatSync(filePath), label);
-		return result;
+		assertBoundedReadActive(options);
+		return read(fileDescriptor, openedBefore);
 	} finally {
 		closeSync(fileDescriptor);
 	}
 }
 
-async function readFileHandleBounded(fileHandle: FileHandle, maxBytes: number): Promise<Buffer | undefined> {
+export function withStableFileDescriptorSync<T>(
+	filePath: string,
+	label: string,
+	read: (fileDescriptor: number, openedVersion: Stats) => T,
+	options?: BoundedReadOptions,
+): T {
+	return withRegularFileDescriptorSync(
+		filePath,
+		label,
+		(fileDescriptor, openedBefore) => {
+			const result = read(fileDescriptor, openedBefore);
+			assertBoundedReadActive(options);
+			assertStableReadVersion(openedBefore, openedBefore, fstatSync(fileDescriptor), lstatSync(filePath), label);
+			return result;
+		},
+		options,
+	);
+}
+
+/** One byte-bound/overflow policy for both synchronous and asynchronous descriptor adapters. */
+function* boundedFileChunks(
+	maxBytes: number,
+): Generator<{ buffer: Buffer; position: number }, Buffer | undefined, number> {
 	validateByteLimit(maxBytes);
 	const chunks: Buffer[] = [];
 	let totalBytes = 0;
 	while (totalBytes < maxBytes) {
 		const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes - totalBytes));
-		const { bytesRead } = await fileHandle.read(chunk, 0, chunk.length, totalBytes);
+		const bytesRead = yield { buffer: chunk, position: totalBytes };
 		if (bytesRead === 0) return Buffer.concat(chunks, totalBytes);
 		chunks.push(chunk.subarray(0, bytesRead));
 		totalBytes += bytesRead;
 	}
-	const overflowProbe = Buffer.allocUnsafe(1);
-	if ((await fileHandle.read(overflowProbe, 0, 1, totalBytes)).bytesRead > 0) return undefined;
+	if ((yield { buffer: Buffer.allocUnsafe(1), position: totalBytes }) > 0) return undefined;
 	return Buffer.concat(chunks, totalBytes);
+}
+
+async function readFileHandleBounded(
+	fileHandle: FileHandle,
+	maxBytes: number,
+	options?: BoundedReadOptions,
+): Promise<Buffer | undefined> {
+	const chunks = boundedFileChunks(maxBytes);
+	let next = chunks.next();
+	while (!next.done) {
+		assertBoundedReadActive(options);
+		const { buffer, position } = next.value;
+		const { bytesRead } = await fileHandle.read(buffer, 0, buffer.length, position);
+		assertBoundedReadActive(options);
+		next = chunks.next(bytesRead);
+	}
+	return next.value;
 }
 
 /** Read at most `maxBytes`, then probe one byte so a growing file cannot escape the bound. */
-export function readFileDescriptorBoundedSync(fileDescriptor: number, maxBytes: number): Buffer | undefined {
-	validateByteLimit(maxBytes);
-	const chunks: Buffer[] = [];
-	let totalBytes = 0;
-	while (totalBytes < maxBytes) {
-		const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes - totalBytes));
-		const bytesRead = readSync(fileDescriptor, chunk, 0, chunk.length, null);
-		if (bytesRead === 0) return Buffer.concat(chunks, totalBytes);
-		chunks.push(chunk.subarray(0, bytesRead));
-		totalBytes += bytesRead;
+export function readFileDescriptorBoundedSync(
+	fileDescriptor: number,
+	maxBytes: number,
+	options?: BoundedReadOptions,
+): Buffer | undefined {
+	const chunks = boundedFileChunks(maxBytes);
+	let next = chunks.next();
+	while (!next.done) {
+		assertBoundedReadActive(options);
+		const buffer = next.value.buffer;
+		next = chunks.next(readSync(fileDescriptor, buffer, 0, buffer.length, null));
 	}
-	const overflowProbe = Buffer.allocUnsafe(1);
-	if (readSync(fileDescriptor, overflowProbe, 0, 1, null) > 0) return undefined;
-	return Buffer.concat(chunks, totalBytes);
+	assertBoundedReadActive(options);
+	return next.value;
 }
 
 /** Bounded, version-stable text read for small durable state files. */
-export function readBoundedFileSync(filePath: string, maxBytes: number, label: string): Buffer {
+export function readBoundedFileSync(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	options?: BoundedReadOptions,
+): Buffer {
 	validateByteLimit(maxBytes);
-	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
-		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
-		const content = readFileDescriptorBoundedSync(fileDescriptor, maxBytes);
-		if (!content) throw new Error(`${label} exceeds its byte limit.`);
-		if (content.byteLength !== before.size) {
-			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
-		}
-		return content;
-	});
+	return withStableFileDescriptorSync(
+		filePath,
+		label,
+		(fileDescriptor, before) => {
+			if (before.size > maxBytes) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
+			const content = readFileDescriptorBoundedSync(fileDescriptor, maxBytes, options);
+			if (!content) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
+			if (content.byteLength !== before.size) {
+				throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
+			}
+			return content;
+		},
+		options,
+	);
 }
 
-export function readBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string {
-	return readBoundedFileSync(filePath, maxBytes, label).toString("utf-8");
+export function readBoundedTextFileSync(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	options?: BoundedReadOptions,
+): string {
+	return readBoundedFileSync(filePath, maxBytes, label, options).toString("utf-8");
 }
 
 /** Only absence at initial lookup is empty; unavailable paths and interrupted reads remain errors. */
@@ -207,20 +295,29 @@ export function readBoundedDirectoryNamesSync(directoryPath: string, maxEntries:
 }
 
 /** Async counterpart of {@link readBoundedTextFileSync}. */
-export async function readBoundedFile(filePath: string, maxBytes: number, label: string): Promise<Buffer> {
+export async function readBoundedFile(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	options?: BoundedReadOptions,
+): Promise<Buffer> {
 	validateByteLimit(maxBytes);
+	assertBoundedReadActive(options);
 	const pathBefore = await lstatAsync(filePath);
+	assertBoundedReadActive(options);
 	assertRegularFile(pathBefore, label);
-	const fileHandle = await openAsync(filePath, "r");
+	const fileHandle = await openAsync(filePath, READ_FLAGS);
 	try {
+		assertBoundedReadActive(options);
 		const before = await fileHandle.stat();
 		assertOpenedPathVersion(pathBefore, before, label);
-		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
-		const content = await readFileHandleBounded(fileHandle, maxBytes);
-		if (!content) throw new Error(`${label} exceeds its byte limit.`);
+		if (before.size > maxBytes) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
+		const content = await readFileHandleBounded(fileHandle, maxBytes, options);
+		if (!content) throw new BoundedReadError(`${label} exceeds its byte limit.`, "limit");
 		const after = await fileHandle.stat();
 		const pathAfter = await lstatAsync(filePath);
 		assertStableReadVersion(pathBefore, before, after, pathAfter, label);
+		assertBoundedReadActive(options);
 		if (content.byteLength !== before.size) {
 			throw new FileSnapshotChangedError(`${label} changed while it was being read.`);
 		}
@@ -230,6 +327,11 @@ export async function readBoundedFile(filePath: string, maxBytes: number, label:
 	}
 }
 
-export async function readBoundedTextFile(filePath: string, maxBytes: number, label: string): Promise<string> {
-	return (await readBoundedFile(filePath, maxBytes, label)).toString("utf-8");
+export async function readBoundedTextFile(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+	options?: BoundedReadOptions,
+): Promise<string> {
+	return (await readBoundedFile(filePath, maxBytes, label, options)).toString("utf-8");
 }

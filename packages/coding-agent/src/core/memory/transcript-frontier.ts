@@ -129,6 +129,9 @@ export interface TranscriptFrontierRendering {
 	bytes: number;
 	/** Nodes whose records are in `text`, oldest first. */
 	includedNodeIds: string[];
+	/** Accepted nodes whose text or pointer was retained, plus the exact handles printed by those records. */
+	referencedNodeIds: string[];
+	sourceHandles: string[];
 	/** Spans before this index are covered by the coarse pointer in `text`. */
 	omittedBeforeIndex: number;
 }
@@ -243,6 +246,8 @@ interface RenderableRecord {
 	toIndexExclusive: number;
 	/** Set when the record is an accepted node's own record. */
 	nodeId?: string;
+	pointerNodeId?: string;
+	sourceHandles?: readonly string[];
 }
 
 function internalGapRecord(fromIndex: number, toIndexExclusive: number): RenderableRecord {
@@ -308,11 +313,26 @@ function renderRecords(
 				),
 				bytes,
 				includedNodeIds: included.flatMap((record) => (record.nodeId === undefined ? [] : [record.nodeId])),
+				referencedNodeIds: included.flatMap((record) => {
+					const id = record.nodeId ?? record.pointerNodeId;
+					return id === undefined ? [] : [id];
+				}),
+				sourceHandles: included.flatMap((record) => {
+					const id = record.nodeId ?? record.pointerNodeId;
+					return [...(id === undefined ? [] : [formatTranscriptNodeHandle(id)]), ...(record.sourceHandles ?? [])];
+				}),
 				omittedBeforeIndex: effectiveOmitted,
 			};
 		}
 		if (first >= complete.length) {
-			return { text: "", bytes: 0, includedNodeIds: [], omittedBeforeIndex: frame.coveredThroughIndex };
+			return {
+				text: "",
+				bytes: 0,
+				includedNodeIds: [],
+				referencedNodeIds: [],
+				sourceHandles: [],
+				omittedBeforeIndex: frame.coveredThroughIndex,
+			};
 		}
 		first += 1;
 	}
@@ -1015,7 +1035,14 @@ export function renderFrontierView(
 		if (item.kind === "node") {
 			return { text: renderRecord(item.node), fromIndex, toIndexExclusive, nodeId: item.node.id };
 		}
-		if (item.kind === "mixed") return { text: renderMixedPointer(item, audience), fromIndex, toIndexExclusive };
+		if (item.kind === "mixed")
+			return {
+				text: renderMixedPointer(item, audience),
+				fromIndex,
+				toIndexExclusive,
+				pointerNodeId: item.node.id,
+				sourceHandles: item.compactedHandles,
+			};
 		return {
 			text: `[spans [${fromIndex},${toIndexExclusive}) remain in the live context and are not repeated here]`,
 			fromIndex,

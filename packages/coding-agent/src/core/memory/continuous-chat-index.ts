@@ -5,9 +5,15 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { sameFileVersion } from "../../kernel/storage/bounded-file.ts";
+import {
+	assertBoundedReadActive,
+	type BoundedReadOptions,
+	readBoundedTextFile,
+	sameFileVersion,
+} from "../../kernel/storage/bounded-file.ts";
 import { readFileRangeInto, writeFileRangeFrom } from "../../kernel/storage/positioned-file.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
@@ -36,14 +42,23 @@ export class ContinuousChatCorruptError extends Error {
 }
 
 /** The parsed JSON of a state file, or undefined when it was never written. Malformed JSON is corruption. */
-export async function readJsonFile(filePath: string, label: string): Promise<unknown> {
+export async function readJsonFile(
+	filePath: string,
+	label: string,
+	options?: BoundedReadOptions & { maxBytes?: number },
+): Promise<unknown> {
+	assertBoundedReadActive(options);
 	let content: string;
 	try {
-		content = await readFile(filePath, "utf8");
+		content =
+			options?.maxBytes === undefined
+				? await readFile(filePath, { encoding: "utf8", signal: options?.signal })
+				: await readBoundedTextFile(filePath, options.maxBytes, label, options);
 	} catch (error) {
 		if (isMissingFileError(error)) return undefined;
 		throw error;
 	}
+	assertBoundedReadActive(options);
 	try {
 		return JSON.parse(content);
 	} catch {
@@ -238,15 +253,55 @@ export async function appendDurably(filePath: string, content: string | Buffer):
 }
 
 /** The bytes at `position`, or undefined when the file is missing or ends before `bytes` are available. */
-export async function readRecordAt(filePath: string, position: number, bytes: number): Promise<Buffer | undefined> {
-	const handle = await open(filePath, "r").catch((error: unknown) => {
+export async function readRecordAt(
+	filePath: string,
+	position: number,
+	bytes: number,
+	options?: BoundedReadOptions,
+): Promise<Buffer | undefined> {
+	assertBoundedReadActive(options);
+	if (options !== undefined && (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 1024 * 1024))
+		throw new Error("Continuous-chat bounded record exceeds its byte limit.");
+	const before =
+		options === undefined
+			? undefined
+			: await lstat(filePath).catch((error: unknown) => {
+					if (isMissingFileError(error)) return undefined;
+					throw error;
+				});
+	assertBoundedReadActive(options);
+	if (options !== undefined && before === undefined) return undefined;
+	if (before !== undefined && !before.isFile()) throw new Error("Continuous-chat read source is not a regular file.");
+	const flags =
+		options === undefined ? "r" : constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+	const handle = await open(filePath, flags).catch((error: unknown) => {
 		if (isMissingFileError(error)) return undefined;
 		throw error;
 	});
 	if (handle === undefined) return undefined;
 	try {
+		assertBoundedReadActive(options);
+		if (before !== undefined) {
+			const opened = await handle.stat();
+			if (!opened.isFile() || !sameFileVersion(before, opened))
+				throw new Error("Continuous-chat source changed while opening.");
+		}
 		const buffer = Buffer.alloc(bytes);
-		const complete = await readFileRangeInto(handle, buffer, position, filePath, undefined, true);
+		const complete = await readFileRangeInto(
+			handle,
+			buffer,
+			position,
+			filePath,
+			options?.signal,
+			true,
+			options?.deadlineAt,
+		);
+		if (before !== undefined) {
+			const after = await lstat(filePath);
+			if (after.dev !== before.dev || after.ino !== before.ino)
+				throw new Error("Continuous-chat source was replaced while reading.");
+		}
+		assertBoundedReadActive(options);
 		return complete ? buffer : undefined;
 	} finally {
 		await handle.close();

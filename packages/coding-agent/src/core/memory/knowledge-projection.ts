@@ -24,6 +24,8 @@ export interface KnowledgeProjection {
 	readonly text: string;
 	readonly includedCount: number;
 	readonly omittedCount: number;
+	/** Exact record versions admitted by the whole-record composer; omitted grants are not evidence. */
+	readonly references: readonly KnowledgeGrantReference[];
 	isCurrent(): boolean;
 }
 
@@ -149,11 +151,17 @@ export class KnowledgeProjectionReader {
 		const nonce = createHash("sha256").update(body).digest("hex").slice(0, 32);
 		const text = `${header}\n${wrapUntrustedText(body, "memory:knowledge", { nonce })}\n${omission(block.omittedCount)}`;
 		const fits = memoryTextFitsBudget(text, budget);
+		const included = new Set(fits ? block.includedIds : []);
 		const value: KnowledgeProjection = {
 			revision: snapshot.revision,
 			text: fits ? text : "",
 			includedCount: fits ? block.includedCount : 0,
 			omittedCount: unavailable + (fits ? block.omittedCount : records.length),
+			references: Object.freeze(
+				records
+					.filter((record) => included.has(record.id))
+					.map((record) => Object.freeze({ id: record.id, revision: record.revision })),
+			),
 			isCurrent: () => {
 				const now = new Date().toISOString();
 				try {

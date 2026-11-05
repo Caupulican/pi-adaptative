@@ -56,7 +56,14 @@ export interface TranscriptRecallInitializeRequest {
 	sessionFile?: string;
 }
 
+/** Shared cancellation is readable while the worker is executing synchronous local I/O. */
+export interface TranscriptRecallReadControl {
+	deadlineAt: number;
+	cancelled: Int32Array<SharedArrayBuffer>;
+}
+
 export interface TranscriptRecallQueryRequest {
+	control: TranscriptRecallReadControl;
 	type: "query";
 	generation: number;
 	requestId: number;
@@ -67,6 +74,7 @@ export interface TranscriptRecallQueryRequest {
 }
 
 export interface TranscriptRecallSourceRequest {
+	control: TranscriptRecallReadControl;
 	type: "source";
 	generation: number;
 	requestId: number;
@@ -79,12 +87,14 @@ export interface TranscriptRecallSourceRequest {
 }
 
 export interface TranscriptRecallSessionsRequest {
+	control: TranscriptRecallReadControl;
 	type: "sessions";
 	generation: number;
 	requestId: number;
 }
 
 export interface TranscriptRecallLineageRequest {
+	control: TranscriptRecallReadControl;
 	type: "lineage";
 	generation: number;
 	requestId: number;
@@ -94,6 +104,7 @@ export interface TranscriptRecallLineageRequest {
 }
 
 export interface TranscriptRecallVerifyRequest {
+	control: TranscriptRecallReadControl;
 	type: "verify";
 	generation: number;
 	requestId: number;
@@ -139,6 +150,8 @@ export interface TranscriptRecallResultResponse {
 	generation: number;
 	requestId: number;
 	hits: TranscriptSearchHit[];
+	observation: TranscriptIndexObservation;
+	coverage: TranscriptCoverage;
 }
 
 export interface TranscriptRecallSourceResponse {
@@ -263,6 +276,15 @@ export function isTranscriptRecallRangeCheck(value: unknown): value is Transcrip
 
 export function isTranscriptRecallWorkerRequest(value: unknown): value is TranscriptRecallWorkerRequest {
 	if (!isRecord(value) || !Number.isSafeInteger(value.generation)) return false;
+	if (
+		["query", "source", "sessions", "lineage", "verify"].includes(String(value.type)) &&
+		(!isRecord(value.control) ||
+			!Number.isFinite(value.control.deadlineAt) ||
+			!(value.control.cancelled instanceof Int32Array) ||
+			!(value.control.cancelled.buffer instanceof SharedArrayBuffer) ||
+			value.control.cancelled.length !== 1)
+	)
+		return false;
 	switch (value.type) {
 		case "shutdown":
 			return true;
@@ -371,6 +393,7 @@ function isObservation(value: unknown): value is TranscriptIndexObservation {
 		isRecord(value) &&
 		Number.isSafeInteger(value.generation) &&
 		isCount(value.ingestSeq) &&
+		(value.indexRevision === undefined || isCount(value.indexRevision)) &&
 		Array.isArray(value.sessions) &&
 		value.sessions.length <= TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS &&
 		value.sessions.every(
@@ -378,7 +401,8 @@ function isObservation(value: unknown): value is TranscriptIndexObservation {
 				isRecord(session) &&
 				isNonEmptyBoundedString(session.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
 				isCount(session.lineageRevision) &&
-				isCount(session.dependsThrough),
+				isCount(session.dependsThrough) &&
+				(session.captureRevision === undefined || isCount(session.captureRevision)),
 		)
 	);
 }
@@ -528,6 +552,7 @@ function isSourcePageResult(value: unknown): value is TranscriptSourcePageResult
 	if (value.status === "ok") {
 		return (
 			isSourceSpan(value.span) &&
+			isObservation(value.observation) &&
 			isBoundedString(value.text, TRANSCRIPT_RECALL_MAX_SOURCE_PAGE_BYTES) &&
 			isCount(value.cursor) &&
 			(value.nextCursor === undefined || isCount(value.nextCursor)) &&
@@ -557,7 +582,9 @@ export function isTranscriptRecallWorkerResponse(value: unknown): value is Trans
 				isCount(value.requestId) &&
 				Array.isArray(value.hits) &&
 				value.hits.length <= TRANSCRIPT_RECALL_MAX_HITS &&
-				value.hits.every(isSearchHit)
+				value.hits.every(isSearchHit) &&
+				isObservation(value.observation) &&
+				isCoverage(value.coverage)
 			);
 		case "queryFailed":
 			return isCount(value.requestId) && isBoundedString(value.error, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);

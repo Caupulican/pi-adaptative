@@ -3,7 +3,13 @@ import { createInterface } from "node:readline";
 import { spawn } from "child_process";
 import path from "path";
 import type { AgentTool } from "../../kernel/types.ts";
-import { DEFAULT_MAX_BYTES, formatSize, GREP_MAX_LINE_LENGTH, truncateLine } from "../../kernel/utils/truncate.ts";
+import {
+	DEFAULT_MAX_BYTES,
+	formatSize,
+	GREP_MAX_LINE_LENGTH,
+	truncateHead,
+	truncateLine,
+} from "../../kernel/utils/truncate.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
@@ -15,6 +21,7 @@ import {
 	packToolOutput,
 } from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { boundedGrep } from "./bounded-local-search.ts";
 import {
 	type FffGrepMatch,
 	type FffGrepResult,
@@ -24,6 +31,7 @@ import {
 } from "./fff-search-backend.ts";
 import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { resolveToCwd } from "./path-utils.ts";
+import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
 	invalidArgText,
@@ -47,6 +55,7 @@ const defaultGrepOperations: GrepOperations = {
 };
 
 export interface GrepToolOptions extends ManagedSearchToolOptions {
+	readOperation?: ReadOperationFactory;
 	/** Custom operations for grep. Default: local filesystem plus routed FFF/rg search */
 	operations?: GrepOperations;
 	/** FFF backend for resident indexed search. Set false to force ripgrep fallback. */
@@ -381,7 +390,7 @@ export function createGrepToolDefinition(
 		name: "grep",
 		label: "grep",
 		readOnly: true,
-		description: `Search file contents for a regex or literal pattern; returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches (limit) or ${DEFAULT_MAX_BYTES / 1024}KB, and long lines to ${GREP_MAX_LINE_LENGTH} chars.`,
+		description: `Search file contents for a regex or literal pattern; returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches (limit) or ${DEFAULT_MAX_BYTES / 1024}KB, and long lines to ${GREP_MAX_LINE_LENGTH} chars.${options?.readOperation ? " This bounded review reads only project .gitignore and .ignore rules; global ignore files are excluded. Partial results do not prove absence." : ""}`,
 		promptSnippet: "Search file contents",
 		parameters: grepSchema,
 		async execute(
@@ -407,6 +416,23 @@ export function createGrepToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
+			if (options?.readOperation) {
+				if (options.operations) throw new Error("Bounded search requires the local filesystem adapter");
+				const result = await boundedGrep(
+					options.readOperation("grep", toolCallId, signal),
+					resolveToCwd(searchDir || ".", cwd),
+					{ pattern, glob, ignoreCase, literal, context, limit },
+					cwd,
+				);
+				const truncation = truncateHead(result.text);
+				const bounded = boundReadResult(
+					truncation.content +
+						(result.partial || truncation.truncated ? "\n[Partial search: work or result limit reached]" : ""),
+				);
+				const text = bounded.text;
+				result.publish(text, bounded.truncated || truncation.truncated);
+				return toolTextResult({ text, details: {} });
+			}
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(new Error("Operation aborted"));

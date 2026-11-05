@@ -2,11 +2,12 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
+import { readdir, stat, truncate, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isMissingFileError, withFileLock } from "../util/atomic-file.ts";
+import { readBoundedFile } from "../util/bounded-file.ts";
 import { boundedLine } from "../util/bounded-line.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -70,6 +71,7 @@ import {
 	releaseContinuousChatLeaseSync,
 } from "./continuous-chat-lease.ts";
 import type { ParentProjectionDecision, ParentProjectionGroup } from "./continuous-chat-parent-projection-contract.ts";
+import { type ContinuousChatReadVersion, observeContinuousChatRead } from "./continuous-chat-read.ts";
 import { ContinuousChatRecordProjection } from "./continuous-chat-record-projection.ts";
 import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 import type {
@@ -105,6 +107,7 @@ import {
 	type ContinuousChatWorkAbandonment,
 	type ContinuousChatWorkItem,
 } from "./continuous-chat-work-queue.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
 
 const PROJECT_KEY_PATTERN = /^[a-f0-9]{16}$/i;
 const SEGMENT_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
@@ -211,8 +214,13 @@ interface UnindexedLog {
 	newest: SegmentEnd | undefined;
 }
 
-function readLineAt(filePath: string, offset: number, length: number): Promise<ContinuousChatJournalLine> {
-	return readRecordAt(filePath, offset, length).then((buffer) => {
+function readLineAt(
+	filePath: string,
+	offset: number,
+	length: number,
+	context?: MemoryReadContext,
+): Promise<ContinuousChatJournalLine> {
+	return readRecordAt(filePath, offset, length, context).then((buffer) => {
 		if (buffer === undefined) {
 			throw new ContinuousChatCorruptError(filePath, `Continuous-chat line at byte ${offset} is truncated`);
 		}
@@ -266,8 +274,12 @@ async function fileSize(filePath: string): Promise<number> {
 	}
 }
 
-async function loadRoot(filePath: string): Promise<ContinuousChatRoot> {
-	const parsed = await readJsonFile(filePath, "continuous-chat root");
+async function loadRoot(filePath: string, context?: MemoryReadContext): Promise<ContinuousChatRoot> {
+	const parsed = await readJsonFile(
+		filePath,
+		"continuous-chat root",
+		context === undefined ? undefined : { ...context, maxBytes: 64 * 1024 },
+	);
 	if (parsed === undefined) {
 		return {
 			schemaVersion: CONTINUOUS_CHAT_SCHEMA_VERSION,
@@ -758,8 +770,8 @@ export class ContinuousChatStore {
 		return this.projection?.meta().revision ?? 0;
 	}
 
-	private async readProjection(): Promise<ContinuousChatRecordProjection | undefined> {
-		const root = await loadRoot(this.rootFile);
+	private async readProjection(context?: MemoryReadContext): Promise<ContinuousChatRecordProjection | undefined> {
+		const root = await loadRoot(this.rootFile, context);
 		const path = join(this.rootDir, "projection.sqlite");
 		if (!this.projection && existsSync(path))
 			this.projection = new ContinuousChatRecordProjection(path, false, false);
@@ -768,7 +780,26 @@ export class ContinuousChatStore {
 			if (!meta || meta.identity !== root.projectionId || meta.revision < (root.projectionRevision ?? 0))
 				throw new Error("Continuous-chat projection authority is missing or changed.");
 		}
+		assertMemoryReadActive(context);
 		return this.projection;
+	}
+
+	private async readRangeVersion(end: number, context?: MemoryReadContext): Promise<ContinuousChatReadVersion> {
+		const projection = await this.readProjection(context);
+		const key = () =>
+			projection ? `${projection.meta().identity}:${projection.requiredRevision(end)}` : "unprojected";
+		const captured = key();
+		return {
+			key: captured,
+			isCurrent: () => {
+				if (this.projection !== projection) return false;
+				try {
+					return key() === captured;
+				} catch {
+					return false;
+				}
+			},
+		};
 	}
 
 	private isProjectionCurrent(coordinate: ContinuousChatNodeCoordinate, revision: number): boolean {
@@ -859,8 +890,17 @@ export class ContinuousChatStore {
 		return this.findPublished(sourceKey, (await loadRoot(this.rootFile)).nextId);
 	}
 
-	async readNode(coordinate: ContinuousChatNodeCoordinate): Promise<ContinuousChatTreeNode | undefined> {
-		return this.nodeAt(coordinate);
+	async readNode(
+		coordinate: ContinuousChatNodeCoordinate,
+		context?: MemoryReadContext,
+	): Promise<ContinuousChatTreeNode | undefined> {
+		const end = continuousChatNodeFirstMessage(coordinate) + continuousChatNodeMessageCount(coordinate.level);
+		return observeContinuousChatRead(
+			`${this.rootDir}/node/${continuousChatNodeKey(coordinate)}`,
+			(active) => this.nodeAt(coordinate, active),
+			(active) => this.readRangeVersion(end, active),
+			context,
+		);
 	}
 
 	/**
@@ -915,15 +955,22 @@ export class ContinuousChatStore {
 		return view;
 	}
 
-	async readMessageById(id: number): Promise<ContinuousChatRecord | undefined> {
+	async readMessageById(id: number, context?: MemoryReadContext): Promise<ContinuousChatRecord | undefined> {
 		if (!isNonNegativeSafeInteger(id)) throw new TypeError("Continuous-chat id must be a non-negative integer.");
-		const published = (await loadRoot(this.rootFile)).nextId;
-		if (id >= published) return undefined;
-		return this.recordAt(id);
+		return observeContinuousChatRead(
+			`${this.rootDir}/message/${id}`,
+			async (active) => {
+				const published = (await loadRoot(this.rootFile, active)).nextId;
+				if (id >= published) return undefined;
+				return this.recordAt(id, active);
+			},
+			(active) => this.readRangeVersion(id + 1, active),
+			context,
+		);
 	}
 
-	async readMessageDate(id: number): Promise<string | undefined> {
-		return (await this.readMessageById(id))?.date;
+	async readMessageDate(id: number, context?: MemoryReadContext): Promise<string | undefined> {
+		return (await this.readMessageById(id, context))?.date;
 	}
 
 	async readDate(date: string): Promise<ContinuousChatRecord[]> {
@@ -948,13 +995,20 @@ export class ContinuousChatStore {
 		return record !== undefined && continuousChatDay(record.date) === date ? record : undefined;
 	}
 
-	async readImage(ref: ContinuousChatImageRef): Promise<Buffer> {
+	async readImage(ref: ContinuousChatImageRef, context?: MemoryReadContext): Promise<Buffer> {
 		const filePath = join(this.imagesDir, ref.digest);
-		const data = await readFile(filePath);
-		if (data.byteLength !== ref.bytes || continuousChatImageDigest(data) !== ref.digest) {
-			throw new ContinuousChatCorruptError(filePath, "Continuous-chat image failed integrity validation");
-		}
-		return data;
+		return observeContinuousChatRead(
+			filePath,
+			async (active) => {
+				const data = await readBoundedFile(filePath, ref.bytes, "Continuous-chat image", active);
+				if (data.byteLength !== ref.bytes || continuousChatImageDigest(data) !== ref.digest) {
+					throw new ContinuousChatCorruptError(filePath, "Continuous-chat image failed integrity validation");
+				}
+				return data;
+			},
+			async () => ({ key: ref.digest, isCurrent: () => true }),
+			context,
+		);
 	}
 
 	/**
@@ -1544,10 +1598,13 @@ export class ContinuousChatStore {
 	}
 
 	/** One tree node by coordinate, through the bounded node cache. Undefined when the node was never written. */
-	private async nodeAt(coordinate: ContinuousChatNodeCoordinate): Promise<ContinuousChatTreeNode | undefined> {
-		await this.readProjection();
+	private async nodeAt(
+		coordinate: ContinuousChatNodeCoordinate,
+		context?: MemoryReadContext,
+	): Promise<ContinuousChatTreeNode | undefined> {
+		await this.readProjection(context);
 		const key = continuousChatNodeKey(coordinate);
-		const cached = this.nodeCache.get(key);
+		const cached = context === undefined ? this.nodeCache.get(key) : undefined;
 		if (cached !== undefined) {
 			if (!this.isProjectionCurrent(cached, cached.projectionRevision ?? 0)) {
 				this.nodeCache.delete(key);
@@ -1557,7 +1614,7 @@ export class ContinuousChatStore {
 			this.nodeCache.set(key, cached);
 			return cached;
 		}
-		const node = await this.readNodeFromDisk(coordinate);
+		const node = await this.readNodeFromDisk(coordinate, context);
 		if (node !== undefined && !this.isProjectionCurrent(node, node.projectionRevision ?? 0)) return undefined;
 		if (node !== undefined) this.rememberNode(key, node);
 		return node;
@@ -1565,17 +1622,19 @@ export class ContinuousChatStore {
 
 	private async readNodeFromDisk(
 		coordinate: ContinuousChatNodeCoordinate,
+		context?: MemoryReadContext,
 	): Promise<ContinuousChatTreeNode | undefined> {
 		const slot = await readRecordAt(
 			this.nodeIndexFile(coordinate.level),
 			coordinate.ordinal * CONTINUOUS_CHAT_NODE_INDEX_ENTRY_BYTES,
 			CONTINUOUS_CHAT_NODE_INDEX_ENTRY_BYTES,
+			context,
 		);
 		if (slot === undefined) return undefined;
 		const location = decodeNodeIndexEntry(slot);
 		if (location === undefined) return undefined;
 		const filePath = segmentPath(this.treeDir, location.dayNo);
-		const line = await readLineAt(filePath, location.offset, location.length);
+		const line = await readLineAt(filePath, location.offset, location.length, context);
 		const node = decodeLine(filePath, line, "continuous-chat tree", parseContinuousChatTreeNode);
 		if (node.level !== coordinate.level || node.ordinal !== coordinate.ordinal) {
 			throw new ContinuousChatCorruptError(
@@ -1703,11 +1762,12 @@ export class ContinuousChatStore {
 	}
 
 	/** The location of one indexed message. A missing entry for an id below the published count is corruption. */
-	private async readMessageLocation(id: number): Promise<ContinuousChatMessageLocation> {
+	private async readMessageLocation(id: number, context?: MemoryReadContext): Promise<ContinuousChatMessageLocation> {
 		const entry = await readRecordAt(
 			this.messageIndexFile,
 			id * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
 			CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
+			context,
 		);
 		if (entry === undefined) {
 			throw new ContinuousChatCorruptError(this.messageIndexFile, `Message ${id} is missing from the message index`);
@@ -1716,14 +1776,16 @@ export class ContinuousChatStore {
 	}
 
 	/** One indexed message, read by positioned reads. The caller guarantees `id` is below the published count. */
-	private async recordAt(id: number): Promise<ContinuousChatRecord> {
-		const projection = await this.readProjection();
-		return projection?.project(await this.rawRecordAt(id)) ?? this.rawRecordAt(id);
+	private async recordAt(id: number, context?: MemoryReadContext): Promise<ContinuousChatRecord> {
+		const projection = await this.readProjection(context);
+		const record = await this.rawRecordAt(id, context);
+		assertMemoryReadActive(context);
+		return projection?.project(record) ?? record;
 	}
-	private async rawRecordAt(id: number): Promise<ContinuousChatRecord> {
-		const location = await this.readMessageLocation(id);
+	private async rawRecordAt(id: number, context?: MemoryReadContext): Promise<ContinuousChatRecord> {
+		const location = await this.readMessageLocation(id, context);
 		const filePath = segmentPath(this.mainDir, location.dayNo);
-		const line = await readLineAt(filePath, location.offset, location.length);
+		const line = await readLineAt(filePath, location.offset, location.length, context);
 		const record = decodeLine(filePath, line, "continuous-chat", parseContinuousChatRecord);
 		if (record.id !== id) {
 			throw new ContinuousChatCorruptError(filePath, `Indexed message ${id} holds record ${record.id}`);

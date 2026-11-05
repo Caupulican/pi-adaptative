@@ -1,4 +1,5 @@
-import { closeSync, openSync, readSync } from "node:fs";
+import { readSync } from "node:fs";
+import { withRegularFileDescriptorSync } from "../storage/bounded-file.ts";
 import { isValidSessionId, MAX_SESSION_HEADER_BYTES } from "./session-identity.ts";
 
 export interface SessionHeader {
@@ -28,12 +29,9 @@ export function readSessionHeaderResult(
 	maxBytes: number = MAX_SESSION_HEADER_BYTES,
 ): SessionHeaderReadResult {
 	try {
-		const fd = openSync(filePath, "r");
-		try {
-			return readSessionHeaderFromDescriptor(fd, maxBytes);
-		} finally {
-			closeSync(fd);
-		}
+		return withRegularFileDescriptorSync(filePath, "Session header", (fd) =>
+			readSessionHeaderFromDescriptor(fd, maxBytes),
+		);
 	} catch (cause) {
 		return { ok: false, reason: "unreadable", cause };
 	}

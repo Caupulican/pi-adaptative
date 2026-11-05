@@ -1,3 +1,4 @@
+import { assertMemoryReadActive, type MemoryReadContext } from "../memory/memory-read-context.ts";
 import type { ContextItem, ContextMemoryRef } from "./context-item.ts";
 import type { MemoryIndexRecord, MemoryIndexStore } from "./memory-index-store.ts";
 import {
@@ -24,6 +25,7 @@ export interface MemoryProviderRetrievalReport {
 }
 
 export interface MemoryRetrievalOptions {
+	readContext?: MemoryReadContext;
 	createdAtTurn: number;
 	maxResults: number;
 	memoryIndexStore?: MemoryIndexStore;
@@ -94,6 +96,7 @@ export async function retrieveMemoryForContext(
 	const collected: MemorySearchResult[] = [];
 
 	for (const provider of providers) {
+		assertMemoryReadActive(options.readContext);
 		const policy = defaultPolicyForProvider(provider, options);
 		const rejectionReasons = validateMemorySearchRequest(provider, policy, request);
 		if (rejectionReasons.length > 0) {
@@ -107,7 +110,8 @@ export async function retrieveMemoryForContext(
 		}
 
 		try {
-			const results = await provider.search(request);
+			const results = await provider.search(request, options.readContext);
+			assertMemoryReadActive(options.readContext);
 			collected.push(...results);
 			providerReports.push({
 				providerId: provider.id,
@@ -116,6 +120,7 @@ export async function retrieveMemoryForContext(
 				resultCount: results.length,
 			});
 		} catch (error) {
+			assertMemoryReadActive(options.readContext);
 			providerReports.push({
 				providerId: provider.id,
 				status: "failed",

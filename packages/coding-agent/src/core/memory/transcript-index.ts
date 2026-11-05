@@ -12,6 +12,7 @@ export interface IndexableSpan {
 }
 
 export interface TranscriptIndexQueryOptions {
+	checkpoint?: () => void;
 	k?: number;
 	minScore?: number;
 	maxSnippetChars?: number;
@@ -58,13 +59,20 @@ function lowerWithStableIndices(text: string): string {
 	}).join("");
 }
 
-function buildSnippet(text: string, queryTokens: readonly string[], maxSnippetChars: number): string {
+function buildSnippet(
+	text: string,
+	queryTokens: readonly string[],
+	maxSnippetChars: number,
+	checkpoint?: () => void,
+): string {
 	const lowerText = lowerWithStableIndices(text);
 	// Find matching indices of query tokens in the text (case-insensitive).
 	const matchIndices: number[] = [];
 	for (const token of queryTokens) {
+		checkpoint?.();
 		let pos = lowerText.indexOf(token);
 		while (pos !== -1) {
+			checkpoint?.();
 			matchIndices.push(pos);
 			pos = lowerText.indexOf(token, pos + 1);
 		}
@@ -84,6 +92,7 @@ function buildSnippet(text: string, queryTokens: readonly string[], maxSnippetCh
 		let lo = 0;
 		let hi = 0;
 		for (const center of matchIndices) {
+			checkpoint?.();
 			let start = Math.max(0, center - Math.floor(maxSnippetChars / 2));
 			const end = Math.min(text.length, start + maxSnippetChars);
 			if (end - start < maxSnippetChars && start > 0) {
@@ -152,6 +161,8 @@ export class TranscriptIndex {
 	}
 
 	query(queryText: string, opts?: TranscriptIndexQueryOptions): TranscriptSearchHit[] {
+		const checkpoint = opts?.checkpoint;
+		checkpoint?.();
 		const k = opts?.k ?? 5;
 		const minScore = opts?.minScore ?? 0.34;
 		const maxSnippetChars = opts?.maxSnippetChars ?? 600;
@@ -163,13 +174,18 @@ export class TranscriptIndex {
 
 		const matched = new Map<number, number>();
 		for (const token of queryTokens) {
+			checkpoint?.();
 			const ids = this.postings.get(token);
 			if (!ids) continue;
-			for (const id of ids) matched.set(id, (matched.get(id) ?? 0) + 1);
+			for (const id of ids) {
+				checkpoint?.();
+				matched.set(id, (matched.get(id) ?? 0) + 1);
+			}
 		}
 
 		const candidates: Array<{ indexed: IndexedSpan; score: number }> = [];
 		for (const [id, count] of matched) {
+			checkpoint?.();
 			const score = count / queryTokens.length;
 			if (score <= minScore) continue;
 			const indexed = this.spansById.get(id);
@@ -180,6 +196,7 @@ export class TranscriptIndex {
 		}
 
 		candidates.sort((left, right) => {
+			checkpoint?.();
 			if (right.score !== left.score) return right.score - left.score;
 			if (right.indexed.time !== left.indexed.time) return right.indexed.time > left.indexed.time ? 1 : -1;
 			const leftHandle = formatTranscriptSourceHandle(left.indexed.span.ref);
@@ -190,7 +207,7 @@ export class TranscriptIndex {
 		return candidates.slice(0, k).map(({ indexed, score }) => ({
 			span: indexed.span,
 			score,
-			snippet: buildSnippet(indexed.text, queryTokens, maxSnippetChars),
+			snippet: buildSnippet(indexed.text, queryTokens, maxSnippetChars, checkpoint),
 		}));
 	}
 

@@ -21,6 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fsPromises, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import lockfile from "proper-lockfile";
 import type { TimerPort } from "../timer-port.ts";
 import { type FaultableFs, nodeFs } from "./faultable-fs.ts";
@@ -117,6 +118,8 @@ export interface AtomicFileLockOptions {
 	 * always released by the operation that took it.
 	 */
 	deadlineAt?: number;
+	/** Cancel async queue and backoff waits. A dispatched OS attempt settles and releases any late lock first. */
+	signal?: AbortSignal;
 }
 
 export interface SynchronousFileLockScope {
@@ -265,8 +268,10 @@ async function withSerializedPathOperation<T>(
 	filePath: string,
 	fn: () => Promise<T>,
 	deadlineAt?: number,
+	signal?: AbortSignal,
 ): Promise<T> {
 	const key = pathOperationKey(filePath);
+	signal?.throwIfAborted();
 	// A caller already past its deadline never joins the queue, so nothing is ever chained behind it.
 	if (deadlineAt !== undefined) throwIfPastDeadline(filePath, deadlineAt, "the deadline passed before it was queued");
 	const preceding = tails.get(key) ?? Promise.resolve();
@@ -276,17 +281,20 @@ async function withSerializedPathOperation<T>(
 	});
 	tails.set(key, tail);
 
-	if (deadlineAt === undefined) await preceding;
-	else if (!(await settlesBy(preceding, deadlineAt))) {
+	try {
+		if (!(await settlesBy(preceding, deadlineAt, signal)))
+			throw new FileLockDeadlineError(filePath, "an earlier operation in this process still holds the path");
+	} catch (error) {
 		// Leaving at the deadline, this caller's tail still resolves only once its predecessor settles, so the
 		// operation queued after it never overtakes the one ahead of it.
 		void preceding.then(() => {
 			releaseTail?.();
 			if (tails.get(key) === tail) tails.delete(key);
 		});
-		throw new FileLockDeadlineError(filePath, "an earlier operation in this process still holds the path");
+		throw error;
 	}
 	try {
+		signal?.throwIfAborted();
 		// Admission is checked again here: an already settled predecessor can win the wait above at any time. The
 		// first thing `fn` does is the work being admitted (for a file lock, preparing its directory).
 		if (deadlineAt !== undefined) {
@@ -426,13 +434,14 @@ export async function withFileLock<T>(
 		options?.lockfilePath ?? filePath,
 		async () => {
 			if (options?.createParentDirectories !== false) await ensureLockDir(filePath, options?.lockfilePath);
+			options?.signal?.throwIfAborted();
 			const lockOptions = {
 				lockfilePath: options?.lockfilePath,
 				realpath: options?.realpath ?? DEFAULT_REALPATH,
 				stale: options?.stale,
 			};
 			const release =
-				deadlineAt === undefined
+				deadlineAt === undefined && options?.signal === undefined
 					? await lockfile.lock(filePath, {
 							...lockOptions,
 							retries: {
@@ -442,8 +451,9 @@ export async function withFileLock<T>(
 								maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
 							},
 						})
-					: await lockByDeadline(filePath, lockOptions, options ?? {}, deadlineAt);
+					: await lockWithinLifetime(filePath, lockOptions, options ?? {});
 			try {
+				options?.signal?.throwIfAborted();
 				// A lock won after the deadline (an attempt already submitted can complete late) is released by the
 				// cleanup below without running the critical section.
 				if (deadlineAt !== undefined)
@@ -455,21 +465,32 @@ export async function withFileLock<T>(
 			}
 		},
 		deadlineAt,
+		options?.signal,
 	);
 }
 
 /** Whether `promise` settles before `deadlineAt` (an already settled one always does). */
-async function settlesBy(promise: Promise<void>, deadlineAt: number): Promise<boolean> {
+async function settlesBy(promise: Promise<void>, deadlineAt?: number, signal?: AbortSignal): Promise<boolean> {
+	if (deadlineAt === undefined && signal === undefined) {
+		await promise;
+		return true;
+	}
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let cancel: (() => void) | undefined;
 	try {
 		return await Promise.race([
 			promise.then(() => true),
-			new Promise<boolean>((resolveRace) => {
-				timer = setTimeout(() => resolveRace(false), Math.max(0, deadlineAt - Date.now()));
+			new Promise<boolean>((resolveRace, rejectRace) => {
+				if (deadlineAt !== undefined)
+					timer = setTimeout(() => resolveRace(false), Math.max(0, deadlineAt - Date.now()));
+				cancel = () => rejectRace(signal?.reason);
+				signal?.addEventListener("abort", cancel, { once: true });
+				if (signal?.aborted) cancel();
 			}),
 		]);
 	} finally {
 		clearTimeout(timer);
+		if (cancel) signal?.removeEventListener("abort", cancel);
 	}
 }
 
@@ -485,25 +506,29 @@ function throwIfPastDeadline(filePath: string, deadlineAt: number, waitingFor: s
  * clock, as {@link settlesBy} does: the lock is shared across processes, so its holder, its staleness and the caller's
  * `deadlineAt` are all real time, and a session timer port could not move them.
  */
-async function lockByDeadline(
+async function lockWithinLifetime(
 	filePath: string,
 	lockOptions: { lockfilePath: string | undefined; realpath: boolean; stale: number | undefined },
 	options: AtomicFileLockOptions,
-	deadlineAt: number,
 ): Promise<() => Promise<void>> {
+	const { deadlineAt, signal } = options;
 	for (let attempt = 1; ; attempt++) {
-		throwIfPastDeadline(
-			filePath,
-			deadlineAt,
-			attempt === 1 ? "the deadline passed before the lock was attempted" : "another holder has the lock",
-		);
+		signal?.throwIfAborted();
+		if (deadlineAt !== undefined)
+			throwIfPastDeadline(
+				filePath,
+				deadlineAt,
+				attempt === 1 ? "the deadline passed before the lock was attempted" : "another holder has the lock",
+			);
 		try {
 			return await lockfile.lock(filePath, { ...lockOptions, retries: 0 });
 		} catch (error) {
-			const held = typeof error === "object" && error !== null && "code" in error && error.code === "ELOCKED";
-			if (!held) throw error;
-			const gap = Math.min(retryDelayMs(options, attempt), Math.max(0, deadlineAt - Date.now()));
-			await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, gap));
+			if (!isLockedError(error) || (deadlineAt === undefined && attempt > retryCount(options))) throw error;
+			const gap = Math.min(
+				retryDelayMs(options, attempt),
+				deadlineAt === undefined ? Infinity : Math.max(0, deadlineAt - Date.now()),
+			);
+			await delay(gap, undefined, { signal });
 		}
 	}
 }

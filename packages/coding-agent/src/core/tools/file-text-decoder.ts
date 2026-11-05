@@ -3,6 +3,7 @@ import { AgentToolExecutionError } from "../../kernel/types.ts";
 import { ENCODING_EVIDENCE_REQUIRED, PythonCodecUnavailableError } from "./file-codec-runner.ts";
 import { createFileCodecReadSession } from "./file-codec-stream.ts";
 import { firstInvalidUtf8Offset } from "./file-encoding-policy.ts";
+import type { ReadOperation } from "./read-operation-context.ts";
 
 const DECODE_CHUNK_BYTES = 1024 * 1024;
 const EMPTY = Buffer.alloc(0);
@@ -80,6 +81,7 @@ export async function* decodeTextChunks(
 	signal?: AbortSignal,
 	onEncodingDetected?: (encoding: string) => void,
 	wholeSource?: () => AsyncIterable<Buffer> | Iterable<Buffer>,
+	operation?: ReadOperation,
 ): AsyncGenerator<string> {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
 	const native = new TextDecoder("utf-8", { fatal: true });
@@ -127,7 +129,7 @@ export async function* decodeTextChunks(
 	let decoded = false;
 	const openSession = async (): Promise<void> => {
 		try {
-			run = await createFileCodecReadSession(signal);
+			run = await createFileCodecReadSession(signal, operation);
 		} catch (error) {
 			if (error instanceof PythonCodecUnavailableError && encoding === undefined && evidence !== undefined)
 				throw readEncodingRequiredError(path, evidence, error.reason);
@@ -239,12 +241,21 @@ export async function decodeReadText(
 	encoding?: string,
 	signal?: AbortSignal,
 	onEncodingDetected?: (encoding: string) => void,
+	operation?: ReadOperation,
 ): Promise<string> {
 	const parts: string[] = [];
 	// The whole file is already in hand, so detection re-reads exactly these bytes. It still has to
 	// be a separate pass: the decoder hands the codec one 1 MiB window at a time, and an ASCII head
 	// longer than that window would otherwise hide the bytes that settle the encoding.
-	for await (const text of decodeTextChunks([source], path, encoding, signal, onEncodingDetected, () => [source]))
+	for await (const text of decodeTextChunks(
+		[source],
+		path,
+		encoding,
+		signal,
+		onEncodingDetected,
+		() => [source],
+		operation,
+	))
 		parts.push(text);
 	return parts.join("");
 }

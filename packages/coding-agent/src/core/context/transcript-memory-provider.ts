@@ -8,12 +8,14 @@
  * answer), and `queried` with zero results (nothing matched).
  */
 
+import type { MemoryReadContext } from "../memory/memory-read-context.ts";
 import {
 	formatTranscriptSourceHandle,
 	parseTranscriptSourceHandle,
 	type TranscriptSearchHit,
 	type TranscriptSourceReader,
 } from "../memory/transcript-memory-contracts.ts";
+import { observedTranscriptReader } from "../memory/transcript-read-evidence.ts";
 import { describeTranscriptRole, TRANSCRIPT_SOURCE_PAGE_BYTES } from "../memory/transcript-source-tools.ts";
 import type {
 	MemoryItem,
@@ -135,11 +137,11 @@ export function createTranscriptMemoryProvider(
 		label: "Conversation history",
 		source: "transcript_recall",
 		capabilities: TRANSCRIPT_MEMORY_CAPABILITIES,
-		async search(request: MemorySearchRequest): Promise<MemorySearchResult[]> {
+		async search(request: MemorySearchRequest, context?: MemoryReadContext): Promise<MemorySearchResult[]> {
 			const backend = reader();
 			if (backend === undefined)
 				throw new Error("unavailable: Transcript history is not available in this session.");
-			const result = await backend.search({
+			const result = await observedTranscriptReader(backend, context).search({
 				query: request.query,
 				maxResults: request.maxResults,
 				includeCurrentSession,
@@ -149,13 +151,17 @@ export function createTranscriptMemoryProvider(
 			const now = Date.now();
 			return result.hits.map((hit) => toSearchResult(hit, now));
 		},
-		async fetch(ref: MemoryRef): Promise<MemoryItem | undefined> {
+		async fetch(ref: MemoryRef, context?: MemoryReadContext): Promise<MemoryItem | undefined> {
 			const backend = reader();
 			if (backend === undefined)
 				throw new Error("unavailable: Transcript history is not available in this session.");
 			const parsed = parseTranscriptSourceHandle(ref.itemId, projectId());
 			if (parsed === undefined) return undefined;
-			const page = await backend.readSource({ ref: parsed, cursor: 0, maxBytes: TRANSCRIPT_SOURCE_PAGE_BYTES });
+			const page = await observedTranscriptReader(backend, context).readSource({
+				ref: parsed,
+				cursor: 0,
+				maxBytes: TRANSCRIPT_SOURCE_PAGE_BYTES,
+			});
 			if (page.status === "not_found") return undefined;
 			if (page.status !== "ok") throw new Error(`${page.status}: ${page.reason}`);
 			const handle = formatTranscriptSourceHandle(page.span.ref);

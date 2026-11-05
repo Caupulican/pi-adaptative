@@ -5,6 +5,7 @@ import {
 	MAX_FILE_CODEC_PROTOCOL_BYTES,
 	resolveFileCodecLaunch,
 } from "./file-codec-runner.ts";
+import type { ReadOperation } from "./read-operation-context.ts";
 
 interface CodecFrame {
 	sequence: number;
@@ -17,16 +18,21 @@ interface CodecFrame {
 }
 
 /** A read owns one helper. Frames are correlated, serialized, bounded, and never replayed. */
-export async function createFileCodecReadSession(signal?: AbortSignal) {
-	const launch = await resolveFileCodecLaunch(signal);
+export async function createFileCodecReadSession(signal?: AbortSignal, operation?: ReadOperation) {
+	const launch = await resolveFileCodecLaunch(signal, operation);
 	signal?.throwIfAborted();
+	operation?.charge("processes", 1);
 	const stop = new AbortController();
-	const child = spawnProcess(launch.command, [...launch.args, "--read-stream"], {
-		cwd: launch.cwd,
-		stdio: ["pipe", "pipe", "pipe"],
-		detached: process.platform !== "win32",
-		windowsHide: true,
-	});
+	const child = spawnProcess(
+		launch.command,
+		[...launch.args, "--read-stream", ...(operation ? ["--no-external-codecs"] : [])],
+		{
+			cwd: launch.cwd,
+			stdio: ["pipe", "pipe", "pipe"],
+			detached: process.platform !== "win32",
+			windowsHide: true,
+		},
+	);
 	let failure: Error | undefined;
 	let closed = false;
 	let exited = false;
@@ -53,6 +59,7 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 	const onAbort = () => fail(new Error("Encoding recovery aborted"));
 	const terminal = waitForChildProcessWithTermination(child, {
 		signal: stop.signal,
+		timeoutMs: operation ? Math.max(1, operation.deadlineAt - Date.now()) : undefined,
 		killGraceMs: 2_000,
 		onDiagnostic: () => fail(new Error("Encoding recovery process termination failed")),
 	}).then(
@@ -69,6 +76,12 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 	);
 	child.stdout?.on("data", (data: Buffer) => {
 		if (closed || failure || data.length === 0) return;
+		try {
+			operation?.charge("outputBytes", data.length);
+		} catch (error) {
+			fail(error instanceof Error ? error : fileCodecRecoveryError());
+			return;
+		}
 		if (!pending || frameReceived || retained + data.length > MAX_FILE_CODEC_PROTOCOL_BYTES) {
 			fail(fileCodecRecoveryError());
 			return;
@@ -110,7 +123,14 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 			fail(fileCodecRecoveryError());
 		}
 	});
-	child.stderr?.on("data", () => fail(fileCodecRecoveryError()));
+	child.stderr?.on("data", (data: Buffer) => {
+		try {
+			operation?.charge("outputBytes", data.length);
+		} catch {
+			/* The failed protocol still ends its process. */
+		}
+		fail(fileCodecRecoveryError());
+	});
 	for (const stream of [child.stdin, child.stdout, child.stderr]) {
 		stream?.on("error", () => fail(fileCodecRecoveryError()));
 	}
@@ -127,6 +147,7 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 		final: boolean,
 		endsProcess: boolean,
 	): Promise<CodecFrame> => {
+		operation?.assertCurrent();
 		if (failure) throw failure;
 		if (closed || exited || endingFrame || pending) throw new Error("Encoding read session is not available");
 		const request = JSON.stringify({ sequence, final, ...body });
@@ -134,7 +155,12 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 		const response = Promise.withResolvers<CodecFrame>();
 		pending = { sequence: sequence++, final, endsProcess, resolve: response.resolve, reject: response.reject };
 		frameReceived = false;
-		const deadline = setTimeout(() => fail(new Error("Encoding recovery timed out")), FILE_CODEC_TIMEOUT_MS);
+		const deadline = setTimeout(
+			() => fail(new Error("Encoding recovery timed out")),
+			operation
+				? Math.max(1, Math.min(FILE_CODEC_TIMEOUT_MS, operation.deadlineAt - Date.now()))
+				: FILE_CODEC_TIMEOUT_MS,
+		);
 		try {
 			try {
 				child.stdin?.write(`${request}\n`, (error) => {
@@ -152,6 +178,7 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 			}
 			if ("error" in frame) throw fileCodecRecoveryError(frame.error, frame.detail);
 			if (failure) throw failure;
+			operation?.assertCurrent();
 			return frame;
 		} catch (error) {
 			fail(error instanceof Error ? error : fileCodecRecoveryError());

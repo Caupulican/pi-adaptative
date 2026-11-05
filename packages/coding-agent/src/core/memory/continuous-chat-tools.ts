@@ -24,6 +24,7 @@ import {
 	CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION,
 } from "./continuous-chat-prompt.ts";
 import { memoryFailure } from "./history-tool.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
 import { TRANSCRIPT_RECALL_RESULT_MARKER } from "./transcript-memory-contracts.ts";
 import { CONTINUOUS_CHAT_DATE_TOOL_NAME, CONTINUOUS_CHAT_ZOOM_TOOL_NAME } from "./worker-memory-tools.ts";
 
@@ -108,7 +109,16 @@ export async function executeContinuousChatNavigation(
 	signal?: AbortSignal,
 	pageBytes = CONTINUOUS_CHAT_ZOOM_PAGE_BYTES,
 	imageBytes = CONTINUOUS_CHAT_ZOOM_IMAGE_MAX_BYTES,
+	readContext?: MemoryReadContext,
 ): Promise<AgentToolResult<Record<string, unknown>>> {
+	const context: MemoryReadContext = {
+		...readContext,
+		signal:
+			signal && readContext?.signal
+				? AbortSignal.any([signal, readContext.signal])
+				: (signal ?? readContext?.signal),
+	};
+	assertMemoryReadActive(context);
 	const port = source();
 	if (port === undefined) {
 		return memoryFailure(
@@ -125,13 +135,14 @@ export async function executeContinuousChatNavigation(
 			: await new ContinuousChatNavigator(port.navigation, port.workerLogs, pageBytes, imageBytes).execute(
 					parsed,
 					signal,
+					context,
 				);
 	const text = renderContinuousChatNavigationResult(result);
 	if (result.status === "rejected") {
 		return memoryFailure(result.reason, text, { [TRANSCRIPT_RECALL_RESULT_MARKER]: true });
 	}
 	const details = { [TRANSCRIPT_RECALL_RESULT_MARKER]: true };
-	if (result.status !== "message") return { content: [{ type: "text", text }], details };
+	if (result.status !== "message" || imageBytes === 0) return { content: [{ type: "text", text }], details };
 	const images: ImageContent[] = [];
 	let attachedBytes = 0;
 	for (const image of result.images) {
@@ -139,8 +150,8 @@ export async function executeContinuousChatNavigation(
 			throw new Error("Continuous-chat navigator returned an over-budget image page.");
 		}
 		attachedBytes += image.bytes;
-		const data = await port.navigation.readImage(image);
-		signal?.throwIfAborted();
+		const data = await port.navigation.readImage(image, context);
+		assertMemoryReadActive(context);
 		images.push({ type: "image", data: data.toString("base64"), mimeType: image.mimeType });
 	}
 	return { content: [{ type: "text", text }, ...images], details };
@@ -150,7 +161,8 @@ export async function executeContinuousChatNavigation(
 export type ContinuousChatNavigationExecutor = (
 	tool: ContinuousChatNavigationToolName,
 	args: unknown,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	toolCallId: string,
 ) => Promise<AgentToolResult<Record<string, unknown>>>;
 
 function navigationTool(
@@ -168,7 +180,7 @@ function navigationTool(
 		promptSnippet,
 		parameters,
 		readOnly: true,
-		execute: async (_toolCallId, params: unknown, signal) => execute(name, params, signal),
+		execute: async (toolCallId, params: unknown, signal) => execute(name, params, signal, toolCallId),
 	};
 }
 

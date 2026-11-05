@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from "node:util";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
-import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
@@ -16,6 +15,8 @@ import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import { ProactivityInvestigation } from "./proactivity-investigation.ts";
+import type { ProactivityInvestigationHost } from "./proactivity-read-authority.ts";
 import {
 	buildReviewPrompt,
 	countOwnerTurns,
@@ -42,16 +43,14 @@ export interface ProactivityRunOutcome {
 	readonly delivered: readonly ProactiveNote[];
 }
 
-export interface ProactivityControllerDeps {
+export interface ProactivityControllerDeps extends ProactivityInvestigationHost {
 	isDisposed(): boolean;
 	isChildSession(): boolean;
 	/** True while the owner's turn (or its retry or follow-up) holds the session. */
 	isForegroundBusy(): boolean;
 	getSessionId(): string;
-	getAgentDir(): string;
 	getSessionManager(): SessionManager;
 	getSettingsManager(): ProactivityControllerSettingsSource;
-	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getGoalStateSnapshot(): GoalState | undefined;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
@@ -79,9 +78,9 @@ function goalSummary(goal: GoalState): string {
 /**
  * Owns the idle review that raises notes the owner would want to hear. The host decides everything that has a cost or a
  * consequence: whether a review may start (enabled, per-session cap, enough new owner turns, an idle
- * foreground), what it may do (one tool that records a note; no files, commands or messages), and what is delivered
- * (well-formed, new, within the limit). The model only judges whether the conversation shows a need, so the path is the
- * same for every model that can call a tool.
+ * foreground), which bounded source reads its current authority permits, and what is delivered
+ * (well-formed, new, within the limit, with current evidence). The model judges whether the conversation shows a need;
+ * the host admits reads and validates their evidence before any note reaches the owner.
  */
 export class ProactivityController {
 	private _timer: unknown;
@@ -245,6 +244,7 @@ export class ProactivityController {
 		this._isRunning = true;
 		let runtimeLease: RuntimeWorkLease | undefined;
 		let usage: BoundedCompletionUsage | undefined;
+		let investigation: ProactivityInvestigation | undefined;
 		let deregisterInFlight: (() => void) | undefined;
 		let started = false;
 		try {
@@ -263,22 +263,41 @@ export class ProactivityController {
 			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
 			deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${this._runs}`);
 			const capture: { raised: ProactiveNote[] } = { raised: [] };
+			const reviewInvestigation = new ProactivityInvestigation(this.deps, {
+				model,
+				maxOutputTokens: capability.laneMaxOutputTokens,
+				signal,
+				assertCurrent,
+				isNoteRaised: () => capture.raised.length > 0,
+			});
+			investigation = reviewInvestigation;
 			const completion = await this.deps.runIsolatedCompletion({
 				systemPrompt: REVIEW_SYSTEM_PROMPT,
 				messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 				model,
 				thinkingLevel: resolveModelThinkingLevel(model, "low"),
 				maxTokens: capability.laneMaxOutputTokens,
-				tools: [createRaiseNoteTool(capture, settings.maxNotesPerRun)],
+				tools: [
+					...reviewInvestigation.tools,
+					createRaiseNoteTool(capture, settings.maxNotesPerRun, (ids) =>
+						reviewInvestigation.validateEvidenceForNote(ids),
+					),
+				],
 				maxTurns: 2,
 				signal,
+				beforeToolCall: (context, toolSignal) => reviewInvestigation.beforeToolCall(context, toolSignal),
+				onMessage: (message) => reviewInvestigation.onMessage(message),
+				onProviderRequestSnapshot: (request) => reviewInvestigation.noteRequest(request.context),
 				requestPreflight: (request) => {
 					assertCurrent();
-					return runUsage.preflight(request);
+					const sourceAllowance = reviewInvestigation.preflight(request);
+					const spendingAllowance = runUsage.preflight(request);
+					return { maxTokens: Math.min(sourceAllowance.maxTokens, spendingAllowance.maxTokens) };
 				},
 				requestGuard: () => {
 					assertCurrent();
 					runUsage.assertHealthy();
+					reviewInvestigation.assertHealthy();
 				},
 				providerResponseObserver: runUsage,
 				maxRetries: 0,
@@ -286,6 +305,7 @@ export class ProactivityController {
 				laneKind: "proactivity",
 			});
 			runUsage.assertHealthy();
+			reviewInvestigation.assertHealthy();
 			assertCurrent();
 			if (completion.stopReason === "error" || completion.stopReason === "aborted")
 				throw new Error(completion.errorMessage ?? `Proactive review ${completion.stopReason}.`);
@@ -298,11 +318,15 @@ export class ProactivityController {
 				this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
 				return { started: true, delivered: [] };
 			}
+			await reviewInvestigation.revalidate();
+			assertCurrent();
+			runUsage.assertHealthy();
+			reviewInvestigation.assertHealthy();
 			const message = {
 				customType: PROACTIVE_NOTE_CUSTOM_TYPE,
 				content: renderNoteMessage(notes),
 				display: true,
-				details: { notes },
+				details: { notes, evidence: reviewInvestigation.evidenceDetails() },
 			};
 			const mode = settings.delivery === "turn" ? "turn" : "next-owner-turn";
 			const payloadDigest = canonicalDigest({ message, mode });
@@ -319,6 +343,8 @@ export class ProactivityController {
 					signal,
 					beforeOwnership: () => {
 						assertCurrent();
+						runUsage.assertHealthy();
+						reviewInvestigation.assertHealthy();
 						stopObserving();
 					},
 				},
@@ -332,11 +358,15 @@ export class ProactivityController {
 			throw error;
 		} finally {
 			stopObserving();
-			this._isRunning = false;
-			usage?.release();
-			deregisterInFlight?.();
-			runtimeLease?.release();
-			if (signal.aborted && !this._aborted && !this.deps.isDisposed()) this.scheduleFromIdle();
+			try {
+				await investigation?.dispose();
+			} finally {
+				this._isRunning = false;
+				usage?.release();
+				deregisterInFlight?.();
+				runtimeLease?.release();
+				if (signal.aborted && !this._aborted && !this.deps.isDisposed()) this.scheduleFromIdle();
+			}
 		}
 	}
 }

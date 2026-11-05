@@ -8,9 +8,11 @@ import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/ch
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
+import { executeBoundedRepoRead } from "./bounded-repo-read.ts";
 import { reduceToolOutput } from "./output-reduction.ts";
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import { resolveToCwd } from "./path-utils.ts";
+import type { ReadOperationFactory } from "./read-operation-context.ts";
 import { formatCollapsibleToolResult, renderTextComponent, str, toolTextResult } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -90,6 +92,7 @@ export interface RepoReadToolDetails {
 }
 
 export interface RepoReadToolOptions {
+	readOperation?: ReadOperationFactory;
 	/** Test seam: the spawner used for `git`. */
 	spawn?: typeof spawnProcess;
 	/** Base environment; defaults to the process environment. */
@@ -496,11 +499,17 @@ export function createRepoReadToolDefinition(
 		name: "repo_read",
 		label: "repo_read",
 		readOnly: true,
-		description:
-			"Read-only git (status, log, diff, show, blame, ls-files, rev-parse) with a limited, output-shaping option set; other options are refused. Use bash for anything else.",
+		description: options?.readOperation
+			? "Bounded native Git read: status, log, diff, show, ls-files or rev-parse. Process count, output and deadline are limited; internal Git I/O is not metered. Use literal paths for status/diff/show/ls-files and HEAD, full commit hashes or refs/ names for revisions. Global configuration and automatic network access are disabled."
+			: "Read-only git (status, log, diff, show, blame, ls-files, rev-parse) with a limited, output-shaping option set; other options are refused. Use bash for anything else.",
 		promptSnippet: "Read-only git inspection",
 		parameters: repoReadSchema,
 		async execute(_toolCallId, input: RepoReadToolInput, signal?: AbortSignal) {
+			if (options?.readOperation) {
+				if (options.spawn || options.environment)
+					throw new Error("Bounded repo_read requires the native local adapter");
+				return executeBoundedRepoRead(options.readOperation("repo_read", _toolCallId, signal), input, cwd);
+			}
 			if (signal?.aborted) throw new Error("Operation aborted");
 			const action = input.action;
 			if (!REPO_READ_ACTIONS.includes(action)) refuse(`'${String(action)}' is not a read-only git action`);

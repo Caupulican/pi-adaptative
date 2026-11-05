@@ -96,7 +96,11 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		});
 	}
 	if (execution !== "not_started" && execution !== "running" && execution !== "unknown") return undefined;
-	if (Object.hasOwn(record, "operationStatus") || (execution !== "unknown" && postprocessingFailures.length > 0))
+	if (
+		Object.hasOwn(record, "operationStatus") ||
+		(execution === "running" && postprocessingFailures.length > 0) ||
+		(execution === "not_started" && postprocessingFailures.includes("after_hook"))
+	)
 		return undefined;
 	if (execution === "unknown") {
 		return Object.freeze({ ...base, execution, ...(typeof failureCode === "string" ? { failureCode } : {}) });

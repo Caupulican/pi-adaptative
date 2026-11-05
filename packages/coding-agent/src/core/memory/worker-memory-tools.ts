@@ -22,6 +22,16 @@ export const WORKER_MEMORY_BROKER_TOOL_NAME_SET: ReadonlySet<string> = new Set(W
 /** Root-only memory tools: a worker never holds these, whatever its grant names. */
 export const WORKER_ROOT_MEMORY_TOOL_NAMES: ReadonlySet<string> = new Set([ROOT_MEMORY_TOOL_NAME]);
 
+/** Root memory authority may lend its read-only broker tools; the root mutator never crosses lanes. */
+export function lendsMemoryReadTool(surface: readonly string[], tool: string): boolean {
+	return (
+		WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(tool) &&
+		(surface.includes(tool) ||
+			surface.includes(ROOT_MEMORY_TOOL_NAME) ||
+			surface.includes(CONTINUOUS_CHAT_ZOOM_TOOL_NAME))
+	);
+}
+
 /**
  * The one read/write partition of the root `memory` tool's actions. The history actions are offered in both
  * memory systems (alone in ICM); `list` and the writes belong to OKF's curated stores. The tool schemas, the
@@ -64,6 +74,35 @@ export interface LaneMemoryCapacity {
 /** The lane's live capacity, or undefined while it has sent no request (its capacity is then unknown). */
 export type LaneMemoryCapacitySource = () => LaneMemoryCapacity | undefined;
 
+export interface MemoryReadSourceReference {
+	readonly kind: "transcript" | "summary" | "knowledge" | "managed" | "icm";
+	readonly ref: string;
+	readonly revision: string;
+}
+
+export interface MemoryReadReceipt {
+	readonly id: string;
+	readonly kind: "search" | "source" | "navigation";
+	readonly sources: readonly MemoryReadSourceReference[];
+	readonly textDigest: string;
+	readonly complete: boolean;
+	readonly disposition: "read" | "refused" | "unavailable";
+	/** Source/policy freshness only; later receiving-request capacity revisions do not invalidate evidence. */
+	isCurrent(): boolean;
+	/** Caller supplies its reserved revalidation deadline. Does not issue a new evidence receipt. */
+	revalidate(options: WorkerMemoryReadOptions): Promise<boolean>;
+}
+
+export interface WorkerMemoryReadOptions {
+	readonly signal?: AbortSignal;
+	readonly deadlineAt?: number;
+	/** Host-only restriction; ordinary callers retain their existing provider behavior. */
+	readonly admission?: "native-only";
+	/** Maximum decoded image bytes admitted by navigation; zero retains descriptors without loading images. */
+	readonly maxImageBytes?: number;
+	readonly observe?: (receipt: MemoryReadReceipt) => void;
+}
+
 /**
  * One worker source read's answer: the page or expansion text, or a typed refusal (`memory_source_<status>: ...`)
  * that the worker sees verbatim, exact-source pointers included, exactly as the root sees its history refusals.
@@ -80,11 +119,12 @@ export type WorkerMemorySourceAnswer = { ok: true; text: string } | { ok: false;
 export interface WorkerMemoryBroker {
 	/** Current exact task-selected facts, sized against the complete request being prepared. */
 	projectKnowledge?(budget: MemoryPromptBudget): KnowledgeProjection;
-	read(query: string): Promise<string>;
-	readSource(ref: string, cursor?: number): Promise<WorkerMemorySourceAnswer>;
+	read(query: string, options?: WorkerMemoryReadOptions): Promise<string>;
+	readSource(ref: string, cursor?: number, options?: WorkerMemoryReadOptions): Promise<WorkerMemorySourceAnswer>;
 	navigate(
 		tool: (typeof CONTINUOUS_CHAT_NAVIGATION_TOOL_NAMES)[number],
 		args: unknown,
 		signal?: AbortSignal,
+		options?: WorkerMemoryReadOptions,
 	): Promise<AgentToolResult<Record<string, unknown>>>;
 }

@@ -19,7 +19,7 @@ import {
 	writeFileSync,
 } from "fs";
 import { arch, platform } from "os";
-import { dirname, join } from "path";
+import { dirname, isAbsolute, join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
@@ -437,13 +437,48 @@ function cacheResolvedSystemPath(tool: ManagedToolName, resolvedPath: string): v
 	}
 }
 
+/** Maximum filesystem inspections made by installed-only discovery. No process or cache writes. */
+export const INSTALLED_TOOL_METADATA_BOUND = 512;
+
+export function resolveInstalledExecutable(names: readonly string[], preferred: readonly string[] = []): string | null {
+	const pathValue = process.env.PATH ?? "";
+	if (pathValue.length > 65_536 || names.length > 8 || preferred.length > 8) return null;
+	const directories = pathValue.split(platform() === "win32" ? ";" : ":").filter(isAbsolute);
+	const extensions = platform() === "win32" ? [".exe", ".com", ""] : [""];
+	let candidates = 0;
+	const inspect = (candidate: string): boolean => {
+		if (++candidates > INSTALLED_TOOL_METADATA_BOUND / 2) return false;
+		try {
+			if (!statSync(candidate).isFile()) return false;
+			if (platform() !== "win32") accessSync(candidate, fsConstants.X_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	for (const candidate of preferred) if (inspect(candidate)) return candidate;
+	for (const directory of directories) {
+		for (const name of names) {
+			for (const extension of extensions) {
+				if (candidates >= INSTALLED_TOOL_METADATA_BOUND / 2) return null;
+				const candidate = join(directory, name + extension);
+				if (inspect(candidate)) return candidate;
+			}
+		}
+	}
+	return null;
+}
+
 // Get the path to a tool (system-wide or in our tools dir)
-export function getToolPath(tool: ManagedToolName): string | null {
+export function getToolPath(tool: ManagedToolName, options?: { installedOnly: boolean }): string | null {
 	const config = TOOLS[tool];
 	if (!config) return null;
 
 	// Check our tools directory first
 	const localPath = getManagedToolBinaryPath(tool);
+	if (options?.installedOnly) {
+		return resolveInstalledExecutable(config.systemBinaryNames ?? [config.binaryName], [localPath]);
+	}
 	if (existsSync(localPath)) {
 		return localPath;
 	}

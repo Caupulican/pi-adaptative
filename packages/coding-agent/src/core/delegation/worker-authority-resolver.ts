@@ -8,10 +8,8 @@ import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
-	CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
-	ROOT_MEMORY_TOOL_NAME,
+	lendsMemoryReadTool,
 	WORKER_CHAT_NAVIGATION_TOOL_NAME_SET,
-	WORKER_MEMORY_BROKER_TOOL_NAME_SET,
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
@@ -592,15 +590,14 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		const inheritedSurface = new Set(inheritedSurfaceNames);
 		const foregroundTools = input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES;
 		// The bounded memory reads (memory_read, zoom, date) may be granted when the foreground reads memory itself.
-		const boundedMemoryReadInherited =
-			(foregroundTools.includes(ROOT_MEMORY_TOOL_NAME) ||
-				foregroundTools.includes(CONTINUOUS_CHAT_ZOOM_TOOL_NAME)) &&
-			input.foregroundEnvelope?.capabilities.includes("memory.query") === true;
 		const uninheritedTools = uniqueToolNames.filter(
 			(toolName) =>
 				toolName !== STABLE_SHELL_TOOL_NAME &&
 				!inheritedSurface.has(toolName) &&
-				!(WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName) && boundedMemoryReadInherited) &&
+				!(
+					lendsMemoryReadTool(foregroundTools, toolName) &&
+					input.foregroundEnvelope?.capabilities.includes("memory.query") === true
+				) &&
 				!(
 					!input.base &&
 					toolName === BOT_MESSAGE_TOOL_NAME &&

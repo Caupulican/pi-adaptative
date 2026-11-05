@@ -1,3 +1,4 @@
+import type { MemoryReadContext } from "../memory/memory-read-context.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import {
 	type ContextEvidenceRef,
@@ -83,8 +84,8 @@ export interface MemoryProvider {
 	label: string;
 	source: MemoryProviderSource;
 	capabilities: MemoryProviderCapabilities;
-	search(request: MemorySearchRequest): Promise<MemorySearchResult[]>;
-	fetch(ref: MemoryRef): Promise<MemoryItem | undefined>;
+	search(request: MemorySearchRequest, context?: MemoryReadContext): Promise<MemorySearchResult[]>;
+	fetch(ref: MemoryRef, context?: MemoryReadContext): Promise<MemoryItem | undefined>;
 	proposeWrite?(request: MemoryWriteRequest): Promise<MemoryWritePreview>;
 	write?(approved: ApprovedMemoryWrite): Promise<MemoryWriteResult>;
 }

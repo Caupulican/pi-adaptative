@@ -38,11 +38,20 @@ export function addResourceIgnoreRules(matcher: ResourceIgnoreMatcher, dir: stri
 		const ignorePath = join(dir, filename);
 		if (!existsSync(ignorePath)) continue;
 		try {
-			const patterns = readFileSync(ignorePath, "utf8")
-				.split(/\r?\n/)
-				.map((line) => prefixResourceIgnorePattern(line, prefix))
-				.filter((line): line is string => line !== undefined);
-			if (patterns.length > 0) matcher.add(patterns);
+			addResourceIgnoreText(matcher, readFileSync(ignorePath, "utf8"), prefix);
 		} catch {}
 	}
+}
+
+export function addResourceIgnoreText(matcher: ResourceIgnoreMatcher, text: string, prefix = ""): void {
+	// A matcher rooted at this directory needs the original anchoring and escaping rules.
+	if (!prefix) {
+		matcher.add(text);
+		return;
+	}
+	const patterns = text
+		.split(/\r?\n/)
+		.map((line) => prefixResourceIgnorePattern(line, prefix))
+		.filter((line): line is string => line !== undefined);
+	if (patterns.length > 0) matcher.add(patterns);
 }

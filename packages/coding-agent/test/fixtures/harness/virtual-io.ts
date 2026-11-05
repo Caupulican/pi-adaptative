@@ -38,6 +38,8 @@ export interface IoOperation {
 	readonly kind: string;
 	readonly path: string;
 	readonly destination?: string;
+	/** Bytes returned by a successful modeled file read, including descriptor and stream reads. */
+	readonly bytesRead?: number;
 	/** The open flags, on an `open` operation handed to a fault or observer matcher (never in the ledger). */
 	readonly flags?: string;
 }
@@ -647,7 +649,7 @@ export class VirtualFileSystem {
 		this.fault({ kind: "read", path }, "before");
 		const node = this.nodes.get(path)!;
 		if (node.kind !== "file") throw this.failure("read", "EISDIR", path, "read");
-		this.log({ kind: "read", path });
+		this.log({ kind: "read", path, bytesRead: node.data.length });
 		const encoding = typeof options === "string" ? options : (options as { encoding?: string } | undefined)?.encoding;
 		return encoding ? node.data.toString(encoding as BufferEncoding) : Buffer.from(node.data);
 	}
@@ -1321,7 +1323,7 @@ export class VirtualFileSystem {
 		const result = node.data.subarray(descriptor.position);
 		descriptor.position = node.data.length;
 		const encoding = typeof options === "string" ? options : (options as { encoding?: string } | undefined)?.encoding;
-		this.note("read", descriptor.path);
+		this.log({ kind: "read", path: descriptor.path, bytesRead: result.length });
 		return encoding ? result.toString(encoding as BufferEncoding) : Buffer.from(result);
 	}
 
@@ -1331,7 +1333,7 @@ export class VirtualFileSystem {
 		this.fault({ kind: "read", path: descriptor.path }, "before");
 		const data = descriptor.node.data;
 		const result = Buffer.from(data.subarray(start, end === undefined ? data.length : end + 1));
-		this.note("read", descriptor.path);
+		this.log({ kind: "read", path: descriptor.path, bytesRead: result.length });
 		return result;
 	}
 
@@ -1349,7 +1351,7 @@ export class VirtualFileSystem {
 		const amount = Math.max(0, Math.min(length, node.data.length - start));
 		buffer.set(node.data.subarray(start, start + amount), offset);
 		if (position === null) descriptor.position += amount;
-		this.note("read", descriptor.path);
+		this.log({ kind: "read", path: descriptor.path, bytesRead: amount });
 		return amount;
 	}
 

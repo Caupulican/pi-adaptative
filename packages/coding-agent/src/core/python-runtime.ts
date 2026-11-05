@@ -5,6 +5,7 @@ import { ensureTool, getToolPath } from "../utils/tools-manager.ts";
 import { cacheFile, runtimesDir } from "./agent-paths.ts";
 import { execCommand } from "./exec.ts";
 import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
+import { installedPythonCandidates } from "./python-installed.ts";
 
 export const PYTHON_RUNTIME_REQUEST = ">=3.10";
 export const PYTHON_RUNTIME_INSTALL_REQUEST = "3.13";
@@ -17,6 +18,7 @@ const PYTHON_RUNTIME_COMMAND_BUFFER = 64 * 1024;
 export interface PythonRuntimeCommandOptions {
 	timeoutMs: number;
 	env: NodeJS.ProcessEnv;
+	signal?: AbortSignal;
 }
 
 export interface PythonRuntimeCommandResult {
@@ -33,6 +35,8 @@ export interface PythonRuntimeDependencies {
 	ensureUv: (silent: boolean) => Promise<string | undefined>;
 	/** An already-installed uv, found without downloading anything. */
 	findUv: () => string | undefined;
+	/** Bounded read-only discovery; the caller's deadline is checked while traversing candidates. */
+	findInstalledPython: (assertCurrent: () => void) => readonly string[];
 	isOffline: () => boolean;
 	makeDirectory: (path: string) => void;
 	/** Validate a literal absolute executable file and return its current opaque identity; undefined means unavailable. */
@@ -68,6 +72,11 @@ export interface PythonRuntimeEnsureOptions {
 	 * its failures. A non-ready answer from such a probe is never cached. Default: true.
 	 */
 	acquire?: boolean;
+	/** Non-acquiring lookup owns its cancellation and deadline independently of any installation. */
+	signal?: AbortSignal;
+	deadlineAt?: number;
+	/** Optional metered process adapter for non-acquiring lookup. */
+	run?: PythonRuntimeDependencies["run"];
 }
 
 export interface PythonRuntimeManager {
@@ -110,9 +119,16 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 	let lastOutcome: PythonRuntimeOutcome | undefined;
 	let lastOutcomeAt = 0;
 	let lastInterpreterIdentity: string | undefined;
+	let installed:
+		| {
+				agentDir: string;
+				identity: string;
+				outcome: Extract<PythonRuntimeOutcome, { status: "ready" }>;
+		  }
+		| undefined;
 
-	const ensureOnce = async (silent: boolean, acquire: boolean): Promise<PythonRuntimeOutcome> => {
-		const uvPath = acquire ? await deps.ensureUv(silent) : deps.findUv();
+	const ensureOnce = async (silent: boolean): Promise<PythonRuntimeOutcome> => {
+		const uvPath = await deps.ensureUv(silent);
 		if (!uvPath) {
 			return { status: "uv-unavailable", reason: "uv is unavailable; run `pi doctor` or reconnect and retry." };
 		}
@@ -165,12 +181,6 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 		}
 		const initialOutcome = resolveFoundPython(initialFind);
 		if (initialOutcome) return initialOutcome;
-		if (!acquire) {
-			return {
-				status: "python-unavailable",
-				reason: "No Python interpreter is installed yet; real use installs it.",
-			};
-		}
 		if (deps.isOffline()) {
 			return {
 				status: "offline",
@@ -201,24 +211,72 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 		};
 	};
 
+	const resolveInstalled = async (options: PythonRuntimeEnsureOptions): Promise<PythonRuntimeOutcome> => {
+		const agentDir = deps.agentDir;
+		const deadline = options.deadlineAt ?? deps.now() + PYTHON_RUNTIME_FIND_TIMEOUT_MS;
+		const assertCurrent = (): void => {
+			options.signal?.throwIfAborted();
+			if (deps.agentDir !== agentDir) throw new Error("Python runtime owner changed during discovery.");
+			if (!Number.isFinite(deadline) || deps.now() >= deadline)
+				throw new Error("Installed Python discovery deadline expired.");
+		};
+		assertCurrent();
+		if (!options.force && lastOutcome?.status === "ready") {
+			const current = deps.inspectInterpreter(lastOutcome.pythonPath);
+			assertCurrent();
+			if (current !== undefined && current === lastInterpreterIdentity) return lastOutcome;
+		}
+		if (!options.force && installed?.agentDir === agentDir) {
+			const current = deps.inspectInterpreter(installed.outcome.pythonPath);
+			assertCurrent();
+			if (current !== undefined && current === installed.identity) return installed.outcome;
+		}
+		const uvPath = deps.findUv();
+		assertCurrent();
+		if (!uvPath)
+			return { status: "uv-unavailable", reason: "uv is not installed; this lookup cannot acquire software." };
+		const run = options.run ?? deps.run;
+		for (const pythonPath of deps.findInstalledPython(assertCurrent)) {
+			assertCurrent();
+			const identity = deps.inspectInterpreter(pythonPath);
+			if (!identity) continue;
+			assertCurrent();
+			// Isolated, site-free and bytecode-free: discovery cannot load project startup code or write caches.
+			const result = await run(
+				pythonPath,
+				["-I", "-S", "-B", "-c", "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))"],
+				agentDir,
+				{
+					timeoutMs: Math.max(1, Math.min(PYTHON_RUNTIME_FIND_TIMEOUT_MS, deadline - deps.now())),
+					env: withoutHarnessLaunchEnv(process.env),
+					signal: options.signal,
+				},
+			);
+			assertCurrent();
+			if (result.code !== 0 || result.killed || result.stdoutTruncated) continue;
+			const version = /^(\d+)\.(\d+)\r?\n$/.exec(result.stdout);
+			const minor = Number(version?.[2]);
+			if (!version || Number(version[1]) !== 3 || !Number.isSafeInteger(minor) || minor < 10) continue;
+			if (deps.inspectInterpreter(pythonPath) !== identity) continue;
+			assertCurrent();
+			// A concurrent installer owns its own cache publication; read-only lookup never replaces it.
+			const outcome = Object.freeze({ status: "ready" as const, uvPath, pythonPath, pythonInstalled: false });
+			installed = { agentDir, identity, outcome };
+			return outcome;
+		}
+		return {
+			status: "python-unavailable",
+			reason: "No compatible installed Python was found within the read-only discovery bounds.",
+		};
+	};
+
 	return {
 		ensure(options = {}) {
+			if (options.acquire === false) return resolveInstalled(options);
+			if (options.run || options.signal || options.deadlineAt !== undefined)
+				throw new Error("Scoped Python discovery requires acquire: false.");
 			if (inFlight) return inFlight;
 			const force = options.force ?? false;
-			if (options.acquire === false) {
-				if (lastOutcome?.status === "ready") {
-					const current = deps.inspectInterpreter(lastOutcome.pythonPath);
-					if (current !== undefined && current === lastInterpreterIdentity) return Promise.resolve(lastOutcome);
-				}
-				// A probe neither shares nor replaces the acquiring path's state unless it found a ready runtime.
-				return ensureOnce(options.silent ?? true, false).then((outcome) => {
-					if (outcome.status === "ready") {
-						lastOutcome = Object.freeze(outcome);
-						lastOutcomeAt = deps.now();
-					}
-					return outcome;
-				});
-			}
 			if (!force && lastOutcome?.status === "ready") {
 				const current = deps.inspectInterpreter(lastOutcome.pythonPath);
 				if (current !== undefined && current === lastInterpreterIdentity) return Promise.resolve(lastOutcome);
@@ -231,7 +289,7 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			) {
 				return Promise.resolve(lastOutcome);
 			}
-			inFlight = ensureOnce(options.silent ?? true, true)
+			inFlight = ensureOnce(options.silent ?? true)
 				.then((outcome) => {
 					lastOutcome = Object.freeze(outcome);
 					lastOutcomeAt = deps.now();
@@ -254,7 +312,8 @@ const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 		return getAgentDir();
 	},
 	ensureUv: (silent) => ensureTool("uv", silent),
-	findUv: () => getToolPath("uv") ?? undefined,
+	findUv: () => getToolPath("uv", { installedOnly: true }) ?? undefined,
+	findInstalledPython: (assertCurrent) => installedPythonCandidates(getAgentDir(), assertCurrent),
 	isOffline: () => isTruthyEnvFlag(process.env.PI_OFFLINE),
 	makeDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
 	inspectInterpreter: inspectPythonInterpreter,
@@ -263,6 +322,7 @@ const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 			env: options.env,
 			maxBuffer: PYTHON_RUNTIME_COMMAND_BUFFER,
 			timeout: options.timeoutMs,
+			signal: options.signal,
 		});
 		return {
 			code: result.code,

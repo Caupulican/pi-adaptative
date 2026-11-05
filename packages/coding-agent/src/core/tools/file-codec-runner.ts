@@ -1,8 +1,12 @@
 import { join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
+import { INSTALLED_TOOL_METADATA_BOUND } from "../../utils/tools-manager.ts";
 import { execCommand } from "../exec.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { PYTHON_DISCOVERY_METADATA_BOUND } from "../python-installed.ts";
 import { ensurePythonRuntime } from "../python-runtime.ts";
+import type { ReadOperation } from "./read-operation-context.ts";
+import { runReadProcess } from "./read-process.ts";
 
 export const MAX_FILE_CODEC_PROTOCOL_BYTES = 64 * 1024 * 1024;
 export const FILE_CODEC_TIMEOUT_MS = 30_000;
@@ -25,10 +29,34 @@ export class PythonCodecUnavailableError extends Error {
 	}
 }
 
-export async function resolveFileCodecLaunch(signal?: AbortSignal) {
+export async function resolveFileCodecLaunch(signal?: AbortSignal, operation?: ReadOperation) {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
-	const runtime = await awaitPreflight(() => ensurePythonRuntime({ silent: true }), signal);
+	if (operation) operation.charge("metadata", INSTALLED_TOOL_METADATA_BOUND + PYTHON_DISCOVERY_METADATA_BOUND);
+	const runtime = operation
+		? await ensurePythonRuntime({
+				silent: true,
+				acquire: false,
+				signal,
+				deadlineAt: operation.deadlineAt,
+				run: async (command, args, cwd, options) => {
+					const result = await runReadProcess(operation, command, args, {
+						cwd,
+						env: options.env,
+						outputCap: 64 * 1024,
+					});
+					const decoder = new TextDecoder("utf-8", { fatal: true });
+					return {
+						code: result.code ?? -1,
+						stdout: decoder.decode(result.stdout),
+						stderr: decoder.decode(result.stderr),
+						killed: result.capped,
+						stdoutTruncated: result.capped,
+					};
+				},
+			})
+		: await awaitPreflight(() => ensurePythonRuntime({ silent: true }), signal);
 	if (runtime.status !== "ready") throw new PythonCodecUnavailableError(runtime.reason);
+	operation?.assertCurrent();
 	const resources = getBundledResourcesDir();
 	return {
 		command: runtime.pythonPath,

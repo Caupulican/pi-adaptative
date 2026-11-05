@@ -15,6 +15,7 @@ import {
 	packToolOutput,
 } from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { boundedFind } from "./bounded-local-search.ts";
 import {
 	type FffSearchBackend,
 	type FffSearchResult,
@@ -23,6 +24,7 @@ import {
 } from "./fff-search-backend.ts";
 import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
 	invalidArgText,
@@ -51,6 +53,7 @@ const defaultFindOperations: FindOperations = {
 };
 
 export interface FindToolOptions extends ManagedSearchToolOptions {
+	readOperation?: ReadOperationFactory;
 	/** Custom operations for find. Default: local filesystem plus routed FFF/fd search */
 	operations?: FindOperations;
 	/** FFF backend for resident indexed search. Set false to force fd fallback. */
@@ -329,7 +332,7 @@ export function createFindToolDefinition(
 		name: "find",
 		label: "find",
 		readOnly: true,
-		description: `Search for files by glob pattern; returns paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+		description: `Search for files by glob pattern; returns paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.${options?.readOperation ? " This bounded review reads only project .gitignore, .ignore and .fdignore rules; global ignore files are excluded. Partial results do not prove absence." : ""}`,
 		promptSnippet: "Find files by glob",
 		parameters: findSchema,
 		async execute(
@@ -344,6 +347,26 @@ export function createFindToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
+			if (options?.readOperation) {
+				if (options.operations) throw new Error("Bounded search requires the local filesystem adapter");
+				const result = await boundedFind(
+					options.readOperation("find", toolCallId, signal),
+					resolveToCwd(searchDir || ".", cwd),
+					{ pattern, limit, ignoreCase },
+					cwd,
+				);
+				const formatted = formatFindResults(result.paths, limit ?? DEFAULT_LIMIT, {
+					toolCallId,
+					rawPath: searchDir,
+					pattern,
+				});
+				const bounded = boundReadResult(
+					formatted.text + (result.partial ? "\n[Partial search: work or result limit reached]" : ""),
+				);
+				const text = bounded.text;
+				result.publish(text, bounded.truncated || formatted.details?.truncation?.truncated);
+				return toolTextResult({ text, details: formatted.details });
+			}
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(new Error("Operation aborted"));

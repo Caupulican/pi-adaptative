@@ -265,11 +265,20 @@ export class ResearchLaneController {
 							tools: activeToolSurface.tools,
 							maxTurns: 6,
 							beforeToolCall: activeToolSurface.beforeToolCall,
+							afterToolCall: async () => {
+								activeToolSurface.assertHealthy();
+								return undefined;
+							},
+							requestGuard: () => {
+								activeToolSurface.assertHealthy();
+								return undefined;
+							},
 							signal,
 							cacheRetention: "short",
 							laneKind: "research",
 						});
 						spentUsage = completion.usage;
+						activeToolSurface.assertHealthy();
 						return {
 							text: completion.text,
 							costUsd: completion.usage.cost.total,

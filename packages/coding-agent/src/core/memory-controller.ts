@@ -116,8 +116,18 @@ import { KnowledgeStore } from "./memory/knowledge-store.ts";
 import type { KnowledgeReadSource } from "./memory/knowledge-tool.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
+	assertMemoryReadActive,
+	INCOMPLETE_MEMORY_READ,
+	type MemoryReadContext,
+	type MemoryReadEvidence,
+	waitForMemoryRead,
+} from "./memory/memory-read-context.ts";
+import { MemoryReadFlights } from "./memory/memory-read-flight.ts";
+import { createMemoryReadReceipt } from "./memory/memory-read-receipt.ts";
+import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
 	FileStoreProvider,
+	type FileStoreReadSnapshot,
 	type ManagedMemoryDriftEntry,
 	type ManagedMemoryTarget,
 	type StructuredReflectionApplyResult,
@@ -149,8 +159,6 @@ import {
 import {
 	describeSummaryReference,
 	expandTranscriptNode,
-	extractTranscriptNodeHandles,
-	extractTranscriptSourceHandles,
 	openTranscriptSource,
 	reasonSentence,
 	TRANSCRIPT_SOURCE_PAGE_BYTES,
@@ -168,6 +176,7 @@ import type {
 	LaneMemoryCapacity,
 	LaneMemoryCapacitySource,
 	WorkerMemoryBroker,
+	WorkerMemoryReadOptions,
 	WorkerMemorySourceAnswer,
 } from "./memory/worker-memory-tools.ts";
 import type { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
@@ -411,6 +420,7 @@ const POLICY_BLOCKED_HISTORY_READER: TranscriptSourceReader = {
 	search: async () => ({ status: "forbidden", reason: MEMORY_RETRIEVAL_DISABLED_REASON }),
 	readSource: async () => ({ status: "forbidden", reason: MEMORY_RETRIEVAL_DISABLED_REASON }),
 	coverage: () => undefined,
+	observationCurrent: () => ({ status: "forbidden", reason: MEMORY_RETRIEVAL_DISABLED_REASON }),
 };
 const POLICY_BLOCKED_HISTORY_EXPANDER: TranscriptNodeExpander = {
 	expand: async () => ({ status: "forbidden", reason: MEMORY_RETRIEVAL_DISABLED_REASON }),
@@ -426,11 +436,12 @@ const POLICY_BLOCKED_SUMMARY_LOOKUP: TranscriptSummaryLookup = {
 function laneSummaryCandidate(
 	summary: TranscriptSummaryReference,
 	hitScores: ReadonlyMap<string, number>,
-): MemoryTierCandidate {
+): LaneMemoryCandidate {
 	// The root's own heading for the record, so a root read and a worker read report it the same way.
 	const heading = describeSummaryReference(summary);
 	return {
 		id: summary.handle,
+		sourceHandles: [summary.handle, ...summary.covers],
 		tier: "evidence_pointer",
 		sourceLabel: LANE_SUMMARY_SOURCE_LABEL,
 		summary: `${heading}\n${summary.text}`,
@@ -574,8 +585,23 @@ export interface LaneMemoryReadSnapshot {
 	readonly sourceGeneration: number;
 	readonly sourceRevision: number;
 	readonly content: string;
+	readonly evidence: readonly MemoryReadEvidence[];
+	readonly sourceHandles: readonly string[];
 	/** Rechecked by the receiving broker after its await, before exposing text or admitting source handles. */
 	isCurrent(): boolean;
+}
+
+interface LaneMemorySourceRead {
+	readonly lifecycleRecall: string;
+	readonly okfReport: MemoryRetrievalReport | undefined;
+	readonly historyReport: MemoryRetrievalReport;
+	readonly summaries: { candidates: LaneMemoryCandidate[]; status: string };
+	readonly evidence: readonly MemoryReadEvidence[];
+	readonly standing: FileStoreReadSnapshot | undefined;
+}
+
+interface LaneMemoryCandidate extends MemoryTierCandidate {
+	readonly sourceHandles: readonly string[];
 }
 
 /** A memory mutation or lifecycle transition invalidated a delegated read before it could be used. */
@@ -651,7 +677,7 @@ export class MemoryController {
 	/** Monotone process-local revision advanced by the durable writer's authoritative change callback. */
 	private _memoryContentRevision = 0;
 	/** Active equivalent reads only. Completed snapshots are not cached across possible external file changes. */
-	private readonly _laneMemoryReads = new Map<string, Promise<LaneMemoryReadSnapshot>>();
+	private readonly _laneMemoryReads = new MemoryReadFlights(TRANSCRIPT_FOREGROUND_READ_MS);
 	/** Whether the latest request's history frontier was confirmed against the store (see `runMemoryRetrieval`). */
 	private _frontierConfirmed = false;
 	private _transitioning = false;
@@ -973,9 +999,12 @@ export class MemoryController {
 		this._shutdownPromise ??= (async () => {
 			const legacy = this._legacyMemoryEnabled();
 			this._memoryGeneration++;
+			this._activeMemorySystem = undefined;
+			this._transitioning = true;
 			const activation = this._activationAbort;
 			this._activationAbort = undefined;
 			activation?.abort(new Error("Memory activation stopped by shutdown."));
+			await this._laneMemoryReads.abort(new Error("Memory reads stopped by shutdown."));
 			this._fileStoreWriter = undefined;
 			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
 			const hierarchyStopped = this._hierarchy?.detach();
@@ -986,8 +1015,6 @@ export class MemoryController {
 			this._unsubscribeSettingsRecovery?.();
 			this._unsubscribeSettingsRecovery = undefined;
 			this._releaseTranscriptRecall();
-			this._activeMemorySystem = undefined;
-			this._transitioning = true;
 			// Attach to all already-started stops immediately; one rejection must not leave another unobserved.
 			const draining = Promise.allSettled([
 				hierarchyStopped,
@@ -1631,6 +1658,7 @@ export class MemoryController {
 			text: projection?.text ?? "",
 			includedCount: projection?.includedCount ?? 0,
 			omittedCount: projection?.omittedCount ?? references.length,
+			references: projection?.references ?? [],
 			isCurrent: () => context.isCurrent() && (projection?.isCurrent() ?? true),
 		};
 	}
@@ -2108,19 +2136,21 @@ export class MemoryController {
 	/**
 	 * One immutable delegated-memory snapshot, sized against the RECEIVING lane (`capacity`): its own window, the
 	 * request it already carries, the reply room it keeps and the tokens it may still spend, never the root
-	 * model's. Equivalent concurrent reads (same memory state, retrieval policy, lane request and allowance) share
-	 * the exact promise and object while completed reads are discarded, so a later call observes fresh external
+	 * model's. Equivalent concurrent reads share raw source acquisition; each consumer composes its own output
+	 * and checks its own request revision. Completed reads are discarded, so a later call observes fresh external
 	 * state. A lane whose capacity is unknown or exhausted gets a stated constraint, never an assumption of room.
 	 * OKF lanes also get standing memory, extension recall and the frontier; an ICM lane gets the history query
-	 * and the approved summaries covering its hits, nothing else. `deadlineAt` is the calling tool call's one
-	 * deadline; an equivalent concurrent read shares the first caller's.
+	 * and the approved summaries covering its hits. `deadlineAt` belongs to this consumer; each physical source
+	 * flight has its own fixed deadline. Native-only reads exclude opaque extension callbacks.
 	 */
 	readMemorySnapshotForLane(
 		query: string,
 		capacity: LaneMemoryCapacitySource,
 		deadlineAt: number,
 		knowledgeReferences: readonly KnowledgeGrantReference[] = [],
+		options: WorkerMemoryReadOptions = {},
 	): Promise<LaneMemoryReadSnapshot> {
+		assertMemoryReadActive({ signal: options.signal, deadlineAt });
 		const generation = this._memoryGeneration;
 		const revision = this._memoryContentRevision;
 		if (!this._historyAvailable(generation)) {
@@ -2165,25 +2195,10 @@ export class MemoryController {
 				),
 			);
 		}
-		const maxResults = Math.min(3, budget.maxResults);
+		const maxResults = Math.min(3, settings.maxResults);
 		const turnIndex = this.deps.getTurnIndex();
 		const policy = this._retrievalPolicyKey();
-		const key = JSON.stringify([
-			generation,
-			revision,
-			policy,
-			legacy,
-			turnIndex,
-			normalizedQuery,
-			maxResults,
-			budget,
-			lane?.revision,
-			knowledgeReferences,
-			knowledgeReferences.length ? this._knowledgeStore?.revision() : undefined,
-		]);
-		const active = this._laneMemoryReads.get(key);
-		if (active) return active;
-		const loading = this._loadLaneMemorySnapshot({
+		return this._loadLaneMemorySnapshot({
 			generation,
 			revision,
 			policy,
@@ -2193,17 +2208,12 @@ export class MemoryController {
 			turnIndex,
 			budget,
 			capacity,
+			laneRevision: lane?.revision,
 			lifecycleTail: this._lifecycleTail,
 			deadlineAt,
 			knowledgeReferences,
+			options,
 		});
-		this._laneMemoryReads.set(key, loading);
-		void loading
-			.finally(() => {
-				if (this._laneMemoryReads.get(key) === loading) this._laneMemoryReads.delete(key);
-			})
-			.catch(() => {});
-		return loading;
 	}
 
 	/** The allowance a delegated lane's read may fill, resolved by the one budget owner on the lane's own request. */
@@ -2252,6 +2262,35 @@ export class MemoryController {
 		// resolved by the same budget owner as the snapshot; what cannot fit is a stated constraint, never cut text.
 		const laneBudget = () =>
 			this._laneMemoryBudget(this.deps.getSettingsManager().getMemoryRetrievalSettings().maxResults, capacity());
+		const checkDelivery = (
+			admission: Admission,
+			budget: MemoryPromptBudget,
+			context: MemoryReadContext,
+			laneRevision: number | undefined,
+		): void => {
+			assertMemoryReadActive(context);
+			if (!current(admission) || capacity()?.revision !== laneRevision || !isDeepStrictEqual(laneBudget(), budget))
+				throw new LaneMemorySnapshotStaleError();
+		};
+		const observe = (
+			kind: "search" | "source" | "navigation",
+			text: string,
+			evidence: readonly MemoryReadEvidence[],
+			admission: Admission,
+			options: WorkerMemoryReadOptions,
+			disposition: "read" | "refused" | "unavailable" = "read",
+		): void => {
+			options.observe?.(
+				createMemoryReadReceipt({
+					kind,
+					text,
+					evidence,
+					disposition,
+					isCurrent: () => current(admission),
+					flights: this._laneMemoryReads,
+				}),
+			);
+		};
 		return {
 			projectKnowledge: (budget) => {
 				const references = parseKnowledgeGrantReferences(knowledgeReferences());
@@ -2267,88 +2306,127 @@ export class MemoryController {
 					},
 				};
 			},
-			read: async (query) => {
+			read: async (query, options = {}) => {
 				const policy = this._retrievalPolicyKey();
 				const references = parseKnowledgeGrantReferences(knowledgeReferences());
 				// One deadline for the whole tool call, set once here and passed unchanged to every summary read.
-				const snapshot = await this.readMemorySnapshotForLane(
-					query,
-					capacity,
-					Date.now() + TRANSCRIPT_FOREGROUND_READ_MS,
-					references,
-				);
+				const deadlineAt = options.deadlineAt ?? Date.now() + TRANSCRIPT_FOREGROUND_READ_MS;
+				const snapshot = await this.readMemorySnapshotForLane(query, capacity, deadlineAt, references, options);
+				assertMemoryReadActive({ signal: options.signal, deadlineAt });
 				if (!snapshot.isCurrent() || !isDeepStrictEqual(references, knowledgeReferences()))
 					throw new LaneMemorySnapshotStaleError();
-				for (const handle of [
-					...extractTranscriptSourceHandles(snapshot.content, this._projectId()),
-					...extractTranscriptNodeHandles(snapshot.content),
-				]) {
+				observe(
+					"search",
+					snapshot.content,
+					snapshot.evidence,
+					{ generation: snapshot.sourceGeneration, policy },
+					options,
+					snapshot.evidence.length ? "read" : "unavailable",
+				);
+				for (const handle of snapshot.sourceHandles) {
 					admit(handle, { generation: snapshot.sourceGeneration, policy });
 				}
 				return snapshot.content;
 			},
-			readSource: async (ref, cursor) => {
+			readSource: async (ref, cursor, options = {}) => {
 				// One deadline for the whole tool call, set once here and passed unchanged to every summary read.
-				const deadlineAt = Date.now() + TRANSCRIPT_FOREGROUND_READ_MS;
+				const context = {
+					signal: options.signal,
+					deadlineAt: options.deadlineAt ?? Date.now() + TRANSCRIPT_FOREGROUND_READ_MS,
+				};
+				assertMemoryReadActive(context);
+				const deliveryAdmission = { generation: this._memoryGeneration, policy: this._retrievalPolicyKey() };
+				const laneRevision = capacity()?.revision;
+				const budget = laneBudget();
+				const deliver = (
+					answer: WorkerMemorySourceAnswer,
+					evidence: readonly MemoryReadEvidence[] = [],
+					handles: readonly string[] = [],
+				): WorkerMemorySourceAnswer => {
+					checkDelivery(deliveryAdmission, budget, context, laneRevision);
+					if (!evidence.every((item) => item.isCurrent())) throw new LaneMemorySnapshotStaleError();
+					if (budget.enabled && !memoryTextFitsBudget(answer.text, budget)) {
+						answer = answer.ok
+							? { ok: true, text: LANE_SOURCE_OVER_ROOM_TEXT }
+							: laneSourceRefusal(answer.status, "Refusal details exceed this worker's remaining context room.");
+						evidence = [];
+						handles = [];
+					}
+					observe(
+						"source",
+						answer.text,
+						evidence,
+						deliveryAdmission,
+						options,
+						answer.ok ? (evidence.length ? "read" : "unavailable") : "refused",
+					);
+					for (const handle of handles) admit(handle, deliveryAdmission);
+					return answer;
+				};
 				const nodePrefix = parseTranscriptNodeHandle(ref);
 				if (nodePrefix !== undefined) {
 					const nodeHandle = `txn:${nodePrefix}`;
 					const nodeAdmission = admitted.get(nodeHandle);
 					if (nodeAdmission === undefined) {
-						return laneSourceRefusal(
-							"forbidden",
-							"this summary was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it",
+						return deliver(
+							laneSourceRefusal(
+								"forbidden",
+								"this summary was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it",
+							),
 						);
 					}
 					if (!current(nodeAdmission)) throw new LaneMemorySnapshotStaleError();
-					const budget = laneBudget();
 					if (!budget.enabled)
-						return { ok: true, text: laneConstraintText(budget.reason, capacity() !== undefined) };
-					const expanded = await expandTranscriptNode(
-						this._currentHistoryExpander(nodeAdmission.generation),
-						nodeHandle,
-						{ deadlineAt },
+						return deliver({ ok: true, text: laneConstraintText(budget.reason, capacity() !== undefined) });
+					const { value: expanded, evidence } = await this._readLaneMemorySource(
+						JSON.stringify(["expand", nodeAdmission, nodeHandle, options.admission]),
+						(read) =>
+							expandTranscriptNode(this._currentHistoryExpander(nodeAdmission.generation), nodeHandle, read),
+						context,
 					);
+					checkDelivery(deliveryAdmission, budget, context, laneRevision);
 					if (!current(nodeAdmission)) throw new LaneMemorySnapshotStaleError();
 					if (!expanded.ok) {
 						// A summary that cannot be shown names its exact sources instead; the lane is shown those
 						// pointers in this refusal, so it may open them, as it may any source a read of it named.
-						for (const handle of extractTranscriptSourceHandles(expanded.reason, this._projectId())) {
-							admit(handle, nodeAdmission);
-						}
-						return laneSourceRefusal(expanded.status, expanded.reason);
+						return deliver(laneSourceRefusal(expanded.status, expanded.reason), evidence, expanded.sourceHandles);
 					}
 					// Not shown, so nothing it names is admitted either.
 					if (!memoryTextFitsBudget(expanded.text, budget))
-						return { ok: true, text: LANE_EXPANSION_OVER_ROOM_TEXT };
+						return deliver({ ok: true, text: LANE_EXPANSION_OVER_ROOM_TEXT });
 					// What an admitted expansion returns is part of what the lane was shown.
+					const shownHandles: string[] = [];
 					for (const key of ["children", "sources"] as const) {
 						const handles = expanded.details[key];
 						if (Array.isArray(handles)) {
-							for (const handle of handles) if (typeof handle === "string") admit(handle, nodeAdmission);
+							for (const handle of handles) if (typeof handle === "string") shownHandles.push(handle);
 						}
 					}
-					return { ok: true, text: expanded.text };
+					return deliver({ ok: true, text: expanded.text }, evidence, shownHandles);
 				}
 				const projectId = this._projectId();
 				const parsed = parseTranscriptSourceHandle(ref, projectId);
 				if (parsed === undefined) {
-					return laneSourceRefusal(
-						"invalid",
-						"ref is not a valid transcript handle (expected tx:<session>:<entry>:<part>:<digest> or txn:<16 hex>)",
+					return deliver(
+						laneSourceRefusal(
+							"invalid",
+							"ref is not a valid transcript handle (expected tx:<session>:<entry>:<part>:<digest> or txn:<16 hex>)",
+						),
 					);
 				}
 				const handle = formatTranscriptSourceHandle(parsed);
 				const admission = admitted.get(handle);
 				if (admission === undefined) {
-					return laneSourceRefusal(
-						"forbidden",
-						"this source was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it",
+					return deliver(
+						laneSourceRefusal(
+							"forbidden",
+							"this source was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it",
+						),
 					);
 				}
 				if (!current(admission)) throw new LaneMemorySnapshotStaleError();
-				const budget = laneBudget();
-				if (!budget.enabled) return { ok: true, text: laneConstraintText(budget.reason, capacity() !== undefined) };
+				if (!budget.enabled)
+					return deliver({ ok: true, text: laneConstraintText(budget.reason, capacity() !== undefined) });
 				// The page shrinks until the whole rendered page (header, wrapper, continuation) fits; its continuation
 				// metadata always names where the rest starts.
 				for (
@@ -2356,27 +2434,55 @@ export class MemoryController {
 					maxBytes >= LANE_MIN_SOURCE_PAGE_BYTES;
 					maxBytes = Math.floor(maxBytes / 2)
 				) {
-					const outcome = await openTranscriptSource(
-						this._currentTranscriptReader(admission.generation),
-						projectId,
-						{ ref: handle, cursor, maxBytes, deadlineAt },
+					const { value: outcome, evidence } = await this._readLaneMemorySource(
+						JSON.stringify(["source", admission, handle, cursor, maxBytes, options.admission]),
+						(read) =>
+							openTranscriptSource(this._currentTranscriptReader(admission.generation), projectId, {
+								ref: handle,
+								cursor,
+								maxBytes,
+								...read,
+							}),
+						context,
 					);
+					checkDelivery(deliveryAdmission, budget, context, laneRevision);
 					if (!current(admission)) throw new LaneMemorySnapshotStaleError();
 					if (!outcome.ok) {
 						// A stale source names, as a typed field, the current source at its position; the lane is shown it
 						// in this refusal, so it may open it, as it may any source a read of it named.
-						if (outcome.currentHandle !== undefined) admit(outcome.currentHandle, admission);
-						return laneSourceRefusal(outcome.status, outcome.reason);
+						return deliver(
+							laneSourceRefusal(outcome.status, outcome.reason),
+							evidence,
+							outcome.currentHandle ? [outcome.currentHandle] : [],
+						);
 					}
 					if (!memoryTextFitsBudget(outcome.text, budget)) continue;
 					// A continuation of an admitted source is part of what the lane was shown.
 					const nextPartHandle = outcome.details.nextPartHandle;
-					if (typeof nextPartHandle === "string") admit(nextPartHandle, admission);
-					return { ok: true, text: outcome.text };
+					return deliver(
+						{ ok: true, text: outcome.text },
+						evidence,
+						typeof nextPartHandle === "string" ? [nextPartHandle] : [],
+					);
 				}
-				return { ok: true, text: LANE_SOURCE_OVER_ROOM_TEXT };
+				return deliver({ ok: true, text: LANE_SOURCE_OVER_ROOM_TEXT });
 			},
-			navigate: async (tool, args, signal) => {
+			navigate: async (tool, args, signal, options = {}) => {
+				if (
+					options.maxImageBytes !== undefined &&
+					(!Number.isSafeInteger(options.maxImageBytes) || options.maxImageBytes < 0)
+				)
+					throw new RangeError("Memory navigation image allowance must be a non-negative safe integer.");
+				const imageBytes = Math.min(
+					CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
+					options.maxImageBytes ?? CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
+				);
+				const context = {
+					signal:
+						signal && options.signal ? AbortSignal.any([signal, options.signal]) : (signal ?? options.signal),
+					deadlineAt: options.deadlineAt ?? Date.now() + TRANSCRIPT_FOREGROUND_READ_MS,
+				};
+				assertMemoryReadActive(context);
 				const laneDetails = { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true };
 				const admission: Admission = {
 					generation: this._memoryGeneration,
@@ -2384,43 +2490,74 @@ export class MemoryController {
 				};
 				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
 					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
+					observe("navigation", reason, [], admission, options, "refused");
 					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
 				}
 				if (!current(admission)) throw new LaneMemorySnapshotStaleError();
+				const laneRevision = capacity()?.revision;
 				const budget = laneBudget();
 				if (!budget.enabled) {
 					const constraint = laneConstraintText(budget.reason, capacity() !== undefined);
+					observe("navigation", constraint, [], admission, options, "unavailable");
 					return { content: [{ type: "text", text: constraint }], details: laneDetails };
 				}
 				// The chat's view, messages and images, read with the lane's fixed page and image bounds. No agent logs: a
 				// worker's private log is the root's to read, so a name is refused as worker-log-unavailable.
-				const result = await executeContinuousChatNavigation(
-					() => {
-						const port = this.continuousChatHost()?.port;
-						return port && { navigation: port.navigation };
-					},
-					tool,
-					args,
-					signal,
-					CONTINUOUS_CHAT_LANE_PAGE_BYTES,
-					CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
+				const { value: result, evidence } = await this._readLaneMemorySource(
+					JSON.stringify(["navigation", admission, tool, args, imageBytes, options.admission]),
+					(read) =>
+						executeContinuousChatNavigation(
+							() => {
+								const port = this.continuousChatHost()?.port;
+								return port && { navigation: port.navigation };
+							},
+							tool,
+							args,
+							read.signal,
+							CONTINUOUS_CHAT_LANE_PAGE_BYTES,
+							imageBytes,
+							read,
+						),
+					context,
 				);
-				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
-					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
-					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
-				}
-				if (!current(admission) || !isDeepStrictEqual(laneBudget(), budget)) {
-					throw new LaneMemorySnapshotStaleError();
-				}
-				if (result.isError) return result;
+				checkDelivery(admission, budget, context, laneRevision);
+				if (!evidence.every((item) => item.isCurrent())) throw new LaneMemorySnapshotStaleError();
 				const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 				// A page that does not fit the lane's room is a stated constraint, never cut (as with a source page).
 				if (!memoryTextFitsBudget(text, { ...budget, maxLines: Number.MAX_SAFE_INTEGER })) {
+					observe("navigation", LANE_CHAT_OVER_ROOM_TEXT, [], admission, options, "unavailable");
 					return { content: [{ type: "text", text: LANE_CHAT_OVER_ROOM_TEXT }], details: laneDetails };
 				}
+				observe("navigation", text, evidence, admission, options, result.isError ? "refused" : "read");
 				return result;
 			},
 		};
+	}
+
+	/** One tracked native operation; caller-specific output checks stay outside the shared source flight. */
+	private _readLaneMemorySource<T>(
+		key: string,
+		read: (context: MemoryReadContext) => Promise<T>,
+		consumer: MemoryReadContext,
+	): Promise<{ value: T; evidence: readonly MemoryReadEvidence[] }> {
+		return this._laneMemoryReads.read(
+			key,
+			async (signal, deadlineAt) => {
+				const evidence: MemoryReadEvidence[] = [];
+				const context = {
+					signal,
+					deadlineAt,
+					observe: (item: MemoryReadEvidence) => {
+						evidence.push(item);
+					},
+				};
+				const value = await read(context);
+				assertMemoryReadActive(context);
+				return { value, evidence: Object.freeze(evidence) };
+			},
+			consumer.signal,
+			consumer.deadlineAt,
+		);
 	}
 
 	/** The project identity transcript handles are scoped to; the same key the project memory files use. */
@@ -2609,7 +2746,7 @@ export class MemoryController {
 	}
 
 	/** Stops the project chat of a replaced or shut-down generation; its queued records finish first. */
-	private async _releaseContinuousChat(): Promise<void> {
+	private async _releaseContinuousChat(readsStopped?: Promise<void>): Promise<void> {
 		const host = this._continuousChat;
 		this._continuousChat = undefined;
 		// The refusal de-dup belongs to the chat it was observed on; the next chat warns afresh.
@@ -2618,10 +2755,26 @@ export class MemoryController {
 		// and switching away from a failed ICM generation clears the fail-closed wrapper even when no host opened.
 		this._setContinuousChatWire(undefined);
 		if (host === undefined) return;
+		await readsStopped;
 		await host.dispose();
 	}
 
-	/** Whether a delegated read planned against `input` still describes the memory, policy and lane it will serve. */
+	/** Source freshness never depends on a consuming lane's later provider request or capacity. */
+	private _laneSourceCurrent(input: {
+		generation: number;
+		revision: number;
+		policy: string;
+		legacy: boolean;
+	}): boolean {
+		return (
+			this._historyAvailable(input.generation) &&
+			input.legacy === this._legacyMemoryEnabled() &&
+			input.revision === this._memoryContentRevision &&
+			input.policy === this._retrievalPolicyKey()
+		);
+	}
+
+	/** Delivery checks each receiving lane separately even when its source read was shared. */
 	private _laneReadCurrent(input: {
 		generation: number;
 		revision: number;
@@ -2629,26 +2782,21 @@ export class MemoryController {
 		legacy: boolean;
 		budget: MemoryPromptBudget;
 		capacity: LaneMemoryCapacitySource;
+		laneRevision: number | undefined;
 	}): boolean {
-		if (
-			!this._historyAvailable(input.generation) ||
-			input.legacy !== this._legacyMemoryEnabled() ||
-			input.revision !== this._memoryContentRevision ||
-			input.policy !== this._retrievalPolicyKey()
-		) {
-			return false;
-		}
+		if (!this._laneSourceCurrent(input) || input.capacity()?.revision !== input.laneRevision) return false;
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		return isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, input.capacity()), input.budget);
 	}
 
 	/** A delegated lane's search hit as a composer candidate; OKF documents also carry a whole pointer form. */
-	private _laneCandidate(result: MemorySearchResult, tier: MemoryTierCandidate["tier"]): MemoryTierCandidate {
+	private _laneCandidate(result: MemorySearchResult, tier: MemoryTierCandidate["tier"]): LaneMemoryCandidate {
 		const { item } = result;
 		const heading = `[OKF ${item.title ?? item.id}] ${item.summary}`;
 		const okf = tier !== "evidence_pointer";
 		return {
 			id: item.id,
+			sourceHandles: item.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID ? item.refs.map((ref) => ref.itemId) : [],
 			tier,
 			sourceLabel: `memory:${item.providerId}`,
 			summary: okf ? `${heading}\n${item.content ?? ""}` : item.summary,
@@ -2656,6 +2804,83 @@ export class MemoryController {
 			score: result.score,
 			...(item.stale !== undefined ? { stale: item.stale } : {}),
 			...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
+		};
+	}
+
+	/** Raw local acquisition is the only shared work; composition and grants belong to individual consumers. */
+	private async _loadLaneMemorySources(
+		input: {
+			generation: number;
+			revision: number;
+			policy: string;
+			legacy: boolean;
+			query: string;
+			maxResults: number;
+			turnIndex: number;
+			lifecycleTail: Promise<void>;
+			admission: WorkerMemoryReadOptions["admission"];
+		},
+		context: MemoryReadContext,
+	): Promise<LaneMemorySourceRead> {
+		await waitForMemoryRead(input.lifecycleTail, context);
+		assertMemoryReadActive(context);
+		if (!this._laneSourceCurrent(input)) throw new LaneMemorySnapshotStaleError();
+		const evidence: MemoryReadEvidence[] = [];
+		const readContext = { ...context, observe: (item: MemoryReadEvidence) => evidence.push(item) };
+		const retrievalOptions = {
+			createdAtTurn: input.turnIndex,
+			maxResults: input.maxResults,
+			defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+			readContext,
+		};
+		const tasks = await Promise.allSettled([
+			input.legacy && input.admission !== "native-only" ? this.prefetchRecall(input.query) : Promise.resolve(""),
+			input.legacy
+				? retrieveMemoryForContext(
+						[this._getMemoryOkfProvider()],
+						{ query: input.query, maxResults: input.maxResults },
+						retrievalOptions,
+					)
+				: Promise.resolve(undefined),
+			retrieveMemoryForContext(
+				[this._getTranscriptMemoryProvider(input.generation, !input.legacy)],
+				{ query: input.query, maxResults: input.maxResults },
+				retrievalOptions,
+			),
+			input.legacy && input.admission === "native-only"
+				? this._fileStoreWriter?.readSystemPromptSnapshot(readContext)
+				: Promise.resolve(undefined),
+		] as const);
+		// Retain physical source ownership until all already-dispatched reads have settled.
+		assertMemoryReadActive(context);
+		const [recall, okf, history, standing] = tasks;
+		if (recall.status === "rejected") throw recall.reason;
+		if (okf.status === "rejected") throw okf.reason;
+		if (history.status === "rejected") throw history.reason;
+		if (standing.status === "rejected") throw standing.reason;
+		const summaries = input.legacy
+			? { candidates: [], status: "" }
+			: await this._laneSummaryReferences(input.generation, history.value, input.maxResults, readContext);
+		assertMemoryReadActive(context);
+		if (!this._laneSourceCurrent(input)) throw new LaneMemorySnapshotStaleError();
+		if (input.legacy && input.admission !== "native-only") {
+			// Opaque extension callbacks retain their ordinary behavior but cannot certify native read provenance.
+			evidence.push(INCOMPLETE_MEMORY_READ);
+		}
+		if (
+			[...(okf.value?.providerReports ?? []), ...history.value.providerReports].some(
+				(report) => report.status !== "queried",
+			) ||
+			summaries.status
+		)
+			evidence.push(INCOMPLETE_MEMORY_READ);
+		return {
+			lifecycleRecall: recall.value,
+			okfReport: okf.value,
+			historyReport: history.value,
+			summaries,
+			evidence: Object.freeze(evidence),
+			standing: standing.value,
 		};
 	}
 
@@ -2680,40 +2905,53 @@ export class MemoryController {
 		turnIndex: number;
 		budget: MemoryPromptBudget;
 		capacity: LaneMemoryCapacitySource;
+		laneRevision: number | undefined;
 		lifecycleTail: Promise<void>;
 		deadlineAt: number;
 		knowledgeReferences: readonly KnowledgeGrantReference[];
+		options: WorkerMemoryReadOptions;
 	}): Promise<LaneMemoryReadSnapshot> {
-		await input.lifecycleTail;
-		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
-		const retrievalOptions = {
-			createdAtTurn: input.turnIndex,
-			maxResults: input.maxResults,
-			defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
-		};
-		const [lifecycleRecall, okfReport, historyReport] = await Promise.all([
-			input.legacy ? this.prefetchRecall(input.query) : "",
-			input.legacy
-				? retrieveMemoryForContext(
-						[this._getMemoryOkfProvider()],
-						{ query: input.query, maxResults: input.maxResults },
-						retrievalOptions,
-					)
-				: undefined,
-			retrieveMemoryForContext(
-				[this._getTranscriptMemoryProvider(input.generation, !input.legacy, input.deadlineAt)],
-				{ query: input.query, maxResults: input.maxResults },
-				retrievalOptions,
-			),
+		const context = { signal: input.options.signal, deadlineAt: input.deadlineAt };
+		const key = JSON.stringify([
+			input.generation,
+			input.revision,
+			input.policy,
+			input.legacy,
+			input.turnIndex,
+			input.query,
+			input.maxResults,
+			input.options.admission,
 		]);
+		// Copy only source-owned inputs: no capacity callback, selected knowledge, observer or consumer deadline.
+		const source = {
+			generation: input.generation,
+			revision: input.revision,
+			policy: input.policy,
+			legacy: input.legacy,
+			turnIndex: input.turnIndex,
+			query: input.query,
+			maxResults: input.maxResults,
+			admission: input.options.admission,
+			lifecycleTail: input.lifecycleTail,
+		};
+		const {
+			lifecycleRecall,
+			okfReport,
+			historyReport,
+			summaries,
+			evidence: sourceEvidence,
+			standing,
+		} = await this._laneMemoryReads.read(
+			key,
+			(signal, deadlineAt) => this._loadLaneMemorySources(source, { signal, deadlineAt }),
+			context.signal,
+			context.deadlineAt,
+		);
+		assertMemoryReadActive(context);
 		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
-		// An OKF lane is pointed at earlier summaries by the frontier below; an ICM lane by the hits' covering summaries.
-		const summaries = input.legacy
-			? { candidates: [], status: "" }
-			: await this._laneSummaryReferences(input.generation, historyReport, input.maxResults, input.deadlineAt);
-		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
+		const evidence = [...sourceEvidence];
 
-		const candidates: MemoryTierCandidate[] = [
+		const candidates: LaneMemoryCandidate[] = [
 			...(okfReport?.results ?? []).map((result) => this._laneCandidate(result, "long_term")),
 			...historyReport.results.map((result) => this._laneCandidate(result, "evidence_pointer")),
 			...summaries.candidates,
@@ -2722,6 +2960,7 @@ export class MemoryController {
 		if (lifecycleText.length > 0) {
 			candidates.push({
 				id: "lifecycle-recall",
+				sourceHandles: [],
 				tier: "long_term",
 				sourceLabel: "memory:lifecycle",
 				summary: lifecycleText,
@@ -2759,13 +2998,38 @@ export class MemoryController {
 			"read",
 		);
 		const knowledgeText = knowledge.text;
+		if (knowledgeText && knowledge.references.length) {
+			const grant = this.captureKnowledgeGrant(knowledge.references);
+			evidence.push(
+				Object.freeze({
+					sources: Object.freeze(
+						grant.references.map((reference) =>
+							Object.freeze({
+								kind: "knowledge" as const,
+								ref: reference.id,
+								revision: String(reference.revision),
+							}),
+						),
+					),
+					complete: knowledge.omittedCount === 0,
+					isCurrent: () => grant.isCurrent(),
+					revalidate: async (next: MemoryReadContext) => {
+						assertMemoryReadActive(next);
+						return grant.isCurrent();
+					},
+				}),
+			);
+		}
+		if (knowledgeText && knowledge.omittedCount > 0) evidence.push(INCOMPLETE_MEMORY_READ);
 		if (knowledgeText) remaining = reserveMemoryPromptBudget(remaining, laneRecordReserve(knowledgeText));
 		else if (input.knowledgeReferences.length > 0) omitted.push("selected knowledge");
 		// Standing memory takes at most half of the allowance, and only as the whole block the provider fitted.
 		const standingBudget = shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE);
 		const standingRaw = input.legacy
-			? this._memoryManager
-					.buildSystemPromptBlockFresh(standingBudget.enabled ? standingBudget : remaining)
+			? (input.options.admission === "native-only"
+					? (standing?.render(standingBudget.enabled ? standingBudget : remaining) ?? "")
+					: this._memoryManager.buildSystemPromptBlockFresh(standingBudget.enabled ? standingBudget : remaining)
+				)
 					.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, LANE_STANDING_NOTE)
 					.trim()
 			: "";
@@ -2776,13 +3040,23 @@ export class MemoryController {
 
 		// The frontier takes at most half of what is left, in whole node records (bytes, tokens and lines, as at the root).
 		let frontierText = "";
+		let frontierHandles: readonly string[] = [];
 		const fenced = this._frontierFence();
+		const hierarchy = this._hierarchy;
 		// A worker lane's frontier is confirmed against the store like the root's, at this read's awaited boundary.
 		const frontierConfirmed =
-			input.legacy && this._hierarchy && "fence" in fenced && remaining.enabled
-				? await this._hierarchy.confirmFrontier(Date.now() + TRANSCRIPT_FOREGROUND_READ_MS)
+			input.legacy && hierarchy && "fence" in fenced && remaining.enabled
+				? (
+						await this._readLaneMemorySource(
+							JSON.stringify(["frontier", input.generation, input.revision, input.policy]),
+							(read) => hierarchy.confirmFrontier(read.deadlineAt!, read),
+							context,
+						)
+					).value
 				: false;
-		if (frontierConfirmed && this._hierarchy && "fence" in fenced && remaining.enabled) {
+		assertMemoryReadActive(context);
+		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
+		if (frontierConfirmed && hierarchy && "fence" in fenced && remaining.enabled) {
 			const allowance =
 				memoryShareAllowanceBytes(remaining, LANE_FRONTIER_BUDGET_SHARE) -
 				utf8ByteLength(LANE_FRONTIER_HEADING) -
@@ -2791,8 +3065,12 @@ export class MemoryController {
 			// The heading line and the separator line `laneRecordReserve` charges come out of the line share.
 			const allowanceLines = shareOfMemoryPromptBudget(remaining, LANE_FRONTIER_BUDGET_SHARE).maxLines - 2;
 			if (allowance > 0 && allowanceLines > 0) {
-				const preview = this._hierarchy.previewFrontier(allowance, allowanceLines, fenced.fence, "lane");
-				if (preview.state === "shown") frontierText = [LANE_FRONTIER_HEADING, preview.text].join("\n");
+				const preview = hierarchy.previewFrontier(allowance, allowanceLines, fenced.fence, "lane");
+				if (preview.state === "shown") {
+					frontierText = [LANE_FRONTIER_HEADING, preview.text].join("\n");
+					frontierHandles = preview.sourceHandles;
+					evidence.push(preview.evidence);
+				}
 			}
 			if (frontierText.length > 0) {
 				remaining = reserveMemoryPromptBudget(remaining, laneRecordReserve(frontierText));
@@ -2800,7 +3078,9 @@ export class MemoryController {
 		}
 
 		const block = composeTieredMemoryPromptBlock(candidates, remaining);
-		if (!knowledge.isCurrent()) throw new LaneMemorySnapshotStaleError();
+		assertMemoryReadActive(context);
+		if (!this._laneReadCurrent(input) || !knowledge.isCurrent() || !evidence.every((item) => item.isCurrent()))
+			throw new LaneMemorySnapshotStaleError();
 		const admitted = new Set(block.includedIds);
 		const transcriptAdmitted = candidates.some(
 			(candidate) => admitted.has(candidate.id) && isHistoryRecord(candidate),
@@ -2826,6 +3106,7 @@ export class MemoryController {
 				input.revision,
 				input.legacy ? LANE_NO_MEMORY_TEXT : LANE_NO_HISTORY_TEXT,
 				() => this._laneReadCurrent(input) && knowledge.isCurrent(),
+				evidence,
 			);
 		}
 		const combined = parts.join(LANE_RECORD_SEPARATOR);
@@ -2836,6 +3117,13 @@ export class MemoryController {
 			input.revision,
 			wrapUntrustedText(combined, "worker-memory", { nonce }),
 			() => this._laneReadCurrent(input) && knowledge.isCurrent(),
+			evidence,
+			[
+				...frontierHandles,
+				...candidates
+					.filter((candidate) => admitted.has(candidate.id))
+					.flatMap((candidate) => candidate.sourceHandles),
+			],
 		);
 	}
 
@@ -2848,8 +3136,8 @@ export class MemoryController {
 		generation: number,
 		report: MemoryRetrievalReport,
 		maxNodes: number,
-		deadlineAt: number,
-	): Promise<{ candidates: MemoryTierCandidate[]; status: string }> {
+		context: MemoryReadContext,
+	): Promise<{ candidates: LaneMemoryCandidate[]; status: string }> {
 		const projectId = this._projectId();
 		const hits = report.results.flatMap((result) => {
 			const ref = parseTranscriptSourceHandle(result.item.id, projectId);
@@ -2860,7 +3148,7 @@ export class MemoryController {
 		const found = await lookup.summariesFor(
 			hits.map((hit) => hit.ref),
 			{ maxNodes },
-			{ deadlineAt },
+			context,
 		);
 		if (found.status !== "ok") {
 			return {
@@ -2877,6 +3165,8 @@ export class MemoryController {
 		sourceRevision: number,
 		content: string,
 		isCurrent: () => boolean,
+		evidence: readonly MemoryReadEvidence[] = [],
+		sourceHandles: readonly string[] = [],
 	): LaneMemoryReadSnapshot {
 		const policy = this._retrievalPolicyKey();
 		const snapshotId = createHash("sha256")
@@ -2888,12 +3178,15 @@ export class MemoryController {
 			sourceGeneration,
 			sourceRevision,
 			content,
+			evidence: Object.freeze([...evidence]),
+			sourceHandles: Object.freeze([...sourceHandles]),
 			isCurrent: () => {
 				try {
 					return (
 						sourceGeneration === this._memoryGeneration &&
 						sourceRevision === this._memoryContentRevision &&
 						policy === this._retrievalPolicyKey() &&
+						evidence.every((item) => item.isCurrent()) &&
 						isCurrent()
 					);
 				} catch {
@@ -2936,11 +3229,15 @@ export class MemoryController {
 	 * reach `onActivation`, so a host observes an activation it did not await (a recovery).
 	 */
 	initialize(cause: MemoryActivationCause = "load"): Promise<void> {
+		const previousSystem = this._activeMemorySystem;
+		this._activeMemorySystem = undefined;
+		this._transitioning = true;
 		const previousActivation = this._activationAbort;
 		const activation = new AbortController();
 		this._activationAbort = activation;
 		const generation = ++this._memoryGeneration;
 		previousActivation?.abort(new Error("Memory activation was superseded."));
+		const readsStopped = this._laneMemoryReads.abort(new Error("Memory reads belong to a retired generation."));
 		const system = this.deps.getSettingsManager().getMemorySystem();
 		this.deps.onActivation?.({ phase: "start", generation, system, cause });
 		let ended = false;
@@ -2961,7 +3258,6 @@ export class MemoryController {
 			});
 		};
 		let failure: string | undefined;
-		const previousSystem = this._activeMemorySystem;
 		const previous = this._memoryManager;
 		// The manager's failure lines are session warnings, never stderr writes from a host that owns the terminal. The required provider's
 		// availability and initialization failures are reported by the initialization below (with the same cause), so only those lines are
@@ -2979,22 +3275,20 @@ export class MemoryController {
 			},
 		});
 		this._memoryManager = manager;
-		this._activeMemorySystem = undefined;
 		this._fileStoreWriter = undefined;
 		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes. A live ICM
 		// chat outlives the generation: its runtime lease and any turn in flight belong to the chat, so an ICM generation
 		// keeps it. Only a switch away from ICM, or a failed activation, releases it.
 		const keptChat = system === "icm" ? this._continuousChat : undefined;
-		const hierarchyStopped = this._hierarchy?.detach();
-		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat() : undefined;
+		const hierarchyStopped = readsStopped.then(() => this._hierarchy?.detach());
+		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat(readsStopped) : undefined;
 		const knowledgeStopped = this._stopKnowledgeCollector();
-		const stopping = Promise.allSettled([hierarchyStopped, continuousChatStopped, knowledgeStopped]);
+		const stopping = Promise.allSettled([readsStopped, hierarchyStopped, continuousChatStopped, knowledgeStopped]);
 		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
 		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
 			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
 		}
 		this._releaseTranscriptRecall();
-		this._transitioning = true;
 		this._initializationFailed = false;
 		this._shutdownPromise = undefined;
 		this._memoryOkfProvider = undefined;

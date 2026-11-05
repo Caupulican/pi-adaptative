@@ -1,7 +1,12 @@
 import path from "node:path";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
-import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "../../kernel/index.ts";
+import {
+	type AgentLoopConfig,
+	type AgentTool,
+	AgentToolPolicyDeniedError,
+	type BeforeToolCallResult,
+} from "../../kernel/index.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
@@ -15,11 +20,10 @@ import {
 	WORKER_MEMORY_BROKER_TOOL_NAMES,
 	WORKER_MEMORY_READ_TOOL_NAME,
 	type WorkerMemoryBroker,
+	type WorkerMemoryReadOptions,
 } from "../memory/worker-memory-tools.ts";
-import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
 	CapabilityGateway,
-	CapabilityGatewayDeniedError,
 	type GatewayInitialUsage,
 	type SharedCapabilityBudget,
 } from "../orchestration/capability-gateway.ts";
@@ -37,17 +41,17 @@ import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings/settings-rules.ts";
 import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
 import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
-import { READ_ONLY_SHELL_TOOL_NAMES, toolSurvivesReadOnly } from "../tool-capability-policy.ts";
+import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { type BashToolOptions, createBashTool } from "../tools/bash.ts";
 import { createEditTool, type EditToolOptions } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
-import { createFindTool } from "../tools/find.ts";
-import { createGrepTool } from "../tools/grep.ts";
-import { createLsTool } from "../tools/ls.ts";
+import { createFindTool, type FindToolOptions } from "../tools/find.ts";
+import { createGrepTool, type GrepToolOptions } from "../tools/grep.ts";
+import { createLsTool, type LsToolOptions } from "../tools/ls.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
-import { createRepoReadTool } from "../tools/repo-read.ts";
+import { createRepoReadTool, type RepoReadToolOptions } from "../tools/repo-read.ts";
 import { createRunProcessTool, type RunProcessToolOptions } from "../tools/run-process.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import { createToolSchemaSearchDefinition } from "../tools/tool_search.ts";
@@ -55,16 +59,13 @@ import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
-import { classifyYoloBoundary } from "./edge-policy.ts";
-import { evaluateToolGate } from "./gates.ts";
+import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admission.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
-/** What a worker does when a write lands outside its scope: it never routes around the grant, it reports. */
-export const WORKER_WRITE_SCOPE_GUIDANCE =
-	"A worker writes only inside its working directory plus the roots its dispatcher granted with writePaths. Do not route around this: finish what is in scope and report to the parent the absolute path you need to write and why, so it can start a new worker with writePaths for it (a worker's own write scope cannot be widened).";
+export { WORKER_WRITE_SCOPE_GUIDANCE } from "./lane-tool-admission.ts";
 
 /**
  * The tool mechanics every agent shares with root: output reduction, the command prefix and shell,
@@ -90,6 +91,10 @@ export interface SharedLaneToolOptions {
 	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables" | "environment">;
 	readonly runProcess?: Pick<RunProcessToolOptions, "attributionEnvironment">;
 	readonly read?: ReadToolOptions;
+	readonly grep?: GrepToolOptions;
+	readonly find?: FindToolOptions;
+	readonly ls?: LsToolOptions;
+	readonly repoRead?: RepoReadToolOptions;
 	readonly edit?: Pick<EditToolOptions, "fileEncodings">;
 	/**
 	 * The session's packed tool-output store. grep and find pack into it only on a lane that holds
@@ -124,7 +129,6 @@ const laneMemorySchema = {
 	anyOf: [Type.Object({ query: Type.String() }), Type.Object({ ref: Type.String() })],
 };
 type LaneMemoryParams = Static<typeof laneMemorySchema>;
-const WRITE_LANE_TOOL_NAME_SET = new Set<string>(WRITE_LANE_TOOL_NAMES);
 const PROCESS_TOOL_NAMES = new Set<string>([STABLE_SHELL_TOOL_NAME, PYTHON_LANE_TOOL_NAME, PROCESS_LANE_TOOL_NAME]);
 
 export interface LaneToolSurface {
@@ -140,6 +144,10 @@ export interface LaneToolSurface {
 	unboundAllowPatterns: string[];
 	/** Per-call path and capability gate for the isolated worker loop. */
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
+	/** Retained fatal admission failures must be checked before accepting a lane result. */
+	assertHealthy(): void;
+	/** Register the owner of execution-admitted mutation and tool-selection attribution. */
+	onToolAdmitted(observer: (event: LaneToolAdmissionEvent) => void): () => void;
 	/** Canonical cumulative authority/budget meter for a compiled worker grant. */
 	gateway?: CapabilityGateway;
 	toolUsage: LaneToolUsage;
@@ -168,6 +176,8 @@ export interface LaneToolSurfaceOptions {
 	writeProtectedPaths?: readonly string[];
 	/** Orchestrator-requested, policy-filtered read-only memory broker. Omitted means no memory tool. */
 	memoryBroker?: WorkerMemoryBroker;
+	/** Per-invocation host limits and receipt observer for the broker's read-only operations. */
+	memoryReadOptions?: (toolCallId: string) => WorkerMemoryReadOptions;
 	/** Research never sets this. Workers require both this flag and at least one write path. */
 	writeEnabled?: boolean;
 	writePaths?: readonly string[];
@@ -239,6 +249,7 @@ function createLaneTools(
 	toolUsage: LaneToolUsage,
 	privatePathBoundary?: CredentialExposureBoundary,
 	memoryBroker?: WorkerMemoryBroker,
+	memoryReadOptions?: (toolCallId: string) => WorkerMemoryReadOptions,
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 	shellSessionKey?: string,
@@ -251,10 +262,10 @@ function createLaneTools(
 		shared.artifactStore && names.includes("artifact_retrieve") ? { artifactStore: shared.artifactStore } : {};
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd, shared.read)],
-		["grep", () => createGrepTool(cwd, packing)],
-		["find", () => createFindTool(cwd, packing)],
-		["ls", () => createLsTool(cwd)],
-		["repo_read", () => createRepoReadTool(cwd)],
+		["grep", () => createGrepTool(cwd, { ...shared.grep, ...packing })],
+		["find", () => createFindTool(cwd, { ...shared.find, ...packing })],
+		["ls", () => createLsTool(cwd, shared.ls)],
+		["repo_read", () => createRepoReadTool(cwd, shared.repoRead)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
 		[TOOL_SCHEMA_SEARCH_NAME, () => wrapToolDefinition(createToolSchemaSearchDefinition())],
@@ -291,6 +302,13 @@ function createLaneTools(
 		);
 	}
 	if (memoryBroker) {
+		const readOptions = (toolCallId: string, signal: AbortSignal | undefined): WorkerMemoryReadOptions => {
+			const options = memoryReadOptions?.(toolCallId);
+			return {
+				...options,
+				signal: signal && options?.signal ? AbortSignal.any([signal, options.signal]) : (signal ?? options?.signal),
+			};
+		};
 		factories.set(WORKER_MEMORY_READ_TOOL_NAME, () => ({
 			name: WORKER_MEMORY_READ_TOOL_NAME,
 			label: "Read Memory",
@@ -298,7 +316,7 @@ function createLaneTools(
 			description:
 				"Read-only, bounded, source-labeled memory for this delegated task: past-conversation evidence and, where the session keeps it, standing memory. A query searches; a cited tx:... handle as ref opens that source's exact text (cursor pages it), a txn:... handle expands that summary one level.",
 			parameters: laneMemorySchema,
-			execute: async (_toolCallId, params) => {
+			execute: async (toolCallId, params, signal) => {
 				const { query: rawQuery, ref, cursor } = params as LaneMemoryParams;
 				// A typed refusal reaches the worker verbatim (pointers included) with the root's error kind and marker.
 				const refusal = (status: string, text: string) => ({
@@ -312,7 +330,7 @@ function createLaneTools(
 					refusal("invalid_request", `memory_query_invalid: ${reasonSentence(reason)}`);
 				if (ref !== undefined) {
 					if (rawQuery !== undefined) return invalidQuery("pass either query or ref, not both");
-					const answer = await memoryBroker.readSource(ref, cursor);
+					const answer = await memoryBroker.readSource(ref, cursor, readOptions(toolCallId, signal));
 					if (answer.ok) {
 						return {
 							content: [{ type: "text" as const, text: answer.text }],
@@ -326,14 +344,16 @@ function createLaneTools(
 					return invalidQuery(`query must contain from 1 through ${MAX_LANE_MEMORY_QUERY_CHARS} characters`);
 				}
 				return {
-					content: [{ type: "text" as const, text: await memoryBroker.read(query) }],
+					content: [
+						{ type: "text" as const, text: await memoryBroker.read(query, readOptions(toolCallId, signal)) },
+					],
 					details: { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true },
 				};
 			},
 		}));
 		// The chat's read tools, through the same broker: the root's definitions, bounded for this lane.
 		const navigation = createContinuousChatNavigationTools(
-			(tool, args, signal) => memoryBroker.navigate(tool, args, signal),
+			(tool, args, signal, toolCallId) => memoryBroker.navigate(tool, args, signal, readOptions(toolCallId, signal)),
 			{ agentLogs: false },
 		);
 		for (const definition of navigation) factories.set(definition.name, () => wrapToolDefinition(definition));
@@ -367,12 +387,7 @@ function createLaneTools(
 					`worker:${shellSessionKey ?? mutationScope}`,
 				)
 			: privateGuarded;
-		return [
-			wrapToolExecution(guarded, (executor) => ({
-				...executor,
-				execute: (toolCallId, ...args) => toolUsage.run(toolCallId, () => executor.execute(toolCallId, ...args)),
-			})),
-		];
+		return [guarded];
 	});
 }
 
@@ -518,6 +533,22 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			}
 		: undefined;
 
+	const admission = new LaneToolAdmission({
+		cwd: options.cwd,
+		allowedTools: allowedToolSet,
+		manifests: manifestsByName,
+		gateway,
+		yolo: options.yolo,
+		shellReadOnly: options.shellReadOnly,
+		denyCommands: options.denyCommands,
+		readEnvelope,
+		writeEnvelope,
+		writeProtectionEnvelope,
+		yoloWriteScopeEnvelope,
+		assertOpen: () => toolUsage.assertOpen(),
+		checkEdge: options.checkEdge,
+	});
+
 	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
 	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
 	// the scratch directory, so a shell lane leaves nothing behind.
@@ -562,6 +593,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		toolUsage,
 		privatePathBoundary,
 		options.memoryBroker,
+		options.memoryReadOptions,
 		options.executionPolicy,
 		options.processMaxWallClockMs,
 		options.shellSessionKey,
@@ -586,11 +618,27 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					: tool,
 			)
 		: rawTools;
+	const admittedTools = watchedTools.map((tool) =>
+		wrapToolExecution(tool, (executor) => ({
+			...executor,
+			execute: (toolCallId, args, signal, onUpdate) =>
+				toolUsage.run(toolCallId, async () => {
+					const refused = await admission.admit({ toolCallId, toolName: tool.name, args }, signal);
+					signal?.throwIfAborted();
+					toolUsage.assertOpen();
+					admission.assertHealthy();
+					if (refused?.block) {
+						throw new AgentToolPolicyDeniedError(refused.reason, refused.terminate);
+					}
+					return executor.execute(toolCallId, args, signal, onUpdate);
+				}),
+		})),
+	);
 	const tools = getPathAliasTable
-		? watchedTools.map((tool) =>
+		? admittedTools.map((tool) =>
 				wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd),
 			)
-		: watchedTools;
+		: admittedTools;
 
 	return {
 		tools,
@@ -610,106 +658,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		deniedTools,
 		unboundAllowPatterns,
 		toolUsage,
-		beforeToolCall: async ({ toolCall, args }) => {
-			toolUsage.assertOpen();
-			// Git freedom is the orchestrator's decision, applied through checkEdge at dispatch.
-			if (!allowedToolSet.has(toolCall.name)) {
-				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
-			}
-			if (options.shellReadOnly && READ_ONLY_SHELL_TOOL_NAMES.has(toolCall.name.toLowerCase())) {
-				const command = (args as { command?: unknown } | undefined)?.command;
-				const violation = typeof command === "string" ? readOnlyShellViolation(command, options.cwd) : undefined;
-				if (violation) {
-					return {
-						block: true,
-						reason: `Read-only worker: ${violation}. Read, search and inspect freely, and redirect output into a new file if needed; report any change that is required to the parent instead of making it.`,
-					};
-				}
-			}
-			if (writeProtectionEnvelope && WRITE_LANE_TOOL_NAME_SET.has(toolCall.name)) {
-				const protection = evaluateToolGate({
-					toolName: toolCall.name,
-					args,
-					cwd: options.cwd,
-					envelope: writeProtectionEnvelope,
-				});
-				if (protection.outcome !== "allow") {
-					return {
-						block: true,
-						reason: `Harness resource is write-protected (${protection.reasonCode}): ${protection.message ?? "write refused"}`,
-					};
-				}
-			}
-			if (options.yolo) {
-				const boundary = classifyYoloBoundary({
-					toolName: toolCall.name,
-					args,
-					cwd: options.cwd,
-					scopeCwd: options.cwd,
-					denyCommands: options.denyCommands,
-				});
-				if (boundary) {
-					return {
-						block: true,
-						reason:
-							boundary.kind === "confirm"
-								? `Owner approval required: ${boundary.reason}`
-								: `YOLO hardline: ${boundary.reason}`,
-					};
-				}
-				if (yoloWriteScopeEnvelope && WRITE_LANE_TOOL_NAME_SET.has(toolCall.name)) {
-					const scope = evaluateToolGate({
-						toolName: toolCall.name,
-						args,
-						cwd: options.cwd,
-						envelope: yoloWriteScopeEnvelope,
-					});
-					if (scope.outcome !== "allow") {
-						return {
-							block: true,
-							reason: `Lane tool blocked (${scope.reasonCode}): ${scope.message ?? "write is outside this worker's scope"} ${WORKER_WRITE_SCOPE_GUIDANCE}`,
-						};
-					}
-				}
-				// checkEdge keeps the owner's local-commit branch rule; every permission gate below is skipped.
-				return options.checkEdge ? await options.checkEdge(toolCall.name, args, options.cwd) : undefined;
-			}
-			if (gateway) {
-				const manifest = manifestsByName.get(toolCall.name);
-				if (!manifest) {
-					return { block: true, reason: `Lane tool '${toolCall.name}' has no compiled capability manifest.` };
-				}
-				try {
-					gateway.authorizeToolCall(manifest, toolCall.name, args);
-				} catch (error) {
-					if (error instanceof CapabilityGatewayDeniedError) {
-						if (error.status === "budget_exhausted") throw error;
-						return {
-							block: true,
-							reason: `Lane tool blocked (${error.reasonCode}): ${error.message}${error.reasonCode === "scope_denied" ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
-						};
-					}
-					throw error;
-				}
-			} else {
-				const outcome = evaluateToolGate({
-					toolName: toolCall.name,
-					args,
-					cwd: options.cwd,
-					envelope: WRITE_LANE_TOOL_NAME_SET.has(toolCall.name) ? writeEnvelope : readEnvelope,
-				});
-				if (outcome.outcome !== "allow") {
-					return {
-						block: true,
-						reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}${WRITE_LANE_TOOL_NAME_SET.has(toolCall.name) && outcome.reasonCode.includes("path") ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
-					};
-				}
-			}
-			if (options.checkEdge) {
-				const edgeOutcome = await options.checkEdge(toolCall.name, args, options.cwd);
-				if (edgeOutcome?.block) return edgeOutcome;
-			}
-			return undefined;
+		assertHealthy: () => admission.assertHealthy(),
+		onToolAdmitted: (observer) => admission.subscribe(observer),
+		beforeToolCall: async ({ toolCall, args }, signal) => {
+			signal?.throwIfAborted();
+			return admission.check(toolCall.name, args);
 		},
 		...(gateway ? { gateway } : {}),
 	};

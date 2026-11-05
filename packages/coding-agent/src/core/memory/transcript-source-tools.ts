@@ -9,6 +9,7 @@
  */
 
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
 import {
 	formatTranscriptSourceHandle,
 	parseTranscriptNodeHandle,
@@ -21,6 +22,7 @@ import {
 	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
 } from "./transcript-memory-contracts.ts";
+import { observedTranscriptReader } from "./transcript-read-evidence.ts";
 
 /** UTF-8 bytes of exact source text returned by one `history_source` page. */
 export const TRANSCRIPT_SOURCE_PAGE_BYTES = 8_192;
@@ -45,6 +47,7 @@ export type TranscriptToolOutcome =
 			 * source at that position (a handle only, never text), for a fresh exact read. Typed, never parsed.
 			 */
 			currentHandle?: string;
+			sourceHandles?: readonly string[];
 	  };
 
 /**
@@ -140,9 +143,7 @@ export interface TranscriptHistorySearchInput {
 }
 
 /** Options of one summary read: the operation deadline set once where the tool call starts. */
-export interface TranscriptSummaryReadOptions {
-	deadlineAt?: number;
-}
+export interface TranscriptSummaryReadOptions extends MemoryReadContext {}
 
 /** An approved summary node that covers search hits: a whole record, approved text only. */
 export interface TranscriptSummaryReference {
@@ -274,8 +275,9 @@ export async function searchTranscriptHistory(
 export async function openTranscriptSource(
 	reader: TranscriptSourceReader | undefined,
 	projectId: string | undefined,
-	input: { ref: string; cursor?: number; maxBytes?: number; deadlineAt?: number },
+	input: { ref: string; cursor?: number; maxBytes?: number } & MemoryReadContext,
 ): Promise<TranscriptToolOutcome> {
+	assertMemoryReadActive(input);
 	if (reader === undefined || projectId === undefined) {
 		return failure("unavailable", "Transcript history is not available in this session.");
 	}
@@ -295,7 +297,7 @@ export async function openTranscriptSource(
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > TRANSCRIPT_SOURCE_PAGE_BYTES) {
 		return failure("invalid_request", `maxBytes must be an integer from 1 through ${TRANSCRIPT_SOURCE_PAGE_BYTES}.`);
 	}
-	const page = await reader.readSource({
+	const page = await observedTranscriptReader(reader, input).readSource({
 		ref,
 		cursor,
 		maxBytes,
@@ -378,7 +380,7 @@ export type TranscriptNodeExpansion =
 			/** A leaf: the exact source parts it covers, in order. */
 			sources?: TranscriptNodeSourceView[];
 	  }
-	| { status: TranscriptReadUnavailableStatus | "invalid_handle"; reason: string };
+	| { status: TranscriptReadUnavailableStatus | "invalid_handle"; reason: string; sourceHandles?: readonly string[] };
 
 /** One level of zoom into the summary hierarchy. Read-only; backed by the same store the frontier comes from. */
 export interface TranscriptNodeExpander {
@@ -395,9 +397,15 @@ export async function expandTranscriptNode(
 	handle: string,
 	options: TranscriptSummaryReadOptions = {},
 ): Promise<TranscriptToolOutcome> {
+	assertMemoryReadActive(options);
 	if (expander === undefined) return failure("unavailable", "The summary hierarchy is not available in this session.");
 	const expansion = await expander.expand(handle, options);
-	if (expansion.status !== "ok") return failure(expansion.status, expansion.reason);
+	assertMemoryReadActive(options);
+	if (expansion.status !== "ok")
+		return {
+			...failure(expansion.status, expansion.reason),
+			...(expansion.sourceHandles ? { sourceHandles: expansion.sourceHandles } : {}),
+		};
 	const lines = [describeNode(expansion.node), wrapUntrustedText(expansion.node.text, HISTORY_UNTRUSTED_SOURCE)];
 	if (expansion.children && expansion.children.length > 0) {
 		lines.push(

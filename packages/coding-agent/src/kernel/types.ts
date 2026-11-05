@@ -178,6 +178,34 @@ export type AgentMessageOrigin = "local";
 export type AgentToolErrorKind = ToolErrorKind;
 
 /**
+ * Admission refused before the operation started, including policy checked inside an executor.
+ * Throw only before dispatching the underlying operation. The loop records the same policy
+ * rejection as `beforeToolCall`, rather than a failed or completed operation.
+ */
+export class AgentToolPolicyDeniedError extends Error {
+	readonly terminate: boolean | undefined;
+
+	constructor(reason?: string, terminate?: boolean) {
+		super(reason || "Tool execution was blocked");
+		this.name = "AgentToolPolicyDeniedError";
+		this.terminate = terminate;
+	}
+}
+
+/** Read a policy refusal across runtime copies without trusting getters or class identity. */
+export function readAgentToolPolicyDeniedError(error: unknown): AgentToolPolicyDeniedError | undefined {
+	const identity = readNamedToolError(error, "AgentToolPolicyDeniedError");
+	if (!identity) return undefined;
+	try {
+		const terminate = Reflect.get(identity.error, "terminate");
+		if (terminate !== undefined && typeof terminate !== "boolean") return undefined;
+		return new AgentToolPolicyDeniedError(identity.message, terminate);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Structured execution failure emitted by a tool when recovery identity must not depend on rendered diagnostics.
  *
  * `failureCode` identifies the tool-owned terminal outcome. `outputSignature` identifies the complete raw
@@ -210,19 +238,28 @@ export class AgentToolExecutionError extends Error {
  * `name`, `message`, `failureCode`, `errorKind`, and `outputSignature`.
  */
 export function readAgentToolExecutionError(error: unknown): AgentToolExecutionError | undefined {
-	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	const identity = readNamedToolError(error, "AgentToolExecutionError");
+	if (!identity) return undefined;
 	try {
-		const name = Reflect.get(error, "name");
-		const message = Reflect.get(error, "message");
-		const failureCode = Reflect.get(error, "failureCode");
-		const outputSignature = Reflect.get(error, "outputSignature");
-		const errorKind = Reflect.get(error, "errorKind");
-		if (name !== "AgentToolExecutionError") return undefined;
-		if (typeof message !== "string" || message.length === 0) return undefined;
+		const failureCode = Reflect.get(identity.error, "failureCode");
+		const outputSignature = Reflect.get(identity.error, "outputSignature");
+		const errorKind = Reflect.get(identity.error, "errorKind");
 		if (typeof failureCode !== "string" || failureCode.length === 0) return undefined;
 		if (typeof outputSignature !== "string") return undefined;
 		if (errorKind !== "tool_failure" && errorKind !== "operation_outcome") return undefined;
-		return new AgentToolExecutionError(message, failureCode, outputSignature, errorKind);
+		return new AgentToolExecutionError(identity.message, failureCode, outputSignature, errorKind);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Shared guarded identity check for host tool error contracts from other runtime copies. */
+function readNamedToolError(error: unknown, name: string): { error: object; message: string } | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		if (Reflect.get(error, "name") !== name) return undefined;
+		const message = Reflect.get(error, "message");
+		return typeof message === "string" && message.length > 0 ? { error, message } : undefined;
 	} catch {
 		return undefined;
 	}
@@ -440,6 +477,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Execute the tool call. Throw for exceptional execution failures, or return
 	 * `{ isError: true }` with bounded diagnostic content for an expected
 	 * operation failure such as a non-zero subprocess exit.
+	 * A policy guard refusing before operation dispatch throws {@link AgentToolPolicyDeniedError}.
 	 */
 	execute: (
 		toolCallId: string,

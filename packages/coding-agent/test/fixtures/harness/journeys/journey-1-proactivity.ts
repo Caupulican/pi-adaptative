@@ -8,6 +8,8 @@ import type { ExtensionUIContext } from "../../../../src/core/extensions/types.t
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1ProactivityDurability } from "./journey-1-proactivity-durability.ts";
+import { runJourney1ProactivityInvestigation } from "./journey-1-proactivity-investigation.ts";
+import { runJourney1ProactivityMemory } from "./journey-1-proactivity-memory.ts";
 
 const NOTE_TEXT = "The changelog entry you asked for is still not written.";
 const NOTE_MARKER = "[proactive note]";
@@ -33,7 +35,7 @@ const PREVIOUS_TURN_JUDGMENTS = {
 /**
  * Proactivity: an idle review of the conversation may raise a note the owner did not ask for. One owner turn ends and the
  * review is armed on the proactivity timer; the review sees the owner's standing preferences and the conversation, offers
- * exactly one tool, and raises a note that reaches the owner's next turn once; a review that raises the same note again, and
+ * its bounded read tools, and raises a note that reaches the owner's next turn once; a review that raises the same note again, and
  * a review that raises nothing, deliver nothing; the per-session cap stops further reviews; and a session whose owner turned
  * the feature off arms no timer and sends no review request.
  */
@@ -129,7 +131,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 
 	const noteCount = (request: string): number => request.split(NOTE_MARKER).length - 1;
 
-	// Review 1: the review reads the preferences and the conversation, has one tool, and raises one note.
+	// Review 1: the review reads the preferences and conversation, has a read-only surface, and raises one note.
 	const seen: { systemPrompt: string; tools: string[]; messages: string }[] = [];
 	await ownerTurn(
 		"proactivity-1",
@@ -160,7 +162,15 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		},
 	);
 	expect(first, "a review that raised a note says so").toBe("raised");
-	expect(seen[0]?.tools, "the review can only record a note").toEqual(["raise_note"]);
+	expect(seen[0]?.tools, "the review can read and record a note").toEqual(
+		expect.arrayContaining(["read", "raise_note"]),
+	);
+	expect(
+		seen[0]?.tools.every((name) =>
+			["read", "grep", "find", "ls", "repo_read", "memory_read", "zoom", "date", "raise_note"].includes(name),
+		),
+		"the review exposes only bounded reads and note capture",
+	).toBe(true);
 	expect(seen[0]?.systemPrompt, "the review is told to stay quiet by default").toContain("Stay quiet by default");
 	expect(seen[0]?.messages, "the review reads the owner's standing preferences").toContain(preferences);
 	expect(seen[0]?.messages, "the review reads the conversation").toContain("Finish the migration");
@@ -588,5 +598,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(confirmations, "every mutating call reached the expected owner boundary exactly once").toBe(7);
 	expect(await world.disposeSessionInBody(off.session), "the off session closes cleanly").toBeUndefined();
 	trace.mark("root", "proactivity.done");
+	await runJourney1ProactivityInvestigation(world);
+	await runJourney1ProactivityMemory(world);
 	await runJourney1ProactivityDurability(world);
 }

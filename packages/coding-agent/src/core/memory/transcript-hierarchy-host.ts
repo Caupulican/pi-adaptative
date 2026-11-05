@@ -16,6 +16,7 @@ import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
+import type { MemoryReadContext, MemoryReadEvidence } from "./memory-read-context.ts";
 import { type FrontierAudience, projectFrontierView, renderFrontierView } from "./transcript-frontier.ts";
 import {
 	type TranscriptForgetOutcome,
@@ -122,6 +123,8 @@ export type TranscriptFrontierState =
 export type TranscriptFrontierPreview =
 	| {
 			state: "shown";
+			sourceHandles: readonly string[];
+			evidence: MemoryReadEvidence;
 			/** Rendered record text (without the untrusted wrapper). */
 			text: string;
 			bytes: number;
@@ -195,6 +198,7 @@ export class TranscriptHierarchyHost {
 	private coordinator: TranscriptMemory | undefined;
 	/** Read-only access to stored nodes for the current attachment while no coordinator runs; built on first read. */
 	private view: TranscriptSummaryView | undefined;
+	private readonly retiringViews = new Set<Promise<void>>();
 	private reader: TranscriptLineageReader | undefined;
 	private isCurrent: () => boolean = () => false;
 	private attachment = 0;
@@ -219,7 +223,7 @@ export class TranscriptHierarchyHost {
 		this.reader = reader;
 		this.isCurrent = isCurrent;
 		this.attachment += 1;
-		this.view = undefined;
+		this.discardView();
 		return this.request();
 	}
 
@@ -228,12 +232,13 @@ export class TranscriptHierarchyHost {
 		this.reader = undefined;
 		this.isCurrent = () => false;
 		this.attachment += 1;
-		this.view = undefined;
+		this.discardView();
 		return this.request();
 	}
 
 	/** Called when effective settings changed; restarts only when something that shapes the coordinator did. */
 	settingsChanged(): Promise<void> {
+		if (!this.deps.isRetrievalEnabled()) this.discardView();
 		return this.request();
 	}
 
@@ -264,7 +269,7 @@ export class TranscriptHierarchyHost {
 			return { status: "refused", reason: `forgetting ${sessionId} could not be recorded: ${refusal}` };
 		}
 		// The read-only view loads again against the new forget state; nothing it cached about the session survives.
-		this.view = undefined;
+		this.discardView();
 		return {
 			status: "forgotten",
 			cleanupPending: "no coordinator is running; the derived summaries are removed the next time one runs",
@@ -304,7 +309,7 @@ export class TranscriptHierarchyHost {
 	async repairForgetState(): Promise<{ ok: boolean; message: string }> {
 		const repaired = await this.openStore().repairForgottenSessions(true);
 		if (repaired.status === "repaired") {
-			this.view = undefined;
+			this.discardView();
 			// A coordinator that stopped on the unknown state is replaced only by a changed signature: it is made to differ so
 			// the restart this repair exists for actually happens.
 			this.appliedSignature = undefined;
@@ -368,9 +373,21 @@ export class TranscriptHierarchyHost {
 			allowanceLines,
 			audience,
 		});
-		return rendering.text === ""
-			? { state: "no_room" }
-			: { state: "shown", text: rendering.text, bytes: rendering.bytes, revision: snapshot.selection.revision };
+		if (rendering.text === "") return { state: "no_room" };
+		const evidence = coordinator.frontierEvidence(
+			rendering.referencedNodeIds,
+			snapshot.selection,
+			rendering.sourceHandles,
+		);
+		if (!evidence) return { state: "unconfirmed" };
+		return {
+			state: "shown",
+			text: rendering.text,
+			bytes: rendering.bytes,
+			revision: snapshot.selection.revision,
+			sourceHandles: rendering.sourceHandles,
+			evidence,
+		};
 	}
 
 	/**
@@ -378,10 +395,10 @@ export class TranscriptHierarchyHost {
 	 * coordinator's mirror against the store. Nothing is described without a running coordinator, so then there is
 	 * nothing to confirm.
 	 */
-	async confirmFrontier(deadlineAt: number): Promise<boolean> {
+	async confirmFrontier(deadlineAt: number, context: MemoryReadContext = {}): Promise<boolean> {
 		const coordinator = this.coordinator;
 		if (!coordinator?.isRunning()) return true;
-		return coordinator.confirmFrontier(deadlineAt);
+		return coordinator.confirmFrontier(deadlineAt, context);
 	}
 
 	/** Record the cause of a frontier composition failure (the request continues without a frontier). */
@@ -483,9 +500,21 @@ export class TranscriptHierarchyHost {
 		});
 	}
 
+	private discardView(): void {
+		const view = this.view;
+		this.view = undefined;
+		if (!view) return;
+		const done = view.close();
+		this.retiringViews.add(done);
+		void done.finally(() => this.retiringViews.delete(done)).catch(() => {});
+	}
+
 	private request(): Promise<void> {
 		this.chain = this.chain
-			.then(() => this.reconcile())
+			.then(async () => {
+				await Promise.all([...this.retiringViews]);
+				await this.reconcile();
+			})
 			.catch((error: unknown) => {
 				this.lastError = error instanceof Error ? error.message : String(error);
 			});
@@ -573,7 +602,8 @@ export class TranscriptHierarchyHost {
 			return;
 		}
 		// The coordinator reads through its own catalog now; the view's copy of the nodes is dropped.
-		this.view = undefined;
+		this.discardView();
+		await Promise.all([...this.retiringViews]);
 		// Indexing starts on purpose only after the coordinator subscribed to index changes (during start), so the
 		// ready change reaches it. A reader that was replaced meanwhile is left to its own generation.
 		if (this.reader === reader && this.isCurrent()) reader.start();

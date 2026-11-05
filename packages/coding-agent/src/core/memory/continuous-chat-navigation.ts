@@ -26,6 +26,7 @@ import {
 	renderContinuousChatPendingLine,
 	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
 
 /** Page size of the root's zoom: a long message or an agent's log comes in pages of this many UTF-8 bytes. */
 export const CONTINUOUS_CHAT_ZOOM_PAGE_BYTES = 32_768;
@@ -44,10 +45,13 @@ const ZOOM_ARGUMENT_KEYS: readonly string[] = ["id", "n", "page"];
 
 /** Committed tree nodes, logged messages and their images. `ContinuousChatStore` satisfies it structurally. */
 export interface ContinuousChatNavigationSource {
-	readNode(coordinate: ContinuousChatNodeCoordinate): Promise<ContinuousChatTreeNode | undefined>;
-	readMessageById(id: number): Promise<ContinuousChatRecord | undefined>;
-	readMessageDate(id: number): Promise<string | undefined>;
-	readImage(ref: ContinuousChatImageRef): Promise<Buffer>;
+	readNode(
+		coordinate: ContinuousChatNodeCoordinate,
+		context?: MemoryReadContext,
+	): Promise<ContinuousChatTreeNode | undefined>;
+	readMessageById(id: number, context?: MemoryReadContext): Promise<ContinuousChatRecord | undefined>;
+	readMessageDate(id: number, context?: MemoryReadContext): Promise<string | undefined>;
+	readImage(ref: ContinuousChatImageRef, context?: MemoryReadContext): Promise<Buffer>;
 }
 
 /** One page of an agent's chat log. `pageCount` is at least 1 and `page` is below it. */
@@ -249,23 +253,36 @@ export class ContinuousChatNavigator {
 	async execute(
 		command: ContinuousChatNavigationCommand,
 		signal?: AbortSignal,
+		readContext?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
-		if (command.tool === "date") return this.lookupDate(command.id, signal);
-		if (command.kind === "worker") return this.zoomWorker(command.name, command.page, signal);
-		if (command.n === 1) return this.zoomMessage(command.id, command.page, signal);
-		return this.zoomNode(command.id, command.n, command.page, signal);
+		const context: MemoryReadContext = {
+			...readContext,
+			signal:
+				signal && readContext?.signal
+					? AbortSignal.any([signal, readContext.signal])
+					: (signal ?? readContext?.signal),
+		};
+		assertMemoryReadActive(context);
+		if (command.tool === "date") return this.lookupDate(command.id, context);
+		if (command.kind === "worker") return this.zoomWorker(command.name, command.page, context);
+		if (command.n === 1) return this.zoomMessage(command.id, command.page, context);
+		return this.zoomNode(command.id, command.n, command.page, context);
 	}
 
-	private async lookupDate(id: number, signal?: AbortSignal): Promise<ContinuousChatNavigationResult> {
-		const date = await this.source.readMessageDate(id);
-		signal?.throwIfAborted();
+	private async lookupDate(id: number, context?: MemoryReadContext): Promise<ContinuousChatNavigationResult> {
+		const date = await this.source.readMessageDate(id, context);
+		assertMemoryReadActive(context);
 		if (date === undefined) return rejected("not-found", `No message ${id}.`);
 		return { status: "date", id, date };
 	}
 
-	private async zoomMessage(id: number, page: number, signal?: AbortSignal): Promise<ContinuousChatNavigationResult> {
-		const record = await this.source.readMessageById(id);
-		signal?.throwIfAborted();
+	private async zoomMessage(
+		id: number,
+		page: number,
+		context?: MemoryReadContext,
+	): Promise<ContinuousChatNavigationResult> {
+		const record = await this.source.readMessageById(id, context);
+		assertMemoryReadActive(context);
 		if (record === undefined) return rejected("not-found", `No message ${id}.`);
 		const textPage = pageContinuousChatText([record.text], this.pageBytes, page);
 		const imagePages: ContinuousChatImageRef[][] = [];
@@ -275,7 +292,7 @@ export class ContinuousChatNavigator {
 			if (
 				current === undefined ||
 				current.length === CONTINUOUS_CHAT_ZOOM_IMAGE_MAX_COUNT ||
-				currentBytes + image.bytes > this.imageBytes
+				(this.imageBytes > 0 && currentBytes + image.bytes > this.imageBytes)
 			) {
 				current = [];
 				imagePages.push(current);
@@ -304,7 +321,7 @@ export class ContinuousChatNavigator {
 		id: number,
 		n: number,
 		page: number,
-		signal?: AbortSignal,
+		context?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
 		const level = Math.round(Math.log2(n));
 		if (2 ** level !== n) return rejected("not-power-of-two", `n must be a power of two, got ${n}.`);
@@ -315,16 +332,16 @@ export class ContinuousChatNavigator {
 		const coordinate = { level, ordinal: id / n };
 		const label = continuousChatNodeLabel(coordinate);
 		if (page !== 0) return rejected("page-out-of-range", `Line ${label} has no pages; page must be 0.`);
-		const node = await this.source.readNode(coordinate);
-		signal?.throwIfAborted();
+		const node = await this.source.readNode(coordinate, context);
+		assertMemoryReadActive(context);
 		if (node === undefined) {
-			const lastDate = await this.source.readMessageDate(id + n - 1);
-			signal?.throwIfAborted();
+			const lastDate = await this.source.readMessageDate(id + n - 1, context);
+			assertMemoryReadActive(context);
 			if (lastDate === undefined) {
 				return rejected("out-of-range", `Messages ${id} to ${id + n - 1} are not all logged.`);
 			}
 			// Not merged yet: the line still opens into its two children, each a summary or a pending line.
-			return this.unmergedChildren(coordinate, id, n, signal);
+			return this.unmergedChildren(coordinate, id, n, context);
 		}
 		const children = node.children;
 		if (children === undefined) return rejected("incomplete", `Line ${label} has no children.`);
@@ -334,10 +351,10 @@ export class ContinuousChatNavigator {
 		if (parent === undefined || parent.level !== level || parent.ordinal !== coordinate.ordinal) {
 			return rejected("incomplete", `Line ${label} does not cover its two children.`);
 		}
-		const left = await this.source.readNode(children[0]);
-		signal?.throwIfAborted();
-		const right = await this.source.readNode(children[1]);
-		signal?.throwIfAborted();
+		const left = await this.source.readNode(children[0], context);
+		assertMemoryReadActive(context);
+		const right = await this.source.readNode(children[1], context);
+		assertMemoryReadActive(context);
 		if (left === undefined || right === undefined) {
 			return rejected("incomplete", `Line ${label} is missing a child line.`);
 		}
@@ -354,17 +371,17 @@ export class ContinuousChatNavigator {
 		coordinate: ContinuousChatNodeCoordinate,
 		id: number,
 		n: number,
-		signal?: AbortSignal,
+		context?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
 		const left = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 };
 		const right = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 + 1 };
-		const lines: [string, string] = [await this.childLine(left, signal), await this.childLine(right, signal)];
+		const lines: [string, string] = [await this.childLine(left, context), await this.childLine(right, context)];
 		return { status: "children", id, n, lines };
 	}
 
-	private async childLine(child: ContinuousChatNodeCoordinate, signal?: AbortSignal): Promise<string> {
-		const node = await this.source.readNode(child);
-		signal?.throwIfAborted();
+	private async childLine(child: ContinuousChatNodeCoordinate, context?: MemoryReadContext): Promise<string> {
+		const node = await this.source.readNode(child, context);
+		assertMemoryReadActive(context);
 		if (node !== undefined) return renderContinuousChatViewLine(node);
 		return renderContinuousChatPendingLine(
 			child,
@@ -372,12 +389,16 @@ export class ContinuousChatNavigator {
 		);
 	}
 
-	private async zoomWorker(name: string, page: number, signal?: AbortSignal): Promise<ContinuousChatNavigationResult> {
+	private async zoomWorker(
+		name: string,
+		page: number,
+		context?: MemoryReadContext,
+	): Promise<ContinuousChatNavigationResult> {
 		if (this.workerLogs === undefined) {
 			return rejected("worker-log-unavailable", "Agent chat logs are not available.");
 		}
 		const reply = await this.workerLogs.readPage(name, page, this.pageBytes);
-		signal?.throwIfAborted();
+		assertMemoryReadActive(context);
 		if (reply === undefined) return rejected("not-found", `No page ${page} of agent ${name}.`);
 		if (!isWorkerLogPageFor(reply, name, page, this.pageBytes)) {
 			return rejected("worker-log-unavailable", `The agent chat log port returned an invalid page for ${name}.`);

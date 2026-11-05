@@ -13,9 +13,9 @@
  * the store's own writes is found at the next full load, as recovery's own start-up check finds it. Every read still goes through the catalog's approval, retention and live-dependency checks.
  * Its delivery fence ({@link TranscriptSummaryReadContext.confirm}) is the same refresh, started after the read's
  * own lineage checks: one root read when nothing changed. Loads go through {@link TranscriptBoundedRead}: at most one runs per view, with at most one more
- * queued for fences; the running one is shared and runs under no caller's deadline, and its wait for the store
- * lock ends after the lock's default retry window (`DEFAULT_FILE_LOCK_RETRY_WINDOW_MS`) as a typed busy status.
- * Each caller waits only until its own deadline (typed timeout); a file read already started is not cancelled.
+ * queued for fences. Each physical read has a fixed deadline and a cancellation signal covering the store lock
+ * and bounded descriptor reads. Each caller owns its deadline and cancellation; the last departing caller
+ * aborts the underlying read, whose actual cleanup is joined before the view is released.
  * Store I/O and lock failures arrive typed from the store and are answered as the read's typed status, so a
  * search keeps its exact hits.
  * Damage the coordinator's recovery would repair is never served around: damaged nodes and every ancestor
@@ -24,6 +24,7 @@
  */
 
 import { DEFAULT_FILE_LOCK_RETRY_WINDOW_MS } from "../util/atomic-file.ts";
+import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
 import type {
 	TranscriptLineageReader,
 	TranscriptReadUnavailable,
@@ -42,6 +43,7 @@ import {
 	forgottenNodeIds,
 	TranscriptSummaryCatalog,
 	type TranscriptSummaryReadContext,
+	type TranscriptSummaryReadFence,
 } from "./transcript-summary-catalog.ts";
 import type { TranscriptSummaryMetadataRoot } from "./transcript-summary-metadata.ts";
 import { type TranscriptSummaryNode, validateParentChildren } from "./transcript-summary-node.ts";
@@ -66,8 +68,8 @@ export interface TranscriptSummaryViewDeps {
 const NO_MANIFEST = -1;
 
 /** The cache key of one load: the manifest revision and the permanent forget state's revision. */
-function loadKey(manifestRevision: number, forgetRevision: number): string {
-	return `${manifestRevision}:${forgetRevision}`;
+function loadKey(writerFence: number, manifestRevision: number, forgetRevision: number): string {
+	return `${writerFence}:${manifestRevision}:${forgetRevision}`;
 }
 
 /** What the view needs to follow the store from the state it loaded, instead of loading it again. */
@@ -106,14 +108,17 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	private readonly deps: TranscriptSummaryViewDeps;
 	private loaded: { ticket: number; revision: string; summaries: LoadedSummaries } | undefined;
 	/** Store loads: one running plus one queued for fences, each caller settled by its own deadline. */
-	private readonly loads = new TranscriptBoundedRead<LoadedSummaries>((ticket) => this.refresh(ticket));
+	private readonly loads = new TranscriptBoundedRead<LoadedSummaries>((ticket, context) =>
+		this.refresh(ticket, context),
+	);
+	private closed = false;
 
 	constructor(deps: TranscriptSummaryViewDeps) {
 		this.deps = deps;
 	}
 
 	async expand(handle: string, options: TranscriptSummaryReadOptions = {}): Promise<TranscriptNodeExpansion> {
-		const ready = await this.readable(this.loads.join(options.deadlineAt));
+		const ready = await this.readable(this.loads.join(options));
 		// A store that cannot be read still answers a malformed handle as malformed: the catalog orders the checks.
 		const catalog = "status" in ready ? new TranscriptSummaryCatalog() : ready.catalog;
 		return catalog.expand(handle, {
@@ -128,7 +133,7 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		limits: { maxNodes: number },
 		options: TranscriptSummaryReadOptions = {},
 	): Promise<TranscriptSummaryLookupResult> {
-		const ready = await this.readable(this.loads.join(options.deadlineAt));
+		const ready = await this.readable(this.loads.join(options));
 		if ("status" in ready) return ready;
 		return ready.catalog.approvedSummariesCovering(refs, limits, this.readContext(options));
 	}
@@ -140,40 +145,60 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	 */
 	private readContext(options: TranscriptSummaryReadOptions): TranscriptSummaryReadContext {
 		return {
+			...options,
 			reader: this.deps.reader,
 			cutoff: () => this.deps.cutoff(),
 			priority: "foreground",
 			...(options.deadlineAt !== undefined ? { deadlineAt: options.deadlineAt } : {}),
-			confirm: () => this.readable(this.loads.fence(options.deadlineAt)),
+			confirm: (context = options) => this.readable(this.loads.fence(context)),
 		};
+	}
+
+	async close(): Promise<void> {
+		this.closed = true;
+		this.loaded = undefined;
+		await this.loads.close();
 	}
 
 	/** The catalog to read through, or the typed reason summary reads cannot be served. */
 	private async readable(
 		loading: Promise<StoreLoad>,
-	): Promise<{ catalog: TranscriptSummaryCatalog } | TranscriptReadUnavailable> {
+	): Promise<TranscriptSummaryReadFence | TranscriptReadUnavailable> {
 		const current = await loading;
 		if ("status" in current) return current;
+		const held = this.loaded;
+		if (this.closed || held?.summaries !== current)
+			return { status: "stale_snapshot", reason: "The summary view changed while the read was in flight." };
 		if (current.anchorsDamaged !== undefined && this.deps.cutoff() !== undefined) {
 			return {
 				status: "unavailable",
 				reason: `the retention anchors are damaged (${current.anchorsDamaged}), so summary ages cannot be established while retention is on; a running summary hierarchy rebuilds them, and exact history recall is unaffected`,
 			};
 		}
-		return { catalog: current.catalog };
+		return {
+			catalog: current.catalog,
+			revision: held.revision,
+			isCurrent: () =>
+				!this.closed &&
+				this.loaded?.revision === held.revision &&
+				this.loaded.summaries.catalog === current.catalog &&
+				!(current.anchorsDamaged !== undefined && this.deps.cutoff() !== undefined),
+		};
 	}
 
 	/**
 	 * The catalog for the store as it is now. Following the store mutates the catalog it already holds; a reload builds a
 	 * new one, so a read still running on the previous one is judged again against the current one by its delivery fence.
 	 */
-	private async refresh(ticket: number): Promise<StoreLoad> {
+	private async refresh(ticket: number, context: MemoryReadContext): Promise<StoreLoad> {
+		assertMemoryReadActive(context);
 		const held = this.loaded?.summaries;
 		const cursor = held?.cursor;
-		const followed = await this.deps.store.follow(cursor?.root);
+		const followed = await this.deps.store.follow(cursor?.root, context);
 		if (followed.status === "unavailable") return { status: "unavailable", reason: followed.reason };
 		if (held && cursor && (followed.status === "unchanged" || followed.status === "changed")) {
-			const forget = await this.deps.store.readForgottenSessionsAt(followed.root, cursor.legacy);
+			const forget = await this.deps.store.readForgottenSessionsAt(followed.root, cursor.legacy, context);
+			assertMemoryReadActive(context);
 			if (forget.status === "unavailable") return { status: "unavailable", reason: forget.reason };
 			if (forget.status === "unknown") return forgetUnknown(forget.reason);
 			if (forget.revision === cursor.forgetRevision) {
@@ -186,8 +211,15 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 							followed.root,
 							followed.accepted,
 							forget.sessions,
+							context,
 						);
-						if (next) return this.remember(ticket, loadKey(followed.root.revision, forget.revision), next);
+						assertMemoryReadActive(context);
+						if (next)
+							return this.remember(
+								ticket,
+								loadKey(followed.root.writerFence, followed.root.revision, forget.revision),
+								next,
+							);
 					} catch (error) {
 						// An I/O failure while reading changed node files is the store being unavailable, as on any other read.
 						const unavailable = storeUnavailable("following the summary store", error);
@@ -197,7 +229,7 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 				}
 			}
 		}
-		return this.reload(ticket);
+		return this.reload(ticket, context);
 	}
 
 	/**
@@ -211,13 +243,15 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		root: TranscriptSummaryMetadataRoot,
 		changes: ReadonlyMap<string, TranscriptSummaryAcceptedNode | undefined>,
 		forgotten: ReadonlySet<string>,
+		context: MemoryReadContext,
 	): Promise<LoadedSummaries | undefined> {
 		const { store } = this.deps;
 		const { catalog } = held;
 		const fetched = new Map<string, TranscriptSummaryNode>();
 		for (const [id, entry] of changes) {
+			assertMemoryReadActive(context);
 			if (!entry) continue;
-			const read = await store.readNode(id);
+			const read = await store.readNode(id, context);
 			if (read.status !== "ok" || nodeDisagreesWithEntry(read.node, entry)) return undefined;
 			fetched.set(id, read.node);
 		}
@@ -226,6 +260,7 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		const ascending = [...fetched.values()].sort((left, right) => left.level - right.level);
 		const denied = new Set<string>();
 		for (const node of ascending) {
+			assertMemoryReadActive(context);
 			if (node.children) {
 				const left = lookup(node.children[0]);
 				const right = lookup(node.children[1]);
@@ -246,7 +281,8 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 			}
 		}
 		const issues: TranscriptSummaryRecoveryIssue[] = [];
-		const anchors = await store.readAnchors(issues);
+		const anchors = await store.readAnchors(issues, context);
+		assertMemoryReadActive(context);
 		const nextDenied = new Map(cursor.denied);
 		for (const [id, entry] of changes) {
 			if (entry) continue;
@@ -272,31 +308,37 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	}
 
 	/** Load the whole store into a new catalog: how the view starts, and the way back from anything it cannot follow. */
-	private async reload(ticket: number): Promise<StoreLoad> {
-		const read = await this.deps.store.readManifest();
+	private async reload(ticket: number, context: MemoryReadContext): Promise<StoreLoad> {
+		const read = await this.deps.store.readManifest(context);
 		if (read.status === "unavailable") return { status: "unavailable", reason: read.reason };
 		if (read.status === "corrupt") return damaged(read.detail);
 		// The permanent forget state is part of what a load reflects: a session forgotten since is denied at once, and an
 		// unknown state serves no summaries (it never reads as "nothing was forgotten").
-		const forget = await this.deps.store.readForgottenSessions();
+		const forget = await this.deps.store.readForgottenSessions(context);
+		assertMemoryReadActive(context);
 		if (forget.status === "unknown") return forgetUnknown(forget.reason);
 		if (forget.status === "unavailable") return { status: "unavailable", reason: forget.reason };
-		const revision = loadKey(read.status === "ok" ? read.manifest.revision : NO_MANIFEST, forget.revision);
+		const revision = loadKey(
+			read.status === "ok" ? read.manifest.writerFence : 0,
+			read.status === "ok" ? read.manifest.revision : NO_MANIFEST,
+			forget.revision,
+		);
 		if (this.loaded?.revision === revision) return this.loaded.summaries;
 		const catalog = new TranscriptSummaryCatalog();
 		if (read.status === "missing") return this.remember(ticket, revision, { catalog });
-		// The shared load runs under no caller's deadline, but its wait for the store lock is bounded by the lock's own
-		// default retry window: a long same-process holder gives a typed "busy" here instead of an endless queue. The
-		// file reads after admission are not bounded (and not preemptible).
+		// The shared load carries its fixed physical deadline through lock admission and every descriptor read.
 		const state = await this.deps.store.load({
+			...context,
 			lockAdmissionDeadlineAt: Date.now() + DEFAULT_FILE_LOCK_RETRY_WINDOW_MS,
 		});
+		assertMemoryReadActive(context);
 		if ("status" in state) return { status: "unavailable", reason: state.reason };
 		const corrupt = state.issues.find((issue) => issue.kind === "manifest_corrupt");
 		if (corrupt) return damaged(corrupt.detail);
 		// Damaged nodes and every ancestor built on them are left out, as recovery would revoke them.
 		const left = new Set(state.issues.map(damagedNodeId).filter((id): id is string => id !== undefined));
 		for (let grew = left.size > 0; grew; ) {
+			assertMemoryReadActive(context);
 			grew = false;
 			for (const node of state.nodes.values()) {
 				if (!left.has(node.id) && node.children?.some((child) => left.has(child))) {
@@ -307,7 +349,9 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		}
 		// The one permanent-forget rule (shared with the coordinator's catalog): the nodes naming a forgotten session and every
 		// summary built on them. The state the load itself read is the one the nodes are filtered by.
-		const forgottenNow = state.forgotten.status === "ok" ? state.forgotten : forget;
+		if (state.forgotten.status === "unknown") return forgetUnknown(state.forgotten.reason);
+		if (state.forgotten.status === "unavailable") return state.forgotten;
+		const forgottenNow = state.forgotten;
 		const denied = forgottenNodeIds(state.nodes.values(), forgottenNow.sessions);
 		catalog.replace(
 			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied.has(node.id)),
@@ -315,9 +359,14 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		);
 		const anchors = state.issues.find((issue) => issue.kind === "anchors_corrupt");
 		// The revision the nodes were loaded at, not the one read before: a publication in between reloads next time.
-		const loadedAt = loadKey(state.manifest?.revision ?? NO_MANIFEST, forgottenNow.revision);
+		const loadedAt = loadKey(
+			state.manifest?.writerFence ?? 0,
+			state.manifest?.revision ?? NO_MANIFEST,
+			forgottenNow.revision,
+		);
 		// Only an undamaged paged state can be followed; anything else reloads on every change, as it always did.
 		const followable = state.root !== undefined && left.size === 0 && state.forgotten.status === "ok";
+		assertMemoryReadActive(context);
 		return this.remember(ticket, loadedAt, {
 			catalog,
 			...(anchors ? { anchorsDamaged: anchors.detail } : {}),
@@ -341,7 +390,8 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	 * revision restarted lower after a corrupt-manifest rebuild. The caller answers from what it loaded either way.
 	 */
 	private remember(ticket: number, revision: string, summaries: LoadedSummaries): LoadedSummaries {
-		if (this.loaded === undefined || ticket > this.loaded.ticket) this.loaded = { ticket, revision, summaries };
+		if (!this.closed && (this.loaded === undefined || ticket > this.loaded.ticket))
+			this.loaded = { ticket, revision, summaries };
 		return summaries;
 	}
 }
