@@ -288,7 +288,8 @@ export class HerdrBackend implements CollaborationBackend {
 				"not-submitted",
 			);
 		// The prompt travels on the socket, never as a process argument other local users can list. The request is
-		// the CLI's `--wait --timeout`: the server waits for the first settled idle, done or blocked state.
+		// the CLI's `--wait --timeout` with its documented default states named, so the wait never rests on a
+		// server-side default for an omitted `until`.
 		const deadline = AbortSignal.timeout(input.timeoutMs + 5000);
 		const connection = await (this.options.connect ?? connectHerdrChannel)(
 			this.options.socketPath,
@@ -300,7 +301,7 @@ export class HerdrBackend implements CollaborationBackend {
 				await connection.request("agent.prompt", {
 					target: before.paneId,
 					text: input.text,
-					wait: { timeout_ms: input.timeoutMs },
+					wait: { timeout_ms: input.timeoutMs, until: ["idle", "done", "blocked"] },
 				}),
 			);
 		} finally {
