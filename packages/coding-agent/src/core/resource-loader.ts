@@ -398,6 +398,11 @@ export interface DefaultResourceLoaderOptions {
 	additionalPromptTemplatePaths?: string[];
 	additionalThemePaths?: string[];
 	extensionFactories?: ExtensionFactory[];
+	/**
+	 * When false, a configured package that is not installed is skipped instead of installed. Unattended hosts (the
+	 * away daemon) set it: no background process installs software, and none races a session installing the same one.
+	 */
+	installMissingPackages?: boolean;
 	noExtensions?: boolean;
 	noSkills?: boolean;
 	noPromptTemplates?: boolean;
@@ -436,6 +441,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
 	private extensionFactories: ExtensionFactory[];
+	private installMissingPackages: boolean;
 	private noExtensions: boolean;
 	private noSkills: boolean;
 	private noPromptTemplates: boolean;
@@ -515,6 +521,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths ?? [];
 		this.additionalThemePaths = options.additionalThemePaths ?? [];
 		this.noExtensions = options.noExtensions ?? false;
+		this.installMissingPackages = options.installMissingPackages ?? true;
 		this.extensionFactories = options.extensionFactories ?? [];
 		this.noSkills = options.noSkills ?? false;
 		this.noPromptTemplates = options.noPromptTemplates ?? false;
@@ -773,13 +780,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 			.map((path) => this.resolveResourcePath(path));
 	}
 
+	/** The configured packages' resources; a loader that installs nothing skips each package that is not installed. */
+	private resolveConfiguredPackages(): ReturnType<DefaultPackageManager["resolve"]> {
+		return this.packageManager.resolve(this.installMissingPackages ? undefined : async () => "skip");
+	}
+
 	/**
 	 * Get all discoverable extension paths (enabled and disabled).
 	 * Used for profile resource filtering to show the full universe of available extensions.
 	 */
 	async getDiscoverableExtensionPaths(): Promise<string[]> {
 		await this.settingsManager.reload();
-		const resolvedPaths = await this.packageManager.resolve();
+		const resolvedPaths = await this.resolveConfiguredPackages();
 		const additionalExtensionPaths = this.filterInstructionPaths(this.additionalExtensionPaths);
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(additionalExtensionPaths, {
 			temporary: true,
@@ -1039,7 +1051,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			if (!options.skipSettingsReload) {
 				await this.settingsManager.reload();
 			}
-			const resolvedPaths = await this.packageManager.resolve();
+			const resolvedPaths = await this.resolveConfiguredPackages();
 			const additionalExtensionPaths = this.filterInstructionPaths(this.additionalExtensionPaths);
 			const cliExtensionPaths = await this.packageManager.resolveExtensionSources(additionalExtensionPaths, {
 				temporary: true,

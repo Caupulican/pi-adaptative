@@ -55,6 +55,7 @@ import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { createSessionOperationGate } from "../system-one/operation-gate-wiring.ts";
+import { ProjectTrustStore, resolveProjectTrust } from "../trust-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 
 export interface AwayParentContextInput {
@@ -174,12 +175,21 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const authStorage = input.authStorage ?? AuthStorage.create(configFile(agentDir, "auth.json"));
 		const modelRegistry =
 			input.modelRegistry ?? ModelRegistry.create(authStorage, configFile(agentDir, "models.json"));
-		const settings = SettingsManager.create(cwd, agentDir);
+		// An unattended run honors the owner's recorded trust decision for the project exactly as a session start does
+		// (a read-only, lock-free store read), and installs nothing: no project the owner declined can reach it.
+		const trustDefault = SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getProjectTrustDefault();
+		const projectTrusted = resolveProjectTrust(
+			cwd,
+			new ProjectTrustStore(agentDir, { readOnly: true }),
+			trustDefault,
+		);
+		const settings = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const resourceLoader = new DefaultResourceLoader({
 			cwd,
 			agentDir,
 			settingsManager: settings,
 			noExtensions: true,
+			installMissingPackages: false,
 		});
 		await resourceLoader.reload();
 
@@ -189,12 +199,13 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const parentModel = restored && modelRegistry.hasConfiguredAuth(restored) ? restored : undefined;
 
 		// The model-call vehicle: its own settings and minimal loader, so building it changes nothing this context reads.
-		const ephemeralSettings = SettingsManager.create(cwd, agentDir);
+		const ephemeralSettings = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const ephemeralLoader = new DefaultResourceLoader({
 			cwd,
 			agentDir,
 			settingsManager: ephemeralSettings,
 			noExtensions: true,
+			installMissingPackages: false,
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
