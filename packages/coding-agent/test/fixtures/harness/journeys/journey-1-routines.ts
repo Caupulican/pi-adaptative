@@ -897,7 +897,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			// four more runs fit the $1 day bound again and a fifth does not.
 			expect(ranOccurrences[0]?.awaySettlement?.costUsd, "the run's settled spend is saved on the run").toBe(0);
 			const roomAfterStop = routineAwaySpendRoom(
-				awayStore.listRoutineOccurrences(),
+				awayStore.listRoutineOccurrences({ routineId: awayRoutineId }),
 				{ maxUsdPerRun: 0.25, maxUsdPerDay: 1 },
 				world.timers.port("routines").now(),
 			);
