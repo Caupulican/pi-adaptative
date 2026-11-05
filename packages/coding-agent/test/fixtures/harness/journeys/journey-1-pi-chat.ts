@@ -5,6 +5,7 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { piChatExtension } from "../../../../src/core/chat/extension.ts";
 import { sessionMeshId } from "../../../../src/core/chat/identity.ts";
 import type { AgentSendResult } from "../../../../src/core/chat/mesh.ts";
+import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { MessageInbox } from "../../../../src/core/messaging/inbox.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { createBarrier } from "../scripted-provider.ts";
@@ -46,14 +47,13 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const settings = { memorySystem: "okf", autoLearn: { enabled: false } } as const;
 	const extensionErrors: string[] = [];
 	const notices: string[] = [];
-	// The scripted human has no notification or status line; this phase records the two the extension drives.
-	const ui = new Proxy(world.humanInput.ui, {
-		get: (target, property, receiver) => {
-			if (property === "notify") return (message: string) => void notices.push(message);
-			if (property === "setStatus") return () => undefined;
-			return Reflect.get(target, property, receiver);
-		},
-	});
+	// The host copies the UI context's own properties, so this phase supplies a concrete object: the scripted human's
+	// question presentation plus the two operations the extension drives (a recorded notification and a status line).
+	const ui = {
+		askQuestions: world.humanInput.ui.askQuestions,
+		notify: (message: string) => void notices.push(message),
+		setStatus: () => undefined,
+	} as unknown as ExtensionUIContext;
 	/** The status of the one target, with the whole result and any extension error as the assertion's evidence. */
 	const expectStatus = (result: { readonly details: unknown }, expected: string, label: string): void => {
 		const sent = result.details as AgentSendResult;
