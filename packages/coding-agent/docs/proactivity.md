@@ -60,6 +60,19 @@ The daemon starts in the agent directory with a reduced environment: platform, l
 
 `/bot daemon status` shows whether the daemon runs, each routine it did not run away with the reason, how it last ended (released by `/bot daemon stop`, stopped by a signal, or the error that ended it) and its most recent reports (at most 20 are kept). When a daemon ended on an error, the session that starts the next one reports it once. A worker process never starts the daemon, and the daemon and every run away apply only the owner's global settings: no project's settings, trusted or not, change what an unattended run may do, and a run away installs no package and reads no project instruction file.
 
+## Third-party words
+
+Every message that can open or steer a turn carries its origin, recorded where it is created and saved with it: the owner's typed or pasted words, the owner's own automation (routines, CI events, proactive notes, goal continuation, worker results, harness notices, installed extensions), or a third party's words an extension delivers with an origin (a peer agent on pi-chat, verified or not, or another channel). A run's authority follows the latest message that decides it: a third party's words make it third-party, and the owner's typed words given later return it to the owner. The owner's automation keeps the authority the run already has, and a continuation answers whoever its history last answered. A saved message whose origin cannot be read counts as a third party's.
+
+A run that carries a third party's words cannot act for the owner outward on its own:
+
+- `git push`, outward `gh` commands, package publishing and starting or messaging other agents (`delegate`, `pi_collaboration` launches and follow-ups, a goal's `dispatch_worker`) run only under a standing grant of the owner: an explicit `edge.allow` list, `/edge allow`, or a `goal grant_edge` citing words the owner typed. The default `edge.allow`, a grant given at an edge prompt, one System One read from the owner's words and YOLO mode cover only the owner's own runs.
+- Without such a grant the action is prepared instead of run. It is kept as a draft in the session, the tool result says it is held, who asked for it and how the owner can release it, and the owner's next turn carries one notice: `Held, not run: <action> (<classes>), asked by <origin>. Approve it in your next message, or grant <classes> in your own words.` The same action asked again keeps the same draft and adds no notice. A branch keeps at most 64 drafts; past that, one notice says the later ones are not recorded.
+- Starting, amending, completing or blocking a goal, changing its requirements or grants, creating, changing, resuming or running a routine, and handing recorded knowledge to another agent (the `knowledge` parameter of `delegate` and `pi_collaboration`), are refused outright with the reason.
+- A goal's owner evidence skips messages from a third party, so a peer's words never satisfy a goal's owner requirement.
+
+The rule reads the command itself: a script that pushes is judged as any other command. Sending mail, spending money and handling credentials stay with the edge policy and System One. Runs the owner's words decide are unchanged.
+
 ## Limits
 
 The defaults allow one review after two idle minutes, require three new owner turns between reviews, permit four reviews per running session and allow two notes per review. The review uses at most two provider requests. See the [settings reference](settings.md#proactivity) for all fields.

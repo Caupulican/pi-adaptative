@@ -7,6 +7,7 @@ import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@c
 import { type Agent, AgentBusyError } from "../kernel/agent.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import { stampTurnOrigin } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { resourceDir } from "./agent-paths.ts";
@@ -63,6 +64,7 @@ import type { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import type { ToolProtocolController } from "./tool-protocol-controller.ts";
+import { channelTurnOrigin } from "./turn-origin.ts";
 import { boundedLine } from "./util/bounded-line.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
@@ -734,8 +736,8 @@ export class PromptSubmissionController {
 			}
 
 			userRequest = carryOwnerWords(submittedWords, expandedText);
-			// Starting a goal is the owner's call: pasted words never state it.
-			if (!options?.internalContextType)
+			// Starting a goal is the owner's call: pasted words and a third party's words never state it.
+			if (!options?.internalContextType && !options?.origin)
 				goalToolStartAuthority = parseExplicitGoalStartAuthority(ownerTypedText(userRequest));
 
 			// If streaming — or waiting out a retry backoff, which is still an active
@@ -940,6 +942,7 @@ export class PromptSubmissionController {
 				// The message carries the input it is: its persistence delivers that input (a queued input its own turn took
 				// included), matched by this identity, never by the turn's end or the message's text.
 				if (lifecycle.input) stampOwnerInput(userMessage, lifecycle.input.inputId);
+				if (options?.origin) stampTurnOrigin(userMessage, channelTurnOrigin(options.origin));
 				this.deps.earlyDisplayedUserMessages.add(userMessage);
 				this.deps.emit({ type: "message_start", message: userMessage });
 			}

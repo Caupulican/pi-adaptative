@@ -1,5 +1,6 @@
 import type { ToolCall } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
+import { parseTurnOriginRecord, UNREADABLE_TURN_ORIGIN } from "../../kernel/turn-origin-stamp.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
@@ -27,6 +28,12 @@ export function resolveSessionUserEvidence(
 		const entry = branch[index];
 		if (entryId && entry.id !== entryId) continue;
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
+		// A third party's words an extension delivered are not the owner's statement, nor are words of unreadable origin.
+		if (
+			entry.turnOrigin !== undefined &&
+			(parseTurnOriginRecord(entry.turnOrigin) ?? UNREADABLE_TURN_ORIGIN).thirdParty
+		)
+			continue;
 		const content = entry.message.content;
 		const text =
 			typeof content === "string"

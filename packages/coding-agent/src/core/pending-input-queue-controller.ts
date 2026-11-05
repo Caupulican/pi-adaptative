@@ -1,5 +1,6 @@
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
+import { stampTurnOrigin } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
 import type { ForegroundInputPort, ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
@@ -23,6 +24,7 @@ import {
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff, RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
+import { channelTurnOrigin } from "./turn-origin.ts";
 import { type SteerDecision, type SteerWake, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 export interface PendingQueueSnapshot {
@@ -1163,6 +1165,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					admission.ownerOriginalText,
 					admission.ownerPasted,
 				);
+				if (entry.origin) stampTurnOrigin(entry.message, channelTurnOrigin(entry.origin));
 				this.deps.ownerInputs.move(entry.inputId, "handed");
 				if (admission.ownerOriginalText !== undefined) this.deps.authorizeParentNoteOwner(entry.inputId);
 				enqueue(entry.message);

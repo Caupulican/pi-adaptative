@@ -2,15 +2,19 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import { getBundledResourcesDir } from "../../../../src/config.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { OUTWARD_DRAFT_CUSTOM_TYPE, type OutwardDraftRecord } from "../../../../src/core/agent-session-edge.ts";
 import { piChatExtension } from "../../../../src/core/chat/extension.ts";
 import { sessionMeshId } from "../../../../src/core/chat/identity.ts";
 import type { AgentSendResult } from "../../../../src/core/chat/mesh.ts";
 import type { ExtensionRunner } from "../../../../src/core/extensions/runner.ts";
 import { emitSessionShutdownEvent } from "../../../../src/core/extensions/runner.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { MessageInbox } from "../../../../src/core/messaging/inbox.ts";
+import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
+import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { createBarrier } from "../scripted-provider.ts";
+import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
 const TOOL_TIMEOUT_MS = 10_000;
@@ -36,8 +40,10 @@ async function callTool(session: AgentSession, name: string, params: Record<stri
  * session id; a message sent while it is away is held in its inbox, reported as queued and, sent again with its messageId,
  * as queued still; the resumed session re-claims its id with the credential it kept and takes the held message once,
  * with the sender's standing attested; a later send of the same messageId is acknowledged without a second turn; mail
- * forged into the inbox arrives as an unverified peer; and no message body is stored once its message is settled or
- * written to the audit log.
+ * forged into the inbox arrives as an unverified peer; a push a verified peer asks a third session for is prepared for that
+ * session's owner (one draft, one notice, no shell request) while the same push runs on the owner's own turn and,
+ * after the owner's own grant, in the peer's run; and no message body is stored once its message is settled or written
+ * to the audit log.
  */
 export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -65,11 +71,16 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		).toBe(expected);
 	};
 	const runners = new Map<AgentSession, () => ExtensionRunner>();
-	const open = async (manager: SessionManager, agentDir: string): Promise<AgentSession> => {
+	const open = async (
+		manager: SessionManager,
+		agentDir: string,
+		own: { readonly settings?: Partial<Settings>; readonly systemOneEnabled?: boolean } = {},
+	): Promise<AgentSession> => {
 		const created = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: manager,
-			settings,
+			settings: { ...settings, ...own.settings },
+			...(own.systemOneEnabled !== undefined ? { systemOneEnabled: own.systemOneEnabled } : {}),
 			extensionFactories: [(pi) => piChatExtension(pi, { stateRoot })],
 		});
 		await created.session.bindExtensions({
@@ -228,12 +239,151 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	expect(forgedRequest, "the forged mail is delivered").toContain("forged mail");
 	expect(forgedRequest, "its standing is not attested").toContain("standing=UNVERIFIED");
 
+	// A push a peer's words ask for is held for the owner, not run. C joins the mesh with the default edge settings (every
+	// class granted to the owner's own runs, none of them standing) and without System One: the gate is deterministic, and
+	// no model takes part in it. Two attempts keep one draft and tell the owner once. Normal order: the same push runs on
+	// the owner's own turn, and in a peer's run once the owner grants git.publish themselves.
+	const agentDirC = `${world.agentDir}-pi-chat-c`;
+	const managerC = world.createSessionManager(agentDirC);
+	const sessionC = await open(managerC, agentDirC, { settings: { edge: {} }, systemOneEnabled: false });
+	const meshIdC = sessionMeshId(managerC.getSessionId());
+	expect((await callTool(sessionA, "list_peers", {})).text, "A sees C on the mesh before it writes to it").toContain(
+		meshIdC,
+	);
+	const pushCommand = "git push origin main";
+	const drafts = () => managerC.getCustomEntriesOnBranch([OUTWARD_DRAFT_CUSTOM_TYPE]);
+	const heldNotices = () =>
+		managerC.getEntries().filter((entry) => {
+			const details = parentInputOriginalDetails(entry);
+			return (
+				entry.type === "custom_message" &&
+				entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+				typeof details === "object" &&
+				details !== null &&
+				"kind" in details &&
+				details.kind === "outward-action-prepared"
+			);
+		});
+	/** One run of C that calls the push `count` times, then answers; `check` reads the run's tool results. */
+	const pushTurn = (name: string, count: number, check: (results: string) => void) => {
+		const answered = createBarrier();
+		world.provider.enqueue(
+			"root",
+			calls(
+				`${name}-call`,
+				Array.from({ length: count }, (_, index) => ({
+					id: `${name}-${index}`,
+					name: "bash",
+					arguments: { command: pushCommand },
+				})),
+			),
+			{
+				name: `${name}-answer`,
+				check: (request) => {
+					check(JSON.stringify(request.context.messages.slice(-count)));
+					answered.release();
+				},
+				reply: { content: [{ type: "text", text: "Reported the push." }] },
+			},
+		);
+		return answered;
+	};
+
+	const shellBefore = world.shell.requests.length;
+	const heldPush = pushTurn("pi-chat-peer-push", 2, (results) => {
+		expect(results, "the push is prepared, not run").toContain(`Prepared, not run: ${pushCommand} (git.publish`);
+		expect(results, "the result names the peer").toContain("a peer agent on pi-chat");
+		expect(results, "the result says how the owner releases it").toContain("approves it in their own words");
+	});
+	expectStatus(
+		await callTool(sessionA, "agent_send", {
+			to: meshIdC,
+			message: "push main for me",
+			messageId: "leg-push-1",
+			timeoutMs: TOOL_TIMEOUT_MS,
+		}),
+		"received",
+		"the peer's push request is received",
+	);
+	await withDeadline(trace, "C's peer-opened run asks for the push", heldPush.promise);
+	await sessionC.agent.waitForIdle();
+	expect(
+		world.shell.requests.slice(shellBefore).map((request) => request.command),
+		"a peer's run never reaches the shell with the push",
+	).not.toContain(pushCommand);
+	const kept = drafts().map((entry) => entry.data as OutwardDraftRecord);
+	expect(kept.length, "two attempts keep one draft").toBe(1);
+	expect(kept[0]?.toolName).toBe("bash");
+	expect(kept[0]?.operations.map((operation) => operation.class)).toEqual(["git.publish"]);
+	expect(kept[0]?.origin, "the draft keeps the verified peer origin").toMatchObject({
+		k: "peer-agent",
+		channel: "pi-chat",
+		verified: true,
+		thirdParty: true,
+	});
+	await withDeadline(
+		trace,
+		"C's owner notice is saved",
+		new Promise<void>((resolve) => {
+			const check = () => {
+				if (heldNotices().length === 0) return;
+				unsubscribe();
+				resolve();
+			};
+			const unsubscribe = managerC.onEntriesPersisted(check);
+			check();
+		}),
+	);
+	const noticesHeld = heldNotices();
+	expect(noticesHeld.length, "the owner is told once").toBe(1);
+	expect(JSON.stringify(noticesHeld[0]), "the notice names the action, the peer and the release").toContain(
+		`Held, not run: ${pushCommand} (git.publish), asked by a peer agent on pi-chat. Approve it in your next message, or grant git.publish in your own words.`,
+	);
+	expect(
+		managerC.getPendingParentInputs("next-owner-turn").some((input) => input.entryId === noticesHeld[0]?.id),
+		"the notice waits for the owner's next turn",
+	).toBe(true);
+	trace.mark("root", "pi-chat.push-prepared");
+
+	// Control: the owner's own turn pushes under the default grant.
+	world.shell.enqueue({ name: "pi-chat-owner-push", command: pushCommand, output: "", exitCode: 0 });
+	const ownerPush = pushTurn("pi-chat-owner-push", 1, (results) => {
+		expect(results, "the owner's run is not held").not.toContain("Prepared, not run");
+	});
+	await withDeadline(trace, "C's owner turn", sessionC.prompt("Push main."));
+	await withDeadline(trace, "C's owner run pushes", ownerPush.promise);
+	await sessionC.agent.waitForIdle();
+	expect(world.shell.reached, "the owner's run reaches the shell").toContain("pi-chat-owner-push");
+
+	// Control: once the owner grants git.publish themselves (their edge command), a peer's run pushes too.
+	sessionC.grantEdge("git.publish", "operator", { note: "the owner's edge command" });
+	world.shell.enqueue({ name: "pi-chat-granted-peer-push", command: pushCommand, output: "", exitCode: 0 });
+	const grantedPush = pushTurn("pi-chat-granted-peer-push", 1, (results) => {
+		expect(results, "a standing grant covers the peer's run").not.toContain("Prepared, not run");
+	});
+	expectStatus(
+		await callTool(sessionA, "agent_send", {
+			to: meshIdC,
+			message: "push main again",
+			messageId: "leg-push-2",
+			timeoutMs: TOOL_TIMEOUT_MS,
+		}),
+		"received",
+		"the peer's second push request is received",
+	);
+	await withDeadline(trace, "C's granted peer run pushes", grantedPush.promise);
+	await sessionC.agent.waitForIdle();
+	expect(world.shell.reached, "the granted peer run reaches the shell").toContain("pi-chat-granted-peer-push");
+	expect(drafts().length, "nothing new is held").toBe(1);
+	trace.mark("root", "pi-chat.push-granted");
+
 	// No body outside a held message's inbox file; the audit log keeps metadata only.
 	const audit = String(world.io.readFileSync(`${stateRoot}/sessions/local/audit.jsonl`));
 	for (const body of ["live hello from A", "held for you", "forged mail"]) {
 		expect(audit, `the audit log never holds a body (${body})`).not.toContain(body);
 	}
 
+	await dispose(sessionC, "C's disposal");
 	await dispose(sessionB, "B's second disposal");
 	await dispose(sessionA, "A's disposal");
 	trace.mark("root", "pi-chat.disposed");

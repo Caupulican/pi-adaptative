@@ -80,6 +80,13 @@ import { ownerInputIdOf } from "../owner-input-stamp.ts";
 import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
 import { FileSnapshotChangedError, sameFileVersion } from "../storage/bounded-file.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
+import {
+	parseTurnOriginRecord,
+	stampTurnOrigin,
+	type TurnOriginRecord,
+	turnOriginStampOf,
+	UNREADABLE_TURN_ORIGIN,
+} from "../turn-origin-stamp.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
 import type { UsageComponent } from "../usage-components.ts";
@@ -973,6 +980,14 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 			const record = parseWorkerControlRecord(entry.workerControl);
 			if (record) stampWorkerControl(entry.message, record);
 		}
+		// An origin that does not parse is third-party: an unreadable record never gains the owner's authority.
+		if (
+			entry.turnOrigin !== undefined &&
+			entry.message.role === "user" &&
+			Object.isExtensible(entry.message) &&
+			turnOriginStampOf(entry.message) === undefined
+		)
+			stampTurnOrigin(entry.message, parseTurnOriginRecord(entry.turnOrigin) ?? UNREADABLE_TURN_ORIGIN);
 		return entry.message;
 	}
 	if (entry.type === "custom_message") {
@@ -999,6 +1014,12 @@ function deliveredWorkerControl(message: AgentMessage): { workerControl?: Return
 function deliveredOwnerInput(message: AgentMessage): { ownerInputId?: string } {
 	const id = message.role === "user" ? ownerInputIdOf(message) : undefined;
 	return id === undefined ? {} : { ownerInputId: id };
+}
+
+/** The origin stamp a persisted user message carries, to be written on its entry. */
+function deliveredTurnOrigin(message: AgentMessage): { turnOrigin?: TurnOriginRecord } {
+	const record = message.role === "user" ? turnOriginStampOf(message) : undefined;
+	return record === undefined ? {} : { turnOrigin: record };
 }
 
 /**
@@ -2844,6 +2865,7 @@ export class SessionManager {
 			message,
 			...(origin === undefined ? {} : { origin }),
 			...deliveredOwnerInput(message),
+			...deliveredTurnOrigin(message),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2890,6 +2912,7 @@ export class SessionManager {
 					message,
 					...(item.origin === undefined ? {} : { origin: item.origin }),
 					...deliveredOwnerInput(message),
+					...deliveredTurnOrigin(message),
 				};
 				sourceMessages.push(message);
 			} else if (item.kind === "custom") {

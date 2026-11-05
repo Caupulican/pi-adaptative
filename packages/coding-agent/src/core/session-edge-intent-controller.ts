@@ -11,7 +11,11 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
 	type EdgeGrantDetails,
 	edgeRecordsOnBranch,
+	effectiveEdgeGrants,
 	enforceSessionEdgeOperation,
+	keepOutwardDraft,
+	MAX_OUTWARD_DRAFTS,
+	originLabel,
 	recordEdgeGrant,
 	recordEdgeRevoke,
 	type SessionEdgeDeps,
@@ -25,7 +29,8 @@ import {
 } from "./autonomy/edge-policy.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { ToolInfo } from "./extensions/index.ts";
-import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
+import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
+import type { OwnerEvidenceRecord, OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { RouterCandidatePool } from "./model-router/candidate-pool.ts";
 import {
@@ -77,6 +82,7 @@ import {
 	optionalToolRequestAliases,
 	readOptionalToolIntent,
 } from "./tool-applicability-gate.ts";
+import type { TurnOriginRecord } from "./turn-origin.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 
 /**
@@ -207,6 +213,12 @@ export interface SessionEdgeIntentControllerDeps {
 	pushPendingNextTurnMessage(message: CustomMessage): void;
 	setOperatorBlocker(blocker: string | undefined): void;
 	emitWarning(message: string): void;
+	/** The decisive origin of the foreground run in progress (`RunTurnOrigin`). */
+	getRunTurnOrigin(): TurnOriginRecord | undefined;
+	/** Tells the owner once, with their next turn (`HarnessNoticeController.observe`). */
+	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
+	/** The owner's original words a persisted entry delivered (`OwnerEvidenceLedger.findSource`), if it delivered any. */
+	findOwnerEvidence(sourceId: string): Pick<OwnerEvidenceRecord, "pasted"> | undefined;
 }
 
 export class SessionEdgeIntentController {
@@ -342,7 +354,7 @@ export class SessionEdgeIntentController {
 			getEngine: () => this.deps.getSemanticDecisionEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.deps.getLastUserRequest()}`,
-			getEdgeGrants: () => this.getEdgeGrants(),
+			getEdgeGrants: () => effectiveEdgeGrants(this.edgeDeps()),
 			askOperator: async (operation, signal) =>
 				enforceSessionEdgeOperation(this.edgeDeps(), operation, "operation", signal),
 			notify: (message) => {
@@ -361,6 +373,7 @@ export class SessionEdgeIntentController {
 			getBranch: () => this.deps.getSessionManager().getBranch(),
 			getEdgeRecords: () => edgeRecordsOnBranch(this.deps.getSessionManager()),
 			getSettingsAllow: () => this.deps.getSettingsManager().getEdgeSettings().allow,
+			getStandingSettingsAllow: () => this.deps.getSettingsManager().getEdgeSettings().standingAllow,
 			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,
 			appendCustomEntry: (customType, data) => this.deps.getSessionManager().appendCustomEntry(customType, data),
 			getCwd: () => this.deps.getCwd(),
@@ -380,6 +393,23 @@ export class SessionEdgeIntentController {
 			},
 			mayHoldUnownedWorktreeChanges: (signal) =>
 				mayHoldUnownedWorktreeChanges(this.deps.getCwd(), [...this.deps.getWrittenMutationPaths()], signal),
+			getRunOrigin: () => this.deps.getRunTurnOrigin(),
+			prepareOutward: (draft) => {
+				const held = keepOutwardDraft(this.deps.getSessionManager(), draft);
+				// One notice per kept draft (its id is the reason, so a repeat adds nothing), and one when the list is full.
+				this.deps.observeHarnessNotice("outward-action-prepared", () =>
+					held.kept
+						? { scope: held.id, state: { reason: held.id, text: held.notice } }
+						: {
+								scope: "full",
+								state: {
+									reason: "full",
+									text: `Held, not run: actions asked by ${originLabel(draft.origin)}; the ${MAX_OUTWARD_DRAFTS} drafts kept are all that are recorded. Approve them in your next message, or grant their classes in your own words.`,
+								},
+							},
+				);
+				return held.kept ? held.id : undefined;
+			},
 		};
 	}
 
@@ -914,12 +944,13 @@ export class SessionEdgeIntentController {
 		const decidesRules = this.decidesOwnerAxis("rule_authority", acceptedOrder);
 		if (decidesRules) this.ruleAuthorityValue = resolveRuleAuthority(classified);
 		if (classified.capabilitiesAuthorized) {
-			// Read where the outcome applies: a judgment applied later than it was made grants only what is still off.
+			// Read where the outcome applies: a judgment applied later than it was made grants only what is still off. A
+			// model's reading of the owner's words is not standing: it never lets a third party's words act.
 			const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
 			for (const edgeClass of EDGE_CLASSES) {
 				if (edgeClass === "git.publish" && this.localCommitBranchValue !== undefined) continue;
 				if (granted.has(edgeClass)) continue;
-				this.grantEdge(edgeClass, "operator", { note: "explicit user request" });
+				this.grantEdge(edgeClass, "operator", { note: "explicit user request", standing: false });
 			}
 		}
 		// The rule notes speak for the words that decided rule authority; newer owner words already said theirs.
@@ -1193,8 +1224,18 @@ export class SessionEdgeIntentController {
 		return this.modelPolicy.allows(model);
 	}
 
+	/**
+	 * Records a grant. The owner's own edge command (`operator`) stands unless its caller says otherwise; a grant cited
+	 * from their words stands when the cited entry holds words they typed, not pasted.
+	 */
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
-		recordEdgeGrant(this.edgeDeps(), edgeClass, source, details);
+		const cited =
+			source === "instructions" && details.messageEntryId
+				? this.deps.findOwnerEvidence(`${this.deps.getSessionManager().getSessionId()}/${details.messageEntryId}`)
+				: undefined;
+		const standing =
+			details.standing ?? (source === "operator" || (cited !== undefined && (cited.pasted?.length ?? 0) === 0));
+		recordEdgeGrant(this.edgeDeps(), edgeClass, source, { ...details, standing });
 		// The owner acted at the edge: whatever was waiting on them is no longer a blocker.
 		if (source === "operator") this.deps.setOperatorBlocker(undefined);
 	}

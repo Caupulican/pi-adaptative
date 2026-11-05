@@ -476,6 +476,8 @@ export interface EdgeSettings {
 export interface ResolvedEdgeSettings {
 	mode: "guarded" | "yolo";
 	allow: EdgeClass[];
+	/** The classes of `allow` the owner wrote in settings, empty when `allow` is the default: only these are standing. */
+	standingAllow: EdgeClass[];
 	deny: string[];
 }
 

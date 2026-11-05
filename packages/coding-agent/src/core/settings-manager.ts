@@ -3862,12 +3862,14 @@ export class SettingsManager {
 		// Load diagnostics already report the file error. Withhold standing grants, but keep
 		// provider planning and ordinary tools available so the session can diagnose and repair it.
 		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge)))
-			return { mode: "guarded", allow: [], deny: [] };
+			return { mode: "guarded", allow: [], standingAllow: [], deny: [] };
 		const configured = this.settings.edge?.allow;
 		// Resolve once here: foreground, worker inheritance and provider authority context all
 		// consume these grants. Autonomy/learning presets never narrow execution authority.
 		const allow =
 			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
+		// The default grants every class to the owner's own runs; only a list the owner wrote covers a third party's.
+		const standingAllow = configured === undefined ? [] : [...new Set(allow)];
 		const configuredDeny = this.settings.edge?.deny;
 		// A deny list that cannot be read cannot be enforced, so YOLO waits until it is corrected. The
 		// standing grants do not depend on it and stay as configured.
@@ -3875,11 +3877,12 @@ export class SettingsManager {
 			configuredDeny !== undefined &&
 			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
 		) {
-			return { mode: "guarded", allow: [...new Set(allow)], deny: [] };
+			return { mode: "guarded", allow: [...new Set(allow)], standingAllow, deny: [] };
 		}
 		return {
 			mode: this.settings.edge?.mode === "yolo" ? "yolo" : "guarded",
 			allow: [...new Set(allow)],
+			standingAllow,
 			deny: [...new Set((configuredDeny ?? []).map((value) => value.trim()))],
 		};
 	}

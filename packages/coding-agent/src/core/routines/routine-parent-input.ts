@@ -14,7 +14,7 @@ import {
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Why a result that would start a parent turn rides with the owner's next turn instead. */
 export const ROUTINE_RESULT_WAKES_HOLD = "max_result_wakes_per_day_reached";
-const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
+export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
 
 /**
  * Host identity is separate from the worker's untrusted summary. A quiet result rides with the owner's next turn; every

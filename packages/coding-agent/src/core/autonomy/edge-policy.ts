@@ -369,6 +369,117 @@ function classifyEveryEdgeOperation(input: ClassifyEdgeInput): EdgeOperation[] {
 
 export type YoloBoundaryDecision = { kind: "block" | "confirm"; reason: string };
 
+// ---------------------------------------------------------------------------------------------
+// Outward actions of a run that carries a third party's words
+
+const PACKAGE_PUBLISHERS: Readonly<Record<string, ReadonlySet<string>>> = {
+	npm: new Set(["publish"]),
+	pnpm: new Set(["publish"]),
+	yarn: new Set(["publish", "npm"]),
+	bun: new Set(["publish"]),
+	cargo: new Set(["publish"]),
+	docker: new Set(["push"]),
+	podman: new Set(["push"]),
+	gem: new Set(["push"]),
+	twine: new Set(["upload"]),
+	poetry: new Set(["publish"]),
+	vsce: new Set(["publish"]),
+};
+const GH_OUTWARD: Readonly<Record<string, ReadonlySet<string>>> = {
+	release: new Set(["create", "upload", "edit", "delete"]),
+	pr: new Set(["create", "merge", "comment", "review", "close", "edit"]),
+	issue: new Set(["create", "comment", "close", "edit"]),
+	gist: new Set(["create"]),
+};
+/** Tool actions that hand the run's work to another agent: its authority would leave with it. */
+const DELEGATION_ACTIONS: Readonly<Record<string, ReadonlySet<string | undefined>>> = {
+	delegate: new Set([undefined, "start", "send", "broadcast", "follow_up", "resume"]),
+	pi_collaboration: new Set(["fire_task", "send_followup", "launch_workspace", "answer_question"]),
+	goal: new Set(["dispatch_worker"]),
+};
+/** Goal actions that set what the owner's goal is or may do; only the owner's turn decides them. */
+const OWNER_GOAL_ACTIONS: ReadonlySet<string> = new Set([
+	"start",
+	"add_requirement",
+	"set_requirement_check",
+	"satisfy_requirement",
+	"block_requirement",
+	"reopen_requirement",
+	"complete",
+	"block_goal",
+	"grant_edge",
+	"amend_goal",
+]);
+/** Routine actions that create, change, restart or run standing work (`RoutineSessionController.requireOwnerTurn`). */
+const OWNER_ROUTINE_ACTIONS: ReadonlySet<string> = new Set(["create", "update", "resume", "run"]);
+
+function classifyOutwardArgv(argv: readonly string[]): EdgeOperation | undefined {
+	const joined = argv.join(" ");
+	const tool = commandTool(argv[0]);
+	if (tool === "git" && gitInvocation(argv)?.subcommand === "push") {
+		return { class: "git.publish", operation: joined, reason: "pushes to a remote" };
+	}
+	const words = positional(argv.slice(1)).map(lower);
+	if (tool === "gh" && GH_OUTWARD[words[0] ?? ""]?.has(words[1] ?? "")) {
+		return words[0] === "release"
+			? { class: "git.publish", operation: joined, reason: "publishes a release" }
+			: { class: "operation.irreversible", operation: joined, reason: "writes on the remote repository" };
+	}
+	if (PACKAGE_PUBLISHERS[tool]?.has(words[0] ?? "")) {
+		return { class: "package.publish", operation: joined, reason: "publishes a package or image" };
+	}
+	return undefined;
+}
+
+/**
+ * What a run carrying a third party's words may not do on its own: push, publish, write on a remote repository, hand
+ * its work to another agent, and every operation the edge already classifies. Literal, like the rest of the edge: a
+ * script that pushes is not read. Only that run's gate reads this; the owner's own runs never do.
+ */
+export function classifyOutwardEdgeOperations(input: ClassifyEdgeInput): EdgeOperation[] {
+	const operations = classifyEveryEdgeOperation(input);
+	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
+	const name = input.toolName.toLowerCase();
+	const action = typeof args.action === "string" ? args.action : undefined;
+	if (DELEGATION_ACTIONS[name]?.has(action)) {
+		operations.push({
+			class: "operation.irreversible",
+			operation: `${input.toolName} ${action ?? "start"}`,
+			reason: "hands the run's work to another agent, past this gate",
+		});
+	}
+	const invocations: string[][] = [];
+	if (name === "run_process" || name === "run-process") {
+		const executable = typeof args.executable === "string" ? args.executable.trim() : "";
+		const processArgs = Array.isArray(args.args)
+			? args.args.filter((item): item is string => typeof item === "string")
+			: [];
+		if (executable) invocations.push([executable, ...processArgs]);
+	}
+	if ((name === "bash" || name === "powershell" || name === "shell") && typeof args.command === "string") {
+		invocations.push(...shellInvocations(args.command));
+	}
+	for (const argv of invocations) {
+		const outward = classifyOutwardArgv(argv);
+		if (outward) operations.push(outward);
+	}
+	return operations;
+}
+
+/** Why a tool call is the owner's own decision, which a run carrying a third party's words never makes. */
+export function ownerOnlyToolCallReason(toolName: string, args: unknown): string | undefined {
+	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+	if (toolName === "goal" && typeof record.action === "string" && OWNER_GOAL_ACTIONS.has(record.action))
+		return `goal ${record.action} sets what the owner's goal is or may do`;
+	// The routine's own owner-turn rule reads the run's owner sources; a third party's later words do not remove them.
+	if (toolName === "routine" && typeof record.action === "string" && OWNER_ROUTINE_ACTIONS.has(record.action))
+		return `routine ${record.action} creates, changes, restarts or runs the owner's standing work`;
+	// A knowledge grant hands owner knowledge values to another agent, whatever grant covers the launch itself.
+	if ((toolName === "delegate" || toolName === "pi_collaboration") && record.knowledge !== undefined)
+		return `${toolName} knowledge hands the owner's recorded knowledge to another agent`;
+	return undefined;
+}
+
 const POSIX_SYSTEM_DIRECTORIES: ReadonlySet<string> = new Set([
 	"/",
 	"/home",
@@ -498,6 +609,11 @@ export interface EdgeGrantRecord {
 	note?: string;
 	/** Optional exact operation scope key for narrow grants. */
 	scopeKey?: string;
+	/**
+	 * The owner stated it in their own typed words: it also covers a run that carries a third party's words. Absent on
+	 * a grant given at a prompt, which answers the run that asked.
+	 */
+	standing?: true;
 	grantedAt: string;
 }
 
@@ -517,6 +633,8 @@ export interface EdgeGrantView {
 	scopeKey?: string;
 	grantedAt?: string;
 	messageEntryId?: string;
+	/** Settings grants the owner wrote (not the default) and grants the owner typed (see `EdgeGrantRecord.standing`). */
+	standing?: true;
 }
 
 export interface ToolkitScriptScopeInput {
@@ -657,6 +775,7 @@ function grantRecord(data: unknown): EdgeGrantRecord | undefined {
 		...(typeof record.messageEntryId === "string" ? { messageEntryId: record.messageEntryId } : {}),
 		...(typeof record.note === "string" ? { note: record.note } : {}),
 		...(scope.narrow ? { scopeKey: scope.scopeKey } : {}),
+		...(record.standing === true ? { standing: true as const } : {}),
 		grantedAt: typeof record.grantedAt === "string" ? record.grantedAt : "",
 	};
 }
@@ -683,11 +802,16 @@ function revokeRecord(data: unknown): EdgeRevokeRecord | undefined {
 export function collectEdgeGrants(
 	entries: readonly EdgeGrantSourceEntry[],
 	settingsAllow: readonly string[],
+	standingSettingsAllow: readonly string[] = [],
 ): EdgeGrantView[] {
 	const grants = new Map<string, EdgeGrantView>();
 	for (const cls of settingsAllow) {
 		if (isEdgeClass(cls)) {
-			grants.set(`${cls}:*`, { class: cls, source: "settings" });
+			grants.set(`${cls}:*`, {
+				class: cls,
+				source: "settings",
+				...(standingSettingsAllow.includes(cls) ? { standing: true as const } : {}),
+			});
 		}
 	}
 	for (const entry of entries) {
@@ -705,6 +829,7 @@ export function collectEdgeGrants(
 				...(record.note ? { note: record.note } : {}),
 				...(record.scopeKey !== undefined ? { scopeKey: record.scopeKey } : {}),
 				...(record.messageEntryId ? { messageEntryId: record.messageEntryId } : {}),
+				...(record.standing ? { standing: true as const } : {}),
 				grantedAt: record.grantedAt,
 			});
 		} else if (custom.customType === EDGE_REVOKE_CUSTOM_TYPE) {

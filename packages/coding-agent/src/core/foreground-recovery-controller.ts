@@ -23,6 +23,7 @@ import type {
 	RuntimeWorkLease,
 } from "./runtime-generation-admission.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
+import { RunTurnOrigin } from "./turn-origin.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import { createWaitStatus, type WaitEndReason, type WaitStatusEvent, waitFor } from "./util/wait.ts";
@@ -194,10 +195,16 @@ export class ForegroundRecoveryController {
 	private readonly deps: ForegroundRecoveryControllerDeps;
 	private readonly runtimeLeases = new Map<ForegroundSubmissionLease, { lease: RuntimeWorkLease; owned: boolean }>();
 	private readonly unsubscribeRuntime: () => void;
+	private readonly unsubscribeTurnOrigin: () => void;
+	/** The authority of the run in progress, from the messages that open and steer it (`turn-origin.ts`). */
+	readonly turnOrigin = new RunTurnOrigin();
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
 		this.deps = deps;
 		this.unsubscribeRuntime = deps.runtimeAdmission.subscribeAvailability(() => this.notifyActivity());
+		this.unsubscribeTurnOrigin = deps.agent.subscribe((event) => {
+			if (event.type === "message_end") this.turnOrigin.note(event.message);
+		});
 		const admissionClock = (deps.timers ?? SYSTEM_TIMER_SOURCE).port("provider-admission");
 		this.retry = new RetryController(
 			deps.agent,
@@ -1039,6 +1046,9 @@ export class ForegroundRecoveryController {
 			// From here the run delivers what the agent's queue holds, until its last round.
 			this.setConsumingRun(true);
 			this.recoveryRoundAvailable = !atRoundCap();
+			// The run answers who opened it (a continuation: who its history last answered), until a steer decides again.
+			if (mode === "continue") this.turnOrigin.begin([], this.deps.agent.state.messages);
+			else this.turnOrigin.begin([messages ?? []].flat());
 			if (mode !== "continue") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
 				// prompt([]) creates fresh loop limits and recovery state over the committed transcript.
@@ -1141,6 +1151,7 @@ export class ForegroundRecoveryController {
 			} finally {
 				// After the run's cleanup, so the turn covers every provider round the run made.
 				endChatTurn?.();
+				this.turnOrigin.end();
 				detachAbort();
 				this.activeRuns--;
 				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
@@ -1252,6 +1263,7 @@ export class ForegroundRecoveryController {
 		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
 		this.submissionAbort?.abort("session dispose");
 		this.unsubscribeRuntime();
+		this.unsubscribeTurnOrigin();
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();
 		this.activityListeners.clear();

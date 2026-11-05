@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent, Usage } from "@caupulican/pi-ai/types";
+import type { TurnOriginRecord } from "../turn-origin-stamp.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import type { UsageComponent } from "../usage-components.ts";
 import type { WorkerControlRecord } from "../worker-control-stamp.ts";
@@ -26,6 +27,11 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	 * prefix read of an oversized entry still reaches it.
 	 */
 	workerControl?: WorkerControlRecord;
+	/**
+	 * Where this user message came from when nothing else it carries says so (`turnOriginStampOf`): a third party's words
+	 * an extension delivered. Read back as an untyped value; a record that does not parse is treated as third-party.
+	 */
+	turnOrigin?: TurnOriginRecord;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

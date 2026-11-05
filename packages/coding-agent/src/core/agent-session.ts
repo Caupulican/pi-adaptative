@@ -689,6 +689,9 @@ export class AgentSession {
 				this._operatorBlocker = blocker;
 			},
 			emitWarning: (msg) => this._emit({ type: "warning", message: msg }),
+			getRunTurnOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
+			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
+			findOwnerEvidence: (sourceId) => this._reflection.ownerEvidence.findSource(sourceId),
 		});
 		this._unsettledLadder = new SessionUnsettledLadderController({
 			getSessionManager: () => this.sessionManager,
@@ -3128,13 +3131,6 @@ export class AgentSession {
 		note: string,
 	): readonly SemanticVerificationObligationView[] {
 		return this._semanticPlane.controller?.verification.waive(ids, note) ?? [];
-	}
-
-	/**
-	 * AGENTS.md and standing user-rule lines for one System One classification.
-	 */
-	private writtenRuleText(): string {
-		return this._edgeIntent.writtenRuleText();
 	}
 
 	/** The owner's current model pool policy. */

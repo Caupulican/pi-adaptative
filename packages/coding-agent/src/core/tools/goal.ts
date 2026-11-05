@@ -100,7 +100,7 @@ const goalSchema = Type.Object(
 				EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)),
 				{
 					description:
-						"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing and settings edits need no grant. A granted class is not asked again.",
+						"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing and settings edits need no grant, except when the operator's words let actions a peer or another channel asks for run. A granted class is not asked again.",
 				},
 			),
 		),

@@ -21,7 +21,8 @@ export type HarnessNoticeKind =
 	| "routine-paused"
 	| "routine-unschedulable"
 	| "host-event-gap"
-	| "host-event-source";
+	| "host-event-source"
+	| "outward-action-prepared";
 
 /** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */
 export interface HarnessNotice {
