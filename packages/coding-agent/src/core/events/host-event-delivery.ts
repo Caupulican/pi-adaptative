@@ -1,3 +1,4 @@
+import type { ParentInputMode } from "../../kernel/session/parent-input-ledger.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { ciEventSubject, ciThreadKey, hostEventHash } from "./host-event-contract.ts";
@@ -29,10 +30,17 @@ export function hostEventEvidenceText(accepted: AcceptedHostEvent, delivery: Hos
 	].join("\n");
 }
 
-export function hostEventParentInput(accepted: AcceptedHostEvent, delivery: HostEventDelivery): ParentInputDelivery {
+/** The parent-input type of a host event delivered to its owning session; the daily-usage owner counts its wakes. */
+export const HOST_EVENT_CUSTOM_TYPE = "host-event";
+
+export function hostEventParentInput(
+	accepted: AcceptedHostEvent,
+	delivery: HostEventDelivery,
+	mode: ParentInputMode,
+): ParentInputDelivery {
 	const envelope = accepted.envelope;
 	const message = {
-		customType: "host-event",
+		customType: HOST_EVENT_CUSTOM_TYPE,
 		display: true,
 		content: hostEventEvidenceText(accepted, delivery),
 		details: {
@@ -52,5 +60,6 @@ export function hostEventParentInput(accepted: AcceptedHostEvent, delivery: Host
 		payloadDigest: hostEventHash("pi-host-event-parent-v1", message),
 		message,
 		origin: accepted.origin,
+		mode,
 	};
 }

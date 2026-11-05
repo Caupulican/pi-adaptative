@@ -130,9 +130,13 @@ import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
 import {
+	MAX_TURN_WAKES_HOLD,
+	type ParentWakeDelivery,
 	ProactivityController,
 	type ProactivityControllerDeps,
 	type ProactivityDailyState,
+	parentTurnWakes,
+	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
@@ -218,6 +222,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _goalAutoContinue: GoalAutoContinueController;
 	private readonly _research: ResearchLaneController;
 	private readonly _proactivity: ProactivityController;
+	/** How the last CI event for this session reached the parent: a wake or carried past the wake bound. */
+	private _lastEventDelivery: ParentWakeDelivery | undefined;
 	private readonly _fitness: ModelFitnessController;
 	/** Lazily materialized only when managed-lane state is queried or reported. */
 	private _managedLanes: ManagedLaneController | undefined;
@@ -614,6 +620,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			canDeliver: () => !this.deps.isDisposed() && this.deps.getSettingsManager().getProactivitySettings().enabled,
 			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
 			subscribeSettings: (listener) => this.deps.getSettingsManager().subscribeChanges(listener),
+			admitRootDelivery: async (deliveryId) => {
+				// A replay must repeat the saved metadata, so a saved delivery is never measured again.
+				const saved = manager.getParentInput(deliveryId);
+				if (saved) return { mode: saved.metadata.mode };
+				const day = await this.deps.aggregateUsageWindow(rollingDayWindow(Date.now()));
+				return parentTurnWakes(day) >= this.deps.getSettingsManager().getProactivitySettings().maxTurnWakesPerDay
+					? { mode: "next-owner-turn", hold: MAX_TURN_WAKES_HOLD }
+					: { mode: "turn" };
+			},
+			rootDelivered: (delivery) => {
+				this._lastEventDelivery = delivery;
+			},
 			deliverParent: (input, options) => this.deps.deliverNotes(input, options),
 			deliverTask: async (delivery, active) => {
 				const control = this._getWorkerController().getAgentControl();
@@ -806,7 +824,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	getProactivityDailyState(): ProactivityDailyState {
-		return this._proactivity.getDailyState();
+		const daily = this._proactivity.getDailyState();
+		return this._lastEventDelivery ? { ...daily, lastEventDelivery: this._lastEventDelivery } : daily;
 	}
 
 	resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined {

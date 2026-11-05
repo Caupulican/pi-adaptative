@@ -3401,6 +3401,14 @@ export class SessionManager {
 		return this._parentInputIndex().pendingInputs(mode);
 	}
 
+	/**
+	 * The saved input of a delivery on any branch, pending or consumed. A replayed delivery must repeat its saved
+	 * metadata exactly (`appendParentInput`), so a caller that chooses a mode reads the saved one first.
+	 */
+	getParentInput(deliveryId: string): PersistedParentInput | undefined {
+		return this._parentInputReceipt(deliveryId);
+	}
+
 	/** Indexed canonical source for both live ingestion and the same proof used by historical imports. */
 	getParentInputConsumptionSource(): ParentInputConsumptionSource {
 		let cache = this.parentEvidenceCache;

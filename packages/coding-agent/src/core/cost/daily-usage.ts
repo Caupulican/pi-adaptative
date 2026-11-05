@@ -7,6 +7,7 @@ import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
+import { HOST_EVENT_CUSTOM_TYPE } from "../events/host-event-delivery.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "../proactivity/proactivity-review.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { accountingProjectionPath } from "./accounting-evidence.ts";
@@ -48,6 +49,8 @@ export type DailyUsageTotals = {
 	proactivityCost: number;
 	/** Accepted proactive-note deliveries that start a parent turn without an owner message. */
 	proactiveTurnWakes: number;
+	/** Host events (CI results) delivered to the main session as a parent turn without an owner message. */
+	hostEventTurnWakes: number;
 	totalCost: number;
 	reportedTotalCost?: number;
 	input: number;
@@ -68,6 +71,7 @@ function createZeroTotals(): DailyUsageTotals {
 		historySummaryCost: 0,
 		proactivityCost: 0,
 		proactiveTurnWakes: 0,
+		hostEventTurnWakes: 0,
 		totalCost: 0,
 		input: 0,
 		output: 0,
@@ -120,8 +124,9 @@ function addDailyUsageRecord(
 ): boolean {
 	if (!isInsideWindow(Date.parse(record.timestamp), window)) return false;
 	// A wake is an event, not spend: it does not make its session one that spent in the window.
-	if (record.kind === "proactive_wake") {
-		totals.proactiveTurnWakes++;
+	if (record.kind === "wake") {
+		if (record.wake === "proactive_note") totals.proactiveTurnWakes++;
+		else totals.hostEventTurnWakes++;
 		return false;
 	}
 	const seen = record.kind === "spawned" ? spawned : record.kind === "semantic" ? semantic : undefined;
@@ -223,13 +228,20 @@ interface DailyUsageSpendRecord {
 	proactivity: boolean;
 }
 
-/** An accepted proactive note whose delivery starts a parent turn, at its acceptance time. */
-interface ProactiveWakeRecord {
-	kind: "proactive_wake";
+/** An accepted proactive note or host event whose delivery starts a parent turn, at its acceptance time. */
+interface ParentWakeRecord {
+	kind: "wake";
+	wake: "proactive_note" | "host_event";
 	timestamp: string;
 }
 
-type DailyUsageRecord = DailyUsageSpendRecord | ProactiveWakeRecord;
+type DailyUsageRecord = DailyUsageSpendRecord | ParentWakeRecord;
+
+/** The wake an accepted parent input of this type counts as, if its mode starts a turn. */
+const PARENT_WAKE_KINDS: ReadonlyMap<string, ParentWakeRecord["wake"]> = new Map([
+	[PROACTIVE_NOTE_CUSTOM_TYPE, "proactive_note"],
+	[HOST_EVENT_CUSTOM_TYPE, "host_event"],
+]);
 
 /** Persisted and held semantic receipts map to one record shape, so the report-id dedupe sees them as the same charge. */
 function semanticUsageRecord(report: SemanticAccountingReport, timestamp: string): DailyUsageSpendRecord {
@@ -258,10 +270,9 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			historySummary: false,
 			proactivity: false,
 		}));
-	if (entry.type === "custom_message" && entry.customType === PROACTIVE_NOTE_CUSTOM_TYPE)
-		return parentInputOf(entry)?.metadata.mode === "turn"
-			? [{ kind: "proactive_wake", timestamp: entry.timestamp }]
-			: [];
+	const wake = entry.type === "custom_message" ? PARENT_WAKE_KINDS.get(entry.customType) : undefined;
+	if (wake)
+		return parentInputOf(entry)?.metadata.mode === "turn" ? [{ kind: "wake", wake, timestamp: entry.timestamp }] : [];
 	if (entry.type !== "custom") return [];
 	if (entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
 		const report = entry.data as SemanticAccountingReport | undefined;
@@ -359,8 +370,8 @@ async function readSessionDirectory(directory: string) {
 	}
 }
 
-/** A wake line carries no usage, so the usage prefilter also admits proactive-note lines. */
-const PROACTIVE_NOTE_LINE = `"${PROACTIVE_NOTE_CUSTOM_TYPE}"`;
+/** A wake line carries no usage, so the usage prefilter also admits proactive-note and host-event lines. */
+const PARENT_WAKE_LINES = [...PARENT_WAKE_KINDS.keys()].map((customType) => `"${customType}"`);
 
 /**
  * Entire scan is asynchronous; retained cache entries contain usage only, never conversation payloads. The live session
@@ -422,7 +433,7 @@ export async function aggregateDailyUsageAsync(
 					} else
 						await visitSessionEntriesAsync(
 							filePath,
-							(line) => line.includes('"usage"') || line.includes(PROACTIVE_NOTE_LINE),
+							(line) => line.includes('"usage"') || PARENT_WAKE_LINES.some((wake) => line.includes(wake)),
 							(entry) => {
 								records.push(...usageRecords(entry));
 							},

@@ -290,7 +290,7 @@ export interface ProactivitySettings {
 	maxRunsPerSession?: number; // default: 4 reviews per session
 	maxUsd?: number; // default: 0.05 for the isolated review; a parent wake uses normal session accounting and budgets
 	maxUsdPerDay?: number; // default: 0.25 review spend over a rolling 24 h across the agent dir's sessions; then no review starts
-	maxTurnWakesPerDay?: number; // default: 3 note deliveries that start a parent turn over a rolling 24 h; later ones wait for the owner's next turn
+	maxTurnWakesPerDay?: number; // default: 3 parent turns started without an owner message (proactive notes and CI events together) over a rolling 24 h; later deliveries wait for the owner's next turn
 	maxNotesPerRun?: number; // default: 2 notes a review may raise
 	delivery?: "note" | "turn"; // default: "turn" — wakes the parent; explicit "note" waits for the owner's next turn
 	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)

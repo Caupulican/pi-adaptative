@@ -1,6 +1,7 @@
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
+import type { ParentWakeDelivery } from "../proactivity/proactivity-controller.ts";
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { HostEventError, type HostEventSink, hostEventHash, hostEventString } from "./host-event-contract.ts";
@@ -18,6 +19,13 @@ export interface HostEventSessionControllerDeps {
 	canDeliver(): boolean;
 	subscribeContext(listener: () => void): () => void;
 	subscribeSettings(listener: () => void): () => void;
+	/**
+	 * How a root delivery reaches the parent: a delivery already saved keeps its saved mode; a new one wakes a parent
+	 * turn within the rolling-day wake bound and is otherwise carried with the owner's next turn.
+	 */
+	admitRootDelivery(deliveryId: string): Promise<ParentWakeDelivery>;
+	/** Records how a root delivery was accepted, for `/proactivity status`. */
+	rootDelivered(delivery: ParentWakeDelivery): void;
 	deliverParent(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/**
 	 * `dormant` keeps the delivery pending until a state, readiness or control change re-drives it;
@@ -265,8 +273,11 @@ export class HostEventSessionController {
 		const events = this.deps.runtime.hostEvents;
 		const accepted = events.getEvent(delivery.eventId);
 		if (!accepted) throw new HostEventError("missing", "Host event evidence is missing.");
+		// Past the wake bound the event is carried with the owner's next turn: never dropped, never a wake.
+		const admission = await this.deps.admitRootDelivery(delivery.deliveryId);
+		this.assertCurrent();
 		// The foreground submission's own runtime reader is asserted before this append.
-		const receipt = await this.deps.deliverParent(hostEventParentInput(accepted, delivery), {
+		const receipt = await this.deps.deliverParent(hostEventParentInput(accepted, delivery, admission.mode), {
 			signal: this.signal,
 			withAppend: (append) =>
 				events.guardedRootDelivery(delivery.deliveryId, "append", (transaction) => {
@@ -282,6 +293,7 @@ export class HostEventSessionController {
 		});
 		// Replay already validated exact parent-input metadata under its transcript lock.
 		events.acknowledgeRoot(delivery.deliveryId, receipt.entryId);
+		this.deps.rootDelivered(admission);
 	}
 
 	private report(key: string, error: unknown): void {

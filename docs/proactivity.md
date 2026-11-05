@@ -8,8 +8,9 @@ Staying quiet is a normal result.
 The default delay is two minutes, with at least three new owner turns between reviews and at most
 four reviews per session. Each review permits two model responses, up to two notes and an estimated
 spending limit of $0.05. Across sessions and restarts, the last rolling 24 hours allow $0.25 of review
-spend (`maxUsdPerDay`) and three note deliveries that start a parent turn (`maxTurnWakesPerDay`). At
-the spend bound no review starts; past the wake bound, accepted notes wait for the owner's next turn.
+spend (`maxUsdPerDay`) and three parent turns started without an owner message, by notes and CI
+events together (`maxTurnWakesPerDay`). At the spend bound no review starts; past the wake bound,
+accepted notes and CI events wait for the owner's next turn.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 
@@ -93,7 +94,11 @@ A failure becomes actionable only after the source has reconciled the current at
 failed attempt followed by a running or successful rerun remains available as historical evidence
 and does not start a repair. A new applicable failure reaches the main session through durable
 parent-input delivery. If an already consumed failure is superseded, the later result supplies a
-correction. Turning proactivity off stops delivery while the source retains evidence.
+correction. Such a delivery starts a parent turn and counts toward `maxTurnWakesPerDay` together
+with proactive notes; past that bound the event is saved to the conversation and carried with the
+owner's next turn instead, and `/proactivity status` shows `Last CI event delivery: waits for the
+owner's next turn (max_turn_wakes_per_day_reached)`. Turning proactivity off stops delivery while
+the source retains evidence.
 
 The `delegate` tool exposes bounded event recall and task subscriptions:
 

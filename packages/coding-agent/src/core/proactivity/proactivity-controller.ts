@@ -52,10 +52,37 @@ export interface ProactivityRunOutcome {
 /** The rolling day the daily bounds count: everything recorded since one day before the measurement. */
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** The last rolling-day measurement across the owner's sessions, and how the last accepted notes were delivered. */
+export function rollingDayWindow(atMs: number): DailyUsageWindow {
+	return { startMs: atMs - DAY_MS, endMs: Number.POSITIVE_INFINITY };
+}
+
+/** The hold `proactivity.maxTurnWakesPerDay` names when it carries a delivery with the owner's next turn. */
+export const MAX_TURN_WAKES_HOLD = "max_turn_wakes_per_day_reached";
+
+/** Measured wakes that count toward `proactivity.maxTurnWakesPerDay`: proactive notes and host events alike. */
+export function parentTurnWakes(day: Pick<DailyUsageTotals, "proactiveTurnWakes" | "hostEventTurnWakes">): number {
+	return day.proactiveTurnWakes + day.hostEventTurnWakes;
+}
+
+/** How one parent delivery was made, and the bound that carried it with the owner's next turn instead of waking. */
+export interface ParentWakeDelivery {
+	readonly mode: ParentInputMode;
+	readonly hold?: string;
+}
+
+/**
+ * The last rolling-day measurement across the owner's sessions, and how the last accepted notes and the last CI event
+ * for the main session were delivered. `turnWakes` counts every wake the bound counts; `eventWakes` is the CI share.
+ */
 export interface ProactivityDailyState {
-	readonly measured?: { readonly reviewUsd: number; readonly turnWakes: number; readonly atMs: number };
-	readonly lastDelivery?: { readonly mode: ParentInputMode; readonly hold?: string };
+	readonly measured?: {
+		readonly reviewUsd: number;
+		readonly turnWakes: number;
+		readonly eventWakes: number;
+		readonly atMs: number;
+	};
+	readonly lastDelivery?: ParentWakeDelivery;
+	readonly lastEventDelivery?: ParentWakeDelivery;
 }
 
 export interface ProactivityControllerDeps extends ProactivityInvestigationHost {
@@ -70,10 +97,10 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
-	/** Review spend and proactive parent wakes inside a window across the owner's sessions, from the daily-usage owner. */
+	/** Review spend and parent wakes inside a window across the owner's sessions, from the daily-usage owner. */
 	aggregateUsageWindow(
 		window: DailyUsageWindow,
-	): Promise<Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes">>;
+	): Promise<Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes" | "hostEventTurnWakes">>;
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Resolves after canonical acceptance; consumption is owned by the mode-aware parent ledger. */
@@ -277,10 +304,11 @@ export class ProactivityController {
 			// The daily bounds count every session of this owner over the last rolling day, measured once at admission: a
 			// session runs one review at a time, so only another session admitting concurrently can pass the same measurement.
 			const atMs = Date.now();
-			const day = await this.deps.aggregateUsageWindow({ startMs: atMs - DAY_MS, endMs: Number.POSITIVE_INFINITY });
+			const day = await this.deps.aggregateUsageWindow(rollingDayWindow(atMs));
+			const turnWakes = parentTurnWakes(day);
 			this._daily = {
 				...this._daily,
-				measured: { reviewUsd: day.proactivityCost, turnWakes: day.proactiveTurnWakes, atMs },
+				measured: { reviewUsd: day.proactivityCost, turnWakes, eventWakes: day.hostEventTurnWakes, atMs },
 			};
 			assertCurrent();
 			const remainingDayUsd = settings.maxUsdPerDay - day.proactivityCost;
@@ -290,9 +318,7 @@ export class ProactivityController {
 			}
 			// Past the wake bound the review still runs; its accepted notes wait for the owner's next turn.
 			const deliveryHold =
-				settings.delivery === "turn" && day.proactiveTurnWakes >= settings.maxTurnWakesPerDay
-					? "max_turn_wakes_per_day_reached"
-					: undefined;
+				settings.delivery === "turn" && turnWakes >= settings.maxTurnWakesPerDay ? MAX_TURN_WAKES_HOLD : undefined;
 			const runUsage = new BoundedCompletionUsage(usageOwner, "proactivity", Math.min(maxUsd, remainingDayUsd), 2);
 			usage = runUsage;
 			runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({

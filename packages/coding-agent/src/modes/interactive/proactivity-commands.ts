@@ -4,6 +4,7 @@
  */
 
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { ParentWakeDelivery } from "../../core/proactivity/proactivity-controller.ts";
 import { withProactivityChange } from "../../core/proactivity/proactivity-settings.ts";
 import { MAX_PROACTIVITY_PREFERENCES_CHARS } from "../../core/settings/settings-rules.ts";
 import type {
@@ -30,25 +31,26 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 	const settings = host.settingsManager.getProactivitySettings();
 	const lanes = host.session.backgroundLanes;
 	const skip = lanes.getLastProactivitySkipReason();
-	const { measured, lastDelivery } = lanes.getProactivityDailyState();
+	const { measured, lastDelivery, lastEventDelivery } = lanes.getProactivityDailyState();
+	const delivered = (delivery: ParentWakeDelivery) =>
+		delivery.mode === "turn"
+			? "woke a parent turn"
+			: `waits for the owner's next turn${delivery.hold === undefined ? "" : ` (${delivery.hold})`}`;
 	return [
 		`Proactivity: ${settings.enabled ? "on" : "off"}`,
 		`Review after ${Math.round(settings.idleDelayMs / 1000)}s idle, at least ${settings.minOwnerTurnsBetweenRuns} new owner turn(s) apart, ${settings.maxRunsPerSession} per session, up to ${settings.maxNotesPerRun} note(s), $${settings.maxUsd.toFixed(2)} bound per review.`,
-		`Rolling 24 h across the sessions stored with this one: $${settings.maxUsdPerDay.toFixed(2)} review spend, ${settings.maxTurnWakesPerDay} parent-turn wake(s); past the wake bound, notes wait for the owner's next turn.`,
+		`Rolling 24 h across the sessions stored with this one: $${settings.maxUsdPerDay.toFixed(2)} review spend, ${settings.maxTurnWakesPerDay} parent-turn wake(s) by notes and CI events together; past the wake bound, both wait for the owner's next turn.`,
 		`Delivery: ${settings.delivery === "turn" ? "wakes a turn" : "a visible note with the next turn"}`,
 		`Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}`,
 		`CI events: ${settings.ciEvents ? "on" : "off"}`,
 		...(measured === undefined
 			? []
 			: [
-					`Last measured: $${measured.reviewUsd.toFixed(4)} review spend, ${measured.turnWakes} parent-turn wake(s) in the rolling 24 h`,
+					`Last measured: $${measured.reviewUsd.toFixed(4)} review spend, ${measured.turnWakes} parent-turn wake(s) (${measured.eventWakes} by CI events) in the rolling 24 h`,
 				]),
 		...(skip === undefined ? [] : [`Last gate: ${skip}`]),
-		...(lastDelivery === undefined
-			? []
-			: [
-					`Last note delivery: ${lastDelivery.mode === "turn" ? "woke a parent turn" : `waits for the owner's next turn${lastDelivery.hold === undefined ? "" : ` (${lastDelivery.hold})`}`}`,
-				]),
+		...(lastDelivery === undefined ? [] : [`Last note delivery: ${delivered(lastDelivery)}`]),
+		...(lastEventDelivery === undefined ? [] : [`Last CI event delivery: ${delivered(lastEventDelivery)}`]),
 	].join("\n");
 }
 
