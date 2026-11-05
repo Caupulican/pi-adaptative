@@ -1197,7 +1197,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
  * quoted timing words do not carry are never judged; the owner hears once, with the next turn, which stated request
  * the host could not schedule. Words the model's context held when it saved a routine, steered words included, are
  * passed over unread while earlier words nothing answered are still read; a request the owner navigates away from
- * while it is judged creates nothing; and a stale pass restored after the owner removed its routine creates nothing.
+ * while it is judged creates nothing; a stale pass restored after the owner removed its routine creates nothing; and the
+ * routine the model saved with an end is removed, and told once, after the owner returns to the conversation that saved it.
  */
 async function runJourney1RoutineIntake(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
 	const agentDir = `${world.agentDir}-routine-intake`;
@@ -1562,6 +1563,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		}
 		await withDeadline(world.trace, "routine intake tool save", saving);
 		await withDeadline(world.trace, "routine intake tool save settled", root.session.waitForForegroundIdle());
+		// The conversation that saved the changelog routine: its routine runs and ends only while the owner is on it.
+		const savedLeaf = root.sessionManager.getLeafId()!;
 		const sourceOf = (words: string) =>
 			getOwnerEvidenceSnapshots(root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE])).find(
 				(entry) => entry.text === words,
@@ -1746,8 +1749,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		});
 		expect(world.timers.armedDelays("routine-intake")).toEqual([]);
 
-		// Once the routine clock passes the changelog routine's end, the routine is removed and the owner hears it once,
-		// with the next turn, without a run or a parent wake.
+		// The changelog routine was saved on the conversation the owner moved away from: while the owner stays away, its end
+		// passes and this branch neither removes nor tells it. Once the owner returns to that conversation, the routine is
+		// removed and the owner hears it once, with the next turn, without a run or a parent wake.
+		expect(sourceOf(handled), "the reopened session is still away from the save").toBeUndefined();
 		const completions = () =>
 			root.sessionManager
 				.getEntries()
@@ -1762,6 +1767,16 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			});
 		});
 		world.timers.advance("routines", 3_600_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(store().getRoutine("changelog-review"), "a branch away from the save does not end it").toBeDefined();
+		expect(completions(), "nor tells its end").toHaveLength(0);
+		const returned = await withDeadline(
+			world.trace,
+			"routine intake owner returns to the save",
+			root.session.navigateTree(savedLeaf, { summarize: false }),
+		);
+		expect(returned.cancelled, "the owner's return applies").toBe(false);
+		expect(sourceOf(handled), "the words that saved the routine are on the branch again").toBeDefined();
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		await withDeadline(world.trace, "routine expiry notice", expiryNoticed);
 		expect(store().getRoutine("changelog-review"), "an ended routine is removed").toBeUndefined();
