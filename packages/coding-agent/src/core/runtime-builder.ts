@@ -144,7 +144,7 @@ import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import type { RuleHookRefusal } from "./rule-hooks/rule-hook-delivery.ts";
 import {
 	type RuntimeCandidateAttempt,

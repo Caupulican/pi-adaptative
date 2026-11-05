@@ -12,7 +12,7 @@ import {
 } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export interface ToolCapabilityPolicy {

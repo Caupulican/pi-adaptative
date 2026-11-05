@@ -15,8 +15,8 @@ import {
 	type RoutineScheduleInput,
 	routineAuthoringSchema,
 } from "./routine-contract.ts";
+import { ROUTINE_TOOL_NAME } from "./routine-tool-names.ts";
 
-export const ROUTINE_TOOL_NAME = "routine";
 const ROUTINE_LIST_PAGE_SIZE = 20;
 
 export interface RoutineToolInput extends RoutineAuthoringInput {

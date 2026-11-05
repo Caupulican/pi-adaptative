@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Session startup no longer fails when tool registries load the routine tool through a circular import.
 - Background knowledge requests refused before transport release their unused accounting reservations without inventing a provider response. Requests that may have reached the provider remain held until their actual accounting is known.
 - Cache diagnostics compare explicit view cache blocks rather than volatile text beyond the cache boundary. Shorter unchanged prefixes no longer report a broken cache; changed cached blocks still do.
 - Reusing a named worker with selected knowledge preserves its admitted profile, memory tools and verifier instead of substituting root defaults. New knowledge selections still require current scope and revision checks; changed authority must match the existing worker.
