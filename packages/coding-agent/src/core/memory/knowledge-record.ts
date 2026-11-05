@@ -70,6 +70,12 @@ export interface KnowledgeMutationReceipt {
 	readonly revision: number;
 }
 
+/**
+ * Source identity of an owner's direct `/knowledge` command. Only the admission's owner-command path mints it;
+ * conversation citations always resolve through the owner-evidence ledger as `<session>/<entry>`.
+ */
+export const OWNER_COMMAND_SOURCE_PREFIX = "owner-command:";
+
 export const MAX_KNOWLEDGE_TEXT_CHARS = 2_000;
 export const MAX_KNOWLEDGE_CITATIONS = 16;
 export const MAX_KNOWLEDGE_PAGE_SIZE = 100;
@@ -228,6 +234,15 @@ export function knowledgeAppliesTo(record: KnowledgeScope, scope: KnowledgeScope
 	);
 }
 
+export interface KnowledgeListOptions {
+	query?: string;
+	kind?: KnowledgeKind;
+	/** Only records that apply everywhere (`global`) or only to the current project (`project`). */
+	reach?: "global" | "project";
+	after?: string;
+	limit?: number;
+}
+
 /** Mutation effects and evidence receipts commit together at this storage boundary. */
 export interface KnowledgeStorePort {
 	readonly work: KnowledgeWorkCache;
@@ -238,10 +253,9 @@ export interface KnowledgeStorePort {
 	get(id: string): KnowledgeRecord | undefined;
 	/** Exact scope only; includes forgotten identities. The caller must follow full pages before declaring no match. */
 	slots(scope: KnowledgeScope, kind: KnowledgeKind, after?: string): KnowledgeSlot[];
-	list(
-		scope: KnowledgeScope,
-		options?: { query?: string; kind?: KnowledgeKind; after?: string; limit?: number },
-	): KnowledgeRecord[];
+	list(scope: KnowledgeScope, options?: KnowledgeListOptions): KnowledgeRecord[];
+	/** Live records in scope whose identity starts with `prefix` (at least 8 hex), at most two so ambiguity shows. */
+	resolve(scope: KnowledgeScope, prefix: string): KnowledgeRecord[];
 	history(id: string, beforeRevision?: number): KnowledgeRecord[];
 	isSourceForgotten(id: string, sessionId: string, sourceId: string): boolean;
 	put(

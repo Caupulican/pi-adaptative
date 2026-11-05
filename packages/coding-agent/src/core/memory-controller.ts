@@ -97,7 +97,11 @@ import {
 import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { memoryFailure } from "./memory/history-tool.ts";
-import { KnowledgeAdmission, type KnowledgeAdmissionPort } from "./memory/knowledge-admission.ts";
+import {
+	KnowledgeAdmission,
+	type KnowledgeAdmissionPort,
+	type KnowledgeOwnerControls,
+} from "./memory/knowledge-admission.ts";
 import type {
 	KnowledgeCollectionHost,
 	KnowledgeCollectionStatus,
@@ -618,10 +622,11 @@ export class LaneMemorySnapshotStaleError extends Error {
 	}
 }
 
-/** The operator's `/memory` authority over managed files, history forgetting and knowledge-collection status. */
+/** The operator's `/memory` and `/knowledge` authority: managed files, history forgetting and owner knowledge. */
 export type MemoryOperatorPort = Pick<
 	MemoryController,
 	| "getKnowledgeCollectionStatus"
+	| "getKnowledgeOwnerControls"
 	| "memoryDriftReport"
 	| "memoryAcceptDrift"
 	| "memoryRestoreManaged"
@@ -1714,6 +1719,22 @@ export class MemoryController {
 					throw new Error(failure ?? "Knowledge admission context changed");
 			},
 		});
+	}
+
+	/** The owner's direct view and exact-record commands: the canonical store and the shared admission, with no judge. */
+	getKnowledgeOwnerControls(): KnowledgeOwnerControls | undefined {
+		const store = this._knowledgeStore;
+		if (!store || !this._currentKnowledgeReader()) return undefined;
+		return {
+			scope: this._knowledgeScope(),
+			store,
+			command: (input, signal) => {
+				const admission = this.getKnowledgeAdmission();
+				if (!admission || store !== this._knowledgeStore)
+					throw new Error("Knowledge is no longer available in this session; nothing changed");
+				return admission.ownerCommand(input, this.deps.getSessionId(), signal);
+			},
+		};
 	}
 
 	private _knowledgeToolSource(): KnowledgeReadSource | undefined {

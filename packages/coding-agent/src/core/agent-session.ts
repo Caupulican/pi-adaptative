@@ -3032,6 +3032,17 @@ export class AgentSession {
 	get memoryOperator(): MemoryOperatorPort {
 		return this._memory;
 	}
+
+	/**
+	 * The owner's confirmation on their own screen, the same bound UI a tool reaches through `ctx.ui.confirm`; undefined
+	 * exactly when no UI is bound (`ctx.hasUI` false), so an owner command that needs confirmation refuses.
+	 */
+	get ownerConfirm(): ExtensionUIContext["confirm"] | undefined {
+		const runner = this._extensionRunner;
+		if (!runner.hasUI()) return undefined;
+		const ui = runner.getUIContext();
+		return (title, message, options) => ui.confirm(title, message, options);
+	}
 	private obligationProjection?: {
 		messages: readonly AgentMessage[];
 		revision: number;

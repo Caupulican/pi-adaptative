@@ -12,6 +12,7 @@ import {
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
 	type KnowledgeKind,
+	type KnowledgeListOptions,
 	type KnowledgeMutationReceipt,
 	type KnowledgeOperation,
 	type KnowledgeRecord,
@@ -273,15 +274,14 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			});
 	}
 
-	list(
-		scope: KnowledgeScope,
-		options: { query?: string; kind?: KnowledgeKind; after?: string; limit?: number } = {},
-	): KnowledgeRecord[] {
+	list(scope: KnowledgeScope, options: KnowledgeListOptions = {}): KnowledgeRecord[] {
 		if (!isKnowledgeScope(scope)) throw new TypeError("Invalid knowledge scope");
 		const limit = options.limit ?? 20;
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_KNOWLEDGE_PAGE_SIZE)
 			throw new RangeError("Invalid knowledge page size");
 		if (options.after !== undefined) requireId(options.after);
+		if (options.reach !== undefined && options.reach !== "global" && options.reach !== "project")
+			throw new TypeError("Invalid knowledge reach");
 		if ((options.query?.length ?? 0) > 1_000) throw new RangeError("Knowledge query is too long");
 		const words = terms(options.query ?? "");
 		if (words.length > MAX_QUERY_TERMS)
@@ -294,6 +294,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			SELECT e.id,e.revision,e.body FROM entries e ${search}
 			e.audience=? AND e.project IN('',?) AND e.role IN('',?) AND e.body IS NOT NULL
 			AND e.id>? ${options.kind === undefined ? "" : "AND e.kind=?"}
+			${options.reach === undefined ? "" : options.reach === "global" ? "AND e.project=''" : "AND e.project<>''"}
 			GROUP BY e.id ${words.length ? "HAVING count(DISTINCT t.term)=?" : ""}
 			ORDER BY e.id LIMIT ?
 		`)
@@ -311,11 +312,27 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		if (
 			records.some(
 				(record) =>
-					!knowledgeAppliesTo(record.scope, scope) || (options.kind !== undefined && record.kind !== options.kind),
+					!knowledgeAppliesTo(record.scope, scope) ||
+					(options.kind !== undefined && record.kind !== options.kind) ||
+					(options.reach !== undefined && (record.scope.project === "") !== (options.reach === "global")),
 			)
 		) {
 			throw new Error("Knowledge scope index does not match its records");
 		}
+		return records;
+	}
+
+	resolve(scope: KnowledgeScope, prefix: string): KnowledgeRecord[] {
+		if (!isKnowledgeScope(scope)) throw new TypeError("Invalid knowledge scope");
+		if (!/^[a-f0-9]{8,64}$/.test(prefix)) throw new TypeError("Invalid knowledge identity prefix");
+		// Hex identities sort below "g", so this range is exactly the identities that start with the prefix.
+		const records = this.db
+			.prepare(`SELECT id,revision,body FROM entries WHERE id>=? AND id<? AND body IS NOT NULL
+			AND audience=? AND project IN('',?) AND role IN('',?) ORDER BY id LIMIT 2`)
+			.all(prefix, `${prefix}g`, scope.audience, scope.project, scope.role)
+			.map(decode);
+		if (records.some((record) => !record.id.startsWith(prefix) || !knowledgeAppliesTo(record.scope, scope)))
+			throw new Error("Knowledge identity index does not match its records");
 		return records;
 	}
 

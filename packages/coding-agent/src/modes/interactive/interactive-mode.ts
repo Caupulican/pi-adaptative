@@ -127,6 +127,7 @@ import * as historyReloadMath from "./history-reload-math.ts";
 import { InteractiveEventController } from "./interactive-event-controller.ts";
 import { InteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
+import { handleKnowledgeCommand } from "./knowledge-commands.ts";
 import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
@@ -1645,6 +1646,11 @@ export class InteractiveMode {
 			if (text === "/memory" || text.startsWith("/memory ")) {
 				this.editor.setText("");
 				await handleMemoryCommand(this.memoryCommandHost(), text);
+				return;
+			}
+			if (text === "/knowledge" || text.startsWith("/knowledge ")) {
+				this.editor.setText("");
+				await handleKnowledgeCommand({ session: this.session, ...this.operatorCommandOutput() }, text);
 				return;
 			}
 			if (text === "/edge" || text.startsWith("/edge ")) {
