@@ -298,8 +298,8 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 						reportId: `${event.laneId}:${event.dispatchSequence}`,
 					});
 			},
-			launchTurn: (job, agent, answer, knowledge) =>
-				(options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer, knowledge),
+			launchTurn: (job, agent, answer, knowledge, signal) =>
+				(options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer, knowledge, signal),
 		});
 		const deadlines = new CollaborationDeadlines(
 			(jobId, agentId, turnId) => coordinator.stopAgent(jobId, agentId, turnId, { kind: "deadline" }),
@@ -767,6 +767,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 									steer: params.steer,
 									...(!answering ? { newTask: { goalId: params.goalId } } : {}),
 									...(grant ? { knowledge: grant.handoff } : {}),
+									...(signal ? { signal } : {}),
 								},
 							);
 					knowledgeReport = grant?.report();

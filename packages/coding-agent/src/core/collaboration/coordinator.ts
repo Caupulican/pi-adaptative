@@ -42,13 +42,15 @@ export interface CollaborationCoordinatorDeps {
 	backend: CollaborationBackendFactory;
 	/**
 	 * Starts one reserved turn. `knowledge` is the grant of the call that reserved this exact turn; a turn whose record
-	 * names granted references is answered from it (or told the knowledge is withdrawn when it is absent).
+	 * names granted references is answered from it (or told the knowledge is withdrawn when it is absent). `signal` is
+	 * that call's cancellation; a launch it cancels rejects like any failed launch.
 	 */
 	launchTurn(
 		job: CollaborationJob,
 		agent: CollaborationAgent,
 		answer?: CollaborationAnswer,
 		knowledge?: CollaborationKnowledgeHandoff,
+		signal?: AbortSignal,
 	): Promise<void>;
 	report(event: ManagedLaneEvent): void;
 }
@@ -637,7 +639,7 @@ export class CollaborationCoordinator {
 						const agent = store.load(job.id).agents.find((candidate) => candidate.id === memberId)!;
 						if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
 						try {
-							await this.deps.launchTurn(job, agent, undefined, knowledge);
+							await this.deps.launchTurn(job, agent, undefined, knowledge, signal);
 							break;
 						} catch (error) {
 							if (signal.aborted || this.disposed) throw error;
@@ -751,7 +753,7 @@ export class CollaborationCoordinator {
 				for (const agent of job.agents) {
 					this.assertActive(signal);
 					submitted.add(agent.id);
-					await this.launchReservedTurn(job, agent, undefined, knowledge);
+					await this.launchReservedTurn(job, agent, undefined, knowledge, signal);
 				}
 			return this.deps.store.load(job.id);
 		} catch (error) {
@@ -778,7 +780,12 @@ export class CollaborationCoordinator {
 		agentId: string | undefined,
 		text: string,
 		answer?: CollaborationAnswer,
-		options?: { steer?: boolean; newTask?: CollaborationTaskCorrelation; knowledge?: CollaborationKnowledgeHandoff },
+		options?: {
+			steer?: boolean;
+			newTask?: CollaborationTaskCorrelation;
+			knowledge?: CollaborationKnowledgeHandoff;
+			signal?: AbortSignal;
+		},
 	): Promise<CollaborationAgent> {
 		this.assertActive();
 		this.refresh();
@@ -858,7 +865,7 @@ export class CollaborationCoordinator {
 			options?.newTask,
 			options?.knowledge?.references,
 		);
-		await this.launchReservedTurn(job, agent, answer, options?.knowledge);
+		await this.launchReservedTurn(job, agent, answer, options?.knowledge, options?.signal);
 		return agent;
 	}
 	private async launchReservedTurn(
@@ -866,11 +873,12 @@ export class CollaborationCoordinator {
 		agent: CollaborationAgent,
 		answer?: CollaborationAnswer,
 		knowledge?: CollaborationKnowledgeHandoff,
+		signal?: AbortSignal,
 	): Promise<void> {
 		try {
-			this.assertActive();
+			this.assertActive(signal);
 			this.dispatch(job, agent);
-			await this.deps.launchTurn(job, agent, answer, knowledge);
+			await this.deps.launchTurn(job, agent, answer, knowledge, signal);
 		} catch (error) {
 			await this.stopAgent(job.id, agent.id, agent.turnId, {
 				kind: "failure",

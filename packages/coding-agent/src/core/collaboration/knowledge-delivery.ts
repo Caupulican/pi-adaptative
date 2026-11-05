@@ -88,7 +88,7 @@ export function requestTurnKnowledge(
 /**
  * Parent side: answer this turn's one request with the block current at that moment. Resolves when the answer was
  * handed to the channel (`answered`) or when the channel ended, the helper reported its terminal, or `signal`
- * aborted first (`ended`); the caller closes the channel in that case so a waiting helper starts without knowledge.
+ * aborted before the request was answered (`ended`); the caller closes the channel or ends the helper in that case.
  */
 export function answerTurnKnowledge(
 	port: KnowledgeChannelPort,
@@ -106,10 +106,16 @@ export function answerTurnKnowledge(
 			signal?.removeEventListener("abort", onAbort);
 			resolve(outcome);
 		};
-		const onAbort = () => settle("ended");
+		// Once the answer is handed to the channel only its send result, or the channel's end, settles: an abort then
+		// could not take back an answer the helper may already be prompting with.
+		let answering = false;
+		const onAbort = () => {
+			if (!answering) settle("ended");
+		};
 		const stopMessages = port.onMessage((value) => {
 			if (isTurnMessage(value, "terminal", turnId)) return settle("ended");
-			if (!isTurnMessage(value, "need-knowledge", turnId)) return;
+			if (answering || !isTurnMessage(value, "need-knowledge", turnId)) return;
+			answering = true;
 			let text: string | undefined;
 			try {
 				text = current() || undefined;

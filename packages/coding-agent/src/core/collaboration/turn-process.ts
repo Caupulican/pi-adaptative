@@ -28,9 +28,22 @@ function childKnowledgeChannel(child: ChildProcess): KnowledgeChannelPort {
 	};
 }
 
+/** Ends a helper the launch gave up on through the bounded process-tree owner and names whether that is proven. */
+async function abandonedHelperError(child: ChildProcess, summary: string): Promise<Error> {
+	try {
+		const outcome = await killTree(child);
+		return new Error(outcome === "failed" ? `${summary} Helper process-tree termination is unproven.` : summary);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return new Error(`${summary} Helper process-tree termination failed (${message}); termination is unproven.`);
+	}
+}
+
 /**
  * Detached finite control helper; native model CLIs remain interactive in the backend's PTYs. `knowledge` is the
  * grant of the call that reserved this turn; its block reaches the helper over IPC only, never as an argument.
+ * `signal` is that call's cancellation: before the helper is admitted, or while a granted turn's helper has not yet
+ * been answered, it ends the helper and rejects, so the caller releases the turn as for any failed launch.
  */
 export async function launchCollaborationTurnProcess(
 	store: CollaborationJobStore,
@@ -38,7 +51,9 @@ export async function launchCollaborationTurnProcess(
 	agent: CollaborationAgent,
 	answer?: CollaborationAnswer,
 	knowledge?: CollaborationKnowledgeHandoff,
+	signal?: AbortSignal,
 ): Promise<void> {
+	signal?.throwIfAborted();
 	const target = getSelfLaunchTarget();
 	if (!target) throw new Error("This host cannot launch a persistent collaboration turn controller.");
 	const child = spawnProcess(
@@ -67,37 +82,27 @@ export async function launchCollaborationTurnProcess(
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onStartupAbort);
 			child.off("message", onMessage);
 			reject(error);
 		};
-		const settleStartupTimeout = async (): Promise<void> => {
+		const abandonStartup = async (summary: string): Promise<void> => {
 			if (settled) return;
-			// Timeout wins admission synchronously. A late ready message must stay fenced while the
+			// Timeout or cancellation wins admission synchronously. A late ready message must stay fenced while the
 			// bounded process-tree owner reaches its own terminal.
 			settled = true;
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onStartupAbort);
 			child.off("message", onMessage);
-			try {
-				const outcome = await killTree(child);
-				reject(
-					new Error(
-						outcome === "failed"
-							? "Collaboration controller startup timed out. Helper process-tree termination is unproven."
-							: "Collaboration controller startup timed out.",
-					),
-				);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				reject(
-					new Error(
-						`Collaboration controller startup timed out. Helper process-tree termination failed (${message}); termination is unproven.`,
-					),
-				);
-			}
+			reject(await abandonedHelperError(child, summary));
 		};
 		const timer = setTimeout(() => {
-			void settleStartupTimeout();
+			void abandonStartup("Collaboration controller startup timed out.");
 		}, 30000);
+		const onStartupAbort = () => {
+			void abandonStartup("Collaboration controller startup was cancelled.");
+		};
+		signal?.addEventListener("abort", onStartupAbort, { once: true });
 		child.once("error", fail);
 		const onMessage = (value: unknown) => {
 			if (settled) return;
@@ -113,17 +118,28 @@ export async function launchCollaborationTurnProcess(
 			settled = true;
 			admitted = true;
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onStartupAbort);
 			child.off("message", onMessage);
 			void (async () => {
 				// A granted task's helper asks for its block right before it prompts; the launch (and so the tool call
-				// that reports withdrawals) waits for that answer, the helper's end, or the turn deadline.
+				// that reports withdrawals) waits for that answer, the helper's end, the turn deadline or the call's
+				// cancellation.
 				if (turnExpectsKnowledge(agent, answer !== undefined)) {
+					const deadline = AbortSignal.timeout(Math.max(1, (agent.deadlineAt ?? Date.now()) - Date.now()));
 					const outcome = await answerTurnKnowledge(
 						childKnowledgeChannel(child),
 						agent.turnId,
 						() => knowledge?.deliver(agent.id),
-						AbortSignal.timeout(Math.max(1, (agent.deadlineAt ?? Date.now()) - Date.now())),
+						signal ? AbortSignal.any([deadline, signal]) : deadline,
 					);
+					// Cancelled before the helper's request was answered, so before it could prompt with the block: end it
+					// and fail the launch.
+					if (outcome === "ended" && signal?.aborted) {
+						reject(
+							await abandonedHelperError(child, "Collaboration turn launch was cancelled before its prompt."),
+						);
+						return;
+					}
 					// Unanswered: close the channel so a still-waiting helper starts without knowledge.
 					if (outcome === "ended" && child.connected) child.disconnect();
 				}
