@@ -3,6 +3,7 @@ import { getBundledResourcesDir } from "../../config.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../extensions/types.ts";
 import type { InboxExpiredUnread } from "../messaging/inbox.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { registerChatCommand } from "./commands.ts";
@@ -152,7 +153,8 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 		const senders = [...new Set(untold.map((item) => item.sender))];
 		sendVisibleCard({
 			customType: CHAT_CUSTOM_MESSAGE_TYPE,
-			content: `[pi-chat] ${untold.length} held ${untold.length === 1 ? "message" : "messages"} expired before this session collected ${untold.length === 1 ? "it" : "them"}, from ${senders.slice(0, 8).join(", ")}${senders.length > 8 ? ` and ${senders.length - 8} more` : ""}; the oldest was sent ${untold[0]!.createdAt}. The bodies are gone: ask the sender to resend if it still matters.`,
+			// Sender ids come from the inbox file, unverified for expired mail: they reach the model only fenced.
+			content: `[pi-chat] ${untold.length} held ${untold.length === 1 ? "message" : "messages"} expired before this session collected ${untold.length === 1 ? "it" : "them"}; the oldest was sent ${untold[0]!.createdAt}. The bodies are gone: ask the sender to resend if it still matters. Sender ids as the inbox recorded them:\n${wrapUntrustedText(`${senders.slice(0, 8).join("\n")}${senders.length > 8 ? `\n(${senders.length - 8} more)` : ""}`, "pi-chat:expired-senders")}`,
 			display: true,
 			details: { kind: "expired", keys: untold.map(expiredKey) },
 		});

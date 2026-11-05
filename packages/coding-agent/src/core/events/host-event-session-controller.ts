@@ -9,6 +9,7 @@ import {
 	HostEventError,
 	type HostEventReplayGap,
 	type HostEventSink,
+	type HostEventSourceEndReason,
 	hostEventHash,
 	hostEventString,
 } from "./host-event-contract.ts";
@@ -65,6 +66,16 @@ function replayGapNotice(gap: HostEventReplayGap): HarnessNoticeObservation {
 			// The notice id omits the scope: the source and range make each gap's notice its own.
 			reason: `${gap.reason}:${gap.sourceId}:${gap.afterSequence}-${gap.throughSequence}`,
 			text: `Up to ${count} CI ${count === 1 ? "result was" : "results were"} never delivered to this session: ${GAP_CAUSES[gap.reason]}. Check CI directly for results from that period.`,
+		},
+	};
+}
+
+function endedSourceNotice(sourceId: string, reason: HostEventSourceEndReason): HarnessNoticeObservation {
+	return {
+		scope: `ended:${sourceId}`,
+		state: {
+			reason: `${reason}:${sourceId}`,
+			text: "CI results this session had not yet received were dropped: the CI event journal was replaced because it was unreadable or another release started a new one. Check CI directly for results from before now.",
 		},
 	};
 }
@@ -168,7 +179,11 @@ export class HostEventSessionController {
 					events.retireThrough(horizon, lifetime);
 					events.prune();
 				}),
-			deactivate: async (sourceId) => events.deactivateSource(sourceId, lifetime),
+			deactivate: async (sourceId, ended) => {
+				events.deactivateSource(sourceId, lifetime);
+				if (ended && this.active() && Object.hasOwn(deps.runtime.getSnapshot().eventSources, sourceId))
+					deps.observeNotice("host-event-gap", () => endedSourceNotice(sourceId, ended));
+			},
 			reportConnection: (source, connection) => {
 				if (!this.active()) return;
 				deps.observeNotice("host-event-source", () => ({

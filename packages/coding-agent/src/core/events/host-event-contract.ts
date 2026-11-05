@@ -242,6 +242,9 @@ export interface HostEventReplayHorizon {
  * Why a consumer's replay entitlement ended: parked past its retention, removed to make room for live custody, or
  * absent from the source for a cause it did not record (a session checkpoint older than its own custody).
  */
+/** Why a source ended for every consumer: its journal was unreadable or another release started a new one. */
+export type HostEventSourceEndReason = "journal_replaced";
+
 export const HOST_EVENT_REPLAY_GAP_REASONS = ["consumer_inactive", "consumer_expired", "consumer_evicted"] as const;
 export type HostEventReplayGapReason = (typeof HOST_EVENT_REPLAY_GAP_REASONS)[number];
 
@@ -293,8 +296,11 @@ export interface HostEventSink {
 	accept(envelope: HostEventEnvelope, signal: AbortSignal): Promise<HostEventReceipt>;
 	seal(seal: HostEventCatchUpSeal, signal: AbortSignal): Promise<void>;
 	retireThrough(horizon: HostEventReplayHorizon, signal: AbortSignal): Promise<void>;
-	/** Revocation remains available after source cancellation. */
-	deactivate(sourceId: string): Promise<void>;
+	/**
+	 * Revocation remains available after source cancellation. `ended` names why the source itself ended (a replaced
+	 * journal), so its unreceived history is gone rather than paused.
+	 */
+	deactivate(sourceId: string, ended?: HostEventSourceEndReason): Promise<void>;
 	subscribeWritable(listener: () => void): () => void;
 	/** Each change of the named source's connection state; never throws into the source. */
 	reportConnection(source: string, connection: HostEventSourceConnection | undefined): void;

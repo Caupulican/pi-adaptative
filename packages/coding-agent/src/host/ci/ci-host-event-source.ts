@@ -820,9 +820,10 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.claimed = undefined;
 		this.sourceId = undefined;
 		this.forced = true;
+		// A new source id means the journal itself was replaced: what this session had not received is gone.
 		if (previous && previous !== snapshot.sourceId)
 			void this.sink
-				?.deactivate(previous)
+				?.deactivate(previous, "journal_replaced")
 				.catch((error: unknown) => this.report("custody", `CI source deactivation failed: ${errorText(error)}`));
 		return undefined;
 	}
