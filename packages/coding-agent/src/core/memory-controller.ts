@@ -1431,8 +1431,16 @@ export class MemoryController {
 		wireMessages: readonly AgentMessage[] = [],
 	): MemoryPromptPlan {
 		const generation = this._memoryGeneration;
+		const usesKnowledge = () =>
+			!this.deps.isChildSession() && this.deps.getSettingsManager().getMemorySystem() === "icm";
+		if (usesKnowledge()) return this._appendKnowledgePrompt(messages, wireMessages);
 		if (!this._legacyMemoryEnabled()) {
-			return this._appendKnowledgePrompt(messages, wireMessages);
+			// A temporarily unavailable OKF generation is not an ICM generation.
+			return {
+				messages,
+				isCurrent: () => generation === this._memoryGeneration && !usesKnowledge() && !this._legacyMemoryEnabled(),
+				commit: () => {},
+			};
 		}
 		const revision = this._memoryContentRevision;
 		const headroom = this.deps.getPromptHeadroom?.(messages);
@@ -1510,6 +1518,9 @@ export class MemoryController {
 			],
 			isCurrent: () =>
 				generation === this._memoryGeneration &&
+				!this.deps.isChildSession() &&
+				this.deps.getSettingsManager().getMemorySystem() === "icm" &&
+				!this._legacyMemoryEnabled() &&
 				reader === this._currentKnowledgeReader() &&
 				policy === this._retrievalPolicyKey() &&
 				isDeepStrictEqual(scope, this._knowledgeScope()) &&
