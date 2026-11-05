@@ -41,6 +41,20 @@ Extraction submissions and per-candidate/window judgments are retained in the sa
 
 Forgetting is conservative about existing work identities: a retired result is not reused or extracted again under the same identity. A pending source that depended on that result can therefore remain held. New original owner evidence has its own identity and can support a new admission. A checkpoint refused before the transport starts cancels its usage reservation without recording a provider response or a charge.
 
+### Owner controls
+
+`/knowledge` gives the owner direct access without a model turn:
+
+```
+/knowledge list [<kind>|global|project] [<after-id>]
+/knowledge show <id> [<citation-offset>]
+/knowledge history <id> [<before-revision>]
+/knowledge correct <id> <new value>
+/knowledge forget <id>
+```
+
+`list`, `show` and `history` page current records, citations and revisions with their provenance: owner message or owner command, evidence dates, revision, scope and validity. An ID may be a unique prefix of at least eight characters. `correct` replaces the value verbatim and keeps the fact's identity, scope and validity; the old value stays in history. `forget` removes the value and its history and leaves the identity as an evidence barrier. Both ask for confirmation on the owner's screen first and are refused without an owner UI. They pass through the same admission and store fences as the `knowledge` tool (expected revision, forgotten sources, newer-evidence rules, replay receipts) and run no judge and spend nothing, with or without System One. The typed command, its session and its time are the change's evidence; they are never added to the owner-evidence ledger, so model and collector proposals still cite only original owner messages.
+
 ## What history recall covers
 
 Recall indexes the sessions of the current project (same working directory), newest first, from the canonical session files in the current session directory and the legacy default directory. Per session it follows the selected branch: the ancestry of the last entry. Side branches are indexed too and are searched only when asked for, labelled `alternate`.

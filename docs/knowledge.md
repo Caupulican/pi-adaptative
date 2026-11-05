@@ -23,3 +23,17 @@ Schema-1 databases migrate on open. A previously forgotten schema-1 record has n
 Automatic collection (`autoLearn.enabled`, on by default) runs in persisted ICM root sessions whenever a priced collection model and a judge are available. After owner input and an idle delay, an isolated extraction reads complete original owner inputs and proposes bounded changes. Those proposals pass through the same admission as the `knowledge` tool. Its spending is limited per original source and per session; an exhausted allowance holds new sources before any request until the limit changes. A citation inside quoted or code-marked text is rejected as shown, not stated; unmarked pasted text is left to the semantic judgment. In-memory-only and child sessions never collect.
 
 `/memory knowledge` and `context_audit` report whether collection is active, which judge it uses, its spending against the session limit and its last pass, or the reason it starts no requests: disabled, invalid or unreadable settings, no model, an unpriced model, no judge, an exhausted allowance, unsettled spending, an unpersisted or child session, or ICM memory not active.
+
+## Owner controls
+
+The owner views and edits accepted knowledge directly with `/knowledge` in an interactive ICM root session. No model takes part:
+
+- `/knowledge list [<kind>|global|project] [<after-id>]` lists current records ten at a time. Each line shows the record's ID prefix, category, reach, revision, basis, validity state, last evidence date and value. A full page ends with the command for the next page.
+- `/knowledge show <id> [<citation-offset>]` shows one record: subject and key, value, first and last evidence dates, validity interval and its citations four at a time (owner message or owner command, time, session, source and quote).
+- `/knowledge history <id> [<before-revision>]` pages retained revisions five at a time.
+- `/knowledge correct <id> <new value>` replaces the record's value with the text after the ID, taken verbatim apart from surrounding whitespace. Identity, category, scope, validity interval and first evidence date are kept, and the previous value stays in its history.
+- `/knowledge forget <id>` forgets the record exactly like a forget through the tool: the value and its history are removed and the identity stays as an evidence barrier.
+
+An ID is the full record ID or a unique prefix of at least eight characters within the owner's current scope. Output is bounded per line and known secret patterns are redacted.
+
+A correction or forget first asks for confirmation on the owner's screen and changes nothing until the owner accepts. Without a bound owner UI it is refused. The change then passes through the same admission and store as the tool: the revision read before the confirmation must still be current, forgotten sources and newer-evidence fences apply, and a retry of the same command against the same revision returns its recorded outcome instead of applying twice. The command needs no semantic judgment and spends nothing, with or without System One. Its evidence is the command itself: the citation records the typed command text, the session and a time after the record's last evidence, under an `owner-command:` source ID. This evidence is not added to the original owner-evidence ledger, so collection and model-proposed changes still cite only original owner messages; pasted text, worker reports and summaries never become owner knowledge through a command. A command or value containing a credential is refused.
