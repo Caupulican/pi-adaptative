@@ -182,12 +182,19 @@ lifetime comes from the words: "every time", "whenever", "toda vez", "sempre que
 a CI result watch only the next attempt; an "until" with an end after it ("until the release
 ships") makes the request conditional. A CI watch that states neither ("if CI fails") is dropped. Its
 outcomes are every outcome word of the excerpt, finishing or ending naming all of them, and a slot
-may omit them only when the words name failure alone. A watch of one named workflow is dropped: the
-host cannot check workflow names. A conditional request keeps the end the owner stated, read by the
-host from their sentence (`endCondition`, at most 300 characters, otherwise the request is dropped
-with a notice); every run's worker is told that end and reports first once it is reached, and the
-routine ends 14 days after the request at the latest (`expiresAt`), since the host cannot watch the
-stated end itself. A one-time CI request runs for the next
+may omit them only when the words name failure alone. A watch may name one workflow file ("when
+ci.yml fails"): the host derives `.github/workflows/<file>` from the words and the model's slot must
+equal it. The names checked are the workflows of the CI attempts this session has received from a
+ready CI source, so the request is dropped when no such reader or source exists, when no attempt has
+been seen yet, when it names more than one file or a file the session does not watch (the CI source
+watches `ci.yml`). A conditional request keeps the end the owner stated, read by the host from their
+sentence (`endCondition`, at most 300 characters, otherwise the request is dropped with a notice);
+every run's worker is told that end and asked to report `conditionMet` truthfully. When a run that
+completed cleanly reports it met, the host records that in the same store write as the result,
+starts no further run (also while the session is closed), and removes the routine once its runs are
+delivered, telling the owner once; a closed session's routine is removed when the session next runs,
+and a restart repeats nothing. The host does not check the end itself, so the
+routine still ends 14 days after the request at the latest (`expiresAt`). A one-time CI request runs for the next
 matching attempt only (`stopAfterFirstRun`) with the same end; an ended routine is removed after its runs are
 delivered, and an expired one is announced once. Each proposal is judged for being an
 explicit request and for a faithful schedule, given the host-chosen parts and its next three runs (an
