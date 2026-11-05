@@ -1,6 +1,7 @@
 import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import type { WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import type { AttemptParentWrite } from "../orchestration/task-runtime-state.ts";
 import { decodeWorkerReceiptReview, type WorkerReceiptReview } from "../orchestration/worker-receipt-publication.ts";
 import {
 	decodeSessionSnapshotPayload,
@@ -47,6 +48,18 @@ export function appendWorkerClaimSnapshot(
 	 * validator's own documented default for single-cwd-per-process callers. */
 	options?: { cwd?: string; receiptReview?: WorkerReceiptReview; parentWriteId?: string },
 ): string {
+	return sessionManager.appendCustomEntry(
+		WORKER_CLAIM_CUSTOM_TYPE,
+		workerClaimSnapshotPayload(claim, request, options),
+	);
+}
+
+/** The snapshot a claim is stored as: normalized for the host, with the parent-review marker its request decides. */
+function workerClaimSnapshotPayload(
+	claim: WorkerClaim,
+	request: WorkerRequest | undefined,
+	options: { cwd?: string; receiptReview?: WorkerReceiptReview; parentWriteId?: string } | undefined,
+): WorkerClaimSnapshotPayload {
 	const normalizedClaim = normalizeWorkerClaimForHost(claim);
 	const stored = cloneWorkerClaimForStorage(normalizedClaim);
 	// Stamp the parent-review marker here by re-running the SAME gate
@@ -57,14 +70,41 @@ export function appendWorkerClaimSnapshot(
 	if (request) {
 		stored.parentReviewRequired = isParentReviewRequired({ request, claim: normalizedClaim, cwd: options?.cwd });
 	}
-	const payload: WorkerClaimSnapshotPayload = {
+	return {
 		version: 1,
 		claim: stored,
 		...(request ? { request: structuredClone(request) } : {}),
 		...(options?.receiptReview ? { receiptReview: { ...options.receiptReview } } : {}),
 		...(options?.parentWriteId ? { parentWriteId: options.parentWriteId } : {}),
 	};
-	return sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, payload);
+}
+
+/**
+ * The claim of one worker generation as the parent will hold it: the latest one its attempt still holds in the
+ * parent-write outbox (recorded by a host that is not the parent, not yet imported), else the latest the transcript
+ * holds. Outbox writes are imported in record order after every entry already in the transcript, so a pending one is
+ * always the newer.
+ */
+export function readWorkerClaimSnapshotForAttempt(
+	entries: readonly SessionEntry[],
+	pendingWrites: Readonly<Record<string, AttemptParentWrite>> | undefined,
+	requestId: string,
+	attemptId: string,
+): WorkerClaimSnapshotPayload | undefined {
+	const newestFirst = Object.values(pendingWrites ?? {}).sort((left, right) => right.sequence - left.sequence);
+	for (const write of newestFirst) {
+		const body = write.body;
+		if (body.kind !== "worker_claim" || !isWorkerClaim(body.claim)) continue;
+		const claim = body.claim as unknown as WorkerClaim;
+		if (claim.requestId !== requestId || claim.terminalAttemptId !== attemptId) continue;
+		const request = body.request;
+		return workerClaimSnapshotPayload(
+			claim,
+			request !== undefined && typeof request.id === "string" ? (request as unknown as WorkerRequest) : undefined,
+			{ ...(body.cwd === undefined ? {} : { cwd: body.cwd }), parentWriteId: write.writeId },
+		);
+	}
+	return getWorkerClaimSnapshotForAttempt(entries, requestId, attemptId);
 }
 
 /** Requests persisted alongside worker claims. */

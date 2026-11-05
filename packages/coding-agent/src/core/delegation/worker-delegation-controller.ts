@@ -136,7 +136,7 @@ import {
 	type SanitizedContextForkMode,
 	selectSanitizedContextFork,
 } from "./sanitized-context-fork.ts";
-import { getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
+import { readWorkerClaimSnapshotForAttempt, type WorkerClaimSnapshotPayload } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import {
 	type WorkerAgentControlPort,
@@ -695,12 +695,7 @@ export class WorkerDelegationController {
 				this.terminalHandoffs.signal();
 				this.notifications.statusChanged();
 			},
-			getWorkerClaimSnapshot: (taskId, attemptId) =>
-				getWorkerClaimSnapshotForAttempt(
-					getActiveSessionBranchEntries(this.deps.getSessionManager()),
-					taskId,
-					attemptId,
-				),
+			getWorkerClaimSnapshot: (taskId, attemptId) => this.workerClaimSnapshot(taskId, attemptId),
 			getWorkerResult: (attemptId) => this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId]?.result,
 			getGoalState: () => this.deps.getGoalStateSnapshot(),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
@@ -2305,17 +2300,23 @@ export class WorkerDelegationController {
 	 * settled it, that pending blocker no longer holds: restate it from the verdict, re-judged by the
 	 * same gate, so the parent's handoff, status and goal evidence read the review state that is true.
 	 */
+	/** One generation's claim as the parent holds it, its pending outbox claim included (a non-parent host records there). */
+	private workerClaimSnapshot(taskId: string, attemptId: string): WorkerClaimSnapshotPayload | undefined {
+		return readWorkerClaimSnapshotForAttempt(
+			getActiveSessionBranchEntries(this.deps.getSessionManager()),
+			this.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId]?.parentWrites,
+			taskId,
+			attemptId,
+		);
+	}
+
 	private settleVerifiedSubjectClaim(record: LaneRecord): void {
 		if (!record.attemptId) return;
 		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
 		const attempt = snapshot.attempts[record.attemptId];
 		const verification = attempt ? attemptVerification(snapshot, attempt) : undefined;
 		if (!verification) return;
-		const stored = getWorkerClaimSnapshotForAttempt(
-			getActiveSessionBranchEntries(this.deps.getSessionManager()),
-			record.laneId,
-			record.attemptId,
-		);
+		const stored = this.workerClaimSnapshot(record.laneId, record.attemptId);
 		if (!stored || !isVerificationPending(stored.claim)) return;
 		const settled = withoutVerificationPending(stored.claim);
 		const blockers = [
