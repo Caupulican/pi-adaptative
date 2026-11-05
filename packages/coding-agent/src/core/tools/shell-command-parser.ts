@@ -23,11 +23,18 @@ export interface ShellToken {
 	groups?: ShellGroup[];
 	/** The word starts with a quoted string: a string literal, never a command name to PowerShell. */
 	literal?: boolean;
+	/** With `compound`: the word holds a quote or an escape, so the shell never reads it as a reserved word. */
+	quoted?: boolean;
 }
 
 interface TokenizeOptions {
 	operators: boolean;
 	dialect: ShellCommandDialect;
+	/**
+	 * POSIX only: an unquoted `(` or `)` outside an expansion is its own operator token (`((` when two are adjacent), and
+	 * `;;`, `;&`, `;;&` are one operator each, so a caller can read subshells, function definitions and `case` items.
+	 */
+	compound?: boolean;
 }
 
 export type ShellCommandDialect = "posix" | "powershell";
@@ -175,12 +182,15 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 	let expansions: ShellExpansion[] = [];
 	let groups: ShellGroup[] = [];
 	let literal = false;
+	let quotedWord = false;
+	const compound = posix && options.compound === true;
 	const pushArgument = () => {
 		if (argumentStarted || current.length > 0) {
 			const token: ShellToken = { kind: "arg", value: current };
 			if (expansions.length > 0) token.expansions = expansions;
 			if (groups.length > 0) token.groups = groups;
 			if (literal) token.literal = true;
+			if (compound && quotedWord) token.quoted = true;
 			tokens.push(token);
 		}
 		current = "";
@@ -188,6 +198,7 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 		expansions = [];
 		groups = [];
 		literal = false;
+		quotedWord = false;
 	};
 	/** Copies the construct at `index` into the word: the new index, `index` itself when none starts there, -1 when it never closes. */
 	const takeConstruct = (index: number): number => {
@@ -230,6 +241,7 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 			}
 			if (current === "" && next === "\\") {
 				current = "\\\\";
+				quotedWord = true;
 				index++;
 				continue;
 			}
@@ -238,6 +250,7 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 				continue;
 			}
 			escaped = true;
+			quotedWord = true;
 			continue;
 		}
 		if (quote) {
@@ -259,6 +272,7 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 		if (char === "'" || char === '"') {
 			if (current === "" && !argumentStarted) literal = true;
 			argumentStarted = true;
+			quotedWord = true;
 			quote = char;
 			continue;
 		}
@@ -280,6 +294,20 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 			continue;
 		}
 
+		if (compound && (char === "(" || char === ")")) {
+			pushArgument();
+			const doubled = char === "(" && next === "(";
+			tokens.push({ kind: "operator", value: doubled ? "((" : char });
+			if (doubled) index++;
+			continue;
+		}
+		if (compound && char === ";" && (next === ";" || next === "&")) {
+			pushArgument();
+			const value = next === ";" && input[index + 2] === "&" ? ";;&" : `;${next}`;
+			tokens.push({ kind: "operator", value });
+			index += value.length - 1;
+			continue;
+		}
 		if (options.operators && posix && char === "&" && next === ">") {
 			pushArgument();
 			const append = input[index + 2] === ">";
@@ -364,8 +392,9 @@ export function tokenizeCommand(
 export function tokenizeShellCommand(
 	command: string,
 	dialect: ShellCommandDialect = defaultShellCommandDialect(),
+	options: { compound?: boolean } = {},
 ): ShellToken[] | null {
-	return tokenize(command, { operators: true, dialect });
+	return tokenize(command, { operators: true, dialect, compound: options.compound });
 }
 
 export interface ShellInvocationPrefixResult {
@@ -518,4 +547,265 @@ export function parseShellCommandSequence(
 /** `cd <one path>`: the only stage a filtered run replays into the session before the command. */
 export function isChangeDirectoryInvocation(args: string[]): boolean {
 	return args[0] === "cd" && args.length === 2 && args[1].length > 0;
+}
+
+/** A redirection of a simple or compound command: its operator and, unless it copies or closes a descriptor, its target. */
+export interface ShellRedirection {
+	readonly operator: string;
+	readonly target?: ShellToken;
+}
+
+/**
+ * One command of a POSIX command line read with its compound structure. `simple`: words and redirections. `group`:
+ * `{ ...; }` or a `( ... )` subshell. `if`: every condition and branch list in order. `loop`: `for NAME [in WORDS]`,
+ * `while` or `until` (its condition list) and its body. `case`: the word, every pattern and every item's list.
+ */
+export type ShellCompoundNode =
+	| { readonly kind: "simple"; readonly words: ShellToken[]; readonly redirections: ShellRedirection[] }
+	| {
+			readonly kind: "group";
+			readonly subshell: boolean;
+			readonly body: ShellCompoundNode[];
+			readonly redirections: ShellRedirection[];
+	  }
+	| { readonly kind: "if"; readonly lists: ShellCompoundNode[][]; readonly redirections: ShellRedirection[] }
+	| {
+			readonly kind: "loop";
+			readonly variable?: ShellToken;
+			readonly words: ShellToken[];
+			readonly condition: ShellCompoundNode[];
+			readonly body: ShellCompoundNode[];
+			readonly redirections: ShellRedirection[];
+	  }
+	| {
+			readonly kind: "case";
+			readonly word: ShellToken;
+			readonly patterns: ShellToken[];
+			readonly lists: ShellCompoundNode[][];
+			readonly redirections: ShellRedirection[];
+	  };
+
+/** How deep compound commands may nest before a reader of the structure stops. */
+export const MAX_COMPOUND_DEPTH = 16;
+
+const RESERVED_CLOSERS = new Set(["}", "then", "elif", "else", "fi", "do", "done", "esac"]);
+const CASE_ITEM_ENDS = [";;", ";&", ";;&"];
+const LIST_SEPARATORS = new Set([";", "&", "&&", "||", "\n", "\r", "|", "|&"]);
+
+/**
+ * Reads a POSIX command line tokenized with `compound` into its commands: brace groups, subshells, `if`, `for`,
+ * `while`, `until` and `case`. Reserved words count only unquoted and where a command starts, so `echo done` and `'fi'`
+ * stay words. A string is why the line cannot be read: a function definition (it stays defined in the shell and runs
+ * in place of the program a later command names), an arithmetic command or `for ((...))`, `select`, a here-document
+ * (its text is not part of the structure), a construct left open, or nesting deeper than `MAX_COMPOUND_DEPTH`.
+ */
+export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompoundNode[] | string {
+	let index = 0;
+	const reserved = (token: ShellToken | undefined): string | undefined =>
+		token?.kind === "arg" && !token.quoted ? token.value : undefined;
+	const isOperator = (token: ShellToken | undefined, values: readonly string[]): boolean =>
+		token?.kind === "operator" && values.includes(token.value);
+	const skip = (values: readonly string[]) => {
+		while (isOperator(tokens[index], values)) index++;
+	};
+	const redirection = (redirections: ShellRedirection[]): string | undefined => {
+		const token = tokens[index]!;
+		if (/^<<-?$/u.test(token.value)) return "it uses a here-document, whose text the gate does not judge";
+		index++;
+		if (!redirectTakesTarget(token.value)) {
+			redirections.push({ operator: token.value });
+			return undefined;
+		}
+		const target = tokens[index];
+		if (target?.kind !== "arg") return "it redirects without naming a file";
+		index++;
+		redirections.push({ operator: token.value, target });
+		return undefined;
+	};
+	/** Redirections written after a compound command's closing word apply to the whole command. */
+	const closed = (
+		closer: string,
+		make: (redirections: ShellRedirection[]) => ShellCompoundNode,
+	): ShellCompoundNode | string => {
+		const redirections: ShellRedirection[] = [];
+		while (tokens[index]?.kind === "redirect") {
+			const refusal = redirection(redirections);
+			if (refusal) return refusal;
+		}
+		if (tokens[index]?.kind === "arg")
+			return `it writes ${tokens[index]!.value} after ${closer}, where no word belongs`;
+		return make(redirections);
+	};
+	const expect = (word: string, construct: string): string | undefined => {
+		if (reserved(tokens[index]) !== word) return `it has ${construct} without ${word}`;
+		index++;
+		return undefined;
+	};
+	const simple = (): ShellCompoundNode | string => {
+		const words: ShellToken[] = [];
+		const redirections: ShellRedirection[] = [];
+		while (index < tokens.length) {
+			const token = tokens[index]!;
+			if (token.kind === "arg") {
+				words.push(token);
+				index++;
+				continue;
+			}
+			if (token.kind === "redirect") {
+				const refusal = redirection(redirections);
+				if (refusal) return refusal;
+				continue;
+			}
+			if (isOperator(token, ["(", "(("])) {
+				if (words.length === 1 && token.value === "(" && isOperator(tokens[index + 1], [")"]))
+					return `it defines the shell function ${words[0]!.value}, which stays defined in the shell and runs in place of the program a later command names`;
+				return `it opens ${token.value} after ${words[0]?.value ?? "a redirection"}, where no command starts`;
+			}
+			break;
+		}
+		return { kind: "simple", words, redirections };
+	};
+	const list = (closers: ReadonlySet<string>, depth: number): ShellCompoundNode[] | string => {
+		if (depth > MAX_COMPOUND_DEPTH)
+			return `it nests compound commands deeper than the gate judges (${MAX_COMPOUND_DEPTH} levels)`;
+		const nodes: ShellCompoundNode[] = [];
+		while (index < tokens.length) {
+			const token = tokens[index]!;
+			if (token.kind === "operator" || token.kind === "pipe") {
+				if (LIST_SEPARATORS.has(token.value)) {
+					index++;
+					continue;
+				}
+				if (closers.has(token.value)) return nodes;
+			}
+			const word = reserved(token);
+			if (word !== undefined && closers.has(word)) return nodes;
+			const node = command(depth);
+			if (typeof node === "string") return node;
+			if (node) nodes.push(node);
+		}
+		return closers.size === 0 ? nodes : `it leaves a compound command open (no ${[...closers].join(" or ")})`;
+	};
+	const command = (depth: number): ShellCompoundNode | string | undefined => {
+		const token = tokens[index]!;
+		if (token.kind === "operator") {
+			if (token.value === "((") return "it runs an arithmetic command ((...)), which can assign variables";
+			if (token.value !== "(") return `it has ${token.value} where a command starts`;
+			index++;
+			const body = list(new Set([")"]), depth + 1);
+			if (typeof body === "string") return body;
+			index++;
+			return closed(")", (redirections) => ({ kind: "group", subshell: true, body, redirections }));
+		}
+		const word = reserved(token);
+		switch (word) {
+			case "!":
+				index++;
+				return undefined;
+			case "{": {
+				index++;
+				const body = list(new Set(["}"]), depth + 1);
+				if (typeof body === "string") return body;
+				index++;
+				return closed("}", (redirections) => ({ kind: "group", subshell: false, body, redirections }));
+			}
+			case "if": {
+				index++;
+				const lists: ShellCompoundNode[][] = [];
+				for (let next = "elif"; next === "elif"; ) {
+					const condition = list(new Set(["then"]), depth + 1);
+					if (typeof condition === "string") return condition;
+					index++;
+					const branch = list(new Set(["elif", "else", "fi"]), depth + 1);
+					if (typeof branch === "string") return branch;
+					lists.push(condition, branch);
+					next = reserved(tokens[index++]) ?? "";
+					if (next !== "else") continue;
+					const otherwise = list(new Set(["fi"]), depth + 1);
+					if (typeof otherwise === "string") return otherwise;
+					lists.push(otherwise);
+					index++;
+				}
+				return closed("fi", (redirections) => ({ kind: "if", lists, redirections }));
+			}
+			case "while":
+			case "until": {
+				index++;
+				const condition = list(new Set(["do"]), depth + 1);
+				if (typeof condition === "string") return condition;
+				index++;
+				const body = list(new Set(["done"]), depth + 1);
+				if (typeof body === "string") return body;
+				index++;
+				return closed("done", (redirections) => ({ kind: "loop", words: [], condition, body, redirections }));
+			}
+			case "for": {
+				index++;
+				const variable = tokens[index];
+				if (isOperator(variable, ["(("]))
+					return "it runs an arithmetic for loop (for ((...))), which can assign variables";
+				if (variable?.kind !== "arg") return "it has a for loop without a variable name";
+				index++;
+				skip(["\n", "\r"]);
+				const words: ShellToken[] = [];
+				if (reserved(tokens[index]) === "in") {
+					index++;
+					while (tokens[index]?.kind === "arg") words.push(tokens[index++]!);
+				}
+				skip([";", "\n", "\r"]);
+				const missing = expect("do", "a for loop");
+				if (missing) return missing;
+				const body = list(new Set(["done"]), depth + 1);
+				if (typeof body === "string") return body;
+				index++;
+				return closed("done", (redirections) => ({
+					kind: "loop",
+					variable,
+					words,
+					condition: [],
+					body,
+					redirections,
+				}));
+			}
+			case "case": {
+				index++;
+				const subject = tokens[index];
+				if (subject?.kind !== "arg") return "it has a case statement without a word";
+				index++;
+				skip(["\n", "\r"]);
+				const missing = expect("in", "a case statement");
+				if (missing) return missing;
+				const patterns: ShellToken[] = [];
+				const lists: ShellCompoundNode[][] = [];
+				for (skip(["\n", "\r"]); reserved(tokens[index]) !== "esac"; skip(["\n", "\r"])) {
+					if (isOperator(tokens[index], ["("])) index++;
+					for (;;) {
+						const pattern = tokens[index];
+						if (pattern?.kind !== "arg") return "it has a case item without a pattern";
+						patterns.push(pattern);
+						index++;
+						if (tokens[index]?.kind !== "pipe" || tokens[index]!.value !== "|") break;
+						index++;
+					}
+					if (!isOperator(tokens[index], [")"])) return "it has a case pattern without )";
+					index++;
+					const items = list(new Set([...CASE_ITEM_ENDS, "esac"]), depth + 1);
+					if (typeof items === "string") return items;
+					lists.push(items);
+					if (isOperator(tokens[index], CASE_ITEM_ENDS)) index++;
+				}
+				index++;
+				return closed("esac", (redirections) => ({ kind: "case", word: subject, patterns, lists, redirections }));
+			}
+			case "select":
+				return "it uses select, which reads its choice from the terminal";
+			case "function":
+				return "it defines a shell function, which stays defined in the shell and runs in place of the program a later command names";
+			default:
+				if (word !== undefined && RESERVED_CLOSERS.has(word))
+					return `it has ${word} without the command that opens it`;
+				return simple();
+		}
+	};
+	return list(new Set(), 0);
 }

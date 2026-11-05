@@ -4,9 +4,12 @@ import { globIterateSync } from "glob";
 import { isPathWithinScope, physicalPathSync, safeRealpathSync } from "../autonomy/path-scope.ts";
 import {
 	MAX_TRACKED_DIRECTORIES,
+	parseShellCompound,
 	parseShellInvocationPrefixes,
 	redirectTakesTarget,
 	type ShellCommandDialect,
+	type ShellCompoundNode,
+	type ShellRedirection,
 	type ShellToken,
 	tokenizeShellCommand,
 } from "../tools/shell-command-parser.ts";
@@ -236,6 +239,8 @@ interface JudgeContext {
 	readonly lane: ReadOnlyShellLaneScope | undefined;
 	/** Every program judged (wrappers and wrapped programs included), for the observational line. */
 	readonly programs: string[];
+	/** Inside a loop body or condition, which runs any number of times. */
+	readonly loop?: boolean;
 }
 /** Programs whose purpose is to reach another host. */
 const NETWORK_CLIENTS = new Set([
@@ -1617,7 +1622,8 @@ function nestedShellViolation(
 			? walkCommand(
 					command,
 					{ list: [...cwds.list], unknown: cwds.unknown },
-					{ ...context, dialect, depth: context.depth + 1 },
+					// A nested shell is a new process each time it runs, so its `cd` ends with it, loop or not.
+					{ ...context, dialect, depth: context.depth + 1, loop: false },
 				)
 			: `${name} names no command`;
 	if (SHELL_WRAPPERS.has(name)) {
@@ -1895,6 +1901,12 @@ function leafViolation(args: readonly string[], cwds: WorkingDirectories, contex
 		case "git":
 			return gitViolation(args, cwds, context);
 		case "cd":
+			// Each pass of a loop may move again from where the last one left the shell; the gate counts no passes.
+			if (context.loop && lane) return "it changes directory inside a loop, whose passes the gate does not count";
+			if (context.loop) {
+				cwds.unknown = true;
+				return undefined;
+			}
 			return changeDirectory(rest.filter((arg) => arg === "-" || !/^-(?:[LPe@]+|-)$/u.test(arg))[0], cwds, context);
 		case "npm":
 		case "pnpm":
@@ -2046,13 +2058,8 @@ function invocationViolation(
 	return programViolation(args.slice(index), cwds, context);
 }
 
-interface Redirection {
-	readonly operator: string;
-	readonly target?: ShellToken;
-}
-
 function redirectionViolation(
-	redirection: Redirection,
+	redirection: ShellRedirection,
 	cwds: WorkingDirectories,
 	context: JudgeContext,
 ): string | undefined {
@@ -2071,10 +2078,10 @@ function redirectionViolation(
  */
 function judgeSimpleCommands(
 	tokens: readonly ShellToken[],
-	judge: (words: ShellToken[], redirections: Redirection[], previous: string | undefined) => string | undefined,
+	judge: (words: ShellToken[], redirections: ShellRedirection[], previous: string | undefined) => string | undefined,
 ): string | undefined {
 	let words: ShellToken[] = [];
-	let redirections: Redirection[] = [];
+	let redirections: ShellRedirection[] = [];
 	let previous: string | undefined;
 	for (let index = 0; index < tokens.length; index++) {
 		const token = tokens[index]!;
@@ -2103,35 +2110,106 @@ function judgeSimpleCommands(
 	return judge(words, redirections, previous);
 }
 
+/** A loop variable keeps its last value in the shell; names programs read from their environment are not loop variables. */
+function loopVariableViolation(variable: ShellToken): string | undefined {
+	if (ALLOWED_ASSIGNMENT_RE.test(variable.value) || /^[a-z][a-z0-9]*$/u.test(variable.value)) return undefined;
+	return `it binds the loop variable ${variable.value}, which may be a variable programs read; use a name of lowercase letters and digits (for f in ...)`;
+}
+
+/** The rules for one simple command: the expansions in its words, its redirections, then its invocation. */
+function simpleCommandViolation(
+	words: readonly ShellToken[],
+	redirections: readonly ShellRedirection[],
+	cwds: WorkingDirectories,
+	context: JudgeContext,
+): string | undefined {
+	for (const word of words) {
+		const violation = expansionViolation(word);
+		if (violation) return violation;
+	}
+	for (const redirection of redirections) {
+		const violation = redirectionViolation(redirection, cwds, context);
+		if (violation) return violation;
+	}
+	return words.length === 0
+		? undefined
+		: invocationViolation(
+				words.map((word) => word.value),
+				cwds,
+				context,
+			);
+}
+
 /**
- * The rules over a whole command line: every simple command (split on `;`, `&&`, `||`, `|`, `|&`, `&` and line
- * breaks by the shared tokenizer), its redirections and expansions, with `cd` tracked. PowerShell command lines go
- * through the PowerShell walk.
+ * The rules for a list of commands read with their compound structure. Every simple command in every body is judged
+ * like a top-level one. A compound command's redirections are judged from the directories it starts in. A `( ... )`
+ * subshell's `cd` ends with it; a `{ ... }` group's, a branch's and a case item's stay possible for what follows. A loop
+ * (`for`, `while`, `until`) judges its condition and body once with `loop` set, since a pass repeats the same commands
+ * (a `cd` there is the exception, see `leafViolation`); a `for` loop's variable and words and a `case` word and its
+ * patterns are judged for expansions.
  */
-function walkCommand(command: string, cwds: WorkingDirectories, context: JudgeContext): string | undefined {
-	if (context.dialect === "powershell") return walkPowerShell(command, cwds, context);
-	const tokens = tokenizeShellCommand(command, "posix");
-	if (!tokens) return "it has an unterminated quote, escape or substitution";
-	return judgeSimpleCommands(tokens, (words, redirections) => {
-		for (const word of words) {
-			const violation = expansionViolation(word);
+function compoundViolation(
+	nodes: readonly ShellCompoundNode[],
+	cwds: WorkingDirectories,
+	context: JudgeContext,
+): string | undefined {
+	for (const node of nodes) {
+		if (node.kind === "simple") {
+			const violation = simpleCommandViolation(node.words, node.redirections, cwds, context);
 			if (violation) return violation;
+			continue;
 		}
-		const first = words[0]?.value;
-		if (first !== undefined && /^[({]$|^\(/u.test(first))
-			return "it opens a subshell or command group, which the gate does not judge";
-		for (const redirection of redirections) {
+		for (const redirection of node.redirections) {
 			const violation = redirectionViolation(redirection, cwds, context);
 			if (violation) return violation;
 		}
-		return words.length === 0
-			? undefined
-			: invocationViolation(
-					words.map((word) => word.value),
-					cwds,
-					context,
-				);
-	});
+		let violation: string | undefined;
+		switch (node.kind) {
+			case "group":
+				violation = node.subshell
+					? compoundViolation(
+							node.body,
+							{ list: [...cwds.list], unknown: cwds.unknown },
+							{ ...context, loop: false },
+						)
+					: compoundViolation(node.body, cwds, context);
+				break;
+			case "if":
+				for (const list of node.lists) {
+					violation = compoundViolation(list, cwds, context);
+					if (violation) break;
+				}
+				break;
+			case "loop": {
+				violation = node.variable ? loopVariableViolation(node.variable) : undefined;
+				for (const word of node.variable ? [node.variable, ...node.words] : []) {
+					violation ??= expansionViolation(word);
+				}
+				const loop = { ...context, loop: true };
+				violation ??= compoundViolation(node.condition, cwds, loop) ?? compoundViolation(node.body, cwds, loop);
+				break;
+			}
+			case "case":
+				for (const word of [node.word, ...node.patterns]) violation ??= expansionViolation(word);
+				for (const list of node.lists) violation ??= compoundViolation(list, cwds, context);
+				break;
+		}
+		if (violation) return violation;
+	}
+	return undefined;
+}
+
+/**
+ * The rules over a whole command line: every simple command (split on `;`, `&&`, `||`, `|`, `|&`, `&` and line
+ * breaks by the shared tokenizer, inside the compound commands `parseShellCompound` reads), its redirections and
+ * expansions, with `cd` tracked. PowerShell command lines go through the PowerShell walk.
+ */
+function walkCommand(command: string, cwds: WorkingDirectories, context: JudgeContext): string | undefined {
+	if (context.dialect === "powershell") return walkPowerShell(command, cwds, context);
+	const tokens = tokenizeShellCommand(command, "posix", { compound: true });
+	if (!tokens) return "it has an unterminated quote, escape or substitution";
+	const nodes = parseShellCompound(tokens);
+	return typeof nodes === "string" ? nodes : compoundViolation(nodes, cwds, context);
 }
 
 /** PowerShell's built-in aliases for the cmdlets below (and for `cd`), as the language resolves them. */
