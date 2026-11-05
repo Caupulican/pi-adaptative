@@ -135,6 +135,7 @@ import type { WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts"
 import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
 import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
+import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -452,6 +453,7 @@ export interface RuntimeBuilderDeps {
 	getToolTaskDependencies?(): ToolTaskDependencies;
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
 	getSelfCompactTool?(): ToolDefinition | undefined;
+	getProactivityTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -1703,6 +1705,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME)) {
 				const definition = this.deps.getSelfCompactTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(PROACTIVITY_TOOL_NAME)) {
+				const definition = this.deps.getProactivityTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {

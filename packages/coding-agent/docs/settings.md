@@ -449,7 +449,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 
 **What the review can do.** The host decides whether a review may start (enabled, the per-session cap, enough new owner turns, an idle foreground) and what it may do: its one tool records a note. The model only judges whether the conversation shows a need, so the behavior does not depend on a particular model. The host then drops notes that are empty, malformed or repeats of a note already raised on the branch, and delivers at most `maxNotesPerRun`. A review that raises nothing, the usual outcome, leaves no trace in the conversation.
 
-**Owner control.** `/proactivity status` shows the settings and the gate that last kept a review from running. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. These are prompt commands, so a model turn or an unattended run cannot change them.
+**Owner control.** `/proactivity status` shows the settings and the gate that last kept a review from running. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. The root model can also read or propose changes through the `proactivity` tool. Every change requires confirmation on the owner's screen; cancellation, refusal, a conflicting edit during confirmation, or an unattended session prevents the write. Workers do not receive this tool. See [Proactivity](proactivity.md).
 
 ### Cost Guard
 

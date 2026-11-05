@@ -1,9 +1,10 @@
 /**
- * `/proactivity`: the owner's controls over the idle review that raises notes. Typed at the prompt, so only the owner
- * can use it: the on/off switch and the standing preferences are never writable from a model turn or an unattended run.
+ * `/proactivity`: direct owner controls over the idle review. Model proposals use the separate proactivity tool,
+ * which requires confirmation on the owner's screen before changing the switch or standing preferences.
  */
 
 import type { AgentSession } from "../../core/agent-session.ts";
+import { withProactivityChange } from "../../core/proactivity/proactivity-settings.ts";
 import { MAX_PROACTIVITY_PREFERENCES_CHARS } from "../../core/settings/settings-rules.ts";
 import type {
 	ProactivitySettings,
@@ -25,22 +26,6 @@ export interface ProactivityHost {
 
 const USAGE = "Usage: /proactivity [status|on|off|review|prefs <text>|prefs clear]";
 
-/** The owner's settings with one field changed; every other field stays as it resolves now. */
-function withChange(settings: ResolvedProactivitySettings, change: Partial<ProactivitySettings>): ProactivitySettings {
-	return {
-		enabled: settings.enabled,
-		idleDelayMs: settings.idleDelayMs,
-		minOwnerTurnsBetweenRuns: settings.minOwnerTurnsBetweenRuns,
-		maxRunsPerSession: settings.maxRunsPerSession,
-		maxUsd: settings.maxUsd,
-		maxNotesPerRun: settings.maxNotesPerRun,
-		delivery: settings.delivery,
-		preferences: settings.preferences,
-		...(settings.model === undefined ? {} : { model: settings.model }),
-		...change,
-	};
-}
-
 export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsManager" | "session">): string {
 	const settings = host.settingsManager.getProactivitySettings();
 	const skip = host.session.backgroundLanes.getLastProactivitySkipReason();
@@ -61,7 +46,7 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 		return;
 	}
 	if (action === "on" || action === "off") {
-		host.settingsManager.setProactivitySettings(withChange(settings, { enabled: action === "on" }));
+		host.settingsManager.setProactivitySettings(withProactivityChange(settings, { enabled: action === "on" }));
 		host.showStatus(
 			action === "on" ? "Proactivity on: idle reviews may raise notes." : "Proactivity off: no idle review runs.",
 		);
@@ -98,7 +83,7 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 			return;
 		}
 		if (words === "clear") {
-			host.settingsManager.setProactivitySettings(withChange(settings, { preferences: "" }));
+			host.settingsManager.setProactivitySettings(withProactivityChange(settings, { preferences: "" }));
 			host.showStatus("Cleared. No proactivity preferences are saved.");
 			return;
 		}
@@ -108,7 +93,7 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 			);
 			return;
 		}
-		host.settingsManager.setProactivitySettings(withChange(settings, { preferences: words }));
+		host.settingsManager.setProactivitySettings(withProactivityChange(settings, { preferences: words }));
 		host.showStatus(`Saved. Every review reads: ${words}`);
 		return;
 	}

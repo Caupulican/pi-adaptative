@@ -18,7 +18,6 @@ import {
 	type DaemonLeaseRelease,
 	daemonLeaseBelongsTo,
 	formatDurationIntervalMs,
-	MIN_ROUTINE_INTERVAL_MS,
 	type PersistentBotDaemonStatus,
 	type PersistentBotInboxEntry,
 	type PersistentRoutineScheduleRecord,
@@ -1260,21 +1259,22 @@ export class PersistentBotTeamStore {
 	}
 
 	/**
-	 * The detached daemon's tick: every enabled due routine is advanced and marked queued, its bot's summary updated
-	 * or its team handed the routine prompt as a brain message, all in one locked transaction over the shared store.
-	 * A store an older build rewrote in the version-1 shape is resealed in the same transaction.
+	 * The detached daemon's tick: every enabled due routine not yet marked queued is marked queued, its bot's summary
+	 * updated or its team handed the routine prompt as a brain message, all in one locked transaction over the shared
+	 * store. The daemon runs no model, so it never consumes a due routine: `nextRunAt` stays put and the next session's
+	 * scheduler claims it (`claimDueRoutinesInMap`), which dispatches it and moves `nextRunAt` forward. Advancing it here
+	 * made that claim skip the routine, so a routine queued by the daemon was never dispatched. A store an older build
+	 * rewrote in the version-1 shape is resealed in the same transaction.
 	 */
 	queueDueRoutinesForDaemon(nowMs = Date.now()): number {
 		return this.mutate(() => {
 			const nowIso = new Date(nowMs).toISOString();
 			let queued = 0;
 			for (const routine of [...this.routines.values()]) {
-				if (!routine.enabled || routine.nextRunAt > nowMs) continue;
+				if (!routine.enabled || routine.nextRunAt > nowMs || routine.lastStatus === "queued") continue;
 				const summary = `[Daemon ${nowIso}] Routine queued across TUI session: ${routine.prompt.slice(0, 160)}`;
 				this.routines.set(routine.routineId, {
 					...routine,
-					lastRunAt: nowMs,
-					nextRunAt: nowMs + Math.max(MIN_ROUTINE_INTERVAL_MS, routine.intervalMs),
 					lastStatus: "queued",
 					lastSummary: summary,
 					updatedAt: nowIso,

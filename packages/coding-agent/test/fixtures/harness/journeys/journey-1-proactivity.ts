@@ -1,6 +1,7 @@
 import type { Context } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
@@ -191,6 +192,104 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		"proactivity_disabled",
 	);
 	expect(world.provider.requests.length - requestsBefore, "only the owner's own turn reached the provider").toBe(1);
+
+	// Preferences are a normal model tool, but only a settled owner confirmation may change them.
+	const settings = off.settingsManager;
+	const toolTurn = async (
+		label: string,
+		action: string,
+		expected: string,
+		preferencesText?: string,
+	): Promise<void> => {
+		world.systemOne.enterPhase(label, PREVIOUS_TURN_JUDGMENTS);
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-call`, [
+				{
+					id: label,
+					name: "proactivity",
+					arguments: { action, ...(preferencesText ? { text: preferencesText } : {}) },
+				},
+			]),
+			{
+				...text(`${label}-done`, "Understood."),
+				check: (request) => {
+					const result = request.context.messages.find(
+						(message) => message.role === "toolResult" && message.toolCallId === label,
+					);
+					expect(result, `${label}: the production tool ran through the provider loop`).toBeDefined();
+					expect(JSON.stringify(result), `${label}: the result reports the actual outcome`).toContain(expected);
+				},
+			},
+		);
+		await withDeadline(trace, label, off.session.prompt("Update my proactive review preferences."));
+	};
+	expect(off.session.getActiveToolNames(), "the preferences tool is available by default").toContain("proactivity");
+	await toolTurn("preferences-unattended", "turn_on", "owner confirmation is unavailable");
+	expect(settings.getProactivitySettings().enabled, "without an owner UI, the tool cannot enable reviews").toBe(false);
+	let decision: "decline" | "accept" | "conflict" | "other-setting" | "cancel" = "decline";
+	let confirmations = 0;
+	const confirmationReached = createBarrier();
+	const finishConfirmation = createBarrier();
+	const ui = {
+		askQuestions: world.humanInput.ui.askQuestions,
+		confirm: async (_title: string, message: string) => {
+			confirmations += 1;
+			expect(message, "the owner sees the concrete proposed change").toContain("Allow the assistant to");
+			if (decision === "conflict") {
+				settings.setProactivitySettings({
+					...settings.getProactivitySettings(),
+					preferences: "Owner edited meanwhile.",
+				});
+			}
+			if (decision === "other-setting") {
+				settings.setProactivitySettings({ ...settings.getProactivitySettings(), maxRunsPerSession: 7 });
+			}
+			if (decision === "cancel") {
+				confirmationReached.release();
+				await finishConfirmation.promise;
+			}
+			return decision !== "decline";
+		},
+	} as unknown as ExtensionUIContext;
+	await off.session.bindExtensions({ uiContext: ui });
+	await toolTurn("preferences-declined", "set_preferences", "owner did not confirm", "No nightly reminders.");
+	expect(settings.getProactivitySettings().preferences, "declining preserves the preferences").toBe("");
+	decision = "conflict";
+	await toolTurn("preferences-conflict", "set_preferences", "changed during confirmation", "No nightly reminders.");
+	expect(settings.getProactivitySettings().preferences, "a stale confirmation cannot replace an owner edit").toBe(
+		"Owner edited meanwhile.",
+	);
+	decision = "other-setting";
+	await toolTurn("preferences-accepted", "set_preferences", "Saved.", "No nightly reminders.");
+	expect(settings.getProactivitySettings().preferences, "the confirmed text is saved").toBe("No nightly reminders.");
+	expect(settings.getProactivitySettings().maxRunsPerSession, "an unrelated concurrent setting is retained").toBe(7);
+	decision = "accept";
+	await toolTurn("preferences-read", "view", "No nightly reminders.");
+	expect(confirmations, "reading requires no confirmation").toBe(3);
+	await toolTurn("preferences-clear", "clear_preferences", "Saved.");
+	expect(settings.getProactivitySettings().preferences, "the confirmed clear removes the text").toBe("");
+	await toolTurn("preferences-enable", "turn_on", "Saved.");
+	expect(settings.getProactivitySettings().enabled, "the owner can enable reviews through the tool").toBe(true);
+	await toolTurn("preferences-disable", "turn_off", "Saved.");
+	expect(settings.getProactivitySettings().enabled, "the owner can disable reviews through the tool").toBe(false);
+
+	// Abort after the confirmation boundary was reached, even if a late affirmative answer arrives.
+	decision = "cancel";
+	world.systemOne.enterPhase("preferences-cancel", PREVIOUS_TURN_JUDGMENTS);
+	world.provider.enqueue(
+		"root",
+		calls("preferences-cancel-call", [
+			{ id: "preferences-cancel", name: "proactivity", arguments: { action: "turn_on" } },
+		]),
+	);
+	const cancelledTurn = off.session.prompt("Enable proactive reviews.");
+	await withDeadline(trace, "preferences cancellation reaches confirmation", confirmationReached.promise);
+	const abort = off.session.abort("owner cancelled proactivity confirmation");
+	finishConfirmation.release();
+	await withDeadline(trace, "preferences cancellation settles", Promise.all([abort, cancelledTurn]));
+	expect(settings.getProactivitySettings().enabled, "a cancelled request cannot save a late confirmation").toBe(false);
+	expect(confirmations, "every mutating call reached the expected owner boundary exactly once").toBe(7);
 	expect(await world.disposeSessionInBody(off.session), "the off session closes cleanly").toBeUndefined();
 	trace.mark("root", "proactivity.done");
 }

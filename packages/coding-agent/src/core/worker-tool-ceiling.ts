@@ -6,6 +6,7 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
+import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
@@ -37,6 +38,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	// The decision ledger is the root's and System One's review surface; workers never read it.
 	DECISION_LEDGER_READ_TOOL_NAME,
 	SELF_COMPACT_TOOL_NAME,
+	PROACTIVITY_TOOL_NAME,
 ]);
 
 /**

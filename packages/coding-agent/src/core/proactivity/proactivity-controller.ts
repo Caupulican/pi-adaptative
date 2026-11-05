@@ -62,9 +62,18 @@ export interface ProactivityControllerDeps {
 	timers?: TimerPort;
 }
 
+/** The active goal and what is still open on it, bounded: the host's own record of work the owner asked for. */
+function goalSummary(goal: GoalState): string {
+	const open = goal.requirements.filter((requirement) => requirement.status === "open").slice(0, 8);
+	return [
+		goal.userGoal,
+		...(open.length > 0 ? ["Still open:", ...open.map((requirement) => `- ${requirement.text}`)] : []),
+	].join("\n");
+}
+
 /**
  * Owns the idle review that raises notes the owner would want to hear. The host decides everything that has a cost or a
- * consequence: whether a review may start (opt-in, per-session cap, enough new owner turns, an idle
+ * consequence: whether a review may start (enabled, per-session cap, enough new owner turns, an idle
  * foreground), what it may do (one tool that records a note; no files, commands or messages), and what is delivered
  * (well-formed, new, within the limit). The model only judges whether the conversation shows a need, so the path is the
  * same for every model that can call a tool.
@@ -200,7 +209,7 @@ export class ProactivityController {
 										entries,
 										preferences: settings.preferences,
 										ownerProfile: this.deps.getHandoffPersonaGuidance?.() ?? "",
-										...(goal && isGoalExecutionActive(goal.status) ? { goalSummary: goal.userGoal } : {}),
+										...(goal && isGoalExecutionActive(goal.status) ? { goalSummary: goalSummary(goal) } : {}),
 									}),
 								},
 							],

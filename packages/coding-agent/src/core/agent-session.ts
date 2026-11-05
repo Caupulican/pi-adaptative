@@ -248,6 +248,7 @@ import {
 	type QueuedInput,
 } from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
+import { createProactivityToolDefinition } from "./proactivity/proactivity-tool.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { DurableOwnerRuleStore, type OwnerRulePolicy } from "./project-rules/durable-owner-rules.ts";
 import type { SessionProjectRules } from "./project-rules/session-project-rules.ts";
@@ -1891,6 +1892,8 @@ export class AgentSession {
 			getRuntimeUpdateTool: () => (this._isChildSession ? undefined : this.runtimeUpdates.createTool()),
 			getSelfCompactTool: () =>
 				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
+			getProactivityTool: () =>
+				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
