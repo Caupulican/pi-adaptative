@@ -6,6 +6,7 @@
  * memory, settings, skills or publish waits for its session and is reported once.
  */
 
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "../capability-contract.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 
@@ -27,9 +28,9 @@ const AWAY_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set<HarnessCapabil
 /** A due routine with no saved run: nothing pins the parent it would run in. */
 export const AWAY_UNPINNED_REASON =
 	"it has no saved run with a pinned origin, so it runs only while its session is open.";
-/** A saved run whose pinned origin the parent's current branch no longer carries. */
+/** A saved run whose pinned origin the parent's current branch no longer carries, or whose session file is gone. */
 export const AWAY_OFF_BRANCH_REASON =
-	"its saved origin is not on the session's current branch, or that branch is empty, so it waits for the session to open.";
+	"its saved origin is not on the session's current branch, that branch is empty, or the session file is gone, so it waits for the session to open.";
 
 /** A saved run whose pinned origin names no session file: nothing locates the parent to open away. */
 export const AWAY_NO_SESSION_FILE_REASON =
@@ -38,8 +39,17 @@ export const AWAY_NO_SESSION_FILE_REASON =
 export const AWAY_LEASES_UNREADABLE_REASON =
 	"its session's lease registry cannot be read, so nothing proves the session closed; it waits for the session to open.";
 
-/** Why this saved run cannot run away, or undefined when it can. */
-export function awayRunRefusal(intent: WorkerSavedIntent): string | undefined {
+/** The models a run away would call, as the host's model registry resolves them. */
+export interface AwayModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+}
+
+/**
+ * Why this saved run cannot run away, or undefined when it can. With `models`, a run whose pinned worker or verifier
+ * model has no declared prices is refused too: every request away is priced against the per-run bound, so such a
+ * run would be refused at its first request after its claim.
+ */
+export function awayRunRefusal(intent: WorkerSavedIntent, models?: AwayModelSource): string | undefined {
 	const contract = intent.executionContract;
 	const profiles = contract.verifier ? [contract.worker, contract.verifier] : [contract.worker];
 	const outside = new Set<string>();
@@ -56,6 +66,13 @@ export function awayRunRefusal(intent: WorkerSavedIntent): string | undefined {
 	// A goal and host-event subscriptions are tracked by the open session's goal owner and event custody.
 	if (intent.objectiveId !== null) outside.add("a goal binding");
 	if (intent.subscriptions.length > 0) outside.add("host-event subscriptions");
-	if (outside.size === 0) return undefined;
-	return `its run needs ${[...outside].sort().join(", ")}, which only the open session can gate and isolate, so it waits for the session to open.`;
+	if (outside.size > 0)
+		return `its run needs ${[...outside].sort().join(", ")}, which only the open session can gate and isolate, so it waits for the session to open.`;
+	if (models)
+		for (const { modelBinding } of profiles) {
+			const model = models.find(modelBinding.provider, modelBinding.modelId);
+			if (!model || model.costDefaulted)
+				return `its pinned model ${modelBinding.provider}/${modelBinding.modelId} is unknown here or has no declared prices, so its spend cannot be bounded away; it waits for the session to open.`;
+		}
+	return undefined;
 }

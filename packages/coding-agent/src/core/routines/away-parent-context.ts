@@ -83,6 +83,8 @@ export interface AwayParentContext {
 	readonly workers: WorkerDelegationController;
 	/** The token of this context's own hold on the parent bundle; every other live holder means the parent is open. */
 	readonly holdToken: string;
+	/** The registry this context's runs resolve and price their models in. */
+	readonly modelRegistry: ModelRegistry;
 	/** The parent transcript as last read; reopened when the file changed. */
 	reader(): ReadonlySessionManager;
 	/** Every orchestration ledger event this context records (worker admission, progress and terminals). */
@@ -380,6 +382,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			lifecycle,
 			workers,
 			holdToken,
+			modelRegistry,
 			reader: () => readerNow(),
 			subscribeExecution: (listener) => store.subscribe(() => listener()),
 			hasLiveRun: () => {

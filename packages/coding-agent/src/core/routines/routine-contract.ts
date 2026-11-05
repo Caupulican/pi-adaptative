@@ -353,6 +353,17 @@ export class RoutineIntakeRefusal extends Error {
 	}
 }
 
+/**
+ * A host's admission guard refused a routine dispatch (its session opened, its away host closed, its origin left the
+ * branch). When no execution of the run exists, nothing was handed to an executor and the run returns to pending.
+ */
+export class RoutineAdmissionRefused extends Error {
+	constructor(reason: string) {
+		super(reason);
+		this.name = "RoutineAdmissionRefused";
+	}
+}
+
 export interface PersistentRoutineDefinition {
 	readonly routineId: string;
 	readonly incarnationId: string;
@@ -442,9 +453,14 @@ export interface RoutineOccurrence {
 	readonly uncertainty?: string;
 	/**
 	 * Claimed by a host running the routine away (its session not open). Set by each claim before dispatch and fixed
-	 * from dispatch on; the away spend bound charges these occurrences.
+	 * from dispatch on; a run returned to pending drops it. The away spend bound charges these occurrences.
 	 */
 	readonly executor?: "away";
+	/**
+	 * A dispatched run away's end: when it became terminal and what its attempts spent, read from their ledger usage
+	 * (absent when unread: the run is charged its full per-run bound). Written by whichever host finished it.
+	 */
+	readonly awaySettlement?: { readonly at: number; readonly costUsd?: number };
 }
 
 /** The rolling window of the away spend bound. */
@@ -454,45 +470,107 @@ export const ROUTINE_AWAY_SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const ROUTINE_AWAY_SPEND_REFUSAL =
 	"the away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
 
+/** Why a due slot was not run away while an earlier run away of its routine is not yet delivered. */
+export const ROUTINE_AWAY_HELD_REASON =
+	"an earlier run away of it has not been delivered to its session yet, so later slots wait for the session to open and its next run's missed count covers them.";
+
 /** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
 export interface RoutineAwayClaimGate {
 	readonly maxUsdPerRun: number;
 	readonly maxUsdPerDay: number;
-	/**
-	 * Final spend of terminal away occurrences, read from their executions' ledger usage. A run without an entry (still
-	 * running, unpriced, or unread) is charged its full per-run bound, so a stale map only over-reserves.
-	 */
-	readonly settledUsd: ReadonlyMap<string, number>;
+}
+
+/** Whole micro-dollars: the bound's sums and comparisons are exact. */
+function micros(usd: number): number {
+	return Math.round(usd * 1_000_000);
 }
 
 /**
- * What runs away inside the spend window charge the away spend bound: a run that may still spend holds its full
- * per-run bound, a finished run its settled usage (the per-run bound when unread), a run that never started nothing.
+ * What one run away charges the away spend bound now, in micro-dollars, and until when (undefined: until it changes).
+ * Admission, not creation, starts the charge, so a run is charged at any age:
+ * - admitted and not finished (claimed, dispatching, running): its full per-run bound, until it finishes or returns to
+ *   pending (which drops `executor`);
+ * - uncertain: its full per-run bound, until resolved, or the spend window after the journal's uncertain retention;
+ * - finished after dispatch: its settled spend (its full per-run bound when unread), for the spend window after it
+ *   finished;
+ * - finished without dispatch (cancelled before it started): nothing.
  */
-export function routineAwaySpendCharged(
+function routineAwayCharge(
+	item: RoutineOccurrence,
+	maxUsdPerRun: number,
+	nowMs: number,
+): { readonly micros: number; readonly until?: number } | undefined {
+	if (item.executor !== "away") return undefined;
+	if (item.phase === "uncertain") {
+		const until = item.updatedAt + ROUTINE_UNCERTAIN_RETENTION_MS + ROUTINE_AWAY_SPEND_WINDOW_MS;
+		return until > nowMs ? { micros: micros(maxUsdPerRun), until } : undefined;
+	}
+	if (item.phase !== "terminal") return { micros: micros(maxUsdPerRun) };
+	if (!item.dispatchKey) return undefined;
+	const until = (item.awaySettlement?.at ?? item.updatedAt) + ROUTINE_AWAY_SPEND_WINDOW_MS;
+	if (until <= nowMs) return undefined;
+	return { micros: micros(item.awaySettlement?.costUsd ?? maxUsdPerRun), until };
+}
+
+/** Whether the run away is still charged the away spend bound, so the journal keeps it. */
+export function routineAwayCharged(item: RoutineOccurrence, nowMs: number): boolean {
+	return routineAwayCharge(item, 0, nowMs) !== undefined;
+}
+
+/**
+ * The away spend bound's state: whether one more run fits (`charged + maxUsdPerRun <= maxUsdPerDay`, exact in
+ * micro-dollars) and, when it does not, the earliest instant a charge ends by time (undefined when every charge ends
+ * only by a store change: a run finishing or returning to pending).
+ */
+export function routineAwaySpendRoom(
 	occurrences: Iterable<RoutineOccurrence>,
 	gate: RoutineAwayClaimGate,
 	nowMs: number,
-): number {
-	let charged = 0;
+): { readonly chargedMicros: number; readonly fits: (extraRuns: number) => boolean; readonly exit?: number } {
+	let chargedMicros = 0;
+	let exit: number | undefined;
 	for (const item of occurrences) {
-		if (item.executor !== "away" || item.createdAt <= nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS) continue;
-		if (item.phase !== "terminal") charged += gate.maxUsdPerRun;
-		else if (item.dispatchKey) charged += gate.settledUsd.get(item.occurrenceId) ?? gate.maxUsdPerRun;
+		const charge = routineAwayCharge(item, gate.maxUsdPerRun, nowMs);
+		if (!charge) continue;
+		chargedMicros += charge.micros;
+		if (charge.until !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, charge.until);
 	}
-	return charged;
+	const perRun = micros(gate.maxUsdPerRun);
+	const perDay = micros(gate.maxUsdPerDay);
+	return {
+		chargedMicros,
+		fits: (extraRuns) => chargedMicros + (extraRuns + 1) * perRun <= perDay,
+		...(exit === undefined ? {} : { exit }),
+	};
 }
 
-/** When the oldest run away still inside the spend window leaves it, or undefined when none is inside. */
-export function routineAwaySpendWindowExit(
+/**
+ * Whether an away claim holds the routine's next slot: a run away of this incarnation is unfinished, or its result is
+ * not yet delivered. One run away per routine waits for its session at a time; later slots stay due for the session.
+ * An uncertain run whose uncertainty was delivered stops holding once the journal's uncertain retention passed, as the
+ * journal then treats it as settled.
+ */
+export function routineAwayHeld(
 	occurrences: Iterable<RoutineOccurrence>,
+	routine: { readonly routineId: string; readonly incarnationId: string },
 	nowMs: number,
-): number | undefined {
-	let exit: number | undefined;
-	for (const item of occurrences)
-		if (item.executor === "away" && item.createdAt > nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS)
-			exit = Math.min(exit ?? Number.POSITIVE_INFINITY, item.createdAt + ROUTINE_AWAY_SPEND_WINDOW_MS);
-	return exit;
+): boolean {
+	for (const item of occurrences) {
+		if (
+			item.executor !== "away" ||
+			item.routineId !== routine.routineId ||
+			item.definition.incarnationId !== routine.incarnationId
+		)
+			continue;
+		if (item.result?.delivery === "pending" || item.priorUncertaintyResult?.delivery === "pending") return true;
+		if (
+			item.phase === "uncertain"
+				? item.updatedAt > nowMs - ROUTINE_UNCERTAIN_RETENTION_MS
+				: item.phase !== "terminal"
+		)
+			return true;
+	}
+	return false;
 }
 
 export interface RoutineDelivery {
@@ -628,10 +706,15 @@ export interface RoutineClaimResult {
 	/** Due routines an away claim left due because the away spend bound has no room for another run. */
 	readonly awayRefused: readonly string[];
 	/**
-	 * With `awayRefused`: when the oldest charged away run leaves the spend window, the earliest instant its room can
-	 * return without a store change. Absent when no charged run can leave it.
+	 * With `awayRefused`: the earliest instant a charge ends by time, so room can return without a store change. Absent
+	 * when every charge ends only by a store change (a run finishing or returning to pending).
 	 */
 	readonly awayRetryAt?: number;
+	/**
+	 * Due routines an away claim left due because an earlier run away of each is not yet delivered
+	 * ({@link routineAwayHeld}); a store change (the delivery) lifts it.
+	 */
+	readonly awayHeld: readonly string[];
 }
 
 export interface RoutineEventDecision {
@@ -1135,6 +1218,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			"priorUncertaintyResult",
 			"uncertainty",
 			"executor",
+			"awaySettlement",
 		]) ||
 		(value.executor !== undefined && value.executor !== "away")
 	)
@@ -1308,6 +1392,28 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		if (result && (value.phase === "uncertain") !== (result.outcome === "uncertain")) return undefined;
 		if ((value.phase === "uncertain") !== (uncertainty !== undefined)) return undefined;
 		if (result && !dispatchKey && (result.outcome !== "cancelled" || executionRef)) return undefined;
+		let awaySettlement: RoutineOccurrence["awaySettlement"];
+		if (value.awaySettlement !== undefined) {
+			const settlement = value.awaySettlement;
+			if (
+				!isPlainRecord(settlement) ||
+				!hasOnlyKeys(settlement, ["at", "costUsd"]) ||
+				value.executor !== "away" ||
+				value.phase !== "terminal" ||
+				!dispatchKey ||
+				!validInstant(settlement.at) ||
+				settlement.at < value.createdAt ||
+				(settlement.costUsd !== undefined &&
+					(typeof settlement.costUsd !== "number" ||
+						!Number.isFinite(settlement.costUsd) ||
+						settlement.costUsd < 0))
+			)
+				return undefined;
+			awaySettlement = {
+				at: settlement.at,
+				...(typeof settlement.costUsd === "number" ? { costUsd: settlement.costUsd } : {}),
+			};
+		}
 		if (
 			priorUncertaintyResult &&
 			(value.phase !== "terminal" ||
@@ -1337,6 +1443,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			...(priorUncertaintyResult ? { priorUncertaintyResult } : {}),
 			...(uncertainty === undefined ? {} : { uncertainty }),
 			...(value.executor === "away" ? { executor: "away" as const } : {}),
+			...(awaySettlement ? { awaySettlement } : {}),
 		};
 	} catch {
 		return undefined;

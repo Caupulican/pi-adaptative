@@ -17,6 +17,7 @@ import {
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
 	ROUTINE_JOURNAL_SHARE,
+	RoutineAdmissionRefused,
 	type RoutineAwayClaimGate,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
@@ -213,6 +214,8 @@ export class RoutineSchedulerController {
 	 * charged run leaves the window. Room otherwise returns only with a store change, which wakes the scheduler.
 	 */
 	private awayWait: { readonly routines: ReadonlySet<string>; readonly retryAt?: number } | undefined;
+	/** Away only: routines the last claim left due because an earlier run away of each is not yet delivered. */
+	private awayHeld: ReadonlySet<string> = new Set();
 	/** `routinePreviousSlot` of each routine cursor seen by the last schedule read, so a cursor is evaluated once. */
 	private previousSlots = new Map<string, number | undefined>();
 
@@ -261,6 +264,14 @@ export class RoutineSchedulerController {
 			},
 		);
 		return pass;
+	}
+
+	/**
+	 * Away only: whether the last claim left due runs for lack of room under the away spend bound, and the earliest
+	 * instant a charge ends by time (absent when room returns only with a store change).
+	 */
+	awaySpendWait(): { readonly retryAt?: number } | undefined {
+		return this.awayWait && (this.awayWait.retryAt === undefined ? {} : { retryAt: this.awayWait.retryAt });
 	}
 
 	run(routineId: string, expectedRevision: number | undefined, commandId: string): string {
@@ -395,7 +406,7 @@ export class RoutineSchedulerController {
 					occurrence.phase !== "claimed" ||
 					this.deferred.get(occurrence.occurrenceId) === this.capacityRevision ||
 					occurrence.claim?.owner !== this.deps.owner ||
-					!this.deps.canUseOrigin(occurrence.parentOrigin)
+					(!this.deps.canUseOrigin(occurrence.parentOrigin) && !this.claimedAway(occurrence))
 				)
 					continue;
 				const unit = `dispatch|${occurrence.occurrenceId}`;
@@ -529,14 +540,17 @@ export class RoutineSchedulerController {
 		);
 		// Host events are read only while an event routine can be decided; other sessions never load the ledger here.
 		const hostEvents = eventRoutines.length > 0 ? this.deps.hostEvents.feed() : undefined;
+		// Away, a run already claimed away is reclaimed whatever its origin or authority reads now: its dispatch either
+		// runs it or releases it, so no run away is left holding its host and its charge.
 		const recoverable = this.occurrences().filter(
 			(entry) =>
 				this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
-				this.deps.canUseOrigin(entry.parentOrigin) &&
-				(!away ||
-					(entry.target.kind === "session" &&
-						entry.definition.executionSnapshot !== undefined &&
-						away.refusal(entry.definition.executionSnapshot.savedIntent) === undefined)) &&
+				(this.claimedAway(entry) ||
+					(this.deps.canUseOrigin(entry.parentOrigin) &&
+						(!away ||
+							(entry.target.kind === "session" &&
+								entry.definition.executionSnapshot !== undefined &&
+								away.refusal(entry.definition.executionSnapshot.savedIntent) === undefined)))) &&
 				(entry.phase === "pending" ||
 					(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
 		);
@@ -548,6 +562,7 @@ export class RoutineSchedulerController {
 			this.journalFull = false;
 			this.shareWait = new Set();
 			this.awayWait = undefined;
+			this.awayHeld = new Set();
 			this.faults.delete("journal");
 			return;
 		}
@@ -580,7 +595,8 @@ export class RoutineSchedulerController {
 						...(claim.awayRetryAt === undefined ? {} : { retryAt: claim.awayRetryAt }),
 					}
 				: undefined;
-		for (const routineId of claim.awayRefused)
+		this.awayHeld = new Set(claim.awayHeld);
+		for (const routineId of [...claim.awayRefused, ...claim.awayHeld])
 			this.report(
 				`away|${routineId}`,
 				`Routine ${routineId} was not run away: ${this.deps.store.getRoutine(routineId)?.awayRefusal?.reason ?? "the away spend bound has no room for another run."}`,
@@ -685,6 +701,10 @@ export class RoutineSchedulerController {
 			),
 			recipient: this.deps.parentSessionId,
 			nowMs: this.deps.timers.now(),
+			// A run away settles its spend in the write that ends it, whichever host ends it.
+			...(occurrence.executor === "away"
+				? { awaySpentUsd: this.deps.worker.spentUsd(this.request(occurrence)) }
+				: {}),
 		};
 		// A resolved uncertainty is never quiet: the parent was already told this run's outcome was unknown.
 		if (occurrence.phase === "uncertain")
@@ -702,10 +722,68 @@ export class RoutineSchedulerController {
 			});
 	}
 
+	/** Away, a run claimed away is this host's to dispatch or release, whatever its origin reads now. */
+	private claimedAway(occurrence: RoutineOccurrence): boolean {
+		return this.deps.away !== undefined && occurrence.executor === "away";
+	}
+
+	/**
+	 * Returns a claim no executor took to pending, for whichever host may run it (the parent's own once it opens).
+	 * Away, a run that can no longer run away is released the same way, with its reason recorded on its routine.
+	 */
+	private release(occurrence: RoutineOccurrence, claimToken: string, reason: string): void {
+		this.deps.store.deferRoutineOccurrence({
+			occurrenceId: occurrence.occurrenceId,
+			claimToken,
+			nowMs: this.deps.timers.now(),
+		});
+		if (this.deps.away)
+			this.report(`away|${occurrence.routineId}`, `Routine ${occurrence.routineId} was not run away: ${reason}`);
+	}
+
+	/**
+	 * After the host's guard refused a dispatch: with no execution of the run, nothing was handed to an executor and the
+	 * claim is released; an execution that exists is recorded (exactly once). False when no execution can be
+	 * established exactly (conflicting identity): the caller marks the run uncertain.
+	 */
+	private settleRefused(occurrence: RoutineOccurrence, claimToken: string, refused: RoutineAdmissionRefused): boolean {
+		let execution: RoutineWorkerState | undefined;
+		try {
+			execution = this.deps.worker.find(this.request(occurrence));
+		} catch {
+			return false;
+		}
+		if (execution) this.recordExecution(occurrence, execution);
+		else this.release(occurrence, claimToken, refused.message);
+		return true;
+	}
+
 	private async dispatch(claimed: RoutineOccurrence, result: RoutineTickResult): Promise<void> {
-		const assertOrigin = this.deps.captureOriginGuard(claimed.parentOrigin);
-		assertOrigin();
+		const guard = this.deps.captureOriginGuard(claimed.parentOrigin);
+		// Every refusal of the host's guard is typed, wherever the worker layer calls it; the first one is kept.
+		const guarded: { refused?: RoutineAdmissionRefused } = {};
+		const assertOrigin = (): void => {
+			try {
+				guard();
+			} catch (error) {
+				guarded.refused ??=
+					error instanceof RoutineAdmissionRefused ? error : new RoutineAdmissionRefused(errorText(error));
+				throw guarded.refused;
+			}
+		};
 		const claimToken = claimed.claim!.token;
+		const intent = claimed.definition.executionSnapshot?.savedIntent;
+		const awayReason = this.deps.away && (intent ? this.deps.away.refusal(intent) : AWAY_UNPINNED_REASON);
+		if (awayReason) {
+			this.release(claimed, claimToken, awayReason);
+			return;
+		}
+		try {
+			assertOrigin();
+		} catch (error) {
+			this.release(claimed, claimToken, errorText(error));
+			return;
+		}
 		const dispatchKey = `routine:${claimed.occurrenceId}`;
 		this.deps.store.markRoutineDispatching({
 			occurrenceId: claimed.occurrenceId,
@@ -731,19 +809,25 @@ export class RoutineSchedulerController {
 				);
 				if (!this.active) return;
 				if (!outcome.started) {
+					// The guard refused: a run with no execution was handed to no executor; one that has an execution keeps it.
+					if (guarded.refused) {
+						if (!this.settleRefused(occurrence, claimToken, guarded.refused)) throw guarded.refused;
+						return;
+					}
 					if (
 						outcome.skipReason === "worker_specialist_busy" ||
 						outcome.skipReason === "worker_cleanup_pending" ||
 						outcome.skipReason.startsWith("worker_specialist_release_retained:")
 					) {
 						// The executor confirmed no admission. Keep this exact occurrence across restart;
-						// only a later capacity event permits another attempt in this live scheduler.
+						// only a later capacity event permits another attempt in this live scheduler. Away, the release
+						// also frees the host: the run waits for a later host or the parent's own scheduler.
 						this.deferred.set(occurrence.occurrenceId, capacityRevision);
-						this.deps.store.deferRoutineOccurrence({
-							occurrenceId: occurrence.occurrenceId,
+						this.release(
+							occurrence,
 							claimToken,
-							nowMs: this.deps.timers.now(),
-						});
+							`its worker could not take it now (${outcome.skipReason}), for example while a turn of its session is pending on it; it waits for a later host or for the session to open.`,
+						);
 						return;
 					}
 					this.deps.store.finishRoutineOccurrence({
@@ -753,6 +837,8 @@ export class RoutineSchedulerController {
 						summary: boundedText(outcome.skipReason, MAX_ROUTINE_SUMMARY_CHARS),
 						recipient: this.deps.parentSessionId,
 						nowMs: this.deps.timers.now(),
+						// Nothing started, so nothing was spent.
+						...(occurrence.executor === "away" ? { awaySpentUsd: 0 } : {}),
 					});
 					result.failed.push(`${occurrence.routineId}: ${outcome.skipReason}`);
 					return;
@@ -774,6 +860,12 @@ export class RoutineSchedulerController {
 			result.dispatched.push(occurrence.routineId);
 		} catch (error) {
 			if (!this.active) return;
+			if (
+				guarded.refused &&
+				occurrence.target.kind === "session" &&
+				this.settleRefused(occurrence, claimToken, guarded.refused)
+			)
+				return;
 			const detail = boundedText(
 				boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ??
 					"Routine dispatch failed.",
@@ -847,14 +939,15 @@ export class RoutineSchedulerController {
 		}
 		try {
 			const nowMs = this.deps.timers.now();
-			const waiting = new Set([...this.shareWait, ...(this.awayWait?.routines ?? [])]);
+			const waiting = new Set([...this.shareWait, ...(this.awayWait?.routines ?? []), ...this.awayHeld]);
 			let next = this.nextScheduledAt(nowMs, this.journalFull, waiting);
 			if (this.awayWait?.retryAt !== undefined) next = Math.min(next, this.awayWait.retryAt);
 			for (const occurrence of this.occurrences())
 				if (
 					occurrence.claim &&
 					(occurrence.phase === "dispatching" ||
-						(occurrence.phase === "claimed" && this.deps.canUseOrigin(occurrence.parentOrigin)))
+						(occurrence.phase === "claimed" &&
+							(this.deps.canUseOrigin(occurrence.parentOrigin) || this.claimedAway(occurrence))))
 				)
 					next = Math.min(next, occurrence.claim.leaseUntil);
 			if (Number.isFinite(next)) this.arm(Math.max(nowMs + RETRY_DELAY_MS, next));

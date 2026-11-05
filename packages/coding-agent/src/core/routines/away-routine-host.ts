@@ -17,10 +17,10 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { configFile } from "../agent-paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { AwayParentWriteRefusal } from "../delegation/away-parent-writes.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { ResolvedRoutineAwaySettings } from "../settings/settings-schema.ts";
@@ -29,23 +29,20 @@ import { type AwayParentContext, AwayParentUnavailable, openAwayParentContext } 
 import {
 	AWAY_LEASES_UNREADABLE_REASON,
 	AWAY_NO_SESSION_FILE_REASON,
+	AWAY_OFF_BRANCH_REASON,
 	AWAY_UNPINNED_REASON,
 	awayRunRefusal,
 } from "./away-routine-admission.ts";
 import {
+	ROUTINE_AWAY_HELD_REASON,
 	ROUTINE_AWAY_SPEND_REFUSAL,
-	ROUTINE_AWAY_SPEND_WINDOW_MS,
+	RoutineAdmissionRefused,
 	type RoutineAwayClaimGate,
-	type RoutineOccurrence,
-	routineAwaySpendCharged,
-	routineAwaySpendWindowExit,
+	routineAwayHeld,
+	routineAwaySpendRoom,
 	routineEnded,
 } from "./routine-contract.ts";
-import {
-	RoutineSchedulerController,
-	routineHostEventFeed,
-	routineInstructions,
-} from "./routine-scheduler-controller.ts";
+import { RoutineSchedulerController, routineHostEventFeed } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import { RoutineWorkerExecutor } from "./routine-worker-executor.ts";
 
@@ -72,8 +69,6 @@ interface AwayRoutineHost {
 	readonly parentSessionId: string;
 	readonly context: AwayParentContext;
 	readonly scheduler: RoutineSchedulerController;
-	/** Final spend of this parent's finished runs away, read from their attempts' ledger usage. */
-	settledUsd(): ReadonlyMap<string, number>;
 }
 
 /** What one parent has for a host to do, as the store reads now. */
@@ -83,6 +78,8 @@ interface ParentWork {
 	active: boolean;
 	/** Due work a host may run: routine slots and recoverable or uncertain occurrences. */
 	readonly due: string[];
+	/** Some of `due` is already charged (an uncertain run away), so a host may take it with no spend room. */
+	dueWithoutRoom: boolean;
 	/** The due routines among `due`, which a refusal of the whole parent is recorded on. */
 	readonly dueRoutines: string[];
 	/** Due routines no host could run, with why; recorded only while the parent is closed. */
@@ -90,7 +87,7 @@ interface ParentWork {
 }
 
 function emptyParentWork(): ParentWork {
-	return { sessionFile: undefined, active: false, due: [], dueRoutines: [], refusals: [] };
+	return { sessionFile: undefined, active: false, due: [], dueWithoutRoom: false, dueRoutines: [], refusals: [] };
 }
 
 function errorText(error: unknown): string {
@@ -138,7 +135,9 @@ async function openAwayRoutineHost(args: {
 	});
 	try {
 		// The reader is the parent's persisted file itself, so every entry it holds is persisted.
+		// A parent whose file is gone has no current branch to check an origin against: its last read is not one.
 		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean => {
+			if (fileStamp(args.sessionFile) === "missing") return false;
 			const reader = context.reader();
 			return (
 				origin.sessionId === reader.getSessionId() &&
@@ -166,8 +165,9 @@ async function openAwayRoutineHost(args: {
 			},
 			canUseOrigin,
 			captureOriginGuard: (origin) => () => {
-				if (context.isClosed() || args.isParentOpen() || !canUseOrigin(origin))
-					throw new Error("Routine origin is not on the closed parent's current branch.");
+				if (context.isClosed()) throw new RoutineAdmissionRefused("its away host closed.");
+				if (args.isParentOpen()) throw new RoutineAdmissionRefused("its session opened, so the session runs it.");
+				if (!canUseOrigin(origin)) throw new RoutineAdmissionRefused(AWAY_OFF_BRANCH_REASON);
 			},
 			subscribeContext: (listener) => {
 				contextListeners.add(listener);
@@ -183,7 +183,7 @@ async function openAwayRoutineHost(args: {
 				subscribe: () => () => {},
 			},
 			subscribeCapacity: (listener) => context.workers.getAgentControl().subscribeStateChanges(listener),
-			away: { gate: () => args.gate(), refusal: awayRunRefusal },
+			away: { gate: () => args.gate(), refusal: (intent) => awayRunRefusal(intent, context.modelRegistry) },
 			dispatchMessage: () => {
 				throw new Error(
 					"A host running away dispatches only session routines, through the native worker executor.",
@@ -191,39 +191,7 @@ async function openAwayRoutineHost(args: {
 			},
 			warn: args.report,
 		});
-		const settledUsd = (): ReadonlyMap<string, number> => {
-			const settled = new Map<string, number>();
-			const snapshot = context.lifecycle.getTaskRuntimeSnapshot();
-			for (const occurrence of deps.store.listRoutineOccurrences({ parentSessionId, phases: ["terminal"] })) {
-				const intent = occurrence.definition.executionSnapshot?.savedIntent;
-				if (occurrence.executor !== "away" || !occurrence.dispatchKey || !intent) continue;
-				let attemptIds: ReadonlySet<string>;
-				try {
-					attemptIds = worker.notificationAttemptIds({
-						intent,
-						instructions: routineInstructions(occurrence),
-						dispatchKey: occurrence.dispatchKey,
-					});
-				} catch {
-					// A conflicting identity is unread spend: the run stays charged its full bound.
-					continue;
-				}
-				let costUsd = 0;
-				let priced = true;
-				for (const attemptId of attemptIds) {
-					const attempt = snapshot.attempts[attemptId];
-					const usage = attempt ? projectAttemptUsage(attempt, snapshot.checkpoints) : undefined;
-					if (!usage) {
-						priced = false;
-						break;
-					}
-					costUsd += usage.costUsd;
-				}
-				if (priced) settled.set(occurrence.occurrenceId, costUsd);
-			}
-			return settled;
-		};
-		return { parentSessionId, context, scheduler, settledUsd };
+		return { parentSessionId, context, scheduler };
 	} catch (error) {
 		await context.close();
 		throw error;
@@ -238,8 +206,6 @@ export class AwayRoutineSupervisor {
 	private readonly idle = new Map<string, string>();
 	/** Per parent, when a failed open is tried again. */
 	private readonly retryAt = new Map<string, number>();
-	/** Final spend of finished runs away, kept after their host closed; pruned as runs leave the spend window. */
-	private readonly settled = new Map<string, number>();
 	/** The message last reported per cause; a cause reports again only after it cleared or its message changed. */
 	private readonly reported = new Map<string, string>();
 	private readonly unsubscribe: () => void;
@@ -309,9 +275,10 @@ export class AwayRoutineSupervisor {
 		}
 		const nowMs = clock.now();
 		const occurrences = store.listRoutineOccurrences();
-		this.pruneSettled(occurrences, nowMs);
-		const room =
-			routineAwaySpendCharged(occurrences, this.gate(), nowMs) + settings.maxUsdPerRun <= settings.maxUsdPerDay;
+		// Recomputed after every host's claim: one parent's admitted runs can leave no room for the next parent.
+		let room = routineAwaySpendRoom(occurrences, this.gate(), nowMs).fits(0);
+		// A model price change can lift a refusal a parent's file stamp does not show.
+		const modelsStamp = fileStamp(configFile(this.deps.agentDir, "models.json"));
 		const parents = new Map<string, ParentWork>();
 		const work = (parentSessionId: string): ParentWork => {
 			let entry = parents.get(parentSessionId);
@@ -332,7 +299,7 @@ export class AwayRoutineSupervisor {
 			const sessionFile = snapshot?.savedIntent.receiptOrigin.sessionFile;
 			const reason = !snapshot
 				? AWAY_UNPINNED_REASON
-				: (awayRunRefusal(snapshot.savedIntent) ??
+				: (awayRunRefusal(snapshot.savedIntent, this.deps.modelRegistry) ??
 					(sessionFile === undefined ? AWAY_NO_SESSION_FILE_REASON : undefined));
 			if (routine.nextRunAt > nowMs) {
 				// A routine due later wakes the supervisor then, to run it or to record why it cannot.
@@ -343,6 +310,15 @@ export class AwayRoutineSupervisor {
 			const current = routine.awayRefusal?.reason;
 			if (reason !== undefined) {
 				entry.refusals.push({ routineId: routine.routineId, reason, ...(current ? { current } : {}) });
+				continue;
+			}
+			// One run away per routine waits for its session at a time; the claim holds the slot the same way.
+			if (routineAwayHeld(occurrences, routine, nowMs)) {
+				entry.refusals.push({
+					routineId: routine.routineId,
+					reason: ROUTINE_AWAY_HELD_REASON,
+					...(current ? { current } : {}),
+				});
 				continue;
 			}
 			if (!room) {
@@ -366,16 +342,25 @@ export class AwayRoutineSupervisor {
 				if (occurrence.phase === "terminal") continue;
 				const entry = work(parentSessionId);
 				entry.sessionFile ??= sessionFile;
-				// An uncertain run is due once per change: a host resumes its suspended attempt or resolves it exactly.
-				if (occurrence.phase === "uncertain") entry.due.push(`occurrence:${occurrence.occurrenceId}`);
-				else entry.active = true;
+				// An uncertain run is due once per change: a host resumes its suspended attempt or resolves it exactly. It
+				// is already charged, so it needs no room.
+				if (occurrence.phase === "uncertain") {
+					entry.due.push(`occurrence:${occurrence.occurrenceId}`);
+					entry.dueWithoutRoom = true;
+				} else entry.active = true;
 				continue;
 			}
 			const recoverable =
 				occurrence.phase === "pending" ||
 				(occurrence.phase === "claimed" && occurrence.claim !== undefined && occurrence.claim.leaseUntil <= nowMs);
 			const intent = occurrence.definition.executionSnapshot?.savedIntent;
-			if (!recoverable || !intent || sessionFile === undefined || awayRunRefusal(intent) !== undefined) continue;
+			if (
+				!recoverable ||
+				!intent ||
+				sessionFile === undefined ||
+				awayRunRefusal(intent, this.deps.modelRegistry) !== undefined
+			)
+				continue;
 			// A run not yet charged is admitted only under the spend bound; the claim records the refusal on its routine.
 			if (!room) {
 				waitingForRoom = true;
@@ -388,10 +373,28 @@ export class AwayRoutineSupervisor {
 
 		let closedAny = false;
 		let capped = false;
+		/**
+		 * After a host's claim: keep it while it holds a run; otherwise close it and remember its parent idle, unless the
+		 * claim waited for spend room, which time or another run's end returns without any change to the parent.
+		 */
+		const afterClaim = async (host: AwayRoutineHost, fingerprint: string): Promise<boolean> => {
+			const held = this.holdsWork(host);
+			room = routineAwaySpendRoom(store.listRoutineOccurrences(), this.gate(), nowMs).fits(0);
+			if (held) return true;
+			const spendWait = host.scheduler.awaySpendWait();
+			await this.closeHosts([host.parentSessionId]);
+			closedAny = true;
+			if (spendWait) {
+				waitingForRoom = true;
+				if (spendWait.retryAt !== undefined) next = Math.min(next, spendWait.retryAt);
+				this.idle.delete(host.parentSessionId);
+			} else this.idle.set(host.parentSessionId, fingerprint);
+			return false;
+		};
 		for (const parentSessionId of new Set([...parents.keys(), ...this.hosts.keys()])) {
 			if (this.disposed) return;
 			const entry = parents.get(parentSessionId) ?? emptyParentWork();
-			const fingerprint = `${fileStamp(entry.sessionFile)}|${[...entry.due].sort().join(",")}`;
+			const fingerprint = `${fileStamp(entry.sessionFile)}|${modelsStamp}|${[...entry.due].sort().join(",")}`;
 			const host = this.hosts.get(parentSessionId);
 			const open = this.parentOpen(parentSessionId);
 			// A refusal stands only for a closed parent: an open one runs its own routines.
@@ -406,7 +409,8 @@ export class AwayRoutineSupervisor {
 				// Idle: let it claim what is due now, then keep it only while that left a run to hold.
 				if (!open && entry.due.length > 0 && this.idle.get(parentSessionId) !== fingerprint) {
 					await host.scheduler.tick();
-					if (this.holdsWork(host)) continue;
+					await afterClaim(host, fingerprint);
+					continue;
 				}
 				await this.closeHosts([parentSessionId]);
 				this.idle.set(parentSessionId, fingerprint);
@@ -420,6 +424,11 @@ export class AwayRoutineSupervisor {
 			}
 			if (open) continue;
 			if (!entry.active && (entry.due.length === 0 || this.idle.get(parentSessionId) === fingerprint)) continue;
+			// Every due run of this parent needs room an earlier parent's claim in this pass may have taken.
+			if (!entry.active && !entry.dueWithoutRoom && !room) {
+				waitingForRoom = true;
+				continue;
+			}
 			const retryAt = this.retryAt.get(parentSessionId);
 			if (retryAt !== undefined && retryAt > nowMs) {
 				next = Math.min(next, retryAt);
@@ -445,6 +454,12 @@ export class AwayRoutineSupervisor {
 					for (const routineId of entry.dueRoutines)
 						refusals.push({ routineId, reason: `${error.message} It waits for the session to open.` });
 					this.idle.set(parentSessionId, fingerprint);
+					// No host can release this parent's lapsed away claims, so the supervisor does; a run that reached
+					// dispatch bypasses the idle memo and is tried again on the open retry, not every pass.
+					if (entry.active && !store.releaseLapsedAwayClaims({ parentSessionId, nowMs })) {
+						this.retryAt.set(parentSessionId, nowMs + OPEN_RETRY_MS);
+						next = Math.min(next, nowMs + OPEN_RETRY_MS);
+					}
 				} else {
 					this.reportOnce(
 						`open|${parentSessionId}`,
@@ -464,10 +479,7 @@ export class AwayRoutineSupervisor {
 			this.hosts.set(parentSessionId, opened);
 			opened.scheduler.start();
 			await opened.scheduler.tick();
-			if (this.holdsWork(opened)) continue;
-			await this.closeHosts([parentSessionId]);
-			this.idle.set(parentSessionId, fingerprint);
-			closedAny = true;
+			await afterClaim(opened, fingerprint);
 		}
 
 		if (refusals.length > 0) {
@@ -477,8 +489,9 @@ export class AwayRoutineSupervisor {
 		}
 		// A capped parent waits for a host to close; a close in this pass lets another pass open it.
 		if (capped && closedAny) this.dirty = true;
+		// Room returns when a charge ends by time (armed here) or when a run ends or is released (a store change).
 		if (waitingForRoom) {
-			const exit = routineAwaySpendWindowExit(occurrences, nowMs);
+			const exit = routineAwaySpendRoom(store.listRoutineOccurrences(), this.gate(), nowMs).exit;
 			if (exit !== undefined) next = Math.min(next, exit);
 		}
 		if (Number.isFinite(next)) this.arm(Math.max(next, nowMs + MIN_ALARM_DELAY_MS));
@@ -518,37 +531,16 @@ export class AwayRoutineSupervisor {
 		}
 	}
 
-	/** The away spend bound every host's claim is admitted under, with the settled spend of every finished run read so far. */
+	/** The away spend bound every host's claim is admitted under; finished runs carry their own settled spend. */
 	private gate(): RoutineAwayClaimGate {
-		for (const host of this.hosts.values())
-			for (const [occurrenceId, usd] of host.settledUsd()) this.settled.set(occurrenceId, usd);
 		const settings = this.deps.settings();
-		return {
-			maxUsdPerRun: settings.maxUsdPerRun,
-			maxUsdPerDay: settings.maxUsdPerDay,
-			settledUsd: new Map(this.settled),
-		};
-	}
-
-	/** Forgets the settled spend of runs the spend window no longer charges. */
-	private pruneSettled(occurrences: readonly RoutineOccurrence[], nowMs: number): void {
-		const charged = new Set(
-			occurrences
-				.filter(
-					(occurrence) =>
-						occurrence.executor === "away" && occurrence.createdAt > nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS,
-				)
-				.map((occurrence) => occurrence.occurrenceId),
-		);
-		for (const occurrenceId of this.settled.keys()) if (!charged.has(occurrenceId)) this.settled.delete(occurrenceId);
+		return { maxUsdPerRun: settings.maxUsdPerRun, maxUsdPerDay: settings.maxUsdPerDay };
 	}
 
 	private async closeHosts(parentSessionIds: readonly string[]): Promise<void> {
 		for (const parentSessionId of parentSessionIds) {
 			const host = this.hosts.get(parentSessionId);
 			if (!host) continue;
-			// Remember what its finished runs spent; a closed host can no longer read it.
-			for (const [occurrenceId, usd] of host.settledUsd()) this.settled.set(occurrenceId, usd);
 			this.hosts.delete(parentSessionId);
 			await this.closeHost(host);
 		}

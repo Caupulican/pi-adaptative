@@ -38,6 +38,8 @@ export interface RoutineStorePort {
 		refusals: readonly { readonly routineId: string; readonly reason: string }[];
 		nowMs: number;
 	}): void;
+	/** Returns a parent's away claims that lapsed before dispatch to pending without `executor`; whether any was. */
+	releaseLapsedAwayClaims(input: { parentSessionId: string; nowMs: number }): boolean;
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
 		expectedRevision?: number;
@@ -55,7 +57,10 @@ export interface RoutineStorePort {
 		dispatchKey: string;
 		nowMs: number;
 	}): void;
-	/** Only an executor's explicit refusal before admission may return a dispatch to pending. */
+	/**
+	 * Only a claim no executor took (an executor's explicit refusal before admission, or the host's admission guard)
+	 * may return to pending; it drops `executor`.
+	 */
 	deferRoutineOccurrence(input: { occurrenceId: string; claimToken: string; nowMs: number }): void;
 	markRoutineRunning(input: {
 		occurrenceId: string;
@@ -78,6 +83,8 @@ export interface RoutineStorePort {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
+		awaySpentUsd?: number;
 	}): void;
 	resolveUncertainRoutineOccurrence(input: {
 		occurrenceId: string;
@@ -88,6 +95,8 @@ export interface RoutineStorePort {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
+		awaySpentUsd?: number;
 	}): void;
 	listPendingRoutineDeliveries(parentSessionId: string, limit: number): readonly RoutineDelivery[];
 	acknowledgeRoutineDelivery(input: {

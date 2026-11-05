@@ -3,10 +3,13 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { projectWorkerAttemptLaneRecord, selectedWorkerAttempt } from "../delegation/worker-lane-projection.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
-import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import type { AttemptStatus, WorkerResultContract } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
+
+/** Attempt states that can still spend: a settled run away reads only attempts past them. */
+const LIVE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set(["queued", "leased", "running", "suspended"]);
 
 export interface RoutineWorkerRequest {
 	readonly intent: WorkerSavedIntent;
@@ -93,6 +96,26 @@ export class RoutineWorkerExecutor {
 			if (subject && subjects.has(subject.attemptId)) ids.add(attempt.attemptId);
 		}
 		return ids;
+	}
+
+	/**
+	 * What the run's attempts (subject retries and their reviewers) spent, from their canonical ledger usage. Undefined,
+	 * so the caller keeps charging the full bound, when an attempt can still run (queued, leased, running, suspended),
+	 * has no canonical usage accounting, or the run's identity conflicts.
+	 */
+	spentUsd(request: RoutineWorkerRequest): number | undefined {
+		try {
+			const snapshot = this.deps.getSnapshot();
+			let costUsd = 0;
+			for (const attemptId of this.notificationAttemptIds(request)) {
+				const attempt = snapshot.attempts[attemptId];
+				if (!attempt?.usageAccounting || LIVE_ATTEMPT_STATUSES.has(attempt.status)) return undefined;
+				costUsd += attempt.usageAccounting.total.costUsd;
+			}
+			return costUsd;
+		} catch {
+			return undefined;
+		}
 	}
 
 	async start(
