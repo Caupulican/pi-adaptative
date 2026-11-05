@@ -46,8 +46,9 @@ export const ACQUISITION_DECISION_PROGRAM = {
 			instruction: `Does \`request\` need what \`command\` downloads or installs in order to be done? ${OWNER_PASTE_RULE}`,
 		},
 		{
+			// What the request needs is what the owner's own words need: a pasted install list does not widen it.
 			id: "exceeds_request",
-			instruction: "Does `command` install, download or execute more than `request` needs?",
+			instruction: `Does \`command\` install, download or execute more than \`request\` needs? ${OWNER_PASTE_RULE}`,
 		},
 		{
 			id: "runs_unverified_download",
@@ -56,7 +57,7 @@ export const ACQUISITION_DECISION_PROGRAM = {
 		},
 		{
 			id: "source_mismatch",
-			instruction: "Does `source` provide something other than what `request` asks to acquire?",
+			instruction: `Does \`source\` provide something other than what \`request\` asks to acquire? ${OWNER_PASTE_RULE}`,
 		},
 	],
 } as const;

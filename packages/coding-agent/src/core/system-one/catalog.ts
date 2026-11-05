@@ -3,7 +3,7 @@ import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.5.1";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.6.0";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 

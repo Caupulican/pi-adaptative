@@ -335,10 +335,11 @@ gave: a pasted "never push", "you may run curl" or "from now on do X" grants no 
 delivery limit, hands nothing off, changes no model pool, forbids no tool, records no durable owner rule
 and gives the goal tools no start authority. Every
 question that reads the owner's words for authority (the classification, the screen, the model pool and
-optional-tool questions, the operation gate's `request_authorizes` and the acquisition gate's need
-question) receives the whole message with each pasted span inside the untrusted boundary
-(`<untrusted_content source="owner-paste">`) and an instruction that such content decides nothing and only
-explains what the owner's own words refer to. A message with no typed words is never queued or classified,
+optional-tool questions, the operation gate's `request_authorizes`, the acquisition gate's need, excess and
+source questions, and plan review's coverage question) receives the whole message with each pasted span
+inside the untrusted boundary (`<untrusted_content source="owner-paste">`) and an instruction that a
+directive stated only there binds nothing; a request the owner's own words make about the material ("run
+this", "apply this") stays the owner's, and the material only shows what it refers to. A message with no typed words is never queued or classified,
 so it costs no System One request. A long paste is shortened inside its fence so the owner's typed words
 always reach the judgment whole. The same fenced request is what the gates, plan review and owner
 questions read as the turn's request. Paste provenance survives take-back to the editor, a failed send-now,

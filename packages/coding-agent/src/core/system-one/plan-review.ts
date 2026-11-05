@@ -7,6 +7,7 @@
  * on System One).
  */
 
+import { OWNER_PASTE_RULE } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 
 /**
@@ -22,7 +23,8 @@ export const PLAN_REVIEW_PROGRAM = {
 	decisions: [
 		{
 			id: "misses_request_part",
-			instruction: "Does `request` ask for something that no item of `steps` does?",
+			// A pasted directive is not a part of the request a plan must cover.
+			instruction: `Does \`request\` ask for something that no item of \`steps\` does? ${OWNER_PASTE_RULE}`,
 			criteria: {
 				true: "A part of the request (a feature, a change, a document) has no step that does it.",
 				false: "Every part of the request is done by at least one step.",
