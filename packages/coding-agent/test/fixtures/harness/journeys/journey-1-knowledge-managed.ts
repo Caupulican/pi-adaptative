@@ -10,7 +10,7 @@ import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/k
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings } from "./shared.ts";
+import { icmContinuousSettings } from "./shared.ts";
 
 /**
  * Existing journey 1, managed leg: a persistent collaboration task granted one current, one ungranted-by-omission and
@@ -205,7 +205,9 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 		});
 		const handoff = createBarrier();
 		let parentContext = "";
-		world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS);
+		// The tool runs outside any owner turn, and the parent's only turn is the managed terminal's tool-free wake:
+		// no owner turn is judged, so this phase declares nothing and any judgment request here is unscripted.
+		world.systemOne.enterPhase(label, {});
 		world.provider.enqueue("root", {
 			name: `${label}-handoff`,
 			check: (request) => {
