@@ -356,7 +356,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 					"evidence",
 					"A citation has no complete original owner source on this branch",
 				);
-			cited.push({ source: source.text, quote: citation.quote });
+			cited.push({ source, quote: citation.quote });
 			if (hasMaskableSecretText(source.text) || hasMaskableSecretText(citation.quote))
 				return held("secret", "never", "Secret-bearing evidence is not admitted to knowledge");
 			if (!originals.some((original) => original.source === source.sourceId))

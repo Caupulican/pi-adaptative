@@ -9,7 +9,12 @@ import {
 	DELETE_WORD_FORWARD,
 	dispatchDeletionInput,
 } from "../editing-actions.ts";
-import { type EditorChangeSummary, firstNonWhitespaceCharacter } from "../editor-component.ts";
+import {
+	type EditorChangeSummary,
+	type EditorTextRange,
+	firstNonWhitespaceCharacter,
+	mergeTextRanges,
+} from "../editor-component.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, isLegacyMultilineNewline, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -243,6 +248,121 @@ interface EditorSnapshot {
 	state: EditorState;
 	pastes: Map<number, string>;
 	pasteCounter: number;
+	pastedRanges: EditorTextRange[];
+}
+
+/** An edit that states its own effect on the pasted ranges, instead of having it reconstructed from the text. */
+type ProvenanceEdit =
+	| { readonly kind: "paste"; readonly at: number; readonly length: number }
+	| { readonly kind: "restore"; readonly ranges: EditorTextRange[] };
+
+/**
+ * `ranges` after `[start, end)` of their text was replaced by `inserted` code units: ranges before it stay, ranges after
+ * it shift, a range overlapping it keeps only its parts outside it. The inserted text is added as a range when `pasted`.
+ */
+function replaceRanges(
+	ranges: readonly EditorTextRange[],
+	start: number,
+	end: number,
+	inserted: number,
+	pasted: boolean,
+): EditorTextRange[] {
+	const delta = inserted - (end - start);
+	const result: EditorTextRange[] = [];
+	for (const range of ranges) {
+		if (range.end <= start) result.push(range);
+		else if (range.start >= end) result.push({ start: range.start + delta, end: range.end + delta });
+		else {
+			if (range.start < start) result.push({ start: range.start, end: start });
+			if (range.end > end) result.push({ start: start + inserted, end: range.end + delta });
+		}
+	}
+	if (pasted) result.push({ start, end: start + inserted });
+	return mergeTextRanges(result);
+}
+
+function piecesLength(pieces: readonly string[]): number {
+	let length = 0;
+	for (const piece of pieces) length += piece.length;
+	return length;
+}
+
+/** Length of the common prefix of two texts given as pieces; pieces that are the same string are passed whole. */
+function commonPrefixLength(left: readonly string[], right: readonly string[]): number {
+	let total = 0;
+	let leftIndex = 0;
+	let rightIndex = 0;
+	let leftOffset = 0;
+	let rightOffset = 0;
+	while (leftIndex < left.length && rightIndex < right.length) {
+		const leftPiece = left[leftIndex]!;
+		const rightPiece = right[rightIndex]!;
+		if (leftOffset === 0 && rightOffset === 0 && leftPiece === rightPiece) {
+			total += leftPiece.length;
+			leftIndex++;
+			rightIndex++;
+			continue;
+		}
+		while (
+			leftOffset < leftPiece.length &&
+			rightOffset < rightPiece.length &&
+			leftPiece.charCodeAt(leftOffset) === rightPiece.charCodeAt(rightOffset)
+		) {
+			leftOffset++;
+			rightOffset++;
+			total++;
+		}
+		if (leftOffset < leftPiece.length && rightOffset < rightPiece.length) return total;
+		if (leftOffset === leftPiece.length) {
+			leftIndex++;
+			leftOffset = 0;
+		}
+		if (rightOffset === rightPiece.length) {
+			rightIndex++;
+			rightOffset = 0;
+		}
+	}
+	return total;
+}
+
+/** Length of the common suffix of two texts given as pieces, at most `limit`. */
+function commonSuffixLength(left: readonly string[], right: readonly string[], limit: number): number {
+	let total = 0;
+	let leftIndex = left.length - 1;
+	let rightIndex = right.length - 1;
+	let leftOffset = 0;
+	let rightOffset = 0;
+	while (leftIndex >= 0 && rightIndex >= 0 && total < limit) {
+		const leftPiece = left[leftIndex]!;
+		const rightPiece = right[rightIndex]!;
+		if (leftOffset === 0 && rightOffset === 0 && leftPiece === rightPiece && total + leftPiece.length <= limit) {
+			total += leftPiece.length;
+			leftIndex--;
+			rightIndex--;
+			continue;
+		}
+		while (
+			total < limit &&
+			leftOffset < leftPiece.length &&
+			rightOffset < rightPiece.length &&
+			leftPiece.charCodeAt(leftPiece.length - 1 - leftOffset) ===
+				rightPiece.charCodeAt(rightPiece.length - 1 - rightOffset)
+		) {
+			leftOffset++;
+			rightOffset++;
+			total++;
+		}
+		if (total >= limit || (leftOffset < leftPiece.length && rightOffset < rightPiece.length)) return total;
+		if (leftOffset === leftPiece.length) {
+			leftIndex--;
+			leftOffset = 0;
+		}
+		if (rightOffset === rightPiece.length) {
+			rightIndex--;
+			rightOffset = 0;
+		}
+	}
+	return total;
 }
 
 interface LayoutLine {
@@ -342,6 +462,17 @@ export class Editor implements Component, Focusable {
 	private pastes: Map<number, string> = new Map();
 	private pasteCounter: number = 0;
 
+	/**
+	 * Paste provenance: the ranges of the expanded text (paste markers expanded) the user pasted rather than typed,
+	 * sorted and disjoint, reported with each submission. A paste adds its exact span; any other edit is reconstructed
+	 * at `notifyChange` by diffing the expanded text against `provenanceBaseline`, and the changed part becomes typed.
+	 */
+	private pastedRanges: EditorTextRange[] = [];
+	/** The expanded text, as pieces, that `pastedRanges` describe; undefined while none is tracked (diffing costs nothing). */
+	private provenanceBaseline: string[] | undefined;
+	/** Set by the next edit when it states its own effect on `pastedRanges`; consumed by its `notifyChange`. */
+	private provenanceEdit: ProvenanceEdit | undefined;
+
 	// Bracketed paste mode buffering
 	private bracketedPaste = new BracketedPasteBuffer();
 
@@ -382,7 +513,7 @@ export class Editor implements Component, Focusable {
 	// Highlighted spans of fenced code blocks, keyed by exact text (render-time only).
 	private readonly codeCache = new CodeHighlightCache();
 
-	public onSubmit?: (text: string) => void;
+	public onSubmit?: (text: string, pasted?: readonly EditorTextRange[]) => void;
 	public onChange?: (text: string) => void;
 	public readonly supportsChangeSummary = true as const;
 	public onChangeSummary?: (summary: EditorChangeSummary) => void;
@@ -402,6 +533,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private notifyChange(): void {
+		this.reconcilePastedRanges();
 		if (this.onChangeSummary) {
 			let firstNonWhitespace: string | undefined;
 			for (const line of this.state.lines) {
@@ -411,6 +543,67 @@ export class Editor implements Component, Focusable {
 			this.onChangeSummary({ firstNonWhitespace });
 		}
 		if (this.onChange) this.onChange(this.getText());
+	}
+
+	/**
+	 * Bring `pastedRanges` up to date with the current text. A stated edit applies exactly; any other change is the
+	 * span between the common prefix and common suffix of the previous and current expanded text, now typed. Among
+	 * identical characters that span is ambiguous, but the typed and pasted contents are the same under any alignment.
+	 */
+	private reconcilePastedRanges(): void {
+		const edit = this.provenanceEdit;
+		this.provenanceEdit = undefined;
+		if (!edit && !this.provenanceBaseline) return;
+		if (edit?.kind === "restore") this.pastedRanges = edit.ranges;
+		const next = this.expandedPieces(this.state.lines);
+		if (edit?.kind === "paste") {
+			this.pastedRanges = replaceRanges(this.pastedRanges, edit.at, edit.at, edit.length, true);
+		} else if (!edit && this.provenanceBaseline) {
+			const previous = this.provenanceBaseline;
+			const previousLength = piecesLength(previous);
+			const nextLength = piecesLength(next);
+			const prefix = commonPrefixLength(previous, next);
+			const suffix = commonSuffixLength(previous, next, Math.min(previousLength, nextLength) - prefix);
+			this.pastedRanges = replaceRanges(
+				this.pastedRanges,
+				prefix,
+				previousLength - suffix,
+				nextLength - suffix - prefix,
+				false,
+			);
+		}
+		this.provenanceBaseline = this.pastedRanges.length > 0 ? next : undefined;
+	}
+
+	/**
+	 * The expanded text of `lines` as pieces: raw segments, each valid marker's paste content (the stored string itself,
+	 * so an unchanged paste compares by identity) and line breaks. Joined, they are the expanded text.
+	 */
+	private expandedPieces(lines: readonly string[]): string[] {
+		const pieces: string[] = [];
+		for (const [index, line] of lines.entries()) {
+			if (index > 0) pieces.push("\n");
+			let from = 0;
+			if (this.pastes.size > 0 && line.includes("[paste #")) {
+				for (const match of line.matchAll(PASTE_MARKER_REGEX)) {
+					const content = this.pastes.get(Number(match[1]));
+					if (content === undefined) continue;
+					pieces.push(line.slice(from, match.index), content);
+					from = match.index + match[0].length;
+				}
+			}
+			pieces.push(from === 0 ? line : line.slice(from));
+		}
+		return pieces;
+	}
+
+	/**
+	 * Ranges of `getExpandedText()` the user pasted rather than typed: whatever they kept verbatim from a paste. A paste
+	 * they edited is typed where they edited it.
+	 */
+	getPastedRanges(): EditorTextRange[] {
+		this.reconcilePastedRanges();
+		return this.pastedRanges.map((range) => ({ start: range.start, end: range.end }));
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -1096,6 +1289,7 @@ export class Editor implements Component, Focusable {
 		}
 		this.pastes.clear();
 		this.pasteCounter = 0;
+		this.provenanceEdit = { kind: "restore", ranges: [] };
 		this.setTextInternal(normalized);
 	}
 
@@ -1104,6 +1298,9 @@ export class Editor implements Component, Focusable {
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
+		this.pastedRanges = [];
+		this.provenanceBaseline = undefined;
+		this.provenanceEdit = undefined;
 		this.bracketedPaste.clear();
 		if (!preserveHistory) this.history = [];
 		this.historyIndex = -1;
@@ -1309,6 +1506,19 @@ export class Editor implements Component, Focusable {
 		// Split into lines to check for large paste
 		const pastedLines = filteredText.split("\n");
 
+		// Inline or behind a marker, the paste occupies exactly its text in the expanded text, at the cursor. Any change
+		// not yet reconciled is reconciled first, so the paste is the only edit its notification applies.
+		this.reconcilePastedRanges();
+		if (filteredText.length > 0) {
+			const at = piecesLength(
+				this.expandedPieces([
+					...this.state.lines.slice(0, this.state.cursorLine),
+					(this.state.lines[this.state.cursorLine] ?? "").slice(0, this.state.cursorCol),
+				]),
+			);
+			this.provenanceEdit = { kind: "paste", at, length: filteredText.length };
+		}
+
 		// Check if this is a large paste (> 10 lines or > 1000 characters)
 		const totalChars = filteredText.length;
 		if (!this.privateContent && (pastedLines.length > 10 || totalChars > 1000)) {
@@ -1374,8 +1584,17 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		const expanded = this.expandPasteMarkers(this.state.lines.join("\n"));
 		const result = this.privateContent || this.exactText ? expanded : expanded.trim();
+		// A slash command completed just before submit changed the text without notifying: reconcile it here.
+		this.reconcilePastedRanges();
+		const offset = result === expanded ? 0 : expanded.length - expanded.trimStart().length;
+		const pasted = this.pastedRanges
+			.map((range) => ({
+				start: Math.max(0, range.start - offset),
+				end: Math.min(result.length, range.end - offset),
+			}))
+			.filter((range) => range.start < range.end);
 		this.resetState(true);
-		if (this.onSubmit) this.onSubmit(result);
+		if (this.onSubmit) this.onSubmit(result, pasted);
 	}
 
 	[DELETE_CHARACTER_BACKWARD](): void {
@@ -2017,7 +2236,12 @@ export class Editor implements Component, Focusable {
 
 	private pushUndoSnapshot(): void {
 		if (this.privateContent) return;
-		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
+		this.undoStack.push({
+			state: this.state,
+			pastes: this.pastes,
+			pasteCounter: this.pasteCounter,
+			pastedRanges: this.pastedRanges,
+		});
 	}
 
 	private undo(): void {
@@ -2027,6 +2251,8 @@ export class Editor implements Component, Focusable {
 		Object.assign(this.state, snapshot.state);
 		this.pastes = snapshot.pastes;
 		this.pasteCounter = snapshot.pasteCounter;
+		// The snapshot's ranges describe its text exactly; diffing back to it could only lose them.
+		this.provenanceEdit = { kind: "restore", ranges: snapshot.pastedRanges };
 		this.lastAction = null;
 		this.preferredVisualCol = null;
 		this.notifyChange();

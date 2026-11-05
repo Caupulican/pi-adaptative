@@ -129,7 +129,7 @@ one pass reads at most four unread complete originals from the owner-evidence le
 One bound, each original passes a cheap gate first; one bounded extraction request then proposes
 at most two requests per original, each with two verbatim excerpts (what and when) and timing slots,
 never a cron rule or an instant. The host keeps a proposal only when both excerpts are the owner's
-stated (not shown) words of at least two words, the instruction is more than the timing words, and
+stated (not shown: not pasted into the editor, quoted or code-marked) words of at least two words, the instruction is more than the timing words, and
 the stated timing words carry every slot value: hour and minute, interval count and unit, weekdays,
 day of month, date, zone and CI outcome, as digits or through small English, Portuguese and Spanish
 word tables (`routine-intake-timing.ts`). The host then compiles the schedule, filling open parts

@@ -5,6 +5,7 @@ import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.
 import type { ForegroundInputPort, ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import {
 	type OwnerInputEnd,
 	type OwnerInputId,
@@ -35,6 +36,8 @@ export interface QueuedInput {
 	text: string;
 	images?: ImageContent[];
 	preservedImages?: PreservedQueuedImages;
+	/** Ranges of `text` the owner pasted; set on a taken input only while `text` is the owner's original submission. */
+	pasted?: readonly OwnerTextRange[];
 }
 
 /**
@@ -46,6 +49,8 @@ export interface QueuedInputAdmission {
 	images?: ImageContent[];
 	queuedGoalAuthority?: ExplicitGoalStartAuthority;
 	ownerOriginalText?: string;
+	/** Ranges of `ownerOriginalText` the owner pasted rather than typed. */
+	ownerPasted?: readonly OwnerTextRange[];
 }
 
 /**
@@ -125,9 +130,9 @@ export interface PendingInputQueueDeps {
 	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
 	/**
 	 * A queued message the operator authored (not an extension), with the operator's ORIGINAL
-	 * words before skill/template expansion: owner evidence once the message is persisted.
+	 * words before skill/template expansion and the ranges of them they pasted: owner evidence once the message is persisted.
 	 */
-	noteOwnerAuthoredMessage?(message: AgentMessage, originalText: string): void;
+	noteOwnerAuthoredMessage?(message: AgentMessage, originalText: string, pasted?: readonly OwnerTextRange[]): void;
 	/** The session and branch an input is accepted in; omitted, every context is current. */
 	getInputContext?(): PendingInputContext;
 	/** Whether an input accepted in `context` still belongs to the session's current context. */
@@ -591,12 +596,14 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		images: ImageContent[] | undefined,
 		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
 		ownerOriginalText: string | undefined,
+		ownerPasted?: readonly OwnerTextRange[],
 	): AgentMessage {
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
 		stampOwnerInput(message, inputId);
 		if (queuedGoalAuthority) this.deps.goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
-		if (ownerOriginalText !== undefined) this.deps.noteOwnerAuthoredMessage?.(message, ownerOriginalText);
+		if (ownerOriginalText !== undefined)
+			this.deps.noteOwnerAuthoredMessage?.(message, ownerOriginalText, ownerPasted);
 		return message;
 	}
 
@@ -1138,6 +1145,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					admission.images,
 					admission.queuedGoalAuthority,
 					admission.ownerOriginalText,
+					admission.ownerPasted,
 				);
 				this.deps.ownerInputs.move(entry.inputId, "handed");
 				if (admission.ownerOriginalText !== undefined) this.deps.authorizeParentNoteOwner(entry.inputId);
@@ -1271,7 +1279,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			this._removeEntry(entry);
 			this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason });
 			this._leavePreparing(entry.inputId, true);
-			taken.push(input);
+			// Pasted ranges are offsets into the owner's original words: they hold only while the taken text is those words.
+			const pasted = entry.admission?.ownerOriginalText === input.text ? entry.admission.ownerPasted : undefined;
+			taken.push(pasted ? { ...input, pasted } : input);
 		}
 		return taken;
 	}

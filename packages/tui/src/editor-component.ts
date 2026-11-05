@@ -6,6 +6,25 @@ export interface EditorChangeSummary {
 	firstNonWhitespace: string | undefined;
 }
 
+/** A range of editor text in UTF-16 code-unit offsets, `end` exclusive. */
+export interface EditorTextRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+/** `ranges` sorted, with empty ones dropped and overlapping or touching ones merged: the form editors report. */
+export function mergeTextRanges(ranges: readonly EditorTextRange[]): EditorTextRange[] {
+	const result: EditorTextRange[] = [];
+	for (const range of [...ranges].sort((left, right) => left.start - right.start)) {
+		if (range.start >= range.end) continue;
+		const last = result.at(-1);
+		if (last && range.start <= last.end)
+			result[result.length - 1] = { start: last.start, end: Math.max(last.end, range.end) };
+		else result.push(range);
+	}
+	return result;
+}
+
 export function firstNonWhitespaceCharacter(text: string): string | undefined {
 	const index = text.search(/\S/u);
 	return index === -1 ? undefined : text[index];
@@ -39,8 +58,11 @@ export interface EditorComponent extends Component {
 	// Callbacks (required)
 	// =========================================================================
 
-	/** Called when user submits (e.g., Enter key) */
-	onSubmit?: (text: string) => void;
+	/**
+	 * Called when user submits (e.g., Enter key). An editor that tracks paste provenance passes `pasted`: the sorted,
+	 * disjoint ranges of `text` the user pasted rather than typed (a pasted part the user edited counts as typed).
+	 */
+	onSubmit?: (text: string, pasted?: readonly EditorTextRange[]) => void;
 
 	/** Called when text changes */
 	onChange?: (text: string) => void;
@@ -73,6 +95,9 @@ export interface EditorComponent extends Component {
 	 * Falls back to getText() if not implemented.
 	 */
 	getExpandedText?(): string;
+
+	/** Ranges of `getExpandedText()` the user pasted rather than typed, for an editor that tracks paste provenance. */
+	getPastedRanges?(): readonly EditorTextRange[];
 
 	// =========================================================================
 	// Autocomplete support (optional)

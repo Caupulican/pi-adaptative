@@ -16,6 +16,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
 import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 import type { PendingInputHandle } from "../../core/pending-input-queue-controller.ts";
 
@@ -23,6 +24,8 @@ export type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
+	/** Ranges of `text` the owner pasted, as the editor recorded them. */
+	pasted?: readonly OwnerTextRange[];
 	/** The session's kept input for this message, replaced when the message is kept again. */
 	input: PendingInputHandle;
 };
@@ -57,6 +60,7 @@ async function submitQueuedMessage(
 	} else {
 		await host.session.prompt(message.text, {
 			images: message.images,
+			pasted: message.pasted,
 			streamingBehavior: message.mode,
 			preflightResult,
 			heldInput: message.input,

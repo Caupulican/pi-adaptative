@@ -816,7 +816,7 @@ export class PromptSubmissionController {
 							text: expandedText,
 							...(currentImages ? { images: currentImages } : {}),
 							...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
-							...(ownerOriginalText !== undefined ? { ownerOriginalText } : {}),
+							...(ownerOriginalText !== undefined ? { ownerOriginalText, ownerPasted: options.pasted } : {}),
 						});
 					}
 				} finally {
@@ -891,7 +891,8 @@ export class PromptSubmissionController {
 					content: userContent,
 					timestamp: Date.now(),
 				};
-				if (options?.source !== "extension") this.deps.reflection.markOwnerInput(userMessage, text);
+				if (options?.source !== "extension")
+					this.deps.reflection.markOwnerInput(userMessage, text, options?.pasted);
 				promptMessage = userMessage;
 				// The message carries the input it is: its persistence delivers that input (a queued input its own turn took
 				// included), matched by this identity, never by the turn's end or the message's text.

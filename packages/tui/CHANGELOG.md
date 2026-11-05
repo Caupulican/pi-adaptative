@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `Editor` tracks which text was pasted: `onSubmit(text, pasted)` and `getPastedRanges()` report the ranges of the submitted (expanded) text that were pasted rather than typed, for marker and inline pastes alike. A pasted part the user edits counts as typed; undo restores the ranges with the text. `EditorComponent` declares both as optional, so custom editors are unaffected, and the editor's text, rendering, cursor and undo behave as before.
+
 ## [0.104.34] - 2026-11-04
 
 ## [0.104.33] - 2026-11-04

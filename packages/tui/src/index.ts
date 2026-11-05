@@ -35,7 +35,9 @@ export { VisibilityContainer } from "./components/visibility-container.ts";
 export {
 	type EditorChangeSummary,
 	type EditorComponent,
+	type EditorTextRange,
 	firstNonWhitespaceCharacter,
+	mergeTextRanges,
 } from "./editor-component.ts";
 // Fuzzy matching
 export { type FuzzyMatch, fuzzyFilter, fuzzyMatch } from "./fuzzy.ts";

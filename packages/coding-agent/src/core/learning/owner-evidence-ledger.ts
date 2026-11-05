@@ -1,5 +1,6 @@
 /** Original-owner evidence shared by reflection and durable knowledge learning. */
 import { createHash } from "node:crypto";
+import { mergeTextRanges } from "@caupulican/pi-tui";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -36,10 +37,92 @@ export interface OwnerEvidenceRecord {
 	/** Length of the full original input. Older records may contain only its first 4,000 characters. */
 	chars: number;
 	createdAt: string;
+	/**
+	 * Ranges of `text` the owner pasted rather than typed, as the interactive editor reported them: sorted, disjoint,
+	 * non-empty. Shown text everywhere the owner's statement is decided. Absent when nothing was pasted, and on records
+	 * written before paste provenance or by a programmatic submitter.
+	 */
+	pasted?: readonly OwnerTextRange[];
 }
 
 export interface OwnerEvidenceEntry
-	extends Pick<OwnerEvidenceRecord, "sessionId" | "sourceId" | "entryId" | "createdAt" | "text"> {}
+	extends Pick<OwnerEvidenceRecord, "sessionId" | "sourceId" | "entryId" | "createdAt" | "text" | "pasted"> {}
+
+/** A range of the owner's original text in UTF-16 code-unit offsets, `end` exclusive. */
+export interface OwnerTextRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+/**
+ * The owner's original words with the ranges of them they pasted: what every shown-versus-stated decision reads. A
+ * record or entry is one; passing only its text would drop the pasted ranges, so the shared functions take this.
+ */
+export interface OwnerWords {
+	readonly text: string;
+	readonly pasted?: readonly OwnerTextRange[];
+}
+
+/**
+ * Ranges in the canonical form a record stores: integral, inside `[0, length)`, non-empty, sorted, with overlapping or
+ * touching ranges merged.
+ */
+export function normalizeOwnerRanges(ranges: readonly OwnerTextRange[] | undefined, length: number): OwnerTextRange[] {
+	return mergeTextRanges(
+		(ranges ?? [])
+			.filter((range) => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end))
+			.map((range) => ({ start: Math.max(0, range.start), end: Math.min(length, range.end) })),
+	);
+}
+
+/** The part of `ranges` inside `[start, end)` of a text, in offsets of that slice. */
+export function sliceOwnerRanges(
+	ranges: readonly OwnerTextRange[] | undefined,
+	start: number,
+	end: number,
+): OwnerTextRange[] {
+	return normalizeOwnerRanges(
+		(ranges ?? []).map((range) => ({ start: range.start - start, end: range.end - start })),
+		end - start,
+	);
+}
+
+/**
+ * The words of `[start, end)` of `owner` without surrounding whitespace, with the pasted ranges that fall inside them:
+ * how a submission's text transforms (trimming, stripping a prefix) keep its provenance aligned.
+ */
+export function trimOwnerWords(owner: OwnerWords, start = 0, end = owner.text.length): Required<OwnerWords> {
+	const slice = owner.text.slice(start, end);
+	const from = start + slice.length - slice.trimStart().length;
+	const text = slice.trim();
+	return { text, pasted: sliceOwnerRanges(owner.pasted, from, from + text.length) };
+}
+
+/** `parts` joined by `separator` into one submission, each part's pasted ranges moved to its place in the result. */
+export function joinOwnerWords(parts: readonly OwnerWords[], separator: string): Required<OwnerWords> {
+	const pasted: OwnerTextRange[] = [];
+	let offset = 0;
+	for (const part of parts) {
+		for (const range of part.pasted ?? []) pasted.push({ start: range.start + offset, end: range.end + offset });
+		offset += part.text.length + separator.length;
+	}
+	const text = parts.map((part) => part.text).join(separator);
+	return { text, pasted: normalizeOwnerRanges(pasted, text.length) };
+}
+
+/** Stored ranges must already be canonical: a record is never repaired on load. */
+function isCanonicalOwnerRanges(value: unknown, length: number): boolean {
+	if (!Array.isArray(value) || value.length === 0) return false;
+	let previousEnd = -1;
+	for (const range of value) {
+		if (!range || typeof range !== "object") return false;
+		const { start, end } = range as Record<string, unknown>;
+		if (typeof start !== "number" || typeof end !== "number") return false;
+		if (!Number.isSafeInteger(start) || start <= previousEnd || start >= end || end > length) return false;
+		previousEnd = end;
+	}
+	return true;
+}
 
 const MAX_OWNER_EVIDENCE_ENTRIES = 64;
 /** Legacy reflection gets a small preview; collection pages through the original independently. */
@@ -97,7 +180,8 @@ function isOwnerEvidenceRecord(value: unknown): value is OwnerEvidenceRecord {
 		record.chars >= record.text.length &&
 		typeof record.createdAt === "string" &&
 		Number.isFinite(Date.parse(record.createdAt)) &&
-		new Date(record.createdAt).toISOString() === record.createdAt
+		new Date(record.createdAt).toISOString() === record.createdAt &&
+		(record.pasted === undefined || isCanonicalOwnerRanges(record.pasted, record.text.length))
 	);
 }
 
@@ -105,7 +189,10 @@ const OWNER_EVIDENCE_CODEC: SessionSnapshotCodec<OwnerEvidenceRecord, "evidence"
 	customType: OWNER_EVIDENCE_CUSTOM_TYPE,
 	valueKey: "evidence",
 	isValue: isOwnerEvidenceRecord,
-	clone: (record) => ({ ...record }),
+	clone: (record) => ({
+		...record,
+		...(record.pasted ? { pasted: record.pasted.map((range) => ({ start: range.start, end: range.end })) } : {}),
+	}),
 };
 
 export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): OwnerEvidenceRecord[] {
@@ -153,17 +240,29 @@ const GUILLEMETS = "\u00ab\u00bb\u2039\u203a";
 /** Also apostrophes: an unpaired one is a letter, not an open quotation. */
 const APOSTROPHES = "'\u2019";
 const SHOWN_TAGS = /<(blockquote|q|pre|code)\b[^>]*>/giu;
+/** Private use: no letter, digit, space, quotation mark or markup, so pasted text reads as no syntax at all. */
+const PASTED_UNIT = String.fromCharCode(0xe000);
 
 /**
- * Every region of the owner's original words that is shown rather than stated: fenced (``` or ~~~) and indented code
- * blocks, blockquote lines, `<blockquote>`/`<q>`/`<pre>`/`<code>` elements, inline code spans, and quotations in any
- * common style (ASCII, curly, low-9, guillemets, CJK brackets). Computed once on the untrimmed original. Quotation marks
- * pair by position (an opener follows no letter or digit, a closer precedes none), so a stray `27"` or an escaped `\"`
- * never shifts later quotations into stated text. Unclosed openers, fences and elements extend to the end of the text:
- * every uncertainty resolves to shown.
+ * Every region of the owner's original words that is shown rather than stated: text they pasted (as the editor recorded
+ * it, whatever it contains), fenced (``` or ~~~) and indented code blocks, blockquote lines,
+ * `<blockquote>`/`<q>`/`<pre>`/`<code>` elements, inline code spans, and quotations in any common style (ASCII, curly,
+ * low-9, guillemets, CJK brackets). Computed once on the untrimmed original. Pasted code units are read as a neutral
+ * character, so a quotation mark, fence or tag inside a paste never pairs with or extends into typed text. Quotation
+ * marks pair by position (an opener follows no letter or digit, a closer precedes none), so a stray `27"` or an escaped
+ * `\"` never shifts later quotations into stated text. Unclosed openers, fences and elements extend to the end of the
+ * text: every uncertainty resolves to shown.
  */
-export function ownerShownRegions(text: string): OwnerShownRegion[] {
-	const regions: OwnerShownRegion[] = [];
+export function ownerShownRegions(owner: OwnerWords): OwnerShownRegion[] {
+	const pasted = normalizeOwnerRanges(owner.pasted, owner.text.length);
+	let text = owner.text;
+	for (const range of pasted)
+		text = text.slice(0, range.start) + PASTED_UNIT.repeat(range.end - range.start) + text.slice(range.end);
+	const regions: OwnerShownRegion[] = pasted.map((range) => ({
+		start: range.start,
+		end: range.end,
+		inlineCode: false,
+	}));
 	const lines: Array<{ start: number; end: number; text: string }> = [];
 	for (let start = 0; start <= text.length; ) {
 		const newline = text.indexOf("\n", start);
@@ -345,12 +444,12 @@ export interface OwnerQuoteLocation {
 }
 
 /** Shown-region masks of one original: every region, and only quotations and blocks (inline code excluded). */
-function shownMasks(ownerText: string): { all: Uint8Array; quoted: Uint8Array } {
-	const regions = ownerShownRegions(ownerText);
+function shownMasks(owner: OwnerWords): { all: Uint8Array; quoted: Uint8Array } {
+	const regions = ownerShownRegions(owner);
 	return {
-		all: shownMask(ownerText, regions),
+		all: shownMask(owner.text, regions),
 		quoted: shownMask(
-			ownerText,
+			owner.text,
 			regions.filter((region) => !region.inlineCode),
 		),
 	};
@@ -364,13 +463,13 @@ function spanIsShown(ownerText: string, masks: { all: Uint8Array; quoted: Uint8A
 
 /**
  * Whether `[start, end)` of the owner's original text is text the owner SHOWED rather than said: it overlaps any
- * quotation, quoted block or code block, or none of its letters or digits lies outside inline code. A pasted excerpt
- * is evidence of what the owner showed, never automatically of what they believe; this is the host's deterministic
- * half of that judgment. The semantic half stays model work. Inline code inside a stated sentence (`we use \`vitest\``)
- * does not make the sentence shown.
+ * pasted text, quotation, quoted block or code block, or none of its letters or digits lies outside inline code. A
+ * pasted excerpt is evidence of what the owner showed, never automatically of what they believe; this is the host's
+ * deterministic half of that judgment. The semantic half stays model work. Inline code inside a stated sentence
+ * (`we use \`vitest\``) does not make the sentence shown.
  */
-export function isShownSpan(ownerText: string, start: number, end: number): boolean {
-	return spanIsShown(ownerText, shownMasks(ownerText), start, end);
+export function isShownSpan(owner: OwnerWords, start: number, end: number): boolean {
+	return spanIsShown(owner.text, shownMasks(owner), start, end);
 }
 
 /**
@@ -380,13 +479,14 @@ export function isShownSpan(ownerText: string, start: number, end: number): bool
  * code, and `sentence` the stated words of the sentence around it, both normalized, for the explicit/corrective
  * wording check. `start`/`end` are the chosen occurrence's original offsets (-1 when no stated occurrence exists).
  */
-export function locateOwnerQuote(ownerText: string, quote: string): OwnerQuoteLocation {
+export function locateOwnerQuote(owner: OwnerWords, quote: string): OwnerQuoteLocation {
+	const ownerText = owner.text;
 	const haystack = normalizeWithOrigins(ownerText);
 	const needle = normalizeWithOrigins(quote)
 		.text.replace(/^["'`]+|["'`.,;:!?]+$/g, "")
 		.trim();
 	if (needle.length === 0) return { found: false, shown: false, sentence: "", stated: "", start: -1, end: -1 };
-	const masks = shownMasks(ownerText);
+	const masks = shownMasks(owner);
 	const mask = masks.all;
 	let best: { start: number; end: number; stated: string; letters: number } | undefined;
 	let found = false;
@@ -415,6 +515,20 @@ export function locateOwnerQuote(ownerText: string, quote: string): OwnerQuoteLo
 	};
 }
 
+/** A record's reflection preview: its first page of text, with the pasted ranges inside that page. */
+function evidenceEntry(record: OwnerEvidenceRecord): OwnerEvidenceEntry {
+	const text = record.text.slice(0, OWNER_EVIDENCE_PAGE_CHARS);
+	const pasted = sliceOwnerRanges(record.pasted, 0, text.length);
+	return {
+		...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }),
+		sourceId: record.sourceId,
+		entryId: record.entryId,
+		text,
+		createdAt: record.createdAt,
+		...(pasted.length > 0 ? { pasted } : {}),
+	};
+}
+
 interface OwnerEvidenceLedgerDeps {
 	getSessionManager(): SessionManager;
 	warn(message: string): void;
@@ -430,7 +544,7 @@ export class OwnerEvidenceLedger {
 	private records: Array<{ recordId: string; record: OwnerEvidenceRecord; digest: string }> = [];
 	private readonly byRecord = new Map<string, number>();
 	private readonly bySource = new Map<string, number>();
-	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
+	private readonly ownerInputOriginals = new WeakMap<AgentMessage, OwnerWords>();
 	/**
 	 * Sources this process recorded since the session's last completed run. Not rebuilt from the branch: after a
 	 * restart or branch change no earlier statement is current, so a destructive request must be stated again.
@@ -479,9 +593,13 @@ export class OwnerEvidenceLedger {
 		return first.done ? undefined : this.findSource(first.value);
 	}
 
-	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
-	markOwnerInput(message: AgentMessage, originalText: string): void {
-		this.ownerInputOriginals.set(message, originalText);
+	/**
+	 * The session admitted `message` as the operator's own input; `originalText` is what they submitted and `pasted` the
+	 * ranges of it the editor recorded as pasted rather than typed.
+	 */
+	markOwnerInput(message: AgentMessage, originalText: string, pasted?: readonly OwnerTextRange[]): void {
+		const ranges = normalizeOwnerRanges(pasted, originalText.length);
+		this.ownerInputOriginals.set(message, { text: originalText, ...(ranges.length > 0 ? { pasted: ranges } : {}) });
 	}
 
 	/**
@@ -491,9 +609,9 @@ export class OwnerEvidenceLedger {
 	 */
 	noteOwnerInputPersisted(message: AgentMessage, entryId: string | undefined): void {
 		if (!entryId || message.role !== "user") return;
-		const originalText = this.ownerInputOriginals.get(message);
-		if (originalText === undefined || !originalText.trim()) return;
-		if (this.recordOwnerEvidence(entryId, originalText)) this.ownerInputOriginals.delete(message);
+		const original = this.ownerInputOriginals.get(message);
+		if (original === undefined || !original.text.trim()) return;
+		if (this.recordOwnerEvidence(entryId, original)) this.ownerInputOriginals.delete(message);
 	}
 
 	/**
@@ -501,7 +619,7 @@ export class OwnerEvidenceLedger {
 	 * the session at the persistence boundary of a prompt that came through its own owner input
 	 * path (never for internal, extension, worker, tool or recalled messages).
 	 */
-	private recordOwnerEvidence(entryId: string, originalText: string): boolean {
+	private recordOwnerEvidence(entryId: string, original: OwnerWords): boolean {
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const sourceId = `${sessionId}/${entryId}`;
 		// Load before appending: a first read that scans the branch must not see this record twice.
@@ -515,15 +633,16 @@ export class OwnerEvidenceLedger {
 			if (Number.isFinite(lastMs) && createdAtMs <= lastMs) createdAtMs = lastMs + 1;
 		}
 		const createdAt = new Date(createdAtMs).toISOString();
-		const text = originalText;
+		const text = original.text;
 		const record: OwnerEvidenceRecord = {
 			sessionId,
 			sourceId,
 			entryId,
 			text,
 			digest: evidenceTextDigest(text),
-			chars: originalText.length,
+			chars: text.length,
 			createdAt,
+			...(original.pasted ? { pasted: original.pasted } : {}),
 		};
 		let recordId: string;
 		try {
@@ -535,7 +654,7 @@ export class OwnerEvidenceLedger {
 		this.sourceEntries?.add(entryId);
 		this.indexRecord(recordId, record);
 		this.currentTurn.add(sourceId);
-		ledger.push({ sessionId, sourceId, entryId, text: text.slice(0, OWNER_EVIDENCE_PAGE_CHARS), createdAt });
+		ledger.push(evidenceEntry(record));
 		if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
 		for (const listener of this.listeners) listener("source");
 		return true;
@@ -625,13 +744,7 @@ export class OwnerEvidenceLedger {
 			if (!record || sourceEntries.has(record.entryId)) continue;
 			sourceEntries.add(record.entryId);
 			this.indexRecord(entry.id, record);
-			records.push({
-				...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }),
-				sourceId: record.sourceId,
-				entryId: record.entryId,
-				text: record.text.slice(0, OWNER_EVIDENCE_PAGE_CHARS),
-				createdAt: record.createdAt,
-			});
+			records.push(evidenceEntry(record));
 			if (records.length > MAX_OWNER_EVIDENCE_ENTRIES) records.shift();
 		}
 		this.sourceEntries = sourceEntries;

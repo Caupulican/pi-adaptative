@@ -238,7 +238,7 @@ export class BotTeamChatController {
 
 	/**
 	 * Route a submitted prompt. Returns true when the controller consumed it. Returns false when the
-	 * caller should submit normally; for an `@root` address the caller submits `stripLeadingRootAddress(rawText)`.
+	 * caller should submit normally; for an `@root` address the caller submits the text from `rootAddressBodyStart(rawText)`.
 	 */
 	async tryInterceptSubmission(rawText: string): Promise<boolean> {
 		const port = this.host.getSessionPort();
@@ -285,10 +285,12 @@ export class BotTeamChatController {
 		}
 	}
 
-	/** Remove a leading `@root` or `@brain` address so the remaining text submits to root. */
-	stripLeadingRootAddress(rawText: string): string {
-		const match = rawText.trimStart().match(/^@(?:root|brain)\s+([\s\S]+)$/);
-		return match?.[1]?.trim() ?? rawText;
+	/**
+	 * Where the text after a leading `@root` or `@brain` address starts (0 without one): the rest submits to root. An
+	 * offset, not the stripped text, so the caller keeps the submission's pasted ranges aligned.
+	 */
+	rootAddressBodyStart(rawText: string): number {
+		return /^\s*@(?:root|brain)\s+(?=\S)/.exec(rawText)?.[0].length ?? 0;
 	}
 
 	async handleChatCommand(rawText: string): Promise<void> {

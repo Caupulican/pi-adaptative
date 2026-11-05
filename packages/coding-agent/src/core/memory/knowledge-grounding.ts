@@ -159,7 +159,7 @@ export class KnowledgeGrounding {
 			const source = this.deps.evidence.findSource(citation.source);
 			if (!source?.sessionId || source.chars !== source.text.length || hasMaskableSecretText(source.text))
 				throw new KnowledgeGroundingEvidenceRefusal("Grounding requires complete safe original owner evidence");
-			cited.push({ source: source.text, quote: citation.quote });
+			cited.push({ source, quote: citation.quote });
 			sources.set(source.sourceId, source);
 		}
 		const target = change.id ? this.deps.store.get(change.id) : undefined;

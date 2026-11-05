@@ -1060,7 +1060,7 @@ export class AgentSession {
 			goals: this._goals,
 			getExtensionRunner: () => this._extensionRunner,
 			getPromptTemplates: () => this.promptTemplates,
-			noteOwnerAuthoredMessage: (message, originalText) => this._reflection.markOwnerInput(message, originalText),
+			noteOwnerAuthoredMessage: (message, text, pasted) => this._reflection.markOwnerInput(message, text, pasted),
 			authorizeParentNoteOwner: (inputId) => {
 				const epoch = this._foregroundRecovery.getCurrentSubmissionEpoch();
 				if (epoch === undefined) throw new Error("Parent note admission requires a foreground owner.");

@@ -993,7 +993,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 /**
  * Hands-off intake through the real root: after the turn settles, the owner's stated request becomes a read-only
  * routine on host-compiled timing, announced on the next turn with the hour and days the host chose, while a pasted
- * request and an hour the owner's quoted timing words do not carry are never judged. Words the model already answered
+ * request (quoted, or undelimited and known only by the editor's recorded paste provenance) and an hour the owner's
+ * quoted timing words do not carry are never judged. Words the model already answered
  * with a routine save are passed over unread, and a pass replayed after the owner removed its routine creates nothing.
  */
 async function runJourney1RoutineIntake(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
@@ -1057,6 +1058,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		"My colleague wrote:\n> Check the release notes every hour.\nEvery morning, summarize the open review comments.";
 	const instruction = "summarize the open review comments";
 	const unstatedHour = "Post the build summary every evening at 7.";
+	// Pasted with no quotation syntax: only the paste provenance the editor reports shows these are not the owner's words.
+	const pastedRequest = "Rotate the deploy keys every hour.";
+	const secondOwner = `${unstatedHour}\n${pastedRequest}`;
+	const pasted = { start: unstatedHour.length + 1, end: secondOwner.length };
 	try {
 		world.systemOne.enterPhase("routine-intake-owner", {});
 		world.provider.enqueue("root", text("routine-intake-owner-reply", "Noted."));
@@ -1069,9 +1074,14 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			carries_0: { kind: "noul", probability: 0.02 },
 		});
 		world.provider.enqueue("root", text("routine-intake-second-owner-reply", "Noted."));
-		await withDeadline(world.trace, "routine intake second owner words", root.session.prompt(unstatedHour));
+		await withDeadline(
+			world.trace,
+			"routine intake second owner words",
+			root.session.prompt(secondOwner, { pasted: [pasted] }),
+		);
 		const second = latestSource();
-		expect(second.text).toBe(unstatedHour);
+		expect(second.text).toBe(secondOwner);
+		expect(second.pasted, "the owner evidence keeps which words were pasted").toEqual([pasted]);
 
 		world.systemOne.enterPhase("routine-intake-pass", {
 			requests_automation: { kind: "noul", probability: 0.98 },
@@ -1124,6 +1134,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 												instruction: "Post the build summary",
 												when: "every evening",
 												timing: { kind: "daily", time: "19:00" },
+											},
+											// Undelimited pasted words: shown by their recorded provenance alone, so never judged.
+											{
+												instruction: "Rotate the deploy keys",
+												when: "every hour",
+												timing: { kind: "interval", every: 1, unit: "hour" },
 											},
 										],
 									},
@@ -1186,7 +1202,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		).toBe(true);
 		expect(
 			retained.batch?.requests?.map((request) => request.prompt),
-			"neither the pasted request nor the hour its words do not carry is retained",
+			"neither pasted request (quoted or undelimited) nor the hour its words do not carry is retained",
 		).toEqual([instruction]);
 		expect(store().hasRoutineIntakeOrigin(retained.batch!.requests![0]!.key)).toBe(true);
 		expect(intakeState()?.through, "the pass ends at the last source it read").toBe(Date.parse(second.createdAt));

@@ -52,6 +52,12 @@ import {
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import {
+	joinOwnerWords,
+	type OwnerTextRange,
+	sliceOwnerRanges,
+	trimOwnerWords,
+} from "../../core/learning/owner-evidence-ledger.ts";
 import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { FitnessRole } from "../../core/models/fitness-role.ts";
@@ -160,6 +166,8 @@ const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 type UserInputSubmission = {
 	text: string;
 	images?: ImageContent[];
+	/** Ranges of `text` the owner pasted, as the editor recorded them. */
+	pasted?: readonly OwnerTextRange[];
 };
 
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
@@ -959,7 +967,7 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
-				await this.session.prompt(userInput.text, { images: userInput.images });
+				await this.session.prompt(userInput.text, { images: userInput.images, pasted: userInput.pasted });
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1599,8 +1607,9 @@ export class InteractiveMode {
 
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onShortcuts = () => this.handleHotkeysCommand();
-		this.defaultEditor.onSubmit = async (text: string) => {
-			text = text.trim();
+		// `pasted` follows `text` through every transform below: the owner evidence records which words were pasted.
+		this.defaultEditor.onSubmit = async (text: string, pasted?: readonly OwnerTextRange[]) => {
+			({ text, pasted } = trimOwnerWords({ text, pasted }));
 			if (!text) {
 				// Enter on an empty editor while a message waits behind the running turn: the second
 				// Enter means "stop and take it now", the one gesture Escape-then-retype used to be.
@@ -1622,7 +1631,7 @@ export class InteractiveMode {
 			// terminals swallow (e.g. Windows Terminal claims alt+enter).
 			const queueAsFollowUp = text.startsWith(">>");
 			if (queueAsFollowUp) {
-				text = text.slice(2).trim();
+				({ text, pasted } = trimOwnerWords({ text, pasted }, 2));
 				if (!text) return;
 			}
 
@@ -1698,7 +1707,7 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				text = this.botTeamChat.stripLeadingRootAddress(text);
+				({ text, pasted } = trimOwnerWords({ text, pasted }, this.botTeamChat.rootAddressBodyStart(text)));
 			}
 
 			// Other input submitted during work is steering. Slash/bang text must not execute
@@ -1729,7 +1738,7 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				if (this.session.isCompacting) {
-					this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images);
+					this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images, pasted);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 					return;
@@ -1738,6 +1747,7 @@ export class InteractiveMode {
 					await this.session.prompt(text, {
 						streamingBehavior: queueAsFollowUp ? "followUp" : "steer",
 						images,
+						pasted,
 						processSlashCommands: false,
 					});
 				} finally {
@@ -2079,7 +2089,7 @@ export class InteractiveMode {
 			// First, move any pending bash components to chat
 			this.flushPendingBashComponents();
 
-			const submission = this.buildUserInputSubmission(text);
+			const submission = { ...this.buildUserInputSubmission(text), pasted };
 			if (this.onInputCallback) {
 				this.onInputCallback(submission);
 			} else {
@@ -2815,7 +2825,10 @@ export class InteractiveMode {
 	}
 
 	private async handleFollowUp(): Promise<void> {
-		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
+		const { text, pasted } = trimOwnerWords({
+			text: this.editor.getExpandedText?.() ?? this.editor.getText(),
+			pasted: this.editor.getPastedRanges?.(),
+		});
 		if (!text) return;
 
 		// Queue input during compaction (extension commands execute immediately)
@@ -2830,7 +2843,7 @@ export class InteractiveMode {
 				}
 			} else {
 				const images = this.takeClipboardImagesForText(text);
-				this.queueCompactionMessage(text, "followUp", images);
+				this.queueCompactionMessage(text, "followUp", images, pasted);
 			}
 			return;
 		}
@@ -2842,7 +2855,7 @@ export class InteractiveMode {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
 			try {
-				await this.session.prompt(text, { streamingBehavior: "followUp", images });
+				await this.session.prompt(text, { streamingBehavior: "followUp", images, pasted });
 			} finally {
 				this.refreshAutonomyFooterStatus();
 			}
@@ -2857,7 +2870,10 @@ export class InteractiveMode {
 			const isCommandText = text.startsWith("/") || text.startsWith("!");
 			const keepFollowUp = this.session.getSessionWorkState().busy && !isCommandText;
 			this.editor.setText("");
-			await this.editor.onSubmit(keepFollowUp ? `>>${text}` : text);
+			await this.editor.onSubmit(
+				keepFollowUp ? `>>${text}` : text,
+				keepFollowUp ? sliceOwnerRanges(pasted, -2, text.length) : pasted,
+			);
 		}
 	}
 
@@ -3062,7 +3078,7 @@ export class InteractiveMode {
 		const entries = [...steering, ...followUp];
 		if (entries.length === 0) return;
 		this.updatePendingMessagesDisplay();
-		const text = entries.map((entry) => entry.text).join("\n\n");
+		const { text, pasted } = joinOwnerWords(entries, "\n\n");
 		const images = entries.flatMap((entry) => entry.images ?? []);
 		this.activityLane?.announce(
 			`Interrupting to send ${entries.length} queued message${entries.length > 1 ? "s" : ""} now`,
@@ -3073,7 +3089,11 @@ export class InteractiveMode {
 			// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
 			// submitted before that is refused as busy.
 			await this.session.waitForForegroundIdle();
-			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
+			await this.session.prompt(text, {
+				images: images.length ? images : undefined,
+				pasted,
+				processSlashCommands: false,
+			});
 		} catch (error) {
 			// Failed submission returns the complete input through the same clipboard owner as take-back.
 			const current = this.editor.getText();
@@ -3142,10 +3162,15 @@ export class InteractiveMode {
 		return allQueued.length;
 	}
 
-	private queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
+	private queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		pasted?: readonly OwnerTextRange[],
+	): void {
 		// Kept by the session from now: shown in its queue, takeable, and restored held after a restart.
 		const input = this.session.keepQueuedInput(mode, text, images);
-		this.compactionQueuedMessages.push({ text, mode, images, input });
+		this.compactionQueuedMessages.push({ text, mode, images, pasted, input });
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();

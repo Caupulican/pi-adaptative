@@ -295,7 +295,8 @@ interface EditorOptions {
 }
 
 const editor = new Editor(tui, theme, options?);  // tui is required for height-aware scrolling
-editor.onSubmit = (text) => console.log(text);
+editor.onSubmit = (text, pasted) => console.log(text, pasted); // pasted: ranges of text the user pasted, not typed
+editor.getPastedRanges(); // Same ranges for getExpandedText(), before submit
 editor.onChange = (text) => console.log("Changed:", text);
 editor.disableSubmit = true; // Disable submit temporarily
 editor.setAutocompleteProvider(provider);

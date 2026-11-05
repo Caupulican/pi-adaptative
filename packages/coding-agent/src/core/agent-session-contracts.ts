@@ -34,6 +34,7 @@ import type {
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
+import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionHandoff, KnowledgeCollectionOutcome } from "./memory/knowledge-collector.ts";
 import type { MemoryActivationEvent } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -234,6 +235,12 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Owner-visible form of an extension's framed third-party message (a peer message); see {@link SendUserMessageOrigin}. */
 	origin?: SendUserMessageOrigin;
+	/**
+	 * Ranges of `text` (offsets into the text passed to `prompt`, `end` exclusive) the owner pasted rather than typed, as
+	 * the interactive editor recorded them. Stored on the owner evidence and read as shown, never stated, text wherever the
+	 * owner's statement is decided. Omitted by programmatic submitters: their whole text is the owner's.
+	 */
+	pasted?: readonly OwnerTextRange[];
 	/**
 	 * Observe, exactly once, whether the submission was accepted: queued for delivery, or its own turn about to run. A
 	 * submission not accepted reports how its input ended without delivery (`ended`: withdrawn, held, cancelled or refused,

@@ -62,7 +62,7 @@ import { type DurableChangeLayer, evaluateLearningDecision } from "./learning/le
 import { LearningRollbackController, type PreparedLearningRollback } from "./learning/learning-rollback-controller.ts";
 import { type LearningApplicationGuard, LearningWriteJournal } from "./learning/learning-write-journal.ts";
 import { type EvidenceReceipt, ObservationStore, observationKey } from "./learning/observation-store.ts";
-import { locateOwnerQuote, OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
+import { locateOwnerQuote, OwnerEvidenceLedger, type OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -1108,8 +1108,8 @@ export class ReflectionController {
 	}
 
 	/** Original owner text is retained before transforms and admitted only after message persistence. */
-	markOwnerInput(message: AgentMessage, originalText: string): void {
-		this.ownerEvidence.markOwnerInput(message, originalText);
+	markOwnerInput(message: AgentMessage, originalText: string, pasted?: readonly OwnerTextRange[]): void {
+		this.ownerEvidence.markOwnerInput(message, originalText, pasted);
 	}
 
 	noteOwnerInputPersisted(message: AgentMessage, entryId: string | undefined): void {
@@ -1193,7 +1193,7 @@ export class ReflectionController {
 				notes.push(`${citation.source}: no cited span`);
 				continue;
 			}
-			const location = locateOwnerQuote(entry.text, citation.quote);
+			const location = locateOwnerQuote(entry, citation.quote);
 			if (!location.found) {
 				notes.push(`${citation.source}: quote not found in the owner's words`);
 				continue;

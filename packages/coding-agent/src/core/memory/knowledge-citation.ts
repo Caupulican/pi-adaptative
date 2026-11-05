@@ -3,7 +3,7 @@
  * The host proves the cited quote is stated (not shown) text that itself carries the change; the judge only decides
  * meaning inside that bound. Shared by explicit admission and whole-original grounding.
  */
-import { locateOwnerQuote, ownerShownRegions } from "../learning/owner-evidence-ledger.ts";
+import { locateOwnerQuote, type OwnerWords, ownerShownRegions } from "../learning/owner-evidence-ledger.ts";
 
 /** The fact a citation must state: the proposal for remember, the target for forget or correction. */
 export interface CitationFact {
@@ -13,8 +13,8 @@ export interface CitationFact {
 }
 
 export interface CitedOwnerWords {
-	/** The complete original owner source. */
-	readonly source: string;
+	/** The complete original owner source, with the ranges of it the owner pasted. */
+	readonly source: OwnerWords;
 	readonly quote: string;
 }
 
@@ -139,7 +139,7 @@ function shares(words: readonly string[], factTerms: readonly string[]): boolean
 
 /**
  * Why the citations cannot carry `fact`, or undefined when they can. Every quote must be found in its source as the
- * owner's stated words (not inside a quotation, code block, blockquote or quote element) with at least
+ * owner's stated words (not inside pasted text, a quotation, code block, blockquote or quote element) with at least
  * {@link MIN_STATED_QUOTE_CHARS} stated letters. When `fact` is known: no fact term may appear in the cited sources
  * only inside shown text (a pasted "I live in Paris" never yields Paris), and a quote whose source states any fact
  * term must itself state one, so a nearby unrelated sentence cannot vouch for the change. Inline code counts as the
@@ -160,12 +160,12 @@ export function ownerCitationRefusal(
 			return "A citation is absent or quotes text the owner showed, rather than stated";
 		if ((location.stated.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < MIN_STATED_QUOTE_CHARS)
 			return "A citation quotes too little of the owner's own words to state a change";
-		const quotation = new Uint8Array(citation.source.length);
+		const quotation = new Uint8Array(citation.source.text.length);
 		for (const region of ownerShownRegions(citation.source))
 			if (!region.inlineCode) quotation.fill(1, region.start, region.end);
 		const sourceStated: string[] = [];
 		const quoteStated: string[] = [];
-		for (const { term, index } of terms(citation.source)) {
+		for (const { term, index } of terms(citation.source.text)) {
 			if (quotation[index] === 1) {
 				shown.push(term);
 				continue;

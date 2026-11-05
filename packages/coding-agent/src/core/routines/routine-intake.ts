@@ -486,8 +486,8 @@ export class RoutineIntake {
 			let accepted = 0;
 			for (const proposal of proposals[index] ?? []) {
 				if (accepted >= MAX_ROUTINE_INTAKE_SOURCE_REQUESTS) break;
-				const instruction = locateOwnerQuote(source.text, proposal.instruction);
-				const when = locateOwnerQuote(source.text, proposal.when);
+				const instruction = locateOwnerQuote(source, proposal.instruction);
+				const when = locateOwnerQuote(source, proposal.when);
 				// Words found only inside quoted, pasted or code text are what the owner showed, not what they asked.
 				if (!instruction.found || instruction.shown || !when.found || when.shown) continue;
 				const prompt = source.text.slice(instruction.start, instruction.end).trim();
