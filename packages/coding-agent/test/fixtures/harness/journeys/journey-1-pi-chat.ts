@@ -5,6 +5,8 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { piChatExtension } from "../../../../src/core/chat/extension.ts";
 import { sessionMeshId } from "../../../../src/core/chat/identity.ts";
 import type { AgentSendResult } from "../../../../src/core/chat/mesh.ts";
+import type { ExtensionRunner } from "../../../../src/core/extensions/runner.ts";
+import { emitSessionShutdownEvent } from "../../../../src/core/extensions/runner.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { MessageInbox } from "../../../../src/core/messaging/inbox.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
@@ -62,6 +64,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			`${label}: ${JSON.stringify(sent)} errors=${JSON.stringify(extensionErrors)}`,
 		).toBe(expected);
 	};
+	const runners = new Map<AgentSession, () => ExtensionRunner>();
 	const open = async (manager: SessionManager, agentDir: string): Promise<AgentSession> => {
 		const created = await world.createRootSession("root", {
 			agentDir,
@@ -73,9 +76,14 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			uiContext: ui,
 			onError: (error) => extensionErrors.push(`${error.event}: ${error.error}`),
 		});
+		runners.set(created.session, created.getExtensionRunner);
 		return created.session;
 	};
 	const dispose = async (session: AgentSession, label: string): Promise<void> => {
+		// A session's owner runs its extensions' shutdown (where pi-chat leaves the mesh) before the session is disposed.
+		const runner = runners.get(session);
+		if (runner === undefined) throw new Error(`${label}: the session was not opened by this phase`);
+		await emitSessionShutdownEvent(runner(), { type: "session_shutdown", reason: "quit" });
 		expect(await world.disposeSessionInBody(session), label).toBeUndefined();
 	};
 
