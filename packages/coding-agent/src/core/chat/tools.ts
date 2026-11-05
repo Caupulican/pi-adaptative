@@ -37,6 +37,7 @@ export function currentChatIdentity(runtime: ChatRuntime): RuntimeIdentity {
 function knownPeers(runtime: ChatRuntime): PeerRecord[] {
 	const byId = new Map<string, PeerRecord>();
 	for (const peer of readChatPeers(runtime.stateRoot)) byId.set(peer.id, peer);
+	for (const peer of runtime.mesh.recentPeers()) byId.set(peer.id, peer);
 	for (const peer of runtime.mesh.listPeers(false)) byId.set(peer.id, peer);
 	return [...byId.values()];
 }
@@ -112,10 +113,12 @@ export function registerChatTools(pi: ExtensionAPI, runtime: ChatRuntime): void 
 					status.endpoint ? `endpoint: ${status.endpoint}` : undefined,
 				].filter((line): line is string => line !== undefined);
 				if (peers.length > 0) {
+					const live = new Set(runtime.mesh.listPeers(false).map((peer) => peer.id));
 					lines.push("", "id | name (self-declared label) | standing | state | last seen");
 					for (const peer of peers) {
+						const state = !live.has(peer.id) ? "offline (mail is held)" : peer.busy ? "busy" : "idle/unknown";
 						lines.push(
-							`${peer.id} | ${peer.name} | ${peerStanding(peer)} | ${peer.busy ? "busy" : "idle/unknown"} | ${peer.lastSeen ?? "unknown"}`,
+							`${peer.id} | ${peer.name} | ${peerStanding(peer)} | ${state} | ${peer.lastSeen ?? "unknown"}`,
 						);
 					}
 				} else {
@@ -134,7 +137,7 @@ export function registerChatTools(pi: ExtensionAPI, runtime: ChatRuntime): void 
 			name: "agent_send",
 			label: "Agent Send",
 			description:
-				"Send a text message to a peer found with list_peers, on this machine's local mesh. pi-chat is a live message channel, not shared memory or a transcript; it executes nothing and is not encrypted, so send no secrets. Busy, offline and timeout are normal delivery outcomes: report them instead of retrying blindly.",
+				"Send a text message to a peer found with list_peers, on this machine's local mesh. pi-chat is a message channel, not shared memory or a transcript; it executes nothing and is not encrypted, so send no secrets. A peer that is not on the mesh gets the message when its session is next on it, within 24 hours (status queued); send again with the same messageId to learn its fate. Busy, offline and timeout are normal delivery outcomes: report them instead of retrying blindly.",
 			promptSnippet: "Message a pi-chat peer",
 			parameters: AgentSendParameters,
 			async execute(_toolCallId, rawParams) {

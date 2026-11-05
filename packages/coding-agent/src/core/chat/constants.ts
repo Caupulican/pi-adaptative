@@ -33,6 +33,12 @@ export const MAX_REMEMBERED_MESSAGES = 256;
 export const MAX_BROKER_CHAINS = 1024;
 export const MAX_BROKER_CREDENTIALS = 1024;
 
+/** Peers this process remembers having seen, and for how long: the ones mail can still be held for once they leave. */
+export const MAX_SEEN_PEERS = 64;
+export const RECENT_PEER_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** A held message the session could not take waits this long before it is collected again. */
+export const COLLECT_RETRY_MS = 30_000;
+
 /** The user-global state root shared with every agent that joins the same mesh socket. */
 export function defaultChatStateRoot(env: NodeJS.ProcessEnv = process.env): string {
 	const override = env[CHAT_STATE_ROOT_ENV]?.trim();

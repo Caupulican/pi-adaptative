@@ -10,12 +10,12 @@ import {
 	MAX_PENDING_VISIBLE_CARDS,
 	MAX_REPLY_HOPS,
 } from "./constants.ts";
-import { createRuntimeIdentity, resolveIdentity } from "./identity.ts";
+import { bindSessionIdentity, createRuntimeIdentity, resolveIdentity } from "./identity.ts";
 import { incomingPeerRecord, incomingPrompt, incomingSummary, lineCount } from "./incoming.ts";
 import { ChatMesh, type IncomingPeerMessage } from "./mesh.ts";
 import { getChatPlatformInfo } from "./platform.ts";
 import { appendChatAudit, type ChatIdentity, readChatIdentity } from "./state.ts";
-import { type ChatRuntime, registerChatTools } from "./tools.ts";
+import { type ChatRuntime, currentChatIdentity, registerChatTools } from "./tools.ts";
 
 export type ChatExtensionOptions = {
 	/** Defaults to `~/.pi/pi-chat`, or `PI_CHAT_STATE_ROOT`. */
@@ -68,6 +68,7 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 			from: message.from.id,
 			verified: message.from.verified === true,
 			expectReply: message.expectReply,
+			queued: message.queuedAt !== undefined,
 		});
 		const sentHops = message.metadata?.hops;
 		const hops = typeof sentHops === "number" && Number.isInteger(sentHops) && sentHops > 0 ? sentHops : 1;
@@ -96,6 +97,7 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 				hops,
 				maxHops: MAX_REPLY_HOPS,
 				metadata: message.metadata,
+				queuedAt: message.queuedAt,
 				message: message.message,
 				messageBytes: bytes,
 				messageLines: lines,
@@ -140,6 +142,12 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 
 	pi.on("session_start", async (_event, ctx) => {
 		activeUi = ctx.ui;
+		// The mesh id is the session's: it names this peer again after a resume or a restart.
+		const bound = bindSessionIdentity(runtime.identity, ctx.sessionManager.getSessionId());
+		// Another session taking over this process leaves the mesh under its old id first.
+		if (bound.id !== runtime.identity.id) await runtime.mesh.stop();
+		runtime.identity = bound;
+		runtime.mesh.updateSelf(currentChatIdentity(runtime));
 		await runtime.mesh.start();
 		ctx.ui.setStatus(CHAT_EXTENSION_NAME, CHAT_EXTENSION_NAME);
 	});

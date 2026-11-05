@@ -62,3 +62,16 @@ export function resolveIdentity(
 	const name = normalizeName(env[CHAT_AGENT_NAME_ENV]) ?? normalizeName(stored.name) ?? runtime.name;
 	return { id: runtime.id, name, pcLabel: stored.pcLabel, persistent: true };
 }
+
+/**
+ * The mesh id of a pi session. It is the session's own id, so it names the same peer after a resume or a restart and a
+ * message held for it can reach it later; a random per-process id could only ever name one process.
+ */
+export function sessionMeshId(sessionId: string): string {
+	return `session-${sessionId}`;
+}
+
+/** The identity of `runtime` for the session `sessionId`: same name and label, the session's mesh id. */
+export function bindSessionIdentity(runtime: RuntimeIdentity, sessionId: string): RuntimeIdentity {
+	return { ...runtime, id: sessionMeshId(sessionId) };
+}

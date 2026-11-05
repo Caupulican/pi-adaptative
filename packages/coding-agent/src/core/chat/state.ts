@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFileSync,
 	chmodSync,
@@ -7,9 +7,11 @@ import {
 	fsyncSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -54,6 +56,10 @@ export type ChatStatePaths = {
 	audit: string;
 	localSessions: string;
 	socket: string;
+	/** Mail held for a recipient that was not running: the durable side of the mesh. */
+	inbox: string;
+	/** One credential per session id, so a resumed session re-claims the id it had. */
+	credentials: string;
 };
 
 export function getChatStatePaths(root: string): ChatStatePaths {
@@ -66,6 +72,8 @@ export function getChatStatePaths(root: string): ChatStatePaths {
 		audit: join(localSessions, "audit.jsonl"),
 		localSessions,
 		socket: join(localSessions, "broker.sock"),
+		inbox: join(root, "inbox"),
+		credentials: join(localSessions, "credentials"),
 	};
 }
 
@@ -126,14 +134,10 @@ export function createDefaultChatConfig(now = new Date()): ChatConfig {
 }
 
 /**
- * The machine's pi session secret (`session.key`, mode 0600, created by the first session that needs it). A
- * session proves it is a real pi session by keying its hello with it; the broker never accepts a claim of
- * that. A worker-role process never reads it, and a file readable by group or others is not trusted.
+ * A 256-bit secret kept in a file (mode 0600), created by the first process that needs it. A file readable by group or
+ * others is not trusted: no secret is returned for it. `beforeCreate` runs only when the file is about to be created.
  */
-export function readChatSessionSecret(root: string): string | undefined {
-	if (isWorkerSession()) return undefined;
-	ensureChatStateDirs(root);
-	const file = join(root, "session.key");
+function readOrCreateSecretFile(file: string, beforeCreate?: () => void): string | undefined {
 	const readSecret = (): string | undefined => {
 		if ((statSync(file).mode & 0o077) !== 0) return undefined;
 		const secret = readFileSync(file, "utf8").trim();
@@ -144,6 +148,7 @@ export function readChatSessionSecret(root: string): string | undefined {
 	} catch (error: unknown) {
 		if (!isNodeError(error) || error.code !== "ENOENT") throw error;
 	}
+	beforeCreate?.();
 	const created = randomBytes(32).toString("hex");
 	try {
 		writeFileSync(file, `${created}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -152,6 +157,51 @@ export function readChatSessionSecret(root: string): string | undefined {
 		if (!isNodeError(error) || error.code !== "EEXIST") throw error;
 		return readSecret();
 	}
+}
+
+/**
+ * The machine's pi session secret (`session.key`, mode 0600, created by the first session that needs it). A
+ * session proves it is a real pi session by keying its hello with it; the broker never accepts a claim of
+ * that. A worker-role process never reads it, and a file readable by group or others is not trusted.
+ */
+export function readChatSessionSecret(root: string): string | undefined {
+	if (isWorkerSession()) return undefined;
+	ensureChatStateDirs(root);
+	return readOrCreateSecretFile(join(root, "session.key"));
+}
+
+/** Credential files kept at most this many; past it, files unused for {@link CREDENTIAL_MAX_AGE_MS} are removed. */
+const MAX_CREDENTIAL_FILES = 2048;
+const CREDENTIAL_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+function pruneCredentialFiles(dir: string, now: number): void {
+	const names = readdirSync(dir).filter((name) => name.endsWith(".key"));
+	if (names.length < MAX_CREDENTIAL_FILES) return;
+	for (const name of names) {
+		const file = join(dir, name);
+		try {
+			if (now - statSync(file).mtimeMs > CREDENTIAL_MAX_AGE_MS) unlinkSync(file);
+		} catch (error: unknown) {
+			if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+		}
+	}
+}
+
+/**
+ * The credential this session id presents to the broker, created once and kept (`<digest of id>.key`, mode 0600, in the
+ * 0700 state directory, the same boundary as `session.key`). Because it survives the process, a resumed session
+ * re-claims its id after the broker restarted or forgot it. A worker-role process never reads it, and a file readable by
+ * group or others is not trusted: the broker then issues a fresh credential for that connection, as before.
+ */
+export function loadSessionCredential(root: string, peerId: string): string | undefined {
+	if (isWorkerSession()) return undefined;
+	ensureChatStateDirs(root);
+	const dir = getChatStatePaths(root).credentials;
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	chmodBestEffort(dir, 0o700);
+	const digest = createHash("sha256").update(`pi-chat-credential-v1\0${peerId}`).digest("hex").slice(0, 40);
+	const file = join(dir, `${digest}.key`);
+	return readOrCreateSecretFile(file, () => pruneCredentialFiles(dir, Date.now()));
 }
 
 export function readChatConfig(root: string): ChatConfig | undefined {

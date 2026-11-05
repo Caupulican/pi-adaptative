@@ -46,7 +46,7 @@ function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: Cha
 	const lines = [
 		`${CHAT_EXTENSION_NAME}`,
 		`state root: ${state.root}`,
-		"state scope: user-global transport endpoint (config, identity and known peers only; message bodies are not persisted)",
+		"state scope: user-global transport endpoint (config, identity, known peers, session credentials, and mail held up to 24 h for peers that were away)",
 		`configured: ${state.configured ? "yes" : "no"}`,
 		`identity: ${state.identityAvailable ? `${self.name} (${self.id})` : `ephemeral ${self.name} (${self.id})`}`,
 		`mesh: ${mesh.supported ? (mesh.brokerActive ? "unix broker" : mesh.connected ? "unix client" : "not connected") : "unsupported"}`,
@@ -54,6 +54,7 @@ function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: Cha
 		`known peers: ${state.peerCount}`,
 		`audit log: ${getChatStatePaths(runtime.stateRoot).audit}`,
 	];
+	if (mesh.refused) lines.push(`refused by the broker: ${mesh.refused}`);
 	if (platform.note) lines.push(`platform note: ${platform.note}`);
 	ctx.ui.setStatus(CHAT_EXTENSION_NAME, state.configured ? "pi-chat: ready" : "pi-chat: setup needed");
 	sendCommandMessage(pi, lines.join("\n"), { command: "status", state, platform, mesh });
@@ -70,7 +71,7 @@ async function setup(
 		"Create pi-chat user-global transport state and a persistent identity?",
 		`State root: ${runtime.stateRoot}`,
 		"This writes config.json, identity.json and peers.json with best-effort private permissions.",
-		"It does not persist message bodies, send secrets, or run commands.",
+		"It does not send secrets or run commands; message bodies are held only for a peer that is away, up to 24 hours.",
 		existing ? "Existing pi-chat config is updated in place." : "No existing pi-chat config was found.",
 	].join("\n");
 	if (!ctx.hasUI) {
@@ -113,6 +114,7 @@ async function setup(
 function showPeers(pi: ExtensionAPI, runtime: ChatRuntime): void {
 	const self = currentChatIdentity(runtime);
 	const byId = new Map<string, PeerRecord>(readChatPeers(runtime.stateRoot).map((peer) => [peer.id, peer]));
+	for (const peer of runtime.mesh.recentPeers()) byId.set(peer.id, peer);
 	for (const peer of runtime.mesh.listPeers(false)) byId.set(peer.id, peer);
 	const peers = [...byId.values()];
 	const mesh = runtime.mesh.status();

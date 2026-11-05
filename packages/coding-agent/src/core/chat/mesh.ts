@@ -1,10 +1,12 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { type InboxEnqueueResult, type InboxEntry, type InboxFate, MessageInbox } from "../messaging/inbox.ts";
 import {
 	BROKER_PROBE_TIMEOUT_MS,
 	CHAT_CREDENTIAL_ENV,
 	CHAT_SESSION_ID_ENV,
+	COLLECT_RETRY_MS,
 	MAX_BROKER_CHAINS,
 	MAX_BROKER_CREDENTIALS,
 	MAX_ENVELOPE_BYTES,
@@ -12,15 +14,26 @@ import {
 	MAX_PEER_FIELD_CHARS,
 	MAX_REMEMBERED_MESSAGES,
 	MAX_REPLY_HOPS,
+	MAX_SEEN_PEERS,
 	MAX_SOCKET_BUFFER_BYTES,
 	MAX_TIMEOUT_MS,
 	MESSAGE_ID_PATTERN,
+	RECENT_PEER_WINDOW_MS,
 	RECONNECT_INTERVAL_MS,
 	REPLY_CHAIN_WINDOW_MS,
 } from "./constants.ts";
 import type { RuntimeIdentity } from "./identity.ts";
+import { openMail, sealMail } from "./mail.ts";
+import { isPeerRecord, isRecord } from "./peer.ts";
 import { getChatPlatformInfo } from "./platform.ts";
-import { ensureChatStateDirs, type PeerRecord, readChatSessionSecret } from "./state.ts";
+import {
+	appendChatAudit,
+	ensureChatStateDirs,
+	getChatStatePaths,
+	loadSessionCredential,
+	type PeerRecord,
+	readChatSessionSecret,
+} from "./state.ts";
 import type { AgentSendInput } from "./validation.ts";
 
 export type DeliveryStatus =
@@ -31,6 +44,8 @@ export type DeliveryStatus =
 	| "denied"
 	| "timeout"
 	| "offline"
+	/** Held in the peer's durable inbox; delivered when its session is next on the mesh. */
+	| "queued"
 	| "not_authorized"
 	| "bad_envelope";
 
@@ -55,6 +70,8 @@ export type IncomingPeerMessage = {
 	message: string;
 	expectReply: boolean;
 	metadata?: Record<string, unknown>;
+	/** Set when the message was held in this peer's inbox: when its sender queued it. */
+	queuedAt?: string;
 };
 
 export type ChatMeshStatus = {
@@ -62,6 +79,8 @@ export type ChatMeshStatus = {
 	brokerActive: boolean;
 	connected: boolean;
 	endpoint?: string;
+	/** Why the broker last refused this session's id, until a retry registers. */
+	refused?: string;
 };
 
 type WireMessage =
@@ -96,7 +115,7 @@ type WireMessage =
 			reply?: string;
 	  }
 	| { type: "send_result"; id: string; targets: DeliveryTarget[] }
-	| { type: "error"; id?: string; message: string };
+	| { type: "error"; id?: string; message: string; code?: RefusalCode };
 
 /** What the broker holds for one connection: the claim it accepted, the credential bound to it and its rank. */
 type ServerPeerConnection = {
@@ -118,6 +137,9 @@ type ServerPeerConnection = {
 /** The hello protocol that carries the credential handshake; a hello without it is a legacy peer. */
 const CREDENTIAL_PROTOCOL = 2;
 
+/** Why the broker refused a session's id; absent from a frame an older broker sent. */
+type RefusalCode = "id_in_use" | "credential_bound";
+
 type PendingServerSend = {
 	messageId: string;
 	sender: Socket;
@@ -137,33 +159,6 @@ export type ChatMeshOptions = {
 	/** Returns the acknowledgement text for an expectReply message. */
 	onIncoming?: (message: IncomingPeerMessage) => string | undefined | Promise<string | undefined>;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Peer identity text reaches prompts and the UI, so it is bounded and carries no control or line-break characters. */
-function isPeerText(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		value.length > 0 &&
-		value.length <= MAX_PEER_FIELD_CHARS &&
-		!/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
-	);
-}
-
-function isPeerRecord(value: unknown): value is PeerRecord {
-	return (
-		isRecord(value) &&
-		isPeerText(value.id) &&
-		isPeerText(value.name) &&
-		isPeerText(value.address) &&
-		(value.scope === "local" || value.scope === "network" || value.scope === "relay") &&
-		(value.busy === undefined || typeof value.busy === "boolean") &&
-		(value.verified === undefined || typeof value.verified === "boolean") &&
-		(value.lastSeen === undefined || isPeerText(value.lastSeen))
-	);
-}
 
 const SECRET_HEX = /^[0-9a-f]{64}$/;
 
@@ -245,7 +240,10 @@ function parseWire(line: string): WireMessage | undefined {
 		case "send_result":
 			return typeof value.id === "string" && Array.isArray(value.targets) ? (value as WireMessage) : undefined;
 		case "error":
-			return typeof value.message === "string" ? (value as WireMessage) : undefined;
+			return typeof value.message === "string" &&
+				(value.code === undefined || value.code === "id_in_use" || value.code === "credential_bound")
+				? (value as WireMessage)
+				: undefined;
 		default:
 			return undefined;
 	}
@@ -323,15 +321,48 @@ export function resolveTargets(
 	return resolved;
 }
 
-function offlineResult(targets: PeerRecord[], expectReply: boolean): AgentSendResult {
+function offlineResult(id: string, targets: PeerRecord[], expectReply: boolean): AgentSendResult {
 	return {
-		id: randomUUID(),
+		id,
 		targets: targets.map((target) => ({
 			target: target.id,
 			status: target.busy ? "busy" : "offline",
 			reply: expectReply && !target.busy ? "No pi-chat transport is active; delivery was not attempted." : undefined,
 		})),
 	};
+}
+
+const HELD_REPLY =
+	"Held for this peer: it is delivered when its session is next on the mesh, within 24 hours. Send again with the same messageId to learn its fate.";
+
+function fateTarget(target: string, fate: InboxFate): DeliveryTarget {
+	switch (fate.state) {
+		case "pending":
+			return { target, status: "queued", reply: HELD_REPLY };
+		case "delivered":
+			return { target, status: "received", reply: "Delivered from the mail held for this peer." };
+		case "failed":
+			return {
+				target,
+				status: "failed",
+				reply: `The held message failed: ${fate.reason ?? "the peer could not take it"}.`,
+			};
+		case "expired":
+			return { target, status: "failed", reply: "The held message expired undelivered; send a new one." };
+	}
+}
+
+function heldTarget(target: string, held: InboxEnqueueResult): DeliveryTarget {
+	switch (held.status) {
+		case "queued":
+			return { target, status: "queued", reply: HELD_REPLY };
+		case "duplicate":
+			return fateTarget(target, held.fate);
+		case "conflict":
+			return { target, status: "failed", reply: "This messageId was used for a different message; use a new one." };
+		case "full":
+			return { target, status: "offline", reply: `The message was not held: ${held.reason}.` };
+	}
 }
 
 /**
@@ -375,12 +406,23 @@ export class ChatMesh {
 	private started = false;
 	private serverSocketIdentity?: string;
 	private clientSocketIdentity?: string;
+	/** Mail held for peers that were not on the mesh, and for this session when it was not. Absent where the mesh is unsupported. */
+	private readonly inbox?: MessageInbox;
+	private stopInboxWake?: () => void;
+	private draining = false;
+	private drainRequested = false;
+	/** Held messages the session could not take, and when they are collected again. */
+	private readonly collectRetryAt = new Map<string, number>();
+	/** Peers this process saw on the mesh, newest last: the ones mail can still be held for after they leave. */
+	private readonly seenPeers = new Map<string, { peer: PeerRecord; at: number }>();
+	private refused?: string;
 
 	constructor(options: ChatMeshOptions) {
 		this.onIncoming = options.onIncoming;
 		this.stateRoot = options.stateRoot;
 		this.socketPath = getChatPlatformInfo(options.stateRoot).socketPath;
 		this.sessionSecret = this.socketPath ? readChatSessionSecret(options.stateRoot) : undefined;
+		this.inbox = this.socketPath ? new MessageInbox({ dir: getChatStatePaths(options.stateRoot).inbox }) : undefined;
 		this.self = this.buildSelf(options.self);
 	}
 
@@ -398,10 +440,21 @@ export class ChatMesh {
 			brokerActive: this.brokerActive,
 			connected: Boolean(this.client && !this.client.destroyed),
 			endpoint: this.socketPath,
+			...(this.refused ? { refused: this.refused } : {}),
 		};
 	}
 
+	/**
+	 * A change to this peer's record. The id is the session's, so it changes only between sessions, while the mesh is
+	 * stopped: the credential presented to the broker belongs to the id.
+	 */
 	updateSelf(identity: RuntimeIdentity): void {
+		if (identity.id !== this.self.id) {
+			if (this.started)
+				throw new Error("A running pi-chat mesh keeps its id; stop it before another session takes over.");
+			this.credential = undefined;
+			this.refused = undefined;
+		}
 		this.self = this.buildSelf(identity);
 		this.pushHello();
 	}
@@ -449,6 +502,8 @@ export class ChatMesh {
 		if (this.started && (!this.client || this.client.destroyed)) this.started = false;
 		this.stopReconnectTimer();
 		ensureChatStateDirs(this.stateRoot);
+		// The session's own credential, kept across restarts: the broker binds the id to it, and a resumed session re-claims the id.
+		this.credential ??= loadSessionCredential(this.stateRoot, this.self.id);
 		let connected = await this.connectClient();
 		if (this.stopping) return;
 		if (!connected) {
@@ -458,6 +513,7 @@ export class ChatMesh {
 		}
 		if (!connected) this.scheduleReconnect();
 		this.started = true;
+		this.watchInbox();
 		if (connected) await this.awaitFirstPeersFrame();
 	}
 
@@ -498,6 +554,9 @@ export class ChatMesh {
 		this.clientSocketIdentity = undefined;
 		this.connectPromise = undefined;
 		this.withdrawCredential();
+		this.stopInboxWake?.();
+		this.stopInboxWake = undefined;
+		this.refused = undefined;
 		await this.closeServer(true);
 		this.stopping = false;
 	}
@@ -579,11 +638,19 @@ export class ChatMesh {
 		const peersById = new Map<string, PeerRecord>();
 		for (const peer of configuredPeers) peersById.set(peer.id, peer);
 		for (const peer of this.listPeers(false)) peersById.set(peer.id, peer);
+		for (const peer of this.recentPeers()) if (!peersById.has(peer.id)) peersById.set(peer.id, peer);
 		const targets = resolveTargets(input.to, this.self, [...peersById.values()], broadcastEnabled);
-		const client = this.client;
-		if (!client || client.destroyed) return offlineResult(targets, true);
 		// A sender-supplied id makes a retry the same send: the receiver delivers it once.
 		const id = input.messageId ?? randomUUID();
+		const live = await this.sendLive(id, input, targets);
+		// A broadcast is a live announcement; a message to named peers is held for the ones that are away.
+		const broadcast = (Array.isArray(input.to) ? input.to : [input.to]).includes("*");
+		return broadcast ? live : this.holdForAbsent(live, id, input, targets);
+	}
+
+	private sendLive(id: string, input: AgentSendInput, targets: PeerRecord[]): Promise<AgentSendResult> {
+		const client = this.client;
+		if (!client || client.destroyed) return Promise.resolve(offlineResult(id, targets, true));
 		const targetIds = targets.map((target) => target.id);
 		return new Promise<AgentSendResult>((resolve) => {
 			const inFlight = this.pendingClientSends.get(id);
@@ -612,6 +679,207 @@ export class ChatMesh {
 				metadata: input.metadata,
 			});
 		});
+	}
+
+	/** An `offline` outcome for a named peer becomes mail in that peer's inbox: it is delivered when the peer is back. */
+	private holdForAbsent(
+		result: AgentSendResult,
+		id: string,
+		input: AgentSendInput,
+		targets: PeerRecord[],
+	): AgentSendResult {
+		const inbox = this.inbox;
+		if (!inbox) return result;
+		const named = new Set(targets.map((target) => target.id));
+		return {
+			...result,
+			targets: result.targets.map((target) =>
+				target.status === "offline" && named.has(target.target)
+					? this.hold(inbox, target.target, id, input)
+					: target,
+			),
+		};
+	}
+
+	private hold(inbox: MessageInbox, recipient: string, id: string, input: AgentSendInput): DeliveryTarget {
+		try {
+			const hops = typeof input.metadata?.hops === "number" ? input.metadata.hops : 1;
+			const held = inbox.enqueue({
+				id,
+				sender: this.self.id,
+				recipient,
+				envelope: sealMail({
+					sender: this.self,
+					recipient,
+					id,
+					body: input.message,
+					hops,
+					metadata: input.metadata,
+					secret: this.sessionSecret,
+				}),
+				body: input.message,
+			});
+			return heldTarget(recipient, held);
+		} catch (error) {
+			return {
+				target: recipient,
+				status: "offline",
+				reply: `The message could not be held: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+	}
+
+	/** Peers this process saw on the mesh within the last day that are not on it now. */
+	recentPeers(): PeerRecord[] {
+		const cutoff = Date.now() - RECENT_PEER_WINDOW_MS;
+		return [...this.seenPeers.values()]
+			.filter((seen) => seen.at >= cutoff && seen.peer.id !== this.self.id && !this.peers.has(seen.peer.id))
+			.map((seen) => seen.peer);
+	}
+
+	private noteSeen(peer: PeerRecord): void {
+		if (peer.id === this.self.id) return;
+		this.seenPeers.delete(peer.id);
+		this.seenPeers.set(peer.id, { peer, at: Date.now() });
+		while (this.seenPeers.size > MAX_SEEN_PEERS) {
+			const oldest = this.seenPeers.keys().next().value;
+			if (oldest === undefined) break;
+			this.seenPeers.delete(oldest);
+		}
+	}
+
+	private noteInboxFault(error: unknown): void {
+		try {
+			appendChatAudit(this.stateRoot, {
+				kind: "inbox_fault",
+				message: error instanceof Error ? error.message : String(error),
+			});
+		} catch {
+			// The audit log is a diagnostic; a fault in it must not turn a delivery into an error.
+		}
+	}
+
+	/** Collects held mail now and whenever this session's inbox changes. */
+	private watchInbox(): void {
+		if (!this.inbox || this.stopInboxWake) return;
+		this.stopInboxWake = this.inbox.subscribe(this.self.id, () => void this.drainInbox());
+		void this.drainInbox();
+	}
+
+	private async drainInbox(): Promise<void> {
+		const inbox = this.inbox;
+		if (!inbox || !this.onIncoming) return;
+		if (this.draining) {
+			this.drainRequested = true;
+			return;
+		}
+		this.draining = true;
+		try {
+			do {
+				this.drainRequested = false;
+				for (const entry of inbox.pending(this.self.id)) {
+					if (this.stopping) return;
+					await this.collect(inbox, entry);
+				}
+			} while (this.drainRequested && !this.stopping);
+		} catch (error) {
+			this.noteInboxFault(error);
+		} finally {
+			this.draining = false;
+		}
+	}
+
+	/** Delivers one held message to the session as an incoming one; a message the session cannot take is tried again later. */
+	private async collect(inbox: MessageInbox, entry: InboxEntry): Promise<void> {
+		const key = `${entry.sender}\0${entry.id}`;
+		if ((this.collectRetryAt.get(key) ?? 0) > Date.now()) return;
+		const mail = openMail(entry, this.self.id, this.sessionSecret);
+		if (!mail) {
+			inbox.recordFailure(this.self.id, entry.sender, entry.id, "The held message is not valid pi-chat mail.");
+			return;
+		}
+		const outcome = await this.receive(
+			{
+				id: entry.id,
+				from: mail.from,
+				to: this.self.id,
+				message: entry.body,
+				expectReply: false,
+				metadata: { ...mail.metadata, hops: mail.hops },
+				queuedAt: mail.queuedAt,
+			},
+			true,
+		);
+		if (!outcome.failed) {
+			this.collectRetryAt.delete(key);
+			return;
+		}
+		inbox.recordFailure(
+			this.self.id,
+			entry.sender,
+			entry.id,
+			outcome.reply ?? "The session did not accept the message.",
+		);
+		this.collectRetryAt.set(key, Date.now() + COLLECT_RETRY_MS);
+		while (this.collectRetryAt.size > MAX_REMEMBERED_MESSAGES) {
+			const oldest = this.collectRetryAt.keys().next().value;
+			if (oldest === undefined) break;
+			this.collectRetryAt.delete(oldest);
+		}
+	}
+
+	/**
+	 * Delivers an incoming message to the session once. A retried send carries the same sender and id: it is delivered
+	 * once and every copy gets the same outcome, except that a held message whose last try failed is delivered again.
+	 */
+	private async receive(incoming: IncomingPeerMessage, retryFailed = false): Promise<IncomingOutcome> {
+		const key = `${incoming.from.id}\0${incoming.id}`;
+		let delivery = this.receivedMessages.get(key);
+		if (delivery) {
+			this.receivedMessages.delete(key);
+			if (retryFailed && (await delivery).failed) delivery = undefined;
+		}
+		delivery ??= this.deliver(incoming);
+		this.receivedMessages.set(key, delivery);
+		while (this.receivedMessages.size > MAX_REMEMBERED_MESSAGES) {
+			const oldest = this.receivedMessages.keys().next().value;
+			if (oldest === undefined) break;
+			this.receivedMessages.delete(oldest);
+		}
+		const outcome = await delivery;
+		if (!outcome.failed) this.settleHeld(incoming);
+		return outcome;
+	}
+
+	private deliver(incoming: IncomingPeerMessage): Promise<IncomingOutcome> {
+		// Mail this session already took before a restart is not delivered again.
+		if (this.heldFate(incoming)?.state === "delivered") return Promise.resolve({ failed: false });
+		return Promise.resolve(this.onIncoming?.(incoming)).then(
+			(reply): IncomingOutcome => ({ failed: false, reply }),
+			(error: unknown): IncomingOutcome => ({
+				failed: true,
+				reply: error instanceof Error ? error.message : String(error),
+			}),
+		);
+	}
+
+	private heldFate(incoming: IncomingPeerMessage): InboxFate | undefined {
+		try {
+			return this.inbox?.fate(this.self.id, incoming.from.id, incoming.id);
+		} catch (error) {
+			this.noteInboxFault(error);
+			return undefined;
+		}
+	}
+
+	/** A message the session took is no longer waiting in its inbox, whichever way it arrived. */
+	private settleHeld(incoming: IncomingPeerMessage): void {
+		if (this.heldFate(incoming)?.state !== "pending") return;
+		try {
+			this.inbox?.settle(this.self.id, incoming.from.id, incoming.id);
+		} catch (error) {
+			this.noteInboxFault(error);
+		}
 	}
 
 	private scheduleReconnect(): void {
@@ -812,8 +1080,8 @@ export class ChatMesh {
 		socket.on("error", gone);
 	}
 
-	private refuse(socket: Socket, message: string): void {
-		writeWire(socket, { type: "error", message });
+	private refuse(socket: Socket, message: string, code?: RefusalCode): void {
+		writeWire(socket, { type: "error", message, ...(code ? { code } : {}) });
 		socket.end();
 	}
 
@@ -865,7 +1133,7 @@ export class ChatMesh {
 		// it another one, so its later frames are matched against the claim, not the assigned id.
 		const announced = connection.legacyClaim ?? connection.peer?.id;
 		if (!registering && announced !== claimed) {
-			this.refuse(socket, "pi-chat peer id is already in use on this broker.");
+			this.refuse(socket, "pi-chat peer id is already in use on this broker.", "id_in_use");
 			return;
 		}
 		let peerId = connection.peer?.id ?? claimed;
@@ -873,7 +1141,7 @@ export class ChatMesh {
 		// holder's credential re-claims it. A legacy peer has none.
 		const isCredentialBound = (id: string): boolean => this.issuedCredentials.has(id);
 		if (registering && !connection.legacy && isHeldElsewhere(claimed)) {
-			this.refuse(socket, "pi-chat peer id is already in use on this broker.");
+			this.refuse(socket, "pi-chat peer id is already in use on this broker.", "id_in_use");
 			return;
 		}
 		if (registering && connection.legacy && (isHeldElsewhere(claimed) || isCredentialBound(claimed))) {
@@ -899,7 +1167,7 @@ export class ChatMesh {
 			// session presents after a broker restart (the broker that issued it is gone). A legacy peer is
 			// registered without a credential, as an unverified peer.
 			if (known !== undefined && !secretsEqual(known, message.credential)) {
-				this.refuse(socket, "pi-chat peer id is bound to another credential.");
+				this.refuse(socket, "pi-chat peer id is bound to another credential.", "credential_bound");
 				return;
 			}
 			if (!connection.legacy) {
@@ -1093,48 +1361,35 @@ export class ChatMesh {
 	private async handleClientMessage(line: string): Promise<void> {
 		const message = parseWire(line);
 		if (!message) return;
+		if (message.type === "error") {
+			// The broker refuses an id that is held elsewhere or bound to another credential; status says so until a retry registers.
+			if (message.code === "id_in_use" || message.code === "credential_bound") this.refused = message.message;
+			return;
+		}
 		if (message.type === "peers") {
 			this.peers = new Map(message.peers.map((peer) => [peer.id, peer]));
+			for (const peer of message.peers) this.noteSeen(peer);
 			this.noteFirstPeersFrame();
 			if (this.helloDirty) this.pushHello();
 			return;
 		}
 		if (message.type === "registered") {
 			this.adoptCredential(message.credential);
+			this.refused = undefined;
 			if (this.helloDirty) this.pushHello();
+			// Mail held while this session was away.
+			void this.drainInbox();
 			return;
 		}
 		if (message.type === "incoming") {
-			// A retried send carries the same sender and id: it is delivered once, and every copy is acknowledged.
-			const key = `${message.from.id}\0${message.id}`;
-			let delivery = this.receivedMessages.get(key);
-			if (delivery) {
-				this.receivedMessages.delete(key);
-			} else {
-				delivery = Promise.resolve(
-					this.onIncoming?.({
-						id: message.id,
-						from: message.from,
-						to: message.to,
-						message: message.message,
-						expectReply: message.expectReply,
-						metadata: message.metadata,
-					}),
-				).then(
-					(reply): IncomingOutcome => ({ failed: false, reply }),
-					(error: unknown): IncomingOutcome => ({
-						failed: true,
-						reply: error instanceof Error ? error.message : String(error),
-					}),
-				);
-			}
-			this.receivedMessages.set(key, delivery);
-			while (this.receivedMessages.size > MAX_REMEMBERED_MESSAGES) {
-				const oldest = this.receivedMessages.keys().next().value;
-				if (oldest === undefined) break;
-				this.receivedMessages.delete(oldest);
-			}
-			const outcome = await delivery;
+			const outcome = await this.receive({
+				id: message.id,
+				from: message.from,
+				to: message.to,
+				message: message.message,
+				expectReply: message.expectReply,
+				metadata: message.metadata,
+			});
 			if (this.client && !this.client.destroyed) {
 				writeWire(this.client, {
 					type: "delivery_ack",
