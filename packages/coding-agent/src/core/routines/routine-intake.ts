@@ -220,6 +220,12 @@ export interface RoutineIntakeDeps {
 	isDelivered(deliveryId: string): boolean;
 	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+	/**
+	 * The workflow paths this session's live CI sources watch, as the attempts they delivered carry them (the source's
+	 * repository view); empty until one was delivered, undefined while no CI source of this session is live. Without a
+	 * list, a request naming a workflow file is refused.
+	 */
+	ciWorkflowPaths?(): readonly string[] | undefined;
 	warn(message: string): void;
 }
 
@@ -668,6 +674,7 @@ export class RoutineIntake {
 			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
 		});
 		const keys = new Set<string>();
+		const workflowPaths = this.deps.ciWorkflowPaths?.();
 		for (const [index, source] of candidates.entries()) {
 			let accepted = 0;
 			for (const proposal of proposals[index] ?? []) {
@@ -704,6 +711,7 @@ export class RoutineIntake {
 						sentAt: Date.parse(source.createdAt),
 						now: this.deps.time.now(),
 						hostTimeZone: hostTimeZone(),
+						...(workflowPaths ? { workflowPaths } : {}),
 					},
 					proposal.lasts,
 				);

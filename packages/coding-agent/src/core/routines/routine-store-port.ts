@@ -79,6 +79,10 @@ export interface RoutineStorePort {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		/** The run reported no owner update is needed now (succeeded only). */
+		ownerUpdate?: "none";
+		/** The run reported the routine's stated end met (succeeded, with a stated end, only). */
+		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
 	}): void;
@@ -91,6 +95,7 @@ export interface RoutineStorePort {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
 	}): void;

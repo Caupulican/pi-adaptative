@@ -139,7 +139,7 @@ export const intakeTimingSchema = Type.Union([
 					minLength: 1,
 					maxLength: MAX_ROUTINE_WORKFLOW_PATH_CHARS,
 					description:
-						"Leave it out: the host cannot check workflow names, so a request about one workflow is not scheduled.",
+						"Only when the owner named a workflow file (such as ci.yml): .github/workflows/ followed by that file name. Leave it out otherwise.",
 				}),
 			),
 		},
@@ -194,6 +194,11 @@ export interface IntakeTimingContext {
 	readonly sentAt: number;
 	readonly now: number;
 	readonly hostTimeZone: string;
+	/**
+	 * The workflow paths this session's CI source watches, as its attempts carry them. Absent when no reader reaches
+	 * intake: then a request naming a workflow file is refused.
+	 */
+	readonly workflowPaths?: readonly string[];
 }
 
 /**
@@ -206,9 +211,6 @@ export function compileIntakeTiming(
 	context: IntakeTimingContext,
 	lifetime?: IntakeLifetime,
 ): CompiledIntakeTiming | IntakeTimingRefusal {
-	// The CI watch follows one workflow, and no reader of the repository's workflow names reaches intake.
-	if (timing.kind === "event" && timing.workflowPath !== undefined)
-		return { refused: "the host cannot check workflow names, so it cannot watch one workflow" };
 	const when = context.owner.text.slice(context.when.start, context.when.end);
 	const tokens = tokenize(context.owner);
 	const span = excerptSpan(tokens, context.when);
@@ -309,10 +311,19 @@ function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal
 		untils.push({ construct, end });
 	}
 
+	// A workflow file a CI watch's timing excerpt names before any until-word is read as that name, never as timing.
+	const workflows = event
+		? workflowMentions(text, tokens).filter(
+				(mention) => mention.first >= span.first && mention.last <= span.last && !tail[mention.first],
+			)
+		: [];
+	const named = new Uint8Array(tokens.length);
+	for (const mention of workflows) named.fill(1, mention.first, mention.last);
+
 	const vocabulary = event ? eventVocabulary(language) : language.fillers;
 	const unread: Token[] = [];
 	for (let index = span.first; index < span.last; ) {
-		if (covered[index] || tail[index] || within(index, instruction)) {
+		if (covered[index] || tail[index] || named[index] || within(index, instruction)) {
 			index++;
 			continue;
 		}
@@ -358,8 +369,72 @@ function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal
 	if (modifier) return { refused: placeReason(spanText(text, tokens, modifier)) };
 	if (untils.length > 1) return { refused: exactReason(reading.when) };
 	return timing.kind === "event"
-		? compileEvent(reading, timing, stated, untils[0])
+		? compileEvent(reading, timing, stated, untils[0], workflows)
 		: compileCalendar(reading, timing, stated, untils[0]);
+}
+
+/** A workflow file the owner named ("ci.yml", "release-please.yaml"): its tokens, end exclusive, and its name. */
+interface WorkflowMention {
+	readonly first: number;
+	readonly last: number;
+	/** The file name as written, lowercase. */
+	readonly name: string;
+}
+
+/**
+ * Workflow file names in the owner's stated words: a `yml`/`yaml` token after a period, with the letters and digits
+ * joined to it by nothing, `-`, `_` or `.` before it, and nothing joined after it.
+ */
+function workflowMentions(text: string, tokens: readonly Token[]): WorkflowMention[] {
+	const joined = (left: Token, right: Token) =>
+		left.run === right.run && /^[-_.]?$/u.test(text.slice(left.end, right.start));
+	const mentions: WorkflowMention[] = [];
+	for (let index = 1; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		if ((token.text !== "yml" && token.text !== "yaml") || text.slice(tokens[index - 1]!.end, token.start) !== ".")
+			continue;
+		if (!joined(tokens[index - 1]!, token)) continue;
+		const following = tokens[index + 1];
+		if (following && joined(token, following)) continue;
+		let first = index - 1;
+		while (first > 0 && joined(tokens[first - 1]!, tokens[first]!)) first--;
+		mentions.push({ first, last: index + 1, name: text.slice(tokens[first]!.start, token.end).toLowerCase() });
+	}
+	return mentions;
+}
+
+/** A workflow path's file name. */
+function workflowFile(path: string): string {
+	return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * The workflow path a CI watch's timing excerpt derives: none when it names no workflow file, else the one watched
+ * workflow whose file name it names. Refused when it names more than one, when no reader of the watched workflows
+ * reaches intake, or when the name is not exactly one watched workflow's.
+ */
+function watchedWorkflow(
+	mentions: readonly WorkflowMention[],
+	watched: readonly string[] | undefined,
+): { readonly path?: string } | IntakeTimingRefusal {
+	const names = new Set(mentions.map((mention) => mention.name));
+	if (names.size === 0) return {};
+	if (names.size > 1)
+		return { refused: `${[...names].map(quoted).join(" and ")} name more than one workflow; a CI watch follows one` };
+	const name = [...names][0]!;
+	if (watched === undefined)
+		return { refused: `the host cannot check workflow names here, so it cannot watch ${quoted(name)}` };
+	const files = [...new Set(watched.map(workflowFile))];
+	const matches = watched.filter((path) => workflowFile(path).toLowerCase() === name);
+	if (matches.length === 1) return { path: matches[0]! };
+	if (matches.length > 1)
+		return { refused: `${quoted(name)} names more than one watched workflow, so the host cannot tell which` };
+	return {
+		refused:
+			files.length === 0
+				? `the host has not yet seen a CI attempt of the workflow this session watches, so it cannot check ${quoted(name)}`
+				: `the host watches ${files.map(quoted).join(", ")} for this session, not ${quoted(name)}`,
+	};
 }
 
 /** Constructs inside the instruction that describe the work rather than schedule it ("summarize last week's PRs"). */
@@ -427,10 +502,15 @@ function compileEvent(
 	timing: Extract<IntakeTiming, { kind: "event" }>,
 	stated: readonly Construct[],
 	until: StatedUntil | undefined,
+	workflows: readonly WorkflowMention[],
 ): CompiledIntakeTiming | IntakeTimingRefusal {
 	const { language, tokens, span, when } = reading;
 	// A CI watch has no clock, day or zone: any other construct of its excerpt means the owner asked for something else.
 	if (stated.some((construct) => construct.type !== "event")) return { refused: exactReason(when) };
+	// The workflow is the host's reading of a named file against what it watches; the model's slot must equal it.
+	const workflow = watchedWorkflow(workflows, reading.context.workflowPaths);
+	if ("refused" in workflow) return workflow;
+	if (timing.workflowPath !== workflow.path) return { refused: differsReason(when) };
 	// Outcomes and lifetime words are read before an until-word; the words after it are the stated end.
 	const untilAt = until?.construct.start ?? span.last;
 	const head: TokenSpan = {
@@ -462,12 +542,17 @@ function compileEvent(
 		return { refused: differsReason(when) };
 	const ending =
 		conclusions.length === CI_TERMINAL_CONCLUSIONS.length ? "finishes" : `ends in ${conclusions.join(" or ")}`;
-	const subject = `a CI attempt of the checked-out revision ${ending}`;
+	const subject = `a CI attempt${workflow.path === undefined ? "" : ` of ${workflowFile(workflow.path)}`} of the checked-out revision ${ending}`;
 	return withLifetime(
 		reading,
 		lifetime,
 		until,
-		{ kind: "event", source: "ci", ...(timing.conclusions === undefined ? {} : { conclusions: [...conclusions] }) },
+		{
+			kind: "event",
+			source: "ci",
+			...(timing.conclusions === undefined ? {} : { conclusions: [...conclusions] }),
+			...(workflow.path === undefined ? {} : { workflowPath: workflow.path }),
+		},
 		lifetime === "next" ? `once, the next time ${subject}, then it is removed` : `every time ${subject}`,
 		[],
 	);

@@ -504,6 +504,8 @@ export interface WorkerResultContract {
 	receipts?: WorkerResultReceipts;
 	/** Host-stamped only for a clean completed claim whose host-accepted report states the owner needs no update now. */
 	ownerUpdate?: "none";
+	/** Host-stamped under the same rule: the report states the end its routine brief named was reached. Routine results only read it. */
+	conditionMet?: true;
 	createdAt: string;
 }
 

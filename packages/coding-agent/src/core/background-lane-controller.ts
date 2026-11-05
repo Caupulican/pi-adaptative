@@ -162,6 +162,7 @@ import {
 } from "./routines/routine-parent-input.ts";
 import {
 	RoutineSchedulerController,
+	routineCiWorkflowPaths,
 	routineEventAnchor,
 	routineHostEventFeed,
 	routineInstructions,
@@ -1584,6 +1585,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
+			ciWorkflowPaths: () => {
+				const lifecycle = this._getWorkerLifecycle();
+				const events = lifecycle.ledger.runtime.hostEvents;
+				return routineCiWorkflowPaths(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
+					events.isSourceReady(sourceId),
+				);
+			},
 			warn: (message) => this._safeWarn(message),
 		});
 		this._routines = { scheduler, session, intake };

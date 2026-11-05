@@ -26,6 +26,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	const { occurrence, result } = delivery;
 	const trigger = occurrence.trigger;
 	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger.expiresAt);
+	if (trigger.kind === "condition") return routineConditionNotice(delivery, trigger);
 	const quiet = result.ownerUpdate === "none";
 	const holds = held && !quiet;
 	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
@@ -115,6 +116,33 @@ function routineExpiryNotice(delivery: RoutineDelivery, expiresAt: number): Pare
 			outcome: result.outcome,
 			resultDigest: result.digest,
 			expiresAt,
+		},
+	};
+	return routineCompletionInput(delivery, message, true);
+}
+
+/**
+ * The host's one notice that a run of the routine reported the end the owner stated as met and the routine was
+ * removed. It carries no worker text (the reporting run's own result carries its evidence) and rides with the owner's
+ * next turn; its identity is the stored occurrence's, so a redelivery after restart is the same input.
+ */
+function routineConditionNotice(
+	delivery: RoutineDelivery,
+	trigger: Extract<RoutineDelivery["occurrence"]["trigger"], { kind: "condition" }>,
+): ParentInputDelivery {
+	const { occurrence, result } = delivery;
+	const end = occurrence.definition.origin?.endCondition ?? "";
+	const message = {
+		customType: ROUTINE_COMPLETION_TYPE,
+		display: true,
+		content: `Routine ${occurrence.routineId} ended: ${JSON.stringify(end)} was reported met by its run ${trigger.occurrenceId}, so the host removed it; it will not run again. The host did not check the end itself: that run's result holds the evidence. Tell the owner once, briefly, when it bears on what they ask next; they can ask for it again.`,
+		details: {
+			occurrenceId: occurrence.occurrenceId,
+			routineId: occurrence.routineId,
+			routineRevision: occurrence.routineRevision,
+			outcome: result.outcome,
+			resultDigest: result.digest,
+			conditionMetBy: trigger.occurrenceId,
 		},
 	};
 	return routineCompletionInput(delivery, message, true);

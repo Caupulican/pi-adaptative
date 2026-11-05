@@ -36,6 +36,8 @@ export interface RoutineToolSummary {
 	readonly unschedulable?: string;
 	/** The host paused it after this many failed runs in a row; it stays paused until the owner resumes it. */
 	readonly pausedAfterFailures?: number;
+	/** A run reported the end the owner stated as met: it runs no more and is removed once its results are delivered. */
+	readonly endReportedMet?: true;
 }
 
 /** Complete authored values for read-before-edit, without compiled authority or parent identity. */

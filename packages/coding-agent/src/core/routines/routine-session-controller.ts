@@ -55,7 +55,10 @@ export function routineIntakeRoutineId(origin: RoutineIntakeOrigin): string {
 
 function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 	const unschedulable = routineZoneUnsupported(routine.schedule);
-	const nextRunAt = unschedulable === undefined ? nextRoutineAt(routine.schedule, routine.cursor) : undefined;
+	const nextRunAt =
+		unschedulable === undefined && !routine.conditionMet
+			? nextRoutineAt(routine.schedule, routine.cursor)
+			: undefined;
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
@@ -66,6 +69,7 @@ function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 		...(routine.lastStatus === undefined ? {} : { lastStatus: routine.lastStatus }),
 		...(unschedulable === undefined ? {} : { unschedulable }),
 		...(routine.failurePause === undefined ? {} : { pausedAfterFailures: routine.failurePause.after }),
+		...(routine.conditionMet ? { endReportedMet: true as const } : {}),
 	};
 }
 

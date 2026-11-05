@@ -380,6 +380,8 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 		workerClaimStringArray(entry ?? [], label, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS);
 	if (report.ownerUpdate !== undefined && report.ownerUpdate !== "none")
 		invalidWorkerClaim("claim.report.ownerUpdate is invalid.");
+	if (report.conditionMet !== undefined && report.conditionMet !== true)
+		invalidWorkerClaim("claim.report.conditionMet is invalid.");
 	return {
 		requirements: workerClaimRecordArray(
 			report.requirements ?? [],
@@ -431,6 +433,7 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 		regressions: texts(report.regressions, "claim.report.regressions"),
 		remaining: texts(report.remaining, "claim.report.remaining"),
 		...(report.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
+		...(report.conditionMet === true ? { conditionMet: true as const } : {}),
 	};
 }
 

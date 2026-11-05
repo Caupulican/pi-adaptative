@@ -38,9 +38,12 @@ import {
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	RoutineAdmissionRefused,
 	type RoutineAwayClaimGate,
+	type RoutineOccurrence,
 	routineAwayHeld,
 	routineAwaySpendRoom,
 	routineEnded,
+	routineJournalRoom,
+	routineJournalShare,
 } from "./routine-contract.ts";
 import { RoutineSchedulerController, routineHostEventFeed } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -202,7 +205,7 @@ async function openAwayRoutineHost(args: {
 export class AwayRoutineSupervisor {
 	private readonly deps: AwayRoutineSupervisorDeps;
 	private readonly hosts = new Map<string, AwayRoutineHost>();
-	/** Per parent, the file stamp and due work its last host closed idle on, or its last refusal was recorded for. */
+	/** Per parent, the file stamp, due work and journal room its last host closed idle on, or its last refusal was recorded for. */
 	private readonly idle = new Map<string, string>();
 	/** Per parent, when a failed open is tried again. */
 	private readonly retryAt = new Map<string, number>();
@@ -294,7 +297,7 @@ export class AwayRoutineSupervisor {
 
 		for (const routine of store.listRoutines()) {
 			if (!routine.enabled || routine.target.kind !== "session" || routine.schedule.kind === "event") continue;
-			if (routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined) continue;
+			if (routineEnded(routine, nowMs) !== undefined) continue;
 			const snapshot = routine.executionSnapshot;
 			const sessionFile = snapshot?.savedIntent.receiptOrigin.sessionFile;
 			const reason = !snapshot
@@ -333,7 +336,25 @@ export class AwayRoutineSupervisor {
 			entry.sessionFile ??= sessionFile;
 			entry.due.push(`routine:${routine.routineId}`);
 			entry.dueRoutines.push(routine.routineId);
+			// A routine holding its whole journal share frees it by time when an uncertain run's retention passes.
+			const share = routineJournalShare(occurrences, routine.routineId, nowMs);
+			if (!share.fits && share.exit !== undefined) next = Math.min(next, share.exit);
 		}
+		// A full journal makes room by time when an entry's retention or away charge ends; otherwise by a store change.
+		const journal = routineJournalRoom(occurrences, nowMs);
+		if (!journal.room && journal.exit !== undefined && [...parents.values()].some((entry) => entry.due.length > 0))
+			next = Math.min(next, journal.exit);
+		/**
+		 * What a parent's idle memo stands on: its transcript, model prices, its due work, and the journal room that work
+		 * needs (the journal's own room and which due routines hold their whole share). Room returning through another
+		 * parent's delivered results changes no file of this parent, so it must change the memo.
+		 */
+		const fingerprintOf = (entry: ParentWork, current: readonly RoutineOccurrence[]): string => {
+			const shareless = entry.dueRoutines.filter(
+				(routineId) => !routineJournalShare(current, routineId, nowMs).fits,
+			);
+			return `${fileStamp(entry.sessionFile)}|${modelsStamp}|${[...entry.due].sort().join(",")}|${routineJournalRoom(current, nowMs).room}|${shareless.sort().join(",")}`;
+		};
 		for (const occurrence of occurrences) {
 			if (occurrence.target.kind !== "session") continue;
 			const parentSessionId = occurrence.parentOrigin.sessionId;
@@ -377,9 +398,10 @@ export class AwayRoutineSupervisor {
 		 * After a host's claim: keep it while it holds a run; otherwise close it and remember its parent idle, unless the
 		 * claim waited for spend room, which time or another run's end returns without any change to the parent.
 		 */
-		const afterClaim = async (host: AwayRoutineHost, fingerprint: string): Promise<boolean> => {
+		const afterClaim = async (host: AwayRoutineHost, entry: ParentWork): Promise<boolean> => {
 			const held = this.holdsWork(host);
-			room = routineAwaySpendRoom(store.listRoutineOccurrences(), this.gate(), nowMs).fits(0);
+			const current = store.listRoutineOccurrences();
+			room = routineAwaySpendRoom(current, this.gate(), nowMs).fits(0);
 			if (held) return true;
 			const spendWait = host.scheduler.awaySpendWait();
 			await this.closeHosts([host.parentSessionId]);
@@ -388,13 +410,15 @@ export class AwayRoutineSupervisor {
 				waitingForRoom = true;
 				if (spendWait.retryAt !== undefined) next = Math.min(next, spendWait.retryAt);
 				this.idle.delete(host.parentSessionId);
-			} else this.idle.set(host.parentSessionId, fingerprint);
+			}
+			// Memoized on the journal room left after the claim, so room returning wakes the parent again.
+			else this.idle.set(host.parentSessionId, fingerprintOf(entry, current));
 			return false;
 		};
 		for (const parentSessionId of new Set([...parents.keys(), ...this.hosts.keys()])) {
 			if (this.disposed) return;
 			const entry = parents.get(parentSessionId) ?? emptyParentWork();
-			const fingerprint = `${fileStamp(entry.sessionFile)}|${modelsStamp}|${[...entry.due].sort().join(",")}`;
+			const fingerprint = fingerprintOf(entry, occurrences);
 			const host = this.hosts.get(parentSessionId);
 			const open = this.parentOpen(parentSessionId);
 			// A refusal stands only for a closed parent: an open one runs its own routines.
@@ -409,7 +433,7 @@ export class AwayRoutineSupervisor {
 				// Idle: let it claim what is due now, then keep it only while that left a run to hold.
 				if (!open && entry.due.length > 0 && this.idle.get(parentSessionId) !== fingerprint) {
 					await host.scheduler.tick();
-					await afterClaim(host, fingerprint);
+					await afterClaim(host, entry);
 					continue;
 				}
 				await this.closeHosts([parentSessionId]);
@@ -479,7 +503,7 @@ export class AwayRoutineSupervisor {
 			this.hosts.set(parentSessionId, opened);
 			opened.scheduler.start();
 			await opened.scheduler.tick();
-			await afterClaim(opened, fingerprint);
+			await afterClaim(opened, entry);
 		}
 
 		if (refusals.length > 0) {

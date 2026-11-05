@@ -46,7 +46,6 @@ import {
 	ROUTINE_INTAKE_LIVE_CAP,
 	ROUTINE_INTAKE_WINDOW_CAP,
 	ROUTINE_JOURNAL_SHARE,
-	ROUTINE_UNCERTAIN_RETENTION_MS,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
@@ -65,11 +64,12 @@ import {
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	rebasedRoutineCursor,
-	routineAwayCharged,
 	routineAwayHeld,
 	routineAwaySpendRoom,
 	routineCursorAfter,
 	routineEnded,
+	routineJournalRemovable,
+	routineJournalShare,
 	routineOccurrenceId,
 	routineOccurrencesSettled,
 	routinePreviousSlot,
@@ -929,16 +929,25 @@ export class PersistentBotTeamStore {
 		summaryRaw: string,
 		recipient: string,
 		ownerUpdate?: "none",
+		conditionMet?: true,
 	): RoutineOccurrence {
 		const summary = summaryRaw.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
 		if (recipient !== occurrence.parentOrigin.sessionId)
 			throw new Error("Routine result recipient does not match its admitted parent.");
-		if (ownerUpdate !== undefined && outcome !== "succeeded")
-			throw new Error("Only a succeeded routine run can skip the owner update.");
-		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none");
+		if ((ownerUpdate !== undefined || conditionMet !== undefined) && outcome !== "succeeded")
+			throw new Error("Only a succeeded routine run can skip the owner update or report its stated end met.");
+		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none", conditionMet === true);
 		const finished: RoutineOccurrence = {
 			...occurrence,
-			result: { outcome, summary, digest, delivery: "pending", recipient, ...(ownerUpdate ? { ownerUpdate } : {}) },
+			result: {
+				outcome,
+				summary,
+				digest,
+				delivery: "pending",
+				recipient,
+				...(ownerUpdate ? { ownerUpdate } : {}),
+				...(conditionMet ? { conditionMet } : {}),
+			},
 		};
 		// The routine's last run state follows the result of its most recently claimed occurrence only.
 		const routine = this.routines.get(occurrence.routineId);
@@ -948,7 +957,28 @@ export class PersistentBotTeamStore {
 		)
 			this.routines.set(routine.routineId, withRoutineRunState(routine, finished));
 		this.recordRoutineFailureStreak(finished, outcome, summary);
+		if (conditionMet) this.recordRoutineConditionMet(finished);
 		return finished;
+	}
+
+	/**
+	 * Marks the routine ended in the write that records a result reporting its stated end met, for the incarnation the
+	 * run belongs to only, and cancels its undispatched runs. The first report stands; the revision does not move. The
+	 * routine is removed, with its one notice, once its runs are settled (`retireEndedRoutines`).
+	 */
+	private recordRoutineConditionMet(occurrence: RoutineOccurrence): void {
+		const routine = this.routines.get(occurrence.routineId);
+		if (
+			routine?.incarnationId !== occurrence.definition.incarnationId ||
+			routine.origin?.endCondition === undefined ||
+			routine.conditionMet
+		)
+			return;
+		this.routines.set(routine.routineId, {
+			...routine,
+			conditionMet: { at: occurrence.updatedAt, occurrenceId: occurrence.occurrenceId },
+		});
+		this.cancelUndispatchedRoutineOccurrences(routine.routineId, occurrence.updatedAt);
 	}
 
 	/**
@@ -983,28 +1013,16 @@ export class PersistentBotTeamStore {
 				lastError: boundedRedactedDiagnosticText(summary) ?? "No summary was provided.",
 			},
 		});
-		this.cancelUndispatchedRoutineOccurrences(routine.routineId, occurrence.updatedAt);
-	}
-
-	/**
-	 * Whether the journal may drop an entry: everything it owes was delivered, and it is finished, or uncertain past
-	 * {@link ROUTINE_UNCERTAIN_RETENTION_MS} since its last transition (its uncertainty was already delivered).
-	 */
-	private routineOccurrenceSettled(item: RoutineOccurrence, nowMs: number): boolean {
-		return (
-			item.result?.delivery === "acknowledged" &&
-			(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged") &&
-			(item.phase === "terminal" ||
-				(item.phase === "uncertain" && item.updatedAt <= nowMs - ROUTINE_UNCERTAIN_RETENTION_MS))
+		this.cancelUndispatchedRoutineOccurrences(
+			routine.routineId,
+			occurrence.updatedAt,
+			"Another run of this routine reported its stated end met before this one was dispatched.",
 		);
 	}
 
-	/** Whether a routine may admit one more run: it holds fewer than {@link ROUTINE_JOURNAL_SHARE} unsettled entries. */
+	/** Whether a routine may admit one more run: it holds fewer than its journal share of unsettled entries. */
 	private routineHasJournalShare(routineId: string, nowMs: number): boolean {
-		let held = 0;
-		for (const item of this.routineOccurrences.values())
-			if (item.routineId === routineId && !this.routineOccurrenceSettled(item, nowMs)) held++;
-		return held < ROUTINE_JOURNAL_SHARE;
+		return routineJournalShare(this.routineOccurrences.values(), routineId, nowMs).fits;
 	}
 
 	/**
@@ -1014,12 +1032,12 @@ export class PersistentBotTeamStore {
 	private routineJournalHasRoom(nowMs: number): boolean {
 		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return true;
 		const removable = Array.from(this.routineOccurrences.values())
-			.filter((item) => this.routineOccurrenceSettled(item, nowMs) && !routineAwayCharged(item, nowMs))
+			.filter((item) => routineJournalRemovable(item, nowMs))
 			.sort((a, b) => a.updatedAt - b.updatedAt);
 		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
 			const item = removable.shift();
 			if (!item) continue;
-			// Slot occurrences cannot recur behind their cursor, nor an expiry notice after its routine is removed; manual
+			// Slot occurrences cannot recur behind their cursor, nor an end notice after its routine is removed; manual
 			// commands and CI attempts can be re-presented.
 			if (item.trigger.kind === "manual" || item.trigger.kind === "event") {
 				if (this.routineReplayTombstones.size >= MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
@@ -1086,13 +1104,17 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	private cancelUndispatchedRoutineOccurrences(routineId: string, nowMs: number): void {
+	private cancelUndispatchedRoutineOccurrences(
+		routineId: string,
+		nowMs: number,
+		summary = "Routine was paused or deleted before dispatch.",
+	): void {
 		for (const item of this.routineOccurrences.values()) {
 			if (item.routineId !== routineId || (item.phase !== "pending" && item.phase !== "claimed")) continue;
 			const cancelled = this.withResult(
 				{ ...item, phase: "terminal", updatedAt: nowMs },
 				"cancelled",
-				"Routine was paused or deleted before dispatch.",
+				summary,
 				item.parentOrigin.sessionId,
 			);
 			this.routineOccurrences.set(item.occurrenceId, cancelled);
@@ -1774,6 +1796,13 @@ export class PersistentBotTeamStore {
 					? {}
 					: { failureStreak: existing.failureStreak }),
 				...(definition.enabled || !existing?.failurePause ? {} : { failurePause: existing.failurePause }),
+				// A reported end stands while the end the owner stated stands; a write that changes or drops it clears it.
+				...(existing?.conditionMet &&
+				existing.incarnationId === definition.incarnationId &&
+				existing.origin?.endCondition !== undefined &&
+				definition.origin?.endCondition === existing.origin.endCondition
+					? { conditionMet: existing.conditionMet }
+					: {}),
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
@@ -1938,9 +1967,10 @@ export class PersistentBotTeamStore {
 
 	/**
 	 * Removes the session's ended routines among `routineIds` once every run of their incarnation is past dispatch and
-	 * delivered. A spent one-run routine leaves quietly: its run's result was the last word. An expired routine leaves a
-	 * terminal notice occurrence, written in the same store write as the removal, so the owner is told exactly once even
-	 * across a crash. `journalFull`: an expired routine stays until delivered results make room for its notice.
+	 * delivered. A spent one-run routine leaves quietly: its run's result was the last word. An expired routine, and one a
+	 * run reported its stated end met for, leaves a terminal notice occurrence, written in the same store write as the
+	 * removal, so the owner is told exactly once even across a crash. `journalFull`: such a routine stays until delivered
+	 * results make room for its notice.
 	 */
 	retireEndedRoutines(input: RoutineRetireInput): {
 		readonly retired: readonly string[];
@@ -1953,9 +1983,16 @@ export class PersistentBotTeamStore {
 				const routine = this.routines.get(routineId);
 				if (!routine || input.nowMs < Date.parse(routine.updatedAt)) continue;
 				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
-				const ended = routineEnded(routine.schedule, routine.cursor, input.nowMs);
+				const ended = routineEnded(routine, input.nowMs);
 				if (!ended || !routineOccurrencesSettled(this.routineOccurrences.values(), routine)) continue;
-				if (ended === "expired" && routine.schedule.kind !== "once" && routine.schedule.expiresAt !== undefined) {
+				const met = ended === "condition" ? routine.conditionMet : undefined;
+				if (met && input.nowMs < met.at) continue;
+				const trigger: RoutineOccurrence["trigger"] | undefined = met
+					? { kind: "condition", occurrenceId: met.occurrenceId, metAt: met.at }
+					: ended === "expired" && routine.schedule.kind !== "once" && routine.schedule.expiresAt !== undefined
+						? { kind: "expiry", expiresAt: routine.schedule.expiresAt }
+						: undefined;
+				if (trigger) {
 					const parentOrigin =
 						routine.target.kind === "session"
 							? routine.executionSnapshot?.savedIntent.receiptOrigin
@@ -1965,7 +2002,6 @@ export class PersistentBotTeamStore {
 						journalFull = true;
 						continue;
 					}
-					const trigger = { kind: "expiry" as const, expiresAt: routine.schedule.expiresAt };
 					const notice = this.createClaimedOccurrence(
 						routine,
 						routineOccurrenceId(routine, trigger),
@@ -1980,7 +2016,9 @@ export class PersistentBotTeamStore {
 						this.withResult(
 							{ ...notice, phase: "terminal" },
 							"cancelled",
-							"The routine reached its end time and was removed.",
+							trigger.kind === "condition"
+								? "A run reported the end the owner stated as met; the routine was removed."
+								: "The routine reached its end time and was removed.",
 							parentOrigin.sessionId,
 						),
 					);
@@ -2105,7 +2143,7 @@ export class PersistentBotTeamStore {
 				if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
 				if (eligible && !eligible.has(id)) continue;
 				// An ended routine starts nothing more; `retireEndedRoutines` removes it once its runs are delivered.
-				if (routineEnded(stored.schedule, stored.cursor, input.nowMs)) continue;
+				if (routineEnded(stored, input.nowMs)) continue;
 				if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;
 				// An occurrence is never older than its definition: with the clock behind the last edit, wait for it.
 				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
@@ -2564,6 +2602,7 @@ export class PersistentBotTeamStore {
 		recipient: string;
 		nowMs: number;
 		ownerUpdate?: "none";
+		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
 	}): void {
@@ -2581,6 +2620,7 @@ export class PersistentBotTeamStore {
 				summary,
 				input.recipient,
 				input.ownerUpdate,
+				input.conditionMet,
 			),
 		);
 	}
@@ -2594,13 +2634,22 @@ export class PersistentBotTeamStore {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
 	}): void {
 		this.mutate(() => {
 			const current = this.routineOccurrences.get(input.occurrenceId);
 			const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
-			const resolutionDigest = routineResultDigest(input.outcome, summary, input.recipient);
+			if (input.conditionMet && input.outcome !== "succeeded")
+				throw new Error("Only a succeeded routine run can report its stated end met.");
+			const resolutionDigest = routineResultDigest(
+				input.outcome,
+				summary,
+				input.recipient,
+				false,
+				input.conditionMet === true,
+			);
 			if (
 				current?.phase === "terminal" &&
 				current.claim?.token === input.claimToken &&
@@ -2631,6 +2680,7 @@ export class PersistentBotTeamStore {
 				digest: resolutionDigest,
 				delivery: "pending" as const,
 				recipient: input.recipient,
+				...(input.conditionMet ? { conditionMet: true as const } : {}),
 			};
 			const { uncertainty: _uncertainty, ...resolvedBase } = current;
 			const next: RoutineOccurrence = {
@@ -2647,6 +2697,7 @@ export class PersistentBotTeamStore {
 			this.routineOccurrences.set(next.occurrenceId, next);
 			// The run's known outcome counts toward the failure streak now; its uncertainty did not.
 			this.recordRoutineFailureStreak(next, input.outcome, summary);
+			if (input.conditionMet) this.recordRoutineConditionMet(next);
 			this.save();
 		});
 	}

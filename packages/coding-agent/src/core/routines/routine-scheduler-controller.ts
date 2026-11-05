@@ -53,11 +53,11 @@ const ROUTINE_UNATTENDED_LINE =
 export function routineInstructions(occurrence: RoutineOccurrence): string {
 	const trigger = occurrence.trigger;
 	const end = occurrence.definition.origin?.endCondition;
-	// The host cannot watch an end the owner stated in words; each run is told it and says when it is reached.
+	// The host cannot watch an end the owner stated in words; each run is told it and reports whether it is reached.
 	const unattended =
 		end === undefined
 			? ROUTINE_UNATTENDED_LINE
-			: `The owner wants this only until the end they stated: ${JSON.stringify(end)}. If that end has been reached, say so first in the report and do not report ownerUpdate "none", so the owner can remove the routine.\n${ROUTINE_UNATTENDED_LINE}`;
+			: `The owner wants this only until the end they stated: ${JSON.stringify(end)}. Report conditionMet truthfully: true only when this run found that end reached, false otherwise. On true the host removes the routine after delivering this result and tells the owner once; say in the report what showed the end was reached, and do not report ownerUpdate "none".\n${ROUTINE_UNATTENDED_LINE}`;
 	if (trigger.kind !== "event") return `${occurrence.definition.prompt}\n\n${unattended}`;
 	const event = trigger.event;
 	const facts = JSON.stringify({
@@ -125,6 +125,34 @@ export function routineHostEventFeed(
 		};
 	});
 	return { events, replayGaps: routineReplayGapDigest(state) };
+}
+
+/**
+ * The workflow paths this session's live CI sources watch, read from the attempts they delivered to the ledger: an
+ * attempt counts when its workflow is the one a live source watches for the current checkout (its root subjects).
+ * Undefined while no source is live here; empty until a watched attempt was delivered.
+ */
+export function routineCiWorkflowPaths(
+	state: TaskRuntimeProjection,
+	isSourceReady: (sourceId: string) => boolean,
+): readonly string[] | undefined {
+	const workflowKey = (host: string, repositoryId: number, workflowId: number) =>
+		JSON.stringify([host, repositoryId, workflowId]);
+	const watched = new Set<string>();
+	let live = false;
+	for (const source of Object.values(state.eventSources)) {
+		if (!isSourceReady(source.registration.sourceId)) continue;
+		live = true;
+		for (const subject of source.registration.rootSubjects)
+			watched.add(workflowKey(subject.host, subject.repositoryId, subject.workflowId));
+	}
+	if (!live) return undefined;
+	const paths = new Set<string>();
+	for (const accepted of Object.values(state.hostEvents)) {
+		const { identity, workflowPath } = accepted.envelope.event;
+		if (watched.has(workflowKey(identity.host, identity.repositoryId, identity.workflowId))) paths.add(workflowPath);
+	}
+	return [...paths].sort();
 }
 
 /** Read-only view of the session's host events; the scheduler never writes event custody. */
@@ -483,7 +511,7 @@ export class RoutineSchedulerController {
 		const ended = this.eligibleRoutines().filter(
 			(routine) =>
 				(routine.target.kind !== "session" || routine.target.parentSessionId === this.deps.parentSessionId) &&
-				routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined &&
+				routineEnded(routine, nowMs) !== undefined &&
 				routineOccurrencesSettled(occurrences, routine),
 		);
 		if (ended.length === 0) return;
@@ -539,7 +567,7 @@ export class RoutineSchedulerController {
 		const eventRoutines = eligibleRoutines.filter(
 			(routine) =>
 				routine.enabled &&
-				routineEnded(routine.schedule, routine.cursor, nowMs) === undefined &&
+				routineEnded(routine, nowMs) === undefined &&
 				routine.schedule.kind === "event" &&
 				routine.target.kind === "session" &&
 				routine.target.parentSessionId === this.deps.parentSessionId,
@@ -712,12 +740,24 @@ export class RoutineSchedulerController {
 				? { awaySpentUsd: this.deps.worker.spentUsd(this.request(occurrence)) }
 				: {}),
 		};
+		// Only a routine whose brief named an end the owner stated acts on a run reporting it met; for any other the
+		// report is dropped and the drop reported once.
+		let conditionMet: { conditionMet: true } | undefined;
+		if (outcome.outcome === "succeeded" && execution.result?.conditionMet === true) {
+			if (occurrence.definition.origin?.endCondition !== undefined) conditionMet = { conditionMet: true };
+			else
+				this.report(
+					`condition|${occurrence.routineId}`,
+					`Routine ${occurrence.routineId}: a run reported an end condition met, but the routine has no stated end; the report was ignored.`,
+				);
+		}
 		// A resolved uncertainty is never quiet: the parent was already told this run's outcome was unknown.
 		if (occurrence.phase === "uncertain")
 			this.deps.store.resolveUncertainRoutineOccurrence({
 				...outcome,
 				dispatchKey: occurrence.dispatchKey!,
 				executionRef: { taskId: execution.taskId, attemptId: execution.attemptId },
+				...conditionMet,
 			});
 		else
 			this.deps.store.finishRoutineOccurrence({
@@ -725,6 +765,7 @@ export class RoutineSchedulerController {
 				...(outcome.outcome === "succeeded" && execution.result?.ownerUpdate === "none"
 					? { ownerUpdate: "none" as const }
 					: {}),
+				...conditionMet,
 			});
 	}
 
@@ -989,7 +1030,7 @@ export class RoutineSchedulerController {
 			// A routine's end wakes the retire step, paused or not. Once ended it has no alarm: the settlement of its last
 			// run or delivery wakes the pass that removes it.
 			const end = this.deps.away || routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;
-			if (routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined) continue;
+			if (routineEnded(routine, nowMs) !== undefined) continue;
 			let due: number | undefined;
 			try {
 				due = routine.enabled ? this.routineDueAt(routine, nowMs, previousSlots) : undefined;
@@ -1039,7 +1080,7 @@ export class RoutineSchedulerController {
 			routine.target.parentSessionId !== this.deps.parentSessionId ||
 			routine.schedule.kind === "event" ||
 			// An ended routine has no run left; the parent retires it when it opens.
-			routineEnded(routine.schedule, routine.cursor, this.deps.timers.now()) !== undefined
+			routineEnded(routine, this.deps.timers.now()) !== undefined
 		)
 			return undefined;
 		const snapshot = routine.executionSnapshot;

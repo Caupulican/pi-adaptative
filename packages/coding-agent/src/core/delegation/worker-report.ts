@@ -146,6 +146,12 @@ export const submitReportParameters = Type.Object(
 					"none when the result needs no attention from the owner now: nothing failed, changed or needs a decision (for example a scheduled check that found nothing new). needed otherwise; omit when unsure.",
 			}),
 		),
+		conditionMet: Type.Optional(
+			Type.Boolean({
+				description:
+					"Only for a routine run whose brief names the end the owner stated: true when this run found that end reached (the host then removes the routine), false when not. Omit otherwise.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -253,6 +259,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 			regressions: clipped(args.regressions, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
 			remaining: clipped(args.remaining, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
 			...(args.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
+			...(args.conditionMet === true ? { conditionMet: true as const } : {}),
 		},
 	};
 }

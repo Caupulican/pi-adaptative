@@ -325,6 +325,12 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		...(args.outputArtifact ? [args.outputArtifact] : []),
 	];
 	const blockers = claim.blockers ?? [];
+	const cleanAccepted =
+		status === "completed" &&
+		blockers.length === 0 &&
+		!claim.inconclusive?.length &&
+		claim.parentReviewRequired !== true &&
+		claim.hostVerdict?.verdict === "accepted";
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		resultId: `result-${args.handle.attemptId}-${args.handle.fencingToken}`,
@@ -378,13 +384,9 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		},
 		createdAt,
 		...(receipts ? { receipts } : {}),
-		...(claim.report?.ownerUpdate === "none" &&
-		status === "completed" &&
-		blockers.length === 0 &&
-		!claim.inconclusive?.length &&
-		claim.parentReviewRequired !== true &&
-		claim.hostVerdict?.verdict === "accepted"
-			? { ownerUpdate: "none" as const }
-			: {}),
+		// The worker's statements about the owner's attention and a routine's stated end count only on a clean,
+		// host-accepted completion; only the routine result path reads them.
+		...(cleanAccepted && claim.report?.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
+		...(cleanAccepted && claim.report?.conditionMet === true ? { conditionMet: true as const } : {}),
 	};
 }

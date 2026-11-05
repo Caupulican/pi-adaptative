@@ -490,7 +490,12 @@ export type RoutineOccurrenceTrigger =
 			readonly event: CiAttemptTerminalEvent;
 	  }
 	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
-	| { readonly kind: "expiry"; readonly expiresAt: number };
+	| { readonly kind: "expiry"; readonly expiresAt: number }
+	/**
+	 * The host's notice that a run reported the routine's stated end met and the routine was removed; recorded terminal,
+	 * never run. Keyed by the reporting occurrence, so a replayed retirement writes the same notice.
+	 */
+	| { readonly kind: "condition"; readonly occurrenceId: string; readonly metAt: number };
 export type RoutineTerminalOutcome = "succeeded" | "failed" | "cancelled" | "uncertain";
 
 export interface RoutineResult {
@@ -502,6 +507,8 @@ export interface RoutineResult {
 	readonly deliveryMarker?: string;
 	/** The worker reported, and the host accepted, that this succeeded run needs no owner update now. */
 	readonly ownerUpdate?: "none";
+	/** The worker reported, and the host accepted, that this succeeded run found the routine's stated end reached. */
+	readonly conditionMet?: true;
 }
 
 export interface RoutineOccurrence {
@@ -646,6 +653,82 @@ export function routineAwayHeld(
 	return false;
 }
 
+/**
+ * Whether the journal may drop an entry: everything it owes was delivered, and it is finished, or uncertain past
+ * {@link ROUTINE_UNCERTAIN_RETENTION_MS} since its last transition (its uncertainty was already delivered).
+ */
+export function routineOccurrenceSettled(item: RoutineOccurrence, nowMs: number): boolean {
+	return (
+		item.result?.delivery === "acknowledged" &&
+		(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged") &&
+		(item.phase === "terminal" ||
+			(item.phase === "uncertain" && item.updatedAt <= nowMs - ROUTINE_UNCERTAIN_RETENTION_MS))
+	);
+}
+
+/**
+ * When an entry stops holding journal room by time alone: an uncertain run whose uncertainty was delivered, once the
+ * uncertain retention passes. Undefined when it settles only with a store change, or already settled.
+ */
+function routineSettlesAt(item: RoutineOccurrence, nowMs: number): number | undefined {
+	if (
+		item.phase !== "uncertain" ||
+		item.result?.delivery !== "acknowledged" ||
+		item.priorUncertaintyResult?.delivery === "pending"
+	)
+		return undefined;
+	const at = item.updatedAt + ROUTINE_UNCERTAIN_RETENTION_MS;
+	return at > nowMs ? at : undefined;
+}
+
+/**
+ * Whether a routine may admit one more run: it holds fewer than {@link ROUTINE_JOURNAL_SHARE} unsettled entries; when
+ * it may not, the earliest instant one of them settles by time (undefined: only a store change frees its share).
+ */
+export function routineJournalShare(
+	occurrences: Iterable<RoutineOccurrence>,
+	routineId: string,
+	nowMs: number,
+): { readonly fits: boolean; readonly exit?: number } {
+	let held = 0;
+	let exit: number | undefined;
+	for (const item of occurrences) {
+		if (item.routineId !== routineId || routineOccurrenceSettled(item, nowMs)) continue;
+		held++;
+		const at = routineSettlesAt(item, nowMs);
+		if (at !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, at);
+	}
+	return held < ROUTINE_JOURNAL_SHARE ? { fits: true } : { fits: false, ...(exit === undefined ? {} : { exit }) };
+}
+
+/** Whether the journal may drop the entry now: settled, and no longer charged to the away spend bound. */
+export function routineJournalRemovable(item: RoutineOccurrence, nowMs: number): boolean {
+	return routineOccurrenceSettled(item, nowMs) && !routineAwayCharged(item, nowMs);
+}
+
+/**
+ * Whether the journal can take one more entry (it is below capacity, or holds an entry it may drop); when it cannot,
+ * the earliest instant an entry becomes droppable by time alone: its uncertain retention or away charge ending
+ * (undefined: only a store change makes room). Replay tombstone capacity is the store's own concern.
+ */
+export function routineJournalRoom(
+	occurrences: readonly RoutineOccurrence[],
+	nowMs: number,
+): { readonly room: boolean; readonly exit?: number } {
+	if (occurrences.length < MAX_ROUTINE_OCCURRENCES) return { room: true };
+	let exit: number | undefined;
+	for (const item of occurrences) {
+		if (routineJournalRemovable(item, nowMs)) return { room: true };
+		const settledAt = routineOccurrenceSettled(item, nowMs) ? nowMs : routineSettlesAt(item, nowMs);
+		if (settledAt === undefined) continue;
+		const charge = routineAwayCharge(item, 0, nowMs);
+		if (charge && charge.until === undefined) continue;
+		const at = Math.max(settledAt, charge?.until ?? settledAt);
+		if (at > nowMs) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, at);
+	}
+	return { room: false, ...(exit === undefined ? {} : { exit }) };
+}
+
 export interface RoutineDelivery {
 	readonly occurrence: RoutineOccurrence;
 	readonly result: RoutineResult;
@@ -670,6 +753,18 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	 * stays paused, dropped by the owner's write that enables it again. It never moves the revision.
 	 */
 	readonly failurePause?: RoutineFailurePause;
+	/**
+	 * The end the owner stated was reported met: written with the accepted result that reported it, for a routine with
+	 * a stated end only. It ends the routine (see {@link routineEnded}); it never moves the revision, and an owner write
+	 * drops it.
+	 */
+	readonly conditionMet?: RoutineConditionMet;
+}
+
+export interface RoutineConditionMet {
+	readonly at: number;
+	/** The occurrence whose result reported it. */
+	readonly occurrenceId: string;
 }
 
 export interface RoutineFailurePause {
@@ -688,18 +783,21 @@ export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed"
 export function routineTriggerAt(trigger: RoutineOccurrenceTrigger): number {
 	if (trigger.kind === "schedule") return trigger.scheduledAt;
 	if (trigger.kind === "expiry") return trigger.expiresAt;
+	if (trigger.kind === "condition") return trigger.metAt;
 	return trigger.kind === "manual" ? trigger.requestedAt : trigger.triggeredAt;
 }
 
 /**
  * Whether a routine has ended at `nowMs`: its one-run event routine took its run (`spent`, whose result is the last
- * word), or its end time passed (`expired`, announced once). An ended routine is never claimed again.
+ * word), a run reported the end the owner stated met (`condition`, announced once), or its end time passed
+ * (`expired`, announced once). An ended routine is never claimed again.
  */
 export function routineEnded(
-	schedule: RoutineSchedule,
-	cursor: RoutineCursor,
+	routine: Pick<RoutineDefinitionView, "schedule" | "cursor" | "conditionMet">,
 	nowMs: number,
-): "spent" | "expired" | undefined {
+): "spent" | "condition" | "expired" | undefined {
+	const { schedule, cursor } = routine;
+	if (routine.conditionMet) return "condition";
 	if (schedule.kind === "once") return undefined;
 	if (schedule.kind === "event" && schedule.stopAfterFirstRun && cursor.kind === "event" && cursor.spent)
 		return "spent";
@@ -1178,6 +1276,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 		awayRefusal: rawAwayRefusal,
 		failureStreak,
 		failurePause: rawFailurePause,
+		conditionMet: rawConditionMet,
 		...rawDefinition
 	} = value;
 	const definition = parseRoutineDefinition(rawDefinition);
@@ -1254,6 +1353,24 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 				lastError: boundedString(rawFailurePause.lastError, MAX_ROUTINE_SUMMARY_CHARS, "pause error"),
 			};
 		}
+		let conditionMet: RoutineConditionMet | undefined;
+		if (rawConditionMet !== undefined) {
+			if (
+				!isPlainRecord(rawConditionMet) ||
+				!hasOnlyKeys(rawConditionMet, ["at", "occurrenceId"]) ||
+				!validInstant(rawConditionMet.at) ||
+				definition.origin?.endCondition === undefined
+			)
+				return undefined;
+			conditionMet = {
+				at: rawConditionMet.at,
+				occurrenceId: boundedString(
+					rawConditionMet.occurrenceId,
+					MAX_ROUTINE_SUMMARY_CHARS,
+					"reporting occurrence",
+				),
+			};
+		}
 		return {
 			...definition,
 			cursor,
@@ -1264,6 +1381,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			...(awayRefusal ? { awayRefusal } : {}),
 			...(failureStreak === undefined ? {} : { failureStreak }),
 			...(failurePause ? { failurePause } : {}),
+			...(conditionMet ? { conditionMet } : {}),
 		};
 	} catch {
 		return undefined;
@@ -1402,6 +1520,21 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			value.dispatchKey === undefined
 		) {
 			trigger = { kind: "expiry", expiresAt: definition.schedule.expiresAt };
+		} else if (
+			isPlainRecord(value.trigger) &&
+			value.trigger.kind === "condition" &&
+			hasOnlyKeys(value.trigger, ["kind", "occurrenceId", "metAt"]) &&
+			definition.origin?.endCondition !== undefined &&
+			validInstant(value.trigger.metAt) &&
+			value.trigger.metAt <= value.createdAt &&
+			value.phase === "terminal" &&
+			value.dispatchKey === undefined
+		) {
+			trigger = {
+				kind: "condition",
+				occurrenceId: boundedString(value.trigger.occurrenceId, 256, "reporting occurrence"),
+				metAt: value.trigger.metAt,
+			};
 		} else return undefined;
 		if (target.kind !== "session" && trigger.kind === "event") return undefined;
 		if (value.occurrenceId !== routineOccurrenceId(definition, trigger)) return undefined;
@@ -1465,6 +1598,12 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		if (result && (value.phase === "uncertain") !== (result.outcome === "uncertain")) return undefined;
 		if ((value.phase === "uncertain") !== (uncertainty !== undefined)) return undefined;
 		if (result && !dispatchKey && (result.outcome !== "cancelled" || executionRef)) return undefined;
+		// Only a dispatched run of a routine with a stated end can report that end met.
+		if (
+			(result?.conditionMet || priorUncertaintyResult?.conditionMet) &&
+			(!dispatchKey || definition.origin?.endCondition === undefined)
+		)
+			return undefined;
 		let awaySettlement: RoutineOccurrence["awaySettlement"];
 		if (value.awaySettlement !== undefined) {
 			const settlement = value.awaySettlement;
@@ -1527,7 +1666,16 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 function parseRoutineResult(value: unknown, parentSessionId: string): RoutineResult {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["outcome", "summary", "digest", "delivery", "recipient", "deliveryMarker", "ownerUpdate"]) ||
+		!hasOnlyKeys(value, [
+			"outcome",
+			"summary",
+			"digest",
+			"delivery",
+			"recipient",
+			"deliveryMarker",
+			"ownerUpdate",
+			"conditionMet",
+		]) ||
 		typeof value.outcome !== "string" ||
 		!["succeeded", "failed", "cancelled", "uncertain"].includes(value.outcome) ||
 		typeof value.summary !== "string" ||
@@ -1536,7 +1684,8 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 		typeof value.digest !== "string" ||
 		!/^[a-f0-9]{64}$/u.test(value.digest) ||
 		(value.delivery !== "pending" && value.delivery !== "acknowledged") ||
-		(value.ownerUpdate !== undefined && (value.ownerUpdate !== "none" || value.outcome !== "succeeded"))
+		(value.ownerUpdate !== undefined && (value.ownerUpdate !== "none" || value.outcome !== "succeeded")) ||
+		(value.conditionMet !== undefined && (value.conditionMet !== true || value.outcome !== "succeeded"))
 	)
 		throw new TypeError("Routine result is invalid.");
 	const recipient = boundedString(value.recipient, 200, "recipient");
@@ -1546,7 +1695,14 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 	if (
 		(value.delivery === "acknowledged") !== (deliveryMarker !== undefined) ||
 		recipient !== parentSessionId ||
-		value.digest !== routineResultDigest(outcome, value.summary, recipient, value.ownerUpdate === "none")
+		value.digest !==
+			routineResultDigest(
+				outcome,
+				value.summary,
+				recipient,
+				value.ownerUpdate === "none",
+				value.conditionMet === true,
+			)
 	)
 		throw new TypeError("Routine result does not match its parent or delivery receipt.");
 	return {
@@ -1557,6 +1713,7 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 		recipient,
 		...(deliveryMarker === undefined ? {} : { deliveryMarker }),
 		...(value.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
+		...(value.conditionMet === true ? { conditionMet: true as const } : {}),
 	};
 }
 
@@ -2051,15 +2208,21 @@ function validIsoInstant(value: unknown): value is string {
 	return validInstant(instant) && new Date(instant).toISOString() === value;
 }
 
-/** A quiet result extends the original payload so results recorded before quiet delivery keep their digest. */
+/**
+ * A quiet result, and one reporting the stated end met, extend the original payload so results without them keep
+ * their digest.
+ */
 export function routineResultDigest(
 	outcome: RoutineTerminalOutcome,
 	summary: string,
 	recipient: string,
 	quiet = false,
+	conditionMet = false,
 ): string {
 	return createHash("sha256")
-		.update(`${outcome}\0${summary}\0${recipient}${quiet ? "\0owner-update:none" : ""}`)
+		.update(
+			`${outcome}\0${summary}\0${recipient}${quiet ? "\0owner-update:none" : ""}${conditionMet ? "\0condition-met" : ""}`,
+		)
 		.digest("hex");
 }
 
@@ -2070,6 +2233,8 @@ export function routineOccurrenceId(
 	let suffix: string;
 	if (trigger.kind === "schedule") suffix = String(trigger.scheduledAt);
 	else if (trigger.kind === "expiry") suffix = `expiry:${trigger.expiresAt}`;
+	else if (trigger.kind === "condition")
+		suffix = `condition:${createHash("sha256").update(trigger.occurrenceId).digest("hex")}`;
 	else if (trigger.kind === "manual")
 		suffix = `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
 	else {

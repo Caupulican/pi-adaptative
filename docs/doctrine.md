@@ -588,6 +588,11 @@ execution without file writes keeps an unrestricted shell: only `readOnly` restr
 operation review as the root's, except under the standing `operation.irreversible` grant, where the
 verdict could only authorize; a held or refused operation is refused and reported to the parent,
 because only the root reaches the owner.
+A worker's report statements for routines (`ownerUpdate: "none"`, `conditionMet: true`) reach its
+result only on a clean, host-accepted completion, and only the routine result path reads them; no
+foreground, goal or delegation consumer interprets them. A routine acts on `conditionMet` only when
+its brief named an end the owner stated: it runs no more, and once its results are delivered it is
+removed with one host notice. The host does not check the end itself.
 `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
 files model-blind like `read`. A plain `log` request returns at most the requested number of concise
@@ -1096,3 +1101,4 @@ measurement gains no new surface.
 | 2026-10-04 | The test suite (1,741 product test files and the destructive suite) is removed so it can be rebuilt by area from git history; the contract list in `contracts.json` is empty, CI is one build-and-check job per OS, and `release-ci-proof.mjs` requires those jobs by name. This supersedes every earlier row that pins a deleted test file. |
 | 2026-11-05 | A `readOnly` worker's shell creates files only inside its own scratch directory (no new file elsewhere), reaches no network without `network.http`, and reads no private harness or credential path through operands, `cd`, globs or recursive searches; listed readers whose options or program text run programs or write files (`sort -o`, `rg --pre`, awk `system()`, sed `w`) are refused for every caller of the read/write line. |
 | 2026-11-05 | The read-only shell line is one walk over one tokenizer for the router, System One's observational line, requirement checks and worker lanes: line continuations, comments, expansions and PowerShell blocks are structural, assignments follow an allowlist, paths are judged lexically and physically, `tsc` leaves the read-only list, and a worker's project search runs without a glob while storage roots and dotenv descents are refused. |
+| 2026-11-05 | The worker report gains `conditionMet` (`WorkerSubmittedReport`, `WorkerResultContract`), stamped under the same clean host-accepted completion rule as `ownerUpdate` and read only by the routine result path: a routine with a stated end that a run reports met runs no more and is removed with one host notice once its results are delivered; any other routine ignores it with a diagnostic. |

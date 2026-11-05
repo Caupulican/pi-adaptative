@@ -201,6 +201,8 @@ export interface WorkerSubmittedReport {
 	readonly remaining: readonly string[];
 	/** The worker's statement that its result needs no owner attention now; absent means it may. */
 	readonly ownerUpdate?: "none";
+	/** The worker's statement that the end its routine's brief named was reached; only routines with a stated end act on it. */
+	readonly conditionMet?: true;
 }
 
 /**
