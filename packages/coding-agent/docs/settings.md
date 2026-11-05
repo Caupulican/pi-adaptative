@@ -429,7 +429,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
     "maxRunsPerSession": 4,
     "maxNotesPerRun": 2,
     "maxUsd": 0.05,
-    "delivery": "note",
+    "delivery": "turn",
     "preferences": "Raise only work I asked for that is still undone."
   }
 }
@@ -443,8 +443,8 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | `minOwnerTurnsBetweenRuns` | `3` | New owner-typed turns required since the last review. Peer messages, goal continuations and other internal turns do not count. |
 | `maxRunsPerSession` | `4` | Reviews per running session, whether or not they raised anything. |
 | `maxNotesPerRun` | `2` | Notes one review may raise. |
-| `maxUsd` | `0.05` | Spend bound of one review. A review that spends more is reported as a warning; it is also limited to two provider requests. |
-| `delivery` | `"note"` | `"note"`: a visible `[proactive note]` carried with the owner's next turn. `"turn"`: the note starts a turn now. |
+| `maxUsd` | `0.05` | Spend bound of the isolated review, limited to two provider requests. A parent wake uses normal session accounting and budgets and can incur additional inference cost. |
+| `delivery` | `"turn"` | An accepted note starts a parent turn without another owner message. Explicit `"note"` carries it with the owner's next turn instead. Both explicit choices are preserved. |
 | `preferences` | empty | The owner's standing words about what to raise, how often and in what tone, at most 2000 characters. Every review reads them and they override the review's defaults. |
 
 **What the review can do.** The host decides whether a review may start (enabled, the per-session cap, enough new owner turns, an idle foreground) and what it may do: its one tool records a note. The model only judges whether the conversation shows a need, so the behavior does not depend on a particular model. The host then drops notes that are empty, malformed or repeats of a note already raised on the branch, and delivers at most `maxNotesPerRun`. A review that raises nothing, the usual outcome, leaves no trace in the conversation.

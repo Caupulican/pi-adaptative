@@ -59,6 +59,9 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	});
 	const session: AgentSession = created.session;
 	const lanes = session.backgroundLanes;
+	expect(created.settingsManager.getProactivitySettings().delivery, "the owner's explicit note choice wins").toBe(
+		"note",
+	);
 
 	/** Resolves with how the next proactive review ends; the session announces it as an event. */
 	const reviewEnds = (): Promise<"raised" | "quiet" | "failed"> =>
@@ -304,6 +307,17 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		...created.settingsManager.getProactivitySettings(),
 		delivery: "turn",
 	});
+	expect(created.settingsManager.getProactivitySettings().delivery, "an explicit turn choice is preserved").toBe(
+		"turn",
+	);
+	const { delivery, ...defaultDeliverySettings } = created.settingsManager.getProactivitySettings();
+	expect(delivery).toBe("turn");
+	created.settingsManager.setProactivitySettings(defaultDeliverySettings);
+	expect(created.settingsManager.getGlobalSettings().proactivity?.delivery, "delivery is now omitted").toBeUndefined();
+	expect(
+		created.settingsManager.getProactivitySettings().delivery,
+		"omitted delivery wakes the parent by default",
+	).toBe("turn");
 	lanes.clearResearchLaneTimer();
 	const currentNote = "The current review can wake its own parent turn.";
 	// This wake is a host-owned custom message, not another owner input to classify.
@@ -323,7 +337,11 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			check: (request) => expect(JSON.stringify(request.context.messages)).toContain(currentNote),
 		},
 	);
-	const deliveredTurn = await withDeadline(trace, "proactivity parent turn delivery", lanes.runProactiveReviewOnce());
+	const deliveredTurn = await withDeadline(
+		trace,
+		"default proactivity parent turn delivery",
+		lanes.runProactiveReviewOnce(),
+	);
 	expect(
 		deliveredTurn.delivered.map((note) => note.text),
 		"own parent wake does not invalidate committed delivery",

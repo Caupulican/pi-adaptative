@@ -288,9 +288,9 @@ export interface ProactivitySettings {
 	idleDelayMs?: number; // default: 120000 — foreground idle time before a review may start
 	minOwnerTurnsBetweenRuns?: number; // default: 3 — new owner turns required since the last review
 	maxRunsPerSession?: number; // default: 4 reviews per session
-	maxUsd?: number; // default: 0.05 per review; the review is bounded by tokens and one tool turn
+	maxUsd?: number; // default: 0.05 for the isolated review; a parent wake uses normal session accounting and budgets
 	maxNotesPerRun?: number; // default: 2 notes a review may raise
-	delivery?: "note" | "turn"; // default: "note" — a visible note carried with the next turn; "turn" wakes the agent now
+	delivery?: "note" | "turn"; // default: "turn" — wakes the parent; explicit "note" waits for the owner's next turn
 	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)
 }
 

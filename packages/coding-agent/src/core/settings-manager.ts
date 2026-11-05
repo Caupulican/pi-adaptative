@@ -3536,7 +3536,10 @@ export class SettingsManager {
 				1,
 				MAX_PROACTIVITY_MAX_NOTES,
 			),
-			delivery: configured.delivery === "turn" ? "turn" : DEFAULT_PROACTIVITY_DELIVERY,
+			delivery:
+				configured.delivery === "note" || configured.delivery === "turn"
+					? configured.delivery
+					: DEFAULT_PROACTIVITY_DELIVERY,
 			preferences:
 				typeof configured.preferences === "string"
 					? configured.preferences.trim().slice(0, MAX_PROACTIVITY_PREFERENCES_CHARS)

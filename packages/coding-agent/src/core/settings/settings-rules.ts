@@ -248,7 +248,7 @@ export const DEFAULT_PROACTIVITY_MAX_USD = 0.05;
 
 export const DEFAULT_PROACTIVITY_MAX_NOTES = 2;
 
-export const DEFAULT_PROACTIVITY_DELIVERY: "note" | "turn" = "note";
+export const DEFAULT_PROACTIVITY_DELIVERY: "note" | "turn" = "turn";
 
 export const MAX_PROACTIVITY_IDLE_DELAY_MS = 3_600_000;
 

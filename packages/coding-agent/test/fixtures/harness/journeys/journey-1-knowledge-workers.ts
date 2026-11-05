@@ -39,6 +39,17 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 	};
 	profiles.save(profile, "global");
 	profiles.save(
+		{
+			...profile,
+			profileId: "knowledge-queued-reader",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "harness-script", modelId: "worker-b", thinkingLevel: "off" }],
+			},
+		},
+		"global",
+	);
+	profiles.save(
 		{ ...profile, profileId: "knowledge-no-memory", capabilityCeiling: ["filesystem.read"], toolNames: ["read"] },
 		"global",
 	);
@@ -77,8 +88,8 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 	store.put(selected, 0, () => {});
 	store.put(privateRecord, 0, () => {});
 	const tracks: string[] = [];
-	for (let size = 1; size <= 40; size *= 2)
-		for (let first = 0; first + size <= 40; first += size) {
+	for (let size = 1; size <= 64; size *= 2)
+		for (let first = 0; first + size <= 64; first += size) {
 			const task =
 				size === 1
 					? `Compaction: compress message ${first} into`
@@ -181,6 +192,10 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 				const projection = currentProjection(request);
 				expect(JSON.stringify(request.context)).not.toContain(privateRecord.text);
 				expect(request.context.tools?.map((tool) => tool.name)).not.toContain("knowledge");
+				expect(
+					request.context.tools?.map((tool) => tool.name),
+					"the reader retains its admitted memory tool",
+				).toContain("memory_read");
 				if (value) {
 					if (root.settingsManager.getMemoryRetrievalSettings().includeInPrompt)
 						expect(projection).toContain(value);
@@ -243,6 +258,170 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		prompt = undefined;
 		held = undefined;
 	};
+	const runQueued = async (change: "correct" | "forget") => {
+		const label = `knowledge-queued-${change}`;
+		const queuedRecord = record(label, `Prefers ${change} fixture examples with tabs.`);
+		const replacement = `Prefers ${change} fixture examples with spaces.`;
+		const references = [{ id: queuedRecord.id, revision: 1 }];
+		store.put(queuedRecord, 0, () => {});
+		const queued = createBarrier();
+		const release = createBarrier();
+		held = release;
+		let attemptId: string | undefined;
+		let queuedAgentId: string | undefined;
+		const before = world.provider.requests.filter((request) => request.model.id === "worker-b").length;
+		world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS);
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-blocker`, [
+				{
+					id: `${label}-blocker`,
+					name: "delegate",
+					arguments: {
+						action: "start",
+						agentId,
+						instructions: "Hold the worker slot until released, then report.",
+					},
+				},
+			]),
+			{
+				name: `${label}-enqueue`,
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(result?.isError, result?.text).toBe(false);
+					expect(
+						Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).some(
+							(attempt) => attempt.agentId === agentId && attempt.status === "running",
+						),
+						"the blocker occupies the only worker slot before the selected task is admitted",
+					).toBe(true);
+				},
+				reply: calls(`${label}-start`, [
+					{
+						id: `${label}-start`,
+						name: "delegate",
+						arguments: {
+							action: "start",
+							profileId: "knowledge-queued-reader",
+							instructions: `Inspect the ${change} fixture preference through memory and report.`,
+							knowledge: references,
+							parallelWork: {
+								independentOf: [agentId],
+								justification: "This reader needs its own task context after the occupied slot is released.",
+							},
+						},
+					},
+				]).reply,
+			},
+			{
+				name: `${label}-queued`,
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(result?.isError, result?.text).toBe(false);
+					const attempt = Object.values(
+						root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
+					).find((candidate) =>
+						candidate.dispatch.knowledgeReferences?.some((reference) => reference.id === queuedRecord.id),
+					);
+					expect(attempt?.status, "the selected task is durably queued before the knowledge changes").toBe(
+						"queued",
+					);
+					expect(attempt?.dispatch.knowledgeReferences).toEqual(references);
+					attemptId = attempt?.attemptId;
+					queuedAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? attempt?.taskId;
+					expect(queuedAgentId).toBeDefined();
+					expect(world.provider.requests.filter((entry) => entry.model.id === "worker-b")).toHaveLength(before);
+					queued.release();
+				},
+				reply: () => ({
+					content: [
+						{
+							type: "toolCall",
+							id: `${label}-wait`,
+							name: "delegate",
+							arguments: { action: "wait", agentId: queuedAgentId, timeoutMs: 60_000 },
+						},
+					],
+					stopReason: "toolUse",
+				}),
+			},
+			{
+				name: `${label}-done`,
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(result?.isError, result?.text).toBe(false);
+				},
+				reply: { content: [{ type: "text", text: "The queued reader completed." }] },
+			},
+		);
+		world.provider.enqueue("worker-a", {
+			name: `${label}-hold`,
+			gate: release.promise,
+			reply: report(`${label}-blocker-report`).reply,
+		});
+		world.provider.enqueue(
+			"worker-b",
+			{
+				name: `${label}-resumed`,
+				check: (request) => {
+					const projection = currentProjection(request);
+					expect(projection, "queued resumption publishes a current knowledge status").not.toBe("");
+					for (const text of [queuedRecord.text, replacement, privateRecord.text])
+						expect(JSON.stringify(request.context)).not.toContain(text);
+				},
+				reply: calls(`${label}-read`, [
+					{ id: `${label}-read`, name: "memory_read", arguments: { query: `${change} fixture preference` } },
+				]).reply,
+			},
+			{
+				name: `${label}-read-current`,
+				check: (request) => {
+					const read = latestBatchResults(request).find((entry) => entry.toolName === "memory_read");
+					expect(read?.isError, read?.text).toBe(false);
+					expect(read?.text).toBeTruthy();
+					for (const text of [queuedRecord.text, replacement, privateRecord.text])
+						expect(read?.text).not.toContain(text);
+					expect(currentProjection(request)).not.toBe("");
+				},
+				reply: report(`${label}-report`).reply,
+			},
+		);
+		prompt = root.session.prompt(`Queue the ${change} fixture reader behind the held worker.`);
+		await withDeadline(world.trace, `${label} durable queue reached`, queued.promise);
+		const citation = {
+			sourceId: `${label}-change`,
+			sessionId: root.session.sessionId,
+			quote: change === "correct" ? replacement : "Forget this fixture preference.",
+			at: correctionAt,
+		};
+		if (change === "correct")
+			store.put(
+				{
+					...queuedRecord,
+					revision: 2,
+					text: replacement,
+					lastEvidencedAt: correctionAt,
+					validFrom: correctionAt,
+					citations: [citation],
+				},
+				1,
+				() => {},
+			);
+		else store.forget(queuedRecord.id, 1, [citation], () => {});
+		release.release();
+		await withDeadline(world.trace, `${label} parent completed`, prompt);
+		const persisted = Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
+			(attempt) => attempt.attemptId === attemptId,
+		);
+		expect(
+			persisted?.dispatch.knowledgeReferences,
+			"dispatch keeps its original exact selection after resumption",
+		).toEqual(references);
+		expect(persisted?.status, "resumption completes the originally admitted attempt").toBe("completed");
+		expect(world.provider.requests.filter((request) => request.model.id === "worker-b")).toHaveLength(before + 2);
+		prompt = undefined;
+		held = undefined;
+	};
 	try {
 		await run("knowledge-no-selection", undefined);
 		root.settingsManager.setMemoryRetrievalSettings({ enabled: true, includeInPrompt: false });
@@ -295,6 +474,9 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		expect(store.get(privateRecord.id)?.text, "worker reads never mutate unselected owner knowledge").toBe(
 			privateRecord.text,
 		);
+		root.settingsManager.setWorkerDelegationSettings({ maxConcurrent: 1 });
+		await runQueued("correct");
+		await runQueued("forget");
 		const before = world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 		world.systemOne.enterPhase("knowledge-no-capability", ICM_INTAKE_JUDGMENTS);
 		world.provider.enqueue(

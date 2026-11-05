@@ -4,7 +4,7 @@ Pi can review an idle conversation for unfinished requests, risks, useful sugges
 
 The review has one tool, `raise_note`. It cannot run commands, inspect files, modify memory or contact anyone. Ordinary review text stays private to the review. The host drops empty or repeated notes and limits how many notes can be delivered.
 
-By default, an accepted note accompanies the owner's next turn. Set `proactivity.delivery` to `"turn"` to have it start a parent turn. Scheduled routines and goal continuation are separate features.
+By default, an accepted note starts a parent turn without waiting for another owner message. The parent handles it under the session's existing authority and budgets. Set `proactivity.delivery` to `"note"` to carry it with the owner's next turn instead. An explicit delivery choice is preserved. Scheduled routines and goal continuation are separate features.
 
 A review retains the conversation branch, settings, goal and memory revision it started with. Foreground work, navigation, relevant settings changes or changed knowledge invalidate its result. Delivery checks those inputs again before entering the session. Each started review announces a raised, quiet or failed outcome; cancellation and provider errors never publish captured notes.
 
@@ -24,7 +24,7 @@ Preferences are a whole document, limited to 2000 characters. The agent reads th
 
 The defaults allow one review after two idle minutes, require three new owner turns between reviews, permit four reviews per running session and allow two notes per review. The review uses at most two provider requests. See the [settings reference](settings.md#proactivity) for all fields.
 
-Before each provider request, the host estimates the complete request cost, including tools and long-context pricing, and reduces the output allowance to fit the remaining `maxUsd`. If even one output token cannot fit, it sends no request. This is an estimate, not a guarantee of the provider's eventual bill; measured overspend stops further requests and note delivery.
+Before each review provider request, the host estimates the complete request cost, including tools and long-context pricing, and reduces the output allowance to fit the remaining `maxUsd`. If even one output token cannot fit, it sends no request. This is an estimate, not a guarantee of the provider's eventual bill; measured overspend stops further review requests and note delivery. `maxUsd` caps only the isolated review. A parent turn uses normal session accounting and budgets and can incur additional inference cost.
 
 Custom models need declared prices for these background reviews. An explicitly configured zero price is valid; omitted prices are unknown and prevent a review request. Tiered prices use the same rate selection as measured usage.
 

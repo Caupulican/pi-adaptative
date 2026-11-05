@@ -2035,6 +2035,13 @@ export class WorkerDelegationController {
 		}
 		const parentAttempt = parentAgent ? this.lifecycle.getLatestAgentAttempt(parentAgent.agentId) : undefined;
 		const parentContract = parentAttempt?.dispatch.executionContract;
+		// A named specialist supplies omitted defaults from its durable contract. Fresh root
+		// defaults cannot describe its existing tool surface, resources or model selection.
+		// Live policy can still refuse it; the specialization comparison never grants a changed contract.
+		const reuseContract =
+			!pinnedContract && !request.profileId && request.reuseAgentId
+				? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)?.dispatch.executionContract
+				: undefined;
 		const executionContext =
 			request.executionContext === undefined ? undefined : decodeExecutionContext(request.executionContext);
 		if (
@@ -2044,7 +2051,10 @@ export class WorkerDelegationController {
 			return { ok: false, skipReason: "worker_execution_context_invalid" };
 		}
 		const executionCwd =
-			pinnedContract?.worker.authority.cwd ?? parentContract?.worker.authority.cwd ?? executionContext?.cwd;
+			pinnedContract?.worker.authority.cwd ??
+			reuseContract?.worker.authority.cwd ??
+			parentContract?.worker.authority.cwd ??
+			executionContext?.cwd;
 		if (parentAgent && !parentContract) {
 			return { ok: false, skipReason: "orchestration_parent_authority_missing" };
 		}
@@ -2068,6 +2078,10 @@ export class WorkerDelegationController {
 			const pinned = this.getWorkerProfileResolver().resolveContract(pinnedContract.worker);
 			if (!pinned.ok) return { ok: false, skipReason: pinned.reason };
 			baseShipment = pinned.resolved;
+		} else if (reuseContract) {
+			const reused = this.getWorkerProfileResolver().resolveContract(reuseContract.worker);
+			if (!reused.ok) return { ok: false, skipReason: reused.reason };
+			baseShipment = reused.resolved;
 		} else if (!request.profileId && parentContract) {
 			const inherited = this.getWorkerProfileResolver().resolveContract(parentContract.worker);
 			if (!inherited.ok) return { ok: false, skipReason: inherited.reason };
@@ -2135,8 +2149,9 @@ export class WorkerDelegationController {
 			return { ok: false, skipReason: "verifier_profile_requires_runtime_dispatch" };
 		}
 		let verifierShipment: ResolvedWorkerProfile | undefined;
-		if (pinnedContract?.verifier) {
-			const verifier = this.getWorkerProfileResolver().resolveContract(pinnedContract.verifier);
+		const verifierContract = pinnedContract?.verifier ?? reuseContract?.verifier;
+		if (verifierContract) {
+			const verifier = this.getWorkerProfileResolver().resolveContract(verifierContract);
 			if (!verifier.ok) {
 				return { ok: false, skipReason: `independent_verifier_unavailable:${verifier.reason}` };
 			}
