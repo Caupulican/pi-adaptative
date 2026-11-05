@@ -3,12 +3,14 @@ import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isSessionIdentity } from "../../kernel/session/session-manager.ts";
-import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
+import type { SystemOneUsageRoute, TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
 import {
 	isReceiptCount,
 	isReceiptText,
+	isSystemOneUsageRoute,
 	MAX_RECEIPT_TEXT_CHARS,
 	MAX_TYPESAFE_USAGE_RECEIPT_BYTES,
+	parseAccountingOrigin,
 	parseTypeSafeUsageReceipt,
 } from "../review/typesafe-usage-receipt-codec.ts";
 import {
@@ -18,6 +20,7 @@ import {
 	writeFileAtomicSync,
 } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import type { AccountingOrigin } from "./accounting-evidence.ts";
 import type { SemanticUsageLedgerIdentity } from "./session-ledger-port.ts";
 
 /**
@@ -60,6 +63,7 @@ const DOCUMENT_KEYS = [
 	"records",
 	"conflicts",
 	"droppedConflicts",
+	"unresolved",
 ] as const;
 const RECORD_KEYS = ["reportId", "payload", "createdAt"] as const;
 const CONFLICT_KEYS = ["reportId", "payload", "seenAt"] as const;
@@ -88,6 +92,35 @@ export interface JournalDocument {
 	readonly records: readonly JournalRecord[];
 	readonly conflicts: readonly JournalConflict[];
 	readonly droppedConflicts: number;
+	readonly unresolved?: readonly UnresolvedUsageRequest[];
+}
+
+/** A dispatched request with no measured response yet. Never projected as zero-cost usage or replayed. */
+export interface UnresolvedUsageRequest {
+	readonly requestId: string;
+	readonly provider: string;
+	readonly model: string;
+	readonly route: SystemOneUsageRoute;
+	readonly origin: AccountingOrigin;
+	readonly startedAt: string;
+}
+
+export function parseUnresolvedUsageRequest(value: unknown): UnresolvedUsageRequest | undefined {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["requestId", "provider", "model", "route", "origin", "startedAt"]))
+		return undefined;
+	const { requestId, provider, model, route, startedAt } = value;
+	const origin = parseAccountingOrigin(value.origin);
+	if (
+		!isReceiptText(requestId) ||
+		!isReceiptText(provider) ||
+		!isReceiptText(model) ||
+		!origin ||
+		!isReceiptText(startedAt) ||
+		!Number.isFinite(Date.parse(startedAt)) ||
+		!isSystemOneUsageRoute(route)
+	)
+		return undefined;
+	return { requestId, provider, model, route, origin, startedAt };
 }
 
 /** The sidecar one session identity owns, and the identity its content must carry. */
@@ -206,6 +239,10 @@ function validateDocument(value: unknown): JournalDocument | undefined {
 	if (headerTimestamp !== undefined && !isReceiptText(headerTimestamp)) return undefined;
 	if (!Array.isArray(records) || records.length > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS) return undefined;
 	if (!Array.isArray(conflicts) || conflicts.length > SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS) return undefined;
+	const unresolved = value.unresolved ?? [];
+	if (!Array.isArray(unresolved) || unresolved.length + records.length > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS)
+		return undefined;
+	const validUnresolved: UnresolvedUsageRequest[] = [];
 	const validRecords: JournalRecord[] = [];
 	const reportIds = new Set<string>();
 	for (const item of records) {
@@ -214,6 +251,12 @@ function validateDocument(value: unknown): JournalDocument | undefined {
 		if (!record || reportIds.has(record.reportId)) return undefined;
 		reportIds.add(record.reportId);
 		validRecords.push(record);
+	}
+	for (const item of unresolved) {
+		const request = parseUnresolvedUsageRequest(item);
+		if (!request || request.origin.sessionId !== sessionId || reportIds.has(request.requestId)) return undefined;
+		reportIds.add(request.requestId);
+		validUnresolved.push(request);
 	}
 	const validConflicts: JournalConflict[] = [];
 	for (const item of conflicts) {
@@ -231,6 +274,7 @@ function validateDocument(value: unknown): JournalDocument | undefined {
 		records: validRecords,
 		conflicts: validConflicts,
 		droppedConflicts,
+		...(validUnresolved.length ? { unresolved: validUnresolved } : {}),
 	};
 }
 
@@ -286,7 +330,7 @@ function moveCorruptJournalAside(path: string): string {
 /** The bounds are checked on the merged document, under the lock, so nothing is written that readJournal would reject. */
 function serializeWithinBounds(document: JournalDocument): string {
 	if (
-		document.records.length > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS ||
+		document.records.length + (document.unresolved?.length ?? 0) > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS ||
 		document.conflicts.length > SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS
 	) {
 		throw new SemanticUsageJournalError("capacity", "usage journal is full");

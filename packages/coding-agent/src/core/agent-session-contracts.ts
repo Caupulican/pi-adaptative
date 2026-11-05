@@ -361,6 +361,10 @@ export interface IsolatedCompletionOptions {
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	/** Final synchronous policy check after harness admission/auth waits, before provider handoff. */
 	requestGuard?: AgentLoopConfig["requestGuard"];
+	/** Physical provider completion observer; survives cancellation of the logical loop. */
+	providerResponseObserver?: AgentLoopConfig["providerResponseObserver"];
+	/** Provider-internal retry allowance; bounded callers account for each dispatch themselves. */
+	maxRetries?: number;
 	/**
 	 * Durable per-request boundary, invoked once per accepted child provider request with the exact
 	 * materialization sent. A child conversation that owns a transcript records its own

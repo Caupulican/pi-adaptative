@@ -1366,6 +1366,8 @@ export class ReflectionController {
 				cacheRetention: opts.cacheRetention,
 				sessionId: affinityKey,
 				requestGuard: opts.requestGuard,
+				providerResponseObserver: opts.providerResponseObserver,
+				maxRetries: opts.maxRetries,
 			};
 
 			const agent = this.deps.getAgent();
@@ -1434,6 +1436,8 @@ export class ReflectionController {
 				planContext: opts.planContext,
 				requestPreflight: opts.requestPreflight,
 				requestGuard: opts.requestGuard,
+				providerResponseObserver: opts.providerResponseObserver,
+				maxRetries: opts.maxRetries,
 				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
 				...(maxTurns === undefined
 					? {}

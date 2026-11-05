@@ -2,6 +2,7 @@ import type { Context } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage-delivery.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
@@ -192,11 +193,19 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			const receipt = resolveSemanticUsageEntry(entry)?.report;
 			return receipt?.route === "proactivity" ? [receipt] : [];
 		});
-	const interruptReview = async (label: string, change: () => Promise<void> | void): Promise<void> => {
+	const interruptReview = async (
+		label: string,
+		change: () => Promise<void> | void,
+		immediate = false,
+	): Promise<void> => {
 		lanes.clearResearchLaneTimer();
 		const reached = createBarrier();
 		const release = createBarrier();
 		const beforeReceipts = receipts().length;
+		const recorded = createBarrier();
+		const stopRecording = created.sessionManager.onEntriesPersisted(() => {
+			if (receipts().length === beforeReceipts + 2) recorded.release();
+		});
 		const outcomes: string[] = [];
 		const unsubscribe = session.subscribe((event) => {
 			if (event.type === "proactive_review") outcomes.push(event.outcome);
@@ -227,10 +236,23 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		try {
 			await withDeadline(trace, `${label} second request reached`, reached.promise);
 			await change();
+			if (immediate) {
+				await withDeadline(trace, `${label} cancels before the provider returns`, pending);
+				expect(receipts().length, "cancellation fabricates no provider receipt").toBe(beforeReceipts + 1);
+				expect(
+					sessionSemanticUsageOf(created.sessionManager).snapshot().unresolved,
+					"the late request keeps its unresolved accounting obligation",
+				).toBe(1);
+			}
 		} finally {
 			release.release();
 		}
 		const settled = await withDeadline(trace, `${label} settled`, pending);
+		try {
+			await withDeadline(trace, `${label} actual provider receipt persisted`, recorded.promise);
+		} finally {
+			stopRecording();
+		}
 		unsubscribe();
 		expect("value" in settled ? settled.value.delivered : [], "a stale review delivers no captured note").toEqual([]);
 		expect(outcomes, "each interrupted review reports exactly one failed terminal").toEqual(["failed"]);
@@ -238,13 +260,18 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		expect(added, "both paid responses survive cancellation without an aggregate duplicate").toHaveLength(2);
 		expect(added.reduce((total, receipt) => total + receipt.usage.cost.total, 0)).toBe(0.001);
 		expect(added.every((receipt) => receipt.origin?.sessionId === created.sessionManager.getSessionId())).toBe(true);
+		expect(sessionSemanticUsageOf(created.sessionManager).snapshot().unresolved).toBe(0);
 	};
-	await interruptReview("proactivity-settings-stale", () => {
-		created.settingsManager.setProactivitySettings({
-			...created.settingsManager.getProactivitySettings(),
-			enabled: false,
-		});
-	});
+	await interruptReview(
+		"proactivity-settings-stale",
+		() => {
+			created.settingsManager.setProactivitySettings({
+				...created.settingsManager.getProactivitySettings(),
+				enabled: false,
+			});
+		},
+		true,
+	);
 	await ownerTurn("proactivity-after-settings", "I have completed the changelog now.");
 	expect(ownerRequests.at(-1)).not.toContain(staleNote);
 	created.settingsManager.setProactivitySettings({

@@ -281,9 +281,8 @@ export class ProactivityController {
 					assertCurrent();
 					runUsage.assertHealthy();
 				},
-				onMessage: (message, origin) => {
-					if (origin !== "local") runUsage.record(message);
-				},
+				providerResponseObserver: runUsage,
+				maxRetries: 0,
 				cacheRetention: "short",
 				laneKind: "proactivity",
 			});

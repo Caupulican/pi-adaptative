@@ -1,7 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
-import type { TypeSafeUsageReceipt } from "./system-one-review-port.ts";
+import type { SystemOneUsageRoute, TypeSafeUsageReceipt } from "./system-one-review-port.ts";
 
 /** Every identity string in a persisted receipt fits this many characters. */
 export const MAX_RECEIPT_TEXT_CHARS = 200;
@@ -35,6 +35,16 @@ export function isReceiptText(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= MAX_RECEIPT_TEXT_CHARS;
 }
 
+export function isSystemOneUsageRoute(value: unknown): value is SystemOneUsageRoute {
+	return (
+		value === "system_one_tool" ||
+		value === "history_summary" ||
+		value === "compaction" ||
+		value === "branch_summary" ||
+		value === "proactivity"
+	);
+}
+
 /**
  * One priced provider response's usage record, as the reviewer produces it and as the usage ledger and the
  * persisted pending journal store it; undefined when malformed. Fails closed: an unknown field, a count that is
@@ -52,15 +62,7 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 	const origin = value.origin === undefined ? undefined : parseAccountingOrigin(value.origin);
 	if (value.origin !== undefined && !origin) return undefined;
 	if (!isReceiptText(receiptId) || !isReceiptCount(attempt)) return undefined;
-	if (
-		route !== undefined &&
-		route !== "system_one_tool" &&
-		route !== "history_summary" &&
-		route !== "compaction" &&
-		route !== "branch_summary" &&
-		route !== "proactivity"
-	)
-		return undefined;
+	if (route !== undefined && !isSystemOneUsageRoute(route)) return undefined;
 	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;
 	if (costStatus !== "catalog_priced" && costStatus !== "unpriced") return undefined;
 	let provenance: { provider: string; model: string } | undefined;

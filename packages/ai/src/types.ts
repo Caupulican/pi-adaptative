@@ -138,7 +138,21 @@ export interface InteractiveAuthRecoveryRequest {
 
 export type InteractiveAuthRecoveryHandler = (request: InteractiveAuthRecoveryRequest) => boolean | Promise<boolean>;
 
+/** Physical provider completion, independent of a caller's cancellation or watchdog result. */
+export interface ProviderResponseTicket {
+	/** Terminal callbacks must be synchronous and infallible; retain their own diagnostics. */
+	complete(message: AssistantMessage): void;
+	failed(error: unknown): void;
+}
+
+export interface ProviderResponseObserver {
+	/** Called once at actual dispatch. Throwing prevents transport. */
+	begin(model: Model<Api>): ProviderResponseTicket;
+}
+
 export interface StreamOptions {
+	/** Host-only physical request lifetime, consumed before provider dispatch. */
+	providerResponseObserver?: ProviderResponseObserver;
 	/**
 	 * Whether a human-facing host may perform interactive recovery for this request.
 	 * Background lanes must set "background" so providers never open browsers or request input.

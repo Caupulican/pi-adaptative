@@ -21,6 +21,7 @@ export class RequestSpendBudget {
 	private spentUsd = 0;
 	private readonly charges = new Map<string, number>();
 	private failure: RequestSpendRefusal | undefined;
+	private pending: string | undefined;
 
 	constructor(maxUsd: number) {
 		if (!Number.isFinite(maxUsd) || maxUsd < 0) throw new Error("Request spending limit must be non-negative.");
@@ -36,6 +37,16 @@ export class RequestSpendBudget {
 	assertAffordable(projectedUsd: number): void {
 		if (!Number.isFinite(projectedUsd) || projectedUsd < 0 || projectedUsd > this.remainingUsd())
 			throw new RequestSpendRefusal("The remaining budget cannot cover the next projected request.");
+	}
+
+	/** A cancelled logical caller cannot start another request while billing is still unknown. */
+	beginRequest(receiptId: string): void {
+		this.assertHealthy();
+		this.pending = receiptId;
+	}
+
+	endRequest(receiptId: string): void {
+		if (this.pending === receiptId) this.pending = undefined;
 	}
 
 	/** Record before checking health, so even an overspend never interrupts durable usage delivery. */
@@ -67,5 +78,6 @@ export class RequestSpendBudget {
 
 	assertHealthy(): void {
 		if (this.failure) throw this.failure;
+		if (this.pending) throw new RequestSpendRefusal("A provider request still has unsettled usage.");
 	}
 }

@@ -470,7 +470,7 @@ export async function admitProviderRequest(
 
 /**
  * Wrap a stream function so every request it starts is admitted through the machine-wide ledger
- * and released when its stream settles (terminal result, stream error, or caller abort), and so
+ * and released when the physical provider request settles (or preparation ends without dispatch), and so
  * every settled result feeds the shared limit state (a 429 or overload records the reset, a
  * success clears it, Codex window snapshots are persisted). Installed outside the idle watchdog
  * and the perf profiler, so time spent waiting is neither a connect stall nor part of the model's
@@ -489,10 +489,11 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 		const now = (): number => deps.ledger.timers.now();
 		const requestStartedAt = now();
 		let released = false;
+		let dispatched = false;
 		const releaseOnce = (): void => {
 			if (released) return;
 			released = true;
-			options?.signal?.removeEventListener("abort", releaseOnce);
+			options?.signal?.removeEventListener("abort", releaseBeforeDispatch);
 			try {
 				release();
 			} catch {
@@ -501,7 +502,10 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 				// failure or create an unobserved rejection from a terminal-result callback.
 			}
 		};
-		options?.signal?.addEventListener("abort", releaseOnce, { once: true });
+		const releaseBeforeDispatch = (): void => {
+			if (!dispatched) releaseOnce();
+		};
+		options?.signal?.addEventListener("abort", releaseBeforeDispatch, { once: true });
 		const recordFailureLimit = (error: unknown): void => {
 			if (!deps.limits) return;
 			try {
@@ -514,26 +518,45 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 		let inner: Awaited<ReturnType<StreamFn>>;
 		try {
 			options?.signal?.throwIfAborted();
-			inner = await streamFn(model, context, options);
-			inner.result().then(
-				(message) => {
-					releaseOnce();
-					if (deps.limits) {
-						try {
-							observeProviderResult(deps.limits, message, now(), key, requestStartedAt);
-						} catch {
-							// Shared-state bookkeeping must never fail the request it observes.
-						}
-					}
+			inner = await streamFn(model, context, {
+				...options,
+				providerResponseObserver: {
+					begin: (requestModel) => {
+						if (released) throw new Error("Provider admission ended before dispatch.");
+						const parent = options?.providerResponseObserver?.begin(requestModel);
+						dispatched = true;
+						return {
+							complete: (message) => {
+								try {
+									parent?.complete(message);
+								} catch (error) {
+									parent?.failed(error);
+								} finally {
+									releaseOnce();
+								}
+								if (deps.limits) {
+									try {
+										observeProviderResult(deps.limits, message, now(), key, requestStartedAt);
+									} catch {
+										/* Limit telemetry must not fail terminal accounting. */
+									}
+								}
+							},
+							failed: (error) => {
+								try {
+									parent?.failed(error);
+								} finally {
+									releaseOnce();
+									recordFailureLimit(error);
+								}
+							},
+						};
+					},
 				},
-				(error) => {
-					releaseOnce();
-					recordFailureLimit(error);
-				},
-			);
+			});
+			inner.result().then(releaseBeforeDispatch, releaseBeforeDispatch);
 		} catch (error) {
-			releaseOnce();
-			recordFailureLimit(error);
+			releaseBeforeDispatch();
 			throw error;
 		}
 		return inner;
