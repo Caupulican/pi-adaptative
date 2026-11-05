@@ -573,6 +573,8 @@ export type ShellCompoundNode =
 			readonly kind: "loop";
 			readonly variable?: ShellToken;
 			readonly words: ShellToken[];
+			/** A `for NAME` without `in`: it iterates the positional parameters, not `words`. */
+			readonly positional?: true;
 			readonly condition: ShellCompoundNode[];
 			readonly body: ShellCompoundNode[];
 			readonly redirections: ShellRedirection[];
@@ -748,7 +750,8 @@ export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompound
 				index++;
 				skip(["\n", "\r"]);
 				const words: ShellToken[] = [];
-				if (reserved(tokens[index]) === "in") {
+				const listed = reserved(tokens[index]) === "in";
+				if (listed) {
 					index++;
 					while (tokens[index]?.kind === "arg") words.push(tokens[index++]!);
 				}
@@ -762,6 +765,7 @@ export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompound
 					kind: "loop",
 					variable,
 					words,
+					...(listed ? {} : { positional: true as const }),
 					condition: [],
 					body,
 					redirections,

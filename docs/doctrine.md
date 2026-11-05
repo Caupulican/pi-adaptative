@@ -575,7 +575,8 @@ program or write a file, is refused with the reason. The rules hold through wrap
 line continuations, nested `bash -c`/`powershell -c`, loops, conditionals, `case`, groups and
 subshells: one tokenizer walk judges every command in every body for every caller, and a refusal
 names the command that breaks the rule. An assignment or loop variable must be on a short allowlist
-(locale, time zone, terminal and colour; a loop variable may also be a lowercase name), and a path
+(locale, time zone, terminal and colour; a loop variable may also be a lowercase name the shell
+itself does not read), a loop's `$f` is judged as each value its words name, and a path
 is judged where the shell would land, through symbolic links and `..`, including every link a
 link-following search (`rg -L`, `grep -R`) meets below its roots. A worker may search its project
 recursively without a file filter, through its shell or its grep tool, which skips credential files

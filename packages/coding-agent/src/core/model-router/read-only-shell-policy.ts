@@ -244,6 +244,8 @@ interface JudgeContext {
 	readonly programs: string[];
 	/** Inside a loop body or condition, which runs any number of times. */
 	readonly loop?: boolean;
+	/** In a lane, the values each enclosing `for` loop binds its variable to (see `loopValues`). */
+	readonly loopValues?: ReadonlyMap<string, readonly string[]>;
 }
 /** Programs whose purpose is to reach another host. */
 const NETWORK_CLIENTS = new Set([
@@ -1233,24 +1235,148 @@ function reachedPaths(expanded: string, cwd: string, word: string): string[] | s
 	try {
 		if (!GLOB_WORD_RE.test(expanded))
 			return [...new Set([nodePath.resolve(cwd, expanded), physicalPathSync(cwd, expanded)])];
-		const parts = expanded.split(nodePath.sep === "\\" ? /[\\/]/u : /\//u);
-		const firstGlob = parts.findIndex((part) => GLOB_WORD_RE.test(part));
-		if (firstGlob >= 0 && parts.slice(firstGlob + 1).includes(".."))
-			return `it names ${word}, a glob through a parent directory the gate cannot resolve`;
-		const prefix = firstGlob <= 0 ? "." : parts.slice(0, firstGlob).join("/") || nodePath.sep;
-		const rest = firstGlob < 0 ? expanded : parts.slice(firstGlob).join("/");
-		const bases =
-			firstGlob < 0 ? [cwd] : [...new Set([nodePath.resolve(cwd, prefix), physicalPathSync(cwd, prefix)])];
-		const targets: string[] = [];
-		for (const base of bases) {
-			const matches = globMatches(rest, base);
-			if (!matches) return `it names more than ${MAX_GLOB_MATCHES} paths through ${word}`;
-			for (const match of matches) targets.push(match, safeRealpathSync(match));
-		}
-		return [...new Set(targets)];
+		const expansion = globExpansion(expanded, cwd, word);
+		if (typeof expansion === "string") return expansion;
+		return [
+			...new Set(expansion.flatMap(({ matches }) => matches.flatMap((match) => [match, safeRealpathSync(match)]))),
+		];
 	} catch {
 		return `it names ${word}, a path the gate cannot resolve`;
 	}
+}
+
+/**
+ * A glob word's matches from `cwd`, per base the glob is read from (the lexical and the physical form of its literal
+ * prefix), with the prefix as written. A string is a refusal; a filesystem error throws.
+ */
+function globExpansion(
+	expanded: string,
+	cwd: string,
+	word: string,
+): { prefix: string | undefined; base: string; matches: string[] }[] | string {
+	const parts = expanded.split(nodePath.sep === "\\" ? /[\\/]/u : /\//u);
+	const firstGlob = parts.findIndex((part) => GLOB_WORD_RE.test(part));
+	if (firstGlob >= 0 && parts.slice(firstGlob + 1).includes(".."))
+		return `it names ${word}, a glob through a parent directory the gate cannot resolve`;
+	const prefix = firstGlob <= 0 ? undefined : parts.slice(0, firstGlob).join("/") || nodePath.sep;
+	const rest = firstGlob < 0 ? expanded : parts.slice(firstGlob).join("/");
+	const bases =
+		firstGlob < 0
+			? [cwd]
+			: [...new Set([nodePath.resolve(cwd, prefix ?? "."), physicalPathSync(cwd, prefix ?? ".")])];
+	const expansion: { prefix: string | undefined; base: string; matches: string[] }[] = [];
+	for (const base of bases) {
+		const matches = globMatches(rest, base);
+		if (!matches) return `it names more than ${MAX_GLOB_MATCHES} paths through ${word}`;
+		expansion.push({ prefix, base, matches });
+	}
+	return expansion;
+}
+
+/** A reference to a variable a `for` loop binds: `$name` or `${name}`, the name ending where a shell name ends. */
+const LOOP_REFERENCE_RE = /\$(?:\{([a-z][a-z0-9]*)\}|([a-z][a-z0-9]*)(?![A-Za-z0-9_]))/gu;
+
+/**
+ * The spellings of `word` with the loop variables it references replaced by every value their loops bind (each
+ * variable takes one value per spelling, the value of one pass). A string is a refusal; unbound references stay.
+ */
+function boundSpellings(word: string, values: ReadonlyMap<string, readonly string[]> | undefined): string[] | string {
+	if (!values || values.size === 0 || !word.includes("$")) return [word];
+	const names = new Set<string>();
+	for (const reference of word.matchAll(LOOP_REFERENCE_RE)) {
+		const name = reference[1] ?? reference[2]!;
+		if (values.has(name)) names.add(name);
+	}
+	let spellings = [word];
+	for (const name of names) {
+		const bound = values.get(name)!;
+		if (spellings.length * bound.length > MAX_GLOB_MATCHES)
+			return `it names ${word}, more than ${MAX_GLOB_MATCHES} paths through its loop variables`;
+		spellings = spellings.flatMap((spelling) =>
+			bound.map((value) =>
+				spelling.replace(LOOP_REFERENCE_RE, (reference: string, braced?: string, bare?: string) =>
+					(braced ?? bare) === name ? value : reference,
+				),
+			),
+		);
+	}
+	return spellings;
+}
+
+/**
+ * Judges every spelling of a word that references bound loop variables, each in a context without the bindings;
+ * undefined when the word references none, so the caller judges it as written.
+ */
+function judgeBoundSpellings(
+	word: string,
+	context: JudgeContext,
+	judge: (spelling: string, passContext: JudgeContext) => string | undefined,
+): { violation: string | undefined } | undefined {
+	const spellings = boundSpellings(word, context.loopValues);
+	if (typeof spellings === "string") return { violation: spellings };
+	if (spellings.length === 1 && spellings[0] === word) return undefined;
+	const passContext = { ...context, loopValues: undefined };
+	for (const spelling of spellings) {
+		const violation = judge(spelling, passContext);
+		if (violation) return { violation };
+	}
+	return { violation: undefined };
+}
+
+/**
+ * The values a lane's `for` loop binds its variable to, each word judged as a path first (a glob there lists what it
+ * matches): a plain word is its expanded text, a glob its matches spelled as the shell spells them (the prefix as
+ * written, then the matched names), or the word itself when nothing matches. A string is a refusal.
+ */
+function loopValues(
+	words: readonly ShellToken[],
+	cwds: WorkingDirectories,
+	context: JudgeContext,
+	lane: ReadOnlyShellLaneScope,
+): string[] | string {
+	const values = new Set<string>();
+	for (const word of words) {
+		const spellings = boundSpellings(word.value, context.loopValues);
+		if (typeof spellings === "string") return spellings;
+		for (const spelling of spellings) {
+			const violation = lanePathViolation(spelling, cwds.list, false, { ...context, loopValues: undefined }, lane);
+			if (violation) return violation;
+			// Judged above: the word expands, and a glob in it resolves from every directory.
+			const expanded = expandLaneWord(spelling, context.dialect, lane)!;
+			if (!GLOB_WORD_RE.test(expanded)) {
+				values.add(expanded);
+				continue;
+			}
+			let matched = false;
+			for (const cwd of cwds.list) {
+				let expansion: ReturnType<typeof globExpansion>;
+				try {
+					expansion = globExpansion(expanded, cwd, word.value);
+				} catch {
+					return `it names ${word.value}, a path the gate cannot resolve`;
+				}
+				if (typeof expansion === "string") return expansion;
+				for (const { prefix, base, matches } of expansion) {
+					for (const match of matches) {
+						const relative = nodePath.relative(base, match);
+						values.add(
+							prefix === undefined
+								? nodePath.isAbsolute(expanded)
+									? match
+									: relative
+								: prefix.endsWith(nodePath.sep)
+									? `${prefix}${relative}`
+									: `${prefix}${nodePath.sep}${relative}`,
+						);
+						matched = true;
+					}
+				}
+			}
+			if (!matched) values.add(expanded);
+			if (values.size > MAX_GLOB_MATCHES) return `it loops over more than ${MAX_GLOB_MATCHES} values`;
+		}
+	}
+	return [...values];
 }
 
 function deniedPathViolation(target: string, recursive: boolean, lane: ReadOnlyShellLaneScope): string | undefined {
@@ -1331,6 +1457,10 @@ function lanePathViolation(
 	lane: ReadOnlyShellLaneScope,
 	followLinks = false,
 ): string | undefined {
+	const bound = judgeBoundSpellings(word, context, (spelling, passContext) =>
+		lanePathViolation(spelling, cwds, recursive, passContext, lane, followLinks),
+	);
+	if (bound) return bound.violation;
 	const expanded = expandLaneWord(word, context.dialect, lane);
 	if (expanded === undefined) return `it names ${word}, a path the gate cannot resolve`;
 	if (!lane.network && NETWORK_SHARE_RE.test(expanded))
@@ -1362,6 +1492,10 @@ function writeViolation(word: string, cwds: WorkingDirectories, context: JudgeCo
 			: undefined;
 	}
 	if (lane.scratchRoots.length === 0) return `it writes ${word} and this worker has no scratch directory`;
+	const bound = judgeBoundSpellings(word, context, (spelling, passContext) =>
+		writeViolation(spelling, cwds, passContext),
+	);
+	if (bound) return bound.violation;
 	const expanded = expandLaneWord(word, context.dialect, lane);
 	if (expanded === undefined || GLOB_WORD_RE.test(expanded))
 		return `it writes to ${word}, a path the gate cannot resolve`;
@@ -1949,7 +2083,15 @@ function laneOperandViolation(
 	context: JudgeContext,
 	lane: ReadOnlyShellLaneScope,
 ): string | undefined {
-	if (NON_PATH_PROGRAMS.has(name)) return undefined;
+	if (NON_PATH_PROGRAMS.has(name)) {
+		// The shell expands a glob before the program runs, so a program that opens nothing still prints what it matches.
+		for (const word of args.slice(1)) {
+			if (!GLOB_WORD_RE.test(word)) continue;
+			const violation = lanePathViolation(word, cwds.list, false, context, lane);
+			if (violation) return violation;
+		}
+		return undefined;
+	}
 	const recursive = searchesRecursively(name, args);
 	const followLinks = recursive && followsLinks(name, args);
 	const operands = pathOperandsWithProgram(name, args);
@@ -2016,7 +2158,7 @@ function leafViolation(args: readonly string[], cwds: WorkingDirectories, contex
 			if (rest.some((arg) => /^-[a-zA-Z]*i|^--in-place(?:=|$)/u.test(arg))) return "sed -i edits files in place";
 			break;
 		case "read": {
-			const violation = readVariableViolation(rest);
+			const violation = readVariableViolation(rest, context.loopValues);
 			if (violation) return violation;
 			break;
 		}
@@ -2205,38 +2347,75 @@ function judgeSimpleCommands(
 }
 
 /**
+ * Lowercase names a shell itself reads: zsh ties `path`, `cdpath`, `fpath`, `manpath` and `mailpath` to their
+ * uppercase variables, and its other special parameters change lookup, prompts or positional parameters.
+ */
+const SHELL_LOWERCASE_PARAMETERS = new Set([
+	"aliases",
+	"argv",
+	"builtins",
+	"cdpath",
+	"commands",
+	"dirstack",
+	"fignore",
+	"fpath",
+	"functions",
+	"histchars",
+	"mailpath",
+	"manpath",
+	"modules",
+	"nameddirs",
+	"options",
+	"parameters",
+	"path",
+	"pipestatus",
+	"prompt",
+	"psvar",
+	"status",
+	"userdirs",
+	"watch",
+]);
+
+/**
  * A variable a loop or `read` sets keeps its value in the shell, so it follows the assignment allowlist widened by
- * lowercase names, which no program reads from its environment by convention. `binding` names the binder and an example.
+ * lowercase names, which programs do not read from their environment by convention; a lowercase name the shell itself
+ * reads (`SHELL_LOWERCASE_PARAMETERS`) is refused. `binding` names the binder and an example.
  */
 function boundVariableViolation(name: string, binding: { what: string; example: string }): string | undefined {
-	if (ALLOWED_ASSIGNMENT_RE.test(name) || /^[a-z][a-z0-9]*$/u.test(name)) return undefined;
-	return `it binds the ${binding.what} ${name}, which may be a variable programs read; use a name of lowercase letters and digits (${binding.example})`;
+	if (ALLOWED_ASSIGNMENT_RE.test(name) || (/^[a-z][a-z0-9]*$/u.test(name) && !SHELL_LOWERCASE_PARAMETERS.has(name)))
+		return undefined;
+	return `it binds the ${binding.what} ${name}, which may be a variable programs or the shell read; use another name of lowercase letters and digits (${binding.example})`;
 }
 
-/** The variables a `read` sets: its name operands and an `-a` array name; option values are not names. */
-function readVariableViolation(rest: readonly string[]): string | undefined {
-	const binding = { what: "read variable", example: "read -r line" };
+/**
+ * The variables a `read` sets (its name operands and an `-a` array name; option values are not names) follow the
+ * bound-variable rule, and none may be a loop variable whose values the gate substitutes for its references.
+ */
+function readVariableViolation(
+	rest: readonly string[],
+	loopValueMap: ReadonlyMap<string, readonly string[]> | undefined,
+): string | undefined {
+	const names: string[] = [];
 	for (let index = 0; index < rest.length; index++) {
 		const word = rest[index]!;
 		if (word === "--") {
-			for (const name of rest.slice(index + 1)) {
-				const violation = boundVariableViolation(name, binding);
-				if (violation) return violation;
-			}
-			return undefined;
+			names.push(...rest.slice(index + 1));
+			break;
 		}
 		if (word.startsWith("-") && word.length > 1) {
 			// Letters up to the first one that takes a value; its value is the rest of the word or the next word.
 			const valueAt = word.slice(1).search(/[adinNptu]/u);
 			if (valueAt < 0) continue;
 			const value = word.length > valueAt + 2 ? word.slice(valueAt + 2) : rest[++index];
-			if (word[valueAt + 1] === "a" && value !== undefined) {
-				const violation = boundVariableViolation(value, binding);
-				if (violation) return violation;
-			}
+			if (word[valueAt + 1] === "a" && value !== undefined) names.push(value);
 			continue;
 		}
-		const violation = boundVariableViolation(word, binding);
+		names.push(word);
+	}
+	for (const name of names) {
+		if (loopValueMap?.has(name))
+			return `it reads into the loop variable ${name}, whose references the gate judges as the loop's own values`;
+		const violation = boundVariableViolation(name, { what: "read variable", example: "read -r line" });
 		if (violation) return violation;
 	}
 	return undefined;
@@ -2313,8 +2492,20 @@ function compoundViolation(
 				for (const word of node.variable ? [node.variable, ...node.words] : []) {
 					violation ??= expansionViolation(word);
 				}
-				const loop = { ...context, loop: true };
-				violation ??= compoundViolation(node.condition, cwds, loop) ?? compoundViolation(node.body, cwds, loop);
+				if (violation) break;
+				// In a lane each pass's value is known when the words are (`for f in src/*.ts`), so `$f` in the body is
+				// judged as each of them; a `for` over the positional parameters binds nothing, and `$f` stays unresolved.
+				let loopValueMap = context.loopValues;
+				if (context.lane && node.variable && !node.positional) {
+					const values = loopValues(node.words, cwds, context, context.lane);
+					if (typeof values === "string") return values;
+					loopValueMap = new Map([...(context.loopValues ?? []), [node.variable.value, values]]);
+				} else if (node.variable && context.loopValues?.has(node.variable.value)) {
+					// A rebinding the gate cannot value hides the outer loop's values.
+					loopValueMap = new Map([...context.loopValues].filter(([name]) => name !== node.variable!.value));
+				}
+				const loop = { ...context, loop: true, loopValues: loopValueMap };
+				violation = compoundViolation(node.condition, cwds, loop) ?? compoundViolation(node.body, cwds, loop);
 				break;
 			}
 			case "case":
