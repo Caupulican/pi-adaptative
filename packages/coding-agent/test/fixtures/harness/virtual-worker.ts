@@ -63,6 +63,7 @@ class VirtualHostedWorker extends EventEmitter {
 	private running = true;
 	/** Set when exit begins: nothing is delivered to the parent after it. */
 	private exiting = false;
+	private didExit = false;
 	/** Set by the harness cutoff: not even an already scheduled exit event reaches production listeners. */
 	private cut = false;
 	private settleExit: (code: number) => void = () => undefined;
@@ -130,6 +131,10 @@ class VirtualHostedWorker extends EventEmitter {
 		this.referenced = false;
 	}
 
+	get threadId(): number {
+		return this.didExit ? -1 : this.id;
+	}
+
 	terminate(): Promise<number> {
 		this.beginExit(1);
 		return this.exited;
@@ -140,6 +145,7 @@ class VirtualHostedWorker extends EventEmitter {
 		this.running = false;
 		this.exiting = true;
 		this.cut = true;
+		this.didExit = true;
 		this.settleExit(1);
 	}
 
@@ -202,6 +208,7 @@ class VirtualHostedWorker extends EventEmitter {
 		this.exiting = true;
 		setImmediate(() => {
 			if (this.cut) return;
+			this.didExit = true;
 			this.host.exited(this);
 			this.emit("exit", code);
 			this.settleExit(code);
@@ -623,7 +630,14 @@ export class VirtualWorkerThreads {
 	}
 
 	assertNoLiveWorkers(): void {
-		if (this.live.size) throw new Error(`Fixture worker threads still live: ${this.live.size}`);
+		if (this.live.size) {
+			const evidence = [...this.live].map((worker) => ({
+				worker: worker.id,
+				threadId: worker.threadId,
+				messages: this.messageLog.filter((message) => message.worker === worker.id).slice(-8),
+			}));
+			throw new Error(`Fixture worker threads still live: ${this.live.size}; ${JSON.stringify(evidence)}`);
+		}
 	}
 
 	/** Fences every remaining worker before the guard restores the host builtins; the leak is reported by the close check. */

@@ -2520,6 +2520,21 @@ export class MemoryController {
 						),
 					context,
 				);
+				// A policy withdrawal is a precise refusal, even when it arrives during the source read.
+				// Check it before the generic stale-snapshot fence so callers can explain the withdrawal.
+				assertMemoryReadActive(context);
+				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
+					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
+					observe(
+						"navigation",
+						reason,
+						[],
+						{ generation: this._memoryGeneration, policy: this._retrievalPolicyKey() },
+						options,
+						"refused",
+					);
+					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
+				}
 				checkDelivery(admission, budget, context, laneRevision);
 				if (!evidence.every((item) => item.isCurrent())) throw new LaneMemorySnapshotStaleError();
 				const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");

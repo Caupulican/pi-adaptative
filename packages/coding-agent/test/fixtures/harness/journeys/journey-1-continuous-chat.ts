@@ -507,7 +507,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				date3MatchesRecord: icmNavOutputs.date3 === icmRecords[3]!.date,
 				leaf9RetriedOnWorkerC,
 			},
-			"Pi-adaptative-memory persists daily JSONL + 16B index, clips tool output at 30k chars, splits assistant output at 30k chars, retries transient compaction errors without blacklisting the model, and serves zoom/date",
+			`Pi-adaptative-memory persists daily JSONL + index, clips tool output at 30k chars, splits assistant output at 30k chars, retries transient compaction errors without blacklisting the model, and serves zoom/date; raw zoom evidence: ${JSON.stringify({ length: icmNavOutputs.raw2?.length, head: icmNavOutputs.raw2?.slice(0, 1_024), recordHead: icmRecords[9]?.text.slice(0, 1_024) })}`,
 		).toEqual({
 			recordCount: 13,
 			indexBytes: 13 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
