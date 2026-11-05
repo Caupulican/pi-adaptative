@@ -898,7 +898,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					"a single parent with room runs its due slot away",
 				).toEqual(["away"]);
 				world.faultMatrix.witness("R56", { control: true });
-				contenderAt = world.timers.port("routines").now() + 10_000;
+				// Due before the daemon's next 10 s renewal, which the advance below fires.
+				contenderAt = world.timers.port("routines").now() + 5_000;
 				world.systemOne.enterPhase("routine-away-contender-create", ICM_INTAKE_JUDGMENTS);
 				world.provider.enqueue(
 					"root",
@@ -2048,6 +2049,14 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			const stop = root.sessionManager.onEntriesPersisted(check);
 			queueMicrotask(check);
 		});
+		// One pass acknowledges the taken result; the next removes the routine whose runs are then all settled.
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(
+			store()
+				.listRoutineOccurrences({ routineId: conditionalId })
+				.find((occurrence) => occurrence.trigger.kind === "schedule")?.result?.delivery,
+			"the woken turn's result is acknowledged",
+		).toBe("acknowledged");
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		await withDeadline(world.trace, "the reported end is noticed", conditionNoticed);
 		expect(workerRequests(), "one run reported the end").toBe(workerRequestsBeforeRun + 1);
