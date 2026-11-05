@@ -6,7 +6,9 @@ export interface SessionEntryIndex {
 }
 
 /** Resolve the optional indexed branch adapter used by narrow SessionManager test and embedding seams. */
-export function resolveSessionEntryIndex(sessionManager: SessionManager): SessionEntryIndex | undefined {
+export function resolveSessionEntryIndex(
+	sessionManager: Partial<Pick<SessionManager, "getLeafId" | "getEntry">>,
+): SessionEntryIndex | undefined {
 	const candidate = sessionManager as unknown as {
 		getLeafId?: () => string | null | undefined;
 		getEntry?: (id: string) => SessionEntry | undefined;

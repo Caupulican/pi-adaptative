@@ -8,7 +8,7 @@
  * Extracted verbatim from agent-session.ts (god-file decomposition). Owns the latest
  * audit/policy/correlation/enforcement/gc reports, the {@link BrainCurator} sidecar and its last
  * skip reasons, and the lazily-built tool-artifact store. Everything else it needs — the turn
- * index, the session/settings managers, the model registry, agent/workspace dirs, the active tool
+ * index, the session log reader, the settings manager, the model registry, agent/workspace dirs, the active tool
  * names, the disposed flag, the isolated-completion primitive, spawned-usage accounting, and the
  * live {@link MemoryManager} — is reached through narrow deps accessors rather than the whole
  * AgentSession.
@@ -242,13 +242,25 @@ export interface ContextGcLane {
 	readonly conversation: string;
 }
 
+/**
+ * What the pipeline reads of the session log: audit lookup, gc/artifact storage dirs and the token-estimate
+ * compaction anchor. The pipeline never writes the log; a curation record goes through the writer its root caller
+ * passes ({@link ContextPipeline.maybeDrainBrainCuration}, {@link ContextPipeline.buildCompactionPreDigest}).
+ */
+export type ContextPipelineSessionReader = Pick<
+	SessionManager,
+	"getSessionId" | "getSessionLineageIds" | "getBranch" | "getLeafId" | "getEntry"
+>;
+
+/** Records one curation entry on the session log. */
+export type CurationEntryWriter = (customType: "brain-curation" | "brain-curation-predigest", data: unknown) => void;
+
 export interface ContextPipelineDeps {
 	/** Capability-tier switch for path aliasing; absent means enabled. */
 	isPathAliasingEnabled?(): boolean;
 	/** Current turn index, stamped into audit/policy/enforcement reports. */
 	getTurnIndex(): number;
-	/** Session log: audit lookup, gc/artifact storage dirs, curation entries, token-estimate compaction anchor. */
-	getSessionManager(): SessionManager;
+	getSessionManager(): ContextPipelineSessionReader;
 	/** Context-gc / prompt-enforcement / curation settings (all opt-in gates). */
 	getSettingsManager(): ContextPipelineSettingsSource;
 	/** Resolves a configured curation model pattern against configured auth. */
@@ -283,7 +295,7 @@ export interface ContextPipelineDeps {
 	/** A disposed session must never persist a curation/pre-digest entry. */
 	isDisposed(): boolean;
 	/** The live memory manager — the active providers' page markers feed the semantic-gc scan. */
-	getMemoryManager(): MemoryManager;
+	getMemoryManager(): Pick<MemoryManager, "getContextMarkers">;
 	/** Roll a curation drain's spawned usage into session accounting (idempotent per reportId).
 	 * `reportId` is REQUIRED: every caller derives a stable id from the work unit's identity
 	 * so a retry cannot double-count. */
@@ -947,7 +959,7 @@ export class ContextPipeline {
 		return resolved.model;
 	}
 
-	maybeDrainBrainCuration(): void {
+	maybeDrainBrainCuration(recordEntry: CurationEntryWriter): void {
 		try {
 			if (!this._brainCurator.hasWork() || this._brainCurator.isDraining) return;
 			const model = this.resolveCurationModelIfFit();
@@ -964,7 +976,7 @@ export class ContextPipeline {
 				return;
 			}
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
-			void this._drainBrainCuration(model, settings.maxJobsPerTurn);
+			void this._drainBrainCuration(model, settings.maxJobsPerTurn, recordEntry);
 		} catch {
 			// curation is a sidecar; it must never disrupt a turn
 		}
@@ -976,7 +988,9 @@ export class ContextPipeline {
 	 * failure rate <=5% before it is trusted to pre-digest compaction input. Returns undefined
 	 * (verbatim compaction, byte-for-byte today's behavior) whenever any gate refuses.
 	 */
-	buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
+	buildCompactionPreDigest(
+		recordEntry: CurationEntryWriter,
+	): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
 		try {
 			const model = this.resolveCurationModelIfFit();
 			if (!model) return undefined;
@@ -1010,7 +1024,7 @@ export class ContextPipeline {
 						}),
 				});
 				if (!this.deps.isDisposed() && result.totalChunks > 0) {
-					this.deps.getSessionManager().appendCustomEntry("brain-curation-predigest", {
+					recordEntry("brain-curation-predigest", {
 						version: 1,
 						totalChunks: result.totalChunks,
 						digested: result.digested,
@@ -1026,7 +1040,11 @@ export class ContextPipeline {
 		}
 	}
 
-	private async _drainBrainCuration(model: Model<Api>, maxJobs: number): Promise<void> {
+	private async _drainBrainCuration(
+		model: Model<Api>,
+		maxJobs: number,
+		recordEntry: CurationEntryWriter,
+	): Promise<void> {
 		try {
 			// ACCUMULATE across all drained jobs (the drain runs the completer once PER job) —
 			// keeping only the last job's usage would under-report every multi-job drain.
@@ -1060,7 +1078,7 @@ export class ContextPipeline {
 				identity: results.map((result) => result.key),
 			});
 			if (this.deps.isDisposed() || results.length === 0) return;
-			this.deps.getSessionManager().appendCustomEntry("brain-curation", {
+			recordEntry("brain-curation", {
 				version: 1,
 				results: results.map((result) => ({
 					key: result.key,

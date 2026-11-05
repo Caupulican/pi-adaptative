@@ -117,6 +117,7 @@ import type { WorkerResponseObservation } from "./delegation/worker-attempt-exec
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
+import { createWorkerRequestPlanner } from "./delegation/worker-request-planner.ts";
 import { createWorkerSkillAccess } from "./delegation/worker-skill-access.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
@@ -1106,23 +1107,18 @@ export class AgentSession {
 			// Live worker supervision: one observation per executed worker tool call, applied through
 			// the root's existing worker-agent control surface.
 			observeWorkerProgress: (observation, signal) => this._workerSupervision.observe(observation, signal),
-			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
-			observeWorkerRequest: (agentId, snapshot, prefixTokens) =>
-				this._cache.observeWorkerRequest(agentId, snapshot, prefixTokens),
-			observeWorkerResponse: (message, observation) => this._cache.recordObservation(message, observation),
+			// Worker conversations plan with root's own context pipeline on their own lane and pass the same cache guard.
+			...createWorkerRequestPlanner({
+				getPipeline: () => this._pipeline,
+				guard: this._cache.guard,
+				getEdgeGrants: () => this.getEdgeGrants(),
+			}),
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
-			admitWorkerEarlyCompaction: ({ agentId, model, contextTokens, messages }) =>
-				this._cache.admitWorkerEarlyCompaction(agentId, model, contextTokens, messages),
-			recordWorkerCompactionOutcome: ({ agentId, ...outcome }) =>
-				this._cache.recordCompactionOutcome(outcome, agentId),
 			// A worker learns tool choice on its own model into the same evidence store root learns in.
 			createWorkerToolSelection: (model, tools) =>
 				createWorkerToolSelection(this._toolPerformanceStore, formatModelRouterModel(model), tools),
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
-			// Worker conversations plan with root's own request-context controller, on their own lane: the
-			// mechanics every agent needs, none of the head-only steps.
-			planWorkerRequest: (input) => this._pipeline.planWorkerRequest(input, () => this.getEdgeGrants()),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
@@ -3342,12 +3338,12 @@ export class AgentSession {
 	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _maybeDrainBrainCuration(): void {
-		this._pipeline.maybeDrainBrainCuration();
+		this._pipeline.maybeDrainBrainCuration((type, data) => this.sessionManager.appendCustomEntry(type, data));
 	}
 
 	/** Compaction call-site delegation to {@link ContextPipeline.buildCompactionPreDigest}. */
 	private _buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
-		return this._pipeline.buildCompactionPreDigest();
+		return this._pipeline.buildCompactionPreDigest((type, data) => this.sessionManager.appendCustomEntry(type, data));
 	}
 
 	/**

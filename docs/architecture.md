@@ -43,7 +43,7 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `reflection-controller.ts` | no | Root-session reflection cue + explicit learning-write controller. |
 | `runtime-update-controller.ts` | no | (no header comment) |
 | `scout-controller.ts` | no | (no header comment) |
-| `session-cache-controller.ts` | no | Prompt-cache custody, survival observation recording, cold-moment transitions, worker early-compaction economics, and cache-priced objective executor selection for a session. |
+| `session-cache-controller.ts` | no | A session's prompt-cache controller: the foreground's side of the lane guard (`CacheLaneGuard` holds custody, knowledge, observations and worker conversations' guard), cold-moment transitions, and cache-priced objective executor selection. |
 | `session-edge-intent-controller.ts` | no | Owner request classification, optional-tool intent checkpointing, rule-authority and local-commit delivery bindings, model-pool policy updates, and session edge grants. |
 | `session-runtime-admission-controller.ts` | no | Adapts session lifetime and resource mutation to the shared runtime generation admission owner. |
 | `session-semantic-plane-controller.ts` | no | Session semantic-plane health recorder, evaluation-recording decision-engine wrapper, and lazy SQLite decision-ledger lifecycle. |
