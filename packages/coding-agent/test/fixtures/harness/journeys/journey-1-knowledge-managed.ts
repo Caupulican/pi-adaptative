@@ -343,9 +343,8 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 			omitted: [],
 		});
 		for (const value of [granted.text, ungranted.text, forgotten.text])
-			expect(resultText(result.content), "the parent's tool result names references, never values").not.toContain(
-				value,
-			);
+			for (const part of [resultText(result.content), JSON.stringify(result.details)])
+				expect(part, "the parent's tool result and its details name references, never values").not.toContain(value);
 		expect(claims, "one helper claim delivered the turn").toHaveLength(1);
 		expect(claims[0].finished, "the claimed turn settles").toBe(true);
 		expect(claims[0].release.kind, "the parent hands the block over IPC at the helper's ask").toBe("delivered");
@@ -432,7 +431,13 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 		expect(claims, "the second task was claimed once").toHaveLength(2);
 		expect(claims[1].release.kind, "the helper is told the grant was withdrawn").toBe("withdrawn");
 		expect(composed[1], "the turn prompt says no knowledge is provided").toContain("none is provided");
-		for (const text of [composed[1], claims[1].evidence, resultText(withdrawn.content), ...jobFiles])
+		for (const text of [
+			composed[1],
+			claims[1].evidence,
+			resultText(withdrawn.content),
+			JSON.stringify(withdrawn.details),
+			...jobFiles,
+		])
 			expect(text, "a withdrawn record reaches neither the lane nor any record").not.toContain(late.text);
 		await withDeadline(world.trace, `${label} parent receives the withdrawn terminal`, withdrawnHandoff.promise);
 		await withDeadline(world.trace, `${label} withdrawn response settled`, session.waitForForegroundIdle());
