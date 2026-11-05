@@ -69,6 +69,11 @@ export interface WorkerRecoveryCoordinatorOptions {
 	): WorkerRecoveryDispatchResult;
 	recoverTaskBearingMailboxTurns(): void;
 	recoverSessionRootReplies(): void;
+	/**
+	 * Present on a host that runs only part of its parent's work (a parent opened away): only the queued, suspended and
+	 * verification work of attempts it admits is resumed here; the rest stays durable for the parent.
+	 */
+	runsAttempt?(attempt: AttemptRuntimeState): boolean;
 	/** Wake the scheduler and UI after a retained retry deadline becomes eligible. */
 	retryReady?(): void;
 	/**
@@ -164,6 +169,7 @@ export class WorkerRecoveryCoordinator {
 				let recoveredAll = true;
 				for (const { attempt, record, verificationOfTaskId } of queued) {
 					if (this.disposed) return;
+					if (this.options.runsAttempt?.(attempt) === false) continue;
 					let retained: boolean;
 					try {
 						retained = this.enqueueOrDeferRetry(
@@ -189,6 +195,11 @@ export class WorkerRecoveryCoordinator {
 
 			for (const recovery of lifecycle.getPendingVerificationRecoveries()) {
 				if (this.disposed) return;
+				const runsAttempt = this.options.runsAttempt;
+				if (runsAttempt) {
+					const subject = lifecycle.getTaskRuntimeSnapshot().attempts[recovery.subjectAttemptId];
+					if (!subject || !runsAttempt(subject)) continue;
+				}
 				if (recovery.action === "reconcile") {
 					try {
 						const record = lifecycle.reconcileVerification(recovery);
@@ -236,7 +247,8 @@ export class WorkerRecoveryCoordinator {
 				.map((notification) => notification.record)
 				// ManagedLaneController owns managed-lane projection and durable delivery; replaying it here
 				// creates a second publisher every time unrelated foreground state triggers recovery.
-				.filter((record) => record.type !== "managed-worker");
+				.filter((record) => record.type !== "managed-worker")
+				.filter((record) => this.runsRecordAttempt(record));
 			if (this.disposed) return;
 			if (terminalRecords.length > 0) {
 				if (this.options.publishTerminalRecords) this.options.publishTerminalRecords(terminalRecords);
@@ -254,6 +266,17 @@ export class WorkerRecoveryCoordinator {
 		} finally {
 			this.recoveringDurableState = false;
 		}
+	}
+
+	/** Whether this host publishes a recovered terminal: every one, unless it runs only part of the parent's work. */
+	private runsRecordAttempt(record: LaneRecord): boolean {
+		const runsAttempt = this.options.runsAttempt;
+		if (!runsAttempt) return true;
+		const attempt =
+			record.attemptId === undefined
+				? undefined
+				: this.options.lifecycle.getTaskRuntimeSnapshot().attempts[record.attemptId];
+		return attempt !== undefined && runsAttempt(attempt);
 	}
 
 	/** Evaluate, persist, and arm one retry through the same durable path used by restart recovery. */

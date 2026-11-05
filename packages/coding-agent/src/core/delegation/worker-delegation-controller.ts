@@ -64,7 +64,12 @@ import {
 } from "../objective-execution/current-objective-execution.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
-import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
+import {
+	EMPTY_ATTEMPT_USAGE,
+	projectAttemptUsage,
+	providerUsageFromAttemptUsage,
+} from "../orchestration/attempt-usage.ts";
+import type { SharedCapabilityBudget } from "../orchestration/capability-gateway.ts";
 import {
 	type AgentBindingContract,
 	type AttemptUsageSnapshot,
@@ -257,6 +262,7 @@ import {
 } from "./worker-terminal-handoff-coordinator.ts";
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
 import {
+	boundedByRunBudget,
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
 	workerTreeCanAdmitAttempt,
@@ -587,6 +593,8 @@ export class WorkerDelegationController {
 	private readonly contextForks: WorkerContextForkStore;
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
+	/** Budgets shared by every attempt of one bounded run (`runCostBound`), keyed by run. */
+	private readonly runBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
 	private readonly inFlightLedgers = new Map<string, InFlightWorkerLedger>();
 	/** Attributes files two concurrently running workers both changed (never blocks either). */
@@ -658,6 +666,9 @@ export class WorkerDelegationController {
 			dispatchVerification: (recovery) => this.dispatchRecoveredVerification(recovery),
 			recoverTaskBearingMailboxTurns: () => this.agentControl.reconcileTaskBearingMailboxTurns(),
 			recoverSessionRootReplies: () => this.agentControl.reconcileSessionRootReplies(),
+			...(this.deps.runsAttempt
+				? { runsAttempt: (attempt: AttemptRuntimeState) => this.runsParentAttempt(attempt) }
+				: {}),
 			publishProviderLimit: (input) => {
 				this.providerLimitStore ??= new ProviderLimitStore(this.deps.getAgentDir());
 				const store = this.providerLimitStore;
@@ -687,6 +698,16 @@ export class WorkerDelegationController {
 			withConversationAdmission: (agent, operation) => this.withProjectContextAdmission(agent, operation),
 			isControlAvailable: () =>
 				!this.workerAbort.signal.aborted && !this.deps.isDisposed() && this.deps.isDelegateToolActive(),
+			...(this.deps.runsAttempt
+				? {
+						runsAgent: (agentId: string) => {
+							const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+							return Object.values(snapshot.attempts).some(
+								(attempt) => attempt.agentId === agentId && this.runsParentAttempt(attempt),
+							);
+						},
+					}
+				: {}),
 			getLifecycle: () => this.getWorkerLifecycle(),
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
 			run: (request, record) => this.runOnce(request, undefined, record),
@@ -2243,6 +2264,37 @@ export class WorkerDelegationController {
 			childAgentId,
 			parentAgentId: snapshot.agents[childAgentId]?.parentAgentId ?? attempt.dispatch.parentAgentId,
 		};
+	}
+
+	/** Whether this host runs the attempt: every one, unless it runs only part of its parent's work. */
+	private runsParentAttempt(attempt: AttemptRuntimeState): boolean {
+		return this.deps.runsAttempt?.(attempt, this.lifecycle.getTaskRuntimeSnapshot()) ?? true;
+	}
+
+	/**
+	 * The budget the attempt's run shares with its other attempts (`runCostBound`), seeded from every durable attempt of
+	 * that run; undefined when the host bounds no run.
+	 */
+	private runBudgetPort(attemptId: string, initialUsage: AttemptUsageSnapshot): SharedCapabilityBudget | undefined {
+		const runCostBound = this.deps.runCostBound;
+		if (!runCostBound) return undefined;
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const attempt = snapshot.attempts[attemptId];
+		const bound = attempt ? runCostBound(attempt, snapshot) : undefined;
+		if (!bound) return undefined;
+		const seeds = Object.values(snapshot.attempts)
+			.filter((candidate) => runCostBound(candidate, snapshot)?.runId === bound.runId)
+			.map((candidate) => ({
+				attemptId: candidate.attemptId,
+				usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
+			}));
+		return this.runBudgets.createPort({
+			rootAgentId: bound.runId,
+			attemptId,
+			budget: { maxCostUsd: bound.maxCostUsd },
+			seeds,
+			initialUsage,
+		});
 	}
 
 	/** Whether this parent still has to import writes another host recorded for the attempt. */
@@ -5153,13 +5205,15 @@ export class WorkerDelegationController {
 		}
 		const rootAttempt = lifecycle.getLatestAgentAttempt(agentBinding.rootAgentId);
 		const rootBudget = rootAttempt?.dispatch.executionContract?.worker.authority.budget ?? grant.budget;
-		const sharedBudget = this.treeBudgets.createPort({
+		const treeBudget = this.treeBudgets.createPort({
 			rootAgentId: agentBinding.rootAgentId,
 			attemptId: durableHandle.attemptId,
 			budget: rootBudget,
 			seeds: collectWorkerTreeBudgetSeeds(lifecycle.getTaskRuntimeSnapshot(), agentBinding.rootAgentId),
 			initialUsage,
 		});
+		const runBudget = this.runBudgetPort(durableHandle.attemptId, initialUsage);
+		const sharedBudget = runBudget ? boundedByRunBudget(treeBudget, runBudget) : treeBudget;
 		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
 		const shellOutputDirectory = shellGranted

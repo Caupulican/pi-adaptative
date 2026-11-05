@@ -125,6 +125,11 @@ export interface WorkerAgentControlCoordinatorOptions {
 	peekConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
 	withConversationAdmission?<T>(agent: AgentBindingContract, operation: () => T): T;
 	isControlAvailable(): boolean;
+	/**
+	 * Present on a host that runs only part of its parent's work (a parent opened away): the mailbox turns, replies and
+	 * root replies of other agents are left durable for the parent.
+	 */
+	runsAgent?(agentId: string): boolean;
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
@@ -1433,7 +1438,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			);
 			return;
 		}
-		for (const reply of replies) this.reconcileSessionRootReply(reply);
+		for (const reply of replies) {
+			if (this.options.runsAgent?.(reply.sourceAgentId) === false) continue;
+			this.reconcileSessionRootReply(reply);
+		}
 	}
 
 	private reconcileSessionRootReply(reply: SessionRootReply): void {
@@ -2147,9 +2155,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	private replyReconciliationAgents(): AgentBindingContract[] {
-		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).sort(
-			(left, right) => left.createdAt.localeCompare(right.createdAt) || left.agentId.localeCompare(right.agentId),
-		);
+		const runsAgent = this.options.runsAgent;
+		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents)
+			.filter((agent) => !runsAgent || runsAgent(agent.agentId))
+			.sort(
+				(left, right) => left.createdAt.localeCompare(right.createdAt) || left.agentId.localeCompare(right.agentId),
+			);
 	}
 
 	private reconcileWorkerReplyOutboxes(agents: readonly AgentBindingContract[]): void {
@@ -2376,6 +2387,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		try {
 			const agent = this.options.getLifecycle().getAgent(agentId);
 			if (!agent) return { started: false, skipReason: "unknown_agent" };
+			if (this.options.runsAgent?.(agentId) === false)
+				return { started: false, skipReason: "worker_agent_runs_in_parent" };
 			const mailbox = this.getMailbox(agentId);
 			for (let settlement = 0; settlement < 64; settlement++) {
 				const message = mailbox.pendingTaskBearing()[0];

@@ -42,7 +42,6 @@ import {
 	ROUTINE_INTAKE_CAP_WINDOW_MS,
 	ROUTINE_INTAKE_LIVE_CAP,
 	ROUTINE_INTAKE_WINDOW_CAP,
-	type RoutineAwayClaimGate,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
@@ -61,6 +60,8 @@ import {
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	rebasedRoutineCursor,
+	routineAwaySpendCharged,
+	routineAwaySpendWindowExit,
 	routineCursorAfter,
 	routineEnded,
 	routineOccurrenceId,
@@ -949,21 +950,6 @@ export class PersistentBotTeamStore {
 			this.routineOccurrences.delete(item.occurrenceId);
 		}
 		return this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES;
-	}
-
-	/**
-	 * What runs away inside the spend window are charged against the away spend bound: a run that may still spend holds
-	 * its full per-run bound, a finished run its settled usage (the per-run bound when unread), a run that never started
-	 * nothing.
-	 */
-	private awaySpendCharged(gate: RoutineAwayClaimGate, nowMs: number): number {
-		let charged = 0;
-		for (const item of this.routineOccurrences.values()) {
-			if (item.executor !== "away" || item.createdAt <= nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS) continue;
-			if (item.phase !== "terminal") charged += gate.maxUsdPerRun;
-			else if (item.dispatchKey) charged += gate.settledUsd.get(item.occurrenceId) ?? gate.maxUsdPerRun;
-		}
-		return charged;
 	}
 
 	/** Records why a due routine was not run away; the same reason is recorded once, and any claim clears it. */
@@ -1888,7 +1874,7 @@ export class PersistentBotTeamStore {
 			// An away claim admits a run only while its full per-run bound still fits the rolling day's bound; a refused
 			// run claims nothing and stays due for its parent.
 			const away = input.away;
-			let awayCharged = away ? this.awaySpendCharged(away, input.nowMs) : 0;
+			let awayCharged = away ? routineAwaySpendCharged(this.routineOccurrences.values(), away, input.nowMs) : 0;
 			const awayRefused: string[] = [];
 			const admitAway = (): boolean => {
 				if (!away) return true;
@@ -1997,14 +1983,10 @@ export class PersistentBotTeamStore {
 				}
 			}
 			if (output.length || changed) this.save();
-			let awayRetryAt: number | undefined;
-			if (awayRefused.length > 0)
-				for (const item of this.routineOccurrences.values())
-					if (item.executor === "away" && item.createdAt > input.nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS)
-						awayRetryAt = Math.min(
-							awayRetryAt ?? Number.POSITIVE_INFINITY,
-							item.createdAt + ROUTINE_AWAY_SPEND_WINDOW_MS,
-						);
+			const awayRetryAt =
+				awayRefused.length > 0
+					? routineAwaySpendWindowExit(this.routineOccurrences.values(), input.nowMs)
+					: undefined;
 			return {
 				claimed: output.map((item) => structuredClone(item)),
 				journalFull,

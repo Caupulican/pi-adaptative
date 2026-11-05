@@ -104,6 +104,43 @@ export function collectWorkerTreeBudgetSeeds(
 	return seeds;
 }
 
+/**
+ * An attempt's agent tree budget further bounded by the budget of the run it serves (see
+ * `ParentExecutionPolicy.runCostBound`): both are checked before each provider request, both record the attempt's
+ * usage, and a request holds a reservation in both. The attempt's own usage and token headroom stay the tree's.
+ */
+export function boundedByRunBudget(tree: SharedCapabilityBudget, run: SharedCapabilityBudget): SharedCapabilityBudget {
+	return {
+		assertBudgetAvailable: (subject) => {
+			tree.assertBudgetAvailable(subject);
+			run.assertBudgetAvailable(subject);
+		},
+		getAttemptUsage: () => tree.getAttemptUsage(),
+		recordAttemptUsage: (usage, accounting) => {
+			tree.recordAttemptUsage(usage, accounting);
+			run.recordAttemptUsage(usage, accounting);
+		},
+		remainingTokens: () => tree.remainingTokens(),
+		reserveProviderBudget: async (requestedMaxTokens, subject, signal) => {
+			const treeReservation = await tree.reserveProviderBudget(requestedMaxTokens, subject, signal);
+			let runReservation: ProviderBudgetReservation;
+			try {
+				runReservation = await run.reserveProviderBudget(treeReservation.maxTokens, subject, signal);
+			} catch (error) {
+				treeReservation.release();
+				throw error;
+			}
+			return {
+				maxTokens: Math.min(treeReservation.maxTokens, runReservation.maxTokens),
+				release: () => {
+					runReservation.release();
+					treeReservation.release();
+				},
+			};
+		},
+	};
+}
+
 function abortReason(signal: AbortSignal): unknown {
 	return signal.reason ?? new Error("Worker provider budget reservation was aborted.");
 }

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
+import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { ciEventSubject, ciSubjectKey, hostEventHash } from "../events/host-event-contract.ts";
 import { hostEventIsCurrent } from "../events/host-event-reducer.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -8,6 +9,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { AWAY_OFF_BRANCH_REASON, AWAY_UNPINNED_REASON } from "./away-routine-admission.ts";
 import {
 	decideRoutineEvents,
 	MAX_ROUTINE_OCCURRENCES,
@@ -158,7 +160,11 @@ interface RoutineSchedulerDeps {
 	 * (never event, bot or team routines, which need the open session or are any session's), and every claim it makes
 	 * is admitted under the away spend bound this returns.
 	 */
-	readonly away?: { gate(): RoutineAwayClaimGate };
+	readonly away?: {
+		gate(): RoutineAwayClaimGate;
+		/** Why a saved run cannot run away (its authority needs the open session), or undefined when it can. */
+		refusal(intent: WorkerSavedIntent): string | undefined;
+	};
 	dispatchMessage(occurrence: RoutineOccurrence): Promise<string>;
 	warn(message: string): void;
 }
@@ -361,6 +367,8 @@ export class RoutineSchedulerController {
 		for (const id of this.deferred.keys()) if (!pendingIds.has(id)) this.deferred.delete(id);
 		for (const occurrence of this.occurrences()) {
 			if (!this.active) return result;
+			// Away, only runs dispatched away are this host's to reconcile; the parent reconciles its own when it opens.
+			if (this.deps.away && occurrence.executor !== "away") continue;
 			if (occurrence.phase === "dispatching" || occurrence.phase === "running" || occurrence.phase === "uncertain")
 				this.attempt(`reconcile|${occurrence.occurrenceId}`, () => this.reconcile(occurrence));
 		}
@@ -479,7 +487,10 @@ export class RoutineSchedulerController {
 			(entry) =>
 				this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
 				this.deps.canUseOrigin(entry.parentOrigin) &&
-				(!away || entry.target.kind === "session") &&
+				(!away ||
+					(entry.target.kind === "session" &&
+						entry.definition.executionSnapshot !== undefined &&
+						away.refusal(entry.definition.executionSnapshot.savedIntent) === undefined)) &&
 				(entry.phase === "pending" ||
 					(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
 		);
@@ -849,9 +860,13 @@ export class RoutineSchedulerController {
 	private schedulable(routine: RoutineDefinitionView): boolean {
 		const snapshot = routine.executionSnapshot;
 		if (snapshot && !this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)) return false;
+		const away = this.deps.away;
 		return (
-			!this.deps.away ||
-			(snapshot !== undefined && routine.target.kind === "session" && routine.schedule.kind !== "event")
+			!away ||
+			(snapshot !== undefined &&
+				routine.target.kind === "session" &&
+				routine.schedule.kind !== "event" &&
+				away.refusal(snapshot.savedIntent) === undefined)
 		);
 	}
 
@@ -860,8 +875,9 @@ export class RoutineSchedulerController {
 	 * silently. Event routines need the open session's sealed sources and are not this host's to report.
 	 */
 	private awayUnrunnable(routine: RoutineDefinitionView): string | undefined {
+		const away = this.deps.away;
 		if (
-			!this.deps.away ||
+			!away ||
 			!routine.enabled ||
 			routine.target.kind !== "session" ||
 			routine.target.parentSessionId !== this.deps.parentSessionId ||
@@ -869,10 +885,9 @@ export class RoutineSchedulerController {
 		)
 			return undefined;
 		const snapshot = routine.executionSnapshot;
-		if (!snapshot) return "it has no saved run with a pinned origin, so it runs only while its session is open.";
-		return this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)
-			? undefined
-			: "its saved origin is not on the session's current branch, or that branch is empty, so it waits for the session to open.";
+		if (!snapshot) return AWAY_UNPINNED_REASON;
+		if (!this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)) return AWAY_OFF_BRANCH_REASON;
+		return away.refusal(snapshot.savedIntent);
 	}
 
 	private routineDueAt(

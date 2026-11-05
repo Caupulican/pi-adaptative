@@ -143,6 +143,7 @@ import {
 	MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 	MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
 	MIN_GRAPH_FRACTION,
+	MIN_ROUTINE_AWAY_MAX_USD_PER_RUN,
 	MIN_TOOL_EXECUTION_CONCURRENCY,
 	matchesResourceProfilePattern,
 	mergeResourceProfileFilters,
@@ -3604,7 +3605,7 @@ export class SettingsManager {
 			maxUsdPerRun: sanitizeNumberSetting(
 				configured.maxUsdPerRun,
 				DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
-				0,
+				MIN_ROUTINE_AWAY_MAX_USD_PER_RUN,
 				MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
 			),
 			maxUsdPerDay: sanitizeNumberSetting(

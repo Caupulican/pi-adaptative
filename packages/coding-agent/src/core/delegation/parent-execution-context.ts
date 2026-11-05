@@ -43,7 +43,11 @@ import type { RepositoryMutationObserver } from "../objective-execution/reposito
 import type { OrchestrationProfile, OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
 import type { PersistedSessionTaskProfileRecord } from "../orchestration/session-task-profile-store.ts";
-import type { AttemptParentWrite } from "../orchestration/task-runtime-state.ts";
+import type {
+	AttemptParentWrite,
+	AttemptRuntimeState,
+	TaskRuntimeProjection,
+} from "../orchestration/task-runtime-state.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
@@ -256,6 +260,21 @@ export interface ParentExecutionPolicy {
 		/** The worker attempt the findings came from: what stays open is that attempt's parent write. */
 		attemptId?: string;
 	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }>;
+	/**
+	 * Present on a host that runs only part of its parent's work (a parent opened away runs only its routine runs):
+	 * restart recovery, verification dispatch, recovered terminals and mailbox adoption act only on the attempts this
+	 * admits, and every other attempt stays durable for the parent. Absent, the host runs all of its parent's work.
+	 */
+	runsAttempt?(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): boolean;
+	/**
+	 * Present on a host that bounds one run's whole spend: every attempt of the run (subject, retries and verifier) that
+	 * returns the same `runId` shares one cost budget of `maxCostUsd`, checked before each provider request on top of
+	 * the attempt's own agent tree budget. Absent, or undefined for an attempt, only the agent tree budget applies.
+	 */
+	runCostBound?(
+		attempt: AttemptRuntimeState,
+		snapshot: TaskRuntimeProjection,
+	): { readonly runId: string; readonly maxCostUsd: number } | undefined;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;
 	/** The best model the policy allows, for a worker whose own binding it disallows. */

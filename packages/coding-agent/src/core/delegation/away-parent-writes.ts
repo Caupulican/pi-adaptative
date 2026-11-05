@@ -136,10 +136,8 @@ export function createAwayParentWrites(deps: AwayParentWriteDeps): AwayParentWri
 				return undefined;
 			}
 		},
-		// Usage stays in the attempt's durable receipts; the parent's receipt delivery charges it when it opens.
-		addSpawnedUsage: (_usage, opts) => {
-			reportOnce(`Spawned usage ${opts.reportId} stays with its attempt receipts for the parent to charge.`);
-			return undefined;
-		},
+		// Usage stays in the attempt's durable receipts; the parent's receipt delivery charges it when it opens. This is
+		// the normal path of every run away, not a refused write, so nothing is reported.
+		addSpawnedUsage: () => undefined,
 	};
 }

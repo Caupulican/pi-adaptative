@@ -251,6 +251,7 @@ export class BillingFailoverController {
 	}
 }
 
-function expiryFromRetryAfter(retryAfterMs: number | undefined, nowMs: number): number | undefined {
+/** When a recorded exhaustion ends: `retryAfterMs` from `nowMs`, or undefined when the provider gave no reset. */
+export function expiryFromRetryAfter(retryAfterMs: number | undefined, nowMs: number): number | undefined {
 	return retryAfterMs === undefined ? undefined : nowMs + retryAfterMs;
 }

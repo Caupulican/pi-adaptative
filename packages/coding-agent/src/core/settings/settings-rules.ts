@@ -283,6 +283,9 @@ export const DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY = 1;
 /** Each hosted session holds its parent context and worker runtime in the daemon's memory. */
 export const DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS = 4;
 
+/** A run away always has a bound: a worker reads a zero budget as unbounded, and the day bound charges this per run. */
+export const MIN_ROUTINE_AWAY_MAX_USD_PER_RUN = 0.01;
+
 export const MAX_ROUTINE_AWAY_MAX_USD_PER_RUN = 5;
 
 export const MAX_ROUTINE_AWAY_MAX_USD_PER_DAY = 50;

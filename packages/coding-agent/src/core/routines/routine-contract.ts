@@ -449,6 +449,36 @@ export interface RoutineAwayClaimGate {
 	readonly settledUsd: ReadonlyMap<string, number>;
 }
 
+/**
+ * What runs away inside the spend window charge the away spend bound: a run that may still spend holds its full
+ * per-run bound, a finished run its settled usage (the per-run bound when unread), a run that never started nothing.
+ */
+export function routineAwaySpendCharged(
+	occurrences: Iterable<RoutineOccurrence>,
+	gate: RoutineAwayClaimGate,
+	nowMs: number,
+): number {
+	let charged = 0;
+	for (const item of occurrences) {
+		if (item.executor !== "away" || item.createdAt <= nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS) continue;
+		if (item.phase !== "terminal") charged += gate.maxUsdPerRun;
+		else if (item.dispatchKey) charged += gate.settledUsd.get(item.occurrenceId) ?? gate.maxUsdPerRun;
+	}
+	return charged;
+}
+
+/** When the oldest run away still inside the spend window leaves it, or undefined when none is inside. */
+export function routineAwaySpendWindowExit(
+	occurrences: Iterable<RoutineOccurrence>,
+	nowMs: number,
+): number | undefined {
+	let exit: number | undefined;
+	for (const item of occurrences)
+		if (item.executor === "away" && item.createdAt > nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS)
+			exit = Math.min(exit ?? Number.POSITIVE_INFINITY, item.createdAt + ROUTINE_AWAY_SPEND_WINDOW_MS);
+	return exit;
+}
+
 export interface RoutineDelivery {
 	readonly occurrence: RoutineOccurrence;
 	readonly result: RoutineResult;
