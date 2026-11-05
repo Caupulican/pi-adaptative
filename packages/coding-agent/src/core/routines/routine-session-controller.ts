@@ -148,6 +148,8 @@ export class RoutineSessionController implements RoutineToolPort {
 
 	async run(routineId: string, expectedRevision: number, invocationId: string, signal?: AbortSignal) {
 		this.check(signal);
+		// A manual occurrence spends a worker run and its result can open another parent turn: only the owner's words start one.
+		this.requireOwnerTurn();
 		this.require(routineId, expectedRevision);
 		const commandId = canonicalDigest({
 			parentSessionId: this.deps.parentSessionId,
@@ -275,14 +277,15 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	/**
-	 * The owner source the current run answers. Standing work is created, changed or restarted only on the owner's own
-	 * words: a run a routine result, CI event or other host input opened cannot extend the automation that woke it.
+	 * The owner source the current run answers. Standing work is created, changed, restarted or run only on the owner's
+	 * own words: a run a routine result, CI event or other host input opened cannot extend or re-trigger the automation
+	 * that woke it.
 	 */
 	private requireOwnerTurn(): number {
 		const at = this.deps.ownerTurnSourceAt();
 		if (at === undefined)
 			throw new Error(
-				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update and resume wait for the owner's request; pause and delete still work. Tell the owner what to change.",
+				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume and run wait for the owner's request; pause and delete still work. Tell the owner what to change.",
 			);
 		return at;
 	}

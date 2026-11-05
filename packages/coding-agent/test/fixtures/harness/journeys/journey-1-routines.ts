@@ -272,7 +272,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		const uncertainSettled = parentSettled(1);
 		const uncertainty = "The native task was admitted, but its immediate readback was unavailable.";
 		world.systemOne.enterPhase("routine-uncertain-parent", {});
-		// The turn this result opens cannot extend the automation that woke it: a create is refused before admission.
+		// The turn this result opens cannot extend or re-trigger the automation that woke it: a create and a manual run
+		// (with the routine's exact current revision, so only the owner-turn gate can refuse it) are refused before admission.
 		world.provider.enqueue(
 			"root",
 			{
@@ -288,15 +289,23 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 							profileId: profile.profileId,
 						},
 					},
+					{
+						id: "routine-wake-run",
+						name: "routine",
+						arguments: { action: "run", routineId, expectedRevision: store().getRoutine(routineId)!.revision },
+					},
 				]),
 				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(uncertainty),
 			},
 			{
 				...text("routine-uncertain-parent", "The scheduled result is currently uncertain."),
 				check: (request) => {
-					const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
-					expect(result?.isError, result?.text).toBe(true);
-					expect(result?.text).toContain("The owner has not spoken in this turn");
+					const results = latestBatchResults(request).filter((entry) => entry.toolName === "routine");
+					expect(results, "the wake turn's create and run each get an answer").toHaveLength(2);
+					for (const result of results) {
+						expect(result.isError, result.text).toBe(true);
+						expect(result.text).toContain("The owner has not spoken in this turn");
+					}
 				},
 			},
 		);

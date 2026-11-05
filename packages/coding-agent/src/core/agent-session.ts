@@ -1632,6 +1632,9 @@ export class AgentSession {
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
 			afterRun: async (beginRuntimeHandoff, signal) => {
+				// The submission is over, including a retry its last agent_end predicted and nothing started (an abort during the
+				// backoff, a runtime stop): a later wake-started run must not read this run's owner words as its own request.
+				this._reflection.ownerEvidence.endOwnerTurn();
 				if (!signal.aborted && !isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
 					this._selfCompaction.schedule();
 				}
