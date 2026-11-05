@@ -272,10 +272,34 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		const uncertainSettled = parentSettled(1);
 		const uncertainty = "The native task was admitted, but its immediate readback was unavailable.";
 		world.systemOne.enterPhase("routine-uncertain-parent", {});
-		world.provider.enqueue("root", {
-			...text("routine-uncertain-parent", "The scheduled result is currently uncertain."),
-			check: (request) => expect(JSON.stringify(request.context.messages)).toContain(uncertainty),
-		});
+		// The turn this result opens cannot extend the automation that woke it: a create is refused before admission.
+		world.provider.enqueue(
+			"root",
+			{
+				...calls("routine-wake-create-call", [
+					{
+						id: "routine-wake-create",
+						name: "routine",
+						arguments: {
+							action: "create",
+							routineId: "wake-authored",
+							prompt: original,
+							schedule: { kind: "interval", intervalMs: 86_400_000 },
+							profileId: profile.profileId,
+						},
+					},
+				]),
+				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(uncertainty),
+			},
+			{
+				...text("routine-uncertain-parent", "The scheduled result is currently uncertain."),
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
+					expect(result?.isError, result?.text).toBe(true);
+					expect(result?.text).toContain("The owner has not spoken in this turn");
+				},
+			},
+		);
 		// Simulate post-admission readback uncertainty at the real store boundary;
 		// the admitted native worker remains gated and has not finished.
 		store().markRoutineUncertain({
@@ -286,6 +310,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			nowMs: world.timers.port("routines").now(),
 		});
 		await withDeadline(world.trace, "uncertain routine outcome accepted before native completion", uncertainSettled);
+		await withDeadline(world.trace, "the woken parent turn ends", root.session.agent.waitForIdle());
+		expect(store().getRoutine("wake-authored"), "a turn a routine result opened saves no routine").toBeUndefined();
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(occurrences()[0]?.phase).toBe("uncertain");
 		expect(occurrences()[0]?.result?.delivery).toBe("acknowledged");

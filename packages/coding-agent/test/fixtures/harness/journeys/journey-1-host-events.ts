@@ -251,24 +251,21 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			const off = manager.onEntriesPersisted(check);
 			check();
 		});
-	// Event routines are saved through the session's own routine tool; no parent turn is spent on authoring.
-	const routineTool = owner.session.backgroundLanes.createRoutineToolDefinition();
-	if (!routineTool) throw new Error("The host-events session offers no routine tool.");
+	// Event routines are saved through the host entry point: the routine tool answers only a turn the owner spoke in, and
+	// no parent turn is spent on authoring here.
 	const routineStore = () => owner.session.backgroundLanes.getBotTeamStore();
 	const routineRuns = (routineId: string) => routineStore().listRoutineOccurrences({ routineId });
 	const routinePrompt = "Check the failing CI attempt and report whether the owner needs to act.";
 	const routineSummary = "ci-event-routine completed.";
 	const routineDelivered = "It ran for a CI failure result.";
 	const saveEventRoutine = async (routineId: string, schedule: Record<string, unknown>) => {
-		const result = await routineTool.execute(
-			`host-events-${routineId}`,
-			{ action: "create", routineId, prompt: routinePrompt, schedule, profileId: routineProfile.profileId } as never,
-			undefined,
-			undefined,
-			undefined as never,
-		);
-		const first = result.content[0];
-		expect(result.isError, first?.type === "text" ? first.text : undefined).toBeUndefined();
+		const saved = await owner.session.backgroundLanes.createRoutine({
+			routineId,
+			prompt: routinePrompt,
+			schedule,
+			profileId: routineProfile.profileId,
+		});
+		expect(saved.routineId).toBe(routineId);
 	};
 	const routineSettled = (routineId: string) =>
 		new Promise<void>((resolve) => {

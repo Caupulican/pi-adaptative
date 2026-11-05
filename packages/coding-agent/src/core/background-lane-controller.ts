@@ -212,8 +212,11 @@ export interface BackgroundLaneControllerDeps
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
-	/** The session's genuine owner input: routine saves read its newest source instant, routine intake its words. */
-	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "subscribe" | "readSources" | "findSource" | "listOwnerEvidence">;
+	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
+	getOwnerEvidence(): Pick<
+		OwnerEvidenceLedger,
+		"subscribe" | "readSources" | "findSource" | "listOwnerEvidence" | "currentTurnOpeningSource"
+	>;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -1467,9 +1470,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
-			latestOwnerSourceAt: () => {
-				const latest = this.deps.getOwnerEvidence().listOwnerEvidence().at(-1);
-				return latest ? Date.parse(latest.createdAt) : undefined;
+			ownerTurnSourceAt: () => {
+				const opening = this.deps.getOwnerEvidence().currentTurnOpeningSource();
+				return opening ? Date.parse(opening.createdAt) : undefined;
 			},
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
@@ -1524,7 +1527,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Saves a routine for this session without the model tool: the tool's validation, saved worker authority capture
-	 * and event anchor, owned by the same session controller.
+	 * and event anchor, owned by the same session controller. The embedding host calls it on its own authority, so it
+	 * needs no owner-opened turn and marks no owner words as answered.
 	 */
 	async createRoutine(
 		spec: Parameters<typeof parseRoutineToolInput>[0],
@@ -1532,7 +1536,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): Promise<RoutineToolView> {
 		this.getBotTeamStore();
 		if (!this._routines) throw new Error("Routines are unavailable in this session.");
-		return this._routines.session.create(parseRoutineToolInput(spec), signal);
+		return this._routines.session.createForHost(parseRoutineToolInput(spec), signal);
 	}
 
 	async tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {

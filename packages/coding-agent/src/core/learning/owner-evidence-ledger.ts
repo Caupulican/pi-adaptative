@@ -469,6 +469,16 @@ export class OwnerEvidenceLedger {
 		return this.currentTurn.has(sourceId);
 	}
 
+	/**
+	 * The first owner source recorded during the current run: the owner input that opened it, or the first one the owner
+	 * sent into a run something else opened. Undefined when the owner has said nothing in this run (a routine result,
+	 * CI event or other wake opened it) or no run is active.
+	 */
+	currentTurnOpeningSource(): OwnerEvidenceRecord | undefined {
+		const first = this.currentTurn.values().next();
+		return first.done ? undefined : this.findSource(first.value);
+	}
+
 	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
 	markOwnerInput(message: AgentMessage, originalText: string): void {
 		this.ownerInputOriginals.set(message, originalText);

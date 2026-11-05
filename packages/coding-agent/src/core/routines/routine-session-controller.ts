@@ -33,8 +33,11 @@ interface RoutineSessionDeps {
 	invocationKey(callId: string): string;
 	/** The session ledger's current position; read only when an event routine is saved. */
 	eventAnchor(): RoutineEventAnchor;
-	/** Owner-evidence instant (ms) of the session's newest owner source, if any; stamped on every non-intake save. */
-	latestOwnerSourceAt(): number | undefined;
+	/**
+	 * Owner-evidence instant (ms) of the first owner source recorded in the current run; undefined when the owner said
+	 * nothing in it (a routine result, CI event or other host input opened it) or no run is active.
+	 */
+	ownerTurnSourceAt(): number | undefined;
 	now(): number;
 	isDisposed(): boolean;
 }
@@ -102,10 +105,14 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
-		return this.save(input, undefined, signal);
+		return this.save(input, undefined, "tool", signal);
 	}
 	update(input: RoutineToolInput, expectedRevision: number, signal?: AbortSignal): Promise<RoutineToolView> {
-		return this.save(input, expectedRevision, signal);
+		return this.save(input, expectedRevision, "tool", signal);
+	}
+	/** The embedding host's own creation: no model turn answers it, so no owner turn is required or stamped. */
+	createForHost(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
+		return this.save(input, undefined, "host", signal);
 	}
 
 	async setEnabled(
@@ -115,6 +122,8 @@ export class RoutineSessionController implements RoutineToolPort {
 		signal?: AbortSignal,
 	): Promise<RoutineToolView> {
 		this.check(signal);
+		// Pausing only narrows standing work, so any turn may do it; resuming restarts it and needs the owner's request.
+		if (enabled) this.requireOwnerTurn();
 		const routine = this.require(routineId, expectedRevision);
 		return view(
 			this.deps.store.upsertRoutine({
@@ -186,9 +195,12 @@ export class RoutineSessionController implements RoutineToolPort {
 	private async save(
 		input: RoutineToolInput,
 		expectedRevision: number | undefined,
+		author: "tool" | "host",
 		signal?: AbortSignal,
 	): Promise<RoutineToolView> {
 		this.check(signal);
+		// Read before admission waits: the stamp is the owner source this run answers, never words sent meanwhile.
+		const toolAuthoredThrough = author === "tool" ? this.requireOwnerTurn() : undefined;
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
 		const sameIntent =
 			prior?.executionSnapshot &&
@@ -207,7 +219,6 @@ export class RoutineSessionController implements RoutineToolPort {
 					signal,
 				);
 		this.check(signal);
-		const toolAuthoredThrough = this.deps.latestOwnerSourceAt();
 		return this.persist(input, savedIntent, {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
@@ -220,7 +231,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	 * The one write of a saved routine for every creation path: the parent check, the calendar zone default, the
 	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces. A calendar
 	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's. A tool save stamps the
-	 * owner source it answered; an intake creation carries the origin it consumes.
+	 * owner source that opened its run; an intake creation carries the origin it consumes.
 	 */
 	private persist(
 		input: RoutineToolInput,
@@ -261,6 +272,19 @@ export class RoutineSessionController implements RoutineToolPort {
 				...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 			}),
 		);
+	}
+
+	/**
+	 * The owner source the current run answers. Standing work is created, changed or restarted only on the owner's own
+	 * words: a run a routine result, CI event or other host input opened cannot extend the automation that woke it.
+	 */
+	private requireOwnerTurn(): number {
+		const at = this.deps.ownerTurnSourceAt();
+		if (at === undefined)
+			throw new Error(
+				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update and resume wait for the owner's request; pause and delete still work. Tell the owner what to change.",
+			);
+		return at;
 	}
 
 	private owns(routine: RoutineDefinitionView): boolean {

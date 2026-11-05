@@ -131,7 +131,7 @@ export interface PromptSubmissionControllerDeps {
 		| "assertExecutionGoalCurrent"
 	>;
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
-	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue">;
+	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue" | "ownerEvidence">;
 	readonly earlyDisplayedUserMessages: Set<AgentMessage>;
 	readonly ownerPolicy: Pick<OwnerPolicyQueue<OwnerRequestClassificationOutcome>, "settle">;
 	/** Owner words join the owner-policy queue, with the judgment they received at submission if any (`SessionEdgeIntentController.enqueueOwnerWords`). */
@@ -1217,7 +1217,13 @@ export class PromptSubmissionController {
 				);
 			}
 			if (toolkitHit !== undefined) {
-				await this.deps.runToolkitHit(toolkitHit, messages, submissionSignal);
+				try {
+					await this.deps.runToolkitHit(toolkitHit, messages, submissionSignal);
+				} finally {
+					// The owner's words were answered without a run, so no run end closes their turn: close it here, or the
+					// next run a routine result or CI event opens would count them as its own.
+					this.deps.reflection.ownerEvidence.endOwnerTurn();
+				}
 				return;
 			}
 			const preflight = this.deps.getSystemOneController()
