@@ -1048,28 +1048,6 @@ export class DurableTaskRuntime {
 		return recovered;
 	}
 
-	expireLeases(at = this.now()): string[] {
-		this.refresh();
-		const expired: string[] = [];
-		for (const attempt of Object.values(this.state.attempts)) {
-			if ((attempt.status !== "leased" && attempt.status !== "running") || !attempt.lease) continue;
-			if (Date.parse(attempt.lease.expiresAt) > at) continue;
-			this.commit({
-				type: attempt.agentId ? "attempt.suspended" : "attempt.lease_expired",
-				aggregateId: attempt.attemptId,
-				actor: "runtime",
-				idempotencyKey: `attempt-lease-expired:${attempt.lease.leaseId}`,
-				payload: toJsonObject({
-					attemptId: attempt.attemptId,
-					leaseId: attempt.lease.leaseId,
-					fencingToken: attempt.lease.fencingToken,
-				}),
-			});
-			expired.push(attempt.attemptId);
-		}
-		return expired;
-	}
-
 	requestAgentResume(agentId: string, attemptId: string): AgentBindingContract {
 		this.refresh();
 		const agent = this.state.agents[agentId];

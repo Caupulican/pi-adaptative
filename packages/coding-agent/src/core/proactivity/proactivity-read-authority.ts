@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isPathWithinScope, pathScopesOverlap, safeRealpathSync } from "../autonomy/path-scope.ts";
 import { lendableToolSurface } from "../default-tool-surface.ts";
-import type { WorkerDelegationControllerDeps } from "../delegation/worker-delegation-controller.ts";
+import type { ParentExecutionContext } from "../delegation/parent-execution-context.ts";
 import { workerMachinePathRoots } from "../delegation/worker-machine-scope.ts";
 import { lendsMemoryReadTool } from "../memory/worker-memory-tools.ts";
 import type { ExecutionGrant, ToolCapabilityManifest } from "../orchestration/contracts.ts";
@@ -26,7 +26,7 @@ export const PROACTIVITY_READ_TOOLS = [
 	"date",
 ] as const;
 export type ProactivityInvestigationHost = Pick<
-	WorkerDelegationControllerDeps,
+	ParentExecutionContext,
 	| "getCwd"
 	| "getAgentDir"
 	| "getForegroundToolNames"

@@ -1,47 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
-import {
-	type AgentContextPlan,
-	type AgentContextWire,
-	type AgentMessage,
-	type AgentTool,
-	decodeExecutionContext,
-} from "../../kernel/index.ts";
-import type { SessionManager } from "../../kernel/node.ts";
+import { type AgentContextWire, type AgentMessage, decodeExecutionContext } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
-import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import { getProcessWorkRun } from "../agent-paths.ts";
-import type {
-	AgentSessionEvent,
-	IsolatedCompletionOptions,
-	IsolatedCompletionResult,
-	WorkerDelegationRunOutcome,
-} from "../agent-session-contracts.ts";
+import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
-import type {
-	CapabilityEnvelope,
-	WorkerClaim,
-	WorkerCommandReceipt,
-	WorkerHostFinding,
-	WorkerRequest,
-} from "../autonomy/contracts.ts";
+import type { WorkerClaim, WorkerHostFinding, WorkerRequest } from "../autonomy/contracts.ts";
 import {
 	buildToolkitScriptOperation,
 	classifyAllEdgeOperations,
-	type EdgeGrantView,
 	edgeBlockReason,
 	isEdgeOperationGranted,
 } from "../autonomy/edge-policy.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
-import { createLaneToolSurface, type SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
+import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
-import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
+import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../autonomy/telemetry-events.ts";
 import {
 	createWorkerToolAdapterRegistry,
 	WORKER_TOOL_ADAPTER_NAMES,
@@ -49,8 +29,6 @@ import {
 	type WorkerToolAdapterSources,
 } from "../autonomy/worker-tool-adapter-registry.ts";
 import { sameTaskBrief } from "../comms/comms-records.ts";
-import type { ArtifactStore } from "../context/context-artifacts.ts";
-import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
 	type HostEventSubscriptionInput,
@@ -62,16 +40,8 @@ import { buildCapabilityCard, describeModelCard } from "../expert-routing/capabi
 import {
 	chooseHostRouteProfile,
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
-	type RouteChoiceJudge,
 	type WorkerTaskFitInput,
 } from "../expert-routing/system-one-choice.ts";
-import type {
-	HmoeIndependence,
-	HmoePreference,
-	HmoePreset,
-	HmoeTeamStrategy,
-	HmoeWeights,
-} from "../expert-routing/vocabulary.ts";
 import {
 	formatWorkerTaskFitnessFailure,
 	WorkerTaskFitness,
@@ -83,13 +53,11 @@ import {
 	type KnowledgeGrantReference,
 	parseKnowledgeGrantReferences,
 } from "../memory/knowledge-grant.ts";
-import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import {
 	deriveModelCapabilityProfile,
 	type ModelCapabilityProfile,
 	resolveWorkerOutputTokenCeiling,
 } from "../model-capability.ts";
-import type { ModelRegistry } from "../model-registry.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import {
 	assertCurrentGoalObjective,
@@ -97,7 +65,6 @@ import {
 } from "../objective-execution/current-objective-execution.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
-import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import {
 	type AgentBindingContract,
@@ -107,14 +74,12 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
-	type OrchestrationThinkingLevel,
 	type ResourcePointer,
 	type WorkerExecutionContract,
 	type WorkerModelRouteSource,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
-import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import {
 	assertSpecialistContextClaim,
@@ -141,39 +106,20 @@ import {
 	retainWorkerReceiptAdmission,
 } from "../orchestration/worker-receipt-origin.ts";
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
-import type { ProfileRegistry } from "../profile-registry.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
-import type { ResourceLoader } from "../resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
-import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
-import type {
-	ModelCapabilitySettings,
-	ModelFavorite,
-	ModelRouterPoolPreference,
-	ModelRouterSelectionMode,
-	ResolvedEdgeSettings,
-	ResolvedWorkerDelegationSettings,
-	SystemOneSettings,
-	ThinkingLevel,
-	WorkerAccountRouting,
-	WorkerThinkingPolicy,
-} from "../settings/settings-schema.ts";
-import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
-import type { SystemOneProviderChoice } from "../system-one/access.ts";
+import type { ResolvedWorkerDelegationSettings } from "../settings/settings-schema.ts";
 import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import { collectWorkerReportClaimReceipts } from "../system-one/claim-delivery.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
-import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
-import type { ReadOnlySkillBroker } from "../tools/skill.ts";
-import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { boundedLine, boundedText } from "../util/bounded-line.ts";
 import {
 	AsyncRetainedReleases,
@@ -182,9 +128,9 @@ import {
 	RetainedReleases,
 	releaseFailureCause,
 } from "../util/resource-release.ts";
-import type { TimerSource } from "../util/timer-port.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
+import type { ParentExecutionContext, ParentExecutionSettingsSource } from "./parent-execution-context.ts";
 import {
 	type SanitizedContextForkMessage,
 	type SanitizedContextForkMode,
@@ -202,11 +148,7 @@ import {
 	WorkerAgentControlCoordinator,
 	type WorkerAgentControlResourceSnapshot,
 } from "./worker-agent-control-coordinator.ts";
-import {
-	createWorkerAttemptExecutor,
-	type WorkerResponseObservation,
-	type WorkerToolSelection,
-} from "./worker-attempt-executor.ts";
+import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
 import {
 	bindBotSoul,
 	bindCompiledToolSurface,
@@ -281,7 +223,7 @@ import {
 } from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
-import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
+import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
 import {
 	type ResolvedWorkerProfile,
@@ -328,59 +270,6 @@ import {
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
-/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
-export interface WorkerDelegationControllerSettingsSource {
-	getCompactionSettings(): {
-		enabled: boolean;
-		reserveTokens: number;
-		keepRecentTokens: number;
-		triggerPercent: number;
-	};
-	getEdgeSettings(): ResolvedEdgeSettings;
-	getMemoryRetrievalSettings(): {
-		enabled: boolean;
-		maxResults: number;
-		includeInPrompt: boolean;
-		allowExternalEgress: boolean;
-	};
-	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
-	getModelFavorites(): ModelFavorite[];
-	getModelRouterSettings(): {
-		enabled: boolean;
-		selectionMode: ModelRouterSelectionMode;
-		poolPreference: ModelRouterPoolPreference;
-		cheapModel?: string;
-		mediumModel?: string;
-		expensiveModel?: string;
-		learningModel?: string;
-		executorModel?: string;
-		fitnessGate: boolean;
-		cheapThinking?: ThinkingLevel;
-		mediumThinking?: ThinkingLevel;
-		expensiveThinking?: ThinkingLevel;
-		executorThinking?: ThinkingLevel;
-		hmoePreset?: HmoePreset;
-		hmoeTeamStrategy?: HmoeTeamStrategy;
-		hmoeIndependence?: HmoeIndependence;
-		hmoePreference?: HmoePreference;
-		hmoeWeights?: HmoeWeights;
-	};
-	getProfileRegistry(): ProfileRegistry;
-	getProjectContextFiles(): "on-demand" | "off";
-	getSystemOneSettings(): {
-		enabled: boolean;
-		provider: SystemOneProviderChoice;
-		loopMode?: SystemOneSettings["loopMode"];
-		completionProfile?: SystemOneSettings["completionProfile"];
-	};
-	getToolkitScripts(): ToolkitScript[];
-	getWorkerAccountRouting(): WorkerAccountRouting;
-	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
-	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
-	getWorkerThinkingPolicy(): WorkerThinkingPolicy;
-	isProjectTrusted(): boolean;
-}
-
 type WorkerDispatchWait = Extract<WorkerDispatchAdmission, { action: "wait" }>;
 
 const FOREGROUND_HOLD_WAIT: WorkerDispatchWait = {
@@ -419,7 +308,7 @@ function laneCompactionReserveTokens(contextWindow: number, reserveTokens: numbe
 
 function workerConversationRetentionPolicy(
 	model: Model<Api>,
-	settingsManager: WorkerDelegationControllerSettingsSource,
+	settingsManager: ParentExecutionSettingsSource,
 	admitEarly?: (contextTokens: number, messages: readonly AgentMessage[]) => boolean,
 ): WorkerConversationRetentionPolicy | undefined {
 	const settings = settingsManager.getCompactionSettings();
@@ -471,175 +360,8 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 	return `Worker ${laneId} ended with ${processes.length} process(es) still running; they were stopped (${detail}). A worker leaves nothing behind: start a durable long-running process from the root (bash with background: true; tool_task inspects it), or have the worker report that it needs one.`;
 }
 
-export interface WorkerDelegationControllerDeps {
+export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
-	isDisposed(): boolean;
-	getSessionId(): string;
-	getCwd(): string;
-	getAgentDir(): string;
-	getSessionManager(): SessionManager;
-	getSettingsManager(): WorkerDelegationControllerSettingsSource;
-	getResourceLoader(): ResourceLoader;
-	getActiveOrchestrationProfile?(): OrchestrationProfile | undefined;
-	getModelRegistry(): ModelRegistry;
-	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
-	getModel(): Model<Api> | undefined;
-	getForegroundThinkingLevel?(): OrchestrationThinkingLevel;
-	/** The session's existing System One owner; admission never creates a separate reviewer. */
-	getRouteChoiceJudge?(): RouteChoiceJudge | undefined;
-	isSystemOneEnabled?(): boolean;
-	getForegroundToolNames?(): readonly string[];
-	isDelegateToolActive(): boolean;
-	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
-	/** Live worker supervision hook; one observation per executed worker tool call. */
-	observeWorkerProgress?(observation: WorkerProgressObservation, signal?: AbortSignal): Promise<unknown> | unknown;
-	/**
-	 * Plan a worker request's context with root's request-context controller on the worker's lane:
-	 * context GC priced on the worker's model and retention trigger, path aliases, the authority context.
-	 */
-	planWorkerRequest?(input: {
-		agentId: string;
-		model: Model<Api>;
-		compactionTriggerTokens: number | undefined;
-		messages: AgentMessage[];
-		sentPrefixCount: number;
-		/** The worker's own tool surface: what its lane's context policy can rely on (a retrieval tool). */
-		toolNames: readonly string[];
-		signal?: AbortSignal;
-		/** What the request carries to the model outside `messages` (`AgentContextPlanRequest.wire`). */
-		wire?: AgentContextWire;
-	}): Promise<AgentContextPlan>;
-	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
-	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
-	/** Tool selection for a worker's model and tools, sharing root's evidence store. */
-	createWorkerToolSelection?(model: Model<Api>, tools: readonly AgentTool[]): WorkerToolSelection;
-	/**
-	 * Whether an early compaction of a worker conversation pays for itself now: the same priced verdict
-	 * root's session lane decides with, on the worker conversation's own cache facts.
-	 */
-	admitWorkerEarlyCompaction?(input: {
-		agentId: string;
-		model: Model<Api>;
-		contextTokens: number;
-		messages: readonly AgentMessage[];
-	}): boolean;
-	/** A worker compaction's measured effect on its lane, recorded where root records its own. */
-	recordWorkerCompactionOutcome?(input: {
-		agentId: string;
-		model: Model<Api>;
-		tokensBefore: number;
-		tokensAfter: number;
-		outputTokens: number;
-	}): void;
-	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
-	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
-	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
-	getSharedLaneToolOptions?(): SharedLaneToolOptions;
-	/** The session's timer source: the write-reservation release backoff and the worker retry ladder arm their alarms on its ports. */
-	getTimers(): TimerSource;
-	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
-	getCredentialExposureBoundary?(): CredentialExposureBoundary;
-	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
-	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
-	emit(event: AgentSessionEvent): void;
-	/** Steer a notice to the owning parent session (a custom message that may trigger a turn). */
-	notifyParentSession?(customType: string, text: string): void;
-	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
-	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
-	getGoalStateSnapshot(): GoalState | undefined;
-	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
-	 * lane-creation time in `prepareWorkerAttempt`, to stamp the new lane's owner epoch via
-	 * `WorkerNotificationCoordinator.noteAttemptOwnerEpoch` -- see that method's doc comment. */
-	getCurrentSubmissionEpoch?(): number | undefined;
-	/**
-	 * The project chat's view a worker is born with, before its task: the delegating turn's pinned view, or the latest
-	 * turn's when none runs. Undefined while no ICM chat runs.
-	 */
-	getContinuousChatBirthView?(): { view: string; timestamp: number } | undefined;
-	/**
-	 * `options.cwd` is the directory the claim's relative `changedFiles` resolve against (the worker's own
-	 * execution directory); the parent-review marker is re-derived against it, so a worker in a task directory or a
-	 * worktree lane is judged against its own scope and not the process's.
-	 */
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
-	/** A terminal handoff the parent has taken: the project chat logs the attempt's claim once, as its `[name]` report. */
-	reportWorkerTerminal?(handoff: Readonly<WorkerTerminalHandoff>): void;
-	/**
-	 * A fresh read-only memory port for one lane; the handles it admits never reach another lane. Reads are
-	 * sized against `capacity`: the receiving lane's own request, never the root model's.
-	 */
-	createLaneMemoryBroker(
-		capacity: LaneMemoryCapacitySource,
-		knowledgeReferences?: () => readonly KnowledgeGrantReference[],
-	): WorkerMemoryBroker;
-	/** Validate root-selected canonical versions without transferring owner-wide memory authority. */
-	captureKnowledgeGrant?(references: readonly KnowledgeGrantReference[]): KnowledgeGrant;
-	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
-	getHandoffPersonaGuidance?(): string | undefined;
-	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
-	getArtifactStore?(): ArtifactStore;
-	/** The session's context-GC store, where `artifact_retrieve context:<key>` originals live. */
-	getContextGcStoreDir?(): string | undefined;
-	/** Host-owned read-only skill broker; no SkillVaultController crosses this boundary. */
-	getSkillReadBroker?(): ReadOnlySkillBroker;
-	/** Host-owned skill metadata source for read-only audit; paths are redacted before projection. */
-	getSkillAuditSource?(): Pick<SkillAuditToolOptions, "getSkills"> &
-		Required<Pick<SkillAuditToolOptions, "redactPath">>;
-	addSpawnedUsage(
-		usage: Usage,
-		opts: { label?: string; sourceSessionId?: string; reportId: string },
-	): string | undefined;
-	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
-	getEdgeGrants?(): readonly EdgeGrantView[];
-	/** Settles the owner's queued words before a worker call reads the parent's grants or delivery limit. */
-	settleOwnerPolicy?(): Promise<void>;
-	/** System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted). */
-	checkOperation?(toolName: string, args: unknown, cwd: string): Promise<{ block: true; reason: string } | undefined>;
-	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
-	localCommitBranch?(): string | undefined;
-	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
-	getPathAliasTable?: () => PathAliasTable;
-	/**
-	 * The parent's semantic duplicate review of code a worker's edit or write added. Its note is appended
-	 * to that tool result so the worker reuses existing logic, exactly as the root's own edits are steered.
-	 */
-	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
-	/**
-	 * Blockers for a worker's report from its own transcript: claims the transcript's tool results
-	 * contradict, and a verifier's acceptance its own transcript does not back. Any blocker makes the
-	 * claim need parent review instead of being accepted.
-	 */
-	reviewWorkerReport?(input: {
-		summary: string;
-		messages: readonly Message[];
-		verifierVerdict?: "accepted" | "rejected";
-		hostVerifiedChecks?: readonly WorkerCommandReceipt[];
-	}): Promise<readonly string[]>;
-	/**
-	 * The unsettled-item ladder for a worker's `inconclusive` findings: System One, then a stronger
-	 * model with System One, over the worker's own transcript. What stays open is returned for the
-	 * owner, and under a handoff is already written to the owner's follow-up document.
-	 */
-	settleInconclusive?(input: {
-		items: readonly string[];
-		messages: readonly Message[];
-		signal?: AbortSignal;
-	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }>;
-	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
-	isModelAllowed?(model: Model<Api>): boolean;
-	/** The best model the policy allows, for a worker whose own binding it disallows. */
-	allocateAllowedModel?(): Model<Api> | undefined;
-	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
-	recordObjectiveMutation?(event: {
-		readonly kind: "owned_write" | "shell";
-		readonly path?: string;
-		readonly cwd: string;
-	}): void;
-	/** Shared-worktree attempts are one root observation. Isolated git dirs stay private. */
-	repositoryObserver?: RepositoryMutationObserver;
-	getSessionCwd?(): string;
-	getObjectiveId?(): string;
 }
 
 type WorkerAdmission =

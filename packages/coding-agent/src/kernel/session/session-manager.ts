@@ -2161,10 +2161,10 @@ export class SessionManager {
 		};
 	}
 
-	/** Persist the buffered prefix when another durable owner is about to reference it. */
+	/** Persist the buffered prefix when another durable owner is about to reference it. Nothing buffered is not a write. */
 	flushBufferedEntries(): void {
-		this._assertWritable();
 		if (!this.persist || this.flushed) return;
+		this._assertWritable();
 		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, []);
 		const result = this._persistEntries([], [], undefined, this._capturePersistenceContext(), {
 			flushBuffered: true,

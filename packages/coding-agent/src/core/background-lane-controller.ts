@@ -37,6 +37,7 @@ import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
+import type { ParentExecutionContext } from "./delegation/parent-execution-context.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -86,10 +87,7 @@ import type {
 } from "./delegation/worker-agent-control.ts";
 import { boundWorkerWaitTimeoutMs } from "./delegation/worker-agent-control-coordinator.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
-import {
-	WorkerDelegationController,
-	type WorkerDelegationControllerDeps,
-} from "./delegation/worker-delegation-controller.ts";
+import { WorkerDelegationController } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
@@ -156,8 +154,9 @@ import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./wor
 
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
+/** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
-	extends WorkerDelegationControllerDeps,
+	extends ParentExecutionContext,
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
