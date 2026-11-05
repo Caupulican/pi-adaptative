@@ -64,6 +64,8 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-contract.ts";
 import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../human-input.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
+import type { KnowledgeHandoffProjection } from "../memory/knowledge-projection.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProviderEgress } from "../memory/memory-provider.ts";
 import type { ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistryContract } from "../model-registry-contract.ts";
@@ -1471,6 +1473,17 @@ export interface ExtensionAPI {
 	 */
 	getHandoffPersonaGuidance(): string | undefined;
 
+	/**
+	 * The exact owner-knowledge versions the parent granted to a handoff whose only channel is its task text,
+	 * rendered once as a bounded, source-labeled, untrusted block of at most `maxBytes` UTF-8 bytes. References
+	 * that are no longer current are named and never projected; `isCurrent()` turns false when a delivered version
+	 * changes, is forgotten or memory policy stops admitting it. Never a permission and never raw memory.
+	 */
+	projectKnowledgeForHandoff(
+		references: readonly KnowledgeGrantReference[],
+		maxBytes: number,
+	): KnowledgeHandoffProjection;
+
 	// =========================================================================
 	// Model and Thinking Level
 	// =========================================================================
@@ -1796,6 +1809,10 @@ export interface ExtensionActions {
 	reportSpawnedUsage: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
 	reportManagedLane: (event: ManagedLaneEvent) => void;
 	getHandoffPersonaGuidance: () => string | undefined;
+	projectKnowledgeForHandoff: (
+		references: readonly KnowledgeGrantReference[],
+		maxBytes: number,
+	) => KnowledgeHandoffProjection;
 }
 
 /**

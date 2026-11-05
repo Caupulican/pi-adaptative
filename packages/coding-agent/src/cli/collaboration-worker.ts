@@ -71,8 +71,9 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		// The turn role: this helper controls nothing; every write it makes is fenced by this exact turn, so the turn
 		// keeps reporting into its job even after another process took control of it (a take-back or an adoption).
 		store = new CollaborationJobStore(directory, parent, { role: "turn" });
-		claimed = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
-		if (!claimed) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
+		const claim = store.claimTurn(jobId, agentId, turnId, process.pid, readOwnProcessStartTime());
+		claimed = claim !== false;
+		if (!claim) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
 		notifyParent({ type: "ready", turnId });
 		const job = store.load(jobId);
 		const agent = job.agents.find((item) => item.id === agentId)!;
@@ -107,6 +108,8 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 				reportCommand: memberPeerInvocation(directory, job.id, job.peerCommand, agentId),
 				text: agent.prompt,
 				timeoutMs,
+				// The claim removed the projection from the record; this process holds the only copy.
+				...(claim.knowledge ? { knowledge: claim.knowledge } : {}),
 			},
 			cancellation.signal,
 			answer ?? undefined,

@@ -13,6 +13,7 @@ import {
 	ManagedLaneRuntimeAdmissionError,
 } from "../extensions/managed-lane-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -215,6 +216,8 @@ export class ManagedLaneController {
 		this.ensureHydrated();
 		if (event.phase === "dispatch") {
 			let runtimeLease: RuntimeWorkLease | undefined;
+			// The delegated lanes' grant parser: a malformed or oversized claim is refused before any durable state.
+			const knowledgeReferences = parseKnowledgeGrantReferences(event.dispatch.knowledgeReferences ?? []);
 			try {
 				const prepared = this.lifecycle.prepareManaged(
 					{
@@ -233,6 +236,7 @@ export class ManagedLaneController {
 						...(event.worktreeLaneKey && event.worktreeLanePath
 							? { worktreeLanePath: event.worktreeLanePath }
 							: {}),
+						...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());

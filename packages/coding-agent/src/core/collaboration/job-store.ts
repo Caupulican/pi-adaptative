@@ -7,6 +7,7 @@ import { judgeOwner, ownProcessOwner, type ProcessOwner } from "../../kernel/rel
 import { readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
 import type { SessionLeaseHolder } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
+import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import type { ProcessParentOwnership } from "../process-matrix/runtime.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -14,12 +15,14 @@ import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/
 import {
 	type CollaborationAgent,
 	type CollaborationJob,
+	type CollaborationKnowledgeHandoff,
 	type CollaborationSteeringRequest,
 	type CollaborationTaskCorrelation,
 	type CollaborationTerminal,
 	type CollaborationWorkerRefusal,
 	digestSchema,
 	jobSchema,
+	MAX_COLLABORATION_KNOWLEDGE_BYTES,
 	MAX_COLLABORATION_WORKER_NOTICE_LENGTH,
 	MAX_COLLABORATION_WORKER_NOTICES,
 	type NewCollaborationJob,
@@ -374,10 +377,29 @@ function skipReason(error: unknown): string {
 	return error instanceof Error ? error.message.slice(0, 120) : "rejected";
 }
 
+/** Every turn settlement passes here, so a settled turn never keeps projected owner knowledge on disk. */
 function releaseTurnProcess(agent: CollaborationAgent): void {
 	delete agent.helperPid;
 	delete agent.helperStartTime;
 	delete agent.deadlineAt;
+	delete agent.knowledgeContext;
+}
+
+/** A new task's grant replaces the previous turn's; a continuation (answer or peer message) carries none. */
+function assignTurnKnowledge(agent: CollaborationAgent, knowledge: CollaborationKnowledgeHandoff | undefined): void {
+	delete agent.knowledgeReferences;
+	delete agent.knowledgeContext;
+	if (!knowledge) return;
+	const references = parseKnowledgeGrantReferences(knowledge.references);
+	if (
+		Buffer.byteLength(knowledge.context, "utf8") > MAX_COLLABORATION_KNOWLEDGE_BYTES ||
+		knowledge.context.includes("\0")
+	)
+		throw new Error(
+			`Collaboration knowledge exceeds ${MAX_COLLABORATION_KNOWLEDGE_BYTES} UTF-8 bytes or is not text.`,
+		);
+	if (references.length) agent.knowledgeReferences = references.map((reference) => ({ ...reference }));
+	if (knowledge.context) agent.knowledgeContext = knowledge.context;
 }
 
 function assertJobIntegrity(job: CollaborationJob): void {
@@ -712,6 +734,7 @@ export class CollaborationJobStore {
 		input: NewCollaborationJob,
 		task: string | undefined,
 		intent: CollaborationStartIntent,
+		knowledge?: CollaborationKnowledgeHandoff,
 	): {
 		job: CollaborationJob;
 		kind: "fresh" | "reuse" | "replay";
@@ -757,7 +780,7 @@ export class CollaborationJobStore {
 					job.agents.every((agent) => agent.closed || hasPeerCredentialFile(this.directory, job.id, agent.id)),
 			);
 			const selected = selectCollaborationSpecialist(reusable, input, intent);
-			if (!selected) return { job: this.createAdmitted(input, task, digest), kind: "fresh" };
+			if (!selected) return { job: this.createAdmitted(input, task, digest, knowledge), kind: "fresh" };
 			const adopting = !this.controls(selected);
 			const job = this.updateRecord(
 				selected.id,
@@ -770,9 +793,14 @@ export class CollaborationJobStore {
 						throw new Error("Collaboration start receipt limit reached.");
 					if (task)
 						for (const agent of input.agents)
-							this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {
-								goalId: input.goalId,
-							});
+							this.reserve(
+								current,
+								agent.id,
+								collaborationAssignment(task, agent.task),
+								false,
+								{ goalId: input.goalId },
+								knowledge,
+							);
 					current.startReceipts ??= [];
 					current.startReceipts.push({
 						key: input.id,
@@ -788,7 +816,12 @@ export class CollaborationJobStore {
 		});
 	}
 	/** Caller holds the admission lock. Publish the complete reservation in the first durable write. */
-	private createAdmitted(input: NewCollaborationJob, task?: string, digest?: string): CollaborationJob {
+	private createAdmitted(
+		input: NewCollaborationJob,
+		task?: string,
+		digest?: string,
+		knowledge?: CollaborationKnowledgeHandoff,
+	): CollaborationJob {
 		if (input.parentSessionId !== this.parentSessionId) throw new Error("Invalid collaboration creation parent.");
 		if (this.list().length >= 32)
 			throw new Error(
@@ -818,7 +851,7 @@ export class CollaborationJobStore {
 		};
 		if (task)
 			for (const agent of input.agents)
-				this.reserve(job, agent.id, collaborationAssignment(task, agent.task), false);
+				this.reserve(job, agent.id, collaborationAssignment(task, agent.task), false, undefined, knowledge);
 		if (digest)
 			job.startReceipts = [
 				{
@@ -1023,10 +1056,12 @@ export class CollaborationJobStore {
 		prompt: string,
 		answering: boolean,
 		newTask?: CollaborationTaskCorrelation,
+		knowledge?: CollaborationKnowledgeHandoff,
 	): CollaborationAgent {
 		const agent = assertOperableAgent(current, agentId);
 		if (newTask !== undefined && (!Value.Check(taskCorrelationSchema, newTask) || answering))
 			throw new Error("Invalid collaboration task correlation; answers must retain their task.");
+		if (knowledge && answering) throw new Error("An answer continues its task; it carries no new knowledge grant.");
 		if (agent.notifiedTurn < agent.turn && !["reserved", "running"].includes(agent.status))
 			throw new Error("Collaboration turn terminal handoff must be published before admitting successor turn.");
 		// An outstanding backend request means nobody has observed the resource this turn would run on.
@@ -1054,6 +1089,7 @@ export class CollaborationJobStore {
 		agent.turnId = randomUUID();
 		agent.status = "reserved";
 		agent.prompt = preparedPrompt;
+		assignTurnKnowledge(agent, knowledge);
 		agent.evidence = "";
 		delete agent.usage;
 		delete agent.resultClaim;
@@ -1069,11 +1105,24 @@ export class CollaborationJobStore {
 		prompt: string,
 		answering = false,
 		newTask?: CollaborationTaskCorrelation,
+		knowledge?: CollaborationKnowledgeHandoff,
 	): CollaborationAgent {
 		const job = this.update(id, (current) => {
-			this.reserve(current, agentId, prompt, answering, newTask);
+			this.reserve(current, agentId, prompt, answering, newTask, knowledge);
 		});
 		return job.agents.find((agent) => agent.id === agentId)!;
+	}
+	/**
+	 * Replace one reserved, not yet delivered turn's projected knowledge (a delivered version changed or was
+	 * forgotten after reservation). Fenced by the exact turn; a turn already claimed by its helper is untouched.
+	 */
+	replaceUndeliveredKnowledge(id: string, agentId: string, turnId: string, context: string): boolean {
+		return this.updateAgent(id, agentId, (agent) => {
+			if (!agent || agent.turnId !== turnId || agent.status !== "reserved" || agent.knowledgeContext === undefined)
+				return false;
+			assignTurnKnowledge(agent, { references: agent.knowledgeReferences ?? [], context });
+			return true;
+		});
 	}
 	private authenticatePeer(job: CollaborationJob, senderId: string, token: string): CollaborationAgent {
 		const sender = job.agents.find((agent) => agent.id === senderId);
@@ -1292,8 +1341,18 @@ export class CollaborationJobStore {
 			return result;
 		});
 	}
-	/** `helperStartTime` is the claiming helper's own `readOwnProcessStartTime()`, recorded beside its pid. */
-	claimTurn(id: string, agentId: string, turnId: string, helperPid: number, helperStartTime?: string): boolean {
+	/**
+	 * `helperStartTime` is the claiming helper's own `readOwnProcessStartTime()`, recorded beside its pid. A claim
+	 * returns the turn's projected knowledge and removes it from the record in the same write: a claimed turn is
+	 * never re-sent, so the projection is read at most once and no longer kept on disk.
+	 */
+	claimTurn(
+		id: string,
+		agentId: string,
+		turnId: string,
+		helperPid: number,
+		helperStartTime?: string,
+	): false | { readonly knowledge?: string } {
 		return this.updateAgent(id, agentId, (agent, job) => {
 			if (
 				!agent ||
@@ -1310,7 +1369,9 @@ export class CollaborationJobStore {
 			agent.helperPid = helperPid;
 			if (helperStartTime === undefined) delete agent.helperStartTime;
 			else agent.helperStartTime = helperStartTime;
-			return true;
+			const knowledge = agent.knowledgeContext;
+			delete agent.knowledgeContext;
+			return knowledge === undefined ? {} : { knowledge };
 		});
 	}
 	finishTurn(

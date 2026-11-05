@@ -1,8 +1,23 @@
 /** Exact owner-approved knowledge identities for one delegated task; never copied fact values. */
+import { Type } from "typebox";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { type KnowledgeRecord, type KnowledgeScope, knowledgeAppliesTo } from "./knowledge-record.ts";
 
 export const MAX_KNOWLEDGE_GRANT_REFERENCES = 32;
+
+/** The one tool-parameter shape of a task's knowledge grant; values still pass `parseKnowledgeGrantReferences`. */
+export function knowledgeGrantReferencesSchema(description: string) {
+	return Type.Array(
+		Type.Object(
+			{
+				id: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+				revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+			},
+			{ additionalProperties: false },
+		),
+		{ maxItems: MAX_KNOWLEDGE_GRANT_REFERENCES, description },
+	);
+}
 
 export interface KnowledgeGrantReference {
 	readonly id: string;

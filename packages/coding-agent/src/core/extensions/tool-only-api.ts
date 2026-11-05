@@ -12,6 +12,7 @@
 
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { ReadonlySessionManager } from "../../kernel/node.ts";
+import { blockedKnowledgeHandoff } from "../memory/knowledge-projection.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { Extension, ExtensionAPI, ExtensionContext, ExtensionToolOnlyView, ExtensionUIContext } from "./types.ts";
 
@@ -154,6 +155,11 @@ export function createToolOnlyExtensionAPI(
 		setThinkingLevel: () => ignore("setThinkingLevel"),
 		reportSpawnedUsage: () => ignore("reportSpawnedUsage"),
 		reportManagedLane: () => ignore("reportManagedLane"),
+		// A worker's grant is its own task's; a granted tool never re-projects owner knowledge to anyone.
+		projectKnowledgeForHandoff: () => {
+			ignore("projectKnowledgeForHandoff");
+			return blockedKnowledgeHandoff("knowledge_unavailable");
+		},
 
 		// Read-only views and the process handle the tool needs to run.
 		exec: (command, args, options) => api.exec(command, args, options),

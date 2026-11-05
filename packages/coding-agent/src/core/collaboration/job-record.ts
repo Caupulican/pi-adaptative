@@ -1,4 +1,5 @@
 import { type Static, Type } from "typebox";
+import { type KnowledgeGrantReference, knowledgeGrantReferencesSchema } from "../memory/knowledge-grant.ts";
 import { collaborationUsageSchema, type WorkerLaunchProfile, workerLaunchProfileSchema } from "./launch-profile.ts";
 import {
 	collaborationIdentitySchema,
@@ -42,6 +43,15 @@ const startReceiptSchema = Type.Object(
 export const taskCorrelationSchema = Type.Object({ goalId: Type.Optional(shortText) }, { additionalProperties: false });
 
 export type CollaborationTaskCorrelation = Static<typeof taskCorrelationSchema>;
+
+/** UTF-8 bound of one turn's projected knowledge; the delivered text stays inside the backend's prompt limit. */
+export const MAX_COLLABORATION_KNOWLEDGE_BYTES = 8 * 1024;
+
+/** One new task's knowledge grant: the exact references and their projection rendered by the host. */
+export interface CollaborationKnowledgeHandoff {
+	readonly references: readonly KnowledgeGrantReference[];
+	readonly context: string;
+}
 
 const terminalSchema = Type.Union([
 	Type.Literal("done"),
@@ -114,6 +124,17 @@ const agentSchema = Type.Object(
 		turnId: Type.String({ maxLength: 128 }),
 		status: Type.Union([Type.Literal("idle"), Type.Literal("reserved"), Type.Literal("running"), terminalSchema]),
 		prompt: Type.String({ maxLength: 32768 }),
+		/**
+		 * Exact owner-knowledge versions projected for this turn's task at reservation; replaced by every reservation.
+		 * They stay when the projection is withdrawn before delivery: they record the grant, not a delivery.
+		 */
+		knowledgeReferences: Type.Optional(knowledgeGrantReferencesSchema("Granted knowledge versions of this turn.")),
+		/**
+		 * The rendered projection of those versions, delivered with this turn's task and never part of `prompt`
+		 * (which becomes durable dispatch history). Replaced by a withdrawal notice before delivery when a granted
+		 * version changed or was forgotten; removed by the helper's claim (read at most once) or by settlement.
+		 */
+		knowledgeContext: Type.Optional(Type.String({ maxLength: MAX_COLLABORATION_KNOWLEDGE_BYTES })),
 		/** Current task ownership; an empty object deliberately means no goal. */
 		taskCorrelation: Type.Optional(taskCorrelationSchema),
 		evidence: Type.String({ maxLength: 16000 }),

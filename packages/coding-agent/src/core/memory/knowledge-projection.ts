@@ -29,6 +29,41 @@ export interface KnowledgeProjection {
 	isCurrent(): boolean;
 }
 
+/**
+ * Granted knowledge rendered once into the task text of a lane that has no per-request view (an externally
+ * managed worker). Same renderer, matcher and parser as delegated lanes; never stored as owner evidence.
+ */
+export interface KnowledgeHandoffProjection {
+	/** Bounded, source-labeled block wrapped as untrusted data; empty when nothing may be delivered. */
+	readonly text: string;
+	/** Exact versions inside `text`. */
+	readonly references: readonly KnowledgeGrantReference[];
+	/** Granted versions that are no longer current: corrected, forgotten, expired or outside the owner's scope. */
+	readonly unavailable: readonly KnowledgeGrantReference[];
+	/** Current granted versions that did not fit the size bound. */
+	readonly omitted: readonly KnowledgeGrantReference[];
+	/** Why no granted record could be projected at all, when that is a policy or availability fact. */
+	readonly blocked?: "memory_retrieval_disabled" | "memory_prompt_excluded" | "knowledge_unavailable";
+	/** The included versions are all still current in the owner's scope. */
+	isCurrent(): boolean;
+}
+
+/** What a handoff an extension starts may read of owner memory: preferences and exact granted records. */
+export interface HandoffKnowledgePort {
+	getHandoffPersonaGuidance(): string | undefined;
+	projectKnowledgeForHandoff(
+		references: readonly KnowledgeGrantReference[],
+		maxBytes: number,
+	): KnowledgeHandoffProjection;
+}
+
+/** No granted record may be projected; the reason covers every reference. */
+export function blockedKnowledgeHandoff(
+	blocked: NonNullable<KnowledgeHandoffProjection["blocked"]>,
+): KnowledgeHandoffProjection {
+	return { text: "", references: [], unavailable: [], omitted: [], blocked, isCurrent: () => true };
+}
+
 type KnowledgeReader = Pick<KnowledgeStorePort, "revision" | "snapshot" | "get">;
 
 /** The only rendering of accepted knowledge; the caller owns scope authorization and lifetime. */

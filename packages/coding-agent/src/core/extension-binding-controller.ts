@@ -43,6 +43,7 @@ import type {
 } from "./extensions/index.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
+import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
@@ -102,8 +103,8 @@ export interface ExtensionBindingControllerDeps {
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined;
 	recordManagedLane(event: ManagedLaneEvent): void;
-	/** Bounded applicable owner working preferences for a handoff an extension starts. */
-	getHandoffPersonaGuidance?(): string | undefined;
+	/** Owner preferences and exact granted knowledge for a handoff an extension starts; absent in minimal hosts. */
+	handoffKnowledge?: HandoffKnowledgePort;
 	isForegroundBusy(): boolean;
 	getPendingMessageCount(): number;
 	isStreaming(): boolean;
@@ -385,7 +386,10 @@ export class ExtensionBindingController {
 				reportManagedLane: (event) => {
 					this.deps.recordManagedLane(event);
 				},
-				getHandoffPersonaGuidance: () => this.deps.getHandoffPersonaGuidance?.(),
+				getHandoffPersonaGuidance: () => this.deps.handoffKnowledge?.getHandoffPersonaGuidance(),
+				projectKnowledgeForHandoff: (references, maxBytes) =>
+					this.deps.handoffKnowledge?.projectKnowledgeForHandoff(references, maxBytes) ??
+					blockedKnowledgeHandoff("knowledge_unavailable"),
 			},
 			{
 				getModel: () => this.deps.getModel(),

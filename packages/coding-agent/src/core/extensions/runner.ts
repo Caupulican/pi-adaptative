@@ -351,6 +351,7 @@ export class ExtensionRunner {
 		this.runtime.reportSpawnedUsage = actions.reportSpawnedUsage;
 		this.runtime.reportManagedLane = actions.reportManagedLane;
 		this.runtime.getHandoffPersonaGuidance = actions.getHandoffPersonaGuidance;
+		this.runtime.projectKnowledgeForHandoff = actions.projectKnowledgeForHandoff;
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;

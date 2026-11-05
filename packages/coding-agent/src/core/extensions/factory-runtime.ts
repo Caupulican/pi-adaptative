@@ -67,6 +67,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		reportSpawnedUsage: notInitialized,
 		reportManagedLane: notInitialized,
 		getHandoffPersonaGuidance: notInitialized,
+		projectKnowledgeForHandoff: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -317,6 +318,10 @@ export function createExtensionAPI(
 		getHandoffPersonaGuidance(): string | undefined {
 			runtime.assertActive();
 			return runtime.getHandoffPersonaGuidance();
+		},
+		projectKnowledgeForHandoff(references, maxBytes) {
+			runtime.assertActive();
+			return runtime.projectKnowledgeForHandoff(references, maxBytes);
 		},
 		setModel(model) {
 			runtime.assertActive();

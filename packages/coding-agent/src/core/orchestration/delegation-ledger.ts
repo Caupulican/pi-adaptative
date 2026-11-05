@@ -83,6 +83,8 @@ export interface PrepareManagedDelegationInput {
 	goalId?: string;
 	worktreeLaneKey?: string;
 	worktreeLanePath?: string;
+	/** Exact granted knowledge versions of this turn's task; never their values. */
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 }
 
 export interface StartedDelegationAttempt {
@@ -255,6 +257,7 @@ export class DelegationOrchestrationLedger {
 				authorizationId: input.authorizationId,
 				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
 				...(input.worktreeLanePath ? { worktreeLanePath: input.worktreeLanePath } : {}),
+				...dispatchEvidence({ knowledgeReferences: input.knowledgeReferences }),
 			},
 		});
 	}

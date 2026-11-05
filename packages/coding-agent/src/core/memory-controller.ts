@@ -114,8 +114,10 @@ import {
 	parseKnowledgeGrantReferences,
 } from "./memory/knowledge-grant.ts";
 import {
+	blockedKnowledgeHandoff,
 	KNOWLEDGE_CONTEXT_CLEARED,
 	KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
+	type KnowledgeHandoffProjection,
 	type KnowledgeProjection,
 	KnowledgeProjectionReader,
 } from "./memory/knowledge-projection.ts";
@@ -2172,6 +2174,50 @@ export class MemoryController {
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		if (!settings.enabled || !settings.includeInPrompt) return undefined;
 		return this.getFileStoreWriter()?.getHandoffPersonaGuidance();
+	}
+
+	/**
+	 * Exact granted records rendered once for a lane whose only channel is its task text (an externally managed
+	 * worker): the delegated lanes' parser, matcher and whole-record renderer inside a UTF-8 byte bound. A grant
+	 * covers only the included versions. Not-current references are named, never projected or refused.
+	 */
+	projectKnowledgeForHandoff(input: readonly KnowledgeGrantReference[], maxBytes: number): KnowledgeHandoffProjection {
+		const references = parseKnowledgeGrantReferences(input);
+		const store = this._knowledgeStore;
+		const allowed = () => {
+			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			return !settings.enabled
+				? "memory_retrieval_disabled"
+				: !settings.includeInPrompt
+					? "memory_prompt_excluded"
+					: !store || store !== this._knowledgeStore || !this._currentKnowledgeReader()
+						? "knowledge_unavailable"
+						: undefined;
+		};
+		if (references.length === 0) return { text: "", references, unavailable: [], omitted: [], isCurrent: () => true };
+		const blocked = allowed();
+		if (blocked || !store) return blockedKnowledgeHandoff(blocked ?? "knowledge_unavailable");
+		const projection = this._projectKnowledgeForLane(
+			references,
+			{ ...charBoundedMemoryPromptBudget(maxBytes), maxBytes },
+			"prompt",
+		);
+		const grant = this.captureKnowledgeGrant(projection.references);
+		const included = new Set(projection.references.map((reference) => reference.id));
+		const scope = this._knowledgeScope();
+		const at = new Date().toISOString();
+		const excluded = references.filter((reference) => !included.has(reference.id));
+		const unavailable = excluded.filter(
+			(reference) => !matchesKnowledgeGrant(store.get(reference.id), reference, scope, at),
+		);
+		return {
+			text: projection.text,
+			references: projection.references,
+			unavailable,
+			omitted: excluded.filter((reference) => !unavailable.includes(reference)),
+			// Only the delivered versions and the policy that admitted them matter; unrelated edits do not.
+			isCurrent: () => allowed() === undefined && grant.isCurrent(),
+		};
 	}
 
 	/** Current owner-facing knowledge for an isolated review, with whole-record framing and freshness. */

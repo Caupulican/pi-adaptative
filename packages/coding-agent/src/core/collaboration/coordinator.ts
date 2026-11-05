@@ -8,6 +8,7 @@ import { type CollaborationBackend, CollaborationBackendError, type Collaboratio
 import {
 	type CollaborationAgent,
 	type CollaborationJob,
+	type CollaborationKnowledgeHandoff,
 	type CollaborationTaskCorrelation,
 	collaborationLaneId,
 	type NewCollaborationJob,
@@ -324,6 +325,8 @@ export class CollaborationCoordinator {
 				),
 				writePaths: agent.profile.writePaths,
 				leaseTtlMs: job.deadlineSeconds * 1000,
+				// The granted versions only; their projected values stay out of durable dispatch history.
+				...(agent.knowledgeReferences?.length ? { knowledgeReferences: agent.knowledgeReferences } : {}),
 			},
 		});
 		this.deps.store.update(job.id, (latest) => {
@@ -336,6 +339,7 @@ export class CollaborationCoordinator {
 		task?: string,
 		signal?: AbortSignal,
 		intent: CollaborationStartIntent = {},
+		knowledge?: CollaborationKnowledgeHandoff,
 	): Promise<CollaborationJob> {
 		this.assertActive(signal);
 		if (this.pendingAdmissions.has(input.id)) throw new Error("Collaboration launch admission is already pending.");
@@ -347,6 +351,7 @@ export class CollaborationCoordinator {
 				task,
 				signal ? AbortSignal.any([signal, pending.controller.signal]) : pending.controller.signal,
 				intent,
+				knowledge,
 			);
 		} finally {
 			if (this.pendingAdmissions.get(input.id) === pending) this.pendingAdmissions.delete(input.id);
@@ -483,6 +488,7 @@ export class CollaborationCoordinator {
 				if (member) {
 					member.status = "failed";
 					member.evidence = `Launch cleanup uncertain: ${detail}; live work may remain active.`;
+					delete member.knowledgeContext;
 				}
 			});
 		}
@@ -516,8 +522,11 @@ export class CollaborationCoordinator {
 		task: string | undefined,
 		signal: AbortSignal,
 		intent: CollaborationStartIntent,
+		knowledge: CollaborationKnowledgeHandoff | undefined,
 	): Promise<CollaborationJob> {
 		this.assertActive(signal);
+		if (knowledge && !task)
+			throw new Error("A knowledge grant belongs to a task; launch without a task carries none.");
 		if (task && input.agents.length > 1) {
 			const tasks = input.agents.map((agent) => agent.task?.trim());
 			if (tasks.some((responsibility) => !responsibility) || new Set(tasks).size !== tasks.length)
@@ -540,7 +549,7 @@ export class CollaborationCoordinator {
 		// No asynchronous gap between ending preflight ownership and durable admission. Stops after
 		// this point use the store's acquisition/turn fences, never the transient launch intent.
 		this.pendingAdmissions.delete(input.id);
-		const admission = store.admit(peers.job, task, intent);
+		const admission = store.admit(peers.job, task, intent, knowledge);
 		if (admission.kind === "replay") return admission.job;
 		if (admission.kind === "reuse") return this.resumeTeam(admission.job, !!task, signal);
 		let job = admission.job;
@@ -753,7 +762,7 @@ export class CollaborationCoordinator {
 		agentId: string | undefined,
 		text: string,
 		answer?: CollaborationAnswer,
-		options?: { steer?: boolean; newTask?: CollaborationTaskCorrelation },
+		options?: { steer?: boolean; newTask?: CollaborationTaskCorrelation; knowledge?: CollaborationKnowledgeHandoff },
 	): Promise<CollaborationAgent> {
 		this.assertActive();
 		this.refresh();
@@ -825,7 +834,7 @@ export class CollaborationCoordinator {
 
 		this.assertActive();
 		this.refresh();
-		const agent = store.reserveTurn(jobId, target.id, text, !!answer, options?.newTask);
+		const agent = store.reserveTurn(jobId, target.id, text, !!answer, options?.newTask, options?.knowledge);
 		await this.launchReservedTurn(job, agent, answer);
 		return agent;
 	}

@@ -203,7 +203,8 @@ export class WorkerLifecycle {
 					before.dispatch.profileId !== input.profileId ||
 					before.dispatch.provider !== input.provider ||
 					before.dispatch.worktreeLaneKey !== input.worktreeLaneKey ||
-					before.dispatch.authorizationId !== input.authorizationId)
+					before.dispatch.authorizationId !== input.authorizationId ||
+					!isDeepStrictEqual(before.dispatch.knowledgeReferences ?? [], input.knowledgeReferences ?? []))
 			) {
 				throw new Error(
 					`Managed worker '${input.laneId}' turn ${input.dispatchSequence} was re-reported with conflicting dispatch data.`,

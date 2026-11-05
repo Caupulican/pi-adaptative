@@ -2084,7 +2084,7 @@ export class AgentSession {
 				this._registerContextMemoryProvider(provider, assertCurrent),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
-			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
+			handoffKnowledge: this._memory,
 			isForegroundBusy: () => this.getSessionWorkState().busy,
 			getPendingMessageCount: () => this.deliverablePendingMessageCount,
 			isStreaming: () => this.isStreaming,

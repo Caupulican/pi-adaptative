@@ -1,4 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 
 /** A report needs new host preparation after replacement settles; its producer must retain the report. */
 export class ManagedLaneRuntimeAdmissionError extends Error {
@@ -45,6 +46,13 @@ export interface ManagedLaneDispatch {
 	writePaths: readonly string[];
 	/** Advisory cross-process cost ceiling when supplied by the immutable profile. */
 	maxCostUsd?: number;
+	/**
+	 * Exact owner-knowledge versions projected for this turn's task when it was reserved: the grant, not proof of
+	 * delivery (a projection withdrawn before delivery keeps its references). The host re-parses them with the
+	 * delegated lanes' grant parser and keeps only the references: projected values reach the external process
+	 * through its own task channel and never enter this durable dispatch.
+	 */
+	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** Lease duration for this externally supervised turn. */
 	leaseTtlMs: number;
 }

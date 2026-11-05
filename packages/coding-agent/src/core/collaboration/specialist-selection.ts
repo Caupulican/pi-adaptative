@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
 import { type CollaborationJob, collaborationLaneId, type NewCollaborationJob } from "./job-record.ts";
 import { buildLaunchProfileFlags } from "./launch-profile.ts";
@@ -72,6 +73,11 @@ export function collaborationSpecializationKey(input: NewCollaborationJob, works
 export interface CollaborationStartIntent {
 	jobId?: string;
 	parallelWork?: { independent: true; justification: string };
+	/**
+	 * The knowledge versions the caller requested for the task (references only, never values), so a replayed
+	 * start must request exactly what it requested; which of them were still current is not part of the intent.
+	 */
+	knowledge?: readonly KnowledgeGrantReference[];
 }
 
 export function collaborationStartDigest(
