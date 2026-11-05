@@ -104,7 +104,7 @@ const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[
 const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
 const DOTENV_GLOB_RE = /(?:^|[\\/])?\.env(?:\.|\*|$)/i;
 /** Hidden dotenv names a shell glob must not be able to expand to. */
-const HIDDEN_DOTENV_NAMES = [".env", ".env.local"];
+const HIDDEN_DOTENV_NAMES = [".env", ".env.local", ".env.production"];
 const GLOB_COMPONENT_RE = /[*?[]|\{[^{}]*,[^{}]*\}/u;
 const MAX_REDACTED_DETAIL_DEPTH = 8;
 const MAX_REDACTED_DETAIL_NODES = 10_000;

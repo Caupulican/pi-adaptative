@@ -178,10 +178,14 @@ function splitSearchLine(line: string): { path: string; position: string; conten
 	return undefined;
 }
 
+/** A grouped-output file header (`path:` alone on its line) and the indented `  N: text` / `  N- text` lines under it. */
+const SEARCH_GROUP_HEADER_RE = /^((?:[A-Za-z]:(?=[\\/]))?[^:\s][^:\r\n]{0,1023}):$/u;
+const SEARCH_GROUP_LINE_RE = /^( +\d+)([:-]) (.*)$/u;
+
 /**
  * Search-output mock: only lines attributed to a protected file (`path:line:content`,
- * `path-line-content` context lines, or `path:content`) lose their values; everything else is
- * untouched apart from secret-shaped text and known values.
+ * `path-line-content` context lines, `path:content`, or the indented `N: content` lines the grep tool groups under a
+ * `path:` header) lose their values; everything else is untouched apart from secret-shaped text and known values.
  */
 export function mockProtectedSearchLines(text: string, isProtectedPath: (path: string) => boolean): string {
 	if (!text) return text;
@@ -200,13 +204,23 @@ export function mockProtectedSearchLines(text: string, isProtectedPath: (path: s
 		verdicts.set(path, verdict);
 		return verdict;
 	};
+	const mockLineContent = (content: string): string => {
+		const mocked = mockCredentialContent(content);
+		return mocked === content && content.trim() ? mockedValue("credential line") : mocked;
+	};
+	let groupPath: string | undefined;
 	const out = lines.map((line) => {
+		const grouped = groupPath === undefined ? null : SEARCH_GROUP_LINE_RE.exec(line);
+		if (grouped && groupPath !== undefined) {
+			if (!protectedPath(groupPath)) return redactKnownSecrets(line);
+			return `${grouped[1]}${grouped[2]} ${mockLineContent(grouped[3]!)}`;
+		}
+		const header = SEARCH_GROUP_HEADER_RE.exec(line);
+		if (header) groupPath = header[1];
 		const split = splitSearchLine(line);
 		if (!split || !protectedPath(split.path)) return redactKnownSecrets(line);
 		const separator = split.position.endsWith("-") ? "-" : ":";
-		const mocked = mockCredentialContent(split.content);
-		const content = mocked === split.content && split.content.trim() ? mockedValue("credential line") : mocked;
-		return `${split.path}${separator}${split.position}${content}`;
+		return `${split.path}${separator}${split.position}${mockLineContent(split.content)}`;
 	});
 	return out.join("\n");
 }

@@ -669,6 +669,19 @@ function curlEffect(rest: readonly string[]): string | undefined {
 }
 
 /**
+ * Whether a ps option word takes the next word as its value. In a short cluster the first value-taking letter takes
+ * the rest of the word (`-Ostat`), so only a cluster that ends in one (`-u`, `-eo`) takes the next word.
+ */
+function psOptionTakesNextWord(word: string): boolean {
+	if (/^--(?:pid|ppid|sid|user|User|group|Group|format|sort|tty|cols|columns|rows)$/u.test(word)) return true;
+	if (!/^-[A-Za-z]/u.test(word)) return false;
+	for (let index = 1; index < word.length; index++) {
+		if ("CGgkOopqstUu".includes(word[index]!)) return index === word.length - 1;
+	}
+	return false;
+}
+
+/**
  * Why a program on the read-only list would still run another program, write a file or read a file its
  * command line does not name, through an option or its own program text; undefined when it does not.
  * Shared by every caller of the read/write line, so `sort -o`, `rg --pre` or awk's `system()` never
@@ -716,15 +729,13 @@ function invocationEffect(commandArgs: readonly string[]): string | undefined {
 			break;
 		case "ps":
 			// The BSD `e` modifier prints every listed process's environment, the owner's processes included. The value
-			// of an option that takes one (`-u deploy`, `-o etime`) is a name, not a modifier word.
+			// of an option that takes one (`-u deploy`, `-eo etime`) is a name, not a modifier word.
 			effect = rest.find(
 				(arg, index) =>
 					!arg.startsWith("-") &&
 					/^[A-Za-z]+$/u.test(arg) &&
 					arg.includes("e") &&
-					!/^-[A-Za-z]*[CGgOoptUu]$|^--(?:pid|ppid|user|group|format|sort|tty|cols|columns|rows)$/u.test(
-						rest[index - 1] ?? "",
-					),
+					!psOptionTakesNextWord(rest[index - 1] ?? ""),
 			);
 			break;
 		case "hostname":

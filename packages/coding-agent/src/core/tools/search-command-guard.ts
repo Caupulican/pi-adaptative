@@ -63,8 +63,11 @@ export interface ShellSearchInvocationScope {
 	mayReadDotenv: boolean;
 }
 
-/** Dotenv names an exclusion glob must cover to keep a descent out of dotenv files. */
-const DOTENV_NAMES = [".env", ".env.local"];
+/**
+ * Dotenv names an exclusion glob must cover to keep a descent out of dotenv files: one glob must cover every
+ * `.env*` variant, so excluding only `.env` and `.env.local` still leaves `.env.production` read.
+ */
+const DOTENV_NAMES = [".env", ".env.local", ".env.production"];
 
 function excludesDotenv(globs: readonly string[]): boolean {
 	return globs.some((glob) => DOTENV_NAMES.every((name) => minimatch(name, glob, { dot: true, matchBase: true })));
