@@ -95,8 +95,7 @@ const eventSchema = Type.Object(
 	{
 		kind: Type.Literal("event"),
 		source: Type.Literal("ci", {
-			description:
-				"Terminal CI attempts of the revision this session has checked out, as the CI source reports them.",
+			description: "Completed CI attempts of the checked-out revision.",
 		}),
 		conclusions: Type.Optional(
 			Type.Array(StringEnum(CI_TERMINAL_CONCLUSIONS), {

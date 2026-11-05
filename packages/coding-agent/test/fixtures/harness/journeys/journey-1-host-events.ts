@@ -351,8 +351,13 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		expect(rootRequests(), "a quiet routine result starts no parent turn").toBe(initialRequests);
 		expect(owner.sessionManager.getPendingParentInputs("next-owner-turn")).toHaveLength(1);
 		expect(entries(), "the routine leaves the retained root note undelivered").toEqual([]);
-		// Saved after the current failure was accepted: that failure can never start it.
-		await saveEventRoutine("ci-failure-anchor", { kind: "event", source: "ci" });
+		// Saved through the host entry point after the current failure was accepted: that failure can never start it.
+		await owner.session.backgroundLanes.createRoutine({
+			routineId: "ci-failure-anchor",
+			prompt: routinePrompt,
+			schedule: { kind: "event", source: "ci" },
+			profileId: routineProfile.profileId,
+		});
 		await runtime.source.stop();
 		await binding.close();
 		owner.settingsManager.setProactivitySettings({

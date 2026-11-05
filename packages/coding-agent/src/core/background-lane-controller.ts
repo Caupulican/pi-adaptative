@@ -151,6 +151,7 @@ import {
 	routineInstructions,
 } from "./routines/routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routines/routine-session-controller.ts";
+import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
@@ -1411,6 +1412,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	createRoutineToolDefinition(): ToolDefinition | undefined {
 		this.getBotTeamStore();
 		return this._routines?.session.tool;
+	}
+
+	/**
+	 * Saves a routine for this session without the model tool: the tool's validation, saved worker authority capture
+	 * and event anchor, owned by the same session controller.
+	 */
+	async createRoutine(
+		spec: Parameters<typeof parseRoutineToolInput>[0],
+		signal?: AbortSignal,
+	): Promise<RoutineToolView> {
+		this.getBotTeamStore();
+		if (!this._routines) throw new Error("Routines are unavailable in this session.");
+		return this._routines.session.create(parseRoutineToolInput(spec), signal);
 	}
 
 	async tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {

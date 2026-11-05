@@ -126,6 +126,21 @@ const parameters = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** The one validation of authored routine fields, shared by the model tool and host callers. */
+export function parseRoutineToolInput(value: {
+	readonly routineId: unknown;
+	readonly prompt: unknown;
+	readonly schedule: unknown;
+	readonly profileId?: string;
+	readonly knowledge?: unknown;
+}): RoutineToolInput {
+	return {
+		...parseRoutineAuthoringInput({ routineId: value.routineId, prompt: value.prompt, schedule: value.schedule }),
+		...(value.profileId === undefined ? {} : { profileId: value.profileId }),
+		knowledge: parseKnowledgeGrantReferences(value.knowledge ?? []),
+	};
+}
+
 function result(value: object) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value };
 }
@@ -135,7 +150,7 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 		name: ROUTINE_TOOL_NAME,
 		label: "Routine",
 		description:
-			"Manage saved prompts scheduled for this main session. Use create for an owner-requested interval, one-time or calendar routine. A calendar schedule is a five-field cron rule evaluated in an IANA time zone (the host zone when omitted); missed slots coalesce into one run. once.notAfter and calendar maxLatenessMs bound how late a run may start. An event schedule {kind:'event', source:'ci'} runs on CI results of the revision this session has checked out instead of a clock: once per new terminal attempt whose conclusion is listed (default failure only) and whose workflow matches workflowPath when set, with that attempt's facts appended to the prompt as data. It never runs for attempts accepted before it was saved, attempts decided together run once with the others counted as missed, and an attempt superseded before it could run is counted in the next run. Use it for 'tell me when CI fails'; the session's own CI failure note is separate and unchanged. For other 'tell me when X', save a routine whose prompt checks X and reports ownerUpdate none when nothing changed: such a run is recorded and carried with the owner's next turn without starting a parent turn; failures and other results start one. list returns bounded metadata; get returns the complete saved prompt and worker preferences. Read get before updating: update replaces all authored fields, so preserve unchanged prompt, schedule, profileId and knowledge. update, pause, resume, delete and run require the exact revision from get. run queues one durable manual occurrence; it does not change the schedule. Selected knowledge must name exact current records; omission grants none. No external recipient is supported here.",
+			"Manage saved prompts scheduled for this main session. Use create for an owner-requested interval, one-time or calendar routine. A calendar schedule is a five-field cron rule evaluated in an IANA time zone (the host zone when omitted); missed slots coalesce into one run. once.notAfter and calendar maxLatenessMs bound how late a run may start. An event schedule {kind:'event', source:'ci'} runs once per new matching CI attempt, with its facts appended as data; use it for 'tell me when CI fails'. For other 'tell me when X', save a routine whose prompt checks X and reports ownerUpdate none when nothing changed: such a run is recorded and carried with the owner's next turn without starting a parent turn; failures and other results start one. list returns bounded metadata; get returns the complete saved prompt and worker preferences. Read get before updating: update replaces all authored fields, so preserve unchanged prompt, schedule, profileId and knowledge. update, pause, resume, delete and run require the exact revision from get. run queues one durable manual occurrence; it does not change the schedule. Selected knowledge must name exact current records; omission grants none. No external recipient is supported here.",
 		parameters,
 		executionMode: "sequential",
 		async execute(invocationId, input, signal) {
@@ -156,16 +171,7 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 					}
 					case "create":
 					case "update": {
-						const authoring = parseRoutineAuthoringInput({
-							routineId: params.routineId,
-							prompt: params.prompt,
-							schedule: params.schedule,
-						});
-						const input: RoutineToolInput = {
-							...authoring,
-							...(params.profileId === undefined ? {} : { profileId: params.profileId }),
-							knowledge: parseKnowledgeGrantReferences(params.knowledge ?? []),
-						};
+						const input = parseRoutineToolInput(params);
 						return result({
 							routine:
 								params.action === "create"
