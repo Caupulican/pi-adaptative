@@ -360,6 +360,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			getAgentDir: () => this.deps.getAgentDir(),
 			saveWorkerClaimSnapshot: (claim, request, options) =>
 				this.deps.saveWorkerClaimSnapshot(claim, request, options),
+			recordUnsettledForOwner: (items) => this.deps.recordUnsettledForOwner(items),
 			warn: (message) => this._safeWarn(message),
 		};
 		const { notifyParentSession, reportWorkerTerminal } = this.deps;

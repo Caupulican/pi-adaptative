@@ -115,7 +115,9 @@ export type AttemptParentWriteBody =
 			readonly cwd?: string;
 	  }
 	| { readonly kind: "notice"; readonly customType: string; readonly text: string }
-	| { readonly kind: "terminal_report"; readonly handoff: JsonObject };
+	| { readonly kind: "terminal_report"; readonly handoff: JsonObject }
+	/** Findings a worker could not settle, for the parent's owner queue (never a steer). */
+	| { readonly kind: "owner_unsettled"; readonly items: readonly string[] };
 
 export interface AttemptParentWrite {
 	readonly writeId: string;

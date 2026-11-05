@@ -55,6 +55,8 @@ export const MAX_ORCHESTRATION_APPROVALS = 256;
 export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
 /** Parent writes one attempt's away run may hold until the parent imports them: claims, notices and reports. */
 export const MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES = 16;
+/** Unsettled findings one parent write carries; a longer list is recorded across several writes. */
+export const MAX_PARENT_WRITE_UNSETTLED_ITEMS = 64;
 /** Source goal state admits at most 512 evidence entries for one objective. */
 export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
 export const MAX_ORCHESTRATION_EVIDENCE = 4_096;

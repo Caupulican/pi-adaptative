@@ -52,6 +52,7 @@ import {
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
 	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
+	MAX_PARENT_WRITE_UNSETTLED_ITEMS,
 	MAX_WORKER_RESOURCE_PATH_LENGTH,
 	MAX_WORKER_RESOURCE_POINTERS,
 	type ManagedLaneLifetime,
@@ -1163,6 +1164,15 @@ export function attemptParentWriteBodyFromValue(value: unknown, label: string): 
 	if (kind === "terminal_report") {
 		const body = exactRecord(value, label, ["kind", "handoff"]);
 		return { kind, handoff: parentWriteJson(body.handoff, `${label}.handoff`) };
+	}
+	if (kind === "owner_unsettled") {
+		const body = exactRecord(value, label, ["kind", "items"]);
+		if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > MAX_PARENT_WRITE_UNSETTLED_ITEMS)
+			throw new DurableTaskRuntimeError(`${label}.items must hold 1-${MAX_PARENT_WRITE_UNSETTLED_ITEMS} findings.`);
+		const items = body.items.map((item, index) => string(item, `${label}.items.${index}`));
+		if (items.some((item) => item.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH))
+			throw new DurableTaskRuntimeError(`${label}.items exceed their durable size bound.`);
+		return { kind, items };
 	}
 	throw new DurableTaskRuntimeError(`${label}.kind is invalid.`);
 }
