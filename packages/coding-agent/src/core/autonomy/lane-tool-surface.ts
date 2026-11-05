@@ -8,6 +8,7 @@ import {
 	AgentToolPolicyDeniedError,
 	type BeforeToolCallResult,
 } from "../../kernel/index.ts";
+import { resolveInstalledManagedTool } from "../../utils/tools-manager.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
@@ -92,6 +93,7 @@ export interface SharedLaneToolOptions {
 		| "windowsShellEngineOptions"
 		| "spawnHook"
 		| "operations"
+		| "managedToolResolver"
 	>;
 	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables" | "environment">;
 	readonly runProcess?: Pick<RunProcessToolOptions, "attributionEnvironment">;
@@ -620,7 +622,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		checkEdge: options.checkEdge,
 	});
 
-	const sharedToolOptions: SharedLaneToolOptions | undefined = runEnvironment
+	const processToolOptions: SharedLaneToolOptions | undefined = runEnvironment
 		? {
 				...options.sharedToolOptions,
 				bash: { ...options.sharedToolOptions?.bash, spawnHook: runEnvironment.spawnHook },
@@ -641,6 +643,18 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				},
 			}
 		: options.sharedToolOptions;
+	// A read-only lane without `network.http` never makes the host download software for it: its shell, grep and find
+	// resolve a managed tool (ripgrep, fd) only when it is already installed.
+	const installedToolsOnly = { managedToolResolver: resolveInstalledManagedTool };
+	const sharedToolOptions: SharedLaneToolOptions | undefined =
+		options.readOnly === true && !networkGranted
+			? {
+					...processToolOptions,
+					bash: { ...processToolOptions?.bash, ...installedToolsOnly },
+					grep: { ...processToolOptions?.grep, ...installedToolsOnly },
+					find: { ...processToolOptions?.find, ...installedToolsOnly },
+				}
+			: processToolOptions;
 	const rawTools = createLaneTools(
 		options.cwd,
 		allowedTools,

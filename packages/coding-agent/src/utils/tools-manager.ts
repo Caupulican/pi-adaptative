@@ -1310,6 +1310,20 @@ export async function ensureToolWithDiagnostics(
 	}
 }
 
+/**
+ * Resolves a managed tool only when it is already installed, and never downloads one: the resolver of a lane that holds
+ * no network grant, whose host must not reach the network or install software on its behalf.
+ */
+export async function resolveInstalledManagedTool(tool: ManagedToolName): Promise<ManagedToolResolution> {
+	const path = getToolPath(tool, { installedOnly: true });
+	if (path) return { status: "available", path };
+	return {
+		status: "unavailable",
+		failureCode: "offline",
+		message: `${tool} is not installed, and this lane holds no network grant to download it.`,
+	};
+}
+
 // Compatibility projection for callers that only need a path. New tool execution paths should use
 // ensureToolWithDiagnostics so failure identity is not discarded at the provisioning boundary.
 export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
