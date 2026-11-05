@@ -81,6 +81,7 @@ import {
 import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
 import type { VirtualSqliteSnapshot } from "./sqlite-io.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
+import { VirtualNetwork } from "./virtual-net.ts";
 import { type VirtualProcessState, VirtualProcessTable } from "./virtual-process-table.ts";
 import { VirtualShell } from "./virtual-shell.ts";
 
@@ -2180,6 +2181,8 @@ export interface HarnessWorldOptions {
 	readonly warningAllowances?: readonly RegExp[];
 	readonly files?: Readonly<Record<string, string>>;
 	readonly settings?: Partial<Settings>;
+	/** Gives the world an in-memory unix-socket network (see `virtual-net.ts`); without it every `net` entry point is refused. */
+	readonly virtualNetwork?: boolean;
 	/** A git repository at the project root (project-relative paths): `committed` is the initial commit; `dirty` are owner edits left unstaged. */
 	readonly repository?: {
 		readonly committed: Readonly<Record<string, string>>;
@@ -2376,6 +2379,8 @@ export class HarnessTimers implements TimerSource {
 export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
+	/** The world's in-memory network; installed only when the world's options ask for it. */
+	readonly network = new VirtualNetwork();
 	readonly systemOne: ScriptedSystemOneTransport;
 	/** The fault and control marks of this world's journey and System One mode; close requires both for every covered row. */
 	readonly faultMatrix: FaultMatrixMarks;
@@ -2442,6 +2447,7 @@ export class HarnessWorld {
 			process: (operation, args) => this.processes.run(operation, args),
 			signal: (pid, signal) => this.processTable.signal(pid, signal),
 			pid: () => this.processTable.self,
+			...(options.virtualNetwork ? { net: this.network } : {}),
 			fetch: (input, init) => this.fetchResponder?.(input, init) ?? this.systemOne.fetch(input, init),
 		});
 		this.guard.install();
@@ -2977,6 +2983,11 @@ export class HarnessWorld {
 				() => this.io.assertNoOpenResources(),
 				// Application connections must be released by their owners after the sessions above are disposed.
 				() => this.guard.assertNoOpenSqliteHandles(),
+				// Every mesh endpoint a session opened on the world's network was closed by its owner.
+				() => {
+					if (this.network.open > 0)
+						throw new Error(`Virtual network leaked ${this.network.open} open endpoint(s)`);
+				},
 				// Every started worker thread must have been terminated or closed by its owner, and every scripted intercept reached.
 				() => this.guard.assertWorkersSettled(),
 				() => this.processTable.assertClean(),

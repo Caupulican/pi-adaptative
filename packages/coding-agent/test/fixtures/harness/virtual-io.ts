@@ -21,6 +21,7 @@ import {
 	VirtualSqlite,
 	type VirtualSqliteSnapshot,
 } from "./sqlite-io.ts";
+import type { VirtualNetwork } from "./virtual-net.ts";
 import { VirtualWorkerThreads } from "./virtual-worker.ts";
 
 interface VirtualNode {
@@ -29,6 +30,8 @@ interface VirtualNode {
 	target?: string;
 	modified: number;
 	identity: number;
+	/** Permission bits a creator or `chmod` gave a file; absent means the default, 0644. */
+	mode?: number;
 }
 
 export interface IoOperation {
@@ -668,9 +671,18 @@ export class VirtualFileSystem {
 		this.fault({ kind: "write", path }, "before", bytes(data));
 		if (!this.nodes.has(dirname(path))) throw this.failure("write", "ENOENT", dirname(path), "open");
 		if (this.nodes.get(path)?.kind === "directory") throw this.failure("write", "EISDIR", path, "open");
+		const created = !this.nodes.has(path);
 		this.setFileData(path, bytes(data));
+		const requestedMode = (options as { mode?: unknown } | undefined)?.mode;
+		if (created && typeof requestedMode === "number") this.setMode(path, requestedMode);
 		this.note("write", path);
 		this.fault({ kind: "write", path }, "after", bytes(data));
+	}
+
+	/** The permission bits of a file, as `stat` reports them. Directories keep their fixed mode. */
+	private setMode(path: string, mode: number): void {
+		const node = this.nodes.get(path);
+		if (node?.kind === "file") node.mode = mode & 0o777;
 	}
 
 	async writeFile(value: unknown, data: unknown, options?: unknown): Promise<void> {
@@ -782,7 +794,7 @@ export class VirtualFileSystem {
 			ctime: new Date(node.modified),
 			birthtime: new Date(1000),
 			atime: new Date(node.modified),
-			mode: node.kind === "directory" ? 0o40755 : 0o100644,
+			mode: node.kind === "directory" ? 0o40755 : 0o100000 | (node.mode ?? 0o644),
 			dev: 1,
 			ino: node.identity,
 			nlink: [...this.nodes.values()].filter((linked) => linked === node).length,
@@ -940,13 +952,14 @@ export class VirtualFileSystem {
 		this.log({ kind: "copy", path: from, destination: to });
 	}
 
-	openSync(value: unknown, flags: unknown): number {
+	openSync(value: unknown, flags: unknown, creationMode?: unknown): number {
 		const path = this.path(value);
 		const mode = decodeOpenFlags(flags);
+		const creation = typeof creationMode === "number" ? { mode: creationMode } : undefined;
 		this.fault({ kind: "open", path, flags: typeof flags === "string" ? flags : String(flags) }, "before");
 		if (mode.exclusive && this.nodes.has(path)) throw this.failure("open", "EEXIST", path, "open");
-		if (mode.truncate && (mode.create || this.nodes.has(path))) this.writeFileSync(path, "");
-		else if (mode.create && !this.nodes.has(path)) this.writeFileSync(path, "");
+		if (mode.truncate && (mode.create || this.nodes.has(path))) this.writeFileSync(path, "", creation);
+		else if (mode.create && !this.nodes.has(path)) this.writeFileSync(path, "", creation);
 		else if (!this.nodes.has(path)) throw this.failure("open", "ENOENT", path, "open");
 		const fd = this.nextDescriptor++;
 		this.descriptors.set(fd, {
@@ -1129,8 +1142,9 @@ export class VirtualFileSystem {
 			},
 			copyFile: async (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
 			truncate: async (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
-			chmod: async (path: unknown) => {
-				this.realpathSync(path, "chmod", "chmod");
+			chmod: async (path: unknown, mode: unknown) => {
+				const resolved = this.realpathSync(path, "chmod", "chmod");
+				if (typeof mode === "number") this.setMode(resolved, mode);
 			},
 			utimes: async (path: unknown, _atime: unknown, mtime: unknown) => this.setTimes(path, mtime),
 		};
@@ -1165,11 +1179,12 @@ export class VirtualFileSystem {
 			linkSync: (existing: unknown, created: unknown) => this.linkSync(existing, created),
 			truncateSync: (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
 			ftruncateSync: (fd: unknown, length = 0) => this.truncateSync(fd, Number(length)),
-			chmodSync: (path: unknown) => {
-				this.realpathSync(path, "chmod", "chmod");
+			chmodSync: (path: unknown, mode: unknown) => {
+				const resolved = this.realpathSync(path, "chmod", "chmod");
+				if (typeof mode === "number") this.setMode(resolved, mode);
 			},
 			utimesSync: (path: unknown, _atime: unknown, mtime: unknown) => this.setTimes(path, mtime),
-			openSync: (path: unknown, flags: unknown) => this.openSync(path, flags),
+			openSync: (path: unknown, flags: unknown, mode?: unknown) => this.openSync(path, flags, mode),
 			closeSync: (fd: unknown) => this.closeSync(fd),
 			fsyncSync: (fd: unknown) => {
 				this.path(fd);
@@ -1440,6 +1455,8 @@ export interface EffectPorts {
 	fetch?: typeof globalThis.fetch;
 	/** Keep the native SQL engine but route every database's storage to RAM. */
 	sqlite?: "memory";
+	/** An in-memory network of unix-socket endpoints in place of the refused `net` entry points. Nothing leaves the process. */
+	net?: VirtualNetwork;
 }
 
 /**
@@ -1538,8 +1555,11 @@ export class EffectGuard {
 				this.replace(target, "request", reject("http.request"));
 				this.replace(target, "get", reject("http.get"));
 			}
-			for (const name of ["connect", "createConnection", "createServer"])
-				this.replace(net, name, reject(`net.${name}`));
+			const network = this.ports.net;
+			for (const name of ["connect", "createConnection", "createServer"]) {
+				const port = name === "createServer" ? network?.createServer : network?.connect;
+				this.replace(net, name, port ?? reject(`net.${name}`));
+			}
 			this.replace(net.Socket.prototype, "connect", reject("net.Socket.connect"));
 			this.replace(net.Server.prototype, "listen", reject("net.Server.listen"));
 			this.replace(tls, "connect", reject("tls.connect"));

@@ -4,6 +4,7 @@ import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
+import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
 import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
@@ -91,6 +92,8 @@ export async function runJourney1(): Promise<void> {
 				[projectPath("src", "features", "retry", "configuration", "limits.ts")]:
 					'export const RETRY_CONFIGURATION = "long";\n',
 			},
+			// The pi-chat phase runs the real mesh over an in-memory unix-socket network; no other phase opens a socket.
+			virtualNetwork: true,
 			// Guarded edge: no standing grant for destructive filesystem operations, so the operator is asked.
 			settings: { edge: { allow: [] } },
 		},
@@ -100,6 +103,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1ContinuousChatPhase(world);
 			await runJourney1WorkerBudgetsPhase(world);
 			await runJourney1WriteReservationsPhase(world);
+			await runJourney1PiChatPhase(world);
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},
