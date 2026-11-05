@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AgentToolExecutionError } from "../../kernel/types.ts";
 
 export type ReadToolName = "read" | "grep" | "find" | "ls" | "repo_read";
 export type ReadWorkKind = "sourceBytes" | "entries" | "files" | "metadata" | "processes" | "outputBytes";
@@ -46,10 +47,19 @@ export interface ReadSourceReceipt {
 	revalidate(signal?: AbortSignal): Promise<boolean>;
 }
 
-export class ReadWorkLimitError extends Error {
+/**
+ * A read refused by its physical work allowance is a definite, side-effect-free operation outcome: the
+ * engine must record it as a completed negative result with a bounded failure code, not as an unknown
+ * execution. The inherited error name is the cross-copy identity the engine reads, so it must stay.
+ */
+export class ReadWorkLimitError extends AgentToolExecutionError {
 	constructor(kind: string) {
-		super(`Read investigation limit reached: ${kind}`);
-		this.name = "ReadWorkLimitError";
+		super(
+			`Read investigation limit reached: ${kind}`,
+			`read_limit_${kind.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}`,
+			`read-limit:${kind}`,
+			"operation_outcome",
+		);
 	}
 }
 
