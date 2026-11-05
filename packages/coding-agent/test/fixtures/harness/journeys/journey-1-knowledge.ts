@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
+import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
@@ -7,6 +8,7 @@ import {
 import type { KnowledgeChange } from "../../../../src/core/memory/knowledge-admission.ts";
 import { knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { handleKnowledgeCommand } from "../../../../src/modes/interactive/knowledge-commands.ts";
 import { HARNESS_PROVIDER, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
@@ -44,9 +46,10 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 		settings: icmContinuousSettings("worker-c", { autoLearn: { enabled: false }, proactivity: { enabled: false } }),
 	});
 	const store = KnowledgeStore.open(agentDir);
-	// Six turns (seven with System One off) publish four records each. Every possible leaf and aligned parent gets
-	// at most one reply: short nodes need no call, but concurrent compactions may consume these exact targets in any order.
-	const records = world.systemOne.enabled ? 24 : 28;
+	// Six turns (seven with System One off) publish four records each, and the owner-command projection turn two. Every
+	// possible leaf and aligned parent gets at most one reply: short nodes need no call, but concurrent compactions may
+	// consume these exact targets in any order.
+	const records = (world.systemOne.enabled ? 24 : 28) + 2;
 	const compactionTracks: string[] = [];
 	for (let size = 1; size <= records; size *= 2) {
 		for (let first = 0; first + size <= records; first += size) {
@@ -259,33 +262,38 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			});
 			expect(judged, "every session-model judgment keeps its own explicit-change receipt").toHaveLength(10);
 			for (const operationId of judged) expect(operationId).toMatch(/^knowledge-collection:explicit:/);
-			world.trace.mark("root", "knowledge.admission-replay");
-			return;
+		} else {
+			root.settingsManager.setProactivitySettings({
+				...root.settingsManager.getProactivitySettings(),
+				enabled: true,
+				minOwnerTurnsBetweenRuns: 1,
+			});
+			world.provider.enqueue("root", {
+				name: "knowledge-proactive-review",
+				check: (request) => {
+					const context = JSON.stringify(request.context.messages);
+					expect(context, "continuous-chat review reads current accepted owner knowledge").toContain(
+						"Uses tabs again.",
+					);
+					expect(context, "superseded values are not current knowledge").not.toContain("Uses spaces.");
+					expect(context).toContain("Current accepted knowledge, revision");
+				},
+				reply: { content: [{ type: "text", text: "none" }] },
+			});
+			expect(
+				await withDeadline(
+					world.trace,
+					"continuous-chat proactive review",
+					root.session.backgroundLanes.runProactiveReviewOnce(),
+				),
+			).toMatchObject({ started: true, delivered: [] });
+			// The owner-command turn below is the next owner turn; no idle review may answer it.
+			root.settingsManager.setProactivitySettings({
+				...root.settingsManager.getProactivitySettings(),
+				enabled: false,
+			});
 		}
-		root.settingsManager.setProactivitySettings({
-			...root.settingsManager.getProactivitySettings(),
-			enabled: true,
-			minOwnerTurnsBetweenRuns: 1,
-		});
-		world.provider.enqueue("root", {
-			name: "knowledge-proactive-review",
-			check: (request) => {
-				const context = JSON.stringify(request.context.messages);
-				expect(context, "continuous-chat review reads current accepted owner knowledge").toContain(
-					"Uses tabs again.",
-				);
-				expect(context, "superseded values are not current knowledge").not.toContain("Uses spaces.");
-				expect(context).toContain("Current accepted knowledge, revision");
-			},
-			reply: { content: [{ type: "text", text: "none" }] },
-		});
-		expect(
-			await withDeadline(
-				world.trace,
-				"continuous-chat proactive review",
-				root.session.backgroundLanes.runProactiveReviewOnce(),
-			),
-		).toMatchObject({ started: true, delivered: [] });
+		await runOwnerKnowledgeCommands(world, root, store, id, records, agentDir);
 		world.trace.mark("root", "knowledge.admission-replay");
 	} finally {
 		store.close();
@@ -293,4 +301,164 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 		await world.provider.waitForProducers();
 		for (const track of compactionTracks) world.provider.retireOptional(track);
 	}
+}
+
+/**
+ * The owner's `/knowledge` command on the same fact, through the session's real operator port: view, provenance and
+ * history, then a correction and a forget that need the owner's confirmation and no model, judge or spend. The next
+ * request's knowledge view is the committed revision, and the command itself never enters the conversation.
+ */
+async function runOwnerKnowledgeCommands(
+	world: HarnessWorld,
+	root: Awaited<ReturnType<HarnessWorld["createRootSession"]>>,
+	store: KnowledgeStore,
+	id: string,
+	records: number,
+	agentDir: string,
+): Promise<void> {
+	world.systemOne.enterPhase("knowledge-commands", {});
+	const run = async (text: string) => {
+		const shown: string[] = [];
+		const failed: string[] = [];
+		await handleKnowledgeCommand(
+			{
+				session: root.session,
+				showStatus: (message) => shown.push(message),
+				showText: (message) => shown.push(message),
+				showError: (message) => failed.push(message),
+			},
+			text,
+		);
+		return { shown: shown.join("\n"), failed: failed.join("\n") };
+	};
+	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
+	const requestsBefore = rootRequests();
+	const systemOneBefore = world.systemOne.requests.length;
+	const short = id.slice(0, 12);
+	const global = { project: "", role: "", audience: "owner" };
+
+	const listed = await run("/knowledge list behavior");
+	expect(listed.failed).toBe("");
+	expect(listed.shown, "the owner sees each fact's identity, category, reach, revision, basis and state").toContain(
+		`${short}  behavior · global · r4 · explicit · current · evidenced`,
+	);
+	expect(listed.shown).toContain("Uses tabs again.");
+	expect((await run("/knowledge list project")).shown, "reach filters by the record's own scope").toBe(
+		"No accepted knowledge records (this project).",
+	);
+	const shown = await run(`/knowledge show ${short}`);
+	expect(shown.failed).toBe("");
+	expect(shown.shown, "show resolves the prefix to the exact record").toContain(`Knowledge ${id}`);
+	expect(shown.shown, "provenance names the original owner message and quotes it").toContain(
+		"Evidence of this revision (1-1 of 1",
+	);
+	expect(shown.shown).toContain("owner message");
+	expect(shown.shown).toContain('"I use tabs again"');
+	const history = await run(`/knowledge history ${short}`);
+	expect(history.shown, "history pages the retained revisions").toContain("r4 · explicit");
+	expect(history.shown, "forgetting removed the earlier value history").not.toContain("Uses spaces.");
+
+	expect(root.session.ownerConfirm, "no owner UI is bound to this session yet").toBeUndefined();
+	expect((await run(`/knowledge forget ${short}`)).failed, "without an owner UI nothing is forgotten").toBe(
+		"Nothing changed: owner confirmation is unavailable.",
+	);
+	expect(store.get(id)).toMatchObject({ revision: 4, text: "Uses tabs again." });
+	expect(rootRequests(), "viewing and a refused forget make no model or judge request").toBe(requestsBefore);
+	expect(world.systemOne.requests.length, "and no System One request").toBe(systemOneBefore);
+
+	let decision = false;
+	let confirmations = 0;
+	let revisionAtCommand = store.revision();
+	const ui = {
+		askQuestions: world.humanInput.ui.askQuestions,
+		confirm: async (_title: string, message: string) => {
+			confirmations += 1;
+			expect(store.revision(), "nothing changes before the owner answers").toBe(revisionAtCommand);
+			expect(message, "the owner sees the exact fact and its revision").toContain("at revision");
+			return decision;
+		},
+	} as unknown as ExtensionUIContext;
+	// The owner's screen arrives as an interactive host binds it; the binding's own memory activation is not a command effect.
+	await root.session.bindExtensions({ uiContext: ui });
+	const requestsBound = rootRequests();
+	const systemOneBound = world.systemOne.requests.length;
+	const correction = `/knowledge correct ${short}   Uses tabs for code and two spaces in YAML.  `;
+	expect((await run(correction)).shown).toBe("Nothing changed: the owner did not confirm.");
+	expect(store.get(id), "a declined correction changes nothing").toMatchObject({
+		revision: 4,
+		text: "Uses tabs again.",
+	});
+	decision = true;
+	expect((await run(correction)).shown).toBe(
+		`Corrected ${short}: revision 5 holds the new value; the previous one stays in its history.`,
+	);
+	const corrected = store.get(id)!;
+	expect(corrected, "the owner's value is stored verbatim as an explicit fact of the same slot").toMatchObject({
+		revision: 5,
+		kind: "behavior",
+		text: "Uses tabs for code and two spaces in YAML.",
+		basis: "explicit",
+	});
+	expect(corrected.citations, "the typed command, its session and its time are the evidence").toEqual([
+		{
+			sourceId: expect.stringMatching(/^owner-command:[a-f0-9]{64}$/),
+			sessionId: root.sessionManager.getSessionId(),
+			quote: correction,
+			at: corrected.lastEvidencedAt,
+		},
+	]);
+	expect(
+		store.history(id).map((version) => version.text),
+		"the previous value stays in history",
+	).toEqual(["Uses tabs for code and two spaces in YAML.", "Uses tabs again."]);
+	expect(store.list(global), "a correction does not create a second fact").toHaveLength(1);
+	expect(
+		getOwnerEvidenceSnapshots(root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE])).some(
+			(record) => record.text.includes("/knowledge"),
+		),
+		"a command is not an owner message the collector or a model could cite",
+	).toBe(false);
+
+	revisionAtCommand = store.revision();
+	expect((await run(`/knowledge forget ${short}`)).shown).toBe(
+		`Forgot ${short} (revision 6). Only newer owner evidence can teach it again.`,
+	);
+	expect(store.get(id), "the confirmed forget removes the value").toBeUndefined();
+	expect(store.history(id), "and its value history").toEqual([]);
+	expect(store.slots(global, "behavior"), "its identity stays as the evidence barrier").toEqual([
+		expect.objectContaining({ id, revision: 6, forgotten: true }),
+	]);
+	expect((await run(`/knowledge forget ${short}`)).failed, "a forgotten record is no longer addressable").toBe(
+		`No current knowledge record ${short} in this scope.`,
+	);
+	expect(confirmations, "only the decline, the correction and the forget reached the owner").toBe(3);
+	expect(rootRequests(), "a confirmed correction and forget make no model or judge request").toBe(requestsBound);
+	expect(world.systemOne.requests.length, "and no System One request").toBe(systemOneBound);
+
+	world.systemOne.enterPhase("knowledge-command-projection", ICM_INTAKE_JUDGMENTS);
+	world.provider.enqueue("root", {
+		name: "knowledge-command-projection",
+		check: (request) => {
+			const views = request.context.messages
+				.filter((message) => message.role === "user")
+				.map((message) => JSON.stringify(message.content))
+				.filter((content) => content.includes("Current accepted knowledge,"));
+			expect(views, "the next request carries one current knowledge view").toHaveLength(1);
+			expect(views[0], "at the revision the owner's forget committed").toContain(
+				`Current accepted knowledge, revision ${store.revision()}.`,
+			);
+			expect(views[0]).toContain("No applicable accepted facts.");
+			expect(views[0], "the forgotten value is absent").not.toContain("two spaces in YAML");
+			expect(JSON.stringify(request.context.messages), "an owner command never enters the conversation").not.toMatch(
+				/\/knowledge (list|show|history|correct|forget)/,
+			);
+		},
+		reply: { content: [{ type: "text", text: "Noted." }] },
+	});
+	await withDeadline(
+		world.trace,
+		"knowledge-command-projection",
+		root.session.prompt("What do you know about my formatting?"),
+	);
+	await icmWaitForChatIdle(world, agentDir, records, (chat) => chat.length === records);
 }
