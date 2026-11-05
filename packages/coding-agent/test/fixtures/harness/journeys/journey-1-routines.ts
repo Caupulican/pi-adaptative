@@ -1094,12 +1094,14 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		// Past routines.maxResultWakesPerDay a result starts no turn: it is saved for the owner's next turn, with one
 		// notice naming the setting. The bound here is exactly the routine-result turns this session already started.
 		const wakeBound = parentInputs().filter((entry) => parentInputOf(entry)?.metadata.mode === "turn").length;
+		open = false;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		root = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: world.openSessionManager(file, agentDir),
 			settings: { ...settings, routines: { maxResultWakesPerDay: wakeBound } },
 		});
+		open = true;
 		const heldSummary = "routine-held-result completed.";
 		const heldEntries = () => parentInputs().filter((entry) => JSON.stringify(entry).includes(heldSummary));
 		const heldSaved = createBarrier();
@@ -1141,7 +1143,9 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		).toEqual([["next-owner-turn", expect.objectContaining({ deliveryHold: ROUTINE_RESULT_WAKES_HOLD })]]);
 		expect(root.sessionManager.getPendingParentInputs("turn"), "the held result starts no turn").toEqual([]);
 		expect(harnessNotices("routine-result-wakes"), "the hold is told once").toHaveLength(1);
-		world.systemOne.enterPhase("routine-held-owner-turn", ICM_INTAKE_JUDGMENTS);
+		// This turn calls no tool and no later owner turn follows in this session, so its owner words are never settled:
+		// System One is asked nothing here.
+		world.systemOne.enterPhase("routine-held-owner-turn", {});
 		world.provider.enqueue("root", {
 			...text("routine-held-owner-turn", "The held routine result is reported."),
 			check: (request) => {
