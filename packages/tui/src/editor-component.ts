@@ -12,6 +12,12 @@ export interface EditorTextRange {
 	readonly end: number;
 }
 
+/** One prompt-history entry: its text and the ranges of it the user pasted (none: typed). */
+export interface EditorHistoryEntry {
+	readonly text: string;
+	readonly pasted?: readonly EditorTextRange[];
+}
+
 /** `ranges` sorted, with empty ones dropped and overlapping or touching ones merged: the form editors report. */
 export function mergeTextRanges(ranges: readonly EditorTextRange[]): EditorTextRange[] {
 	const result: EditorTextRange[] = [];
@@ -134,8 +140,8 @@ export interface EditorComponent extends Component {
 	/** Add text to history for up/down navigation, with the ranges of it the user pasted; recalling it restores them. */
 	addToHistory?(text: string, pasted?: readonly EditorTextRange[]): void;
 
-	/** Replace the full input-history recall buffer, oldest entry first. */
-	setHistory?(texts: readonly string[]): void;
+	/** Replace the full input-history recall buffer, oldest entry first; recalling an entry restores its pasted ranges. */
+	setHistory?(entries: readonly EditorHistoryEntry[]): void;
 
 	// =========================================================================
 	// Advanced text manipulation (optional)

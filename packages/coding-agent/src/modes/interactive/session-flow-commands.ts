@@ -305,7 +305,7 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 					if (newSessionName) {
 						host.session.setSessionName(newSessionName);
 					}
-					host.editor.setText(result.selectedText ?? "");
+					host.editor.setText(result.selectedText ?? "", result.pasted);
 					done();
 					host.showStatus(newSessionName ? `Forked to new session: ${newSessionName}` : "Forked to new session");
 				} catch (error: unknown) {
@@ -422,7 +422,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 					// Update UI
 					await host.renderInitialMessages();
 					if (result.editorText && !host.editor.getText().trim()) {
-						host.editor.setText(result.editorText);
+						host.editor.setText(result.editorText, result.pasted);
 					}
 					host.showStatus("Navigated to selected point");
 					void host.flushCompactionQueue({ willRetry: false });

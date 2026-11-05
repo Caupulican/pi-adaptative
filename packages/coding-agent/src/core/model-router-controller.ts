@@ -969,10 +969,11 @@ export class ModelRouterController {
 	 * Routing for an owner message. The session model answers every owner message (root-first routing): with a talker already chosen the
 	 * route is `talker`, otherwise `direct`. No side trip, opening or toolkit route is produced, so no owner turn is a routed turn and the
 	 * routed-turn machinery (`runRoutedTurn`'s model path, refused-model replacement) has no owner-path producer; the return type keeps
-	 * those kinds for their downstream handlers.
+	 * those kinds for their downstream handlers. The router reads only `typedWords`, the owner's typed words (`ownerTypedText`, each
+	 * pasted span elided): a model, tier or toolkit choice is the owner's only when typed, never when it appears in pasted text.
 	 */
 	async routeOwnerMessage(
-		_prompt: string,
+		_typedWords: string,
 		input: {
 			talkerChosen: boolean;
 			hasImages?: boolean;

@@ -5,6 +5,10 @@
 - `Editor` tracks which text was pasted: `onSubmit(text, pasted)` and `getPastedRanges()` report the ranges of the submitted (expanded) text that were pasted rather than typed, for marker and inline pastes alike. A pasted part the user edits counts as typed; undo restores the ranges with the text. `EditorComponent` declares both as optional, so custom editors are unaffected, and the editor's text, rendering, cursor and undo behave as before.
 - `setText(text, pasted?)` and `addToHistory(text, pasted?)` take the ranges of `text` that were pasted, so text put back into the editor (restored input, a history entry) stays pasted where it was; history navigation restores each entry's ranges. Without `pasted` the text counts as typed, as before. `carryTextRanges(previous, next, ranges, rewritten)` maps ranges across a text rewrite (`"typed"`: the rewritten part becomes typed; `"pasted"`: a rewritten part that touched a pasted range stays pasted).
 
+### Changed
+
+- `setHistory` takes `EditorHistoryEntry` objects (`{ text, pasted? }`) instead of strings, so a replaced history keeps each entry's pasted ranges. Callers passing strings map them to `{ text }`.
+
 ## [0.104.34] - 2026-11-04
 
 ## [0.104.33] - 2026-11-04

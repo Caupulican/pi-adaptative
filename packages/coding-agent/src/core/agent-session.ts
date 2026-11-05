@@ -11,7 +11,6 @@ import { messageRevision } from "../kernel/message-revision.ts";
 import type { CustomMessage } from "../kernel/messages.ts";
 import { classifyFailure } from "../kernel/reliability/index.ts";
 import { compactToolResultDetailsForRetention } from "../kernel/session/message-retention.ts";
-import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "../kernel/tool-protocol-residue.ts";
 import type { AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "../kernel/types.ts";
@@ -306,7 +305,7 @@ import { createSessionShutdownTracker, settleClosingSessionMemory } from "./sess
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionSystemPromptController } from "./session-system-prompt-controller.ts";
-import { SessionTreeNavigator } from "./session-tree-navigator.ts";
+import { SessionTreeNavigator, type TreeNavigationResult } from "./session-tree-navigator.ts";
 import { SessionUnsettledLadderController } from "./session-unsettled-ladder-controller.ts";
 import { deriveSessionWorkState, type SessionWorkState } from "./session-work-state.ts";
 import type { MemorySystem, ResourceProfileFilterSettings, SettingsScope } from "./settings/settings-schema.ts";
@@ -5429,7 +5428,7 @@ export class AgentSession {
 	async navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
-	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+	): Promise<TreeNavigationResult> {
 		return this._treeNavigator.navigateTree(targetId, options);
 	}
 

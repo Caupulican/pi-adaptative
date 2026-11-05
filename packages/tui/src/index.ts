@@ -36,6 +36,7 @@ export {
 	carryTextRanges,
 	type EditorChangeSummary,
 	type EditorComponent,
+	type EditorHistoryEntry,
 	type EditorTextRange,
 	firstNonWhitespaceCharacter,
 	mergeTextRanges,

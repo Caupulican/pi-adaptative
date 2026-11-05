@@ -4227,18 +4227,18 @@ export class SessionManager {
 	}
 
 	/**
-	 * Return recent user-entered prompt text for input recall, oldest entry first.
+	 * Return recent user-entered prompt text for input recall, oldest entry first, each with the entry that holds it.
 	 * This walks only the active branch and does not build/render full session context.
 	 */
-	getRecentUserInputHistory(limit = 100): string[] {
+	getRecentUserInputHistory(limit = 100): Array<{ entryId: string; text: string }> {
 		const maxEntries = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 100;
 		if (maxEntries === 0) return [];
-		const history: string[] = [];
+		const history: Array<{ entryId: string; text: string }> = [];
 		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
 		visitSessionAncestry(leaf, this.byId, (entry) => {
 			if (entry.type === "message" && entry.message.role === "user") {
 				const text = this.getUserInputText(entry.message);
-				if (text) history.push(text);
+				if (text) history.push({ entryId: entry.id, text });
 			}
 			if (history.length >= maxEntries) return false;
 		});

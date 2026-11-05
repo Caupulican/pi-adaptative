@@ -22,6 +22,7 @@ export {
 	type CreateAgentSessionRuntimeResult,
 	CreatedSessionFailure,
 	createAgentSessionRuntime,
+	type ForkResult,
 	type PreparedAgentSessionRuntime,
 	prepareAgentSessionRuntime,
 	SessionReplacementCallbackError,
@@ -97,6 +98,7 @@ export * from "./orchestration/policy-compiler.ts";
 export * from "./orchestration/profile-registry.ts";
 export * from "./orchestration/profile-store.ts";
 export * from "./orchestration/task-runtime.ts";
+export type { TreeNavigationResult } from "./session-tree-navigator.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
 export * from "./steering/index.ts";
 export type {

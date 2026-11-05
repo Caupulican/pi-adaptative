@@ -979,8 +979,9 @@ export class PromptSubmissionController {
 			// goes to a worker through the objective route, never to a swapped root turn.
 			if (options?.autoContinueGoal !== false) {
 				// An owner message: the talker answers, a small message takes a side trip, and the first
-				// substantive message chooses the talker once (conversation-continuity stages 0-1).
-				const route = await this.deps.modelRouter.routeOwnerMessage(expandedText, {
+				// substantive message chooses the talker once (conversation-continuity stages 0-1). The route is decided from
+				// the typed words only; the side trip's cost is the whole message it would send.
+				const route = await this.deps.modelRouter.routeOwnerMessage(ownerTypedText(userRequest), {
 					talkerChosen:
 						this.deps.sessionManager.getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) !== undefined,
 					...routeFacts,

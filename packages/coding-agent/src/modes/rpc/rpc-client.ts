@@ -8,6 +8,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
+import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
 import type { BashResult } from "../../core/tools/schemas/bash.ts";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "../../kernel/index.ts";
 import type { CompactionResult } from "../../kernel/node.ts";
@@ -393,9 +394,10 @@ export class RpcClient {
 
 	/**
 	 * Fork from a specific message.
-	 * @returns Object with `text` (the message text) and `cancelled` (if extension cancelled)
+	 * @returns Object with `text` (the message text), `pasted` (ranges of it the owner pasted, when recorded) and
+	 * `cancelled` (if extension cancelled)
 	 */
-	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+	async fork(entryId: string): Promise<{ text: string; pasted?: readonly OwnerTextRange[]; cancelled: boolean }> {
 		const response = await this.send({ type: "fork", entryId });
 		return this.getData(response);
 	}

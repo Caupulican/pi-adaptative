@@ -299,6 +299,7 @@ editor.onSubmit = (text, pasted) => console.log(text, pasted); // pasted: ranges
 editor.getPastedRanges(); // Same ranges for getExpandedText(), before submit
 editor.setText(text, pasted); // Restore text; pasted (optional) keeps those ranges pasted, else the text is typed
 editor.addToHistory(text, pasted); // History entries keep their pasted ranges; up/down restores them
+editor.setHistory([{ text, pasted }]); // Replace the history (oldest first); each entry keeps its pasted ranges
 // carryTextRanges(previous, next, ranges, "typed" | "pasted") maps ranges across a rewrite of the text
 editor.onChange = (text) => console.log("Changed:", text);
 editor.disableSubmit = true; // Disable submit temporarily

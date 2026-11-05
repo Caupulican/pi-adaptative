@@ -20,6 +20,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
@@ -361,6 +362,14 @@ export class SessionReplacementCallbackError extends Error {
 		this.name = "SessionReplacementCallbackError";
 		this.callbackError = callbackError;
 	}
+}
+
+/** What a fork did, and the user message text it puts back in the editor for a fork before that message. */
+export interface ForkResult {
+	cancelled: boolean;
+	selectedText?: string;
+	/** Ranges of `selectedText` the owner pasted, restored from the message's owner evidence (`ownerPasteRestorer`). */
+	pasted?: readonly OwnerTextRange[];
 }
 
 function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
@@ -1100,21 +1109,21 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	async fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; selectedText?: string }> {
+	): Promise<ForkResult> {
 		return this.runSessionReplacement(() => this.forkUnserialized(entryId, options));
 	}
 
 	private async forkUnserialized(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; selectedText?: string }> {
+	): Promise<ForkResult> {
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
 		if (beforeResult.cancelled) {
 			return { cancelled: true };
 		}
 		let targetLeafId: string | null;
-		let selectedText: string | undefined;
+		let selected: Pick<ForkResult, "selectedText" | "pasted"> = {};
 
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 		if (!selectedEntry) {
@@ -1128,7 +1137,10 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				throw new Error("Invalid entry ID for forking");
 			}
 			targetLeafId = selectedEntry.parentId;
-			selectedText = extractUserMessageText(selectedEntry.message.content);
+			const selectedText = extractUserMessageText(selectedEntry.message.content);
+			// Read from this session's entries, before the fork replaces it: the message's owner evidence is not copied.
+			const pasted = ownerPasteRestorer(this.sessionManager.getEntries())(entryId, selectedText);
+			selected = { selectedText, ...(pasted ? { pasted } : {}) };
 		}
 
 		const previousSessionFile = this.session.sessionFile;
@@ -1142,7 +1154,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				const sessionManager = SessionManager.create(this.cwd, this.services.agentDir, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
 				await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, undefined);
-				return { cancelled: false, selectedText };
+				return { cancelled: false, ...selected };
 			}
 			if (!existsSync(currentSessionFile)) {
 				throw new Error(
@@ -1162,7 +1174,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				options?.withSession,
 				copyBaselineOf(forkedSessionPath),
 			);
-			return { cancelled: false, selectedText };
+			return { cancelled: false, ...selected };
 		}
 
 		let sessionManager: SessionManager;
@@ -1175,7 +1187,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			copyBaseline = copyBaselineOf(sessionManager.getSessionFile());
 		}
 		await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, copyBaseline);
-		return { cancelled: false, selectedText };
+		return { cancelled: false, ...selected };
 	}
 
 	/**

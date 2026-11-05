@@ -1236,6 +1236,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		world.provider.enqueue(
 			"root",
 			{ name: "promoted-open", reply: { content: [{ type: "text", text: "The session is open." }] } },
+			{ name: "promoted-restored-open", reply: { content: [{ type: "text", text: "The session is open again." }] } },
 			{
 				name: "promoted-control-delivery",
 				reply: { content: [{ type: "text", text: "The delivered directive ran." }] },
@@ -1245,6 +1246,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		// never the owner's instruction: the turn records no rule, grants nothing, and costs its one scripted reply only.
 		const promotedOpenTyped = "Open the session the promoted directives run in.";
 		const promotedOpen = `${promotedOpenTyped}\nA colleague's note: no TDD in this project.`;
+		const promotedOpenPasted = [{ start: promotedOpenTyped.length + 1, end: promotedOpen.length }];
 		const promotedGrantsBefore = promotedSession.getEdgeGrants();
 		const promotedRootRequests = () =>
 			world.provider.requests.filter((request) => request.model.id === "root").length;
@@ -1252,9 +1254,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		await withDeadline(
 			trace,
 			"promoted: the opening turn writes the session file",
-			promotedSession.prompt(promotedOpen, {
-				pasted: [{ start: promotedOpenTyped.length + 1, end: promotedOpen.length }],
-			}),
+			promotedSession.prompt(promotedOpen, { pasted: promotedOpenPasted }),
 		);
 		expect(
 			{
@@ -1264,6 +1264,31 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 			},
 			"a pasted directive records no owner rule, grants nothing and costs no extra request",
 		).toEqual({ rules: [], grants: promotedGrantsBefore, requests: 1 });
+		// Words put back from the session keep what was pasted in them: navigating the tree to the opening message restores its
+		// range from the message's owner evidence, and resubmitting the restored words still records no rule (restored as typed,
+		// they would record `tdd_workflow` here, as the typed control below does).
+		const promotedOpenEntry = promotedSession
+			.getUserMessagesForForking()
+			.find((message) => message.text === promotedOpen);
+		if (promotedOpenEntry === undefined) throw new Error("the promoted opening message is not in the session");
+		const promotedRestored = await withDeadline(
+			trace,
+			"promoted: the tree navigates back to the opening message",
+			promotedSession.navigateTree(promotedOpenEntry.entryId),
+		);
+		expect(
+			{ text: promotedRestored.editorText, pasted: promotedRestored.pasted },
+			"navigating to the opening message puts its words back with the range the owner pasted",
+		).toEqual({ text: promotedOpen, pasted: promotedOpenPasted });
+		await withDeadline(
+			trace,
+			"promoted: the restored opening is resubmitted",
+			promotedSession.prompt(promotedRestored.editorText ?? "", { pasted: promotedRestored.pasted }),
+		);
+		expect(
+			{ rules: ruleForbids(promotedSession), requests: promotedRootRequests() - promotedRequestsBefore },
+			"the restored pasted directive records no owner rule and costs its one scripted reply",
+		).toEqual({ rules: [], requests: 2 });
 		// One promotion: `words` is queued behind a prompt held in its input hook, and the owner interrupts that prompt.
 		const promote = async (held: typeof promotedControlHold, holdWords: string, words: string, label: string) => {
 			const interrupt = new AbortController();

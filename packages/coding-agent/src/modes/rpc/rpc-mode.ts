@@ -752,7 +752,11 @@ export async function runRpcMode(
 					return error(id, "fork", "Cannot replace the session while a prompt is in progress.");
 				}
 				const result = await runtimeHost.fork(command.entryId);
-				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
+				return success(id, "fork", {
+					text: result.selectedText,
+					...(result.pasted ? { pasted: result.pasted } : {}),
+					cancelled: result.cancelled,
+				});
 			}
 
 			case "clone": {

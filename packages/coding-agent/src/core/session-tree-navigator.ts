@@ -18,6 +18,7 @@ import { combineUsage } from "../kernel/usage.ts";
 import type { UsageComponent } from "../kernel/usage-components.ts";
 import type { AccountingOrigin } from "./cost/accounting-evidence.ts";
 import type { ExtensionRunner, TreePreparation } from "./extensions/index.ts";
+import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { hasReportableUsage, reportSpawnedUsage, type SpawnedUsageReporter } from "./spawned-usage.ts";
 import type { TimerPort } from "./util/timer-port.ts";
@@ -55,6 +56,16 @@ export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
 	summaryRetryTimers?: TimerPort;
 }
 
+/** What a tree navigation did, and the text it puts back in the editor when it left a user or custom message. */
+export interface TreeNavigationResult {
+	editorText?: string;
+	/** Ranges of `editorText` the owner pasted, restored from the message's owner evidence (`ownerPasteRestorer`). */
+	pasted?: readonly OwnerTextRange[];
+	cancelled: boolean;
+	aborted?: boolean;
+	summaryEntry?: BranchSummaryEntry;
+}
+
 export class SessionTreeNavigator {
 	private readonly deps: SessionTreeNavigatorDeps;
 	private activeAbortController: AbortController | undefined;
@@ -80,12 +91,12 @@ export class SessionTreeNavigator {
 	 * @param options.customInstructions Custom instructions for summarizer
 	 * @param options.replaceInstructions If true, customInstructions replaces the default prompt
 	 * @param options.label Label to attach to the branch summary entry
-	 * @returns Result with editorText (if user message) and cancelled status
+	 * @returns Result with editorText (if user message), its pasted ranges, and cancelled status
 	 */
 	async navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
-	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+	): Promise<TreeNavigationResult> {
 		const sessionManager = this.deps.getSessionManager();
 		const extensionRunner = this.deps.getExtensionRunner();
 		const oldLeafId = sessionManager.getLeafId();
@@ -147,20 +158,13 @@ export class SessionTreeNavigator {
 		let summaryUsageUncertain = false;
 		let navigationFailure: { error: unknown } | undefined;
 		let usageRecordingFailure: unknown | undefined;
-		let result:
-			| { editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }
-			| undefined;
+		let result: TreeNavigationResult | undefined;
 		// Refused while a turn runs, before this navigation supersedes any other: a refused one changes nothing.
 		const releaseHistory = this.deps.beginHistoryRewrite();
 		const previous = this.activeAbortController;
 		this.activeAbortController = branchSummaryAbort;
 
-		const executeNavigation = async (): Promise<{
-			editorText?: string;
-			cancelled: boolean;
-			aborted?: boolean;
-			summaryEntry?: BranchSummaryEntry;
-		}> => {
+		const executeNavigation = async (): Promise<TreeNavigationResult> => {
 			// Install the owner before aborting: an abort listener may start a newer
 			// navigation synchronously, and that request must supersede this one too.
 			previous?.abort();
@@ -270,11 +274,14 @@ export class SessionTreeNavigator {
 			// Determine the new leaf position based on target type
 			let newLeafId: string | null;
 			let editorText: string | undefined;
+			let pasted: readonly OwnerTextRange[] | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
+				// User message: leaf = parent (null if root), text goes to editor with the ranges the owner pasted in it. Its owner
+				// evidence follows it on the branch being left, so every entry of the file is read.
 				newLeafId = targetEntry.parentId;
 				editorText = this._extractUserMessageText(targetEntry.message.content);
+				pasted = ownerPasteRestorer(sessionManager.getEntries())(targetId, editorText);
 			} else if (targetEntry.type === "custom_message") {
 				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
@@ -348,7 +355,7 @@ export class SessionTreeNavigator {
 
 			// Emit to custom tools
 
-			return { editorText, cancelled: false, summaryEntry };
+			return { editorText, ...(pasted ? { pasted } : {}), cancelled: false, summaryEntry };
 		};
 
 		try {

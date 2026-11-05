@@ -54,8 +54,10 @@ import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts"
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import {
 	joinOwnerWords,
+	OWNER_EVIDENCE_CUSTOM_TYPE,
 	type OwnerTextRange,
 	type OwnerWords,
+	ownerPasteRestorer,
 	sliceOwnerRanges,
 	trimOwnerWords,
 } from "../../core/learning/owner-evidence-ledger.ts";
@@ -1202,7 +1204,7 @@ export class InteractiveMode {
 						const result = await this.runtimeHost.fork(entryId, options);
 						if (!result.cancelled) {
 							this.renderCurrentSessionState();
-							this.editor.setText(result.selectedText ?? "");
+							this.editor.setText(result.selectedText ?? "", result.pasted);
 							this.showStatus("Forked to new session");
 						}
 						return { cancelled: result.cancelled };
@@ -1225,7 +1227,7 @@ export class InteractiveMode {
 
 					await this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
-						this.editor.setText(result.editorText);
+						this.editor.setText(result.editorText, result.pasted);
 					}
 					this.showStatus("Navigated to selected point");
 					void this.flushCompactionQueue({ willRetry: false });
@@ -2171,29 +2173,38 @@ export class InteractiveMode {
 		return historyReloadMath.getUserMessageText(message);
 	}
 
-	private setEditorInputHistory(history: readonly string[]): void {
+	/**
+	 * Prompt history rebuilt from the persisted user messages of the branch, oldest first. Each entry keeps the ranges the
+	 * owner pasted in it (`ownerPasteRestorer`, by the entry that holds it), so a recalled message is never resubmitted as typed.
+	 */
+	private setEditorInputHistory(
+		history: readonly { readonly entryId: string | undefined; readonly text: string }[],
+	): void {
+		const restore = ownerPasteRestorer(this.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE]));
+		const entries = history.map(({ entryId, text }) => ({ text, pasted: restore(entryId, text) }));
 		if (this.editor.setHistory) {
-			this.editor.setHistory(history);
+			this.editor.setHistory(entries);
 			return;
 		}
-		for (const text of history) {
-			this.editor.addToHistory?.(text);
+		for (const entry of entries) {
+			this.editor.addToHistory?.(entry.text, entry.pasted);
 		}
 	}
 
 	private populateEditorInputHistoryFromMessages(messages: readonly AgentMessage[]): void {
 		const history = messages
 			.filter((message): message is Message => message.role === "user")
-			.map((message) => this.getUserMessageText(message).trim())
-			.filter((text) => text.length > 0)
+			.map((message) => ({
+				entryId: this.sessionManager.getMessageEntryId(message),
+				text: this.getUserMessageText(message).trim(),
+			}))
+			.filter((entry) => entry.text.length > 0)
 			.slice(-100);
 		this.setEditorInputHistory(history);
 	}
 
 	private populateEditorInputHistoryFromSession(): void {
-		const sessionManager = this.sessionManager as { getRecentUserInputHistory?: (limit?: number) => string[] };
-		const history = sessionManager.getRecentUserInputHistory?.(100);
-		if (history) this.setEditorInputHistory(history);
+		this.setEditorInputHistory(this.sessionManager.getRecentUserInputHistory(100));
 	}
 
 	private resetLiveTuiHistoryTrim(): void {

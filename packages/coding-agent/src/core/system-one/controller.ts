@@ -11,7 +11,7 @@ import { workerTaskFitKey, workerTaskFitStatus } from "../expert-routing/worker-
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
 import { ObjectiveExecutionInterruptedError } from "../objective-execution/current-objective-execution.ts";
-import { carriesOwnerPaste } from "../security/owner-paste-boundary.ts";
+import { boundOwnerRequest, carriesOwnerPaste, OWNER_REQUEST_CHARACTERS } from "../security/owner-paste-boundary.ts";
 import {
 	MAX_OPTIONAL_TOOL_INTENT_TOOLS,
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
@@ -104,6 +104,9 @@ const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
  * this only stops a pathological instruction file from crowding out the request itself.
  */
 export const USER_REQUEST_RULE_BUDGET = 8_000;
+
+/** The longest owner message the owner-words screen reads (`screenOwnerWords`). */
+const OWNER_SCREEN_CHARACTERS = 1_000;
 
 /** The owner's request as it is classified, or undefined when it carries no content to classify. */
 export function normalizeUserRequest(request: string): string | undefined {
@@ -569,7 +572,7 @@ export class SystemOneController {
 		if (userRequest === undefined) return { status: "skipped" };
 		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
 		const askCapabilities = options.capabilitiesPending !== false;
-		const judgedRequest = userRequest.slice(0, 4_000);
+		const judgedRequest = boundOwnerRequest(userRequest, OWNER_REQUEST_CHARACTERS).text;
 		const pasted = carriesOwnerPaste(judgedRequest);
 		const asked: QuestionPack = {};
 		const authorization = pasted ? OWNER_PASTE_AUTHORIZATION_QUESTIONS : USER_AUTHORIZATION_QUESTIONS;
@@ -658,15 +661,20 @@ export class SystemOneController {
 	 * Which of the queued owner messages may carry an instruction: one request, one question per message.
 	 * A message is reported as not carrying one only when the screen's "only small talk" answer is a hard pass; an unsure
 	 * answer or an outage reports it as carrying, so the caller classifies it in full. The screen can
-	 * cost a call, never lose an instruction.
+	 * cost a call, never lose an instruction: a message is read within `OWNER_SCREEN_CHARACTERS`, pasted spans shortened first
+	 * (`boundOwnerRequest`), and one whose typed words alone do not fit is not screened but reported as carrying.
 	 */
 	async screenOwnerWords(
 		messages: readonly string[],
 		options: { signal?: AbortSignal } = {},
 	): Promise<{ status: "screened"; carriesInstruction: boolean[] } | { status: "unavailable"; reason: string }> {
-		if (messages.length === 0) return { status: "screened", carriesInstruction: [] };
+		const bounded = messages.map((message) => boundOwnerRequest(message.trim(), OWNER_SCREEN_CHARACTERS));
+		// The index of each message among those screened, or undefined for one that is classified in full unread.
+		const screenedIndex: Array<number | undefined> = [];
+		const judged: string[] = [];
+		for (const message of bounded) screenedIndex.push(message.whole ? judged.push(message.text) - 1 : undefined);
+		if (judged.length === 0) return { status: "screened", carriesInstruction: messages.map(() => true) };
 		const asked: QuestionPack = {};
-		const judged = messages.map((message) => message.trim().slice(0, 1_000));
 		judged.forEach((message, index) => {
 			asked[`carries_${index}`] = ownerWordsScreenQuestion(index, carriesOwnerPaste(message));
 		});
@@ -678,8 +686,9 @@ export class SystemOneController {
 		);
 		if (evaluated.status === "unavailable") return evaluated;
 		const { response, evaluationId } = evaluated;
-		const carriesInstruction = messages.map(
-			(_message, index) =>
+		const carriesInstruction = screenedIndex.map(
+			(index) =>
+				index === undefined ||
 				evaluateNoul(
 					noulFromAnswer(response.answers[`carries_${index}`], false),
 					"required_true",
@@ -699,7 +708,9 @@ export class SystemOneController {
 		request: string,
 		signal?: AbortSignal,
 	): Promise<{ change: ModelPoolChange; doubts: string[] }> {
-		const state = { user_request: this.projector.redactText(request.trim().slice(0, 4_000)) };
+		const state = {
+			user_request: this.projector.redactText(boundOwnerRequest(request.trim(), OWNER_REQUEST_CHARACTERS).text),
+		};
 		const pasted = carriesOwnerPaste(state.user_request);
 		const questions = modelPoolQuestions(pasted);
 		const first = await this.runStageValidation("intake", state, "read_only", [], questions, signal);

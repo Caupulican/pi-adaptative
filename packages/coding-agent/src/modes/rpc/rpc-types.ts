@@ -9,6 +9,7 @@ import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
+import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
 import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { BashResult } from "../../core/tools/schemas/bash.ts";
@@ -322,7 +323,14 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "reset_tool_protocol"; success: true; data: { removed: boolean } }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
-	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "fork";
+			success: true;
+			/** `pasted`: ranges of `text` the owner pasted, restored from the message's owner evidence. */
+			data: { text: string; pasted?: readonly OwnerTextRange[]; cancelled: boolean };
+	  }
 	| { id?: string; type: "response"; command: "clone"; success: true; data: { cancelled: boolean } }
 	| {
 			id?: string;

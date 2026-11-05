@@ -11,6 +11,7 @@ import {
 } from "../editing-actions.ts";
 import {
 	type EditorChangeSummary,
+	type EditorHistoryEntry,
 	type EditorTextRange,
 	firstNonWhitespaceCharacter,
 	mergeTextRanges,
@@ -650,13 +651,13 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	/** Replace the prompt history buffer. Input is oldest entry first. */
-	setHistory(texts: readonly string[]): void {
+	/** Replace the prompt history buffer. Input is oldest entry first, each entry with the ranges of it the user pasted. */
+	setHistory(entries: readonly EditorHistoryEntry[]): void {
 		this.history = [];
 		this.historyIndex = -1;
 		if (this.privateContent) return;
-		for (const text of texts) {
-			this.addToHistory(text);
+		for (const entry of entries) {
+			this.addToHistory(entry.text, entry.pasted);
 		}
 	}
 

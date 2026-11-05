@@ -200,6 +200,24 @@ export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): Own
 }
 
 /**
+ * The pasted ranges of text put back from a persisted user message (a fork, a tree navigation or prompt history recalls
+ * it), read from the owner-evidence records among `entries`: `(entryId, text)` gives the ranges the record of that message
+ * holds when `text` is still the recorded original. Text the host rewrote before persisting it (a template or skill
+ * expanded, an input transform, a trim) is not the record's and comes back typed, as does a message no record names.
+ * Matched by entry, not source id: a forked file carries its parent's records under the parent's session id.
+ */
+export function ownerPasteRestorer(
+	entries: readonly SessionEntry[],
+): (entryId: string | undefined, text: string) => readonly OwnerTextRange[] | undefined {
+	const recorded = new Map<string, OwnerEvidenceRecord>();
+	for (const record of getOwnerEvidenceSnapshots(entries)) if (record.pasted) recorded.set(record.entryId, record);
+	return (entryId, text) => {
+		const record = entryId === undefined ? undefined : recorded.get(entryId);
+		return record !== undefined && record.text === text ? record.pasted : undefined;
+	};
+}
+
+/**
  * One region of the owner's original text that the owner SHOWED rather than said, in original code-unit offsets
  * (`end` exclusive, delimiters included). `inlineCode` marks a backtick or `<code>` span inside a sentence: how
  * identifiers are written, still shown text for a citation, but not quotation of someone else's words.

@@ -105,8 +105,10 @@ interface AgentSession {
   messages: AgentMessage[];
   isStreaming: boolean;
 
-  // In-place tree navigation within the current session file
-  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
+  // In-place tree navigation within the current session file.
+  // Navigating to a user message returns its text in editorText and, when the owner evidence
+  // recorded pasted ranges for that exact text, those ranges in pasted (pass them back as PromptOptions.pasted).
+  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<TreeNavigationResult>; // { editorText?, pasted?, cancelled, aborted?, summaryEntry? }
 
   // Compaction
   compact(customInstructions?: string): Promise<CompactionResult>;
@@ -764,8 +766,10 @@ await runtime.newSession();
 // Replace the active session with another saved session
 await runtime.switchSession("/path/to/session.jsonl");
 
-// Replace the active session with a fork from a specific user entry
-await runtime.fork("entry-id");
+// Replace the active session with a fork from a specific user entry.
+// Resolves to ForkResult { cancelled, selectedText?, pasted? }: the forked message's text and,
+// when the owner evidence recorded them for that exact text, its pasted ranges.
+const { selectedText, pasted } = await runtime.fork("entry-id");
 
 // Clone the active path through a specific entry
 await runtime.fork("entry-id", { position: "at" });
