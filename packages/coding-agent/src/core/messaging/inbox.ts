@@ -473,15 +473,7 @@ export class MessageInbox {
 			writeFileAtomicSync(file, `${encoded}\n`, { mode: 0o600 });
 			changed = true;
 		});
-		if (changed) this.notify(file);
-	}
-
-	private notify(file: string): void {
-		try {
-			inboxChanges.notify(file);
-		} catch {
-			// A wake is advisory; the durable change stands.
-		}
+		if (changed) inboxChanges.notify(file);
 	}
 
 	private watchDirectory(): () => void {
@@ -492,7 +484,7 @@ export class MessageInbox {
 				this.dir,
 				(_event, filename) => {
 					if (filename && String(filename).endsWith(FILE_SUFFIX)) {
-						this.notify(join(this.dir, basename(String(filename))));
+						inboxChanges.notify(join(this.dir, basename(String(filename))));
 					}
 				},
 				() => {

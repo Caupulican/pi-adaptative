@@ -7,6 +7,7 @@ import {
 } from "../orchestration/session-bundle-lifecycle.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
+import { KeyedSignal } from "../util/keyed-signal.ts";
 import { type SteerDecision, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 
@@ -41,7 +42,8 @@ const MAX_WAIT_TIMEOUT_MS = 300_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_PAGE_SIZE = 16;
 const RANDOM_UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const listenersByMailboxFile = new Map<string, Set<() => void>>();
+/** Wakes, in this process, a reply wait on any mailbox instance backed by the same file; keyed by its path. */
+const replyChanges = new KeyedSignal();
 const assertSessionRootMailboxBounds = createReplaySafeMailboxBounder(
 	"Session root mailbox",
 	MAX_RETAINED_REPLIES,
@@ -608,7 +610,7 @@ export class SessionRootMailbox {
 				replayReceipts: [...state.replayReceipts, replayReceipt(reply, sourceOwned)],
 			};
 		}, !sourceOwned);
-		if (created) this.notify();
+		if (created) replyChanges.notify(this.file);
 		if (completedReplay) return { status: "completed_replay", messageId: reply.messageId, created: false };
 		return {
 			status: "retained",
@@ -664,7 +666,7 @@ export class SessionRootMailbox {
 				),
 			};
 		});
-		if (changed) this.notify();
+		if (changed) replyChanges.notify(this.file);
 		return accepted;
 	}
 
@@ -710,7 +712,7 @@ export class SessionRootMailbox {
 			() => recordBeforeSettling(expired),
 			retention,
 		);
-		if (expired.length > 0) this.notify();
+		if (expired.length > 0) replyChanges.notify(this.file);
 		return expired;
 	}
 
@@ -725,7 +727,7 @@ export class SessionRootMailbox {
 				return false;
 			}),
 		}));
-		if (released) this.notify();
+		if (released) replyChanges.notify(this.file);
 		return released;
 	}
 
@@ -752,7 +754,7 @@ export class SessionRootMailbox {
 				),
 			};
 		});
-		if (changed) this.notify();
+		if (changed) replyChanges.notify(this.file);
 		return accepted;
 	}
 
@@ -767,7 +769,7 @@ export class SessionRootMailbox {
 		// Process-local: a reply another process writes is read at the deadline's final check, never as a wake.
 		const reply: WakeSource<SessionRootReply[]> = {
 			id: "mailbox.reply",
-			subscribe: (onWake) => this.subscribe(onWake),
+			subscribe: (onWake) => replyChanges.subscribe(this.file, onWake),
 			check: () => {
 				const replies = this.pendingReplies(query);
 				return replies.length > 0 ? { kind: "satisfied", value: replies } : undefined;
@@ -786,37 +788,6 @@ export class SessionRootMailbox {
 		if (end.kind === "steered") return { replies: [], timedOut: false, steered: end.decision };
 		if (end.kind === "aborted" && signal) throw abortReason(signal);
 		throw new Error(`Session root reply wait ended ${end.kind} without a reply.`);
-	}
-
-	/**
-	 * Subscribes to process-local mutations for every mailbox instance backed by this file.
-	 * Callers must unsubscribe; durable cross-process delivery remains the control owner's responsibility.
-	 */
-	subscribe(listener: () => void): () => void {
-		const listeners = listenersByMailboxFile.get(this.file) ?? new Set<() => void>();
-		listenersByMailboxFile.set(this.file, listeners);
-		listeners.add(listener);
-		let subscribed = true;
-		return () => {
-			if (!subscribed) return;
-			subscribed = false;
-			listeners.delete(listener);
-			if (listeners.size === 0 && listenersByMailboxFile.get(this.file) === listeners) {
-				listenersByMailboxFile.delete(this.file);
-			}
-		};
-	}
-
-	private notify(): void {
-		const listeners = listenersByMailboxFile.get(this.file);
-		if (!listeners) return;
-		for (const listener of [...listeners]) {
-			try {
-				listener();
-			} catch {
-				// Subscribers are advisory; the durable reply mutation remains authoritative.
-			}
-		}
 	}
 
 	private read(): SessionRootMailboxState {
