@@ -44,9 +44,11 @@ const READ_ONLY_COMMANDS = new Set([
 	"[[",
 	"awk",
 	"basename",
+	"break",
 	"cat",
 	"cd",
 	"cmp",
+	"continue",
 	"column",
 	"comm",
 	"curl",
@@ -83,6 +85,7 @@ const READ_ONLY_COMMANDS = new Set([
 	"printf",
 	"ps",
 	"pwd",
+	"read",
 	"readlink",
 	"realpath",
 	"rg",
@@ -809,6 +812,8 @@ const NON_PATH_PROGRAMS = new Set([
 	"[",
 	"[[",
 	"basename",
+	"break",
+	"continue",
 	"dirname",
 	"echo",
 	"false",
@@ -821,6 +826,7 @@ const NON_PATH_PROGRAMS = new Set([
 	"printf",
 	"ps",
 	"pwd",
+	"read",
 	"seq",
 	"sleep",
 	"systemctl",
@@ -2009,6 +2015,11 @@ function leafViolation(args: readonly string[], cwds: WorkingDirectories, contex
 		case "sed":
 			if (rest.some((arg) => /^-[a-zA-Z]*i|^--in-place(?:=|$)/u.test(arg))) return "sed -i edits files in place";
 			break;
+		case "read": {
+			const violation = readVariableViolation(rest);
+			if (violation) return violation;
+			break;
+		}
 		case "test":
 		case "[":
 		case "[[": {
@@ -2193,10 +2204,42 @@ function judgeSimpleCommands(
 	return judge(words, redirections, previous);
 }
 
-/** A loop variable keeps its last value in the shell; names programs read from their environment are not loop variables. */
-function loopVariableViolation(variable: ShellToken): string | undefined {
-	if (ALLOWED_ASSIGNMENT_RE.test(variable.value) || /^[a-z][a-z0-9]*$/u.test(variable.value)) return undefined;
-	return `it binds the loop variable ${variable.value}, which may be a variable programs read; use a name of lowercase letters and digits (for f in ...)`;
+/**
+ * A variable a loop or `read` sets keeps its value in the shell, so it follows the assignment allowlist widened by
+ * lowercase names, which no program reads from its environment by convention. `binding` names the binder and an example.
+ */
+function boundVariableViolation(name: string, binding: { what: string; example: string }): string | undefined {
+	if (ALLOWED_ASSIGNMENT_RE.test(name) || /^[a-z][a-z0-9]*$/u.test(name)) return undefined;
+	return `it binds the ${binding.what} ${name}, which may be a variable programs read; use a name of lowercase letters and digits (${binding.example})`;
+}
+
+/** The variables a `read` sets: its name operands and an `-a` array name; option values are not names. */
+function readVariableViolation(rest: readonly string[]): string | undefined {
+	const binding = { what: "read variable", example: "read -r line" };
+	for (let index = 0; index < rest.length; index++) {
+		const word = rest[index]!;
+		if (word === "--") {
+			for (const name of rest.slice(index + 1)) {
+				const violation = boundVariableViolation(name, binding);
+				if (violation) return violation;
+			}
+			return undefined;
+		}
+		if (word.startsWith("-") && word.length > 1) {
+			// Letters up to the first one that takes a value; its value is the rest of the word or the next word.
+			const valueAt = word.slice(1).search(/[adinNptu]/u);
+			if (valueAt < 0) continue;
+			const value = word.length > valueAt + 2 ? word.slice(valueAt + 2) : rest[++index];
+			if (word[valueAt + 1] === "a" && value !== undefined) {
+				const violation = boundVariableViolation(value, binding);
+				if (violation) return violation;
+			}
+			continue;
+		}
+		const violation = boundVariableViolation(word, binding);
+		if (violation) return violation;
+	}
+	return undefined;
 }
 
 /** The rules for one simple command: the expansions in its words, its redirections, then its invocation. */
@@ -2264,7 +2307,9 @@ function compoundViolation(
 				}
 				break;
 			case "loop": {
-				violation = node.variable ? loopVariableViolation(node.variable) : undefined;
+				violation = node.variable
+					? boundVariableViolation(node.variable.value, { what: "loop variable", example: "for f in ..." })
+					: undefined;
 				for (const word of node.variable ? [node.variable, ...node.words] : []) {
 					violation ??= expansionViolation(word);
 				}
