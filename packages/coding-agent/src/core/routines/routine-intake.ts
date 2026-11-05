@@ -12,7 +12,12 @@ import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine
 import { StructuredLlmDecisionEngine } from "../decision/engines/structured-llm-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import { locateOwnerQuote, type OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
+import {
+	locateOwnerQuote,
+	normalizeOwnerRanges,
+	type OwnerEvidenceLedger,
+	type OwnerWords,
+} from "../learning/owner-evidence-ledger.ts";
 import { KnowledgeJudgmentRunner } from "../memory/knowledge-judgment-runner.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
@@ -31,7 +36,7 @@ import {
 	type RoutineScheduleInput,
 } from "./routine-contract.ts";
 import { extractRoutineRequests } from "./routine-intake-extractor.ts";
-import { compileIntakeTiming } from "./routine-intake-timing.ts";
+import { compileIntakeTiming, statesIntakeTiming } from "./routine-intake-timing.ts";
 import { routineIntakeNotice } from "./routine-parent-input.ts";
 import { type RoutineSessionController, routineIntakeRoutineId } from "./routine-session-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -346,7 +351,8 @@ export class RoutineIntake {
 	/**
 	 * Opens the next pass over the owner's unread sources, oldest first: at most four complete, secret-free sources of
 	 * this session within one character bound. Sources the model already answered with a routine tool save, copies from
-	 * another session and secret-bearing or oversized sources are passed over unread. The batch is retained before any
+	 * another session, secret-bearing or oversized sources, and sources whose stated words carry no timing the host
+	 * grammar reads (no request could compile from them) are passed over unread. The batch is retained before any
 	 * request starts.
 	 */
 	private open(): RoutineIntakeBatch | undefined {
@@ -373,7 +379,7 @@ export class RoutineIntake {
 					if (sourceIds.length >= MAX_ROUTINE_INTAKE_BATCH_SOURCES || chars + source.chars > MAX_BATCH_CHARS)
 						break scan;
 					const original = this.deps.evidence.findSource(source.sourceId);
-					if (original && !hasMaskableSecretText(original.text)) {
+					if (original && !hasMaskableSecretText(original.text) && statesIntakeTiming(original)) {
 						sourceIds.push(source.sourceId);
 						chars += source.chars;
 					}
@@ -441,8 +447,9 @@ export class RoutineIntake {
 	/**
 	 * With System One bound, each source passes its pre-gate first; one extraction request covers every remaining
 	 * source. A proposal survives only when both excerpts are the owner's stated (not shown) words of at least two words
-	 * each, the instruction is more than the timing words, and the stated timing words carry every timing value; the
-	 * host then compiles the schedule. The routine prompt is the owner's original instruction span, and its identity is
+	 * each, the instruction is more than the timing words, and the host grammar, reading the whole stated message,
+	 * derives exactly the proposed timing from the timing excerpt; the host then compiles the schedule. Pasted ranges
+	 * reach neither the gate nor the extraction. The routine prompt is the owner's original instruction span, and its identity is
 	 * the grounded spans' offsets. At most two requests per source survive.
 	 */
 	private async extract(
@@ -461,7 +468,7 @@ export class RoutineIntake {
 			if (engine === this.deps.systemOne()) {
 				const gate = await engine.evaluate(
 					GATE_PROGRAM,
-					{ ownerMessage: source.text },
+					{ ownerMessage: typedWords(source) },
 					{ ...request, signal, consequence: "low", occupancy: "background" },
 				);
 				const answer = gate.results.requests_automation;
@@ -471,7 +478,7 @@ export class RoutineIntake {
 		}
 		if (candidates.length === 0) return [];
 		const proposals = await extractRoutineRequests({
-			messages: candidates.map((source) => ({ text: source.text, sentAt: source.createdAt })),
+			messages: candidates.map((source) => ({ text: typedWords(source), sentAt: source.createdAt })),
 			timeZone: hostTimeZone(),
 			model,
 			budget: request.budget,
@@ -502,7 +509,9 @@ export class RoutineIntake {
 				const timing = compileIntakeTiming(
 					proposal.timing,
 					{
-						stated: when.stated,
+						owner: source,
+						when: { start: when.start, end: when.end },
+						instruction: { start: instruction.start, end: instruction.end },
 						sentAt: Date.parse(source.createdAt),
 						now: this.deps.time.now(),
 						hostTimeZone: hostTimeZone(),
@@ -561,7 +570,7 @@ export class RoutineIntake {
 				proposedRoutine: {
 					instruction: intake.prompt,
 					timing: intake.cadence,
-					upcomingRuns: upcomingRuns(intake.schedule, Date.parse(source.createdAt)),
+					upcomingRuns: upcomingRuns(intake.schedule, Date.parse(source.createdAt), this.deps.time.now()),
 					hostDefaults: intake.defaults ?? [],
 				},
 			},
@@ -641,9 +650,19 @@ function holds(judged: DecisionEvaluation, id: string): boolean {
 	);
 }
 
-/** The first runs a calendar or one-time schedule would make after the owner's message, in the zone it runs in. */
-function upcomingRuns(schedule: RoutineScheduleInput, after: number): string[] {
+/**
+ * The first runs a schedule would make, in the zone it runs in: a calendar rule's after the owner's message, an
+ * interval's after now (its slots count from the save instant), a one-time instant as is; none for a CI watch.
+ */
+function upcomingRuns(schedule: RoutineScheduleInput, after: number, now: number): string[] {
 	if (schedule.kind === "once") return [new Date(schedule.at).toISOString()];
+	if (schedule.kind === "interval") {
+		const zone = hostTimeZone();
+		return [1, 2, 3].map(
+			(slot) =>
+				`${new Date(now + slot * schedule.intervalMs).toLocaleString("en-US", { timeZone: zone })} (${zone})`,
+		);
+	}
 	if (schedule.kind !== "calendar") return [];
 	const rule = { cron: schedule.cron, timeZone: schedule.timeZone ?? hostTimeZone() };
 	const runs: string[] = [];
@@ -656,6 +675,22 @@ function upcomingRuns(schedule: RoutineScheduleInput, after: number): string[] {
 	}
 	return runs;
 }
+
+/**
+ * The owner's message as the paid pre-gate and extraction read it: every pasted range is replaced by a marker, so
+ * pasted text, which can never ground a request, is neither paid for nor read as the owner's words.
+ */
+function typedWords(owner: OwnerWords): string {
+	let text = "";
+	let from = 0;
+	for (const range of normalizeOwnerRanges(owner.pasted, owner.text.length)) {
+		text += `${owner.text.slice(from, range.start)}${PASTED_MARKER}`;
+		from = range.end;
+	}
+	return text + owner.text.slice(from);
+}
+
+const PASTED_MARKER = "[pasted text omitted]";
 
 /** Bounds an automatic routine's frequency and refuses a one-time instant already past; the owner sees why. */
 function scheduleRefusal(schedule: RoutineScheduleInput, now: number): string | undefined {

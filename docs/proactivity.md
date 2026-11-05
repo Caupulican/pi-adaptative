@@ -126,20 +126,37 @@ the routine session (`core/routines/routine-intake.ts`) and writes only through 
 so an automatic routine has the same parent check, authority capture and store limits as a tool
 save, with read-only worker authority: the worker cannot edit existing files, create files outside its
 scratch area or use the network. After an owner turn settles and the foreground stays idle,
-one pass reads at most four unread complete originals from the owner-evidence ledger. With System
-One bound, each original passes a cheap gate first; one bounded extraction request then proposes
-at most two requests per original, each with two verbatim excerpts (what and when) and timing slots,
-never a cron rule or an instant. The host keeps a proposal only when both excerpts are the owner's
-stated (not shown: not pasted into the editor, quoted or code-marked) words of at least two words, the instruction is more than the timing words, and
-the stated timing words carry every slot value: hour and minute, interval count and unit, weekdays,
-day of month, date, zone and CI outcome, as digits or through small English, Portuguese and Spanish
-word tables (`routine-intake-timing.ts`). The host then compiles the schedule, filling open parts
-with fixed defaults it records and announces: part-of-day hours or 09:00 with a 30-minute start
-window, and weekdays for a daily request without days. A request the extraction marks as lasting only
+one pass reads at most four unread complete originals from the owner-evidence ledger. An original
+whose stated words carry no timing the host grammar reads (no schedule construct in any of its
+languages and no CI subject with an outcome word) is passed over without a gate or extraction
+request. With System One bound, each remaining original passes a cheap gate first; one bounded
+extraction request then proposes at most two requests per original, each with two verbatim excerpts
+(what and when) and timing slots, never a cron rule or an instant. The gate and the extraction see
+pasted ranges only as a `[pasted text omitted]` marker. The host keeps a proposal only when both
+excerpts are the owner's stated (not shown: not pasted into the editor, quoted or code-marked) words
+of at least two words and the instruction is more than the timing words. It then reads the timing
+itself (`routine-intake-timing.ts`): a positional English, Portuguese and Spanish grammar tokenizes
+the whole stated message once (accents folded, whole words only) and recognizes constructs ("every
+morning", "at 7", "every 2 hours", "Mondays and Thursdays", "the 15th of every month", "tomorrow",
+"when CI fails"), each consuming its words once. The schedule is derived from the constructs inside
+the timing excerpt alone, and every slot the model filled must equal it: a mismatch, a timing word
+of the excerpt no construct reads, a construct of the excerpt's sentence outside the excerpt (unless
+wholly inside a separate instruction excerpt), an excerpt edge inside a word, or two languages
+reading the excerpt differently drop the request without a notice. Wordings the host cannot compile
+faithfully also drop it: ordinal or relative weekdays ("first Monday", "next Friday"), the last day
+of the month, "every other", exceptions, "until" or "before" a time, "half past", "twice a day",
+months as limits ("in May"), numeric dates, seconds, months or years as intervals. "Every day at 9"
+is daily, never an interval. The host fills open parts with fixed defaults it records and announces:
+an hour without am or pm reads through a stated part of the day ("every evening at 7" is 19:00),
+otherwise on a 24-hour clock (`09:00 for "9", as no am or pm was stated`); part-of-day hours or 09:00
+when no time is stated, each of these with a 30-minute start window; weekdays for a daily request
+without days. Days 29 to 31 of the month compile as stated and the cadence names the months without
+a run (cron has no last-day rule). A request the extraction marks as lasting only
 until something happens gets an end 14 days out (`expiresAt`), and a one-time CI request runs for the next
 matching attempt only (`stopAfterFirstRun`) with the same end; an ended routine is removed after its runs are
 delivered, and an expired one is announced once. Each proposal is judged for being an
-explicit request and for a faithful schedule, given the host-chosen parts, by System One or else
+explicit request and for a faithful schedule, given the host-chosen parts and its next three runs (an
+interval's counted from now), by System One or else
 the session model, and is created only when both hold at 0.9 probability and confidence. A notice
 with the plain cadence and the host-chosen parts rides with the owner's next turn. The pass, its extracted
 requests and the origin of every created routine are retained in the routine store, so a restart

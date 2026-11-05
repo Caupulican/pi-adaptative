@@ -1082,7 +1082,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		await withDeadline(world.trace, "routine intake owner words", root.session.prompt(owner));
 		const source = latestSource();
 		expect(source.text).toBe(owner);
-		// A second request before the pass: its proposed hour is absent from the timing words the model quoted.
+		// A second request before the pass: the host reads its hour as 19:00, not the proposed 07:00.
 		world.systemOne.enterPhase("routine-intake-second-owner", {
 			...ICM_INTAKE_JUDGMENTS,
 			carries_0: { kind: "noul", probability: 0.02 },
@@ -1096,6 +1096,16 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		const second = latestSource();
 		expect(second.text).toBe(secondOwner);
 		expect(second.pasted, "the owner evidence keeps which words were pasted").toEqual([pasted]);
+		// Words with no timing at all: the pass reads past them without a gate or an extraction.
+		const noTiming = "Thanks, that covers it.";
+		world.systemOne.enterPhase("routine-intake-third-owner", {
+			...ICM_INTAKE_JUDGMENTS,
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue("root", text("routine-intake-third-owner-reply", "Noted."));
+		await withDeadline(world.trace, "routine intake words without timing", root.session.prompt(noTiming));
+		const third = latestSource();
+		expect(third.text).toBe(noTiming);
 
 		world.systemOne.enterPhase("routine-intake-pass", {
 			requests_automation: { kind: "noul", probability: 0.98 },
@@ -1114,6 +1124,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 					).toHaveLength(1);
 					expect(JSON.stringify(request.context.messages)).toContain(instruction);
 					expect(JSON.stringify(request.context.messages)).toContain(unstatedHour);
+					expect(JSON.stringify(request.context.messages), "pasted words are not sent").not.toContain(
+						pastedRequest,
+					);
+					expect(JSON.stringify(request.context.messages), "words without timing are not read").not.toContain(
+						noTiming,
+					);
 				},
 				reply: {
 					content: [
@@ -1143,11 +1159,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 									{
 										id: "m2",
 										requests: [
-											// The quoted timing words lack the hour: the host drops it before any judgment.
+											// The whole timing is quoted but the model picks the morning hour: the host reads "every
+											// evening at 7" as 19:00 and drops it before any judgment.
 											{
 												instruction: "Post the build summary",
-												when: "every evening",
-												timing: { kind: "daily", time: "19:00" },
+												when: "every evening at 7",
+												timing: { kind: "daily", time: "07:00" },
 											},
 											// Undelimited pasted words: shown by their recorded provenance alone, so never judged.
 											{
@@ -1216,10 +1233,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		).toBe(true);
 		expect(
 			retained.batch?.requests?.map((request) => request.prompt),
-			"neither pasted request (quoted or undelimited) nor the hour its words do not carry is retained",
+			"neither pasted request (quoted or undelimited) nor an hour the words read differently is retained",
 		).toEqual([instruction]);
 		expect(store().hasRoutineIntakeOrigin(retained.batch!.requests![0]!.key)).toBe(true);
-		expect(intakeState()?.through, "the pass ends at the last source it read").toBe(Date.parse(second.createdAt));
+		expect(intakeState()?.through, "the pass ends past the words without timing it skipped").toBe(
+			Date.parse(third.createdAt),
+		);
 		const notice = notices()[0]!;
 		const content = notice.type === "custom_message" && typeof notice.content === "string" ? notice.content : "";
 		expect(content).toContain("Scheduled (read-only): weekdays at 09:00 (");
@@ -1235,7 +1254,7 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		);
 		expect(
 			world.systemOne.decoded.length - decodedBeforePass,
-			"System One gates both sources and judges only the grounded request",
+			"System One gates both timed sources, not the words without timing, and judges only the grounded request",
 		).toBe(world.systemOne.enabled ? 3 : 0);
 		const receipts = root.sessionManager.getEntries().flatMap((entry) => {
 			const report = resolveSemanticUsageEntry(entry)?.report;
