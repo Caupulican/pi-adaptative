@@ -111,7 +111,9 @@ position when the routine is saved and never passes a matching attempt that its 
 reconciled. A run is keyed by the attempt (provider, host, repository, run, attempt), so a replayed
 or re-sealed attempt never runs twice, and consumed attempt keys outlive journal pruning. Superseded
 and coalesced attempts are counted in the next run, and a new source replay gap is stated in it. The
-failure note does not depend on routines, and turning proactivity off does not stop a routine.
+failure note does not depend on routines, and turning proactivity off does not stop a routine. A
+routine's result is not counted toward `maxTurnWakesPerDay`; a run whose worker reports no owner
+update is carried with the owner's next turn without starting one.
 
 The `delegate` tool exposes bounded event recall and task subscriptions:
 
