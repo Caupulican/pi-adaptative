@@ -3,11 +3,13 @@ import { blockingSleepMs } from "./atomic-file.ts";
 
 /** The port is the kernel's (its retry backoff runs on it); every session owner below takes one. */
 export {
+	alarmAt,
 	type RepeatingAlarm,
 	repeatEvery,
 	SYSTEM_TIMER_PORT,
 	type TimerOptions,
 	type TimerPort,
+	type WallAlarm,
 } from "../../kernel/timer-port.ts";
 
 /**
@@ -46,6 +48,8 @@ export {
  * - `proactivity`: the idle delay before a proactive review may start. The review is armed only for an idle foreground and
  *   every gate is checked again when the alarm fires.
  * - `knowledge-collection`: the original-owner collector's idle delay and bounded pass deadline.
+ * - `routines`: the clock routine edits, claims and results are stamped with, and the scheduler's slot, lease and retry
+ *   alarms (`alarmAt`, which re-reads this clock at least every `WALL_ALARM_RECHECK_MS`).
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  */

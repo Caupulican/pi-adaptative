@@ -32,6 +32,53 @@ export const SYSTEM_TIMER_PORT: TimerPort = {
 	clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+/** Longest single wait of an {@link alarmAt} alarm: a third of the shortest start window a routine slot can have. */
+export const WALL_ALARM_RECHECK_MS = 20_000;
+
+export interface WallAlarm {
+	/** Clears the pending wait; the alarm never fires after it. Idempotent. */
+	stop(): void;
+}
+
+/**
+ * Fires `fire` once, when the port's clock reads `atMs` or later. A platform timer counts elapsed time on a clock that
+ * can stop while the machine sleeps and does not follow steps of the wall clock, so one long timer toward a wall instant
+ * fires late by every suspension and step. This alarm waits at most `recheckMs` at a time and reads `now()` after each
+ * wait without other work: it fires within `recheckMs` of the instant (or of a resume after it), never before it, and
+ * no wait approaches the platform's 2^31 ms timer limit. It never keeps the process alive.
+ */
+export function alarmAt(
+	timers: TimerPort,
+	atMs: number,
+	fire: () => void,
+	recheckMs = WALL_ALARM_RECHECK_MS,
+): WallAlarm {
+	let handle: unknown;
+	let stopped = false;
+	const wait = (): void => {
+		handle = timers.setTimeout(
+			() => {
+				if (stopped) return;
+				if (timers.now() < atMs) {
+					wait();
+					return;
+				}
+				stopped = true;
+				fire();
+			},
+			Math.max(0, Math.min(atMs - timers.now(), recheckMs)),
+		);
+	};
+	wait();
+	return {
+		stop: () => {
+			if (stopped) return;
+			stopped = true;
+			timers.clearTimeout(handle);
+		},
+	};
+}
+
 export interface RepeatingAlarm {
 	/** Clears the pending tick; a tick that is running finishes, and no tick runs after it. Idempotent. */
 	stop(): void;

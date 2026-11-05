@@ -1,5 +1,6 @@
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type {
+	RoutineClaimResult,
 	RoutineDefinitionView,
 	RoutineDelivery,
 	RoutineOccurrence,
@@ -17,7 +18,7 @@ export interface RoutineStorePort {
 	getRoutine(routineId: string): RoutineDefinitionView | undefined;
 	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView;
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;
-	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): readonly RoutineOccurrence[];
+	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult;
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
 		expectedRevision?: number;

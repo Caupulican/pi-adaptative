@@ -33,6 +33,7 @@ import {
 	parseRoutineOccurrence,
 	parseRoutineScheduleInput,
 	parseRoutineTarget,
+	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
@@ -43,7 +44,10 @@ import {
 	type RoutineOccurrenceListFilter,
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
+	rebasedRoutineCursor,
+	routineCursorAfter,
 	routineOccurrenceId,
+	routinePreviousSlot,
 	routineResultDigest,
 	routineScheduleInputOf,
 	routineSlotRule,
@@ -789,7 +793,8 @@ export class PersistentBotTeamStore {
 		nowMs: number,
 		parentOrigin: WorkerReceiptOrigin,
 	): RoutineOccurrence {
-		this.pruneRoutineOccurrences();
+		if (!this.routineJournalHasRoom())
+			throw new Error("Routine occurrence journal is full of active, uncertain or undelivered entries.");
 		const definitionSnapshot: PersistentRoutineDefinition = {
 			routineId: definition.routineId,
 			incarnationId: definition.incarnationId,
@@ -827,11 +832,11 @@ export class PersistentBotTeamStore {
 				!current?.claim ||
 				current.claim.token !== input.claimToken ||
 				current.phase === "terminal" ||
-				current.phase === "uncertain" ||
-				!Number.isSafeInteger(input.nowMs) ||
-				input.nowMs < current.updatedAt
+				current.phase === "uncertain"
 			)
 				throw new Error("Routine occurrence claim is stale.");
+			if (!Number.isSafeInteger(input.nowMs) || input.nowMs < current.updatedAt)
+				throw new Error("This host's clock reads earlier than the routine occurrence's last transition.");
 			const next = update(structuredClone(current));
 			const deferred = current.phase === "dispatching" && next.phase === "pending";
 			const transitionAllowed =
@@ -889,8 +894,9 @@ export class PersistentBotTeamStore {
 		return finished;
 	}
 
-	private pruneRoutineOccurrences(): void {
-		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return;
+	/** Prunes delivered history when the journal is at capacity; whether one more occurrence then fits. */
+	private routineJournalHasRoom(): boolean {
+		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return true;
 		const removable = Array.from(this.routineOccurrences.values())
 			.filter(
 				(item) =>
@@ -909,8 +915,7 @@ export class PersistentBotTeamStore {
 			}
 			this.routineOccurrences.delete(item.occurrenceId);
 		}
-		if (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES)
-			throw new Error("Routine occurrence journal is full of active or undelivered entries.");
+		return this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES;
 	}
 
 	private cancelUndispatchedRoutineOccurrences(routineId: string, nowMs: number): void {
@@ -1557,7 +1562,7 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineOccurrence[] {
+	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult {
 		return this.mutate(() => {
 			if (
 				!Number.isSafeInteger(input.nowMs) ||
@@ -1631,42 +1636,78 @@ export class PersistentBotTeamStore {
 				this.routineOccurrences.set(occurrenceId, reclaimed);
 				output.push(reclaimed);
 			}
-			for (const [id, routine] of this.routines) {
+			let journalFull = false;
+			for (const [id, stored] of this.routines) {
 				if (output.length >= limit) break;
-				if (!routine.enabled || (input.routineId && input.routineId !== id)) continue;
+				if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
 				if (eligible && !eligible.has(id)) continue;
-				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
-				if (routine.schedule.kind === "event") {
-					if (input.hostEvents && this.decideEventRoutine(routine, input, input.hostEvents, output))
-						changed = true;
+				if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;
+				// An occurrence is never older than its definition: with the clock behind the last edit, wait for it.
+				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
+				if (stored.schedule.kind === "event") {
+					const decided = input.hostEvents
+						? this.decideEventRoutine(stored, input, input.hostEvents, output)
+						: "unchanged";
+					if (decided === "changed") changed = true;
+					else if (decided === "journal-full") journalFull = true;
 					continue;
 				}
-				const dueAt = nextRoutineAt(routine.schedule, routine.cursor);
+				const schedule = stored.schedule;
+				let routine = stored;
+				const rebased = rebasedRoutineCursor(
+					schedule,
+					stored.cursor,
+					input.nowMs,
+					routinePreviousSlot(schedule, stored.cursor),
+				);
+				if (rebased) {
+					routine = {
+						...stored,
+						cursor: rebased,
+						nextRunAt: nextRoutineAt(schedule, rebased) ?? Number.MAX_SAFE_INTEGER,
+					};
+					this.routines.set(id, routine);
+					changed = true;
+				}
+				const dueAt = nextRoutineAt(schedule, routine.cursor);
 				if (dueAt === undefined || dueAt > input.nowMs) continue;
 				const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
 				const occurrenceId = routineOccurrenceId(routine, trigger);
-				if (this.routineOccurrences.has(occurrenceId)) continue;
+				if (this.routineOccurrences.has(occurrenceId)) {
+					// A restarted cursor reached a slot that already has its occurrence: that slot is consumed, never repeated.
+					const cursor = routineCursorAfter(schedule, trigger.scheduledAt);
+					this.routines.set(id, {
+						...routine,
+						cursor,
+						nextRunAt: nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER,
+					});
+					changed = true;
+					continue;
+				}
 				const parentOrigin =
 					routine.target.kind === "session"
 						? routine.executionSnapshot?.savedIntent.receiptOrigin
 						: input.receiptOrigin;
 				if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) continue;
-				const deadline = routineStartDeadline(routine.schedule, trigger.scheduledAt);
+				const deadline = routineStartDeadline(schedule, trigger.scheduledAt);
 				const late = deadline !== undefined && input.nowMs > deadline;
-				if (late && routine.schedule.kind === "calendar") {
+				if (late && schedule.kind === "calendar") {
 					// A slot past its lateness bound is passed over; the next run's missed count carries it.
 					const cursor: RoutineCursor = {
 						kind: "calendar",
-						nextAt: nextCalendarSlotAfter(routine.schedule, trigger.scheduledAt) ?? null,
+						nextAt: nextCalendarSlotAfter(schedule, trigger.scheduledAt) ?? null,
 						skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
 					};
-					const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+					const nextRunAt = nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
 					this.routines.set(id, { ...routine, cursor, nextRunAt });
 					changed = true;
 					continue;
 				}
-				// Return successful reclaims even when fresh admission has no journal space.
-				if (output.length > 0 && this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES) break;
+				// Nothing is consumed without its occurrence: a full journal leaves the slot due until results are delivered.
+				if (!this.routineJournalHasRoom()) {
+					journalFull = true;
+					continue;
+				}
 				const claimed = this.createClaimedOccurrence(
 					routine,
 					occurrenceId,
@@ -1686,48 +1727,36 @@ export class PersistentBotTeamStore {
 						)
 					: claimed;
 				this.routineOccurrences.set(occurrenceId, occurrence);
-				const cursor: RoutineCursor =
-					routine.schedule.kind === "interval"
-						? {
-								kind: "interval",
-								nextIndex:
-									Math.floor((trigger.scheduledAt - routine.schedule.anchorAt) / routine.schedule.intervalMs) +
-									1,
-							}
-						: routine.schedule.kind === "calendar"
-							? {
-									kind: "calendar",
-									nextAt: nextCalendarSlotAfter(routine.schedule, trigger.scheduledAt) ?? null,
-								}
-							: { kind: "once", consumed: true };
-				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+				const cursor = routineCursorAfter(schedule, trigger.scheduledAt);
+				const nextRunAt = nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
 				this.routines.set(id, { ...withRoutineRunState(routine, occurrence), cursor, nextRunAt });
 				if (late) changed = true;
 				else output.push(occurrence);
 			}
 			if (output.length || changed) this.save();
-			return output.map((item) => structuredClone(item));
+			return { claimed: output.map((item) => structuredClone(item)), journalFull };
 		});
 	}
 
 	/**
 	 * Decides one event routine against its session's retained host events. At most one undispatched run exists per
 	 * routine: the latest new attempt runs, older new attempts and superseded ones become its missed count. Returns
-	 * whether the cursor or the journal changed; a new occurrence is appended to `output`.
+	 * whether the cursor or the journal changed, or that a new attempt stays undecided because the journal is full; a
+	 * new occurrence is appended to `output`.
 	 */
 	private decideEventRoutine(
 		routine: RoutineDefinitionView,
 		input: RoutineOccurrenceClaimInput,
 		feed: RoutineHostEventFeed,
 		output: RoutineOccurrence[],
-	): boolean {
-		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return false;
+	): "changed" | "unchanged" | "journal-full" {
+		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return "unchanged";
 		for (const occurrence of this.routineOccurrences.values())
 			if (
 				occurrence.routineId === routine.routineId &&
 				(occurrence.phase === "pending" || occurrence.phase === "claimed")
 			)
-				return false;
+				return "unchanged";
 		const decision = decideRoutineEvents(routine.schedule, routine.cursor, feed);
 		const eventTrigger = (fact: RoutineHostEventFact, missedCount: number): RoutineOccurrence["trigger"] => ({
 			kind: "event",
@@ -1745,9 +1774,10 @@ export class PersistentBotTeamStore {
 		const latest = fresh.at(-1);
 		if (latest) {
 			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
-			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) return false;
-			// Return successful reclaims even when fresh admission has no journal space; the attempt stays undecided.
-			if (output.length > 0 && this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES) return false;
+			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
+				return "unchanged";
+			// Without journal room the attempt stays undecided until delivered results make room.
+			if (!this.routineJournalHasRoom()) return "journal-full";
 			const coalesced = fresh
 				.slice(0, -1)
 				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;
@@ -1773,11 +1803,11 @@ export class PersistentBotTeamStore {
 			};
 			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
 			output.push(occurrence);
-			return true;
+			return "changed";
 		}
-		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return false;
+		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
 		this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
-		return true;
+		return "changed";
 	}
 
 	claimManualRoutineOccurrence(input: {
@@ -1811,6 +1841,10 @@ export class PersistentBotTeamStore {
 				throw new Error("Routine revision changed; read current state before retrying.");
 			if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId)
 				throw new Error("Routine belongs to another parent session.");
+			if (input.nowMs < Date.parse(routine.updatedAt))
+				throw new Error(
+					`This host's clock reads earlier than the routine's last edit (${routine.updatedAt}); run it once the clock has passed that time.`,
+				);
 			if (
 				!input.commandId ||
 				input.commandId.length > MAX_ROUTINE_COMMAND_ID_CHARS ||

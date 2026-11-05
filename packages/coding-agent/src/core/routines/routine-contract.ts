@@ -16,6 +16,7 @@ import {
 	canonicalCalendarCron,
 	canonicalCalendarTimeZone,
 	isCalendarTimeZone,
+	latestCalendarSlotAtOrBefore,
 	MAX_CALENDAR_CRON_CHARS,
 	MAX_CALENDAR_MISSED_COUNT,
 	MAX_CALENDAR_TIME_ZONE_CHARS,
@@ -335,6 +336,15 @@ export interface RoutineOccurrenceClaimInput {
 	readonly hostEvents?: RoutineHostEventFeed;
 }
 
+export interface RoutineClaimResult {
+	readonly claimed: readonly RoutineOccurrence[];
+	/**
+	 * A due routine or event attempt was left due because the occurrence journal has no room for its occurrence: every
+	 * entry is still active, uncertain or awaiting delivery. Nothing was consumed; delivered results make room.
+	 */
+	readonly journalFull: boolean;
+}
+
 export interface RoutineEventDecision {
 	/**
 	 * The routine's cursor once these events are decided, before any occurrence is recorded: `skipped` adds the
@@ -555,6 +565,54 @@ export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 		case "event":
 			return { kind: "event", throughOrdinal: schedule.anchorOrdinal, replayGaps: schedule.anchorReplayGaps };
 	}
+}
+
+/** Cursor once the slot at `scheduledAt` is consumed (claimed, reported or already journaled). */
+export function routineCursorAfter(
+	schedule: Exclude<RoutineSchedule, { kind: "event" }>,
+	scheduledAt: number,
+): RoutineCursor {
+	if (schedule.kind === "interval")
+		return { kind: "interval", nextIndex: Math.floor((scheduledAt - schedule.anchorAt) / schedule.intervalMs) + 1 };
+	if (schedule.kind === "calendar")
+		return { kind: "calendar", nextAt: nextCalendarSlotAfter(schedule, scheduledAt) ?? null };
+	return { kind: "once", consumed: true };
+}
+
+/** The slot before the cursor's next one, when one exists after the anchor; undefined for once and event schedules. */
+export function routinePreviousSlot(schedule: RoutineSchedule, cursor: RoutineCursor): number | undefined {
+	if (schedule.kind === "interval" && cursor.kind === "interval" && cursor.nextIndex > 1)
+		return schedule.anchorAt + schedule.intervalMs * (cursor.nextIndex - 1);
+	if (schedule.kind !== "calendar" || cursor.kind !== "calendar" || cursor.nextAt === null) return undefined;
+	const previous = latestCalendarSlotAtOrBefore(schedule, cursor.nextAt - 1, schedule.anchorAt);
+	return previous > schedule.anchorAt ? previous : undefined;
+}
+
+/**
+ * A clock cursor restarted at the first slot after `nowMs`, when the slot before its next one is later than `nowMs`.
+ * The cursor then moved past a slot that is still in the future: it was consumed while the clock read later than now
+ * (a forward clock fault since corrected, or a step back right after a claim). Without the restart the routine would
+ * stay silent until that future slot. A slot that already has its occurrence is not repeated: the claim treats it as
+ * consumed. `previousSlot` is `routinePreviousSlot` of the same cursor; undefined when no restart applies.
+ */
+export function rebasedRoutineCursor(
+	schedule: RoutineSchedule,
+	cursor: RoutineCursor,
+	nowMs: number,
+	previousSlot: number | undefined,
+): RoutineCursor | undefined {
+	if (previousSlot === undefined || previousSlot <= nowMs) return undefined;
+	if (schedule.kind === "interval")
+		return {
+			kind: "interval",
+			nextIndex: Math.max(1, Math.floor((nowMs - schedule.anchorAt) / schedule.intervalMs) + 1),
+		};
+	if (schedule.kind !== "calendar" || cursor.kind !== "calendar") return undefined;
+	return {
+		kind: "calendar",
+		nextAt: nextCalendarSlotAfter(schedule, Math.max(schedule.anchorAt, nowMs)) ?? null,
+		...(cursor.skipped === undefined ? {} : { skipped: cursor.skipped }),
+	};
 }
 
 export function parseRoutineExecutionSnapshot(value: unknown): RoutineExecutionSnapshot {

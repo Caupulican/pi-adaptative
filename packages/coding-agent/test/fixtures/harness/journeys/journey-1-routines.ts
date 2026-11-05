@@ -544,17 +544,29 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		const file = root.sessionManager.getSessionFile()!;
 		const requests = world.provider.requests.filter((request) => request.model.id !== "worker-c").length;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
-		// Model a process stopping immediately after its durable claim, before dispatch.
-		// An explicit manual run remains recoverable even while its schedule is paused.
-		const interrupted = offlineStore.claimManualRoutineOccurrence({
+		const manualClaim = {
 			routineId: recycledId,
 			expectedRevision: paused.revision,
 			parentSessionId: root.sessionManager.getSessionId(),
 			receiptOrigin: paused.executionSnapshot!.savedIntent.receiptOrigin,
-			commandId: "paused-manual-recovery",
 			owner: "terminated-routine-owner",
-			nowMs: world.timers.port("routines").now(),
 			leaseMs: 120_000,
+		};
+		expect(
+			() =>
+				offlineStore.claimManualRoutineOccurrence({
+					...manualClaim,
+					commandId: "clock-behind-last-edit",
+					nowMs: Date.parse(paused.updatedAt) - 1,
+				}),
+			"a clock set back before the last edit refuses the run instead of writing an occurrence older than its definition",
+		).toThrow(/clock reads earlier than the routine's last edit/);
+		// Model a process stopping immediately after its durable claim, before dispatch.
+		// An explicit manual run remains recoverable even while its schedule is paused.
+		const interrupted = offlineStore.claimManualRoutineOccurrence({
+			...manualClaim,
+			commandId: "paused-manual-recovery",
+			nowMs: world.timers.port("routines").now(),
 		});
 		expect(interrupted.phase).toBe("claimed");
 		world.systemOne.enterPhase("routine-paused-recovery", {});

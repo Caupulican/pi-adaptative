@@ -110,8 +110,10 @@ filter. The routine's cursor is a position in the session's task ledger; it star
 position when the routine is saved and never passes a matching attempt that its source has not
 reconciled. A run is keyed by the attempt (provider, host, repository, run, attempt), so a replayed
 or re-sealed attempt never runs twice, and consumed attempt keys outlive journal pruning. Superseded
-and coalesced attempts are counted in the next run, and a new source replay gap is stated in it. The
-failure note does not depend on routines, and turning proactivity off does not stop a routine. A
+and coalesced attempts are counted in the next run, and a new source replay gap is stated in it.
+While the routine journal shared by the sessions of one agent directory has no room for another
+run, a new attempt stays undecided instead of being skipped; the session is warned once, and the
+attempt runs when delivered results free room. The failure note does not depend on routines, and turning proactivity off does not stop a routine. A
 routine's result is not counted toward `maxTurnWakesPerDay`; a run whose worker reports no owner
 update is carried with the owner's next turn without starting one.
 

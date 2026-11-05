@@ -7,7 +7,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { boundedText } from "../util/bounded-line.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import {
 	decideRoutineEvents,
 	MAX_ROUTINE_OCCURRENCES,
@@ -18,7 +18,9 @@ import {
 	type RoutineEventAnchor,
 	type RoutineHostEventFeed,
 	type RoutineOccurrence,
+	rebasedRoutineCursor,
 	routineOccurrenceId,
+	routinePreviousSlot,
 } from "./routine-contract.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
@@ -144,7 +146,7 @@ export class RoutineSchedulerController {
 	private readonly abort = new AbortController();
 	private readonly unsubscribe: readonly (() => void)[];
 	private unsubscribeCapacity: (() => void) | undefined;
-	private alarm: { handle?: unknown } | undefined;
+	private alarm: WallAlarm | undefined;
 	private pass: Promise<RoutineTickResult> | undefined;
 	private scheduled = false;
 	private dirty = false;
@@ -153,6 +155,14 @@ export class RoutineSchedulerController {
 	private readonly deliveries = new Map<string, Promise<void>>();
 	private capacityRevision = 0;
 	private readonly deferred = new Map<string, number>();
+	/** The reason last reported for each failing step; a step reports again only after it recovered or its reason changed. */
+	private readonly faults = new Map<string, string>();
+	/** A step of the running pass failed: the pass ends normally and the next one starts after the retry delay. */
+	private stepFailed = false;
+	/** The last claim left a due routine unconsumed for lack of journal room; only a store change can admit it. */
+	private journalFull = false;
+	/** `routinePreviousSlot` of each routine cursor seen by the last schedule read, so a cursor is evaluated once. */
+	private previousSlots = new Map<string, number | undefined>();
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
@@ -189,9 +199,12 @@ export class RoutineSchedulerController {
 		const pass = this.runPass();
 		this.pass = pass;
 		void pass.then(
-			() => this.settled(pass),
+			() => {
+				this.faults.delete("pass");
+				this.settled(pass, this.stepFailed);
+			},
 			(error) => {
-				this.warn(error);
+				this.report("pass", error);
 				this.settled(pass, true);
 			},
 		);
@@ -287,9 +300,21 @@ export class RoutineSchedulerController {
 			throw new Error("Routine execution claim changed before worker admission.");
 	}
 
+	/**
+	 * One scheduling pass. Results are delivered first, so their acknowledgement frees journal room for the claim. Each
+	 * step (a delivery read, one occurrence's reconciliation or dispatch, the claim) is isolated: a failing step is
+	 * reported once and retried after `RETRY_DELAY_MS` while every other step of this session still runs.
+	 */
 	private async runPass(): Promise<RoutineTickResult> {
 		const result: RoutineTickResult = { dispatched: [], failed: [] };
+		this.stepFailed = false;
 		this.deps.store.reload();
+		this.attempt("delivery", () => this.deliverPending());
+		const present = new Set(this.occurrences().map((entry) => entry.occurrenceId));
+		for (const unit of this.faults.keys()) {
+			const occurrenceId = unit.split("|")[1];
+			if (occurrenceId !== undefined && !present.has(occurrenceId)) this.faults.delete(unit);
+		}
 		const pendingIds = new Set(
 			this.occurrences()
 				.filter((entry) => entry.phase === "pending" || entry.phase === "claimed")
@@ -299,7 +324,7 @@ export class RoutineSchedulerController {
 		for (const occurrence of this.occurrences()) {
 			if (!this.active) return result;
 			if (occurrence.phase === "dispatching" || occurrence.phase === "running" || occurrence.phase === "uncertain")
-				this.reconcile(occurrence);
+				this.attempt(`reconcile|${occurrence.occurrenceId}`, () => this.reconcile(occurrence));
 		}
 		if (this.deps.canDispatch()) {
 			const nowMs = this.deps.timers.now();
@@ -328,21 +353,34 @@ export class RoutineSchedulerController {
 						(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
 			);
 			if (
-				this.nextScheduledAt() <= nowMs ||
+				this.nextScheduledAt(nowMs) <= nowMs ||
 				recoverable.length > 0 ||
 				(hostEvents !== undefined && this.hasEventWork(eventRoutines, hostEvents))
 			)
-				this.deps.store.claimDueRoutineOccurrences({
-					nowMs,
-					owner: this.deps.owner,
-					leaseMs: CLAIM_LEASE_MS,
-					limit: CLAIM_BATCH_SIZE,
-					parentSessionId: this.deps.parentSessionId,
-					eligibleRoutineIds,
-					eligibleOccurrenceIds: recoverable.map((occurrence) => occurrence.occurrenceId),
-					receiptOrigin: this.deps.getReceiptOrigin(),
-					...(hostEvents ? { hostEvents } : {}),
+				this.attempt("claim", () => {
+					const claim = this.deps.store.claimDueRoutineOccurrences({
+						nowMs,
+						owner: this.deps.owner,
+						leaseMs: CLAIM_LEASE_MS,
+						limit: CLAIM_BATCH_SIZE,
+						parentSessionId: this.deps.parentSessionId,
+						eligibleRoutineIds,
+						eligibleOccurrenceIds: recoverable.map((occurrence) => occurrence.occurrenceId),
+						receiptOrigin: this.deps.getReceiptOrigin(),
+						...(hostEvents ? { hostEvents } : {}),
+					});
+					this.journalFull = claim.journalFull;
+					if (claim.journalFull)
+						this.report(
+							"journal",
+							"Due routines are waiting: the shared routine journal is full of unfinished, uncertain or undelivered runs. They start once delivered results free room.",
+						);
+					else this.faults.delete("journal");
 				});
+			else {
+				this.journalFull = false;
+				this.faults.delete("journal");
+			}
 			for (const occurrence of this.occurrences()) {
 				if (!this.active) return result;
 				if (
@@ -352,10 +390,16 @@ export class RoutineSchedulerController {
 					!this.deps.canUseOrigin(occurrence.parentOrigin)
 				)
 					continue;
-				await this.dispatch(occurrence, result);
+				const unit = `dispatch|${occurrence.occurrenceId}`;
+				try {
+					await this.dispatch(occurrence, result);
+					this.faults.delete(unit);
+				} catch (error) {
+					this.fail(unit, error);
+				}
 			}
 		}
-		this.deliverPending();
+		this.attempt("delivery", () => this.deliverPending());
 		return result;
 	}
 
@@ -581,15 +625,18 @@ export class RoutineSchedulerController {
 				});
 			});
 		this.deliveries.set(occurrence.occurrenceId, delivery);
+		const unit = `delivery|${occurrence.occurrenceId}`;
 		void delivery.then(
 			() => {
 				this.deliveries.delete(occurrence.occurrenceId);
+				this.faults.delete(unit);
 				this.wake();
 			},
 			(error) => {
 				this.deliveries.delete(occurrence.occurrenceId);
-				this.warn(error);
-				this.arm(RETRY_DELAY_MS);
+				this.fail(unit, error);
+				// A pass in flight arms the retry when it settles; otherwise nothing else would.
+				if (!this.pass) this.arm(this.deps.timers.now() + RETRY_DELAY_MS);
 			},
 		);
 	}
@@ -599,7 +646,7 @@ export class RoutineSchedulerController {
 		this.pass = undefined;
 		if (!this.active) return;
 		if (retry) {
-			this.arm(RETRY_DELAY_MS);
+			this.arm(this.deps.timers.now() + RETRY_DELAY_MS);
 			return;
 		}
 		if (this.dirty) {
@@ -607,7 +654,8 @@ export class RoutineSchedulerController {
 			return;
 		}
 		try {
-			let next = this.nextScheduledAt();
+			const nowMs = this.deps.timers.now();
+			let next = this.nextScheduledAt(nowMs, this.journalFull);
 			for (const occurrence of this.occurrences())
 				if (
 					occurrence.claim &&
@@ -615,15 +663,23 @@ export class RoutineSchedulerController {
 						(occurrence.phase === "claimed" && this.deps.canUseOrigin(occurrence.parentOrigin)))
 				)
 					next = Math.min(next, occurrence.claim.leaseUntil);
-			if (Number.isFinite(next)) this.arm(Math.max(RETRY_DELAY_MS, next - this.deps.timers.now()));
+			if (Number.isFinite(next)) this.arm(Math.max(nowMs + RETRY_DELAY_MS, next));
+			this.faults.delete("schedule");
 		} catch (error) {
-			this.warn(error);
-			this.arm(RETRY_DELAY_MS);
+			this.report("schedule", error);
+			this.arm(this.deps.timers.now() + RETRY_DELAY_MS);
 		}
 	}
 
-	private nextScheduledAt(): number {
+	/**
+	 * The earliest instant a routine of this session can be claimed: its next slot after a backward clock step is undone
+	 * (`rebasedRoutineCursor`, as the claim persists it), and never before the routine's last edit. An event routine
+	 * contributes only an edit still ahead of the clock. With `waitingForRoom`, a routine already due is left out: the
+	 * last claim found no journal room for it, and only a store change (which wakes the scheduler) can make room.
+	 */
+	private nextScheduledAt(nowMs: number, waitingForRoom = false): number {
 		let next = Number.POSITIVE_INFINITY;
+		const previousSlots = new Map<string, number | undefined>();
 		for (const routine of this.deps.store.listRoutines()) {
 			if (
 				!routine.enabled ||
@@ -632,9 +688,25 @@ export class RoutineSchedulerController {
 				(routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
 			)
 				continue;
-			const due = nextRoutineAt(routine.schedule, routine.cursor);
-			if (due !== undefined) next = Math.min(next, due);
+			const editedAt = Date.parse(routine.updatedAt);
+			let due: number | undefined;
+			if (routine.schedule.kind === "event") {
+				if (editedAt > nowMs) due = editedAt;
+			} else {
+				const key = `${routine.routineId}:${routine.revision}:${JSON.stringify(routine.cursor)}`;
+				const previousSlot = this.previousSlots.has(key)
+					? this.previousSlots.get(key)
+					: routinePreviousSlot(routine.schedule, routine.cursor);
+				previousSlots.set(key, previousSlot);
+				const cursor =
+					rebasedRoutineCursor(routine.schedule, routine.cursor, nowMs, previousSlot) ?? routine.cursor;
+				const slot = nextRoutineAt(routine.schedule, cursor);
+				if (slot !== undefined) due = Math.max(slot, editedAt);
+			}
+			if (due === undefined || (waitingForRoom && due <= nowMs)) continue;
+			next = Math.min(next, due);
 		}
+		this.previousSlots = previousSlots;
 		return next;
 	}
 
@@ -643,34 +715,51 @@ export class RoutineSchedulerController {
 		this.alarm = undefined;
 		if (alarm) {
 			try {
-				this.deps.timers.clearTimeout(alarm.handle);
+				alarm.stop();
 			} catch (error) {
 				this.warn(error);
 			}
 		}
 	}
 
-	private arm(delayMs: number): void {
+	/** Wakes a pass once this session's routine clock reads `atMs`, rechecking it so a suspend or clock step cannot hold it back. */
+	private arm(atMs: number): void {
 		if (!this.active) return;
 		this.clearAlarm();
-		const alarm: { handle?: unknown } = {};
-		this.alarm = alarm;
 		try {
-			const handle = this.deps.timers.setTimeout(
-				() => {
-					if (this.alarm === alarm) {
-						this.alarm = undefined;
-						this.wake();
-					}
-				},
-				Math.min(delayMs, 2_147_000_000),
-			);
-			if (this.alarm === alarm && this.active) alarm.handle = handle;
-			else this.deps.timers.clearTimeout(handle);
+			const alarm = alarmAt(this.deps.timers, atMs, () => {
+				if (this.alarm !== alarm) return;
+				this.alarm = undefined;
+				this.wake();
+			});
+			this.alarm = alarm;
+			this.faults.delete("alarm");
 		} catch (error) {
-			if (this.alarm === alarm) this.alarm = undefined;
-			this.warn(error);
+			this.report("alarm", error);
 		}
+	}
+
+	/** Runs one isolated step of a pass; its failure is reported once and makes the pass end with a retry. */
+	private attempt(unit: string, step: () => void): void {
+		try {
+			step();
+			this.faults.delete(unit);
+		} catch (error) {
+			this.fail(unit, error);
+		}
+	}
+
+	private fail(unit: string, error: unknown): void {
+		this.stepFailed = true;
+		this.report(unit, error);
+	}
+
+	/** Warns once per failing unit and reason; the same reason again stays quiet until the unit recovers. */
+	private report(unit: string, error: unknown): void {
+		const reason = error instanceof Error ? error.message : String(error);
+		if (this.faults.get(unit) === reason) return;
+		this.faults.set(unit, reason);
+		this.warn(error);
 	}
 
 	private warn(error: unknown): void {
