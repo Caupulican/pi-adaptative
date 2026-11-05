@@ -202,7 +202,6 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			beforeReopen,
 		);
 		world.trace.mark("root", "knowledge.automatic-collection");
-		await runJourney1LongCollection(world);
 	} finally {
 		store.close();
 		if (!disposed) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
@@ -210,4 +209,5 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}
+	await runJourney1LongCollection(world);
 }

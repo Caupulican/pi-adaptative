@@ -11,6 +11,27 @@ import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmContinuousSettings, icmWaitForChatIdle } from "./shared.ts";
 
+/** Each auxiliary store has exactly the original owner message and its acknowledgement. */
+function registerCompactionTracks(world: HarnessWorld, prefix: string): string[] {
+	return [
+		"Compaction: compress message 0 into",
+		"Compaction: compress message 1 into",
+		"Compaction: merge lines 0+1 and 1+1,",
+	].map((task, index) => {
+		const name = `${prefix}-${index}`;
+		world.provider.enqueueTrack(
+			name,
+			"worker-c",
+			(request) => JSON.stringify(request.context.messages.at(-1)).includes(task),
+			{
+				...text(name, "Owner preferences and editor choice; original evidence is retained."),
+				optional: true,
+			},
+		);
+		return name;
+	});
+}
+
 /** Part of journey 1: retained long-original work, whole-source qualifications and interrupted transport. */
 export async function runJourney1LongCollection(world: HarnessWorld): Promise<void> {
 	if (!world.systemOne.enabled) return;
@@ -19,11 +40,7 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		proactivity: { enabled: false },
 		autoLearn: { knowledgeIdleDelayMs: 1_000, knowledgeMaxUsd: 0.02, knowledgeSessionMaxUsd: 1 },
 	});
-	const compactTrack = "long-collection-compaction";
-	world.provider.enqueueTrack(compactTrack, "worker-c", () => true, {
-		...text(compactTrack, "Original owner preferences remain in the source ledger."),
-		optional: true,
-	});
+	const compactTracks = registerCompactionTracks(world, "long-collection-compaction");
 	let root = await world.createRootSession("root", {
 		agentDir,
 		settings: base,
@@ -193,7 +210,7 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		store.close();
 		await world.provider.waitForProducers();
-		world.provider.retireOptional(compactTrack);
+		for (const track of compactTracks) world.provider.retireOptional(track);
 	}
 	await runCompletedLongCollection(world);
 }
@@ -205,11 +222,7 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		proactivity: { enabled: false },
 		autoLearn: { knowledgeIdleDelayMs: 1_000, knowledgeMaxUsd: 1, knowledgeSessionMaxUsd: 2 },
 	});
-	const track = "long-complete-compaction";
-	world.provider.enqueueTrack(track, "worker-c", () => true, {
-		...text(track, "Owner preferences and editor choice; original evidence is retained."),
-		optional: true,
-	});
+	const compactTracks = registerCompactionTracks(world, "long-complete-compaction");
 	let root = await world.createRootSession("root", {
 		agentDir,
 		settings,
@@ -407,6 +420,6 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		store.close();
 		await world.provider.waitForProducers();
-		world.provider.retireOptional(track);
+		for (const track of compactTracks) world.provider.retireOptional(track);
 	}
 }

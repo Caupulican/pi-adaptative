@@ -1078,6 +1078,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	const e10ReleaseA = createBarrier();
 	const e10ReleaseD = createBarrier();
 	const e10ReleaseC = createBarrier();
+	const e10ReachedA = createBarrier();
+	const e10ReachedD = createBarrier();
 	const e10Woke = { a: createBarrier(), b: createBarrier(), c: createBarrier(), d: createBarrier() };
 	// A worker's tail is joined by the foreground submission epoch its wake turn ran under: that epoch is released with no active run.
 	const e10Tails = { c: createBarrier(), d: createBarrier() };
@@ -1121,6 +1123,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		e10Matches("E10-WORKER-A"),
 		{
 			name: "e10-a-write",
+			check: () => e10ReachedA.release(),
 			gate: e10ReleaseA.promise,
 			reply: {
 				content: [
@@ -1206,6 +1209,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		e10Matches("E10-WORKER-D"),
 		{
 			name: "e10-d-write",
+			check: () => e10ReachedD.release(),
 			gate: e10ReleaseD.promise,
 			reply: {
 				content: [
@@ -1401,8 +1405,14 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			session.prompt("Start the overlapping writers on the shared checkout."),
 			120_000,
 		);
+		await withDeadline(
+			trace,
+			"E10 held writers reached their first requests",
+			Promise.all([e10ReachedA.promise, e10ReachedD.promise]),
+			90_000,
+		);
 		e10ReleaseC.release();
-		// C is released only after the start prompt's full tail has returned: its wake is not folded into that turn.
+		// C waits for the start prompt's full tail and A/D's first requests, after their repository baselines are captured.
 		// Immediate receipts, before any wait on the held writers: every start is accepted with its agent and lane. A and D run
 		// gated; B's receipt names the reservation it waits on, and the held lease carries A's own attempt and scope.
 		const e10StartA = e10Start("e10-start-a-1");
