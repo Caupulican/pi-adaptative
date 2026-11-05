@@ -300,6 +300,10 @@ export interface ProactivitySettings {
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model">> &
 	Pick<ProactivitySettings, "model">;
 
+export interface RoutinesSettings {
+	automaticIntake?: boolean; // default: true — after an owner turn settles, explicit recurring, scheduled or conditional requests in the owner's own words become read-only routines; false leaves routine creation to the routine tool
+}
+
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
@@ -726,6 +730,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
+	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words (on by default)
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default

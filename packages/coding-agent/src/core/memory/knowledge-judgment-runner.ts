@@ -101,17 +101,7 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 				cacheRetention: "short",
 				laneKind: this.deps.route,
 				tools: [submit],
-				beforeToolCall: async (context) => {
-					usage.assertHealthy();
-					if (context.assistantMessage.content.filter((part) => part.type === "toolCall").length !== 1)
-						return { block: true, reason: "Submit the judgment as the only tool call in its message." };
-					return undefined;
-				},
-				requestPreflight: (preflight) => usage.preflight(preflight),
-				requestGuard: () => {
-					usage.assertHealthy();
-				},
-				providerResponseObserver: usage,
+				...usage.submissionHooks("Submit the judgment as the only tool call in its message."),
 			});
 			usage.assertHealthy();
 			if (result.stopReason === "error" || result.stopReason === "aborted")

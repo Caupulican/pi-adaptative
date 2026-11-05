@@ -196,6 +196,7 @@ import type {
 	ResourceProfileFilterSettings,
 	ResourceProfileKind,
 	ResourceProfileSettings,
+	RoutinesSettings,
 	ScoutSettings,
 	SelfModificationSettings,
 	Settings,
@@ -3580,6 +3581,11 @@ export class SettingsManager {
 		this.globalSettings.proactivity = { ...settings };
 		this.markModified("proactivity");
 		this.save();
+	}
+
+	getRoutinesSettings(): Required<RoutinesSettings> {
+		const configured = this.settings.routines ?? {};
+		return { automaticIntake: typeof configured.automaticIntake === "boolean" ? configured.automaticIntake : true };
 	}
 
 	getResearchLaneSettings(): ResolvedResearchLaneSettings {

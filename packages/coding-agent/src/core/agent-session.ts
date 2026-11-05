@@ -1100,7 +1100,7 @@ export class AgentSession {
 			modelUnusableCause: (model) => this._modelUnusableCause(model),
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
-			getThinkingLevel: () => this.thinkingLevel,
+			getSystemOneEngine: () => this._semanticPlane.recordingSemanticEngine(),
 			getRouteChoiceJudge: () => this._semanticPlane.controller,
 			isSystemOneEnabled: () => this.systemOneEnabled,
 			getForegroundToolNames: () => this.getActiveToolNames(),

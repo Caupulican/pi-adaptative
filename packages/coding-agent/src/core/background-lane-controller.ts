@@ -31,7 +31,9 @@ import type {
 } from "./agent-session-contracts.ts";
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
+import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
+import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
@@ -151,6 +153,7 @@ import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-m
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import { RoutineIntake, type RoutineIntakeStatus } from "./routines/routine-intake.ts";
 import { isQuietRoutineCompletion, routineParentInput } from "./routines/routine-parent-input.ts";
 import {
 	RoutineSchedulerController,
@@ -204,13 +207,13 @@ export interface BackgroundLaneControllerDeps
 	waitForForegroundIdle(): Promise<void>;
 	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
 	markGoalToolUnavailable(): void;
-	/** Thinking level of the active session model. */
-	getThinkingLevel?(): OrchestrationThinkingLevel;
+	/** The session's bound System One engine, if any: routine intake judges with it before the session model. */
+	getSystemOneEngine(): SemanticDecisionEngine | undefined;
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
-	/** The session's genuine owner input; routines read only its newest source instant. */
-	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "listOwnerEvidence">;
+	/** The session's genuine owner input: routine saves read its newest source instant, routine intake its words. */
+	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "subscribe" | "readSources" | "findSource" | "listOwnerEvidence">;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -249,7 +252,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
-	private _routines: { scheduler: RoutineSchedulerController; session: RoutineSessionController } | undefined;
+	private _routines:
+		| { scheduler: RoutineSchedulerController; session: RoutineSessionController; intake: RoutineIntake }
+		| undefined;
 	private routinesStarted = false;
 	private readonly botBindings: BotRuntimeBindings;
 	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
@@ -813,6 +818,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("stop routine scheduler", () => {
 			routineShutdown = this._routines?.scheduler.close() ?? Promise.resolve();
 		});
+		let intakeShutdown = Promise.resolve();
+		this._runTeardownStep("stop routine intake", () => {
+			intakeShutdown = this._routines?.intake.stop() ?? Promise.resolve();
+		});
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -823,8 +832,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			unsubscribeHostEventState?.();
 			this._hostEventStateListeners.clear();
 		});
-		// Disposal completes only after the routine pass and its deliveries joined, not merely after they were told to stop.
-		return Promise.all([workerShutdown, routineShutdown]).then(() => undefined);
+		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they were told to stop.
+		return Promise.all([workerShutdown, routineShutdown, intakeShutdown]).then(() => undefined);
 	}
 
 	private _runTeardownStep(label: string, step: () => void): void {
@@ -1451,24 +1460,47 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			warn: (message) => this._safeWarn(message),
 		});
-		this._routines = {
+		const session = new RoutineSessionController({
+			store,
 			scheduler,
-			session: new RoutineSessionController({
-				store,
-				scheduler,
-				parentSessionId,
-				capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
-				invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
-				eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
-				latestOwnerSourceAt: () => {
-					const latest = this.deps.getOwnerEvidence().listOwnerEvidence().at(-1);
-					return latest ? Date.parse(latest.createdAt) : undefined;
-				},
-				now: () => this.deps.getTimers().port("routines").now(),
-				isDisposed: () => this.deps.isDisposed(),
-			}),
-		};
-		if (this.routinesStarted) scheduler.start();
+			parentSessionId,
+			capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
+			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
+			eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
+			latestOwnerSourceAt: () => {
+				const latest = this.deps.getOwnerEvidence().listOwnerEvidence().at(-1);
+				return latest ? Date.parse(latest.createdAt) : undefined;
+			},
+			now: () => this.deps.getTimers().port("routines").now(),
+			isDisposed: () => this.deps.isDisposed(),
+		});
+		const intake = new RoutineIntake({
+			parentSessionId,
+			store,
+			routines: session,
+			evidence: this.deps.getOwnerEvidence(),
+			time: this.deps.getTimers().port("routine-intake"),
+			hostInactiveReason: () => {
+				const manager = this.deps.getSessionManager();
+				if (!manager.isPersisted() || !manager.getSessionFile()) return "ephemeral_session";
+				return this.deps.getSettingsManager().getRoutinesSettings().automaticIntake ? undefined : "disabled";
+			},
+			model: () => this._laneModels.resolveModel(undefined),
+			systemOne: () => this.deps.getSystemOneEngine(),
+			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
+			maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
+			isForegroundBusy: () => this.deps.isForegroundBusy(),
+			subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
+			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			deliver: (notice) => this.deps.deliverParentInput(notice),
+			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._routines = { scheduler, session, intake };
+		if (this.routinesStarted) {
+			scheduler.start();
+			intake.start();
+		}
 	}
 
 	startPersistentRoutines(): void {
@@ -1476,6 +1508,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.routinesStarted = true;
 		this.getBotTeamStore();
 		this._routines?.scheduler.start();
+		this._routines?.intake.start();
+	}
+
+	/** Automatic routine intake of this session; undefined where routines do not run (a child session). */
+	getRoutineIntakeStatus(): RoutineIntakeStatus | undefined {
+		this.getBotTeamStore();
+		return this._routines?.intake.status();
 	}
 
 	createRoutineToolDefinition(): ToolDefinition | undefined {
@@ -1827,11 +1866,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * guessed provider.
 	 */
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string } {
-		const fgThinking = this.deps.getThinkingLevel
-			? String(this.deps.getThinkingLevel())
-			: this.deps.getForegroundThinkingLevel
-				? String(this.deps.getForegroundThinkingLevel())
-				: undefined;
+		const fgThinking = this.deps.getForegroundThinkingLevel
+			? String(this.deps.getForegroundThinkingLevel())
+			: undefined;
 
 		const reference = rawModel?.trim();
 		if (!reference) {

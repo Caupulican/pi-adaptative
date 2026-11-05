@@ -49,6 +49,11 @@ export const ROUTINE_INTAKE_CAP_WINDOW_MS = 86_400_000;
 export const ROUTINE_INTAKE_LIVE_CAP = 10;
 /** Sessions whose intake state is kept; the least recently written leaves first and restarts from the newest source. */
 export const MAX_ROUTINE_INTAKE_SESSIONS = 256;
+/** Owner sources one intake pass reads at most; later sources wait for the next pass. */
+export const MAX_ROUTINE_INTAKE_BATCH_SOURCES = 4;
+export const MAX_ROUTINE_INTAKE_SOURCE_REQUESTS = 4;
+/** Every intake spend is accounted under this operation prefix, one operation per pass. */
+export const ROUTINE_INTAKE_OPERATION_PREFIX = "routine-intake:";
 const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
 
 const intervalSchema = Type.Object(
@@ -234,9 +239,35 @@ export interface RoutineOrigin {
 
 /** The identity of one owner request the host turned into a routine: consumed once, never recreated. */
 export interface RoutineIntakeOrigin {
-	/** Canonical digest of the session, source, source digest and request position. */
+	/**
+	 * Canonical digest of the session, the source, its digest and the original offsets of the owner's grounded
+	 * instruction and timing words, so a re-extraction that finds the same words meets the same identity.
+	 */
 	readonly key: string;
 	readonly sourceId: string;
+}
+
+/** One owner request an intake pass extracted and grounded, decided at most once. */
+export interface RoutineIntakeRequest {
+	readonly key: string;
+	readonly sourceId: string;
+	/** The owner's verbatim words for what to do: the routine prompt. */
+	readonly prompt: string;
+	readonly schedule: RoutineScheduleInput;
+	/** Created, refused or rejected; never judged again. */
+	readonly done?: true;
+}
+
+/** The intake pass in flight, retained so a restart neither re-reads its sources nor spends on them twice. */
+export interface RoutineIntakeBatch {
+	readonly operationId: string;
+	/** The parent anchor every notice of this pass is delivered at, so a redelivery carries the same identity. */
+	readonly origin: WorkerSavedIntent["receiptOrigin"];
+	readonly sourceIds: readonly string[];
+	/** The owner-evidence instant the session's intake reaches once this batch ends. */
+	readonly through: number;
+	/** Present once extraction and grounding finished: the retained result the pass decides from. */
+	readonly requests?: readonly RoutineIntakeRequest[];
 }
 
 /** One consumed intake origin, kept for replay refusal and the per-session window cap. */
@@ -254,6 +285,9 @@ export interface RoutineIntakeSession {
 	 * model already handled every source at or before it, so intake never reads them.
 	 */
 	readonly toolAuthoredThrough?: number;
+	/** Instant (ms, owner-evidence clock) of the newest owner source intake has finished with; it never reads older ones. */
+	readonly through?: number;
+	readonly batch?: RoutineIntakeBatch;
 	readonly updatedAt: number;
 }
 
@@ -1281,22 +1315,81 @@ export function parseRoutineIntakeSessions(value: unknown): RoutineIntakeSession
 		throw new TypeError("Routine intake sessions have an invalid size.");
 	const sessions = new Set<string>();
 	return value.map((entry: unknown) => {
-		if (!isPlainRecord(entry) || !hasOnlyKeys(entry, ["parentSessionId", "toolAuthoredThrough", "updatedAt"]))
+		if (
+			!isPlainRecord(entry) ||
+			!hasOnlyKeys(entry, ["parentSessionId", "toolAuthoredThrough", "through", "batch", "updatedAt"])
+		)
 			throw new TypeError("Routine intake session state is invalid.");
 		const parentSessionId = boundedString(entry.parentSessionId, 200, "parent session id");
 		if (
 			sessions.has(parentSessionId) ||
 			!validInstant(entry.updatedAt) ||
-			(entry.toolAuthoredThrough !== undefined && !validInstant(entry.toolAuthoredThrough))
+			(entry.toolAuthoredThrough !== undefined && !validInstant(entry.toolAuthoredThrough)) ||
+			(entry.through !== undefined && !validInstant(entry.through))
 		)
 			throw new TypeError("Routine intake session state is invalid or repeated.");
 		sessions.add(parentSessionId);
 		return {
 			parentSessionId,
 			...(entry.toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough: entry.toolAuthoredThrough }),
+			...(entry.through === undefined ? {} : { through: entry.through }),
+			...(entry.batch === undefined ? {} : { batch: parseRoutineIntakeBatch(entry.batch, parentSessionId) }),
 			updatedAt: entry.updatedAt,
 		};
 	});
+}
+
+/** One retained intake pass of `parentSessionId`; its notices' anchor must belong to that session. */
+export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string): RoutineIntakeBatch {
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["operationId", "origin", "sourceIds", "through", "requests"]) ||
+		typeof value.operationId !== "string" ||
+		!value.operationId.startsWith(ROUTINE_INTAKE_OPERATION_PREFIX) ||
+		value.operationId.length > ROUTINE_INTAKE_OPERATION_PREFIX.length + 64 ||
+		!Array.isArray(value.sourceIds) ||
+		value.sourceIds.length === 0 ||
+		value.sourceIds.length > MAX_ROUTINE_INTAKE_BATCH_SOURCES ||
+		!validInstant(value.through) ||
+		(value.requests !== undefined &&
+			(!Array.isArray(value.requests) ||
+				value.requests.length > MAX_ROUTINE_INTAKE_BATCH_SOURCES * MAX_ROUTINE_INTAKE_SOURCE_REQUESTS))
+	)
+		throw new TypeError("Routine intake batch is invalid.");
+	const origin = workerReceiptOriginFromValue(value.origin);
+	const sourceIds = value.sourceIds.map((sourceId: unknown) =>
+		boundedString(sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
+	);
+	if (origin.sessionId !== parentSessionId || new Set(sourceIds).size !== sourceIds.length)
+		throw new TypeError("Routine intake batch belongs to another session or repeats a source.");
+	const keys = new Set<string>();
+	const requests = (value.requests as unknown[] | undefined)?.map((entry): RoutineIntakeRequest => {
+		if (
+			!isPlainRecord(entry) ||
+			!hasOnlyKeys(entry, ["key", "sourceId", "prompt", "schedule", "done"]) ||
+			!isRoutineDigest(entry.key) ||
+			keys.has(entry.key) ||
+			typeof entry.sourceId !== "string" ||
+			!sourceIds.includes(entry.sourceId) ||
+			(entry.done !== undefined && entry.done !== true)
+		)
+			throw new TypeError("Routine intake request is invalid or repeated.");
+		keys.add(entry.key);
+		return {
+			key: entry.key,
+			sourceId: entry.sourceId,
+			prompt: boundedString(entry.prompt, MAX_ROUTINE_PROMPT_CHARS, "prompt"),
+			schedule: parseRoutineScheduleInput(entry.schedule),
+			...(entry.done ? { done: true as const } : {}),
+		};
+	});
+	return {
+		operationId: value.operationId,
+		origin,
+		sourceIds,
+		through: value.through,
+		...(requests === undefined ? {} : { requests }),
+	};
 }
 
 export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor): number | undefined {

@@ -31,6 +31,7 @@ import {
 	parseLegacyRoutineDefinition,
 	parseRoutineDefinitionView,
 	parseRoutineExecutionSnapshot,
+	parseRoutineIntakeBatch,
 	parseRoutineIntakeConsumptions,
 	parseRoutineIntakeOrigin,
 	parseRoutineIntakeSessions,
@@ -46,6 +47,7 @@ import {
 	type RoutineDelivery,
 	type RoutineHostEventFact,
 	type RoutineHostEventFeed,
+	type RoutineIntakeBatch,
 	type RoutineIntakeConsumption,
 	RoutineIntakeRefusal,
 	type RoutineIntakeSession,
@@ -1652,7 +1654,39 @@ export class PersistentBotTeamStore {
 
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined {
 		const session = this.routineIntakeSessions.get(parentSessionId);
-		return session ? { ...session } : undefined;
+		return session ? structuredClone(session) : undefined;
+	}
+
+	/** Whether an intake origin was consumed, even when the owner has deleted its routine since. */
+	hasRoutineIntakeOrigin(key: string): boolean {
+		return this.routineIntakeOrigins.has(key);
+	}
+
+	/**
+	 * Records a session's intake progress in one write: the newest owner source it finished with (never moved back)
+	 * and the pass in flight (`null` ends it).
+	 */
+	recordRoutineIntake(
+		parentSessionId: string,
+		nowMs: number,
+		change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null },
+	): void {
+		this.mutate(() => {
+			const batch =
+				change.batch === undefined || change.batch === null
+					? change.batch
+					: parseRoutineIntakeBatch(change.batch, parentSessionId);
+			const through = change.through;
+			if (through !== undefined && (!Number.isSafeInteger(through) || through < 0))
+				throw new TypeError("Routine intake progress is invalid.");
+			this.writeRoutineIntakeSession(parentSessionId, nowMs, (current) => ({
+				...(through !== undefined && (current?.through === undefined || through > current.through)
+					? { through }
+					: {}),
+				...(batch === undefined ? {} : { batch: batch ?? undefined }),
+			}));
+			this.save();
+		});
 	}
 
 	/**

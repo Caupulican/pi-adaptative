@@ -50,6 +50,8 @@ export {
  * - `knowledge-collection`: the original-owner collector's idle delay and bounded pass deadline.
  * - `routines`: the clock routine edits, claims and results are stamped with, and the scheduler's slot, lease and retry
  *   alarms (`alarmAt`, which re-reads this clock at least every `WALL_ALARM_RECHECK_MS`).
+ * - `routine-intake`: the idle delay after an owner turn before routine intake reads it, the intake pass deadline and
+ *   its retry delay.
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  */
@@ -75,6 +77,7 @@ export type TimerOwner =
 	| "proactivity"
 	| "knowledge-collection"
 	| "routines"
+	| "routine-intake"
 	| "tool-recovery-log";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */

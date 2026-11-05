@@ -32,6 +32,7 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 	const lanes = host.session.backgroundLanes;
 	const skip = lanes.getLastProactivitySkipReason();
 	const { measured, lastDelivery, lastEventDelivery } = lanes.getProactivityDailyState();
+	const intake = lanes.getRoutineIntakeStatus();
 	const delivered = (delivery: ParentWakeDelivery) =>
 		delivery.mode === "turn"
 			? "woke a parent turn"
@@ -43,6 +44,11 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 		`Delivery: ${settings.delivery === "turn" ? "wakes a turn" : "a visible note with the next turn"}`,
 		`Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}`,
 		`CI events: ${settings.ciEvents ? "on" : "off"}`,
+		...(intake === undefined
+			? []
+			: [
+					`Routine intake: ${intake.state === "active" ? "on" : `off (${intake.reason})`}${intake.judge === undefined ? "" : `, judged by ${intake.judge}`}, $${intake.spentUsd.toFixed(4)} of $${intake.sessionMaxUsd.toFixed(2)} this session${intake.last === undefined ? "" : `; last pass ${intake.last.status}: ${intake.last.sources} source(s), ${intake.last.created} created, ${intake.last.refused} refused`}`,
+				]),
 		...(measured === undefined
 			? []
 			: [

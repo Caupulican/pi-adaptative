@@ -1,12 +1,20 @@
 import { createHash } from "node:crypto";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { formatDurationIntervalMs } from "../delegation/bot-team-routine-helpers.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
-import { MAX_ROUTINE_EVENT_MISSED_COUNT, type RoutineDelivery } from "./routine-contract.ts";
+import {
+	MAX_ROUTINE_EVENT_MISSED_COUNT,
+	type RoutineDelivery,
+	type RoutineIntakeRequest,
+	type RoutineScheduleInput,
+} from "./routine-contract.ts";
 
 const ROUTINE_COMPLETION_TYPE = "routine-completion";
+const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
 
 /**
  * Host identity is separate from the worker's untrusted summary. The delivery mode comes only from the persisted
@@ -71,6 +79,52 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 		message,
 		origin: occurrence.parentOrigin,
 		...(quiet ? { mode: "next-owner-turn" as const } : {}),
+	};
+}
+
+/** Plain words for an authored schedule: the owner's intake notice and the intake judge read the same text. */
+export function describeRoutineSchedule(schedule: RoutineScheduleInput): string {
+	switch (schedule.kind) {
+		case "interval":
+			return `every ${formatDurationIntervalMs(schedule.intervalMs)}`;
+		case "once":
+			return `once at ${new Date(schedule.at).toISOString()}`;
+		case "calendar":
+			return `on the calendar rule "${schedule.cron}" (minute hour day-of-month month day-of-week) in ${schedule.timeZone ?? "this host's time zone"}`;
+		case "event":
+			return `when a CI attempt of the checked-out revision ends in ${(schedule.conclusions ?? ["failure"]).join(" or ")}${schedule.workflowPath === undefined ? "" : ` for ${schedule.workflowPath}`}`;
+	}
+}
+
+/**
+ * The owner-visible notice of one intake decision, carried with the owner's next turn. Its identity derives from the
+ * request alone and its anchor is the pass's retained one, so a redelivery after restart is the same input.
+ */
+export function routineIntakeNotice(
+	request: RoutineIntakeRequest,
+	origin: WorkerReceiptOrigin,
+	outcome: { readonly created: string } | { readonly refused: string },
+): ParentInputDelivery {
+	const cadence = describeRoutineSchedule(request.schedule);
+	const message = {
+		customType: ROUTINE_INTAKE_NOTICE_TYPE,
+		display: true,
+		content:
+			"created" in outcome
+				? `Scheduled (read-only): ${cadence} - ${JSON.stringify(request.prompt)}\nRoutine ${outcome.created} was created from the owner's own words without write authority. The owner can ask to change, widen or cancel it.`
+				: `Not scheduled: ${outcome.refused} - ${JSON.stringify(request.prompt)}\nThe owner's request was recognized but no routine was created.`,
+		details: {
+			routineIntakeKey: request.key,
+			sourceId: request.sourceId,
+			...("created" in outcome ? { routineId: outcome.created } : { refused: outcome.refused }),
+		},
+	};
+	return {
+		deliveryId: `${ROUTINE_INTAKE_NOTICE_TYPE}:${createHash("sha256").update(request.key).digest("hex")}`,
+		payloadDigest: createHash("sha256").update(JSON.stringify(message)).digest("hex"),
+		message,
+		origin,
+		mode: "next-owner-turn",
 	};
 }
 

@@ -1,6 +1,6 @@
 import type { Api, Model, ProviderResponseObserver, ProviderResponseTicket } from "@caupulican/pi-ai";
 import { resolveModelCost } from "@caupulican/pi-ai/usage";
-import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
+import type { AgentLoopConfig, RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import { affordableOutputTokenLimit } from "../cost-guard.ts";
 import type { MaintenanceUsageRoute } from "../review/system-one-review-port.ts";
@@ -56,6 +56,34 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 
 	assertHealthy(): void {
 		this.responses.assertHealthy();
+	}
+
+	/**
+	 * The loop hooks of a completion that ends in one structured submission: every request is priced and admitted
+	 * here, every dispatch and tool call re-checks the allowance and `assertCurrent`, and the submission must be the
+	 * only tool call of its message (`reason` tells the model so).
+	 */
+	submissionHooks(
+		reason: string,
+		assertCurrent?: () => void,
+	): Required<
+		Pick<AgentLoopConfig, "beforeToolCall" | "requestPreflight" | "requestGuard" | "providerResponseObserver">
+	> {
+		return {
+			beforeToolCall: async (context) => {
+				assertCurrent?.();
+				this.assertHealthy();
+				return context.assistantMessage.content.filter((part) => part.type === "toolCall").length === 1
+					? undefined
+					: { block: true, reason };
+			},
+			requestPreflight: (request) => this.preflight(request),
+			requestGuard: () => {
+				assertCurrent?.();
+				this.assertHealthy();
+			},
+			providerResponseObserver: this,
+		};
 	}
 
 	release(): void {

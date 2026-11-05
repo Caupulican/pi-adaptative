@@ -3,6 +3,7 @@ import type {
 	RoutineClaimResult,
 	RoutineDefinitionView,
 	RoutineDelivery,
+	RoutineIntakeBatch,
 	RoutineIntakeSession,
 	RoutineOccurrence,
 	RoutineOccurrenceClaimInput,
@@ -20,6 +21,12 @@ export interface RoutineStorePort {
 	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView;
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined;
+	hasRoutineIntakeOrigin(key: string): boolean;
+	recordRoutineIntake(
+		parentSessionId: string,
+		nowMs: number,
+		change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null },
+	): void;
 	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult;
 	claimManualRoutineOccurrence(input: {
 		routineId: string;
