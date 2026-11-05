@@ -880,19 +880,24 @@ export class PromptSubmissionController {
 				// The owner's own prompt resumes a system-stopped goal or starts an explicit chat goal when it is delivered (its
 				// user entry persisted), never before: a prompt that ends undelivered changes no goal, and its run works on that
 				// goal only from its delivery. The goal it would own is read now, for the readiness that goal work needs. Only
-				// its typed words start a goal (`goalToolStartAuthority`); the objective is read from the whole text.
-				const ownerGoalId = this.deps.goals.previewOwnerPromptGoal(
-					expandedText,
-					goalToolStartAuthority,
-					this.deps.agent.state.messages,
-				);
-				this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, () =>
-					this.deps.goals.applyDeliveredOwnerPrompt(
-						expandedText,
-						goalToolStartAuthority,
-						this.deps.agent.state.messages,
-					),
-				);
+				// its typed words start a goal (`goalToolStartAuthority`); the objective is read from the whole text. An
+				// extension's message (a peer agent's, say) neither starts nor resumes a goal, though its turn still runs on one.
+				const ownerWords = options?.source !== "extension";
+				const ownerGoalId = ownerWords
+					? this.deps.goals.previewOwnerPromptGoal(
+							expandedText,
+							goalToolStartAuthority,
+							this.deps.agent.state.messages,
+						)
+					: undefined;
+				if (ownerWords)
+					this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, () =>
+						this.deps.goals.applyDeliveredOwnerPrompt(
+							expandedText,
+							goalToolStartAuthority,
+							this.deps.agent.state.messages,
+						),
+					);
 				if ((ownerGoalId ?? admittedGoalId) && this.deps.getAdaptiveReadiness()) {
 					this.deps.getAdaptiveReadiness()!.assertReady({ adaptiveEnabled: true });
 				}
@@ -1221,10 +1226,11 @@ export class PromptSubmissionController {
 				this.deps.noteSystemOneTaskDirectoryUnavailable(error);
 			};
 			if (!options?.internalContextType) {
-				this.lastUserRequestValue = fenceOwnerPaste(userRequest);
-				// Only the owner's words are owner policy. An extension's message (a peer agent's, say) is never classified and
-				// decides nothing: no grant, handoff, model pool, delivery binding or rule authority.
+				// Only the owner's words are the turn's request and owner policy. An extension's message (a peer agent's, say) is
+				// never classified and decides nothing: no grant, handoff, model pool, delivery binding or rule authority, and it
+				// replaces no request the operation, acquisition and plan-review gates judge a tool call against.
 				if (options?.source !== "extension") {
+					this.lastUserRequestValue = fenceOwnerPaste(userRequest);
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
 					// that became this turn was judged before it ran: its judgment is applied, never asked again
