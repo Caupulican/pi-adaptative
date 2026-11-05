@@ -27,10 +27,6 @@ async function callTool(session: AgentSession, name: string, params: Record<stri
 	return { text: first?.type === "text" ? first.text : "", details: result.details };
 }
 
-function targetStatus(details: unknown): string | undefined {
-	return (details as AgentSendResult).targets[0]?.status;
-}
-
 /**
  * pi-chat addresses the pi session and holds mail for a peer that is away. Two root sessions join one mesh over the world's
  * in-memory network: a live message reaches the peer (the control); the peer's session ends and is resumed under the same
@@ -48,6 +44,15 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const managerA = world.createSessionManager(agentDirA);
 	const managerB = world.createSessionManager(agentDirB);
 	const settings = { memorySystem: "okf", autoLearn: { enabled: false } } as const;
+	const extensionErrors: string[] = [];
+	/** The status of the one target, with the whole result and any extension error as the assertion's evidence. */
+	const expectStatus = (result: { readonly details: unknown }, expected: string, label: string): void => {
+		const sent = result.details as AgentSendResult;
+		expect(
+			sent.targets[0]?.status,
+			`${label}: ${JSON.stringify(sent)} errors=${JSON.stringify(extensionErrors)}`,
+		).toBe(expected);
+	};
 	const open = async (manager: SessionManager, agentDir: string): Promise<AgentSession> => {
 		const created = await world.createRootSession("root", {
 			agentDir,
@@ -55,7 +60,10 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			settings,
 			extensionFactories: [(pi) => piChatExtension(pi, { stateRoot })],
 		});
-		await created.session.bindExtensions({ uiContext: world.humanInput.ui });
+		await created.session.bindExtensions({
+			uiContext: world.humanInput.ui,
+			onError: (error) => extensionErrors.push(`${error.event}: ${error.error}`),
+		});
 		return created.session;
 	};
 	const dispose = async (session: AgentSession, label: string): Promise<void> => {
@@ -110,7 +118,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		messageId: "leg-live-1",
 		timeoutMs: TOOL_TIMEOUT_MS,
 	});
-	expect(targetStatus(live.details), "a live message is received, not queued").toBe("received");
+	expectStatus(live, "received", "a live message is received, not queued");
 	await withDeadline(trace, "B takes the live message", liveTurn.promise);
 	await sessionB.agent.waitForIdle();
 	expect(taken.at(-1), "B's turn carries the live message").toContain("live hello from A");
@@ -136,21 +144,21 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		messageId: "leg-held-1",
 		timeoutMs: TOOL_TIMEOUT_MS,
 	});
-	expect(targetStatus(held.details), "a message to an absent peer is queued").toBe("queued");
+	expectStatus(held, "queued", "a message to an absent peer is queued");
 	const again = await callTool(sessionA, "agent_send", {
 		to: meshIdB,
 		message: "held for you",
 		messageId: "leg-held-1",
 		timeoutMs: TOOL_TIMEOUT_MS,
 	});
-	expect(targetStatus(again.details), "sending again reports the fate: still queued").toBe("queued");
+	expectStatus(again, "queued", "sending again reports the fate: still queued");
 	const changed = await callTool(sessionA, "agent_send", {
 		to: meshIdB,
 		message: "a different message under the same id",
 		messageId: "leg-held-1",
 		timeoutMs: TOOL_TIMEOUT_MS,
 	});
-	expect(targetStatus(changed.details), "an id reused for another message is refused").toBe("failed");
+	expectStatus(changed, "failed", "an id reused for another message is refused");
 	const heldFiles = world.io
 		.readdirSync(inboxDir)
 		.map(String)
@@ -185,7 +193,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		messageId: "leg-held-1",
 		timeoutMs: TOOL_TIMEOUT_MS,
 	});
-	expect(targetStatus(repeated.details), "a repeated send is received without a second delivery").toBe("received");
+	expectStatus(repeated, "received", "a repeated send is received without a second delivery");
 
 	// Mail forged into the inbox by a process without the machine's session secret arrives as an unverified peer.
 	const forgedTurn = expectTurn("pi-chat-forged-turn", "Read the forged message.");
