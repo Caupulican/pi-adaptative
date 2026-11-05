@@ -4,7 +4,12 @@ import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
-import { nextRoutineAt, type RoutineDefinitionView, routineScheduleInputOf } from "./routine-contract.ts";
+import {
+	nextRoutineAt,
+	type RoutineDefinitionView,
+	type RoutineEventAnchor,
+	routineScheduleInputOf,
+} from "./routine-contract.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
@@ -21,6 +26,8 @@ interface RoutineSessionDeps {
 	readonly parentSessionId: string;
 	capture(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<WorkerSavedIntent>;
 	invocationKey(callId: string): string;
+	/** The session ledger's current position; read only when an event routine is saved. */
+	eventAnchor(): RoutineEventAnchor;
 	now(): number;
 	isDisposed(): boolean;
 }
@@ -159,6 +166,7 @@ export class RoutineSessionController implements RoutineToolPort {
 						: input.schedule,
 				enabled: prior?.enabled ?? true,
 				nowMs: this.deps.now(),
+				...(input.schedule.kind === "event" ? { eventAnchor: this.deps.eventAnchor() } : {}),
 				executionSnapshot: {
 					parentSessionId: this.deps.parentSessionId,
 					parentBranchAnchor: savedIntent.receiptOrigin.leafId,

@@ -14,11 +14,18 @@ const ROUTINE_COMPLETION_TYPE = "routine-completion";
  */
 export function routineParentInput({ occurrence, result }: RoutineDelivery): ParentInputDelivery {
 	const quiet = result.ownerUpdate === "none";
-	const missedCount = occurrence.trigger.kind === "schedule" ? occurrence.trigger.missedCount : 0;
-	const missed =
-		missedCount > 0
-			? ` It also covers ${missedCount} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`
-			: "";
+	const trigger = occurrence.trigger;
+	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
+	let missed = "";
+	if (missedCount > 0 && trigger.kind === "event")
+		missed = ` It also covers ${missedCount} earlier matching CI ${missedCount === 1 ? "attempt" : "attempts"} that did not start a run of their own.`;
+	else if (missedCount > 0)
+		missed = ` It also covers ${missedCount} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
+	if (trigger.kind === "event") {
+		missed = ` It ran for a CI ${trigger.event.conclusion} result.${missed}`;
+		if (trigger.historyGap)
+			missed += " Some CI history was not observed by this session; attempts in between may be missing.";
+	}
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
 		nonce: result.digest,
 	});
@@ -35,6 +42,16 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 			outcome: result.outcome,
 			resultDigest: result.digest,
 			...(missedCount > 0 ? { missedCount } : {}),
+			...(trigger.kind === "event"
+				? {
+						hostEvent: {
+							eventId: trigger.event.eventId,
+							runAttempt: trigger.event.identity.runAttempt,
+							conclusion: trigger.event.conclusion,
+							...(trigger.historyGap ? { historyGap: true as const } : {}),
+						},
+					}
+				: {}),
 			...(quiet ? { ownerUpdate: "none" as const } : {}),
 		},
 	};

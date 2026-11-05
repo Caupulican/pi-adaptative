@@ -144,7 +144,12 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { isQuietRoutineCompletion, routineParentInput } from "./routines/routine-parent-input.ts";
-import { RoutineSchedulerController } from "./routines/routine-scheduler-controller.ts";
+import {
+	RoutineSchedulerController,
+	routineEventAnchor,
+	routineHostEventFeed,
+	routineInstructions,
+} from "./routines/routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routines/routine-session-controller.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
@@ -218,6 +223,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The live managed lanes of the roster, dropped with every lane record change. */
 	private _managedLaneViews: ManagedLaneView[] | undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
+	/** Host-event state and source readiness observers; attached to the runtime once the lifecycle exists. */
+	private readonly _hostEventStateListeners = new Set<() => void>();
+	private _unsubscribeHostEventState: (() => void) | undefined;
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
 	private readonly _research: ResearchLaneController;
@@ -376,6 +384,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._workerLifecycle = lifecycle;
 		this._orchestrationStore = store;
 		this._unsubscribeLaneRecordStore = store.subscribe(() => this._laneRecordsChanged());
+		// Readiness can change without a ledger commit (an identical re-seal in a new process), so observers follow both.
+		this._unsubscribeHostEventState = lifecycle.ledger.runtime.hostEvents.subscribe(() => {
+			for (const listener of [...this._hostEventStateListeners]) listener();
+		});
 		this._workerUsage = new WorkerUsageReceiptDelivery({
 			parentSessionId,
 			runtime: lifecycle.ledger.runtime,
@@ -748,6 +760,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
 		this._runTeardownStep("unsubscribe lane records", () => unsubscribeLaneRecordStore?.());
+		const unsubscribeHostEventState = this._unsubscribeHostEventState;
+		this._unsubscribeHostEventState = undefined;
+		this._runTeardownStep("unsubscribe host event state", () => {
+			unsubscribeHostEventState?.();
+			this._hostEventStateListeners.clear();
+		});
 		// Disposal completes only after the routine pass and its deliveries joined, not merely after they were told to stop.
 		return Promise.all([workerShutdown, routineShutdown]).then(() => undefined);
 	}
@@ -1308,6 +1326,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
 			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
+			hostEvents: {
+				feed: () => {
+					const lifecycle = this._getWorkerLifecycle();
+					const events = lifecycle.ledger.runtime.hostEvents;
+					return routineHostEventFeed(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
+						events.isSourceReady(sourceId),
+					);
+				},
+				subscribe: (listener) => {
+					this._hostEventStateListeners.add(listener);
+					return () => this._hostEventStateListeners.delete(listener);
+				},
+			},
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
 			findCarriedQuietResult: (routineId) => {
@@ -1323,7 +1354,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				if (!intent) return;
 				const attemptIds = worker.notificationAttemptIds({
 					intent,
-					instructions: occurrence.definition.prompt,
+					instructions: routineInstructions(occurrence),
 					dispatchKey: occurrence.dispatchKey,
 				});
 				const lifecycle = this._getWorkerLifecycle();
@@ -1362,6 +1393,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				parentSessionId,
 				capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
 				invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
+				eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
 				now: () => this.deps.getTimers().port("routines").now(),
 				isDisposed: () => this.deps.isDisposed(),
 			}),
