@@ -31,6 +31,7 @@ import {
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
+	MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES,
 	MAX_ORCHESTRATION_ATTEMPTS,
 	MAX_ORCHESTRATION_CHECKPOINTS,
 	MAX_ORCHESTRATION_NOTIFICATIONS,
@@ -51,6 +52,7 @@ import {
 	approvalFromPayload,
 	approvalResolutionFromPayload,
 	assertReferencedAcceptanceCriteriaRetained,
+	attemptParentWriteBodyFromValue,
 	cancellationDetail,
 	checkpointFromPayload,
 	dispatchFromValue,
@@ -82,6 +84,7 @@ import {
 import {
 	type ApprovalRuntimeState,
 	type AttemptDispatchReadiness,
+	type AttemptParentWrite,
 	type AttemptRuntimeState,
 	DurableTaskRuntimeError,
 	missingTrustedCriteria,
@@ -1635,6 +1638,38 @@ export function reduceOrchestrationEvent(
 			if (!attempt || !acknowledgement) throw new DurableTaskRuntimeError("Invalid worker receipt acknowledgement.");
 			assertWorkerReceiptAcknowledgement(state, attempt, acknowledgement);
 			attempts[attemptId] = { ...attempt, receiptAcknowledgement: acknowledgement };
+			break;
+		}
+		case "attempt.parent_write_recorded": {
+			const attemptId = dispatchIdentifier(event.payload.attemptId, "attempt.parent_write_recorded.attemptId");
+			assertEventAggregateId(event, attemptId, "Parent write attempt");
+			const writeId = dispatchIdentifier(event.payload.writeId, "attempt.parent_write_recorded.writeId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			if (attempt.parentWrites && Object.hasOwn(attempt.parentWrites, writeId))
+				throw new DurableTaskRuntimeError(`Parent write '${writeId}' was recorded more than once.`);
+			if (Object.keys(attempt.parentWrites ?? {}).length >= MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES)
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' holds its maximum of pending parent writes.`);
+			const write: AttemptParentWrite = {
+				writeId,
+				sequence: event.ordinal,
+				body: attemptParentWriteBodyFromValue(event.payload.body, "attempt.parent_write_recorded.body"),
+				recordedAt: event.occurredAt,
+			};
+			attempts[attemptId] = { ...attempt, parentWrites: { ...attempt.parentWrites, [writeId]: write } };
+			break;
+		}
+		case "attempt.parent_write_imported": {
+			const attemptId = dispatchIdentifier(event.payload.attemptId, "attempt.parent_write_imported.attemptId");
+			assertEventAggregateId(event, attemptId, "Parent write attempt");
+			const writeId = dispatchIdentifier(event.payload.writeId, "attempt.parent_write_imported.writeId");
+			const attempt = attempts[attemptId];
+			if (!attempt?.parentWrites || !Object.hasOwn(attempt.parentWrites, writeId))
+				throw new DurableTaskRuntimeError("Unknown pending parent write.");
+			const { [writeId]: _imported, ...remaining } = attempt.parentWrites;
+			const { parentWrites: _parentWrites, ...withoutWrites } = attempt;
+			attempts[attemptId] =
+				Object.keys(remaining).length > 0 ? { ...attempt, parentWrites: remaining } : withoutWrites;
 			break;
 		}
 		case "attempt.usage_delivered": {

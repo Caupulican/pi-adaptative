@@ -79,7 +79,7 @@ export interface ManagedLaneControllerDeps {
 	 * `noteAttemptOwnerEpoch` -- mirrors `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): void;
 	/**
 	 * Findings a worker could not settle, for the owner. Under a handoff they are written to the
 	 * owner's follow-up document and its path is returned; with the owner in the loop, undefined.

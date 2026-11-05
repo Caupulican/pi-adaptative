@@ -1016,6 +1016,69 @@ const rows: readonly FaultMatrixRow[] = [
 		modes: ["off"],
 	},
 	{
+		id: "R51",
+		owner: "core/delegation/foreground-parent-writes.ts",
+		journey: 1,
+		phase: "routines parent-write import",
+		fault: "another host recorded two parent writes for a closed parent's attempt; one landed in the transcript before its acknowledgement was recorded",
+		witness: "reopening lands each recorded write exactly once, in record order, and acknowledges both",
+		control: "no foreground claim carries a parent-write marker before any write is recorded",
+		estSeconds: 0.3,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R52",
+		owner: "core/delegation/worker-delegation-controller.ts",
+		journey: 1,
+		phase: "routines parent-write import",
+		fault: "an attempt's terminal is pending while its recorded claim cannot land yet (no persisted parent transcript)",
+		witness: "the terminal is published only after the claim lands",
+		control: "an attempt without recorded writes publishes its terminal at once",
+		estSeconds: 1,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"an away-executed terminal with a pending outbox claim exists only once the away runner dispatches (P4)",
+			},
+		],
+	},
+	{
+		id: "R53",
+		owner: "core/delegation/foreground-parent-writes.ts",
+		journey: 1,
+		phase: "routines parent-write import",
+		fault: "a recorded notice is offered to the parent, which stops before it takes the steer",
+		witness: "the next open offers it once more and acknowledges it only after the steer persisted",
+		control: "a taken notice is acknowledged once and never offered again",
+		estSeconds: 3,
+		status: "open",
+		needs: [
+			{ kind: "witness", detail: "away notices are recorded only by the away runner's parent write port (P4)" },
+		],
+	},
+	{
+		id: "R54",
+		owner: "core/orchestration/task-runtime.ts",
+		journey: 1,
+		phase: "routines parent-write import",
+		fault: "the away host stops before recording a write, or records it while the parent is open",
+		witness:
+			"an unrecorded write leaves no entry and parent recovery re-derives the terminal; a write recorded while the parent is open lands without waiting for a reopen",
+		control: "a write recorded while the parent is closed lands on open (R51)",
+		estSeconds: 1,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"both cuts need the away runner's dispatch and its stop point, and the open parent's import on the away host's committed store change (P4)",
+			},
+		],
+	},
+	{
 		id: "E13R",
 		owner: "core/delegation/worker-write-reservation-coordinator.ts",
 		journey: 1,

@@ -60,7 +60,10 @@ import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { acquireSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
-import { SessionTaskProfileStore } from "./orchestration/session-task-profile-store.ts";
+import {
+	SESSION_TASK_PROFILE_CUSTOM_TYPE,
+	SessionTaskProfileStore,
+} from "./orchestration/session-task-profile-store.ts";
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
@@ -963,7 +966,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					// The worker lifecycle's runtime records into this same store on this same clock (see TimerOwner).
 					now: () => orchestrationClock.now(),
 				});
-				const taskProfileStore = new SessionTaskProfileStore(sessionManager);
+				const taskProfileStore = new SessionTaskProfileStore(sessionManager, (record) =>
+					sessionManager.appendCustomEntry(SESSION_TASK_PROFILE_CUSTOM_TYPE, record),
+				);
 				const foregroundBaseProfile =
 					orchestrationProfile ??
 					(model

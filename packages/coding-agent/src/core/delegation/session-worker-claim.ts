@@ -27,6 +27,8 @@ export type WorkerClaimSnapshotPayload = SessionSnapshotPayload<"claim", WorkerC
 	request?: WorkerRequest;
 	/** Host-authored exact receipt authorization; never copied from an untrusted claim. */
 	receiptReview?: WorkerReceiptReview;
+	/** Set when the parent imported this claim from another host's record: the import's exactly-once marker. */
+	parentWriteId?: string;
 };
 
 const WORKER_CLAIM_SNAPSHOT_CODEC: SessionSnapshotCodec<WorkerClaim, "claim"> = {
@@ -43,7 +45,7 @@ export function appendWorkerClaimSnapshot(
 	/** Baseline for relative changedFiles when re-deriving the review marker; forwarded to
 	 * `isParentReviewRequired`/`validateWorkerClaim`. Defaults to `process.cwd()`, matching the
 	 * validator's own documented default for single-cwd-per-process callers. */
-	options?: { cwd?: string; receiptReview?: WorkerReceiptReview },
+	options?: { cwd?: string; receiptReview?: WorkerReceiptReview; parentWriteId?: string },
 ): string {
 	const normalizedClaim = normalizeWorkerClaimForHost(claim);
 	const stored = cloneWorkerClaimForStorage(normalizedClaim);
@@ -60,6 +62,7 @@ export function appendWorkerClaimSnapshot(
 		claim: stored,
 		...(request ? { request: structuredClone(request) } : {}),
 		...(options?.receiptReview ? { receiptReview: { ...options.receiptReview } } : {}),
+		...(options?.parentWriteId ? { parentWriteId: options.parentWriteId } : {}),
 	};
 	return sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, payload);
 }

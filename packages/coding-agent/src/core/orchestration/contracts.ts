@@ -53,6 +53,8 @@ export const MAX_ORCHESTRATION_CHECKPOINTS = 4_096;
 export const MAX_ORCHESTRATION_APPROVALS = 256;
 /** Approval prompts and terminal handoffs may each retain one notification per attempt. */
 export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
+/** Parent writes one attempt's away run may hold until the parent imports them: claims, notices and reports. */
+export const MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES = 16;
 /** Source goal state admits at most 512 evidence entries for one objective. */
 export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
 export const MAX_ORCHESTRATION_EVIDENCE = 4_096;
@@ -583,6 +585,8 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"attempt.usage_recorded",
 	"attempt.usage_delivered",
 	"attempt.receipts_delivered",
+	"attempt.parent_write_recorded",
+	"attempt.parent_write_imported",
 	"attempt.suspended",
 	"attempt.resumed",
 	"attempt.cancelled",

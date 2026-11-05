@@ -62,6 +62,8 @@ export interface WorkerRecoveryCoordinatorOptions {
 	recoverWriteReservations(): void;
 	publishTerminalRecord(record: LaneRecord): void;
 	publishTerminalRecords?(records: readonly LaneRecord[]): void;
+	/** Land the writes other hosts recorded for this parent before any terminal is republished; never throws. */
+	importParentWrites?(): void;
 	dispatchVerification(
 		recovery: Extract<PendingVerificationRecovery, { action: "dispatch" }>,
 	): WorkerRecoveryDispatchResult;
@@ -123,6 +125,8 @@ export class WorkerRecoveryCoordinator {
 		this.recoveringDurableState = true;
 		const { lifecycle } = this.options;
 		try {
+			this.options.importParentWrites?.();
+			if (this.disposed) return;
 			this.flushDueRetries();
 			if (this.disposed) return;
 			if (!this.queueRecovered) {

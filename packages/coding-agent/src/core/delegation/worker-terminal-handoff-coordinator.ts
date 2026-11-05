@@ -96,7 +96,8 @@ function assertIdentifier(value: unknown, label: string): asserts value is strin
 	}
 }
 
-function snapshotHandoff(handoff: WorkerTerminalHandoff): WorkerTerminalHandoff {
+/** The bounded durable copy of a handoff; throws when any identity or lane-record field is outside its contract. */
+export function snapshotHandoff(handoff: WorkerTerminalHandoff): WorkerTerminalHandoff {
 	assertIdentifier(handoff.terminalAttemptId, "Worker terminal attempt ID");
 	assertIdentifier(handoff.parentAgentId, "Worker terminal parent agent ID");
 	assertIdentifier(handoff.childAgentId, "Worker terminal child agent ID");

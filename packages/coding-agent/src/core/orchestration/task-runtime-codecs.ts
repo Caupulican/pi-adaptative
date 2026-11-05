@@ -38,6 +38,7 @@ import {
 	MANAGED_LANE_LIFETIMES,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
+	MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES,
 	MAX_ORCHESTRATION_ATTEMPTS,
 	MAX_ORCHESTRATION_CHECKPOINT_SUMMARY_LENGTH,
 	MAX_ORCHESTRATION_CHECKPOINTS,
@@ -87,6 +88,8 @@ import {
 } from "./task-runtime-projection.ts";
 import {
 	type ApprovalRuntimeState,
+	type AttemptParentWrite,
+	type AttemptParentWriteBody,
 	type AttemptRuntimeState,
 	type AttemptUsageReceipt,
 	type AttemptVerification,
@@ -910,6 +913,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"usageReceipts",
 		"result",
 		"receiptAcknowledgement",
+		"parentWrites",
 		"verification",
 		"managedLifetime",
 		"executionStartedAt",
@@ -978,6 +982,9 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		),
 		...(attempt.result === undefined ? {} : { result: resultFromValue(attempt.result, `${label}.result`) }),
 		...(receiptAcknowledgement ? { receiptAcknowledgement } : {}),
+		...(attempt.parentWrites === undefined
+			? {}
+			: { parentWrites: attemptParentWritesFromValue(attempt.parentWrites, `${label}.parentWrites`) }),
 		...(verification ? { verification: verification as AttemptVerification } : {}),
 		...(managedLifetime ? { managedLifetime } : {}),
 		...(attempt.executionStartedAt === undefined
@@ -1121,6 +1128,65 @@ export function usageGenerationIdentityFromValue(value: unknown, label: string):
 		throw new DurableTaskRuntimeError(`${label}.fencingToken must be a positive safe integer.`);
 	}
 	return { leaseId: dispatchIdentifier(identity.leaseId, `${label}.leaseId`), fencingToken };
+}
+
+function parentWriteJson(value: unknown, label: string): JsonObject {
+	try {
+		return toJsonObject(value);
+	} catch {
+		throw new DurableTaskRuntimeError(`${label} must be a JSON object.`);
+	}
+}
+
+/** The verbatim port call one parent write replays; the importing parent validates its domain shape. */
+export function attemptParentWriteBodyFromValue(value: unknown, label: string): AttemptParentWriteBody {
+	const kind = record(value, label).kind;
+	if (kind === "worker_claim") {
+		const body = exactRecord(value, label, ["kind", "claim", "request", "cwd"]);
+		const cwd = body.cwd === undefined ? undefined : string(body.cwd, `${label}.cwd`);
+		if (cwd !== undefined && cwd.length > MAX_DISPATCH_PATH_LENGTH)
+			throw new DurableTaskRuntimeError(`${label}.cwd exceeds its durable size bound.`);
+		return {
+			kind,
+			claim: parentWriteJson(body.claim, `${label}.claim`),
+			...(body.request === undefined ? {} : { request: parentWriteJson(body.request, `${label}.request`) }),
+			...(cwd === undefined ? {} : { cwd }),
+		};
+	}
+	if (kind === "notice") {
+		const body = exactRecord(value, label, ["kind", "customType", "text"]);
+		const text = string(body.text, `${label}.text`);
+		if (text.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH)
+			throw new DurableTaskRuntimeError(`${label}.text exceeds its durable size bound.`);
+		return { kind, customType: dispatchIdentifier(body.customType, `${label}.customType`), text };
+	}
+	if (kind === "terminal_report") {
+		const body = exactRecord(value, label, ["kind", "handoff"]);
+		return { kind, handoff: parentWriteJson(body.handoff, `${label}.handoff`) };
+	}
+	throw new DurableTaskRuntimeError(`${label}.kind is invalid.`);
+}
+
+function attemptParentWritesFromValue(value: unknown, label: string): Readonly<Record<string, AttemptParentWrite>> {
+	const entries = record(value, label);
+	if (Object.keys(entries).length > MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES)
+		throw new DurableTaskRuntimeError(`${label} exceeds its parent write bound.`);
+	const writes: Record<string, AttemptParentWrite> = Object.create(null);
+	for (const [key, entry] of Object.entries(entries)) {
+		const write = exactRecord(entry, `${label}.${key}`, ["writeId", "sequence", "body", "recordedAt"]);
+		const writeId = dispatchIdentifier(write.writeId, `${label}.writeId`);
+		if (writeId !== key) throw new DurableTaskRuntimeError(`${label} has a mismatched write identity.`);
+		const sequence = number(write.sequence, `${label}.sequence`);
+		if (!Number.isSafeInteger(sequence) || sequence < 1)
+			throw new DurableTaskRuntimeError(`${label}.sequence must be a positive safe integer.`);
+		writes[key] = {
+			writeId,
+			sequence,
+			body: attemptParentWriteBodyFromValue(write.body, `${label}.${key}.body`),
+			recordedAt: isoDate(write.recordedAt, `${label}.recordedAt`),
+		};
+	}
+	return writes;
 }
 
 function usageReceiptsFromValue(value: unknown, label: string): Readonly<Record<string, AttemptUsageReceipt>> {

@@ -1,12 +1,23 @@
 import { createHash } from "node:crypto";
 import { expect } from "vitest";
+import {
+	appendWorkerClaimSnapshot,
+	getWorkerClaimSnapshotForAttempt,
+	getWorkerClaimSnapshots,
+	WORKER_CLAIM_CUSTOM_TYPE,
+	type WorkerClaimSnapshotPayload,
+} from "../../../../src/core/delegation/session-worker-claim.ts";
+import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
+	toJsonObject,
 } from "../../../../src/core/orchestration/contracts.ts";
+import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { MAX_ROUTINE_INSTANT_MS } from "../../../../src/core/routines/routine-contract.ts";
+import type { SessionManager } from "../../../../src/kernel/node.ts";
 import { parentInputMessage, parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -619,15 +630,75 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		await withDeadline(world.trace, "all recovered parent input batches settled", parentSettled(40));
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 4);
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
-		root = await world.createRootSession("root", {
+		// Another host records parent writes in the attempt's outbox while this parent is closed. The first one landed
+		// before its acknowledgement was recorded (a stop between import and acknowledgement); the second never landed.
+		const awayManager = world.openSessionManager(file, agentDir);
+		const awayAttempt = recovered[0]!.executionRef!;
+		const parentWriteIds = (manager: SessionManager) =>
+			manager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" &&
+					entry.customType === WORKER_CLAIM_CUSTOM_TYPE &&
+					typeof (entry.data as WorkerClaimSnapshotPayload).parentWriteId === "string"
+						? [(entry.data as WorkerClaimSnapshotPayload).parentWriteId]
+						: [],
+				);
+		expect(parentWriteIds(awayManager), "no foreground claim carries a parent-write marker").toEqual([]);
+		world.faultMatrix.witness("R51", { control: true });
+		const awayClaim = getWorkerClaimSnapshotForAttempt(
+			awayManager.getEntries(),
+			awayAttempt.taskId,
+			awayAttempt.attemptId,
+		)!;
+		expect(awayClaim, "the recovered run saved its claim through the parent write port").toBeDefined();
+		const attemptClaims = (manager: SessionManager) =>
+			getWorkerClaimSnapshots(manager.getEntries()).filter(
+				(claim) => claim.terminalAttemptId === awayAttempt.attemptId,
+			).length;
+		expect(attemptClaims(awayManager), "the foreground port saved the recovered run's claim exactly once").toBe(1);
+		const orchestrationClock = world.timers.port("orchestration");
+		const awayRuntime = new WorkerLifecycle({
 			agentDir,
-			sessionManager: world.openSessionManager(file, agentDir),
-			settings,
+			sessionId: awayManager.getSessionId(),
+			store: new OrchestrationEventStore({
+				agentDir,
+				sessionId: awayManager.getSessionId(),
+				now: () => new Date(orchestrationClock.now()).toISOString(),
+				sleepSync: (delayMs) => world.timers.sleepSync(delayMs),
+			}),
+			now: () => orchestrationClock.now(),
+		}).ledger.runtime;
+		const awayBody = {
+			kind: "worker_claim" as const,
+			claim: toJsonObject(awayClaim.claim),
+			...(awayClaim.request ? { request: toJsonObject(awayClaim.request) } : {}),
+		};
+		awayRuntime.recordParentWrite(awayAttempt.attemptId, "away-claim-landed", awayBody);
+		awayRuntime.recordParentWrite(awayAttempt.attemptId, "away-claim-pending", awayBody);
+		appendWorkerClaimSnapshot(awayManager, awayClaim.claim, awayClaim.request, {
+			parentWriteId: "away-claim-landed",
 		});
+		root = await world.createRootSession("root", { agentDir, sessionManager: awayManager, settings });
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(parentInputs(), "recovered inputs retain their original canonical identity").toHaveLength(40);
 		expect(root.sessionManager.getPendingParentInputs()).toHaveLength(0);
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 4);
+		root.session.backgroundLanes.signalWorkerReceiptDelivery();
+		expect(
+			parentWriteIds(root.sessionManager),
+			"each recorded parent write lands exactly once, in record order",
+		).toEqual(["away-claim-landed", "away-claim-pending"]);
+		expect(
+			root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[awayAttempt.attemptId]?.parentWrites,
+			"both recorded writes are acknowledged",
+		).toBeUndefined();
+		expect(attemptClaims(root.sessionManager), "the pre-landed write was found, not appended again").toBe(3);
+		// A second import pass over the acknowledged outbox lands nothing.
+		root.session.backgroundLanes.drainQueuedWorkerDelegations();
+		expect(parentWriteIds(root.sessionManager)).toEqual(["away-claim-landed", "away-claim-pending"]);
+		expect(attemptClaims(root.sessionManager)).toBe(3);
+		world.faultMatrix.witness("R51", { control: false });
 		world.trace.mark("root", "routine.native-durable-delivery");
 	} finally {
 		release.release();

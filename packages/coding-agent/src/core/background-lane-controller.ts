@@ -17,6 +17,7 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { SessionManager } from "../kernel/node.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { spawnProcess } from "../utils/child-process.ts";
@@ -35,6 +36,12 @@ import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
+import {
+	createForegroundTranscriptWrites,
+	type ForegroundTranscriptWriteDeps,
+	type ForegroundTranscriptWrites,
+	importRecordedParentWrites,
+} from "./delegation/foreground-parent-writes.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
 import type { ParentExecutionContext } from "./delegation/parent-execution-context.ts";
@@ -166,7 +173,8 @@ export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
-	extends ParentExecutionContext,
+	extends Omit<ParentExecutionContext, keyof ForegroundTranscriptWrites | "getSessionManager">,
+		Pick<ForegroundTranscriptWriteDeps, "reportWorkerTerminal">,
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
@@ -175,6 +183,8 @@ export interface BackgroundLaneControllerDeps
 			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
 		>,
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
+	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
+	getSessionManager(): SessionManager;
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
 	getSettingsManager(): SettingsManager;
 	/** Host-supplied worktree-sync engine ports, forwarded into every engine-deps build. */
@@ -194,8 +204,6 @@ export interface BackgroundLaneControllerDeps
 	waitForForegroundIdle(): Promise<void>;
 	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
 	markGoalToolUnavailable(): void;
-	/** Tell the parent session that a closed worker's worktree lane was kept because it holds work. */
-	notifyWorktreeLane?(text: string): void;
 	/** Thinking level of the active session model. */
 	getThinkingLevel?(): OrchestrationThinkingLevel;
 	canRunRoutines?(): boolean;
@@ -255,6 +263,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	private _workerReceipts: WorkerReceiptDelivery | undefined;
+	private _transcriptWrites: ForegroundTranscriptWrites | undefined;
+	/** Attempts whose recorded parent writes have not landed in this transcript yet; their terminal notices wait. */
+	private _parentWriteHolds: ReadonlySet<string> = new Set();
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
@@ -327,10 +338,41 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			: undefined;
 	}
 
+	/** The session-writer half of the foreground parent write port; built once, on first worker use. */
+	private _getTranscriptWrites(): ForegroundTranscriptWrites {
+		if (this._transcriptWrites) return this._transcriptWrites;
+		const deps: ForegroundTranscriptWriteDeps = {
+			getSessionManager: () => this.deps.getSessionManager(),
+			getAgentDir: () => this.deps.getAgentDir(),
+			saveWorkerClaimSnapshot: (claim, request, options) =>
+				this.deps.saveWorkerClaimSnapshot(claim, request, options),
+			warn: (message) => this._safeWarn(message),
+		};
+		const { notifyParentSession, reportWorkerTerminal } = this.deps;
+		if (notifyParentSession) deps.notifyParentSession = notifyParentSession;
+		if (reportWorkerTerminal) deps.reportWorkerTerminal = reportWorkerTerminal;
+		this._transcriptWrites = createForegroundTranscriptWrites(deps);
+		return this._transcriptWrites;
+	}
+
+	/**
+	 * Land every write another host recorded for this parent, in record order. Returns the attempts still holding
+	 * writes; their terminal notices wait so a claim never lands after the completion it explains. A foreground-only
+	 * session records none, so this finds nothing.
+	 */
+	private _importParentWrites(lifecycle: WorkerLifecycle): ReadonlySet<string> {
+		return importRecordedParentWrites(
+			lifecycle.ledger.runtime,
+			this._getTranscriptWrites().importParentWrite,
+			(message) => this._safeWarn(message),
+		);
+	}
+
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
 			{
 				...this.deps,
+				...this._getTranscriptWrites(),
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
 			},
 			this._getWorkerNotificationCoordinator(),
@@ -344,7 +386,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _worktreeLaneHostDeps() {
 		return {
 			engineDeps: (cwd?: string) => this._worktreeEngineDeps(cwd),
-			notifyParent: (text: string) => this.deps.notifyWorktreeLane?.(text),
+			notifyParent: (text: string) => this.deps.notifyParentSession?.("worktree-sync-notice", text),
 			warn: (message: string) => this._safeWarn(message),
 		};
 	}
@@ -406,10 +448,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isDisposed: () => Boolean(this.deps.isDisposed()),
 			warn: (message) => this._safeWarn(message),
 		});
+		this._parentWriteHolds = this._importParentWrites(lifecycle);
+		this._replayPendingTerminals(lifecycle, () => true);
+		return lifecycle;
+	}
+
+	/** Replay the durable terminal outbox, except attempts whose recorded parent writes have not landed yet. */
+	private _replayPendingTerminals(
+		lifecycle: WorkerLifecycle,
+		include: (attemptId: string | undefined) => boolean,
+	): void {
 		for (const notification of lifecycle.getPendingTerminalNotifications()) {
+			const attemptId = notification.record.attemptId;
+			if (attemptId !== undefined && this._parentWriteHolds.has(attemptId)) continue;
+			if (!include(attemptId)) continue;
 			this._getWorkerNotificationCoordinator().recordTerminal(notification.record, notification.notificationId);
 		}
-		return lifecycle;
 	}
 
 	private _getWorkerNotificationCoordinator(): WorkerNotificationCoordinator {
@@ -1265,6 +1319,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					);
 				return;
 			}
+		} else if (this._parentWriteHolds.size > 0) {
+			// Writes that could not land before (no persisted transcript yet, a busy lock) are retried here; a terminal
+			// notice held behind them is offered once they land.
+			const held = this._parentWriteHolds;
+			this._parentWriteHolds = this._importParentWrites(this._workerLifecycle);
+			this._replayPendingTerminals(
+				this._workerLifecycle,
+				(attemptId) => attemptId !== undefined && held.has(attemptId),
+			);
 		}
 		this._workerReceipts?.signal();
 	}

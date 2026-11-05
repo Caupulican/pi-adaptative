@@ -1,3 +1,4 @@
+import type { JsonObject } from "../autonomy/contracts.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
@@ -79,6 +80,11 @@ export interface AttemptRuntimeState {
 	result?: WorkerResultContract;
 	/** Physical parent receipt, independent of notification and usage delivery. */
 	receiptAcknowledgement?: WorkerReceiptAcknowledgement;
+	/**
+	 * Parent-transcript outbox of a host that does not own the parent transcript; the parent imports each write and
+	 * acknowledges it, which removes it. Absent on every attempt a foreground parent ran.
+	 */
+	parentWrites?: Readonly<Record<string, AttemptParentWrite>>;
 	/** Settled independent review of this immutable result, retained across task retries. */
 	verification?: AttemptVerification;
 	/**
@@ -97,6 +103,25 @@ export interface AttemptUsageReceipt {
 	readonly fencingToken: number;
 	readonly kind: "baseline" | "increase";
 	readonly usage: AttemptUsageSnapshot;
+	readonly recordedAt: string;
+}
+
+/** One recorded parent write per port call, carried verbatim so the parent's import replays the same call. */
+export type AttemptParentWriteBody =
+	| {
+			readonly kind: "worker_claim";
+			readonly claim: JsonObject;
+			readonly request?: JsonObject;
+			readonly cwd?: string;
+	  }
+	| { readonly kind: "notice"; readonly customType: string; readonly text: string }
+	| { readonly kind: "terminal_report"; readonly handoff: JsonObject };
+
+export interface AttemptParentWrite {
+	readonly writeId: string;
+	/** Ledger ordinal of the record; the parent imports an attempt's writes in this order. */
+	readonly sequence: number;
+	readonly body: AttemptParentWriteBody;
 	readonly recordedAt: string;
 }
 

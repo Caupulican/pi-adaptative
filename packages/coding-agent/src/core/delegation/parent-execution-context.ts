@@ -4,9 +4,11 @@
  * `WorkerDelegationController` reads its parent only through this context (plus its bot-message directory factory),
  * and the lifecycle, notification and receipt plumbing that `BackgroundLaneController` assembles around it reads the
  * same members besides routine ownership. It has four parts: the environment it runs in, the policy and judges a
- * worker run consults, readers of live foreground state, and the writes it makes into the parent. The foreground composition is `AgentSession`'s background-lane wiring: every
- * member is a lazy closure over the live session, because the session switches its manager, settings and resources
- * on resume and reload and builds several owners (memory, model router, tool performance) after this wiring.
+ * worker run consults, readers of live foreground state, and the port every write into the parent goes through. The
+ * foreground composition is `AgentSession`'s background-lane wiring plus the transcript writes the background-lane
+ * controller derives from the session's writer. Every member is a lazy closure over the live session, because the
+ * session reloads its resources and builds several owners (memory, model router, tool performance) after
+ * this wiring.
  */
 
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
@@ -21,6 +23,7 @@ import type {
 import type { CapabilityEnvelope, WorkerClaim, WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
 import type { EdgeGrantView } from "../autonomy/edge-policy.ts";
 import type { SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
@@ -39,7 +42,10 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
 import type { OrchestrationProfile, OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
+import type { PersistedSessionTaskProfileRecord } from "../orchestration/session-task-profile-store.ts";
+import type { AttemptParentWrite } from "../orchestration/task-runtime-state.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
@@ -124,11 +130,8 @@ export interface ParentExecutionEnvironment {
 	getSessionId(): string;
 	getCwd(): string;
 	getAgentDir(): string;
-	/**
-	 * The parent's transcript. Worker execution reads its branch and also appends through it: lane record snapshots,
-	 * session task profiles and a receipt-origin anchor on an empty branch.
-	 */
-	getSessionManager(): SessionManager;
+	/** The parent's transcript, read-only to worker execution. */
+	getSessionManager(): ParentSessionReader;
 	getSettingsManager(): ParentExecutionSettingsSource;
 	getResourceLoader(): ResourceLoader;
 	getActiveOrchestrationProfile?(): OrchestrationProfile | undefined;
@@ -278,11 +281,37 @@ export interface ForegroundStateReaders {
 	getContinuousChatBirthView?(): { view: string; timestamp: number } | undefined;
 }
 
-/** Every write worker execution makes into its parent, apart from the transcript appends named on the environment. */
-export interface ParentWrites {
+/** What worker execution reads from the parent transcript; every write goes through {@link ParentWritePort}. */
+export type ParentSessionReader = Pick<
+	SessionManager,
+	"getBranch" | "getEntries" | "getEntry" | "getLeafId" | "buildSessionContext" | "getSessionLineageIds"
+>;
+
+/**
+ * Names the attempt a parent write belongs to, so a host that does not own the parent transcript records it on that
+ * attempt. `parentWriteId` is set only by the parent's import of such a record and is stored with the entry it
+ * appends, which is how a repeated import finds that the write already landed.
+ */
+export interface ParentWriteOrigin {
+	attemptId?: string;
+	parentWriteId?: string;
+}
+
+/**
+ * A recorded write the parent imports: `imported` once its entry is physically persisted, `pending` while it may still
+ * land, `refused` (reported once) when this parent can never land it.
+ */
+export type ParentWriteImport = "imported" | "pending" | "refused";
+
+/**
+ * Every write worker execution makes into its parent. The foreground port appends to the parent transcript at once,
+ * exactly as the session always has. A host that does not own the parent transcript records each transcript write on
+ * its attempt instead (`attempt.parent_write_recorded`), and the parent imports those records on open.
+ */
+export interface ParentWritePort {
 	emit(event: AgentSessionEvent): void;
 	/** Steer a notice to the owning parent session (a custom message that may trigger a turn). */
-	notifyParentSession?(customType: string, text: string): void;
+	notifyParentSession?(customType: string, text: string, origin?: ParentWriteOrigin): void;
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	/**
@@ -290,9 +319,32 @@ export interface ParentWrites {
 	 * execution directory); the parent-review marker is re-derived against it, so a worker in a task directory or a
 	 * worktree lane is judged against its own scope and not the process's.
 	 */
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
-	/** A terminal handoff the parent has taken: the project chat logs the attempt's claim once, as its `[name]` report. */
-	reportWorkerTerminal?(handoff: Readonly<WorkerTerminalHandoff>): void;
+	saveWorkerClaimSnapshot(
+		claim: WorkerClaim,
+		request?: WorkerRequest,
+		options?: { cwd?: string } & ParentWriteOrigin,
+	): void;
+	/**
+	 * A terminal handoff the parent has taken: the project chat logs the attempt's claim once, as its `[name]` report.
+	 * A failed write is returned, never thrown, so the handoff stays retained and is offered again.
+	 */
+	reportWorkerTerminal?(handoff: Readonly<WorkerTerminalHandoff>): { ok: true } | { ok: false; reason: string };
+	/** The compatibility lane-record projection of a published terminal. */
+	appendLaneRecordSnapshot(record: LaneRecord): void;
+	/** A session task profile, created only by the root's delegate tool. */
+	appendSessionTaskProfile(record: PersistedSessionTaskProfileRecord): void;
+	/**
+	 * The lineage a parentless worker's receipts publish under, captured before admission can await. An empty branch
+	 * gets an explicit anchor entry; a dispatch whose origin is already pinned (a saved intent) never calls this.
+	 */
+	captureReceiptOrigin(assertOuterCurrent?: () => void, anchor?: WorkerReceiptAnchor): WorkerReceiptOrigin;
+	/**
+	 * Present only on the host that owns the parent transcript: import one write another host recorded on `attemptId`,
+	 * exactly once. It runs before that attempt's terminal is published here, so the published terminal reads the
+	 * imported claim. It never throws: a failure is reported once and the write stays `pending`, and a write this parent
+	 * can never land is reported once and `refused`, so it cannot hold its attempt's terminal.
+	 */
+	importParentWrite?(attemptId: string, write: AttemptParentWrite): ParentWriteImport;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
@@ -309,4 +361,4 @@ export interface ParentExecutionContext
 	extends ParentExecutionEnvironment,
 		ParentExecutionPolicy,
 		ForegroundStateReaders,
-		ParentWrites {}
+		ParentWritePort {}

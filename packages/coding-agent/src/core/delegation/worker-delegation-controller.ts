@@ -20,7 +20,6 @@ import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../aut
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
-import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../autonomy/telemetry-events.ts";
 import {
 	createWorkerToolAdapterRegistry,
@@ -129,6 +128,7 @@ import {
 	releaseFailureCause,
 } from "../util/resource-release.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
+import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import type { ParentExecutionContext, ParentExecutionSettingsSource } from "./parent-execution-context.ts";
 import {
@@ -233,7 +233,6 @@ import {
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { recordWorkerReceiptAcceptance } from "./worker-receipt-acceptance.ts";
-import { captureWorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
@@ -643,6 +642,17 @@ export class WorkerDelegationController {
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
 			publishTerminalRecord: (record) => this.publishTerminalRecord(record),
 			publishTerminalRecords: (records) => this.publishRecoveredTerminalRecords(records),
+			...(this.deps.importParentWrite
+				? {
+						importParentWrites: () => {
+							const importWrite = this.deps.importParentWrite;
+							if (importWrite)
+								importRecordedParentWrites(this.lifecycle.ledger.runtime, importWrite, (message) =>
+									this.safeWarn(message),
+								);
+						},
+					}
+				: {}),
 			dispatchVerification: (recovery) => this.dispatchRecoveredVerification(recovery),
 			recoverTaskBearingMailboxTurns: () => this.agentControl.reconcileTaskBearingMailboxTurns(),
 			recoverSessionRootReplies: () => this.agentControl.reconcileSessionRootReplies(),
@@ -756,7 +766,7 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("worker-wait"),
 			warn: (message) => this.safeWarn(message),
 			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
-			captureReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			captureReceiptOrigin: () => this.deps.captureReceiptOrigin(),
 			noteAttemptOwnerEpoch: (attemptId, ownerEpoch) =>
 				this.notifications.noteAttemptOwnerEpoch(attemptId, ownerEpoch),
 		});
@@ -1050,7 +1060,7 @@ export class WorkerDelegationController {
 			reasonCode,
 		}).record;
 		// The claim describes execution; durable usage receipts own parent charge delivery.
-		this.deps.saveWorkerClaimSnapshot(claim, ledger.request, { cwd: ledger.cwd });
+		this.deps.saveWorkerClaimSnapshot(claim, ledger.request, { cwd: ledger.cwd, attemptId: ledger.handle.attemptId });
 		return canceled;
 	}
 
@@ -1391,7 +1401,13 @@ export class WorkerDelegationController {
 	}
 
 	private getTaskProfileStore(): SessionTaskProfileStore {
-		this.taskProfileStore ??= new SessionTaskProfileStore(this.deps.getSessionManager());
+		this.taskProfileStore ??= new SessionTaskProfileStore(
+			{
+				getLeafId: () => this.deps.getSessionManager().getLeafId(),
+				getEntry: (id) => this.deps.getSessionManager().getEntry(id),
+			},
+			(record) => this.deps.appendSessionTaskProfile(record),
+		);
 		return this.taskProfileStore;
 	}
 
@@ -2146,7 +2162,7 @@ export class WorkerDelegationController {
 		// snapshot is a compatibility projection and telemetry is an observer; neither may reopen an
 		// accepted handoff or suppress its in-process publication fence.
 		try {
-			appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+			this.deps.appendLaneRecordSnapshot(record);
 		} catch (error) {
 			this.safeWarn(
 				`Worker terminal snapshot projection failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2179,7 +2195,11 @@ export class WorkerDelegationController {
 			);
 			return "retained";
 		}
-		this.deps.reportWorkerTerminal?.(handoff);
+		const reported = this.deps.reportWorkerTerminal?.(handoff);
+		if (reported && !reported.ok) {
+			this.safeWarn(`Worker terminal handoff for ${handoff.record.laneId} failed: ${reported.reason}`);
+			return "retained";
+		}
 		const notification = this.lifecycle.getAttemptTerminalNotification(handoff.terminalAttemptId);
 		if (notification?.status === "pending") {
 			this.lifecycle.markNotificationsDelivered([notification.notificationId]);
@@ -2228,6 +2248,11 @@ export class WorkerDelegationController {
 		};
 	}
 
+	/** Whether this parent still has to import writes another host recorded for the attempt. */
+	private holdsParentWrites(attempt: AttemptRuntimeState): boolean {
+		return this.deps.importParentWrite !== undefined && attempt.parentWrites !== undefined;
+	}
+
 	private publishRecoveredTerminalRecords(records: readonly LaneRecord[]): void {
 		const handoffs: WorkerTerminalHandoff[] = [];
 		const directRecords: LaneRecord[] = [];
@@ -2242,6 +2267,7 @@ export class WorkerDelegationController {
 				continue;
 			}
 			const { record, attempt, childAgentId, parentAgentId } = terminal;
+			if (this.holdsParentWrites(attempt)) continue;
 			this.agentControl.settleCancelledWorkerSteers(record);
 			this.recovery.clearScheduledRetry(attempt.attemptId);
 			if (this.publishedTerminalAttemptIds.has(attempt.attemptId)) continue;
@@ -2305,6 +2331,7 @@ export class WorkerDelegationController {
 		try {
 			this.deps.saveWorkerClaimSnapshot({ ...claim, ...(blockers.length > 0 ? { blockers } : {}) }, stored.request, {
 				cwd: attempt?.dispatch.executionContract?.worker.authority.cwd,
+				attemptId: record.attemptId,
 			});
 		} catch (error) {
 			this.safeWarn(
@@ -2404,6 +2431,9 @@ export class WorkerDelegationController {
 	private publishTerminalRecord(record: LaneRecord): void {
 		if (!isLaneTerminalStatus(record.status)) return;
 		const { record: current, attempt, childAgentId, parentAgentId } = this.resolveTerminalRecord(record);
+		// Writes another host recorded for this attempt (its claim first) land before its terminal is published; the
+		// next recovery pass imports them and publishes. A foreground attempt never records any.
+		if (this.holdsParentWrites(attempt)) return;
 		record = current;
 		this.agentControl.settleCancelledWorkerSteers(record);
 		this.settleVerifiedSubjectClaim(record);
@@ -4464,8 +4494,7 @@ export class WorkerDelegationController {
 				: undefined;
 		} else {
 			assertReceiptAdmission?.();
-			capturedRequest.receiptOrigin ??= captureWorkerReceiptOrigin(
-				this.deps.getSessionManager(),
+			capturedRequest.receiptOrigin ??= this.deps.captureReceiptOrigin(
 				assertReceiptAdmission,
 				request.receiptOriginAnchor,
 			);
@@ -5298,7 +5327,9 @@ export class WorkerDelegationController {
 				this.safeWarn(message);
 				// The UI warning is not enough: the parent model also needs to know a worker's process was stopped.
 				try {
-					this.deps.notifyParentSession?.("process-matrix-notice", message);
+					this.deps.notifyParentSession?.("process-matrix-notice", message, {
+						attemptId: durableHandle.attemptId,
+					});
 				} catch {
 					// Notification delivery must never fail the worker's own terminal path.
 				}
@@ -5988,7 +6019,10 @@ export class WorkerDelegationController {
 					notify: !verificationRequired,
 				}).record;
 				try {
-					this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest, { cwd: executionPlan.cwd });
+					this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest, {
+						cwd: executionPlan.cwd,
+						attemptId: durableHandle.attemptId,
+					});
 				} catch (error) {
 					this.safeWarn(
 						`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -6096,7 +6130,10 @@ export class WorkerDelegationController {
 					// the runtime did not record.
 					if (finalized) {
 						try {
-							this.deps.saveWorkerClaimSnapshot(failureClaim, workerRequest, { cwd: executionPlan.cwd });
+							this.deps.saveWorkerClaimSnapshot(failureClaim, workerRequest, {
+								cwd: executionPlan.cwd,
+								attemptId: durableHandle.attemptId,
+							});
 						} catch (saveError) {
 							this.safeWarn(
 								`Failed to persist worker claim ${startedRecord.laneId}: ${saveError instanceof Error ? saveError.message : String(saveError)}`,

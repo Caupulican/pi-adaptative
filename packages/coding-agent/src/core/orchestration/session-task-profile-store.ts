@@ -18,7 +18,7 @@ export interface SessionTaskProfileLoadResult {
 	diagnostics: string[];
 }
 
-interface PersistedSessionTaskProfileRecord {
+export interface PersistedSessionTaskProfileRecord {
 	version: 1;
 	baseProfileId: string;
 	authorProfileId?: string;
@@ -60,7 +60,8 @@ function cloneRecord(record: SessionTaskProfileRecord): SessionTaskProfileRecord
  * the active branch.
  */
 export class SessionTaskProfileStore {
-	private readonly sessionManager: SessionManager;
+	private readonly sessionManager: Pick<SessionManager, "getLeafId" | "getEntry">;
+	private readonly appendRecord: (record: PersistedSessionTaskProfileRecord) => void;
 	private cachedLeafId: string | null | undefined;
 	private cachedResult: SessionTaskProfileLoadResult = {
 		records: [],
@@ -68,8 +69,13 @@ export class SessionTaskProfileStore {
 		diagnostics: [],
 	};
 
-	constructor(sessionManager: SessionManager) {
+	/** `appendRecord` appends one `session_task_profile` entry as the child of the current leaf. */
+	constructor(
+		sessionManager: Pick<SessionManager, "getLeafId" | "getEntry">,
+		appendRecord: (record: PersistedSessionTaskProfileRecord) => void,
+	) {
 		this.sessionManager = sessionManager;
+		this.appendRecord = appendRecord;
 	}
 
 	load(): SessionTaskProfileLoadResult {
@@ -128,11 +134,7 @@ export class SessionTaskProfileStore {
 	}
 
 	append(input: SessionTaskProfileRecord): SessionTaskProfileRecord {
-		if (
-			typeof this.sessionManager.getLeafId !== "function" ||
-			typeof this.sessionManager.getEntry !== "function" ||
-			typeof this.sessionManager.appendCustomEntry !== "function"
-		) {
+		if (typeof this.sessionManager.getLeafId !== "function" || typeof this.sessionManager.getEntry !== "function") {
 			throw new Error(BRANCH_STORAGE_REQUIRED);
 		}
 		const loaded = this.load();
@@ -150,7 +152,7 @@ export class SessionTaskProfileStore {
 			...(record.authorProfileId ? { authorProfileId: record.authorProfileId } : {}),
 			profile: record.profile,
 		};
-		this.sessionManager.appendCustomEntry(SESSION_TASK_PROFILE_CUSTOM_TYPE, persisted);
+		this.appendRecord(persisted);
 		const registry = new Map(loaded.registry);
 		registry.set(record.profile.profileId, record);
 		this.cachedLeafId = this.sessionManager.getLeafId();

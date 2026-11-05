@@ -98,6 +98,7 @@ import {
 import {
 	type ApprovalRuntimeState,
 	type AttemptDispatchReadiness,
+	type AttemptParentWriteBody,
 	type AttemptRuntimeState,
 	type CreateObjectiveInput,
 	type CreateTaskInput,
@@ -128,6 +129,8 @@ export {
 export {
 	type ApprovalRuntimeState,
 	type AttemptDispatchReadiness,
+	type AttemptParentWrite,
+	type AttemptParentWriteBody,
 	type AttemptRuntimeState,
 	type CreateObjectiveInput,
 	type CreateTaskInput,
@@ -857,6 +860,33 @@ export class DurableTaskRuntime {
 			actor: "runtime",
 			idempotencyKey: `attempt-receipts-delivered:${attemptId}:${acknowledgement.receiptId}`,
 			payload: toJsonObject({ attemptId, acknowledgement }),
+		});
+	}
+
+	/** A host that does not own the parent transcript records the write; the parent imports it on open. */
+	recordParentWrite(attemptId: string, writeId: string, body: AttemptParentWriteBody): void {
+		this.refresh();
+		this.requireAttempt(attemptId);
+		this.commit({
+			type: "attempt.parent_write_recorded",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-parent-write-recorded:${attemptId}:${writeId}`,
+			payload: toJsonObject({ attemptId, writeId, body }),
+		});
+	}
+
+	/** Parent import only, after the imported entry is physically persisted in the parent transcript. */
+	acknowledgeParentWrite(attemptId: string, writeId: string): void {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		if (!attempt.parentWrites || !Object.hasOwn(attempt.parentWrites, writeId)) return;
+		this.commit({
+			type: "attempt.parent_write_imported",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-parent-write-imported:${attemptId}:${writeId}`,
+			payload: toJsonObject({ attemptId, writeId }),
 		});
 	}
 

@@ -1149,12 +1149,12 @@ export class AgentSession {
 			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
-			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			captureReviewContext: (maxChars) => this._memory.captureReviewContext(maxChars),
 			aggregateUsageWindow: (window) => this._analytics.aggregateUsageWindow(window),
 			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
-			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
+			notifyParentSession: (customType, text, origin) =>
+				this._steerSessionNotice(customType, text, origin?.parentWriteId),
 			createLaneMemoryBroker: (capacity, references) => this._memory.createLaneMemoryBroker(capacity, references),
 			captureKnowledgeGrant: (references) => this._memory.captureKnowledgeGrant(references),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
@@ -3565,10 +3565,13 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Steer a displayed custom notice to this session's model (may trigger a turn); a delivery failure is a visible warning. */
-	private _steerSessionNotice(customType: string, text: string): void {
+	/**
+	 * Steer a displayed custom notice to this session's model (may trigger a turn); a delivery failure is a visible
+	 * warning. An imported notice carries its `parentWriteId` in `details`, its exactly-once marker.
+	 */
+	private _steerSessionNotice(customType: string, text: string, parentWriteId?: string): void {
 		void this.sendCustomMessage(
-			{ customType, content: text, display: true },
+			{ customType, content: text, display: true, ...(parentWriteId ? { details: { parentWriteId } } : {}) },
 			{ triggerTurn: true, deliverAs: "steer" },
 		).catch((error: unknown) => {
 			this._emit({
@@ -5608,7 +5611,11 @@ export class AgentSession {
 		return this._continuousChatPrefix.resolve(() => continuousChatPrefixOf(this.agent.state));
 	}
 
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string {
+	saveWorkerClaimSnapshot(
+		claim: WorkerClaim,
+		request?: WorkerRequest,
+		options?: { cwd?: string; parentWriteId?: string },
+	): string {
 		const entryId = appendWorkerClaimSnapshot(this.sessionManager, claim, request, options);
 		this.recordAcceptedWorkerEvidence();
 		return entryId;
