@@ -580,14 +580,22 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 						details.kind === "host-event-gap"
 					);
 				});
+			// A root host-event append persists inside its task-runtime transaction, where the runtime refuses a re-entrant
+			// read and the persistence observer swallows the throw: the condition is read once that synchronous write returned.
 			const persisted = (done: () => boolean) =>
-				new Promise<void>((resolve) => {
+				new Promise<void>((resolve, reject) => {
 					const check = () => {
-						if (!done()) return;
+						try {
+							if (!done()) return;
+						} catch (error) {
+							off();
+							reject(error);
+							return;
+						}
 						off();
 						resolve();
 					};
-					const off = fresh.sessionManager.onEntriesPersisted(check);
+					const off = fresh.sessionManager.onEntriesPersisted(() => queueMicrotask(check));
 					check();
 				});
 			const heldEvents = () => {
