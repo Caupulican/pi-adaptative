@@ -788,7 +788,9 @@ export class PersistentBotTeamStore {
 			)
 				throw new Error("Routine occurrence claim is stale.");
 			const next = update(structuredClone(current));
+			const deferred = current.phase === "dispatching" && next.phase === "pending";
 			const transitionAllowed =
+				deferred ||
 				(current.phase === "claimed" && next.phase === "dispatching" && current.claim.leaseUntil > input.nowMs) ||
 				((current.phase === "dispatching" || current.phase === "running") &&
 					(next.phase === "running" || next.phase === "terminal" || next.phase === "uncertain"));
@@ -800,19 +802,13 @@ export class PersistentBotTeamStore {
 				next.routineRevision !== current.routineRevision ||
 				next.createdAt !== current.createdAt ||
 				next.updatedAt !== input.nowMs ||
-				JSON.stringify([next.definition, next.parentOrigin, next.target, next.trigger, next.claim]) !==
-					JSON.stringify([
-						current.definition,
-						current.parentOrigin,
-						current.target,
-						current.trigger,
-						current.claim,
-					]) ||
-				(current.dispatchKey !== undefined && next.dispatchKey !== current.dispatchKey) ||
+				JSON.stringify([next.definition, next.parentOrigin, next.target, next.trigger]) !==
+					JSON.stringify([current.definition, current.parentOrigin, current.target, current.trigger]) ||
+				(!deferred && JSON.stringify(next.claim) !== JSON.stringify(current.claim)) ||
+				(!deferred && current.dispatchKey !== undefined && next.dispatchKey !== current.dispatchKey) ||
 				(current.executionRef !== undefined && next.executionRef?.taskId !== current.executionRef.taskId) ||
-				!next.dispatchKey ||
-				next.dispatchKey.length > 512 ||
-				next.dispatchKey.includes("\0") ||
+				(!deferred && !next.dispatchKey) ||
+				(next.dispatchKey !== undefined && (next.dispatchKey.length > 512 || next.dispatchKey.includes("\0"))) ||
 				!parseRoutineOccurrence(next)
 			)
 				throw new Error("Routine transition cannot change its admitted identity or retain invalid state.");
@@ -1682,6 +1678,28 @@ export class PersistentBotTeamStore {
 			updatedAt: input.nowMs,
 		}));
 	}
+	/** Release only a dispatch that the native executor explicitly declined before admission. */
+	deferRoutineOccurrence(input: { occurrenceId: string; claimToken: string; nowMs: number }): void {
+		this.updateClaimedOccurrence(input, (item) => {
+			if (item.phase !== "dispatching" || item.executionRef || item.result)
+				throw new Error("Only an unadmitted routine dispatch can return to pending.");
+			const definition = this.routines.get(item.routineId);
+			if (
+				!definition ||
+				definition.incarnationId !== item.definition.incarnationId ||
+				(!definition.enabled && item.definition.enabled)
+			)
+				return this.withResult(
+					{ ...item, phase: "terminal", updatedAt: input.nowMs },
+					"cancelled",
+					"Routine was paused or deleted before dispatch.",
+					item.parentOrigin.sessionId,
+				);
+			const { claim: _claim, dispatchKey: _dispatchKey, ...pending } = item;
+			return { ...pending, phase: "pending", updatedAt: input.nowMs };
+		});
+	}
+
 	markRoutineRunning(input: {
 		occurrenceId: string;
 		claimToken: string;

@@ -158,6 +158,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 	});
 	const release = createBarrier();
 	const entered = createBarrier();
+	const scheduledRelease = createBarrier();
 	try {
 		await command(
 			"routine-forged-target",
@@ -243,6 +244,36 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(occurrences()[0]?.phase).toBe("uncertain");
 		expect(occurrences()[0]?.result?.delivery).toBe("acknowledged");
+		world.provider.enqueue("worker-a", workerReply("scheduled-routine", replacement, scheduledRelease.promise));
+		const deferred = createBarrier();
+		const stopObservingDeferral = store().subscribe(() => {
+			if (occurrences().some((entry) => entry.trigger.kind === "schedule" && entry.phase === "pending"))
+				deferred.release();
+		});
+		const beforeDaemon = store().getRoutine(routineId)!;
+		world.timers.advance("routines", 60_000);
+		expect(store().queueDueRoutinesForDaemon(world.timers.port("routines").now())).toBe(1);
+		expect(store().getRoutine(routineId)?.nextRunAt, "the daemon leaves due-time ownership with the scheduler").toBe(
+			at,
+		);
+		expect(store().getRoutine(routineId)?.revision, "a daemon observation does not edit saved intent").toBe(
+			beforeDaemon.revision,
+		);
+		try {
+			await withDeadline(world.trace, "busy specialist leaves the scheduled occurrence pending", deferred.promise);
+		} finally {
+			stopObservingDeferral();
+		}
+		store().reload();
+		const pending = occurrences().find((entry) => entry.trigger.kind === "schedule")!;
+		expect(pending.phase).toBe("pending");
+		expect(pending.claim).toBeUndefined();
+		expect(pending.dispatchKey).toBeUndefined();
+		expect(pending.result, "a busy specialist is not a failed routine").toBeUndefined();
+		expect(Object.keys(root.session.backgroundLanes.getTaskRuntimeSnapshot()!.tasks)).toHaveLength(1);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(occurrences().find((entry) => entry.occurrenceId === pending.occurrenceId)).toEqual(pending);
+		expect(parentInputs(), "deferral cannot publish a terminal result").toHaveLength(1);
 		const manualSettled = parentSettled(2);
 		world.systemOne.enterPhase("routine-manual-parent", {});
 		world.provider.enqueue("root", {
@@ -297,7 +328,6 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		).filter((notification) => notification.attemptId === admitted.executionRef?.attemptId);
 		expect(nativeReceipts).toHaveLength(1);
 		expect(nativeReceipts[0]?.status).toBe("delivered");
-		world.provider.enqueue("worker-a", workerReply("scheduled-routine", replacement));
 		world.provider.enqueue("root", {
 			...text("routine-scheduled-parent", "The revised scheduled review completed."),
 			check: (request) => {
@@ -334,20 +364,13 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			},
 		});
 		const scheduledSettled = parentSettled(3);
-		const beforeDaemon = store().getRoutine(routineId)!;
-		world.timers.advance("routines", 60_000);
-		expect(store().queueDueRoutinesForDaemon(world.timers.port("routines").now())).toBe(1);
-		expect(store().getRoutine(routineId)?.nextRunAt, "the daemon leaves due-time ownership with the scheduler").toBe(
-			at,
-		);
-		expect(store().getRoutine(routineId)?.revision, "a daemon observation does not edit saved intent").toBe(
-			beforeDaemon.revision,
-		);
+		scheduledRelease.release();
 		await withDeadline(world.trace, "scheduled routine parent wake settled", scheduledSettled);
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(occurrences()).toHaveLength(2);
 		expect(occurrences().every((entry) => entry.result?.delivery === "acknowledged")).toBe(true);
 		expect(occurrences().filter((entry) => entry.trigger.kind === "schedule")).toHaveLength(1);
+		expect(occurrences().find((entry) => entry.trigger.kind === "schedule")?.occurrenceId).toBe(pending.occurrenceId);
 		for (let run = 0; run < 2; run++) {
 			const label = `routine-repeated-provider-id-${run}`;
 			world.provider.enqueue("worker-a", workerReply(label, replacement));
@@ -498,6 +521,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		world.trace.mark("root", "routine.native-durable-delivery");
 	} finally {
 		release.release();
+		scheduledRelease.release();
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);

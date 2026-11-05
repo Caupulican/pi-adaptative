@@ -770,6 +770,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** Durable logical-worker controls. Each checks UAC before materializing worker state. */
+	subscribeStateChanges(listener: () => void): () => void {
+		return this._getWorkerController().getAgentControl().subscribeStateChanges(listener);
+	}
+
 	listWorkerAgents(scope?: WorkerAgentControlScope): ReturnType<WorkerAgentControlPort["listWorkerAgents"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
@@ -1203,6 +1207,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
 			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
+			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
 			acknowledgeWorkerNotification: (occurrence) => {
 				if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;

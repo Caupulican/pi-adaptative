@@ -35,6 +35,8 @@ export interface RoutineStorePort {
 		dispatchKey: string;
 		nowMs: number;
 	}): void;
+	/** Only an executor's explicit refusal before admission may return a dispatch to pending. */
+	deferRoutineOccurrence(input: { occurrenceId: string; claimToken: string; nowMs: number }): void;
 	markRoutineRunning(input: {
 		occurrenceId: string;
 		claimToken: string;

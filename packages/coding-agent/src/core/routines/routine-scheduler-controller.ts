@@ -30,6 +30,8 @@ interface RoutineSchedulerDeps {
 	captureOriginGuard(origin: WorkerReceiptOrigin): () => void;
 	subscribeContext(listener: () => void): () => void;
 	subscribeExecution(listener: () => void): () => void;
+	/** Includes physical resource release, which may follow the durable terminal record. */
+	subscribeCapacity(listener: () => void): () => void;
 	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
 	/** Consume the native notification only after its parent input is physically durable. */
 	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
@@ -47,6 +49,7 @@ export class RoutineSchedulerController {
 	private readonly deps: RoutineSchedulerDeps;
 	private readonly abort = new AbortController();
 	private readonly unsubscribe: readonly (() => void)[];
+	private unsubscribeCapacity: (() => void) | undefined;
 	private alarm: { handle?: unknown } | undefined;
 	private pass: Promise<RoutineTickResult> | undefined;
 	private scheduled = false;
@@ -54,6 +57,8 @@ export class RoutineSchedulerController {
 	private disposed = false;
 	private started = false;
 	private readonly deliveries = new Map<string, Promise<void>>();
+	private capacityRevision = 0;
+	private readonly deferred = new Map<string, number>();
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
@@ -135,9 +140,9 @@ export class RoutineSchedulerController {
 		this.disposed = true;
 		this.abort.abort(new Error("Routine scheduler stopped; durable occurrences remain available for recovery."));
 		this.clearAlarm();
-		for (const unsubscribe of this.unsubscribe) {
+		for (const unsubscribe of [...this.unsubscribe, this.unsubscribeCapacity]) {
 			try {
-				unsubscribe();
+				unsubscribe?.();
 			} catch (error) {
 				this.warn(error);
 			}
@@ -181,6 +186,12 @@ export class RoutineSchedulerController {
 	private async runPass(): Promise<RoutineTickResult> {
 		const result: RoutineTickResult = { dispatched: [], failed: [] };
 		this.deps.store.reload();
+		const pendingIds = new Set(
+			this.occurrences()
+				.filter((entry) => entry.phase === "pending" || entry.phase === "claimed")
+				.map((entry) => entry.occurrenceId),
+		);
+		for (const id of this.deferred.keys()) if (!pendingIds.has(id)) this.deferred.delete(id);
 		for (const occurrence of this.occurrences()) {
 			if (!this.active) return result;
 			if (occurrence.phase === "dispatching" || occurrence.phase === "running" || occurrence.phase === "uncertain")
@@ -198,6 +209,7 @@ export class RoutineSchedulerController {
 				.map((routine) => routine.routineId);
 			const recoverable = this.occurrences().filter(
 				(entry) =>
+					this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
 					this.deps.canUseOrigin(entry.parentOrigin) &&
 					(entry.phase === "pending" ||
 						(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
@@ -217,6 +229,7 @@ export class RoutineSchedulerController {
 				if (!this.active) return result;
 				if (
 					occurrence.phase !== "claimed" ||
+					this.deferred.get(occurrence.occurrenceId) === this.capacityRevision ||
 					occurrence.claim?.owner !== this.deps.owner ||
 					!this.deps.canUseOrigin(occurrence.parentOrigin)
 				)
@@ -309,6 +322,11 @@ export class RoutineSchedulerController {
 		const occurrence = { ...claimed, phase: "dispatching" as const, dispatchKey };
 		try {
 			if (occurrence.target.kind === "session") {
+				this.unsubscribeCapacity ??= this.deps.subscribeCapacity(() => {
+					this.capacityRevision++;
+					this.wake();
+				});
+				const capacityRevision = this.capacityRevision;
 				const outcome = await this.deps.worker.start(
 					this.request(occurrence),
 					() => {
@@ -319,6 +337,21 @@ export class RoutineSchedulerController {
 				);
 				if (!this.active) return;
 				if (!outcome.started) {
+					if (
+						outcome.skipReason === "worker_specialist_busy" ||
+						outcome.skipReason === "worker_cleanup_pending" ||
+						outcome.skipReason.startsWith("worker_specialist_release_retained:")
+					) {
+						// The executor confirmed no admission. Keep this exact occurrence across restart;
+						// only a later capacity event permits another attempt in this live scheduler.
+						this.deferred.set(occurrence.occurrenceId, capacityRevision);
+						this.deps.store.deferRoutineOccurrence({
+							occurrenceId: occurrence.occurrenceId,
+							claimToken,
+							nowMs: this.deps.timers.now(),
+						});
+						return;
+					}
 					this.deps.store.finishRoutineOccurrence({
 						occurrenceId: occurrence.occurrenceId,
 						claimToken,
@@ -330,6 +363,7 @@ export class RoutineSchedulerController {
 					result.failed.push(`${occurrence.routineId}: ${outcome.skipReason}`);
 					return;
 				}
+				this.deferred.delete(occurrence.occurrenceId);
 				this.recordExecution(occurrence, outcome.state);
 			} else {
 				const summary = await this.deps.dispatchMessage(occurrence);

@@ -500,6 +500,8 @@ export interface WorkerAgentLaneResolution {
 
 /** One canonical host port for model-facing logical-agent controls. */
 export interface WorkerAgentControlPort {
+	/** Lifecycle and physical-release notifications; the subscriber owns detaching its listener. */
+	subscribeStateChanges(listener: () => void): () => void;
 	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
 	observeWorkerTerminalRecords?(records: readonly LaneRecord[]): void;
 	/** Observe only the exact attempts retained in a bounded model-facing control result. */

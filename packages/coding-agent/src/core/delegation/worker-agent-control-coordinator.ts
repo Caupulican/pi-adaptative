@@ -2713,7 +2713,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return admission.ok ? undefined : admission.reasonCode;
 	}
 
-	private subscribeStateChanges(listener: () => void): () => void {
+	/** Worker execution and physical-release events; subscribers own their lifetime. */
+	subscribeStateChanges(listener: () => void): () => void {
 		this.stateListeners.add(listener);
 		return () => this.stateListeners.delete(listener);
 	}
