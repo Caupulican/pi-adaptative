@@ -257,6 +257,46 @@ function workingDirectoriesAfter(
 	return next.length > MAX_SHELL_WORKING_DIRECTORIES ? undefined : next;
 }
 
+/** One step of a command line's credential walk: a file-inspecting command, or a risk the walk itself decided. */
+type ShellInspectionStep =
+	| {
+			readonly kind: "command";
+			readonly cmd: ParsedInvocationCommand;
+			readonly readsPipe: boolean;
+			/** Every directory the command may resolve its relative paths from. */
+			readonly policies: readonly CredentialPathPolicy[];
+	  }
+	| { readonly kind: "risk"; readonly risk: "credential_path" | "process_environment" };
+
+/**
+ * The one walk over a command line that the synchronous and the asynchronous credential checks share: each command
+ * that inspects files, in order, with the working directories earlier `cd`/`pushd` commands made possible, and the risks
+ * the line itself carries (a process-environment read, a working-directory change past the bound). The walk ends at
+ * its first risk.
+ */
+function* shellInspectionSteps(
+	shellTokens: readonly ShellToken[],
+	paths: CredentialPathPolicy,
+): Generator<ShellInspectionStep> {
+	let policies: readonly CredentialPathPolicy[] = [paths];
+	for (const segment of parseShellInvocations(shellTokens)) {
+		for (let i = 0; i < segment.invocation.length; i++) {
+			const cmd = parseInvocationCommand(segment.invocation, i);
+			if (cmd.envRisk) {
+				yield { kind: "risk", risk: cmd.envRisk };
+				return;
+			}
+			if (cmd.isInspectionCommand) yield { kind: "command", cmd, readsPipe: segment.readsPipe, policies };
+		}
+		const moved = workingDirectoriesAfter(segment.invocation, policies);
+		if (!moved) {
+			yield { kind: "risk", risk: "credential_path" };
+			return;
+		}
+		policies = moved;
+	}
+}
+
 function shellCredentialRisk(
 	command: string,
 	paths: CredentialPathPolicy,
@@ -272,24 +312,17 @@ function shellCredentialRisk(
 		return undefined;
 	}
 
-	let policies: readonly CredentialPathPolicy[] = [paths];
-	for (const segment of parseShellInvocations(shellTokens)) {
-		for (let i = 0; i < segment.invocation.length; i++) {
-			const cmd = parseInvocationCommand(segment.invocation, i);
-			if (cmd.envRisk) return cmd.envRisk;
-			if (!cmd.isInspectionCommand) continue;
-			for (const policy of policies) {
-				if (cmd.searchTool) {
-					const searchRisk = searchCredentialRisk(cmd.searchTool, cmd.args, segment.readsPipe, policy, true);
-					if (searchRisk) return searchRisk;
-					continue;
-				}
-				if (hasProtectedArgumentToken(cmd.args, policy)) return "credential_path";
+	for (const step of shellInspectionSteps(shellTokens, paths)) {
+		if (step.kind === "risk") return step.risk;
+		const { cmd } = step;
+		for (const policy of step.policies) {
+			if (cmd.searchTool) {
+				const searchRisk = searchCredentialRisk(cmd.searchTool, cmd.args, step.readsPipe, policy, true);
+				if (searchRisk) return searchRisk;
+				continue;
 			}
+			if (hasProtectedArgumentToken(cmd.args, policy)) return "credential_path";
 		}
-		const moved = workingDirectoriesAfter(segment.invocation, policies);
-		if (!moved) return "credential_path";
-		policies = moved;
 	}
 	return undefined;
 }
@@ -487,32 +520,25 @@ async function shellCredentialRiskAsync(
 		return undefined;
 	}
 
-	let policies: readonly CredentialPathPolicy[] = [paths];
-	for (const segment of parseShellInvocations(shellTokens)) {
-		for (let i = 0; i < segment.invocation.length; i++) {
-			signal?.throwIfAborted();
-			const cmd = parseInvocationCommand(segment.invocation, i);
-			if (cmd.envRisk) return cmd.envRisk;
-			if (!cmd.isInspectionCommand) continue;
-			for (const policy of policies) {
-				if (cmd.searchTool) {
-					const searchRisk = await searchCredentialRiskAsync(
-						cmd.searchTool,
-						cmd.args,
-						segment.readsPipe,
-						policy,
-						true,
-						signal,
-					);
-					if (searchRisk) return searchRisk;
-					continue;
-				}
-				if (await hasProtectedArgumentTokenAsync(cmd.args, policy, signal)) return "credential_path";
+	for (const step of shellInspectionSteps(shellTokens, paths)) {
+		signal?.throwIfAborted();
+		if (step.kind === "risk") return step.risk;
+		const { cmd } = step;
+		for (const policy of step.policies) {
+			if (cmd.searchTool) {
+				const searchRisk = await searchCredentialRiskAsync(
+					cmd.searchTool,
+					cmd.args,
+					step.readsPipe,
+					policy,
+					true,
+					signal,
+				);
+				if (searchRisk) return searchRisk;
+				continue;
 			}
+			if (await hasProtectedArgumentTokenAsync(cmd.args, policy, signal)) return "credential_path";
 		}
-		const moved = workingDirectoriesAfter(segment.invocation, policies);
-		if (!moved) return "credential_path";
-		policies = moved;
 	}
 	return undefined;
 }
