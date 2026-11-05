@@ -31,6 +31,7 @@ import type { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
 	appendOwnerFollowUp,
+	appendUnsettledWorkerFollowUps,
 	consultMessage,
 	groundConsultAnswer,
 	OWNER_QUESTION_CONSULT_PROMPT,
@@ -394,15 +395,11 @@ export class SessionUnsettledLadderController {
 	 */
 	recordUnsettledForOwner(items: readonly string[]): string | undefined {
 		if (!this.deps.isHandoff() || items.length === 0) return undefined;
-		const path = ownerFollowUpPath(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId());
-		const at = new Date().toISOString();
-		for (const item of items)
-			appendOwnerFollowUp(path, {
-				question: `A worker could not settle: ${item}`,
-				reason: "Neither System One nor a stronger model could settle it from the work's evidence.",
-				request: this.deps.getLastUserRequest(),
-				at,
-			});
-		return path;
+		return appendUnsettledWorkerFollowUps(
+			ownerFollowUpPath(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId()),
+			items,
+			this.deps.getLastUserRequest(),
+			new Date().toISOString(),
+		);
 	}
 }

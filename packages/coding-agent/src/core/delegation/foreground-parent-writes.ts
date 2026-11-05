@@ -31,7 +31,7 @@ export type ForegroundTranscriptWrites = Pick<
 	Required<Pick<ParentWritePort, "importParentWrite" | "reportWorkerTerminal">>;
 
 export interface ForegroundTranscriptWriteDeps
-	extends Pick<ParentWritePort, "saveWorkerClaimSnapshot" | "notifyParentSession" | "recordUnsettledForOwner"> {
+	extends Pick<ParentWritePort, "saveWorkerClaimSnapshot" | "notifyParentSession"> {
 	getSessionManager(): SessionManager;
 	getAgentDir(): string;
 	/** The session's project-chat report of a taken terminal handoff; it may throw. */
@@ -80,7 +80,6 @@ function admitWrite(
 	}
 	if (body.kind === "notice")
 		return deps.notifyParentSession ? {} : { refused: "this parent takes no session notices" };
-	if (body.kind === "owner_unsettled") return {};
 	if (!deps.reportWorkerTerminal) return { refused: "this parent takes no worker terminal reports" };
 	try {
 		// The durable shape is the handoff coordinator's own; it rejects any field outside that contract.
@@ -151,13 +150,6 @@ export function createForegroundTranscriptWrites(deps: ForegroundTranscriptWrite
 			if ("refused" in admitted) {
 				warnOnce(`Parent write ${write.writeId} of attempt ${attemptId} is refused: ${admitted.refused}.`);
 				return "refused";
-			}
-			// Unsettled findings replay the call the foreground's own workers make: they join the parent's in-memory owner
-			// queue, which writes no transcript entry and keeps one copy per finding, so an import repeated after a stop
-			// before the acknowledgement adds none.
-			if (write.body.kind === "owner_unsettled") {
-				deps.recordUnsettledForOwner(write.body.items);
-				return "imported";
 			}
 			try {
 				return withSessionFileMutation(deps.getAgentDir(), file, session.getSessionId(), "append", () => {

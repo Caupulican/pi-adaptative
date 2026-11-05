@@ -3,15 +3,16 @@
  * writer and no transcript reader: every write the parent must see is recorded on the worker's attempt
  * (`recordParentWrite`), and the parent imports those records exactly once when it next opens or sees the store change.
  * What the parent re-derives on its own (the lane-record projection, terminal handoffs, usage receipts) is not written
- * here at all. A write this host cannot record (no attempt to carry it, or the attempt's outbox refuses it) is reported
- * once, never dropped silently.
+ * here at all. Findings nothing could settle go to the owner's follow-up document, as under a handoff. A write this
+ * host cannot record (no attempt to carry it, or the attempt's outbox refuses it) is reported once, never dropped
+ * silently.
  */
 
 import { randomUUID } from "node:crypto";
 import type { JsonObject } from "../autonomy/contracts.ts";
-import { MAX_PARENT_WRITE_UNSETTLED_ITEMS } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { AttemptParentWriteBody } from "../orchestration/task-runtime-state.ts";
+import { appendUnsettledWorkerFollowUps, ownerFollowUpPath } from "../system-one/owner-question-routing.ts";
 import type { ParentWriteOrigin, ParentWritePort } from "./parent-execution-context.ts";
 import { snapshotHandoff } from "./worker-terminal-handoff-coordinator.ts";
 
@@ -24,7 +25,11 @@ export class AwayParentWriteRefusal extends Error {
 }
 
 export interface AwayParentWriteDeps {
-	getRuntime(): Pick<DurableTaskRuntime, "recordParentWrite">;
+	getRuntime(): Pick<DurableTaskRuntime, "recordParentWrite" | "getSnapshot">;
+	getAgentDir(): string;
+	getParentSessionId(): string;
+	/** The host's wall clock, read from its timer source. */
+	now(): number;
 	/** The away host's diagnostics: warnings and every write this host cannot record. */
 	report(message: string): void;
 }
@@ -109,14 +114,27 @@ export function createAwayParentWrites(deps: AwayParentWriteDeps): AwayParentWri
 				"A parent opened away captures no receipt origin: only a dispatch with a pinned origin runs away.",
 			);
 		},
+		// The owner is not in the loop of a run away, exactly as under a handoff: what stays open goes to the parent's
+		// durable follow-up document (not its transcript), which the parent announces at the owner's next prompt.
 		recordUnsettledForOwner: (items, origin) => {
-			for (let start = 0; start < items.length; start += MAX_PARENT_WRITE_UNSETTLED_ITEMS)
-				record(
-					origin?.attemptId,
-					{ kind: "owner_unsettled", items: items.slice(start, start + MAX_PARENT_WRITE_UNSETTLED_ITEMS) },
-					"set of unsettled findings",
+			if (items.length === 0) return undefined;
+			const attemptId = origin?.attemptId;
+			const request = attemptId
+				? deps.getRuntime().getSnapshot().attempts[attemptId]?.dispatch.instructions
+				: undefined;
+			try {
+				return appendUnsettledWorkerFollowUps(
+					ownerFollowUpPath(deps.getAgentDir(), deps.getParentSessionId()),
+					items,
+					request ?? "",
+					new Date(deps.now()).toISOString(),
 				);
-			return undefined;
+			} catch (error) {
+				reportOnce(
+					`Unsettled findings of attempt ${attemptId ?? "(unknown)"} were not written for the owner: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return undefined;
+			}
 		},
 		// Usage stays in the attempt's durable receipts; the parent's receipt delivery charges it when it opens.
 		addSpawnedUsage: (_usage, opts) => {

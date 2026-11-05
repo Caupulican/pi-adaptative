@@ -176,3 +176,20 @@ export function appendOwnerFollowUp(
 	appendFileSync(path, `${header}${section}\n${questionLine}\n**Why it needs you:** ${entry.reason}\n`);
 	return path;
 }
+
+/** Worker findings nothing could settle, written for an owner who is not in the loop; returns the document path. */
+export function appendUnsettledWorkerFollowUps(
+	path: string,
+	items: readonly string[],
+	request: string,
+	at: string,
+): string {
+	for (const item of items)
+		appendOwnerFollowUp(path, {
+			question: `A worker could not settle: ${item}`,
+			reason: "Neither System One nor a stronger model could settle it from the work's evidence.",
+			request,
+			at,
+		});
+	return path;
+}
