@@ -23,7 +23,9 @@ const MAX_LINK_HOPS = 40;
  * Spell a link target the way the executing backend names it. The native realpath binding reports
  * the kernel's final name, which on Windows can be a volume GUID namespace with no DOS spelling;
  * that form is not a usable execution path. A mount point is the canonical DOS name of the volume it
- * mounts, so a link whose target only has a volume name resolves to the link itself.
+ * mounts, so a link whose target only has a volume name resolves to the link itself. The target keeps
+ * its `..` components unnormalized: the caller walks them physically, so `a/../b` through a linked `a`
+ * leaves the directory `a` points to, as the kernel resolves it, not the link's own parent.
  */
 export function resolveNativeLinkTarget(linkPath: string, target: string, flavor: ExecutionPathFlavor): string {
 	const paths = executionPathApi(flavor);
@@ -32,8 +34,12 @@ export function resolveNativeLinkTarget(linkPath: string, target: string, flavor
 		if (/^[\\/]{2}[?.][\\/]UNC[\\/]/iu.test(spelled)) spelled = `\\\\${spelled.slice(8)}`;
 		else if (/^[\\/]{2}[?.][\\/]/u.test(spelled)) spelled = spelled.slice(4);
 		if (/^Volume\{[0-9A-Fa-f-]+\}/u.test(spelled)) return linkPath;
+		// A rooted target without a drive names the link's own volume, not the process's current drive.
+		if (/^[\\/](?![\\/])/u.test(spelled)) return `${paths.parse(linkPath).root.replace(/[\\/]+$/u, "")}${spelled}`;
 	}
-	return paths.isAbsolute(spelled) ? paths.resolve(spelled) : paths.resolve(paths.dirname(linkPath), spelled);
+	if (paths.isAbsolute(spelled)) return spelled;
+	const directory = paths.dirname(linkPath);
+	return directory.endsWith(paths.sep) ? `${directory}${spelled}` : `${directory}${paths.sep}${spelled}`;
 }
 
 /**
