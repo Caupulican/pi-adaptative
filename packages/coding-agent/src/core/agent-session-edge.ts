@@ -5,6 +5,7 @@
  */
 import type { BeforeToolCallResult } from "../kernel/index.ts";
 import type { SessionEntry } from "../kernel/node.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
 	classifyAllEdgeOperations,
 	classifyYoloBoundary,
@@ -60,8 +61,13 @@ function requireValidEdgeScope(scopeKey: unknown, kind: "grant" | "revoke"): str
 	return parsed.scopeKey;
 }
 
+/** The branch's edge grant and revoke records in order, from any reader of the session's history. */
+export function edgeRecordsOnBranch(reader: Pick<SessionManager, "getCustomEntriesOnBranch">): readonly SessionEntry[] {
+	return reader.getCustomEntriesOnBranch([EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE]);
+}
+
 /** Granted edge classes: settings first, then the branch's grant and revoke records in order. */
-export function sessionEdgeGrants(deps: SessionEdgeDeps): EdgeGrantView[] {
+export function sessionEdgeGrants(deps: Pick<SessionEdgeDeps, "getEdgeRecords" | "getSettingsAllow">): EdgeGrantView[] {
 	return collectEdgeGrants(deps.getEdgeRecords(), deps.getSettingsAllow());
 }
 

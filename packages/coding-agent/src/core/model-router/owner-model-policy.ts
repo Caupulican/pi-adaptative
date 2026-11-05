@@ -86,24 +86,45 @@ export function latestPoolPolicy(
 	return undefined;
 }
 
+/** The reader of a session's branch the policy in force is read from. */
+export interface PoolPolicyBranchReader {
+	getSessionId(): string;
+	getLeafId(): string | null;
+	getBranch(): readonly { type: string; customType?: string; data?: unknown }[];
+}
+
+/** The policy in force on a reader's branch, read once per branch position: allocation asks per candidate model. */
+export function branchPoolPolicyReader(getReader: () => PoolPolicyBranchReader): () => ModelPoolPolicy | undefined {
+	let read: { branchKey: string; policy: ModelPoolPolicy | undefined } | undefined;
+	return () => {
+		const reader = getReader();
+		const branchKey = `${reader.getSessionId()}:${reader.getLeafId() ?? ""}`;
+		if (read?.branchKey !== branchKey) read = { branchKey, policy: latestPoolPolicy(reader.getBranch()) };
+		return read.policy;
+	};
+}
+
 /** Where the policy is kept: read at every allocation, written on every applied change. */
 export interface ModelPoolPolicyStore {
 	read(): ModelPoolPolicy | undefined;
 	record(record: ModelPoolPolicyRecord): void;
 }
 
-/** Session-scoped policy. Readers call `allows` at the moment they allocate. */
-export class OwnerModelPolicy {
-	private readonly facts: ModelPoolFacts;
-	private readonly store: ModelPoolPolicyStore;
+/**
+ * The policy as its readers see it: the pools in force and the models they allow. Built from a reader of the branch
+ * alone, so a parent opened away allocates its workers under the owner's policy without the means to change it.
+ */
+export class ModelPoolPolicyView {
+	protected readonly facts: ModelPoolFacts;
+	private readonly readPolicy: () => ModelPoolPolicy | undefined;
 
-	constructor(facts: ModelPoolFacts, store: ModelPoolPolicyStore) {
+	constructor(facts: ModelPoolFacts, read: () => ModelPoolPolicy | undefined) {
 		this.facts = facts;
-		this.store = store;
+		this.readPolicy = read;
 	}
 
 	get policy(): ModelPoolPolicy {
-		return this.store.read() ?? ALL_POOLS_ALLOWED;
+		return this.readPolicy() ?? ALL_POOLS_ALLOWED;
 	}
 
 	allows(model: Model<Api>): boolean {
@@ -113,6 +134,16 @@ export class OwnerModelPolicy {
 	/** The subset of `models` the policy allows, in the given order. */
 	allowed<T extends Model<Api>>(models: readonly T[]): T[] {
 		return models.filter((model) => this.allows(model));
+	}
+}
+
+/** Session-scoped policy the owner's words change. Readers call `allows` at the moment they allocate. */
+export class OwnerModelPolicy extends ModelPoolPolicyView {
+	private readonly store: ModelPoolPolicyStore;
+
+	constructor(facts: ModelPoolFacts, store: ModelPoolPolicyStore) {
+		super(facts, () => store.read());
+		this.store = store;
 	}
 
 	/**

@@ -4,9 +4,41 @@
  */
 
 import type { ToolCallStartContext } from "../../kernel/index.ts";
+import { type EdgeGrantView, isEdgeOperationGranted } from "../autonomy/edge-policy.ts";
 import type { DecisionLedgerStore } from "../operator-projection/decision-ledger-store.ts";
 import type { OperationEffectDurableStore } from "./operation-effect-cache.ts";
-import type { OperationGate, OperationGateDecisionRecord } from "./operation-gate.ts";
+import { OperationGate, type OperationGateDecisionRecord, type OperationGateDeps } from "./operation-gate.ts";
+
+/**
+ * A session's operation gate: standing authority is the branch's `operation.irreversible` grant, and the ledger keeps
+ * effect readings and decisions. Its inputs are readers plus `notify`, so a parent opened away builds the same gate for
+ * its workers; owner-word settling and the operator question are the foreground's, and a worker never reaches the latter.
+ */
+export function createSessionOperationGate(
+	input: Pick<
+		OperationGateDeps,
+		"getEngine" | "getRequest" | "getTurnKey" | "notify" | "settleOwnerPolicy" | "askOperator"
+	> & {
+		getCwd(): string;
+		getSessionId(): string;
+		getLedger(): DecisionLedgerStore | undefined;
+		getEdgeGrants(): readonly EdgeGrantView[];
+	},
+): OperationGate {
+	const { settleOwnerPolicy, askOperator } = input;
+	return new OperationGate({
+		...(settleOwnerPolicy ? { settleOwnerPolicy: (signal?: AbortSignal) => settleOwnerPolicy(signal) } : {}),
+		getEngine: () => input.getEngine(),
+		getRequest: () => input.getRequest(),
+		getScopeCwd: () => input.getCwd(),
+		getTurnKey: () => input.getTurnKey(),
+		isGranted: () =>
+			isEdgeOperationGranted({ class: "operation.irreversible", operation: "", reason: "" }, input.getEdgeGrants()),
+		...(askOperator ? { askOperator } : {}),
+		notify: (message) => input.notify(message),
+		...operationGateLedgerBindings(input),
+	});
+}
 
 export function operationGateLedgerBindings(input: {
 	getLedger(): DecisionLedgerStore | undefined;

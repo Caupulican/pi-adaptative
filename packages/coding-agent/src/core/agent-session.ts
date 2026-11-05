@@ -115,6 +115,7 @@ import {
 } from "./delegation/session-worker-claim.ts";
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { createWorkerEdgePolicy } from "./delegation/worker-edge-policy.ts";
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { createWorkerRequestPlanner } from "./delegation/worker-request-planner.ts";
@@ -1120,10 +1121,16 @@ export class AgentSession {
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
-			getEdgeGrants: () => this.getEdgeGrants(),
-			settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
-			checkOperation: (tool, args, cwd) => this._edgeIntent.operationGate.check(tool, args, cwd, "worker"),
-			localCommitBranch: () => this._edgeIntent.localCommitBranch(),
+			...createWorkerEdgePolicy({
+				getEdgeGrants: () => this.getEdgeGrants(),
+				settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
+				getOperationGate: () => this._edgeIntent.operationGate,
+				localCommitBranch: () => this._edgeIntent.localCommitBranch(),
+				getModelPolicy: () => this._edgeIntent.modelPolicy,
+				isAllocatable: (model) =>
+					!this.settingsManager.getModelRouterSettings().enabled ||
+					isModelInRouterPool(this.getRouterCandidatePool(), model),
+			}),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
@@ -1174,10 +1181,6 @@ export class AgentSession {
 			...createWorkerSettlementPolicy(this._unsettledLadder.judges, (items) =>
 				this._unsettledLadder.queueWorkerUnsettled(items),
 			),
-			isModelAllowed: (model) =>
-				this._edgeIntent.modelPolicy.allows(model) &&
-				(!this.settingsManager.getModelRouterSettings().enabled ||
-					isModelInRouterPool(this.getRouterCandidatePool(), model)),
 			// Allocated from the policy-filtered pool, the same way a routed turn picks.
 			allocateAllowedModel: () =>
 				this._modelRouter.selectAutoTierModel("medium").chosen?.model ??

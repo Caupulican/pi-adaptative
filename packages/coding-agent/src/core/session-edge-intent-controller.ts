@@ -10,6 +10,7 @@ import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
 	type EdgeGrantDetails,
+	edgeRecordsOnBranch,
 	enforceSessionEdgeOperation,
 	recordEdgeGrant,
 	recordEdgeRevoke,
@@ -18,20 +19,17 @@ import {
 } from "./agent-session-edge.ts";
 import {
 	EDGE_CLASSES,
-	EDGE_GRANT_CUSTOM_TYPE,
-	EDGE_REVOKE_CUSTOM_TYPE,
 	type EdgeClass,
 	type EdgeConfirmationHandler,
 	type EdgeGrantView,
-	isEdgeOperationGranted,
 } from "./autonomy/edge-policy.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { RouterCandidatePool } from "./model-router/candidate-pool.ts";
 import {
+	branchPoolPolicyReader,
 	describePolicy,
-	latestPoolPolicy,
 	MODEL_POOL_POLICY_CUSTOM_TYPE,
 	MODEL_POOLS,
 	type ModelPoolChange,
@@ -64,8 +62,8 @@ import {
 	type UserRequestClassificationOutcome,
 } from "./system-one/controller.ts";
 import { DelegationGate } from "./system-one/delegation-gate.ts";
-import { OperationGate } from "./system-one/operation-gate.ts";
-import { operationGateLedgerBindings } from "./system-one/operation-gate-wiring.ts";
+import type { OperationGate } from "./system-one/operation-gate.ts";
+import { createSessionOperationGate } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type OwnerWords } from "./system-one/owner-policy-queue.ts";
 import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
 import {
@@ -210,7 +208,6 @@ export class SessionEdgeIntentController {
 	private readonly deps: SessionEdgeIntentControllerDeps;
 	readonly ownerPolicy: OwnerPolicyQueue<OwnerRequestClassificationOutcome>;
 	readonly modelPolicy: OwnerModelPolicy;
-	private poolPolicyRead?: { branchKey: string; policy: ModelPoolPolicy | undefined };
 	private operationGateInstance?: OperationGate;
 	private delegationGateInstance?: DelegationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
@@ -273,15 +270,7 @@ export class SessionEdgeIntentController {
 				isLocal: (model) => isLocalOrManagedRouterModel(model),
 			},
 			{
-				// Allocation asks per candidate model: read the branch once per branch position.
-				read: () => {
-					const sessionManager = this.deps.getSessionManager();
-					const branchKey = `${sessionManager.getSessionId()}:${sessionManager.getLeafId() ?? ""}`;
-					if (this.poolPolicyRead?.branchKey !== branchKey) {
-						this.poolPolicyRead = { branchKey, policy: latestPoolPolicy(sessionManager.getBranch()) };
-					}
-					return this.poolPolicyRead.policy;
-				},
+				read: branchPoolPolicyReader(() => this.deps.getSessionManager()),
 				record: (record) => this.deps.getSessionManager().appendCustomEntry(MODEL_POOL_POLICY_CUSTOM_TYPE, record),
 			},
 		);
@@ -341,27 +330,20 @@ export class SessionEdgeIntentController {
 	}
 
 	get operationGate(): OperationGate {
-		this.operationGateInstance ??= new OperationGate({
+		this.operationGateInstance ??= createSessionOperationGate({
 			settleOwnerPolicy: (signal) => this.ownerPolicy.settle("latest", signal),
 			getEngine: () => this.deps.getSemanticDecisionEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
-			getScopeCwd: () => this.deps.getCwd(),
 			getTurnKey: () => `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.deps.getLastUserRequest()}`,
-			isGranted: () =>
-				isEdgeOperationGranted(
-					{ class: "operation.irreversible", operation: "", reason: "" },
-					this.getEdgeGrants(),
-				),
+			getEdgeGrants: () => this.getEdgeGrants(),
 			askOperator: async (operation, signal) =>
 				enforceSessionEdgeOperation(this.edgeDeps(), operation, "operation", signal),
 			notify: (message) => {
 				if (!this.handoffValue) this.deps.emitWarning(message);
 			},
-			...operationGateLedgerBindings({
-				getLedger: () => this.deps.getDecisionLedger(),
-				getSessionId: () => this.deps.getSessionManager().getSessionId(),
-				getCwd: () => this.deps.getCwd(),
-			}),
+			getLedger: () => this.deps.getDecisionLedger(),
+			getSessionId: () => this.deps.getSessionManager().getSessionId(),
+			getCwd: () => this.deps.getCwd(),
 		});
 		return this.operationGateInstance;
 	}
@@ -370,8 +352,7 @@ export class SessionEdgeIntentController {
 		return {
 			getMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
 			getBranch: () => this.deps.getSessionManager().getBranch(),
-			getEdgeRecords: () =>
-				this.deps.getSessionManager().getCustomEntriesOnBranch([EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE]),
+			getEdgeRecords: () => edgeRecordsOnBranch(this.deps.getSessionManager()),
 			getSettingsAllow: () => this.deps.getSettingsManager().getEdgeSettings().allow,
 			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,
 			appendCustomEntry: (customType, data) => this.deps.getSessionManager().appendCustomEntry(customType, data),
