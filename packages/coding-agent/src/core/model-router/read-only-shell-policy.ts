@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import * as nodePath from "node:path";
 import { globIterateSync } from "glob";
 import { isPathWithinScope, physicalPathSync, safeRealpathSync } from "../autonomy/path-scope.ts";
@@ -800,6 +800,8 @@ const GLOB_WORD_RE = /[*?[]|\{[^}]*(?:,|\.\.)[^}]*\}/u;
 /** A network share: `\\host\share`, `//host/share` or `\\?\UNC\host\share`; not a local device path (`\\?\C:`, `\\.\`). */
 const NETWORK_SHARE_RE = /^(?:\\\\\?\\UNC\\|[\\/]{2}(?![?.][\\/]))/iu;
 const MAX_GLOB_MATCHES = 2000;
+/** The entries a link-following search's tree may hold for the gate to judge every link in it. */
+const MAX_FOLLOWED_ENTRIES = 20_000;
 
 /** Programs on the read-only list that open none of their operands. */
 const NON_PATH_PROGRAMS = new Set([
@@ -1149,6 +1151,28 @@ function searchesRecursively(name: string, args: readonly string[]): boolean {
 	}
 }
 
+/**
+ * Whether a recursive search descends through the symbolic links it meets below its roots (`rg -L`, `grep -R`, a
+ * `diff -r` without `--no-dereference`, `Get-ChildItem -FollowSymlink`); a link named as an operand is judged by where
+ * it leads either way. A letter cluster counts when it holds the follow letter at all, so a reading that misses an
+ * option walks the tree rather than skipping it.
+ */
+function followsLinks(name: string, args: readonly string[]): boolean {
+	const rest = args.slice(1);
+	switch (name) {
+		case "rg":
+			return rest.some((arg) => /^-[A-Za-z]*L/u.test(arg) || arg === "--follow");
+		case "grep":
+			return rest.some((arg) => /^-[A-Za-z]*R/u.test(arg) || arg === "--dereference-recursive");
+		case "diff":
+			return !rest.includes("--no-dereference");
+		case "get-childitem":
+			return rest.some((arg) => /^-fol(?:l(?:o(?:w(?:s(?:y(?:m(?:l(?:i(?:n(?:k)?)?)?)?)?)?)?)?)?)?$/iu.test(arg));
+		default:
+			return false;
+	}
+}
+
 /** The directories a command line may be running in, grown by every `cd` it passes. */
 interface WorkingDirectories {
 	list: string[];
@@ -1239,12 +1263,67 @@ function deniedPathViolation(target: string, recursive: boolean, lane: ReadOnlyS
 	return reached === undefined ? undefined : `it searches ${target}, which holds the private harness path ${reached}`;
 }
 
+/**
+ * Why a search that follows symbolic links below `root` reaches what the lane may not read. A link is judged by where
+ * it leads, file or directory, and a linked directory is searched in turn, once per canonical path, so a link inside
+ * the read scope cannot carry the search outside it. Past `MAX_FOLLOWED_ENTRIES` entries the search is refused.
+ */
+function followedLinkViolation(root: string, lane: ReadOnlyShellLaneScope): string | undefined {
+	let start: string;
+	try {
+		start = safeRealpathSync(root);
+		if (!statSync(start).isDirectory()) return undefined;
+	} catch {
+		return `it searches ${root}, a path the gate cannot resolve`;
+	}
+	const visited = new Set([start]);
+	const pending = [start];
+	let entries = 0;
+	while (pending.length > 0) {
+		const directory = pending.pop()!;
+		let children: Dirent[];
+		try {
+			children = readdirSync(directory, { withFileTypes: true });
+		} catch {
+			// A directory the gate cannot list is one the search cannot list either.
+			continue;
+		}
+		for (const child of children) {
+			if (++entries > MAX_FOLLOWED_ENTRIES)
+				return `it follows symbolic links below ${root}, more than ${MAX_FOLLOWED_ENTRIES} entries for the gate to check; search without following links`;
+			const childPath = nodePath.join(directory, child.name);
+			if (child.isDirectory()) {
+				visited.add(childPath);
+				pending.push(childPath);
+				continue;
+			}
+			if (!child.isSymbolicLink()) continue;
+			let target: string;
+			let linkedDirectory = false;
+			try {
+				target = safeRealpathSync(childPath);
+				linkedDirectory = existsSync(target) && statSync(target).isDirectory();
+			} catch {
+				return `it follows ${childPath}, a link the gate cannot resolve`;
+			}
+			const violation = deniedPathViolation(target, linkedDirectory, lane);
+			if (violation) return `${violation}, through the link ${childPath}`;
+			if (linkedDirectory && !visited.has(target)) {
+				visited.add(target);
+				pending.push(target);
+			}
+		}
+	}
+	return undefined;
+}
+
 function lanePathViolation(
 	word: string,
 	cwds: readonly string[],
 	recursive: boolean,
 	context: JudgeContext,
 	lane: ReadOnlyShellLaneScope,
+	followLinks = false,
 ): string | undefined {
 	const expanded = expandLaneWord(word, context.dialect, lane);
 	if (expanded === undefined) return `it names ${word}, a path the gate cannot resolve`;
@@ -1254,7 +1333,9 @@ function lanePathViolation(
 		const targets = reachedPaths(expanded, cwd, word);
 		if (typeof targets === "string") return targets;
 		for (const target of targets) {
-			const violation = deniedPathViolation(target, recursive, lane);
+			const violation =
+				deniedPathViolation(target, recursive, lane) ??
+				(followLinks ? followedLinkViolation(target, lane) : undefined);
 			if (violation) return violation;
 		}
 	}
@@ -1864,9 +1945,10 @@ function laneOperandViolation(
 ): string | undefined {
 	if (NON_PATH_PROGRAMS.has(name)) return undefined;
 	const recursive = searchesRecursively(name, args);
+	const followLinks = recursive && followsLinks(name, args);
 	const operands = pathOperandsWithProgram(name, args);
 	for (const operand of operands.paths) {
-		const violation = lanePathViolation(operand, cwds.list, recursive, context, lane);
+		const violation = lanePathViolation(operand, cwds.list, recursive, context, lane, followLinks);
 		if (violation) return violation;
 	}
 	for (const root of operands.recursivePaths) {
@@ -1876,7 +1958,8 @@ function laneOperandViolation(
 	// A recursive search without a path operand searches where it runs.
 	if (recursive && operands.paths.length === 0) {
 		for (const cwd of cwds.list) {
-			const violation = deniedPathViolation(cwd, true, lane);
+			const violation =
+				deniedPathViolation(cwd, true, lane) ?? (followLinks ? followedLinkViolation(cwd, lane) : undefined);
 			if (violation) return violation;
 		}
 	}
