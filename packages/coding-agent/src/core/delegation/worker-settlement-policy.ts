@@ -14,6 +14,9 @@ export function createWorkerSettlementPolicy(
 	return {
 		reviewNewCode: ({ toolName, args, cwd }) => judges.codeDuplicates.review(toolName, args, cwd),
 		reviewWorkerReport: (input) => judges.answerClaims.workerReportBlockers(input),
-		settleInconclusive: (input) => judges.settleWorkerInconclusive(input, recordUnsettledForOwner),
+		settleInconclusive: (input) =>
+			judges.settleWorkerInconclusive(input, (items) =>
+				recordUnsettledForOwner(items, input.attemptId === undefined ? undefined : { attemptId: input.attemptId }),
+			),
 	};
 }

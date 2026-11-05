@@ -5839,6 +5839,7 @@ export class WorkerDelegationController {
 									items: inconclusive,
 									messages: reviewMessages,
 									signal: workerSignal,
+									attemptId: durableHandle.attemptId,
 								})
 								.catch(
 									(

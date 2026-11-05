@@ -253,6 +253,8 @@ export interface ParentExecutionPolicy {
 		items: readonly string[];
 		messages: readonly Message[];
 		signal?: AbortSignal;
+		/** The worker attempt the findings came from: what stays open is that attempt's parent write. */
+		attemptId?: string;
 	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }>;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;
@@ -349,7 +351,7 @@ export interface ParentWritePort {
 	 * Findings a worker could not settle, kept by the parent for the owner's review at its next turn boundary. A host
 	 * without the parent's owner queue records them for the parent to import; it never drops them.
 	 */
-	recordUnsettledForOwner(items: readonly string[]): string | undefined;
+	recordUnsettledForOwner(items: readonly string[], origin?: ParentWriteOrigin): string | undefined;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
