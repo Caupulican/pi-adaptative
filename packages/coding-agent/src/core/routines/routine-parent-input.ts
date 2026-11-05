@@ -3,7 +3,8 @@ import { parentInputOriginalDetails } from "../../kernel/session/parent-input-le
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import type { RoutineDelivery } from "./routine-contract.ts";
+import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
+import { MAX_ROUTINE_EVENT_MISSED_COUNT, type RoutineDelivery } from "./routine-contract.ts";
 
 const ROUTINE_COMPLETION_TYPE = "routine-completion";
 
@@ -16,11 +17,17 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 	const quiet = result.ownerUpdate === "none";
 	const trigger = occurrence.trigger;
 	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
+	// A count recorded at its saturation bound stands for that many or more.
+	const saturated =
+		trigger.kind === "event"
+			? missedCount >= MAX_ROUTINE_EVENT_MISSED_COUNT
+			: occurrence.definition.schedule.kind === "calendar" && missedCount >= MAX_CALENDAR_MISSED_COUNT;
+	const count = saturated ? `at least ${missedCount}` : `${missedCount}`;
 	let missed = "";
 	if (missedCount > 0 && trigger.kind === "event")
-		missed = ` It also covers ${missedCount} earlier matching CI ${missedCount === 1 ? "attempt that did not start a run of its own" : "attempts that did not start a run of their own"}.`;
+		missed = ` It also covers ${count} earlier matching CI ${missedCount === 1 ? "attempt that did not start a run of its own" : "attempts that did not start a run of their own"}.`;
 	else if (missedCount > 0)
-		missed = ` It also covers ${missedCount} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
+		missed = ` It also covers ${count} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
 	if (trigger.kind === "event") {
 		missed = ` It ran for a CI ${trigger.event.conclusion} result.${missed}`;
 		if (trigger.historyGap)
@@ -42,6 +49,7 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 			outcome: result.outcome,
 			resultDigest: result.digest,
 			...(missedCount > 0 ? { missedCount } : {}),
+			...(saturated ? { missedCountIsLowerBound: true as const } : {}),
 			...(trigger.kind === "event"
 				? {
 						hostEvent: {

@@ -113,7 +113,7 @@ or re-sealed attempt never runs twice, and consumed attempt keys outlive journal
 and coalesced attempts are counted in the next run, and a new source replay gap is stated in it.
 While the routine journal shared by the sessions of one agent directory has no room for another
 run, a new attempt stays undecided instead of being skipped; the session is warned once, and the
-attempt runs when delivered results free room. The failure note does not depend on routines, and turning proactivity off does not stop a routine. A
+attempt runs when finished, delivered results free room. The failure note does not depend on routines, and turning proactivity off does not stop a routine. A
 routine's result is not counted toward `maxTurnWakesPerDay`; a run whose worker reports no owner
 update is carried with the owner's next turn without starting one.
 

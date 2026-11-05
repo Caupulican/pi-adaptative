@@ -9,6 +9,7 @@ import {
 	type RoutineDefinitionView,
 	type RoutineEventAnchor,
 	routineScheduleInputOf,
+	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -33,7 +34,8 @@ interface RoutineSessionDeps {
 }
 
 function summary(routine: RoutineDefinitionView): RoutineToolSummary {
-	const nextRunAt = nextRoutineAt(routine.schedule, routine.cursor);
+	const unschedulable = routineZoneUnsupported(routine.schedule);
+	const nextRunAt = unschedulable === undefined ? nextRoutineAt(routine.schedule, routine.cursor) : undefined;
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
@@ -42,6 +44,7 @@ function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 		...(nextRunAt === undefined ? {} : { nextRunAt }),
 		...(routine.lastRunAt === undefined ? {} : { lastRunAt: routine.lastRunAt }),
 		...(routine.lastStatus === undefined ? {} : { lastStatus: routine.lastStatus }),
+		...(unschedulable === undefined ? {} : { unschedulable }),
 	};
 }
 
@@ -155,17 +158,19 @@ export class RoutineSessionController implements RoutineToolPort {
 		return this.persist(input, savedIntent, {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
+			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
 		});
 	}
 
 	/**
 	 * The one write of a saved routine for every creation path: the parent check, the calendar zone default, the
-	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces.
+	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces. A calendar
+	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's.
 	 */
 	private persist(
 		input: RoutineToolInput,
 		savedIntent: WorkerSavedIntent,
-		extras: { readonly enabled: boolean; readonly expectedRevision?: number },
+		extras: { readonly enabled: boolean; readonly expectedRevision?: number; readonly timeZone?: string },
 	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
 			throw new Error("Routine parent changed during admission.");
@@ -174,10 +179,10 @@ export class RoutineSessionController implements RoutineToolPort {
 				routineId: input.routineId,
 				prompt: input.prompt,
 				target: { kind: "session", parentSessionId: this.deps.parentSessionId },
-				// A calendar rule without a zone follows the wall clock of the session that authored it.
+				// A calendar rule without a zone keeps the routine's saved zone, or follows the authoring session's wall clock.
 				schedule:
 					input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
-						? { ...input.schedule, timeZone: hostTimeZone() }
+						? { ...input.schedule, timeZone: extras.timeZone ?? hostTimeZone() }
 						: input.schedule,
 				enabled: extras.enabled,
 				nowMs: this.deps.now(),

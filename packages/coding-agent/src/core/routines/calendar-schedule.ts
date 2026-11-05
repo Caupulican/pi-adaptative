@@ -14,7 +14,10 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 /** ECMAScript time value bound; the zone formatter rejects instants beyond it. */
 const MAX_TIME_VALUE_MS = 8_640_000_000_000_000;
-/** Bracket for repeated wall hours; every backward offset change since 1970 is at most two hours. */
+/**
+ * Bracket for repeated wall hours. Backward offset changes since 1970 are at most three hours (Antarctica/Casey went
+ * from +11 to +08); a larger one leaves the backward walk at its known slot, which stays correct.
+ */
 const OVERLAP_MARGIN_MS = 3 * HOUR_MS;
 const MAX_CACHED_RULES = 128;
 
@@ -40,7 +43,9 @@ interface CompiledCron {
 	readonly days: ReadonlySet<number>;
 	readonly months: ReadonlySet<number>;
 	readonly weekdays: ReadonlySet<number>;
-	/** Both day fields restricted: a day matches either one (the traditional cron rule). */
+	// Traditional cron: a day field whose text starts with `*` is unrestricted, so a stepped `*/2` is unrestricted
+	// too. Only when neither starts with `*` does a day match either field (`0 0 1-31/2 * 1`: odd days or Mondays);
+	// otherwise both must match (`0 0 */2 * 1`: odd days that are Mondays).
 	readonly eitherDay: boolean;
 }
 
@@ -66,6 +71,16 @@ export function canonicalCalendarCron(value: unknown): string {
 /** Returns the zone's canonical identifier, or throws a TypeError for an unsupported zone. */
 export function canonicalCalendarTimeZone(value: unknown): string {
 	return zoneFormat(value).resolvedOptions().timeZone;
+}
+
+/** Whether `value` has the shape of a zone name, whatever this runtime supports. */
+export function isCalendarTimeZoneName(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_CALENDAR_TIME_ZONE_CHARS &&
+		value.trim() === value
+	);
 }
 
 export function isCalendarTimeZone(value: unknown): value is string {
@@ -164,12 +179,7 @@ function parseField(text: string, min: number, max: number, label: string): numb
 }
 
 function zoneFormat(value: unknown): Intl.DateTimeFormat {
-	if (
-		typeof value !== "string" ||
-		value.length === 0 ||
-		value.length > MAX_CALENDAR_TIME_ZONE_CHARS ||
-		value.trim() !== value
-	)
+	if (!isCalendarTimeZoneName(value))
 		throw new TypeError("Calendar time zone must be an IANA zone name such as Europe/Lisbon.");
 	const cached = zoneFormats.get(value);
 	if (cached) return cached;

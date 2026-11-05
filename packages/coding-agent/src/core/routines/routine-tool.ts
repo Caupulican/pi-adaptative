@@ -32,6 +32,8 @@ export interface RoutineToolSummary {
 	readonly nextRunAt?: number;
 	readonly lastRunAt?: number;
 	readonly lastStatus?: string;
+	/** Why this runtime cannot place the routine's slots; it has no `nextRunAt` while set. */
+	readonly unschedulable?: string;
 }
 
 /** Complete authored values for read-before-edit, without compiled authority or parent identity. */
@@ -150,7 +152,7 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 		name: ROUTINE_TOOL_NAME,
 		label: "Routine",
 		description:
-			"Manage saved prompts scheduled for this main session. Use create for an owner-requested interval, one-time or calendar routine. A calendar schedule is a five-field cron rule evaluated in an IANA time zone (the host zone when omitted); missed slots coalesce into one run. once.notAfter and calendar maxLatenessMs bound how late a run may start. An event schedule {kind:'event', source:'ci'} runs once per new matching CI attempt, with its facts appended as data; use it for 'tell me when CI fails'. For other 'tell me when X', save a routine whose prompt checks X and reports ownerUpdate none when nothing changed: such a run is recorded and carried with the owner's next turn without starting a parent turn; failures and other results start one. list returns bounded metadata; get returns the complete saved prompt and worker preferences. Read get before updating: update replaces all authored fields, so preserve unchanged prompt, schedule, profileId and knowledge. update, pause, resume, delete and run require the exact revision from get. run queues one durable manual occurrence; it does not change the schedule. Selected knowledge must name exact current records; omission grants none. No external recipient is supported here.",
+			"Manage saved prompts scheduled for this main session. Use create for an owner-requested interval, one-time or calendar routine. A calendar schedule is a five-field cron rule evaluated in an IANA time zone (when omitted: the host zone on create, the saved zone on update); missed slots coalesce into one run. once.notAfter and calendar maxLatenessMs bound how late a run may start. An event schedule {kind:'event', source:'ci'} runs once per new matching CI attempt, with its facts appended as data; use it for 'tell me when CI fails'. For other 'tell me when X', save a routine whose prompt checks X and reports ownerUpdate none when nothing changed: such a run is recorded and carried with the owner's next turn without starting a parent turn; failures and other results start one. list returns bounded metadata; get returns the complete saved prompt and worker preferences. Read get before updating: update replaces all authored fields, so preserve unchanged prompt, schedule, profileId and knowledge. update, pause, resume, delete and run require the exact revision from get. run queues one durable manual occurrence; it does not change the schedule. Selected knowledge must name exact current records; omission grants none. No external recipient is supported here.",
 		parameters,
 		executionMode: "sequential",
 		async execute(invocationId, input, signal) {

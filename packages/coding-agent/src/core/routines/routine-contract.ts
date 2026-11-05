@@ -16,6 +16,7 @@ import {
 	canonicalCalendarCron,
 	canonicalCalendarTimeZone,
 	isCalendarTimeZone,
+	isCalendarTimeZoneName,
 	latestCalendarSlotAtOrBefore,
 	MAX_CALENDAR_CRON_CHARS,
 	MAX_CALENDAR_MISSED_COUNT,
@@ -71,13 +72,14 @@ const calendarSchema = Type.Object(
 			minLength: 9,
 			maxLength: MAX_CALENDAR_CRON_CHARS,
 			description:
-				"Five fields: minute hour day-of-month month day-of-week (0 or 7 is Sunday). Numbers, *, ranges a-b, steps /n and comma lists only. When both day fields are restricted, either may match.",
+				"Five fields: minute hour day-of-month month day-of-week (0 or 7 is Sunday). Numbers, *, ranges a-b, steps /n and comma lists only. A day field starting with * (including */n) is unrestricted; when neither day field starts with *, either may match, otherwise both must.",
 		}),
 		timeZone: Type.Optional(
 			Type.String({
 				minLength: 1,
 				maxLength: MAX_CALENDAR_TIME_ZONE_CHARS,
-				description: "IANA time zone such as Europe/Lisbon. Omit to use this host's zone.",
+				description:
+					"IANA time zone such as Europe/Lisbon. Omitted: this host's zone on create, the saved zone on update.",
 			}),
 		),
 		maxLatenessMs: Type.Optional(
@@ -343,6 +345,8 @@ export interface RoutineClaimResult {
 	 * entry is still active, uncertain or awaiting delivery. Nothing was consumed; delivered results make room.
 	 */
 	readonly journalFull: boolean;
+	/** Clock routines whose slots this runtime could not compute; each was skipped and the others still claimed. */
+	readonly unschedulable: readonly { readonly routineId: string; readonly reason: string }[];
 }
 
 export interface RoutineEventDecision {
@@ -543,6 +547,15 @@ export function routineSlotRule(schedule: RoutineScheduleInput): RoutineSchedule
 				...(schedule.workflowPath === undefined ? {} : { workflowPath: schedule.workflowPath }),
 			};
 	}
+}
+
+/**
+ * Why this runtime cannot place a stored schedule's slots: a calendar zone saved on a runtime whose time zone data has
+ * it and missing here. Undefined for every other schedule.
+ */
+export function routineZoneUnsupported(schedule: RoutineSchedule): string | undefined {
+	if (schedule.kind !== "calendar" || isCalendarTimeZone(schedule.timeZone)) return undefined;
+	return `Calendar time zone "${schedule.timeZone}" is not supported by this runtime, so the routine's slots cannot be placed here.`;
 }
 
 /** Latest instant a scheduled occurrence may start; undefined when its schedule sets no window. */
@@ -1027,12 +1040,14 @@ export function parseLegacyRoutineDefinition(value: unknown): PersistentRoutineD
 export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 	if (!isPlainRecord(value)) throw new TypeError("Routine schedule is invalid.");
 	if (value.kind === "calendar") {
-		// Stored zones are only checked for support: canonical spellings may differ across runtimes.
+		// A stored zone is checked for shape only: canonical spellings and supported zones differ across runtimes, and a
+		// zone this runtime cannot use makes that routine unschedulable here (`routineZoneUnsupported`), never the store
+		// unreadable. Saving still refuses an unsupported zone (`parseRoutineScheduleInput`).
 		if (
 			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt", "maxLatenessMs"]) &&
 			typeof value.cron === "string" &&
 			canonicalCalendarCron(value.cron) === value.cron &&
-			isCalendarTimeZone(value.timeZone) &&
+			isCalendarTimeZoneName(value.timeZone) &&
 			validInstant(value.anchorAt) &&
 			(value.maxLatenessMs === undefined ||
 				(Number.isSafeInteger(value.maxLatenessMs) &&
@@ -1046,7 +1061,7 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 				anchorAt: value.anchorAt,
 				...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
 			};
-		throw new TypeError("Persisted calendar schedule requires a canonical rule, a supported zone and an anchor.");
+		throw new TypeError("Persisted calendar schedule requires a canonical rule, a zone name and an anchor.");
 	}
 	if (value.kind === "event") {
 		if (

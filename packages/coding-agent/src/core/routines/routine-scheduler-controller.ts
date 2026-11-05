@@ -21,6 +21,7 @@ import {
 	rebasedRoutineCursor,
 	routineOccurrenceId,
 	routinePreviousSlot,
+	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
@@ -28,6 +29,10 @@ import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } 
 const CLAIM_LEASE_MS = 120_000;
 const RETRY_DELAY_MS = 5_000;
 const CLAIM_BATCH_SIZE = 8;
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * The exact brief an occurrence's worker receives; its dispatch and notification identity compare this text, so it
@@ -310,10 +315,14 @@ export class RoutineSchedulerController {
 		this.stepFailed = false;
 		this.deps.store.reload();
 		this.attempt("delivery", () => this.deliverPending());
+		// A fault about an occurrence or routine that no longer exists is forgotten.
 		const present = new Set(this.occurrences().map((entry) => entry.occurrenceId));
+		const routines = new Set(this.deps.store.listRoutines().map((routine) => routine.routineId));
 		for (const unit of this.faults.keys()) {
-			const occurrenceId = unit.split("|")[1];
-			if (occurrenceId !== undefined && !present.has(occurrenceId)) this.faults.delete(unit);
+			const separator = unit.indexOf("|");
+			if (separator < 0) continue;
+			const subject = unit.slice(separator + 1);
+			if (!(unit.startsWith("routine|") ? routines : present).has(subject)) this.faults.delete(unit);
 		}
 		const pendingIds = new Set(
 			this.occurrences()
@@ -327,60 +336,7 @@ export class RoutineSchedulerController {
 				this.attempt(`reconcile|${occurrence.occurrenceId}`, () => this.reconcile(occurrence));
 		}
 		if (this.deps.canDispatch()) {
-			const nowMs = this.deps.timers.now();
-			const eligibleRoutines = this.deps.store
-				.listRoutines()
-				.filter(
-					(routine) =>
-						!routine.executionSnapshot ||
-						this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin),
-				);
-			const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
-			const eventRoutines = eligibleRoutines.filter(
-				(routine) =>
-					routine.enabled &&
-					routine.schedule.kind === "event" &&
-					routine.target.kind === "session" &&
-					routine.target.parentSessionId === this.deps.parentSessionId,
-			);
-			// Host events are read only while an event routine can be decided; other sessions never load the ledger here.
-			const hostEvents = eventRoutines.length > 0 ? this.deps.hostEvents.feed() : undefined;
-			const recoverable = this.occurrences().filter(
-				(entry) =>
-					this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
-					this.deps.canUseOrigin(entry.parentOrigin) &&
-					(entry.phase === "pending" ||
-						(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
-			);
-			if (
-				this.nextScheduledAt(nowMs) <= nowMs ||
-				recoverable.length > 0 ||
-				(hostEvents !== undefined && this.hasEventWork(eventRoutines, hostEvents))
-			)
-				this.attempt("claim", () => {
-					const claim = this.deps.store.claimDueRoutineOccurrences({
-						nowMs,
-						owner: this.deps.owner,
-						leaseMs: CLAIM_LEASE_MS,
-						limit: CLAIM_BATCH_SIZE,
-						parentSessionId: this.deps.parentSessionId,
-						eligibleRoutineIds,
-						eligibleOccurrenceIds: recoverable.map((occurrence) => occurrence.occurrenceId),
-						receiptOrigin: this.deps.getReceiptOrigin(),
-						...(hostEvents ? { hostEvents } : {}),
-					});
-					this.journalFull = claim.journalFull;
-					if (claim.journalFull)
-						this.report(
-							"journal",
-							"Due routines are waiting: the shared routine journal is full of unfinished, uncertain or undelivered runs. They start once delivered results free room.",
-						);
-					else this.faults.delete("journal");
-				});
-			else {
-				this.journalFull = false;
-				this.faults.delete("journal");
-			}
+			this.attempt("claim", () => this.claim());
 			for (const occurrence of this.occurrences()) {
 				if (!this.active) return result;
 				if (
@@ -401,6 +357,64 @@ export class RoutineSchedulerController {
 		}
 		this.attempt("delivery", () => this.deliverPending());
 		return result;
+	}
+
+	/** Claims what is due for this session: clock slots, recoverable occurrences and event attempts. */
+	private claim(): void {
+		const nowMs = this.deps.timers.now();
+		const eligibleRoutines = this.deps.store
+			.listRoutines()
+			.filter(
+				(routine) =>
+					!routine.executionSnapshot ||
+					this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin),
+			);
+		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
+		const eventRoutines = eligibleRoutines.filter(
+			(routine) =>
+				routine.enabled &&
+				routine.schedule.kind === "event" &&
+				routine.target.kind === "session" &&
+				routine.target.parentSessionId === this.deps.parentSessionId,
+		);
+		// Host events are read only while an event routine can be decided; other sessions never load the ledger here.
+		const hostEvents = eventRoutines.length > 0 ? this.deps.hostEvents.feed() : undefined;
+		const recoverable = this.occurrences().filter(
+			(entry) =>
+				this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
+				this.deps.canUseOrigin(entry.parentOrigin) &&
+				(entry.phase === "pending" ||
+					(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
+		);
+		if (
+			this.nextScheduledAt(nowMs) > nowMs &&
+			recoverable.length === 0 &&
+			(hostEvents === undefined || !this.hasEventWork(eventRoutines, hostEvents))
+		) {
+			this.journalFull = false;
+			this.faults.delete("journal");
+			return;
+		}
+		const claim = this.deps.store.claimDueRoutineOccurrences({
+			nowMs,
+			owner: this.deps.owner,
+			leaseMs: CLAIM_LEASE_MS,
+			limit: CLAIM_BATCH_SIZE,
+			parentSessionId: this.deps.parentSessionId,
+			eligibleRoutineIds,
+			eligibleOccurrenceIds: recoverable.map((occurrence) => occurrence.occurrenceId),
+			receiptOrigin: this.deps.getReceiptOrigin(),
+			...(hostEvents ? { hostEvents } : {}),
+		});
+		for (const { routineId, reason } of claim.unschedulable)
+			this.report(`routine|${routineId}`, `Routine ${routineId} cannot be scheduled: ${reason}`);
+		this.journalFull = claim.journalFull;
+		if (claim.journalFull)
+			this.report(
+				"journal",
+				"Due routines are waiting: the routine journal shared by this agent directory's sessions is full of unfinished, uncertain or undelivered runs, and only finished, delivered runs leave it.",
+			);
+		else this.faults.delete("journal");
 	}
 
 	/**
@@ -688,26 +702,46 @@ export class RoutineSchedulerController {
 				(routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
 			)
 				continue;
-			const editedAt = Date.parse(routine.updatedAt);
 			let due: number | undefined;
-			if (routine.schedule.kind === "event") {
-				if (editedAt > nowMs) due = editedAt;
-			} else {
-				const key = `${routine.routineId}:${routine.revision}:${JSON.stringify(routine.cursor)}`;
-				const previousSlot = this.previousSlots.has(key)
-					? this.previousSlots.get(key)
-					: routinePreviousSlot(routine.schedule, routine.cursor);
-				previousSlots.set(key, previousSlot);
-				const cursor =
-					rebasedRoutineCursor(routine.schedule, routine.cursor, nowMs, previousSlot) ?? routine.cursor;
-				const slot = nextRoutineAt(routine.schedule, cursor);
-				if (slot !== undefined) due = Math.max(slot, editedAt);
+			try {
+				due = this.routineDueAt(routine, nowMs, previousSlots);
+			} catch (error) {
+				// Only this routine is left out of the alarm; the claim skips and reports it the same way.
+				this.report(
+					`routine|${routine.routineId}`,
+					`Routine ${routine.routineId} cannot be scheduled: ${errorText(error)}`,
+				);
+				continue;
 			}
 			if (due === undefined || (waitingForRoom && due <= nowMs)) continue;
 			next = Math.min(next, due);
 		}
 		this.previousSlots = previousSlots;
 		return next;
+	}
+
+	private routineDueAt(
+		routine: RoutineDefinitionView,
+		nowMs: number,
+		previousSlots: Map<string, number | undefined>,
+	): number | undefined {
+		const editedAt = Date.parse(routine.updatedAt);
+		if (routine.schedule.kind === "event") return editedAt > nowMs ? editedAt : undefined;
+		if (routineZoneUnsupported(routine.schedule) !== undefined) {
+			// Only the claim that records the routine's one notice is due; its slots cannot be placed here.
+			const slot = routine.cursor.kind === "calendar" ? routine.cursor.nextAt : null;
+			return slot !== null && (routine.lastRunAt ?? Number.NEGATIVE_INFINITY) < slot
+				? Math.max(slot, editedAt)
+				: undefined;
+		}
+		const key = `${routine.routineId}:${routine.revision}:${JSON.stringify(routine.cursor)}`;
+		const previousSlot = this.previousSlots.has(key)
+			? this.previousSlots.get(key)
+			: routinePreviousSlot(routine.schedule, routine.cursor);
+		previousSlots.set(key, previousSlot);
+		const cursor = rebasedRoutineCursor(routine.schedule, routine.cursor, nowMs, previousSlot) ?? routine.cursor;
+		const slot = nextRoutineAt(routine.schedule, cursor);
+		return slot === undefined ? undefined : Math.max(slot, editedAt);
 	}
 
 	private clearAlarm(): void {
@@ -756,7 +790,7 @@ export class RoutineSchedulerController {
 
 	/** Warns once per failing unit and reason; the same reason again stays quiet until the unit recovers. */
 	private report(unit: string, error: unknown): void {
-		const reason = error instanceof Error ? error.message : String(error);
+		const reason = errorText(error);
 		if (this.faults.get(unit) === reason) return;
 		this.faults.set(unit, reason);
 		this.warn(error);

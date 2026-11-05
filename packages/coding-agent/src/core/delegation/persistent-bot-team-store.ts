@@ -13,7 +13,6 @@ import {
 	countCalendarSlots,
 	latestCalendarSlotAtOrBefore,
 	MAX_CALENDAR_MISSED_COUNT,
-	nextCalendarSlotAfter,
 } from "../routines/calendar-schedule.ts";
 import {
 	decideRoutineEvents,
@@ -53,6 +52,7 @@ import {
 	routineSlotRule,
 	routineStartDeadline,
 	routineTriggerAt,
+	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -1454,17 +1454,25 @@ export class PersistentBotTeamStore {
 			if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision)
 				throw new Error("Routine revision changed; read current state before retrying.");
 			if (input.createOnly && existing) throw new Error("Routine already exists.");
-			const scheduleInput = parseRoutineScheduleInput(input.schedule);
+			const stored = existing ? routineScheduleInputOf(existing.schedule) : undefined;
+			// The stored schedule resubmitted unchanged (a pause, resume or prompt edit) is kept as saved, so a routine whose
+			// zone this runtime does not support stays editable here; any other schedule is validated as authored.
+			const keepsSchedule = stored !== undefined && isDeepStrictEqual(input.schedule, stored);
+			const scheduleInput = keepsSchedule ? stored : parseRoutineScheduleInput(input.schedule);
 			const session = input.target.kind === "session";
 			if (session !== (input.executionSnapshot !== undefined))
 				throw new Error("Session routines require a host-admitted execution snapshot.");
 			// The stored side is re-canonicalized: a runtime may spell a stored zone differently than when it was saved.
+			// A zone it cannot read at all is compared as saved; a valid new schedule never equals it.
 			const scheduleChanged =
 				!existing ||
-				!isDeepStrictEqual(
-					routineSlotRule(parseRoutineScheduleInput(routineScheduleInputOf(existing.schedule))),
-					routineSlotRule(scheduleInput),
-				);
+				(!keepsSchedule &&
+					!isDeepStrictEqual(
+						routineSlotRule(
+							routineZoneUnsupported(existing.schedule) ? stored! : parseRoutineScheduleInput(stored),
+						),
+						routineSlotRule(scheduleInput),
+					));
 			const anchorAt =
 				!scheduleChanged && existing && "anchorAt" in existing.schedule
 					? existing.schedule.anchorAt
@@ -1637,6 +1645,7 @@ export class PersistentBotTeamStore {
 				output.push(reclaimed);
 			}
 			let journalFull = false;
+			const unschedulable: { routineId: string; reason: string }[] = [];
 			for (const [id, stored] of this.routines) {
 				if (output.length >= limit) break;
 				if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
@@ -1652,90 +1661,172 @@ export class PersistentBotTeamStore {
 					else if (decided === "journal-full") journalFull = true;
 					continue;
 				}
-				const schedule = stored.schedule;
-				let routine = stored;
-				const rebased = rebasedRoutineCursor(
-					schedule,
-					stored.cursor,
-					input.nowMs,
-					routinePreviousSlot(schedule, stored.cursor),
-				);
-				if (rebased) {
-					routine = {
-						...stored,
-						cursor: rebased,
-						nextRunAt: nextRoutineAt(schedule, rebased) ?? Number.MAX_SAFE_INTEGER,
-					};
-					this.routines.set(id, routine);
-					changed = true;
+				// One routine whose slots cannot be computed here is skipped and reported; the others are still claimed.
+				try {
+					const admitted = this.admitClockRoutine(id, stored, input, output);
+					if (admitted.changed) changed = true;
+					if (admitted.journalFull) journalFull = true;
+				} catch (error) {
+					unschedulable.push({ routineId: id, reason: error instanceof Error ? error.message : String(error) });
 				}
-				const dueAt = nextRoutineAt(schedule, routine.cursor);
-				if (dueAt === undefined || dueAt > input.nowMs) continue;
-				const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
-				const occurrenceId = routineOccurrenceId(routine, trigger);
-				if (this.routineOccurrences.has(occurrenceId)) {
-					// A restarted cursor reached a slot that already has its occurrence: that slot is consumed, never repeated.
-					const cursor = routineCursorAfter(schedule, trigger.scheduledAt);
-					this.routines.set(id, {
-						...routine,
-						cursor,
-						nextRunAt: nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER,
-					});
-					changed = true;
-					continue;
-				}
-				const parentOrigin =
-					routine.target.kind === "session"
-						? routine.executionSnapshot?.savedIntent.receiptOrigin
-						: input.receiptOrigin;
-				if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) continue;
-				const deadline = routineStartDeadline(schedule, trigger.scheduledAt);
-				const late = deadline !== undefined && input.nowMs > deadline;
-				if (late && schedule.kind === "calendar") {
-					// A slot past its lateness bound is passed over; the next run's missed count carries it.
-					const cursor: RoutineCursor = {
-						kind: "calendar",
-						nextAt: nextCalendarSlotAfter(schedule, trigger.scheduledAt) ?? null,
-						skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
-					};
-					const nextRunAt = nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
-					this.routines.set(id, { ...routine, cursor, nextRunAt });
-					changed = true;
-					continue;
-				}
-				// Nothing is consumed without its occurrence: a full journal leaves the slot due until results are delivered.
-				if (!this.routineJournalHasRoom()) {
-					journalFull = true;
-					continue;
-				}
-				const claimed = this.createClaimedOccurrence(
-					routine,
-					occurrenceId,
-					trigger,
-					input.owner,
-					input.leaseMs,
-					input.nowMs,
-					parentOrigin,
-				);
-				// A one-off whose start window closed is reported once instead of run late.
-				const occurrence = late
-					? this.withResult(
-							{ ...claimed, phase: "terminal" },
-							"cancelled",
-							"Routine start window closed before it could start; it was not run.",
-							parentOrigin.sessionId,
-						)
-					: claimed;
-				this.routineOccurrences.set(occurrenceId, occurrence);
-				const cursor = routineCursorAfter(schedule, trigger.scheduledAt);
-				const nextRunAt = nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
-				this.routines.set(id, { ...withRoutineRunState(routine, occurrence), cursor, nextRunAt });
-				if (late) changed = true;
-				else output.push(occurrence);
 			}
 			if (output.length || changed) this.save();
-			return { claimed: output.map((item) => structuredClone(item)), journalFull };
+			return { claimed: output.map((item) => structuredClone(item)), journalFull, unschedulable };
 		});
+	}
+
+	/**
+	 * Admits the due slot of one clock routine: the slot's occurrence is claimed and appended to `output`, or, when the
+	 * slot was not run, recorded as a cancelled notice; the cursor moves past it. `journalFull`: the due slot stays due
+	 * because the journal has no room for its occurrence or notice.
+	 */
+	private admitClockRoutine(
+		id: string,
+		stored: RoutineDefinitionView,
+		input: RoutineOccurrenceClaimInput,
+		output: RoutineOccurrence[],
+	): { readonly changed: boolean; readonly journalFull: boolean } {
+		const schedule = stored.schedule;
+		const unchanged = { changed: false, journalFull: false };
+		if (schedule.kind === "event") return unchanged;
+		const parentOrigin =
+			stored.target.kind === "session" ? stored.executionSnapshot?.savedIntent.receiptOrigin : input.receiptOrigin;
+		if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
+			return unchanged;
+		const unsupported = routineZoneUnsupported(schedule);
+		if (unsupported !== undefined) {
+			// No slot can be placed here. The first due slot is reported once (its notice sets lastRunAt to it), and the
+			// cursor waits for a runtime with the zone or an update to a supported zone.
+			const slot = stored.cursor.kind === "calendar" ? stored.cursor.nextAt : null;
+			if (slot === null || slot > input.nowMs || (stored.lastRunAt ?? Number.NEGATIVE_INFINITY) >= slot)
+				return unchanged;
+			const trigger = { kind: "schedule" as const, scheduledAt: slot, missedCount: 0 };
+			const occurrenceId = routineOccurrenceId(stored, trigger);
+			if (this.routineOccurrences.has(occurrenceId)) return unchanged;
+			if (!this.routineJournalHasRoom()) return { changed: false, journalFull: true };
+			this.recordRoutineNotice(
+				stored,
+				occurrenceId,
+				trigger,
+				input,
+				parentOrigin,
+				`${unsupported} It was not run, and later slots are not reported separately; the routine runs again on a runtime that supports the zone or after an update to a supported zone.`,
+			);
+			return { changed: true, journalFull: false };
+		}
+		let routine = stored;
+		let changed = false;
+		const rebased = rebasedRoutineCursor(
+			schedule,
+			stored.cursor,
+			input.nowMs,
+			routinePreviousSlot(schedule, stored.cursor),
+		);
+		if (rebased) {
+			routine = {
+				...stored,
+				cursor: rebased,
+				nextRunAt: nextRoutineAt(schedule, rebased) ?? Number.MAX_SAFE_INTEGER,
+			};
+			this.routines.set(id, routine);
+			changed = true;
+		}
+		const dueAt = nextRoutineAt(schedule, routine.cursor);
+		if (dueAt === undefined || dueAt > input.nowMs) return { changed, journalFull: false };
+		const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
+		const occurrenceId = routineOccurrenceId(routine, trigger);
+		const cursorAfter = routineCursorAfter(schedule, trigger.scheduledAt);
+		const advance = (from: RoutineDefinitionView, cursor: RoutineCursor): { changed: true; journalFull: false } => {
+			this.routines.set(id, {
+				...from,
+				cursor,
+				nextRunAt: nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER,
+			});
+			return { changed: true, journalFull: false };
+		};
+		// A restarted cursor reached a slot that already has its occurrence: that slot is consumed, never repeated.
+		if (this.routineOccurrences.has(occurrenceId)) return advance(routine, cursorAfter);
+		const deadline = routineStartDeadline(schedule, trigger.scheduledAt);
+		const late = deadline !== undefined && input.nowMs > deadline;
+		if (late && schedule.kind === "calendar" && routine.cursor.kind === "calendar") {
+			// A slot past its lateness bound is passed over and counted in the next run's missed count. The first one of a
+			// streak (no earlier skip pending) is reported once; later ones in the streak are only counted.
+			const cursor: RoutineCursor = {
+				kind: "calendar",
+				nextAt: cursorAfter.kind === "calendar" ? cursorAfter.nextAt : null,
+				skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
+			};
+			if (routine.cursor.skipped !== undefined) return advance(routine, cursor);
+			if (!this.routineJournalHasRoom()) return { changed, journalFull: true };
+			const earlier = trigger.missedCount;
+			const covered =
+				earlier > 0
+					? ` and ${earlier >= MAX_CALENDAR_MISSED_COUNT ? "at least " : ""}${earlier} earlier ${earlier === 1 ? "slot" : "slots"}`
+					: "";
+			this.recordRoutineNotice(
+				routine,
+				occurrenceId,
+				trigger,
+				input,
+				parentOrigin,
+				`This routine slot${covered} could not start within the schedule's maxLatenessMs and did not run. Later slots that also miss it are not reported separately: the next run's missed count includes them and these.`,
+			);
+			return advance(this.routines.get(id) ?? routine, cursor);
+		}
+		// Nothing is consumed without its occurrence: a full journal leaves the slot due until results are delivered.
+		if (!this.routineJournalHasRoom()) return { changed, journalFull: true };
+		if (late) {
+			// A one-off whose start window closed is reported once instead of run late.
+			this.recordRoutineNotice(
+				routine,
+				occurrenceId,
+				trigger,
+				input,
+				parentOrigin,
+				"Routine start window closed before it could start; it was not run.",
+			);
+			return advance(this.routines.get(id) ?? routine, cursorAfter);
+		}
+		const claimed = this.createClaimedOccurrence(
+			routine,
+			occurrenceId,
+			trigger,
+			input.owner,
+			input.leaseMs,
+			input.nowMs,
+			parentOrigin,
+		);
+		this.routineOccurrences.set(occurrenceId, claimed);
+		output.push(claimed);
+		return advance(withRoutineRunState(routine, claimed), cursorAfter);
+	}
+
+	/**
+	 * Records a slot that was not run as a terminal cancelled occurrence, which is delivered to the parent once, and makes
+	 * it the routine's last run.
+	 */
+	private recordRoutineNotice(
+		routine: RoutineDefinitionView,
+		occurrenceId: string,
+		trigger: Extract<RoutineOccurrence["trigger"], { kind: "schedule" }>,
+		input: RoutineOccurrenceClaimInput,
+		parentOrigin: WorkerReceiptOrigin,
+		summary: string,
+	): void {
+		const claimed = this.createClaimedOccurrence(
+			routine,
+			occurrenceId,
+			trigger,
+			input.owner,
+			input.leaseMs,
+			input.nowMs,
+			parentOrigin,
+		);
+		this.routines.set(routine.routineId, withRoutineRunState(routine, claimed));
+		this.routineOccurrences.set(
+			occurrenceId,
+			this.withResult({ ...claimed, phase: "terminal" }, "cancelled", summary, parentOrigin.sessionId),
+		);
 	}
 
 	/**
