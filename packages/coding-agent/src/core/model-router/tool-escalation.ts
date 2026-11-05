@@ -950,9 +950,20 @@ const COMMAND_WRAPPERS = new Set([
 	"watch",
 	"xargs",
 ]);
-const MAX_WRAPPER_SCAN_DEPTH = 3;
-/** `networkReach` result for a command nested deeper in wrapper programs than the gate inspects. */
-const WRAPPED_TOO_DEEP = "\0wrapped-too-deep";
+
+/** A program the gate judges by name: what a wrapper program (`timeout 5 curl ...`) runs. */
+function isKnownProgram(name: string): boolean {
+	return (
+		COMMAND_WRAPPERS.has(name) ||
+		NETWORK_CLIENTS.has(name) ||
+		READ_ONLY_COMMANDS.has(name) ||
+		SHELL_WRAPPERS.has(name) ||
+		EFFECTFUL_INTERPRETERS.has(name) ||
+		PACKAGE_MANAGER_NETWORK_SUBCOMMANDS.has(name) ||
+		name === "gh" ||
+		name === "new-object"
+	);
+}
 
 function gitNetworkReach(args: readonly string[]): string | undefined {
 	let index = 1;
@@ -970,20 +981,18 @@ function gitNetworkReach(args: readonly string[]): string | undefined {
 }
 
 /** The network client a command runs (`curl`, `git fetch`, `npm view`), looking through wrapper programs. */
-function networkReach(args: readonly string[], depth = 0): string | undefined {
+function networkReach(args: readonly string[]): string | undefined {
 	const prefix = parseShellInvocationPrefixes([...args]);
 	if (prefix.nonExecutingQuery) return undefined;
 	const commandArgs = prefix.args;
 	const name = executableName(commandArgs[0] ?? "").replace(/^\(/u, "");
 	if (!name) return undefined;
 	if (COMMAND_WRAPPERS.has(name)) {
-		// Fail closed: a program behind more wrappers than the gate inspects may be a network client.
-		if (depth >= MAX_WRAPPER_SCAN_DEPTH) return WRAPPED_TOO_DEEP;
-		for (let index = 1; index < commandArgs.length; index++) {
-			const reach = networkReach(commandArgs.slice(index), depth + 1);
-			if (reach) return reach;
-		}
-		return undefined;
+		// The wrapped program is the first word naming a program the gate knows; options and their values
+		// (`-s KILL`, `5`, `-I {}`) are skipped, and a later word (`xargs grep -l curl`) is that program's operand.
+		// Every pass consumes a word, so the walk ends. The read/write line refuses wrapper programs too.
+		const wrapped = commandArgs.findIndex((arg, index) => index > 0 && isKnownProgram(executableName(arg)));
+		return wrapped < 0 ? undefined : networkReach(commandArgs.slice(wrapped));
 	}
 	if (NETWORK_CLIENTS.has(name)) return name;
 	if (
@@ -1486,8 +1495,6 @@ function laneInvocationViolation(
 	}
 	if (!lane.network) {
 		const reach = networkReach(commandArgs);
-		if (reach === WRAPPED_TOO_DEEP)
-			return "it nests a program in more wrapper programs than the gate inspects, so it may reach the network";
 		if (reach) return `${reach} reaches the network and this worker holds no network grant`;
 	}
 	const effect = invocationEffect(commandArgs);
