@@ -83,6 +83,7 @@ import {
 	type KnowledgeCollectionRuntime,
 	KnowledgeCollector,
 } from "./memory/knowledge-collector.ts";
+import { SessionKnowledgeJudge } from "./memory/knowledge-judgment-runner.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { MemoryMutationOutcomeError } from "./memory/memory-mutation-outcome.ts";
 import type {
@@ -517,10 +518,27 @@ export class ReflectionController {
 
 	/** The original-input and isolated-completion adapter shared by each root ICM generation. */
 	createKnowledgeHost(runtime: KnowledgeCollectionRuntime): KnowledgeCollectionHost {
+		const autoLearn = () => {
+			const settings = this.deps.getSettingsManager();
+			return resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings());
+		};
+		const judge = new SessionKnowledgeJudge({
+			model: () => {
+				const configured = autoLearn().model;
+				return runtime.models.resolveModel(configured === "active" ? undefined : configured);
+			},
+			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
+			autoLearn,
+			maxEstimatedUsd: () => runtime.maxEstimatedUsd(),
+			runIsolatedCompletion: (options) => this.runIsolatedCompletion(options),
+		});
+		// One selection, re-read on every call: a bound System One always wins and never falls back.
+		const engine = () => runtime.engine() ?? judge.engine();
 		return {
 			time: runtime.time,
 			evidence: () => this.ownerEvidence,
-			engine: () => runtime.engine(),
+			engine,
+			explicitRequest: (selected) => judge.explicitRequest(selected),
 			captureGuard: () => this.captureLearningContext(),
 			createCollector: (binding) => {
 				const manager = this.deps.getSessionManager();
@@ -548,6 +566,7 @@ export class ReflectionController {
 				return new KnowledgeCollector({
 					...binding,
 					...runtime,
+					engine,
 					evidence: this.ownerEvidence,
 					settings: this.deps.getSettingsManager(),
 					usageOwner: sessionSemanticUsageOf(manager),

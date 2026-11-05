@@ -5,6 +5,7 @@ import { sessionContextItems } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import {
+	formatKnowledgeCollectionLine,
 	formatTranscriptMemoryLines,
 	type MemoryPromptInclusionReport,
 	type MemoryRetrievalDiagnostics,
@@ -15,6 +16,7 @@ import {
 	CONTINUOUS_CHAT_STATE_CUSTOM_TYPE,
 	CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
 } from "../memory/continuous-chat-projection.ts";
+import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import { boundedTextPreview } from "../text-preview.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
 
@@ -222,6 +224,7 @@ export function createCoreDiagnosticsToolDefinitions(
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
 		transcript: TranscriptMemoryDiagnostics;
+		knowledge: KnowledgeCollectionStatus;
 	},
 	getSelfCompactionView?: () => SelfCompactionView | undefined,
 	getContinuousChatAudit?: () => ContinuousChatAudit | undefined,
@@ -353,6 +356,7 @@ export function createCoreDiagnosticsToolDefinitions(
 								...formatMemoryProviderLines(memoryDiagnostics.retrieval),
 								formatMemoryPromptInclusionLine(memoryDiagnostics.promptInclusion),
 								...formatTranscriptMemoryLines(memoryDiagnostics.transcript),
+								formatKnowledgeCollectionLine(memoryDiagnostics.knowledge),
 							]
 						: []),
 					"",

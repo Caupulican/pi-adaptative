@@ -28,7 +28,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "verify", description: "Verification obligations: /verify [list|show <id>|dismiss <id|all> [note]]" },
 	{
 		name: "memory",
-		description: "Managed memory files: /memory drift · history · accept <target> · restore <target>",
+		description: "Managed memory files: /memory drift · knowledge · history · accept <target> · restore <target>",
 	},
 	{ name: "edge", description: "The edge: /edge [list] · allow <class> [note] · revoke <class>" },
 	{

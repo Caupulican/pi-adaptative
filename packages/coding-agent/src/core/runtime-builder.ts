@@ -118,6 +118,7 @@ import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
+import type { KnowledgeCollectionStatus } from "./memory/knowledge-collector.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
 import type { LaneWorkerRefusal } from "./model-capability.ts";
@@ -466,6 +467,7 @@ export interface RuntimeBuilderDeps {
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
 		transcript: TranscriptMemoryDiagnostics;
+		knowledge: KnowledgeCollectionStatus;
 	};
 	getSelfCompactionView?(): SelfCompactionView;
 	/** Under ICM, what the provider wire carries instead of the rebuilt session context; undefined otherwise. */

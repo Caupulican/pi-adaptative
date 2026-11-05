@@ -73,7 +73,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		sessionManager: world.createSessionManager(mAgentDir),
 		settings: { memorySystem: "okf" },
 	});
-	const mForgetOutcome = await mForgetMarker.session.forgetHistorySession(mLegacyForgottenId);
+	const mForgetOutcome = await mForgetMarker.session.memoryOperator.forgetHistorySession(mLegacyForgottenId);
 	expect(mForgetOutcome.ok, `forgetting ${mLegacyForgottenId} succeeds: ${mForgetOutcome.message}`).toBe(true);
 	expect(await world.disposeSessionInBody(mForgetMarker.session)).toBeUndefined();
 

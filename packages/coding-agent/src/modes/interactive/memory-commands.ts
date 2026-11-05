@@ -6,16 +6,19 @@
  * the managed content. `drift` shows where each file stands.
  */
 import {
+	formatKnowledgeCollectionLine,
 	formatTranscriptMemoryLines,
 	sanitizeTranscriptHistoryForDiagnostics,
 	type TranscriptHistoryStatus,
 } from "../../core/context/memory-diagnostics.ts";
+import type { KnowledgeCollectionStatus } from "../../core/memory/knowledge-collector.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
 import type { MemorySystem } from "../../core/settings/settings-schema.ts";
 
 export interface MemoryCommandHost {
 	getTranscriptHistoryStatus(): TranscriptHistoryStatus;
+	getKnowledgeCollectionStatus(): KnowledgeCollectionStatus;
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]>;
 	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
@@ -29,7 +32,7 @@ export interface MemoryCommandHost {
 }
 
 export const MEMORY_COMMAND_USAGE =
-	"/memory drift · /memory history · /memory history forget <session> <session> · /memory history repair-forget I-accept-lost-forgets · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
+	"/memory drift · /memory knowledge · /memory history · /memory history forget <session> <session> · /memory history repair-forget I-accept-lost-forgets · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
 
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
@@ -118,6 +121,14 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 				...entries.map(describe),
 			].join("\n"),
 		);
+		return;
+	}
+	if (action === "knowledge") {
+		if (target !== undefined) {
+			host.showError(MEMORY_COMMAND_USAGE);
+			return;
+		}
+		host.showText(formatKnowledgeCollectionLine(host.getKnowledgeCollectionStatus()));
 		return;
 	}
 	if (action === "history") {

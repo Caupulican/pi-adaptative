@@ -1,15 +1,23 @@
 /** The session model as a knowledge judge: one isolated, bounded and accounted structured submission. */
+import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { TSchema } from "typebox";
 import type { AgentTool } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
-import { RequestSpendRefusal } from "../cost/request-spend-budget.ts";
+import { RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
-import type { DecisionOptions } from "../decision/engine.ts";
-import type { LlmCompletionRunner, StructuredJudgmentRequest } from "../decision/engines/structured-llm-engine.ts";
+import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
+import {
+	type LlmCompletionRunner,
+	type StructuredJudgmentRequest,
+	StructuredLlmDecisionEngine,
+} from "../decision/engines/structured-llm-engine.ts";
 import { DecisionEngineProtocolError } from "../decision/protocol-error.ts";
+import type { AutoLearnSettings } from "../settings/settings-schema.ts";
+import { canonicalDigest } from "../steering/canonical.ts";
+import { KNOWLEDGE_COLLECTION_OPERATION_PREFIX } from "./knowledge-collector.ts";
 
 export const KNOWLEDGE_JUDGMENT_TOOL_NAME = "submit_judgment";
 const MAX_STATE_TOKENS = 32_000;
@@ -101,5 +109,71 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 			unsubscribe?.();
 			usage.release();
 		}
+	}
+}
+
+export interface SessionKnowledgeJudgeDeps {
+	/** The collection model (`autoLearn.model`), resolved exactly as extraction resolves it. */
+	model(): Model<Api> | undefined;
+	usageOwner(): SessionSemanticUsageDelivery;
+	autoLearn(): Required<AutoLearnSettings>;
+	maxEstimatedUsd(): number | undefined;
+	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+}
+
+/**
+ * The session model's knowledge engine. One instance per model and usage owner, because admission
+ * fences on engine identity; it is offered only to knowledge, never to other System One consumers.
+ */
+export class SessionKnowledgeJudge {
+	private readonly deps: SessionKnowledgeJudgeDeps;
+	private current:
+		| { key: string; usageOwner: SessionSemanticUsageDelivery; engine: SemanticDecisionEngine }
+		| undefined;
+
+	constructor(deps: SessionKnowledgeJudgeDeps) {
+		this.deps = deps;
+	}
+
+	engine(): SemanticDecisionEngine | undefined {
+		const model = this.deps.model();
+		if (!model) return undefined;
+		const usageOwner = this.deps.usageOwner();
+		const key = canonicalDigest(model);
+		if (this.current?.key !== key || this.current.usageOwner !== usageOwner) {
+			const runner = new KnowledgeJudgmentRunner({
+				model,
+				usageOwner,
+				runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
+			});
+			this.current = {
+				key,
+				usageOwner,
+				engine: new StructuredLlmDecisionEngine(`${model.provider}/${model.id}`, runner),
+			};
+		}
+		return this.current.engine;
+	}
+
+	/** One explicit change spends under the same per-change and per-session limits as automatic collection. */
+	explicitRequest(engine: SemanticDecisionEngine | undefined): Pick<DecisionOptions, "budget" | "origin"> | undefined {
+		const current = this.current;
+		if (!engine || engine !== current?.engine) return undefined;
+		const settings = this.deps.autoLearn();
+		const operationId = `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}explicit:${randomUUID()}`;
+		const spending = current.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
+		if (spending.unresolved)
+			throw new RequestSpendRefusal("Knowledge spending for this session is not settled yet; retry later.");
+		const remaining = Math.min(
+			settings.knowledgeMaxUsd,
+			settings.knowledgeSessionMaxUsd - spending.totalUsd,
+			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+		);
+		if (!(remaining > 0))
+			throw new RequestSpendRefusal("The knowledge spending allowance for this session is exhausted.");
+		return {
+			budget: new RequestSpendBudget(remaining),
+			origin: { ...current.usageOwner.captureOrigin(), operationId },
+		};
 	}
 }

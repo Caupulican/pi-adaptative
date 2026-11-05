@@ -11,6 +11,7 @@
  * allow-list cannot leak a field it was never told to copy.
  */
 
+import type { KnowledgeCollectionInactiveReason, KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import { MEMORY_RETRIEVAL_DISABLED_REASON, type TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
 import type { TranscriptSummaryHeldByKind, TranscriptSummaryHoldKind } from "../memory/transcript-summary-store.ts";
 import type { MemoryPolicyRejectionReason } from "./memory-provider-contract.ts";
@@ -631,4 +632,35 @@ function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string
 		);
 	}
 	return lines;
+}
+
+const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveReason, string>> = {
+	disabled: "autoLearn.enabled is off; explicit knowledge changes are still judged",
+	invalid_settings: "the autoLearn knowledge limits are invalid",
+	no_model: "the autoLearn model does not resolve",
+	model_unpriced: "the collection model has no declared price, so no bounded request can be admitted",
+	no_engine: "no semantic judge is available",
+	budget_exhausted: "the knowledge spending limit for this session is reached",
+	accounting_unresolved: "earlier knowledge spending is not settled yet",
+	ephemeral_session: "the session is not persisted",
+	child_session: "child sessions do not collect knowledge",
+	memory_unavailable: "ICM memory is not active",
+};
+
+/** One safe line for context_audit and `/memory knowledge`: state, judge, spending and the last pass. */
+export function formatKnowledgeCollectionLine(status: KnowledgeCollectionStatus): string {
+	const parts = [
+		status.reason
+			? `${status.state} (${status.reason}: ${KNOWLEDGE_INACTIVE_SENTENCES[status.reason]})`
+			: status.state,
+	];
+	if (status.engine)
+		parts.push(`judge ${status.engine.id} ${status.engine.model} (confidence ${status.engine.provenance})`);
+	if (status.spentUsd !== undefined && status.sessionMaxUsd !== undefined)
+		parts.push(`spent $${status.spentUsd.toFixed(4)} of $${status.sessionMaxUsd.toFixed(4)} this session`);
+	if (status.last)
+		parts.push(
+			`last pass ${status.last.status}: ${status.last.sources} source(s), ${status.last.applied} applied, ${status.last.rejected} rejected, ${status.last.held} held`,
+		);
+	return `Knowledge collection: ${parts.join("; ")}`;
 }

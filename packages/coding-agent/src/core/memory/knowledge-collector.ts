@@ -4,6 +4,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { isRequestSpendRefusal, RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
+import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
 import type { OwnerEvidenceDescriptor, OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
@@ -23,7 +24,7 @@ import type { KnowledgeStore } from "./knowledge-store.ts";
 import type { KnowledgeReadSource } from "./knowledge-tool.ts";
 
 const EXTRACTOR_VERSION = "owner-knowledge-v1";
-const OPERATION_PREFIX = "knowledge-collection:";
+export const KNOWLEDGE_COLLECTION_OPERATION_PREFIX = "knowledge-collection:";
 const MAX_SCANNED_PER_PASS = 128;
 const PASS_DEADLINE_MS = 120_000;
 const RETRY_DELAY_MS = 60_000;
@@ -71,10 +72,39 @@ export interface KnowledgeCollectionRuntime {
 	onTerminal(outcome: KnowledgeCollectionOutcome, handoff?: KnowledgeCollectionHandoff): void;
 }
 
+/** Why automatic collection starts no requests; explicit owner changes through the knowledge tool stay available. */
+export type KnowledgeCollectionInactiveReason =
+	| "disabled"
+	| "invalid_settings"
+	| "no_model"
+	| "model_unpriced"
+	| "no_engine"
+	| "budget_exhausted"
+	| "accounting_unresolved"
+	| "ephemeral_session"
+	| "child_session"
+	| "memory_unavailable";
+
+/** The owner-visible state of automatic collection, derived from its configuration and session spending. */
+export interface KnowledgeCollectionStatus {
+	readonly state: "active" | "inactive";
+	readonly reason?: KnowledgeCollectionInactiveReason;
+	readonly engine?: { readonly id: string; readonly model: string; readonly provenance: ConfidenceProvenance };
+	readonly spentUsd?: number;
+	readonly sessionMaxUsd?: number;
+	readonly last?: KnowledgeCollectionOutcome;
+}
+
 export interface KnowledgeCollectionHost {
 	readonly time: TimerPort;
 	evidence(): OwnerEvidenceLedger;
+	/** System One when bound, otherwise this session's own model as a structured judge. */
 	engine(): SemanticDecisionEngine | undefined;
+	/**
+	 * The spending allowance of one explicit knowledge-tool change judged by the session model, under the
+	 * collection's per-change and per-session limits; undefined for any other engine. Throws when exhausted.
+	 */
+	explicitRequest(engine: SemanticDecisionEngine | undefined): Pick<DecisionOptions, "budget" | "origin"> | undefined;
 	captureGuard(): () => string | undefined;
 	createCollector(binding: KnowledgeCollectionBinding): KnowledgeCollector | undefined;
 }
@@ -98,7 +128,9 @@ export interface KnowledgeCollectorDeps extends KnowledgeCollectionBinding, Know
 interface Configuration {
 	readonly key: string;
 	readonly enabled: boolean;
+	readonly reason?: KnowledgeCollectionInactiveReason;
 	readonly model: Model<Api> | undefined;
+	readonly engine: SemanticDecisionEngine | undefined;
 	readonly settings: Required<AutoLearnSettings>;
 }
 
@@ -117,6 +149,7 @@ export class KnowledgeCollector {
 	private more = false;
 	private retryAt: number | undefined;
 	private pendingTerminal: KnowledgeCollectionOutcome | undefined;
+	private lastTerminal: KnowledgeCollectionOutcome | undefined;
 	private accountingDirty = false;
 	private beganWithUnresolvedAccounting = false;
 
@@ -158,6 +191,40 @@ export class KnowledgeCollector {
 		});
 	}
 
+	/** Reads configuration and the session spending projection only; never starts or schedules work. */
+	status(): KnowledgeCollectionStatus {
+		const config = this.configuration();
+		const engine = config.engine
+			? {
+					id: config.engine.id,
+					model: config.engine.model,
+					provenance: config.engine.capabilities().confidenceProvenance,
+				}
+			: undefined;
+		const spending = this.deps.usageOwner.spending(
+			KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+			KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+		);
+		const reason =
+			config.reason ??
+			(spending.unresolved
+				? "accounting_unresolved"
+				: Math.min(
+							config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
+							this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+						) <= 0
+					? "budget_exhausted"
+					: undefined);
+		return {
+			state: reason ? "inactive" : "active",
+			...(reason ? { reason } : {}),
+			...(engine ? { engine } : {}),
+			spentUsd: spending.totalUsd,
+			sessionMaxUsd: config.settings.knowledgeSessionMaxUsd,
+			...(this.lastTerminal ? { last: this.lastTerminal } : {}),
+		};
+	}
+
 	private cancel(): void {
 		if (this.alarm !== undefined) this.deps.time.clearTimeout(this.alarm);
 		this.alarm = undefined;
@@ -189,10 +256,24 @@ export class KnowledgeCollector {
 			settings.knowledgeMaxSourcesPerPass > 0 &&
 			settings.knowledgeMaxSourcesPerPass <= 32 &&
 			(cap === undefined || (Number.isFinite(cap) && cap >= 0));
+		// An unpriced model is refused by every bounded completion, so collection never starts on it.
+		const reason: KnowledgeCollectionInactiveReason | undefined = !settings.enabled
+			? "disabled"
+			: !valid
+				? "invalid_settings"
+				: !model
+					? "no_model"
+					: model.costDefaulted
+						? "model_unpriced"
+						: engine?.capabilities().requestBudget !== true
+							? "no_engine"
+							: undefined;
 		return {
 			settings,
 			model,
-			enabled: settings.enabled && valid && !!model && engine?.capabilities().requestBudget === true,
+			engine,
+			enabled: reason === undefined,
+			...(reason ? { reason } : {}),
 			key: canonicalDigest({
 				settings,
 				cap: cap ?? null,
@@ -231,7 +312,10 @@ export class KnowledgeCollector {
 							this.active &&
 							this.accountingDirty &&
 							this.beganWithUnresolvedAccounting &&
-							!this.deps.usageOwner.spending(OPERATION_PREFIX, OPERATION_PREFIX).unresolved
+							!this.deps.usageOwner.spending(
+								KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+								KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+							).unresolved
 						)
 							this.rescan = true;
 						if (this.more || this.rescan || this.retryAt !== undefined) this.schedule();
@@ -255,7 +339,13 @@ export class KnowledgeCollector {
 		if (this.retryAt !== undefined && this.retryAt <= this.deps.time.now()) this.retryAt = undefined;
 		const controller = new AbortController();
 		this.abort = controller;
-		const outcome = { id: `${OPERATION_PREFIX}${randomUUID()}`, sources: 0, applied: 0, rejected: 0, held: 0 };
+		const outcome = {
+			id: `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}${randomUUID()}`,
+			sources: 0,
+			applied: 0,
+			rejected: 0,
+			held: 0,
+		};
 		let status: KnowledgeCollectionOutcome["status"] = "completed";
 		const deadline = this.deps.time.setTimeout(
 			() => controller.abort(new CollectionDeadline("Knowledge collection deadline reached")),
@@ -264,8 +354,8 @@ export class KnowledgeCollector {
 		try {
 			this.accountingDirty = false;
 			this.beganWithUnresolvedAccounting = this.deps.usageOwner.spending(
-				OPERATION_PREFIX,
-				OPERATION_PREFIX,
+				KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+				KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
 			).unresolved;
 			const guard = this.deps.captureGuard();
 			const origin = this.deps.usageOwner.captureOrigin();
@@ -347,6 +437,7 @@ export class KnowledgeCollector {
 		if (!this.pendingTerminal) return true;
 		try {
 			this.deps.onTerminal(this.pendingTerminal);
+			this.lastTerminal = this.pendingTerminal;
 			this.pendingTerminal = undefined;
 			return true;
 		} catch {
@@ -366,7 +457,12 @@ export class KnowledgeCollector {
 		return canonicalDigest({
 			configKey,
 			...(code === "accounting:unresolved"
-				? { spending: this.deps.usageOwner.spending(OPERATION_PREFIX, OPERATION_PREFIX) }
+				? {
+						spending: this.deps.usageOwner.spending(
+							KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+							KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+						),
+					}
 				: {}),
 			...(code?.startsWith("evidence:") || code?.startsWith("context:") ? { latestSource } : {}),
 			...(code?.startsWith("context:") ? { revision: this.deps.store.revision() } : {}),
@@ -393,8 +489,8 @@ export class KnowledgeCollector {
 		};
 		try {
 			assertCurrent();
-			const operationId = OPERATION_PREFIX + knowledgeCollectionSourceIdentity(claim.source);
-			const spending = this.deps.usageOwner.spending(OPERATION_PREFIX, operationId);
+			const operationId = KNOWLEDGE_COLLECTION_OPERATION_PREFIX + knowledgeCollectionSourceIdentity(claim.source);
+			const spending = this.deps.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
 			const remaining = Math.min(
 				config.settings.knowledgeMaxUsd - spending.operationUsd,
 				config.settings.knowledgeSessionMaxUsd - spending.totalUsd,

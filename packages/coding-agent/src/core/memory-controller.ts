@@ -98,7 +98,11 @@ import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { memoryFailure } from "./memory/history-tool.ts";
 import { KnowledgeAdmission, type KnowledgeAdmissionPort } from "./memory/knowledge-admission.ts";
-import type { KnowledgeCollectionHost, KnowledgeCollector } from "./memory/knowledge-collector.ts";
+import type {
+	KnowledgeCollectionHost,
+	KnowledgeCollectionStatus,
+	KnowledgeCollector,
+} from "./memory/knowledge-collector.ts";
 import {
 	type KnowledgeGrant,
 	type KnowledgeGrantReference,
@@ -613,6 +617,17 @@ export class LaneMemorySnapshotStaleError extends Error {
 		this.name = "LaneMemorySnapshotStaleError";
 	}
 }
+
+/** The operator's `/memory` authority over managed files, history forgetting and knowledge-collection status. */
+export type MemoryOperatorPort = Pick<
+	MemoryController,
+	| "getKnowledgeCollectionStatus"
+	| "memoryDriftReport"
+	| "memoryAcceptDrift"
+	| "memoryRestoreManaged"
+	| "repairHistoryForgetState"
+	| "forgetHistorySession"
+>;
 
 export class MemoryController {
 	/** Stable for this controller generation so an appended frontier preserves the provider-visible prompt prefix. */
@@ -1707,7 +1722,11 @@ export class MemoryController {
 			store: this._knowledgeStore,
 			scope: this._knowledgeScope(),
 			retrievalEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
-			admission: () => this.getKnowledgeAdmission(),
+			// The owner's explicit change: a session-model judgment spends under the collection's limits.
+			admission: () => {
+				const host = this._knowledgeHost;
+				return this.getKnowledgeAdmission(host?.explicitRequest(host.engine()));
+			},
 			readEvidence: this._knowledgeHost
 				? (cursor) => {
 						const evidence = this._knowledgeHost!.evidence();
@@ -1725,6 +1744,20 @@ export class MemoryController {
 						return page;
 					}
 				: undefined,
+		};
+	}
+
+	/** Automatic collection as the owner sees it: active, or the reason it starts no requests. */
+	getKnowledgeCollectionStatus(): KnowledgeCollectionStatus {
+		const collector = this._knowledgeCollector;
+		if (collector && !this._knowledgeStop) return collector.status();
+		return {
+			state: "inactive",
+			reason: this.deps.isChildSession()
+				? "child_session"
+				: this._knowledgeHost && this._currentKnowledgeReader()
+					? "ephemeral_session"
+					: "memory_unavailable",
 		};
 	}
 
@@ -1965,12 +1998,14 @@ export class MemoryController {
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
 		transcript: TranscriptMemoryDiagnostics;
+		knowledge: KnowledgeCollectionStatus;
 	} {
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		return {
 			retrieval: sanitizeMemoryRetrievalReportForDiagnostics(this.getMemoryRetrievalReport(), settings),
 			promptInclusion: this.getMemoryPromptInclusionReport(),
 			transcript: sanitizeTranscriptHistoryForDiagnostics(this.getTranscriptHistoryStatus()),
+			knowledge: this.getKnowledgeCollectionStatus(),
 		};
 	}
 

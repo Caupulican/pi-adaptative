@@ -3557,11 +3557,13 @@ export class InteractiveMode {
 	private memoryCommandHost() {
 		return {
 			getTranscriptHistoryStatus: () => this.session.getTranscriptHistoryStatus(),
-			memoryDriftReport: () => this.session.memoryDriftReport(),
-			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
-			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),
-			forgetHistorySession: (sessionId: string) => this.session.forgetHistorySession(sessionId),
-			repairHistoryForgetState: () => this.session.repairHistoryForgetState(),
+			getKnowledgeCollectionStatus: () => this.session.memoryOperator.getKnowledgeCollectionStatus(),
+			memoryDriftReport: () => this.session.memoryOperator.memoryDriftReport(),
+			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryOperator.memoryAcceptDrift(target),
+			memoryRestoreManaged: (target: ManagedMemoryTarget) =>
+				this.session.memoryOperator.memoryRestoreManaged(target),
+			forgetHistorySession: (sessionId: string) => this.session.memoryOperator.forgetHistorySession(sessionId),
+			repairHistoryForgetState: () => this.session.memoryOperator.repairHistoryForgetState(),
 			getMemorySystem: () => this.session.getMemorySystem(),
 			setMemorySystem: (system: MemorySystem) => this.session.setMemorySystem(system),
 			...this.operatorCommandOutput(),

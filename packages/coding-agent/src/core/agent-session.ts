@@ -182,8 +182,7 @@ import {
 	resolveContinuousChatTurnStart,
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
-import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
-import { MemoryController } from "./memory-controller.ts";
+import { MemoryController, type MemoryOperatorPort } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
 	evaluateLaneWorkerModelRefusal,
@@ -3027,27 +3026,9 @@ export class AgentSession {
 		return this._memory.getTranscriptHistoryStatus();
 	}
 
-	/** Managed memory files against their managed revisions (operator recovery view). */
-	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
-		return this._memory.memoryDriftReport();
-	}
-
-	/** Operator authority: adopt the on-disk memory file as the managed revision. */
-	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
-		return this._memory.memoryAcceptDrift(target);
-	}
-
-	/** Operator authority: restore the last managed content of a memory file. */
-	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
-		return this._memory.memoryRestoreManaged(target);
-	}
-
-	/** Operator authority: repair an unknown permanent forget state (a damaged, rolled-back or missing file). */
-	repairHistoryForgetState(): Promise<{ ok: boolean; message: string }> {
-		return this._memory.repairHistoryForgetState();
-	}
-	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
-		return this._memory.forgetHistorySession(sessionId);
+	/** The operator's `/memory` authority: managed-file drift, history forgetting and knowledge-collection status. */
+	get memoryOperator(): MemoryOperatorPort {
+		return this._memory;
 	}
 	private obligationProjection?: {
 		messages: readonly AgentMessage[];
