@@ -378,5 +378,13 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		},
 		createdAt,
 		...(receipts ? { receipts } : {}),
+		...(claim.report?.ownerUpdate === "none" &&
+		status === "completed" &&
+		blockers.length === 0 &&
+		!claim.inconclusive?.length &&
+		claim.parentReviewRequired !== true &&
+		claim.hostVerdict?.verdict === "accepted"
+			? { ownerUpdate: "none" as const }
+			: {}),
 	};
 }

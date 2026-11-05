@@ -199,6 +199,8 @@ export interface WorkerSubmittedReport {
 	readonly assumptions: readonly string[];
 	readonly regressions: readonly string[];
 	readonly remaining: readonly string[];
+	/** The worker's statement that its result needs no owner attention now; absent means it may. */
+	readonly ownerUpdate?: "none";
 }
 
 /**

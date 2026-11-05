@@ -499,6 +499,8 @@ export interface WorkerResultContract {
 	usage: WorkerUsageContract;
 	/** Exact terminal-slice observations; missing on historical results, never reconstructed. */
 	receipts?: WorkerResultReceipts;
+	/** Host-stamped only for a clean completed claim whose host-accepted report states the owner needs no update now. */
+	ownerUpdate?: "none";
 	createdAt: string;
 }
 

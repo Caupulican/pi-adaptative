@@ -138,12 +138,18 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			const unsubscribe = root.sessionManager.onEntriesPersisted(check);
 			check();
 		});
-	const workerReply = (label: string, expectedPrompt: string, gate?: Promise<void>, onEntered?: () => void) => ({
+	const workerReply = (
+		label: string,
+		expectedPrompt: string,
+		gate?: Promise<void>,
+		onEntered?: () => void,
+		ownerUpdate?: "none",
+	) => ({
 		...calls(`${label}-report`, [
 			{
 				id: `${label}-report`,
 				name: "submit_report",
-				arguments: { status: "completed", summary: `${label} completed.` },
+				arguments: { status: "completed", summary: `${label} completed.`, ...(ownerUpdate ? { ownerUpdate } : {}) },
 			},
 		]),
 		check: (request: ScriptedRequest) => {
@@ -410,6 +416,69 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			await withDeadline(world.trace, label, settled);
 		}
 		expect(occurrences(), "distinct requests may reuse the same provider tool-call ID").toHaveLength(4);
+		// Two runs whose workers report no owner update, with no owner turn between them: the first delivered is kept
+		// and carried with the owner's next turn without a parent wake; the other is acknowledged against it.
+		const quietRelease = createBarrier();
+		const known = new Set(occurrences().map((entry) => entry.occurrenceId));
+		const quietRuns = () => occurrences().filter((entry) => !known.has(entry.occurrenceId));
+		const quietAcknowledged = createBarrier();
+		const stopObservingQuiet = store().subscribe(() => {
+			if (quietRuns().length === 2 && quietRuns().every((entry) => entry.result?.delivery === "acknowledged"))
+				quietAcknowledged.release();
+		});
+		world.provider.enqueue(
+			"worker-a",
+			workerReply("routine-quiet-0", replacement, quietRelease.promise, undefined, "none"),
+			workerReply("routine-quiet-1", replacement, undefined, undefined, "none"),
+		);
+		// The last woken parent turn ends before the owner prompts again.
+		await withDeadline(world.trace, "routine wakes end before the quiet runs", root.session.agent.waitForIdle());
+		world.systemOne.enterPhase("routine-quiet-runs", ICM_INTAKE_JUDGMENTS);
+		const quietRevision = store().getRoutine(routineId)!.revision;
+		world.provider.enqueue(
+			"root",
+			calls("routine-quiet-runs-call", [
+				{
+					id: "quiet-run-0",
+					name: "routine",
+					arguments: { action: "run", routineId, expectedRevision: quietRevision },
+				},
+				{
+					id: "quiet-run-1",
+					name: "routine",
+					arguments: { action: "run", routineId, expectedRevision: quietRevision },
+				},
+			]),
+			text("routine-quiet-runs-done", "Both routine runs are queued."),
+		);
+		await withDeadline(world.trace, "routine-quiet-runs", root.session.prompt("Run the scheduled review twice."));
+		const rootRequestsBeforeQuiet = world.provider.requests.filter((request) => request.model.id === "root").length;
+		try {
+			quietRelease.release();
+			await withDeadline(world.trace, "both quiet routine results acknowledged", quietAcknowledged.promise);
+		} finally {
+			stopObservingQuiet();
+		}
+		const carried = parentInputs().filter((entry) => parentInputOf(entry)?.metadata.mode === "next-owner-turn");
+		expect(carried, "a later quiet run adds no parent input while an earlier one is carried").toHaveLength(1);
+		const carriedSummary = ["routine-quiet-0 completed.", "routine-quiet-1 completed."].find((summary) =>
+			JSON.stringify(carried[0]).includes(summary),
+		);
+		expect(carriedSummary, "the carried input holds one quiet run's result").toBeDefined();
+		expect(
+			quietRuns().map((entry) => [entry.result?.outcome, entry.result?.ownerUpdate, entry.result?.deliveryMarker]),
+			"both quiet results stay in the occurrence history, acknowledged against the one carried input",
+		).toEqual([
+			["succeeded", "none", carried[0]!.id],
+			["succeeded", "none", carried[0]!.id],
+		]);
+		expect(root.sessionManager.getPendingParentInputs("turn"), "a quiet result never wakes the parent").toHaveLength(
+			0,
+		);
+		expect(
+			world.provider.requests.filter((request) => request.model.id === "root"),
+			"no parent turn ran for the quiet results",
+		).toHaveLength(rootRequestsBeforeQuiet);
 		const recycledId = "recreated-review";
 		const recycledInput = {
 			routineId: recycledId,
@@ -418,6 +487,14 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			profileId: profile.profileId,
 		};
 		await command("routine-recycle-create", { action: "create", ...recycledInput });
+		await withDeadline(world.trace, "the owner's next turn consumes the quiet result", parentSettled(6));
+		expect(
+			world.provider.requests
+				.filter((request) => request.model.id === "root")
+				.slice(rootRequestsBeforeQuiet)
+				.some((request) => JSON.stringify(request.context.messages).includes(carriedSummary!)),
+			"the quiet result reaches the owner's next turn",
+		).toBe(true);
 		const retired = store().getRoutine(recycledId)!;
 		await command("routine-recycle-delete", {
 			action: "delete",
@@ -476,7 +553,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			sessionManager: world.openSessionManager(file, agentDir),
 			settings,
 		});
-		const recoveredSettled = parentSettled(6);
+		const recoveredSettled = parentSettled(7);
 		world.timers.advance("routines", 120_000);
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		await withDeadline(world.trace, "paused manual claim recovered after lease expiry", recoveredSettled);
@@ -487,8 +564,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(recovered[0]?.claim?.token).not.toBe(interrupted.claim?.token);
 		expect(recovered[0]?.result?.delivery).toBe("acknowledged");
 		expect(store().getRoutine(recycledId)?.enabled).toBe(false);
-		expect(occurrences(), "reopening cannot repeat a consumed one-off").toHaveLength(4);
-		expect(parentInputs(), "only the recovered manual run adds a new parent input").toHaveLength(6);
+		expect(occurrences(), "reopening cannot repeat a consumed one-off").toHaveLength(6);
+		expect(parentInputs(), "only the recovered manual run adds a new parent input").toHaveLength(7);
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 2);
 		// Stop after canonical acceptance but before a live parent can run: startup must
 		// process selected exact inputs without pulling the unselected tail into that request.
@@ -530,7 +607,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			},
 		);
 		root = await world.createRootSession("root", { agentDir, sessionManager: pendingManager, settings });
-		await withDeadline(world.trace, "all recovered parent input batches settled", parentSettled(39));
+		await withDeadline(world.trace, "all recovered parent input batches settled", parentSettled(40));
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 4);
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		root = await world.createRootSession("root", {
@@ -539,7 +616,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			settings,
 		});
 		await root.session.backgroundLanes.tickPersistentRoutines();
-		expect(parentInputs(), "recovered inputs retain their original canonical identity").toHaveLength(39);
+		expect(parentInputs(), "recovered inputs retain their original canonical identity").toHaveLength(40);
 		expect(root.sessionManager.getPendingParentInputs()).toHaveLength(0);
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 4);
 		world.trace.mark("root", "routine.native-durable-delivery");

@@ -140,6 +140,12 @@ export const submitReportParameters = Type.Object(
 			}),
 		),
 		reasonCodes: Type.Optional(Type.Array(Type.String())),
+		ownerUpdate: Type.Optional(
+			Type.Union([Type.Literal("needed"), Type.Literal("none")], {
+				description:
+					"none when the result needs no attention from the owner now: nothing failed, changed or needs a decision (for example a scheduled check that found nothing new). needed otherwise; omit when unsure.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -246,6 +252,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 			assumptions: clipped(args.assumptions, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
 			regressions: clipped(args.regressions, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
 			remaining: clipped(args.remaining, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
+			...(args.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		},
 	};
 }

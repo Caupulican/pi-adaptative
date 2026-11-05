@@ -57,7 +57,7 @@ export function createProactivityToolDefinition(getSettings: () => ProactivityTo
 		name: PROACTIVITY_TOOL_NAME,
 		label: "Proactivity",
 		description:
-			"View or change how the assistant raises things the owner did not ask about. Call it when the owner states a standing wish about being interrupted, such as 'you check in too much', 'not at night', 'tell me when the changelog is stale' or 'stop reminding me about tests': read the current preferences with view, then set_preferences with the whole document merged with the change. The owner confirms every change on their own screen; with no owner present nothing changes. Never change it for any other reason.",
+			"View or change how the assistant raises things the owner did not ask about. Call it when the owner states a standing wish about the tone or frequency of being interrupted, such as 'you check in too much', 'not at night' or 'stop reminding me about tests': read the current preferences with view, then set_preferences with the whole document merged with the change. A request to be told when something happens, or to check something on a schedule ('tell me when the changelog is stale'), is a routine: use the routine tool. The owner confirms every change on their own screen; with no owner present nothing changes. Never change it for any other reason.",
 		parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {

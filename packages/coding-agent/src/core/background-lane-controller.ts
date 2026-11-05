@@ -141,7 +141,7 @@ import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-m
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
-import { routineParentInput } from "./routines/routine-parent-input.ts";
+import { isQuietRoutineCompletion, routineParentInput } from "./routines/routine-parent-input.ts";
 import { RoutineSchedulerController } from "./routines/routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routines/routine-session-controller.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
@@ -1292,6 +1292,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
+			findCarriedQuietResult: (routineId) => {
+				const manager = this.deps.getSessionManager();
+				const carried = manager
+					.getPendingParentInputs("next-owner-turn")
+					.find((input) => isQuietRoutineCompletion(manager.getEntry(input.entryId), routineId));
+				return carried ? { entryId: carried.entryId } : undefined;
+			},
 			acknowledgeWorkerNotification: (occurrence) => {
 				if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
 				const intent = occurrence.definition.executionSnapshot?.savedIntent;

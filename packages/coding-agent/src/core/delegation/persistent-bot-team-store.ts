@@ -846,12 +846,18 @@ export class PersistentBotTeamStore {
 		outcome: RoutineTerminalOutcome,
 		summaryRaw: string,
 		recipient: string,
+		ownerUpdate?: "none",
 	): RoutineOccurrence {
 		const summary = summaryRaw.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
 		if (recipient !== occurrence.parentOrigin.sessionId)
 			throw new Error("Routine result recipient does not match its admitted parent.");
-		const digest = routineResultDigest(outcome, summary, recipient);
-		return { ...occurrence, result: { outcome, summary, digest, delivery: "pending", recipient } };
+		if (ownerUpdate !== undefined && outcome !== "succeeded")
+			throw new Error("Only a succeeded routine run can skip the owner update.");
+		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none");
+		return {
+			...occurrence,
+			result: { outcome, summary, digest, delivery: "pending", recipient, ...(ownerUpdate ? { ownerUpdate } : {}) },
+		};
 	}
 
 	private pruneRoutineOccurrences(): void {
@@ -1821,6 +1827,7 @@ export class PersistentBotTeamStore {
 		summary: string;
 		recipient: string;
 		nowMs: number;
+		ownerUpdate?: "none";
 	}): void {
 		const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
 		this.updateClaimedOccurrence(input, (item) =>
@@ -1834,6 +1841,7 @@ export class PersistentBotTeamStore {
 				input.outcome,
 				summary,
 				input.recipient,
+				input.ownerUpdate,
 			),
 		);
 	}

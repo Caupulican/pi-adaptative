@@ -170,6 +170,8 @@ export interface RoutineResult {
 	readonly delivery: "pending" | "acknowledged";
 	readonly recipient: string;
 	readonly deliveryMarker?: string;
+	/** The worker reported, and the host accepted, that this succeeded run needs no owner update now. */
+	readonly ownerUpdate?: "none";
 }
 
 export interface RoutineOccurrence {
@@ -649,7 +651,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 function parseRoutineResult(value: unknown, parentSessionId: string): RoutineResult {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["outcome", "summary", "digest", "delivery", "recipient", "deliveryMarker"]) ||
+		!hasOnlyKeys(value, ["outcome", "summary", "digest", "delivery", "recipient", "deliveryMarker", "ownerUpdate"]) ||
 		typeof value.outcome !== "string" ||
 		!["succeeded", "failed", "cancelled", "uncertain"].includes(value.outcome) ||
 		typeof value.summary !== "string" ||
@@ -657,7 +659,8 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 		value.summary.length > MAX_ROUTINE_SUMMARY_CHARS ||
 		typeof value.digest !== "string" ||
 		!/^[a-f0-9]{64}$/u.test(value.digest) ||
-		(value.delivery !== "pending" && value.delivery !== "acknowledged")
+		(value.delivery !== "pending" && value.delivery !== "acknowledged") ||
+		(value.ownerUpdate !== undefined && (value.ownerUpdate !== "none" || value.outcome !== "succeeded"))
 	)
 		throw new TypeError("Routine result is invalid.");
 	const recipient = boundedString(value.recipient, 200, "recipient");
@@ -667,7 +670,7 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 	if (
 		(value.delivery === "acknowledged") !== (deliveryMarker !== undefined) ||
 		recipient !== parentSessionId ||
-		value.digest !== routineResultDigest(outcome, value.summary, recipient)
+		value.digest !== routineResultDigest(outcome, value.summary, recipient, value.ownerUpdate === "none")
 	)
 		throw new TypeError("Routine result does not match its parent or delivery receipt.");
 	return {
@@ -677,6 +680,7 @@ function parseRoutineResult(value: unknown, parentSessionId: string): RoutineRes
 		delivery: value.delivery,
 		recipient,
 		...(deliveryMarker === undefined ? {} : { deliveryMarker }),
+		...(value.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 	};
 }
 
@@ -828,8 +832,16 @@ function validIsoInstant(value: unknown): value is string {
 	return validInstant(instant) && new Date(instant).toISOString() === value;
 }
 
-export function routineResultDigest(outcome: RoutineTerminalOutcome, summary: string, recipient: string): string {
-	return createHash("sha256").update(`${outcome}\0${summary}\0${recipient}`).digest("hex");
+/** A quiet result extends the original payload so results recorded before quiet delivery keep their digest. */
+export function routineResultDigest(
+	outcome: RoutineTerminalOutcome,
+	summary: string,
+	recipient: string,
+	quiet = false,
+): string {
+	return createHash("sha256")
+		.update(`${outcome}\0${summary}\0${recipient}${quiet ? "\0owner-update:none" : ""}`)
+		.digest("hex");
 }
 
 export function routineOccurrenceId(

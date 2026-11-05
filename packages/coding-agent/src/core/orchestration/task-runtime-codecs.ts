@@ -1207,6 +1207,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		"nextAction",
 		"usage",
 		"receipts",
+		"ownerUpdate",
 		"createdAt",
 	]);
 	if (result.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
@@ -1302,6 +1303,9 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 	if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) {
 		throw new DurableTaskRuntimeError(`${label}.fencingToken is invalid.`);
 	}
+	if (result.ownerUpdate !== undefined && (result.ownerUpdate !== "none" || status !== "completed")) {
+		throw new DurableTaskRuntimeError(`${label}.ownerUpdate is invalid.`);
+	}
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		resultId: dispatchIdentifier(result.resultId, `${label}.resultId`),
@@ -1329,6 +1333,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		},
 		createdAt: isoDate(result.createdAt, `${label}.createdAt`),
 		...(receipts ? { receipts } : {}),
+		...(result.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 	};
 }
 

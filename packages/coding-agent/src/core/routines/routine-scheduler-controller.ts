@@ -33,6 +33,8 @@ interface RoutineSchedulerDeps {
 	/** Includes physical resource release, which may follow the durable terminal record. */
 	subscribeCapacity(listener: () => void): () => void;
 	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
+	/** The parent input still carrying an earlier quiet result of this routine to the owner's next turn. */
+	findCarriedQuietResult(routineId: string): { entryId: string } | undefined;
 	/** Consume the native notification only after its parent input is physically durable. */
 	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
 	dispatchMessage(occurrence: RoutineOccurrence): Promise<string>;
@@ -308,13 +310,20 @@ export class RoutineSchedulerController {
 			recipient: this.deps.parentSessionId,
 			nowMs: this.deps.timers.now(),
 		};
+		// A resolved uncertainty always wakes: the parent was already told this run's outcome was unknown.
 		if (occurrence.phase === "uncertain")
 			this.deps.store.resolveUncertainRoutineOccurrence({
 				...outcome,
 				dispatchKey: occurrence.dispatchKey!,
 				executionRef: { taskId: execution.taskId, attemptId: execution.attemptId },
 			});
-		else this.deps.store.finishRoutineOccurrence(outcome);
+		else
+			this.deps.store.finishRoutineOccurrence({
+				...outcome,
+				...(outcome.outcome === "succeeded" && execution.result?.ownerUpdate === "none"
+					? { ownerUpdate: "none" as const }
+					: {}),
+			});
 	}
 
 	private async dispatch(claimed: RoutineOccurrence, result: RoutineTickResult): Promise<void> {
@@ -412,8 +421,13 @@ export class RoutineSchedulerController {
 			.find((entry) => this.deps.canUseOrigin(entry.occurrence.parentOrigin));
 		if (!pending) return;
 		const { occurrence, result } = pending;
+		// One quiet result per routine waits for the owner; later quiet runs are acknowledged against it and stay in history.
 		const delivery = Promise.resolve()
-			.then(() => this.deps.deliver(pending))
+			.then(
+				() =>
+					(result.ownerUpdate === "none" ? this.deps.findCarriedQuietResult(occurrence.routineId) : undefined) ??
+					this.deps.deliver(pending),
+			)
 			.then((receipt) => {
 				if (!this.active) return;
 				if (result.outcome !== "uncertain") this.deps.acknowledgeWorkerNotification(occurrence);
