@@ -5,7 +5,6 @@ import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
 import { type AgentContextWire, type AgentMessage, decodeExecutionContext } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
-import { getProcessWorkRun } from "../agent-paths.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerClaim, WorkerHostFinding, WorkerRequest } from "../autonomy/contracts.ts";
@@ -5220,9 +5219,6 @@ export class WorkerDelegationController {
 		const sharedBudget = runBudget ? boundedByRunBudget(treeBudget, runBudget) : treeBudget;
 		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
-		const shellOutputDirectory = shellGranted
-			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
-			: undefined;
 		const adapterSources: WorkerToolAdapterSources = {};
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === BOT_MESSAGE_TOOL_NAME)) {
 			const directory = this.deps.createBotMessageDirectory?.(agentId, durableHandle.attemptId);
@@ -5396,7 +5392,6 @@ export class WorkerDelegationController {
 					// Notification delivery must never fail the worker's own terminal path.
 				}
 			},
-			...(shellOutputDirectory ? { shellOutputDirectory } : {}),
 			grant,
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),

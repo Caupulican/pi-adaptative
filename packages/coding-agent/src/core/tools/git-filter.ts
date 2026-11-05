@@ -7,7 +7,9 @@ import { waitForChildProcessWithTermination } from "../../utils/child-process.ts
 import { createSafeWriteStream, endWriteStream } from "../../utils/safe-write-stream.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
+import { createScopedPersistedOutputMask, MaskedOutputStream } from "./persisted-output-mask.ts";
 import { hasShellOnlySyntax, isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
+import { createShellOutputDecoder } from "./shell-output-decoder.ts";
 
 export { isComplexShellCommand, parseCommandPrefixes, tokenizeCommand } from "./shell-command-parser.ts";
 
@@ -71,6 +73,8 @@ interface GitFilterOptions {
 	environment?: NodeJS.ProcessEnv;
 	/** Test seam and safety bound for terminal spill settlement. */
 	spillFlushTimeoutMs?: number;
+	/** Where an overflow spill is written (the bash tool's output directory); the process work run otherwise. */
+	outputDirectory?: string;
 }
 
 export function unicodeTruncate(str: string, maxLength: number): string {
@@ -146,7 +150,25 @@ export async function runGitQuery(
 		overflowStream?.off("drain", releaseOverflowBackpressure);
 		releaseOverflowBackpressure();
 	};
+	// Inside a persisted-output mask scope (the credential guard's) the spill file receives the masked text.
+	const scopedMask = createScopedPersistedOutputMask();
+	const maskedOverflow = scopedMask
+		? { decoder: createShellOutputDecoder(), stream: new MaskedOutputStream(scopedMask) }
+		: undefined;
 	const writeOverflowChunk = (chunk: Buffer | string): void => {
+		if (!maskedOverflow) {
+			writeOverflowData(chunk);
+			return;
+		}
+		// A text chunk follows the bytes before it: release the decoder's held bytes first.
+		const text =
+			typeof chunk === "string"
+				? `${maskedOverflow.decoder.decode()}${chunk}`
+				: maskedOverflow.decoder.decode(chunk, { stream: true });
+		const masked = maskedOverflow.stream.write(text);
+		if (masked.length > 0) writeOverflowData(masked);
+	};
+	const writeOverflowData = (chunk: Buffer | string): void => {
 		const stream = overflowStream;
 		if (!stream || overflowWriteError !== undefined || stream.destroyed) return;
 		let accepted: boolean;
@@ -165,6 +187,10 @@ export async function runGitQuery(
 	const endOverflowStream = async (): Promise<void> => {
 		const stream = overflowStream;
 		if (!stream || overflowStreamEnded) return;
+		if (maskedOverflow) {
+			const tail = maskedOverflow.stream.write(maskedOverflow.decoder.decode()) + maskedOverflow.stream.end();
+			if (tail.length > 0) writeOverflowData(tail);
+		}
 		const timeoutMs = Math.max(0, options?.spillFlushTimeoutMs ?? DEFAULT_GIT_FILTER_SPILL_FLUSH_TIMEOUT_MS);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const flushed = endWriteStream(stream).then(() => true);
@@ -196,7 +222,7 @@ export async function runGitQuery(
 			retainedStdoutBytes += chunk.length;
 			if (retainedStdoutBytes > maxRetainedBytes) {
 				overflowPath = join(
-					getProcessWorkRun(getAgentDir(), "outputs", "git").path,
+					options?.outputDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "git").path,
 					`pi-git-${randomBytes(8).toString("hex")}.log`,
 				);
 				overflowStream = createSafeWriteStream(overflowPath, recordOverflowWriteError);

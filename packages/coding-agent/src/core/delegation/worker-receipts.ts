@@ -74,12 +74,6 @@ function exitCodeOf(result: {
 	return undefined;
 }
 
-function detailString(details: unknown, key: string): string | undefined {
-	if (!details || typeof details !== "object") return undefined;
-	const value = (details as Record<string, unknown>)[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
 function detailNumber(details: unknown, key: string): number | undefined {
 	if (!details || typeof details !== "object") return undefined;
 	const value = (details as Record<string, unknown>)[key];
@@ -121,7 +115,6 @@ export function commandReceiptFor(input: {
 	if (!command) return undefined;
 	const exitCode = exitCodeOf(input.result);
 	const durationMs = detailNumber(input.result.details, "durationMs");
-	const outputRef = detailString(input.result.details, "fullOutputPath");
 	return {
 		id: workerCommandReceiptId(input.requestId, input.toolCallId),
 		tool: input.toolName,
@@ -129,7 +122,6 @@ export function commandReceiptFor(input: {
 		isError: input.isError,
 		...(exitCode !== undefined ? { exitCode } : {}),
 		...(durationMs !== undefined ? { durationMs } : {}),
-		...(outputRef !== undefined ? { outputRef } : {}),
 	};
 }
 

@@ -461,6 +461,11 @@ export interface BashToolOptions {
 	prewarmWindowsShell?: boolean;
 	/** Test/embedding hook: override the managed directory used for complete command output. */
 	outputDirectory?: string;
+	/**
+	 * The saved output is reachable only through this shell (a worker's scratch directory, outside its read tool's
+	 * grant), so the broad-search notice names shell readers instead of read offsets.
+	 */
+	outputReadableByShellOnly?: boolean;
 	/** Injectable managed-tool resolver for local shell preparation. */
 	managedToolResolver?: ManagedToolResolver;
 	/** Output reduction switches (settings `toolOutput`); reduction is on at the standard level by default. */
@@ -913,8 +918,11 @@ function createShellToolDefinition(
 						const autoRoutedNotice = autoRoutedReason
 							? `Routed automatically because ${autoRoutedReason}; a narrower search would have returned inline. `
 							: "";
+						const inspectNotice = options?.outputReadableByShellOnly
+							? `Inspect it in this shell (sed -n '1,200p' ${shellQuoteArgument(snapshot.fullOutputPath)}, head or grep on that file) or run a narrower search.`
+							: "Inspect it with bounded read offsets or a narrower search.";
 						return {
-							text: `Broad search output routed to ${snapshot.fullOutputPath}. ${autoRoutedNotice}${persistenceNotice} Inspect it with bounded read offsets or a narrower search.`,
+							text: `Broad search output routed to ${snapshot.fullOutputPath}. ${autoRoutedNotice}${persistenceNotice} ${inspectNotice}`,
 							details: {
 								...(truncation.truncated ? { truncation } : {}),
 								fullOutputPath: snapshot.fullOutputPath,
@@ -1247,7 +1255,12 @@ function createShellToolDefinition(
 							classification.subcommand,
 							classification.globalOptions || [],
 							classification.subcommandArgs || [],
-							{ signal, timeout: effectiveTimeoutSeconds, environment: filterContext.env },
+							{
+								signal,
+								timeout: effectiveTimeoutSeconds,
+								environment: filterContext.env,
+								outputDirectory: options?.outputDirectory,
+							},
 						);
 						if (res.exitCode !== -100) {
 							const rawOutputIncomplete = res.rawBytes === undefined;

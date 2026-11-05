@@ -353,11 +353,6 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 			const exitCode = optionalWorkerClaimInteger(entry.exitCode, `${label}.exitCode`);
 			const durationMs = optionalWorkerClaimInteger(entry.durationMs, `${label}.durationMs`);
 			const commandDigest = optionalCommandDigest(entry.commandDigest, `${label}.commandDigest`);
-			const outputRef = optionalWorkerClaimString(
-				entry.outputRef,
-				`${label}.outputRef`,
-				MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
-			);
 			return {
 				id: requiredWorkerClaimString(entry.id, `${label}.id`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
 				tool: requiredWorkerClaimString(entry.tool, `${label}.tool`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
@@ -366,7 +361,6 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 				isError: entry.isError,
 				...(exitCode !== undefined ? { exitCode } : {}),
 				...(durationMs !== undefined ? { durationMs } : {}),
-				...(outputRef !== undefined ? { outputRef } : {}),
 			};
 		},
 	);

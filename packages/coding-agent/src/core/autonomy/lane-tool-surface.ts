@@ -95,6 +95,7 @@ export interface SharedLaneToolOptions {
 		| "operations"
 		| "managedToolResolver"
 		| "outputDirectory"
+		| "outputReadableByShellOnly"
 	>;
 	readonly python?: Pick<
 		PythonToolOptions,
@@ -650,6 +651,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					...options.sharedToolOptions?.bash,
 					spawnHook: runEnvironment.spawnHook,
 					outputDirectory: runEnvironment.scratchDirectory,
+					outputReadableByShellOnly: true,
 				},
 				python: {
 					...options.sharedToolOptions?.python,

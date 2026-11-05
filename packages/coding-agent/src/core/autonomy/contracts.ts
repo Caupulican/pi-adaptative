@@ -160,8 +160,7 @@ export interface WorkerCommandReceipt {
 	/** Absent when the tool reported none (killed, or a tool that does not run a process). */
 	readonly exitCode?: number;
 	readonly durationMs?: number;
-	/** Where the full output was persisted, when it was. */
-	readonly outputRef?: string;
+	// No output path: a worker's saved full output lives in its scratch directory, removed when the worker ends.
 }
 
 export type WorkerReportRequirementStatus = "met" | "partial" | "not_met" | "not_applicable";
