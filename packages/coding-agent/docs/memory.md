@@ -8,7 +8,15 @@ History recall, the exact text of earlier sessions, works in both systems throug
 
 ICM keeps accepted knowledge separately from conversation history: personal facts (`profile`), standing preferences (`behavior`), durable project decisions and results (`workstream`), related people and organizations (`world`), and dated events (`journal`). Each fact has original owner citations, evidence dates, validity dates and a revision. The root's `knowledge` tool reads these records and proposes corrections or explicit forgetting. Current accepted records enter a bounded request projection, including requests in continuous chat; candidate proposals never enter that projection. Forgetting removes the accepted value and its value history and prevents replay of its old evidence. It does not erase the original conversation log.
 
-Automatic collection is enabled by default for persisted ICM root sessions when a semantic admission engine is available. After owner input and an idle delay, an isolated model reads complete original owner text and submits a bounded proposal list. The same admission owner used by the tool checks the evidence, meaning, scope and identity before storage. Pasted material, tool output, assistant statements and conversation summaries are not owner observations. Inferred patterns require independent owner observations and must satisfy the learning policy. Plainly stated durable facts can be retained without a separate “remember this” instruction.
+Automatic collection is enabled by default for persisted ICM root sessions with a priced collection model. After owner input and an idle delay, an isolated model reads complete original owner text and submits a bounded proposal list. The same admission owner used by the tool checks the evidence, meaning, scope and identity before storage. Pasted material, tool output, assistant statements and conversation summaries are not owner observations. Inferred patterns require independent owner observations and must satisfy the learning policy. Plainly stated durable facts can be retained without a separate “remember this” instruction.
+
+System One judges meaning when it is bound. Otherwise the collection model judges it, for collection and for the `knowledge` tool alike: one isolated request per judgment, whose only tool is a structured submission, charged to the same per-source and per-session allowance. That answer is a self-reported confidence, not a calibrated probability, so admission holds what only a measured probability may decide:
+
+- an inferred pattern (`uncalibrated_inference`);
+- forgetting proposed by background collection (`uncalibrated_background_forget`); the owner asks for it directly instead;
+- a proposal that matches a live fact without naming it (`identity_ambiguous`), until it names that fact's exact id and expected revision. A forgotten identity can still be relearned.
+
+The `disabled` switch (`autoLearn.enabled: false`) stops automatic collection only; explicit requests are still judged. A model with no declared price is never used: collection reports `model_unpriced` and starts no request.
 
 The collector stops when the foreground becomes busy and rejects stale work after branch, settings or memory changes. Claims, candidate receipts and processed sources survive reopening, so a completed source does not buy another extraction on restart. A pending source is not reported as processed after a timeout, incomplete submission or unavailable evidence. Each pass emits a `knowledge_collection` event with actual applied/rejected/held counts and retains a bounded terminal handoff; failed handoff persistence suspends further passes.
 
@@ -17,13 +25,13 @@ Collection settings live under `autoLearn`:
 | Setting | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Automatic learning switch; explicit knowledge requests still use admission |
-| `model` | `"active"` | Extraction model, resolved through the shared lane-model policy |
+| `model` | `"active"` | Extraction model, and the judge when System One is not bound; resolved through the shared lane-model policy |
 | `knowledgeIdleDelayMs` | `2000` | Idle delay before a pass |
 | `knowledgeMaxSourcesPerPass` | `4` | Sources considered before yielding |
 | `knowledgeMaxUsd` | `0.05` | Combined extraction and admission allowance per original source within one session |
 | `knowledgeSessionMaxUsd` | `0.50` | Combined collection allowance for the owning session |
 
-Spending includes retries and earlier attempts in the same session, including after reopening it. Unknown charges stop new collection until accounting settles. Opening a different session does not clear globally retained processed-source or hold records; these spending limits are session limits, not lifetime limits across all sessions. In-memory-only sessions do not run automatic collection because they cannot retain its evidence and accounting handoff.
+Spending includes retries, earlier attempts and explicit-change judgments in the same session, including after reopening it. An exhausted allowance holds new sources before any request until a limit changes. Unknown charges stop new collection until accounting settles. Opening a different session does not clear globally retained processed-source or hold records; these spending limits are session limits, not lifetime limits across all sessions. In-memory-only sessions do not run automatic collection because they cannot retain its evidence and accounting handoff.
 
 Long originals are reviewed in bounded windows with 8,000-character cores and up to 2,000 characters of surrounding context on each side. Windows retain the original source identity and evidence date; overlap never counts as another observation. Each extraction submits at most 32 candidates. If a core needs more, the extractor explicitly requests subdivision instead of truncating its list. A completion assertion is recorded protocol evidence, not a guarantee that the model discovered every possible fact.
 
@@ -110,6 +118,7 @@ Selected facts also enter a request-only worker view when both memory retrieval 
 ## Diagnostics
 
 - `/memory history` shows the history recall state: availability (disabled, unavailable, on_demand, loading, active), sessions and spans indexed and skipped, top skip and uncaptured reasons, truncation, the last indexing error with its time and detail, the latest retrieval (status, result count, source refs) and how many items the prompt block admitted.
+- `/memory knowledge` shows automatic collection: active, or the reason it starts no requests (`disabled`, `invalid_settings`, `no_model`, `model_unpriced`, `no_engine`, `budget_exhausted`, `accounting_unresolved`, `ephemeral_session`, `child_session`, `memory_unavailable`), the judge and its confidence kind, spending against the session limit and the last pass. `context_audit` carries the same line.
 - `context_audit` shows the same without error text or paths, plus each memory provider's retrieval status (`queried`, `blocked`, `failed` with the failure class).
 - History transport. A failed post to the index worker, or a reply outside the protocol, ends that worker once with its cause; reads then answer `unavailable` with that cause until the memory generation restarts the worker. A read that exceeds its bound answers `unavailable` and is counted. Reads made for a history tool call (queries, source reads, and the lineage listings and range checks of summary reads) have one second each and all share the call's deadline; background session and lineage listings for summary construction have 30 seconds. A stopped worker (`stoppedAt`) and a slow one (`readTimeouts`) are reported separately. In coverage, `lastError` is historical; `activeFailures` counts the sources failing now, and when it is zero the error is labelled historical.
 
