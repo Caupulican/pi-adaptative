@@ -1,7 +1,13 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { type InboxEnqueueResult, type InboxEntry, type InboxFate, MessageInbox } from "../messaging/inbox.ts";
+import {
+	type InboxEnqueueResult,
+	type InboxEntry,
+	type InboxExpiredUnread,
+	type InboxFate,
+	MessageInbox,
+} from "../messaging/inbox.ts";
 import {
 	BROKER_PROBE_TIMEOUT_MS,
 	CHAT_CREDENTIAL_ENV,
@@ -158,6 +164,11 @@ export type ChatMeshOptions = {
 	stateRoot: string;
 	/** Returns the acknowledgement text for an expectReply message. */
 	onIncoming?: (message: IncomingPeerMessage) => string | undefined | Promise<string | undefined>;
+	/**
+	 * Held messages that expired before this session collected them. `true` once the session holds a durable record that
+	 * names them; until then they are offered again at the next collection.
+	 */
+	onExpired?: (expired: readonly InboxExpiredUnread[]) => boolean;
 };
 
 const SECRET_HEX = /^[0-9a-f]{64}$/;
@@ -389,6 +400,7 @@ export class ChatMesh {
 	/** Receiver side: messages already delivered, per sender and id, so a retried send is delivered once. */
 	private readonly receivedMessages = new Map<string, Promise<IncomingOutcome>>();
 	private readonly onIncoming?: ChatMeshOptions["onIncoming"];
+	private readonly onExpired?: ChatMeshOptions["onExpired"];
 	private server?: Server;
 	private client?: Socket;
 	private clientBuffer = "";
@@ -419,6 +431,7 @@ export class ChatMesh {
 
 	constructor(options: ChatMeshOptions) {
 		this.onIncoming = options.onIncoming;
+		this.onExpired = options.onExpired;
 		this.stateRoot = options.stateRoot;
 		this.socketPath = getChatPlatformInfo(options.stateRoot).socketPath;
 		this.sessionSecret = this.socketPath ? readChatSessionSecret(options.stateRoot) : undefined;
@@ -781,6 +794,9 @@ export class ChatMesh {
 					if (this.stopping) return;
 					await this.collect(inbox, entry);
 				}
+				const expired = this.onExpired ? inbox.expiredUnread(this.self.id) : [];
+				if (expired.length && !this.stopping && this.onExpired?.(expired))
+					inbox.acknowledgeExpired(this.self.id, expired);
 			} while (this.drainRequested && !this.stopping);
 		} catch (error) {
 			this.noteInboxFault(error);

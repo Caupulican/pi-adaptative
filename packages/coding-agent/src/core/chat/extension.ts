@@ -1,7 +1,10 @@
 import { join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../extensions/types.ts";
+import type { InboxExpiredUnread } from "../messaging/inbox.ts";
 import { isWorkerSession } from "../session-role.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { registerChatCommand } from "./commands.ts";
 import {
 	CHAT_CUSTOM_MESSAGE_TYPE,
@@ -126,10 +129,40 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 		return "ACK: delivered; queued for immediate Pi turn.";
 	};
 
+	// Expired mail is acknowledged in the inbox only once this session's branch holds the card that names it.
+	let sessionBranch: (() => readonly SessionEntry[]) | undefined;
+	const toldExpired = new Set<string>();
+	const expiredKey = (item: InboxExpiredUnread) => `${item.sender}\0${item.id}`;
+	const handleExpired = (expired: readonly InboxExpiredUnread[]): boolean => {
+		const recorded = new Set(
+			(sessionBranch?.() ?? []).flatMap((entry) =>
+				entry.type === "custom_message" &&
+				entry.customType === CHAT_CUSTOM_MESSAGE_TYPE &&
+				isPlainRecord(entry.details) &&
+				entry.details.kind === "expired" &&
+				Array.isArray(entry.details.keys)
+					? entry.details.keys
+					: [],
+			),
+		);
+		if (expired.every((item) => recorded.has(expiredKey(item)))) return true;
+		const untold = expired.filter((item) => !toldExpired.has(expiredKey(item)));
+		if (!sessionBranch || untold.length === 0) return false;
+		for (const item of untold) toldExpired.add(expiredKey(item));
+		const senders = [...new Set(untold.map((item) => item.sender))];
+		sendVisibleCard({
+			customType: CHAT_CUSTOM_MESSAGE_TYPE,
+			content: `[pi-chat] ${untold.length} held ${untold.length === 1 ? "message" : "messages"} expired before this session collected ${untold.length === 1 ? "it" : "them"}, from ${senders.slice(0, 8).join(", ")}${senders.length > 8 ? ` and ${senders.length - 8} more` : ""}; the oldest was sent ${untold[0]!.createdAt}. The bodies are gone: ask the sender to resend if it still matters.`,
+			display: true,
+			details: { kind: "expired", keys: untold.map(expiredKey) },
+		});
+		return false;
+	};
+
 	const runtime: ChatRuntime = {
 		stateRoot,
 		identity,
-		mesh: new ChatMesh({ self: identity, stateRoot, onIncoming: handleIncoming }),
+		mesh: new ChatMesh({ self: identity, stateRoot, onIncoming: handleIncoming, onExpired: handleExpired }),
 		inboundHops: new Map(),
 	};
 
@@ -142,6 +175,8 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 
 	pi.on("session_start", async (_event, ctx) => {
 		activeUi = ctx.ui;
+		sessionBranch = () => ctx.sessionManager.getBranch();
+		toldExpired.clear();
 		// The mesh id is the session's: it names this peer again after a resume or a restart.
 		const bound = bindSessionIdentity(runtime.identity, ctx.sessionManager.getSessionId());
 		// Another session taking over this process leaves the mesh under its old id first.
@@ -162,6 +197,7 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
 		activeUi = undefined;
+		sessionBranch = undefined;
 		agentActive = false;
 		pendingCards.length = 0;
 		await runtime.mesh.stop();

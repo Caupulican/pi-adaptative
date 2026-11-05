@@ -105,12 +105,25 @@ export interface MessageInboxOptions {
 	readonly now?: () => number;
 }
 
+/** A message that expired before its recipient collected it, kept until the recipient acknowledges it was told. */
+export interface InboxExpiredUnread {
+	readonly id: string;
+	readonly sender: string;
+	readonly createdAt: string;
+	readonly expiredAt: string;
+}
+
 interface InboxState {
 	readonly version: 1;
 	readonly recipient: string;
 	readonly entries: readonly InboxEntry[];
 	readonly receipts: readonly InboxReceipt[];
+	/** Absent in a state written before expiry was told to the recipient. */
+	readonly unreadExpired?: readonly InboxExpiredUnread[];
 }
+
+/** Expired messages remembered for the recipient at once; the oldest is forgotten first. */
+const MAX_UNREAD_EXPIRED = 64;
 
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
@@ -238,15 +251,29 @@ function parseState(raw: string, recipient: string, limits: InboxLimits): InboxS
 		value.version !== 1 ||
 		value.recipient !== recipient ||
 		!Array.isArray(value.entries) ||
-		!Array.isArray(value.receipts)
+		!Array.isArray(value.receipts) ||
+		(value.unreadExpired !== undefined && !Array.isArray(value.unreadExpired))
 	) {
 		throw new TypeError("Inbox state does not match its recipient.");
 	}
-	if (value.entries.length > limits.maxPending || value.receipts.length > limits.maxReceipts) {
+	if (
+		value.entries.length > limits.maxPending ||
+		value.receipts.length > limits.maxReceipts ||
+		(value.unreadExpired?.length ?? 0) > MAX_UNREAD_EXPIRED
+	) {
 		throw new TypeError("Inbox state exceeds its bounds.");
 	}
 	const entries = value.entries.map((entry) => parseEntry(entry, limits));
 	const receipts = value.receipts.map(parseReceipt);
+	const unreadExpired = (value.unreadExpired ?? []).map((item: unknown): InboxExpiredUnread => {
+		if (!isPlainRecord(item)) throw new TypeError("Inbox expired message is invalid.");
+		return {
+			id: messageId(item.id),
+			sender: identityText(item.sender, "sender"),
+			createdAt: timestamp(item.createdAt, "creation time"),
+			expiredAt: timestamp(item.expiredAt, "expiry time"),
+		};
+	});
 	const seen = new Set<string>();
 	for (const item of [...entries, ...receipts]) {
 		const key = `${item.sender}\0${item.id}`;
@@ -258,22 +285,38 @@ function parseState(raw: string, recipient: string, limits: InboxLimits): InboxS
 	) {
 		throw new TypeError("Inbox state exceeds its body bound.");
 	}
-	return { version: 1, recipient, entries, receipts };
+	return { version: 1, recipient, entries, receipts, ...(unreadExpired.length ? { unreadExpired } : {}) };
 }
 
-/** Expires what outlived its time to live and forgets receipts past their retention. */
+/**
+ * Expires what outlived its time to live, remembering it for the recipient, and forgets receipts past their
+ * retention.
+ */
 function sweep(state: InboxState, nowMs: number, limits: InboxLimits): InboxState {
 	const entries: InboxEntry[] = [];
 	const receipts = [...state.receipts];
+	const unreadExpired = [...(state.unreadExpired ?? [])];
 	for (const entry of state.entries) {
 		const deadline = Date.parse(entry.createdAt) + limits.ttlMs;
-		if (nowMs > deadline) receipts.push(settledReceipt(entry, "expired", new Date(deadline).toISOString()));
-		else entries.push(entry);
+		if (nowMs <= deadline) {
+			entries.push(entry);
+			continue;
+		}
+		const expiredAt = new Date(deadline).toISOString();
+		receipts.push(settledReceipt(entry, "expired", expiredAt));
+		unreadExpired.push({ id: entry.id, sender: entry.sender, createdAt: entry.createdAt, expiredAt });
 	}
 	const retained = receipts
 		.filter((receipt) => nowMs - Date.parse(receipt.settledAt) <= limits.receiptRetentionMs)
 		.slice(-limits.maxReceipts);
-	return { ...state, entries, receipts: retained };
+	const remembered = unreadExpired.slice(-MAX_UNREAD_EXPIRED);
+	return {
+		version: 1,
+		recipient: state.recipient,
+		entries,
+		receipts: retained,
+		...(remembered.length ? { unreadExpired: remembered } : {}),
+	};
 }
 
 export class MessageInbox {
@@ -371,6 +414,26 @@ export class MessageInbox {
 		return state.entries.filter((entry) => nowMs <= Date.parse(entry.createdAt) + this.limits.ttlMs);
 	}
 
+	/** Messages that expired before the recipient collected them and that it has not acknowledged, oldest first. */
+	expiredUnread(recipient: string): readonly InboxExpiredUnread[] {
+		let expired: readonly InboxExpiredUnread[] = [];
+		this.update(identityText(recipient, "recipient"), (state) => {
+			expired = state.unreadExpired ?? [];
+			return state;
+		});
+		return expired;
+	}
+
+	/** The recipient was told of these expired messages; later expiries stay until they are told too. */
+	acknowledgeExpired(recipient: string, told: readonly InboxExpiredUnread[]): void {
+		const keys = new Set(told.map((item) => `${item.sender}\0${item.id}`));
+		this.update(identityText(recipient, "recipient"), (state) => {
+			const unreadExpired = (state.unreadExpired ?? []).filter((item) => !keys.has(`${item.sender}\0${item.id}`));
+			const { unreadExpired: _told, ...rest } = state;
+			return unreadExpired.length ? { ...rest, unreadExpired } : rest;
+		});
+	}
+
 	/** Settles a waiting message as delivered and drops its body. False when nothing was waiting under that sender and id. */
 	settle(recipient: string, sender: string, id: string): boolean {
 		return this.close(recipient, sender, id);
@@ -461,7 +524,7 @@ export class MessageInbox {
 			const nowMs = this.now();
 			const current = this.readIfPresent(recipient) ?? { version: 1 as const, recipient, entries: [], receipts: [] };
 			const next = mutate(sweep(current, nowMs, this.limits), nowMs);
-			if (next.entries.length === 0 && next.receipts.length === 0) {
+			if (next.entries.length === 0 && next.receipts.length === 0 && !next.unreadExpired?.length) {
 				if (existsSync(file)) {
 					unlinkSync(file);
 					changed = true;
