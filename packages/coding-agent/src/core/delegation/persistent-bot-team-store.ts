@@ -1971,7 +1971,21 @@ export class PersistentBotTeamStore {
 				}
 			}
 			if (output.length || changed) this.save();
-			return { claimed: output.map((item) => structuredClone(item)), journalFull, unschedulable, awayRefused };
+			let awayRetryAt: number | undefined;
+			if (awayRefused.length > 0)
+				for (const item of this.routineOccurrences.values())
+					if (item.executor === "away" && item.createdAt > input.nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS)
+						awayRetryAt = Math.min(
+							awayRetryAt ?? Number.POSITIVE_INFINITY,
+							item.createdAt + ROUTINE_AWAY_SPEND_WINDOW_MS,
+						);
+			return {
+				claimed: output.map((item) => structuredClone(item)),
+				journalFull,
+				unschedulable,
+				awayRefused,
+				...(awayRetryAt === undefined ? {} : { awayRetryAt }),
+			};
 		});
 	}
 

@@ -559,6 +559,11 @@ export interface RoutineClaimResult {
 	readonly unschedulable: readonly { readonly routineId: string; readonly reason: string }[];
 	/** Due routines an away claim left due because the away spend bound has no room for another run. */
 	readonly awayRefused: readonly string[];
+	/**
+	 * With `awayRefused`: when the oldest charged away run leaves the spend window, the earliest instant its room can
+	 * return without a store change. Absent when no charged run can leave it.
+	 */
+	readonly awayRetryAt?: number;
 }
 
 export interface RoutineEventDecision {

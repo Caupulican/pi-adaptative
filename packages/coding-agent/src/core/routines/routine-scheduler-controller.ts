@@ -13,6 +13,7 @@ import {
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
+	type RoutineAwayClaimGate,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
 	type RoutineEventAnchor,
@@ -122,6 +123,15 @@ export interface RoutineHostEventPort {
 	subscribe(listener: () => void): () => void;
 }
 
+/** How finished routine results reach the parent session; only a host with the parent open has it. */
+export interface RoutineResultDelivery {
+	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
+	/** The parent input still carrying an earlier quiet result of this routine to the owner's next turn. */
+	findCarriedQuietResult(routineId: string): { entryId: string } | undefined;
+	/** Consume the native notification only after its parent input is physically durable. */
+	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
+}
+
 interface RoutineSchedulerDeps {
 	readonly store: RoutineStorePort;
 	readonly worker: RoutineWorkerExecutor;
@@ -138,11 +148,17 @@ interface RoutineSchedulerDeps {
 	readonly hostEvents: RoutineHostEventPort;
 	/** Includes physical resource release, which may follow the durable terminal record. */
 	subscribeCapacity(listener: () => void): () => void;
-	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
-	/** The parent input still carrying an earlier quiet result of this routine to the owner's next turn. */
-	findCarriedQuietResult(routineId: string): { entryId: string } | undefined;
-	/** Consume the native notification only after its parent input is physically durable. */
-	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
+	/**
+	 * Present when the parent session is open here. A host running routines away has none: its results stay pending
+	 * in the store and the parent's own scheduler delivers them when it opens.
+	 */
+	readonly delivery?: RoutineResultDelivery;
+	/**
+	 * Present only for a host running the parent's routines away. It runs only the parent's pinned session routines
+	 * (never event, bot or team routines, which need the open session or are any session's), and every claim it makes
+	 * is admitted under the away spend bound this returns.
+	 */
+	readonly away?: { gate(): RoutineAwayClaimGate };
 	dispatchMessage(occurrence: RoutineOccurrence): Promise<string>;
 	warn(message: string): void;
 }
@@ -173,6 +189,11 @@ export class RoutineSchedulerController {
 	private stepFailed = false;
 	/** The last claim left a due routine unconsumed for lack of journal room; only a store change can admit it. */
 	private journalFull = false;
+	/**
+	 * Away only: the routines the last claim left due because the away spend bound had no room, and when the oldest
+	 * charged run leaves the window. Room otherwise returns only with a store change, which wakes the scheduler.
+	 */
+	private awayWait: { readonly routines: ReadonlySet<string>; readonly retryAt?: number } | undefined;
 	/** `routinePreviousSlot` of each routine cursor seen by the last schedule read, so a cursor is evaluated once. */
 	private previousSlots = new Map<string, number | undefined>();
 
@@ -329,7 +350,8 @@ export class RoutineSchedulerController {
 			const separator = unit.indexOf("|");
 			if (separator < 0) continue;
 			const subject = unit.slice(separator + 1);
-			if (!(unit.startsWith("routine|") ? routines : present).has(subject)) this.faults.delete(unit);
+			const aboutRoutine = unit.startsWith("routine|") || unit.startsWith("away|");
+			if (!(aboutRoutine ? routines : present).has(subject)) this.faults.delete(unit);
 		}
 		const pendingIds = new Set(
 			this.occurrences()
@@ -383,6 +405,8 @@ export class RoutineSchedulerController {
 	 * waiting on a run or a delivery is left: that settlement wakes a later pass.
 	 */
 	private retire(): void {
+		// Away, the closed parent's ended routines are retired when it opens: their notice needs its receipt origin.
+		if (this.deps.away) return;
 		const nowMs = this.deps.timers.now();
 		const occurrences = this.occurrences();
 		const ended = this.eligibleRoutines().filter(
@@ -411,8 +435,21 @@ export class RoutineSchedulerController {
 	/** Claims what is due for this session: clock slots, recoverable occurrences and event attempts. */
 	private claim(): void {
 		const nowMs = this.deps.timers.now();
-		const eligibleRoutines = this.eligibleRoutines();
+		const away = this.deps.away;
+		const eligibleRoutines = this.deps.store.listRoutines().filter((routine) => this.schedulable(routine));
 		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
+		// A run that could not run while this session was closed is reported once, before its slot runs here.
+		if (!away)
+			for (const routine of eligibleRoutines)
+				if (
+					routine.awayRefusal &&
+					routine.target.kind === "session" &&
+					routine.target.parentSessionId === this.deps.parentSessionId
+				)
+					this.report(
+						`away|${routine.routineId}`,
+						`Routine ${routine.routineId} did not run while this session was closed: ${routine.awayRefusal.reason}`,
+					);
 		const eventRoutines = eligibleRoutines.filter(
 			(routine) =>
 				routine.enabled &&
@@ -427,6 +464,7 @@ export class RoutineSchedulerController {
 			(entry) =>
 				this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
 				this.deps.canUseOrigin(entry.parentOrigin) &&
+				(!away || entry.target.kind === "session") &&
 				(entry.phase === "pending" ||
 					(entry.phase === "claimed" && entry.claim && entry.claim.leaseUntil <= nowMs)),
 		);
@@ -436,6 +474,7 @@ export class RoutineSchedulerController {
 			(hostEvents === undefined || !this.hasEventWork(eventRoutines, hostEvents))
 		) {
 			this.journalFull = false;
+			this.awayWait = undefined;
 			this.faults.delete("journal");
 			return;
 		}
@@ -447,11 +486,24 @@ export class RoutineSchedulerController {
 			parentSessionId: this.deps.parentSessionId,
 			eligibleRoutineIds,
 			eligibleOccurrenceIds: recoverable.map((occurrence) => occurrence.occurrenceId),
-			receiptOrigin: this.deps.getReceiptOrigin(),
+			// Away, only pinned routines run, so no origin is captured from the closed session.
+			...(away ? { away: away.gate() } : { receiptOrigin: this.deps.getReceiptOrigin() }),
 			...(hostEvents ? { hostEvents } : {}),
 		});
 		for (const { routineId, reason } of claim.unschedulable)
 			this.report(`routine|${routineId}`, `Routine ${routineId} cannot be scheduled: ${reason}`);
+		this.awayWait =
+			claim.awayRefused.length > 0
+				? {
+						routines: new Set(claim.awayRefused),
+						...(claim.awayRetryAt === undefined ? {} : { retryAt: claim.awayRetryAt }),
+					}
+				: undefined;
+		for (const routineId of claim.awayRefused)
+			this.report(
+				`away|${routineId}`,
+				`Routine ${routineId} was not run away: ${this.deps.store.getRoutine(routineId)?.awayRefusal?.reason ?? "the away spend bound has no room for another run."}`,
+			);
 		this.journalFull = claim.journalFull;
 		if (claim.journalFull)
 			this.report(
@@ -658,7 +710,8 @@ export class RoutineSchedulerController {
 	}
 
 	private deliverPending(): void {
-		if (!this.active || this.deliveries.size > 0) return;
+		const parent = this.deps.delivery;
+		if (!parent || !this.active || this.deliveries.size > 0) return;
 		const pending = this.deps.store
 			.listPendingRoutineDeliveries(this.deps.parentSessionId, 2 * MAX_ROUTINE_OCCURRENCES)
 			.find((entry) => this.deps.canUseOrigin(entry.occurrence.parentOrigin));
@@ -668,12 +721,12 @@ export class RoutineSchedulerController {
 		const delivery = Promise.resolve()
 			.then(
 				() =>
-					(result.ownerUpdate === "none" ? this.deps.findCarriedQuietResult(occurrence.routineId) : undefined) ??
-					this.deps.deliver(pending),
+					(result.ownerUpdate === "none" ? parent.findCarriedQuietResult(occurrence.routineId) : undefined) ??
+					parent.deliver(pending),
 			)
 			.then((receipt) => {
 				if (!this.active) return;
-				if (result.outcome !== "uncertain") this.deps.acknowledgeWorkerNotification(occurrence);
+				if (result.outcome !== "uncertain") parent.acknowledgeWorkerNotification(occurrence);
 				this.deps.store.acknowledgeRoutineDelivery({
 					occurrenceId: occurrence.occurrenceId,
 					recipient: result.recipient,
@@ -713,7 +766,8 @@ export class RoutineSchedulerController {
 		}
 		try {
 			const nowMs = this.deps.timers.now();
-			let next = this.nextScheduledAt(nowMs, this.journalFull);
+			let next = this.nextScheduledAt(nowMs, this.journalFull, this.awayWait?.routines);
+			if (this.awayWait?.retryAt !== undefined) next = Math.min(next, this.awayWait.retryAt);
 			for (const occurrence of this.occurrences())
 				if (
 					occurrence.claim &&
@@ -733,22 +787,22 @@ export class RoutineSchedulerController {
 	 * The earliest instant a routine of this session can be claimed: its next slot after a backward clock step is undone
 	 * (`rebasedRoutineCursor`, as the claim persists it), and never before the routine's last edit. An event routine
 	 * contributes only an edit still ahead of the clock. Every routine, paused ones included, contributes its end time
-	 * while that is ahead. With `waitingForRoom`, a routine already due is left out: the
-	 * last claim found no journal room for it, and only a store change (which wakes the scheduler) can make room.
+	 * while that is ahead (not away, where nothing is retired). With `waitingForRoom`, a routine already due is left
+	 * out: the last claim found no journal room for it, and only a store change (which wakes the scheduler) can make
+	 * room; the same holds for a due routine in `awayRefused`, whose room also returns as the away spend window passes.
 	 */
-	private nextScheduledAt(nowMs: number, waitingForRoom = false): number {
+	private nextScheduledAt(nowMs: number, waitingForRoom = false, awayRefused?: ReadonlySet<string>): number {
 		let next = Number.POSITIVE_INFINITY;
 		const previousSlots = new Map<string, number | undefined>();
 		for (const routine of this.deps.store.listRoutines()) {
 			if (
-				(routine.executionSnapshot &&
-					!this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin)) ||
+				!this.schedulable(routine) ||
 				(routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
 			)
 				continue;
 			// A routine's end wakes the retire step, paused or not. Once ended it has no alarm: the settlement of its last
 			// run or delivery wakes the pass that removes it.
-			const end = routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;
+			const end = this.deps.away || routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;
 			if (routineEnded(routine.schedule, routine.cursor, nowMs) !== undefined) continue;
 			let due: number | undefined;
 			try {
@@ -762,11 +816,24 @@ export class RoutineSchedulerController {
 				due = undefined;
 			}
 			if (end !== undefined) due = due === undefined ? end : Math.min(due, end);
-			if (due === undefined || (waitingForRoom && due <= nowMs)) continue;
+			if (due === undefined || (due <= nowMs && (waitingForRoom || awayRefused?.has(routine.routineId)))) continue;
 			next = Math.min(next, due);
 		}
 		this.previousSlots = previousSlots;
 		return next;
+	}
+
+	/**
+	 * Whether this host schedules the routine: a pinned routine only while its origin is usable here, and away only a
+	 * pinned session clock routine.
+	 */
+	private schedulable(routine: RoutineDefinitionView): boolean {
+		const snapshot = routine.executionSnapshot;
+		if (snapshot && !this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)) return false;
+		return (
+			!this.deps.away ||
+			(snapshot !== undefined && routine.target.kind === "session" && routine.schedule.kind !== "event")
+		);
 	}
 
 	private routineDueAt(

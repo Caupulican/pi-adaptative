@@ -1423,31 +1423,33 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				},
 			},
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
-			deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
-			findCarriedQuietResult: (routineId) => {
-				const manager = this.deps.getSessionManager();
-				const carried = manager
-					.getPendingParentInputs("next-owner-turn")
-					.find((input) => isQuietRoutineCompletion(manager.getEntry(input.entryId), routineId));
-				return carried ? { entryId: carried.entryId } : undefined;
-			},
-			acknowledgeWorkerNotification: (occurrence) => {
-				if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
-				const intent = occurrence.definition.executionSnapshot?.savedIntent;
-				if (!intent) return;
-				const attemptIds = worker.notificationAttemptIds({
-					intent,
-					instructions: routineInstructions(occurrence),
-					dispatchKey: occurrence.dispatchKey,
-				});
-				const lifecycle = this._getWorkerLifecycle();
-				const ids: string[] = [];
-				for (const attemptId of attemptIds) {
-					const notification = lifecycle.getAttemptTerminalNotification(attemptId);
-					if (!notification) throw new Error("Routine completion is waiting for its native terminal receipt.");
-					if (notification.status === "pending") ids.push(notification.notificationId);
-				}
-				lifecycle.markNotificationsDelivered(ids);
+			delivery: {
+				deliver: (delivery) => this.deps.deliverParentInput(routineParentInput(delivery)),
+				findCarriedQuietResult: (routineId) => {
+					const manager = this.deps.getSessionManager();
+					const carried = manager
+						.getPendingParentInputs("next-owner-turn")
+						.find((input) => isQuietRoutineCompletion(manager.getEntry(input.entryId), routineId));
+					return carried ? { entryId: carried.entryId } : undefined;
+				},
+				acknowledgeWorkerNotification: (occurrence) => {
+					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
+					const intent = occurrence.definition.executionSnapshot?.savedIntent;
+					if (!intent) return;
+					const attemptIds = worker.notificationAttemptIds({
+						intent,
+						instructions: routineInstructions(occurrence),
+						dispatchKey: occurrence.dispatchKey,
+					});
+					const lifecycle = this._getWorkerLifecycle();
+					const ids: string[] = [];
+					for (const attemptId of attemptIds) {
+						const notification = lifecycle.getAttemptTerminalNotification(attemptId);
+						if (!notification) throw new Error("Routine completion is waiting for its native terminal receipt.");
+						if (notification.status === "pending") ids.push(notification.notificationId);
+					}
+					lifecycle.markNotificationsDelivered(ids);
+				},
 			},
 			dispatchMessage: async (occurrence) => {
 				if (occurrence.target.kind === "bot") {
