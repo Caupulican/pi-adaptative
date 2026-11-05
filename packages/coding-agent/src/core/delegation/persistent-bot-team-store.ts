@@ -38,6 +38,7 @@ import {
 	parseRoutineOccurrence,
 	parseRoutineScheduleInput,
 	parseRoutineTarget,
+	ROUTINE_AWAY_SPEND_REFUSAL,
 	ROUTINE_AWAY_SPEND_WINDOW_MS,
 	ROUTINE_INTAKE_CAP_WINDOW_MS,
 	ROUTINE_INTAKE_LIVE_CAP,
@@ -642,9 +643,6 @@ function appendBoundedFile(filePath: string, line: string, maxLines = 80): void 
 		{ retries: 0 },
 	);
 }
-
-const ROUTINE_AWAY_SPEND_REFUSAL =
-	"the away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
 
 /**
  * The routine's run-state cache for one claimed occurrence: running until its result, then that result's outcome and

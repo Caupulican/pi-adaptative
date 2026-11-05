@@ -78,6 +78,8 @@ export interface AwayParentContext {
 	reader(): ReadonlySessionManager;
 	/** Every orchestration ledger event this context records (worker admission, progress and terminals). */
 	subscribeExecution(listener: () => void): () => void;
+	/** Whether an attempt of a run this context runs is queued, leased or running: closing now would interrupt it. */
+	hasLiveRun(): boolean;
 	isClosed(): boolean;
 	/** Stops worker execution, the ephemeral model-call session and the bundle hold. Idempotent. */
 	close(): Promise<void>;
@@ -360,6 +362,14 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			workers,
 			reader: () => readerNow(),
 			subscribeExecution: (listener) => store.subscribe(() => listener()),
+			hasLiveRun: () => {
+				const snapshot = lifecycle.getTaskRuntimeSnapshot();
+				return Object.values(snapshot.attempts).some(
+					(attempt) =>
+						(attempt.status === "queued" || attempt.status === "leased" || attempt.status === "running") &&
+						runsAttempt(attempt, snapshot),
+				);
+			},
 			isClosed: () => closed,
 			close: async () => {
 				if (closed) return;

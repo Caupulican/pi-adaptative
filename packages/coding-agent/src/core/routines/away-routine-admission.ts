@@ -30,6 +30,13 @@ export const AWAY_UNPINNED_REASON =
 export const AWAY_OFF_BRANCH_REASON =
 	"its saved origin is not on the session's current branch, or that branch is empty, so it waits for the session to open.";
 
+/** A saved run whose pinned origin names no session file: nothing locates the parent to open away. */
+export const AWAY_NO_SESSION_FILE_REASON =
+	"its saved origin names no session file, so it runs only while its session is open.";
+/** The parent's lease registry cannot be read, so nothing proves its session closed. */
+export const AWAY_LEASES_UNREADABLE_REASON =
+	"its session's lease registry cannot be read, so nothing proves the session closed; it waits for the session to open.";
+
 /** Why this saved run cannot run away, or undefined when it can. */
 export function awayRunRefusal(intent: WorkerSavedIntent): string | undefined {
 	const contract = intent.executionContract;

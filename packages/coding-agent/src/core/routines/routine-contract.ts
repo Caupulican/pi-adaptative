@@ -438,6 +438,10 @@ export interface RoutineOccurrence {
 /** The rolling window of the away spend bound. */
 export const ROUTINE_AWAY_SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** Why a due run was not run away for lack of room under the away spend bound. */
+export const ROUTINE_AWAY_SPEND_REFUSAL =
+	"the away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
+
 /** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
 export interface RoutineAwayClaimGate {
 	readonly maxUsdPerRun: number;
