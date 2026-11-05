@@ -205,7 +205,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		for (const [schedule, refusal] of [
 			[{ kind: "calendar", cron: "60 9 * * *", timeZone: "UTC" }, /minute field/],
 			[{ kind: "calendar", cron: "0 9 * * *", timeZone: "Mars/Olympus_Mons" }, /not supported/],
-			[{ kind: "calendar", cron: "0 0 31 2 *", timeZone: "UTC" }, /no time within/],
+			[{ kind: "calendar", cron: "0 0 31 2 *", timeZone: "UTC" }, /never matches/],
 		] as const)
 			expect(
 				() =>

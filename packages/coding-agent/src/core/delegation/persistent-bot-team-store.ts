@@ -1473,7 +1473,7 @@ export class PersistentBotTeamStore {
 			if (plannedRunAt === undefined && schedule.kind === "interval")
 				throw new Error("Routine interval has no representable future instant.");
 			if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
-				throw new Error("Calendar rule matches no time within the next eight years.");
+				throw new Error("Calendar rule never matches a date.");
 			const nextRunAt = plannedRunAt ?? Number.MAX_SAFE_INTEGER;
 			const view: RoutineDefinitionView = {
 				...definition,

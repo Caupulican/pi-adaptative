@@ -323,7 +323,7 @@ export function routineStartDeadline(schedule: RoutineSchedule, scheduledAt: num
 	return undefined;
 }
 
-/** Cursor of a newly authored or changed schedule; a calendar rule with no slot in the search horizon gets null. */
+/** Cursor of a newly authored or changed schedule; a calendar rule that never matches a representable instant gets null. */
 export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 	switch (schedule.kind) {
 		case "interval":

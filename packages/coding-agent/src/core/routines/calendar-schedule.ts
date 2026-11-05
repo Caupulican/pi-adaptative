@@ -20,8 +20,12 @@ const MAX_CACHED_RULES = 128;
 
 export const MAX_CALENDAR_CRON_CHARS = 128;
 export const MAX_CALENDAR_TIME_ZONE_CHARS = 64;
-/** The sparsest satisfiable rule is 29 February, which can skip a century year: eight years apart. */
-export const CALENDAR_SEARCH_HORIZON_DAYS = 3_000;
+/**
+ * One Gregorian cycle: dates and weekdays repeat every 146,097 days, so a rule matching no date
+ * within it matches none ever, and a satisfiable rule (29 February on a given weekday can recur
+ * decades apart) always finds its next slot.
+ */
+export const CALENDAR_SEARCH_HORIZON_DAYS = 146_097 + 1;
 /** Saturation bound for the missed-slot count recorded on a coalesced occurrence. */
 export const MAX_CALENDAR_MISSED_COUNT = 1_000;
 
