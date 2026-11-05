@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import { nextRoutineAt, type RoutineDefinitionView, routineScheduleInputOf } from "./routine-contract.ts";
@@ -41,6 +42,9 @@ function view(routine: RoutineDefinitionView): RoutineToolView {
 	return {
 		...summary(routine),
 		prompt: routine.prompt,
+		...(routine.lastSummary === undefined
+			? {}
+			: { lastSummary: wrapUntrustedText(routine.lastSummary, `routine-last-summary:${routine.routineId}`) }),
 		...(routine.executionSnapshot?.profileId === undefined ? {} : { profileId: routine.executionSnapshot.profileId }),
 		knowledge: routine.executionSnapshot?.savedIntent.knowledgeReferences ?? [],
 	};

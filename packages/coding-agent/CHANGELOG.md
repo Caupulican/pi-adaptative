@@ -19,7 +19,7 @@
 ### Fixed
 
 - A routine result that coalesces missed scheduled slots now states how many in the result delivered to the session (`missedCount` in its details); the count was recorded but not delivered.
-- A routine's `lastStatus` in `list` and `get` now follows its most recently claimed run to that run's outcome (succeeded, failed, cancelled or uncertain), including manual runs; it no longer stays `running` after the run ends.
+- A routine's `lastStatus` in `list` and `get` now follows its most recently claimed run to that run's outcome (succeeded, failed, cancelled or uncertain), including manual runs; it no longer stays `running` after the run ends. `get` also shows the finished run's summary.
 - The day's cross-session usage total reads the sessions under the session's own agent directory instead of the process default, and counts a running session whose file is not written yet.
 - Scheduled routines retain a pending occurrence while a compatible worker is busy and resume on physical resource release instead of reporting a failed run.
 - Accepted proactive notes survive restart in both delivery modes. Automatic notes use the durable parent wake path; note-only delivery waits for the owner's input and a successful response to the exact request carrying it, including in continuous chat. Existing ICM stores preserve original records while replacing obsolete background projections, rebuilding affected summaries and recovering proven consumption without importing excluded sessions.

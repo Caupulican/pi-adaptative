@@ -932,7 +932,8 @@ export class BotTeamChatController {
 							? `team:${r.target.teamId}`
 							: "main session";
 				const next = nextRoutineAt(r.schedule, r.cursor);
-				const status = r.lastStatus ? ` · last=${r.lastStatus}` : "";
+				const outcome = r.lastSummary ? `: ${r.lastSummary.replace(/\r?\n+/g, " ").slice(0, 100)}` : "";
+				const status = r.lastStatus ? ` · last=${r.lastStatus}${outcome}` : "";
 				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${next === undefined ? "complete" : new Date(next).toISOString()}${status} · "${r.prompt}"`;
 			})
 			.join("\n");

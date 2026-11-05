@@ -615,6 +615,21 @@ function appendBoundedFile(filePath: string, line: string, maxLines = 80): void 
 	);
 }
 
+/**
+ * The routine's run-state cache for one claimed occurrence: running until its result, then that result's outcome and
+ * summary. Only run state changes; the definition, revision and updatedAt stay the admitted revision's.
+ */
+function withRoutineRunState(routine: RoutineDefinitionView, occurrence: RoutineOccurrence): RoutineDefinitionView {
+	const { lastSummary: _previousSummary, ...rest } = routine;
+	const result = occurrence.result;
+	return {
+		...rest,
+		lastRunAt: routineTriggerAt(occurrence.trigger),
+		lastStatus: result?.outcome ?? "running",
+		...(result ? { lastSummary: result.summary } : {}),
+	};
+}
+
 export class PersistentBotTeamStore {
 	private readonly agentDir: string;
 	private readonly filePath: string;
@@ -855,17 +870,18 @@ export class PersistentBotTeamStore {
 		if (ownerUpdate !== undefined && outcome !== "succeeded")
 			throw new Error("Only a succeeded routine run can skip the owner update.");
 		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none");
-		// The routine's last status follows the result of its most recently claimed occurrence.
+		const finished: RoutineOccurrence = {
+			...occurrence,
+			result: { outcome, summary, digest, delivery: "pending", recipient, ...(ownerUpdate ? { ownerUpdate } : {}) },
+		};
+		// The routine's last run state follows the result of its most recently claimed occurrence only.
 		const routine = this.routines.get(occurrence.routineId);
 		if (
 			routine?.incarnationId === occurrence.definition.incarnationId &&
 			routine.lastRunAt === routineTriggerAt(occurrence.trigger)
 		)
-			this.routines.set(routine.routineId, { ...routine, lastStatus: outcome });
-		return {
-			...occurrence,
-			result: { outcome, summary, digest, delivery: "pending", recipient, ...(ownerUpdate ? { ownerUpdate } : {}) },
-		};
+			this.routines.set(routine.routineId, withRoutineRunState(routine, finished));
+		return finished;
 	}
 
 	private pruneRoutineOccurrences(): void {
@@ -1643,7 +1659,6 @@ export class PersistentBotTeamStore {
 						)
 					: claimed;
 				this.routineOccurrences.set(occurrenceId, occurrence);
-				const lastStatus = occurrence.result?.outcome ?? "running";
 				const cursor: RoutineCursor =
 					routine.schedule.kind === "interval"
 						? {
@@ -1659,7 +1674,7 @@ export class PersistentBotTeamStore {
 								}
 							: { kind: "once", consumed: true };
 				const nextRunAt = nextRoutineAt(routine.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
-				this.routines.set(id, { ...routine, cursor, nextRunAt, lastRunAt: trigger.scheduledAt, lastStatus });
+				this.routines.set(id, { ...withRoutineRunState(routine, occurrence), cursor, nextRunAt });
 				if (late) changed = true;
 				else output.push(occurrence);
 			}
@@ -1730,7 +1745,7 @@ export class PersistentBotTeamStore {
 				origin,
 			);
 			this.routineOccurrences.set(id, occurrence);
-			this.routines.set(routine.routineId, { ...routine, lastRunAt: trigger.requestedAt, lastStatus: "running" });
+			this.routines.set(routine.routineId, withRoutineRunState(routine, occurrence));
 			this.save();
 			return structuredClone(occurrence);
 		});

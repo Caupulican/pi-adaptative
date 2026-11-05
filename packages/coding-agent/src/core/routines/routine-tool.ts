@@ -37,6 +37,8 @@ export interface RoutineToolSummary {
 /** Complete authored values for read-before-edit, without compiled authority or parent identity. */
 export interface RoutineToolView extends RoutineToolSummary {
 	readonly prompt: string;
+	/** The last finished run's worker summary, inside an untrusted-content boundary. */
+	readonly lastSummary?: string;
 	readonly profileId?: string;
 	readonly knowledge: readonly KnowledgeGrantReference[];
 }
