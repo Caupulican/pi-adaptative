@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -51,7 +52,7 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 /** Whether a canonical parent input is a quiet result of this routine, still carried for the owner's next turn. */
 export function isQuietRoutineCompletion(entry: SessionEntry | undefined, routineId: string): boolean {
 	if (entry?.type !== "custom_message" || entry.customType !== ROUTINE_COMPLETION_TYPE) return false;
-	const details: unknown = entry.details;
+	const details = parentInputOriginalDetails(entry);
 	return (
 		typeof details === "object" &&
 		details !== null &&

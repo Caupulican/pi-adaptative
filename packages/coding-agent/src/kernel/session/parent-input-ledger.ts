@@ -82,6 +82,13 @@ export function parentInputOf(entry: SessionEntry): PersistedParentInput | undef
 	return value;
 }
 
+/** The caller's details of a canonical parent input, which the ledger stores beside its own metadata. */
+export function parentInputOriginalDetails(entry: SessionEntry): unknown {
+	return entry.type === "custom_message" && parentInputOf(entry) && isPlainRecord(entry.details)
+		? entry.details.originalDetails
+		: undefined;
+}
+
 export function parentInputMetadataOfMessage(message: CustomMessage<unknown>): ParentInputMetadata | undefined {
 	if (parentMessageCache.has(message)) return parentMessageCache.get(message);
 	const input = parentInputOf({
