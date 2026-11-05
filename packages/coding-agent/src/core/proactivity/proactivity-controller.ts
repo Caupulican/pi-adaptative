@@ -1,12 +1,15 @@
+import { isDeepStrictEqual } from "node:util";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
-import type { Usage } from "@caupulican/pi-ai/types";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
+import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import type { GoalState } from "../goals/goal-state.ts";
+import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-resolver.ts";
-import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -14,6 +17,7 @@ import {
 	buildReviewPrompt,
 	countOwnerTurns,
 	createRaiseNoteTool,
+	MAX_REVIEW_PROFILE_CHARS,
 	PROACTIVE_NOTE_CUSTOM_TYPE,
 	type ProactiveNote,
 	priorNotes,
@@ -25,6 +29,7 @@ import {
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ProactivityControllerSettingsSource {
 	getProactivitySettings(): ResolvedProactivitySettings;
+	subscribeChanges(listener: () => void): () => void;
 }
 
 /** What a review run ended as; `skipReason` names the first gate that kept it from running. */
@@ -45,18 +50,17 @@ export interface ProactivityControllerDeps {
 	getSettingsManager(): ProactivityControllerSettingsSource;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getGoalStateSnapshot(): GoalState | undefined;
-	/** What the memory system knows about the owner (the same guidance a delegated lane receives); absent when memory is off. */
-	getHandoffPersonaGuidance?(): string | undefined;
+	subscribeForegroundActivity(listener: () => void): () => void;
+	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
+	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
 	emit(event: AgentSessionEvent): void;
-	addSpawnedUsage(
-		usage: Usage,
-		opts: { label?: string; sourceSessionId?: string; reportId: string },
-	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Appends the notes to the session as one visible message; `turn` also starts a turn on it. */
 	deliverNotes(
 		message: { customType: string; content: string; display: boolean; details: { notes: ProactiveNote[] } },
 		delivery: "note" | "turn",
+		runtimeLease: RuntimeWorkLease,
+		commitDelivery: () => void,
 	): Promise<void>;
 	/** The `proactivity` port; defaults to the system timers. */
 	timers?: TimerPort;
@@ -66,8 +70,11 @@ export interface ProactivityControllerDeps {
 function goalSummary(goal: GoalState): string {
 	const open = goal.requirements.filter((requirement) => requirement.status === "open").slice(0, 8);
 	return [
-		goal.userGoal,
-		...(open.length > 0 ? ["Still open:", ...open.map((requirement) => `- ${requirement.text}`)] : []),
+		`Status: ${goal.status}. Only active goals may be continued.`,
+		truncateWithEllipsis(goal.userGoal, 1_000),
+		...(open.length > 0
+			? ["Still open:", ...open.map((requirement) => `- ${truncateWithEllipsis(requirement.text, 300)}`)]
+			: []),
 	].join("\n");
 }
 
@@ -133,6 +140,8 @@ export class ProactivityController {
 	}
 
 	private gate(): string | undefined {
+		if (this.deps.isChildSession()) return "child_session";
+		if (this.deps.isForegroundBusy()) return "foreground_busy";
 		const settings = this.deps.getSettingsManager().getProactivitySettings();
 		if (!settings.enabled) return "proactivity_disabled";
 		if (this._runs >= settings.maxRunsPerSession) return "max_runs_reached";
@@ -166,107 +175,150 @@ export class ProactivityController {
 		if (this._isRunning) return { started: false, skipReason: "proactivity_already_running", delivered: [] };
 		if (this._aborted || this.deps.isDisposed())
 			return { started: false, skipReason: "session_disposed", delivered: [] };
-		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
-			kind: "lane",
-			label: "proactive review",
-			signal: this.abortController.signal,
+		const skipped = this.gate();
+		this._lastSkipReason = skipped;
+		if (skipped !== undefined) return { started: false, skipReason: skipped, delivered: [] };
+		const settingsSource = this.deps.getSettingsManager();
+		const settings = structuredClone(settingsSource.getProactivitySettings());
+		const shipment = this.models.resolveShipment(settings, "no_proactivity_model");
+		if (!shipment.ok) return { started: false, skipReason: shipment.skipReason, delivered: [] };
+		const { model } = shipment;
+		const capability = this.models.capabilityProfile(model);
+		const manager = this.deps.getSessionManager();
+		const branchGuard = manager.captureBranchContext();
+		const entries = getActiveSessionBranchEntries(manager);
+		const goal = structuredClone(this.deps.getGoalStateSnapshot());
+		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
+		const memory = this.deps.captureReviewContext(MAX_REVIEW_PROFILE_CHARS);
+		const maxUsd = clampLaneMaxUsd(settings.maxUsd, envelope?.maxEstimatedUsd);
+		const usageOwner = sessionSemanticUsageOf(manager);
+		const runAbort = new AbortController();
+		const signal = AbortSignal.any([this.abortController.signal, runAbort.signal]);
+		const prompt = buildReviewPrompt({
+			entries,
+			preferences: settings.preferences,
+			ownerProfile: memory.text,
+			...(goal ? { goalSummary: goalSummary(goal) } : {}),
 		});
-		try {
-			runtimeLease.assertCurrent();
-			if (this._isRunning) return { started: false, skipReason: "proactivity_already_running", delivered: [] };
-			if (this._aborted || this.deps.isDisposed())
-				return { started: false, skipReason: "session_disposed", delivered: [] };
-			const skipped = this.gate();
-			if (skipped !== undefined) {
-				this._lastSkipReason = skipped;
-				return { started: false, skipReason: skipped, delivered: [] };
-			}
-			const settings = this.deps.getSettingsManager().getProactivitySettings();
-			const shipment = this.models.resolveShipment(settings, "no_proactivity_model");
-			if (!shipment.ok) return { started: false, skipReason: shipment.skipReason, delivered: [] };
-			const { model } = shipment;
-			const capability = this.models.capabilityProfile(model);
-
-			this._isRunning = true;
-			this._runs++;
-			const entries = getActiveSessionBranchEntries(this.deps.getSessionManager());
-			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
-			const runIndex = this._runs;
-			const deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${runIndex}`);
+		const assertCurrent = () => {
+			signal.throwIfAborted();
+			branchGuard();
+			if (
+				this.deps.isDisposed() ||
+				this.deps.getSessionManager() !== manager ||
+				this.deps.isForegroundBusy() ||
+				!isDeepStrictEqual(settings, settingsSource.getProactivitySettings()) ||
+				!isDeepStrictEqual(envelope, this.deps.getCapabilityEnvelope()) ||
+				!isDeepStrictEqual(goal, this.deps.getGoalStateSnapshot()) ||
+				!memory.isCurrent()
+			)
+				throw new Error("Proactive review context changed; its result was discarded.");
+		};
+		const invalidate = () => runAbort.abort(new Error("Proactive review context changed; its result was discarded."));
+		const checkChange = () => {
 			try {
-				const capture: { raised: ProactiveNote[] } = { raised: [] };
-				const goal = this.deps.getGoalStateSnapshot();
-				const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
-				const completion = await this.deps.runIsolatedCompletion({
-					systemPrompt: REVIEW_SYSTEM_PROMPT,
-					messages: [
-						{
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: buildReviewPrompt({
-										entries,
-										preferences: settings.preferences,
-										ownerProfile: this.deps.getHandoffPersonaGuidance?.() ?? "",
-										...(goal && isGoalExecutionActive(goal.status) ? { goalSummary: goalSummary(goal) } : {}),
-									}),
-								},
-							],
-							timestamp: Date.now(),
-						},
-					],
-					model,
-					thinkingLevel: resolveModelThinkingLevel(model, "low"),
-					maxTokens: capability.laneMaxOutputTokens,
-					tools: [createRaiseNoteTool(capture, settings.maxNotesPerRun)],
-					maxTurns: 2,
-					signal: this.abortController.signal,
-					cacheRetention: "short",
-					laneKind: "proactivity",
-				});
-				if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-					this.deps.addSpawnedUsage(completion.usage, {
-						label: "proactive-review",
-						reportId: `proactivity:${this.deps.getSessionId()}:${runIndex}`,
-					});
-				}
-				if (completion.usage.cost.total > maxUsd) {
-					this.deps.emit({
-						type: "warning",
-						message: `Proactive review spent $${completion.usage.cost.total.toFixed(4)}, above its $${maxUsd.toFixed(4)} bound.`,
-					});
-				}
-				if (this.deps.isDisposed() || this._aborted) return { started: true, delivered: [] };
-				const notes = selectNotesToDeliver(
-					capture.raised,
-					priorNotes(getActiveSessionBranchEntries(this.deps.getSessionManager())).digests,
-					settings.maxNotesPerRun,
-				);
-				if (notes.length === 0) {
-					this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
-					return { started: true, delivered: [] };
-				}
-				await this.deps.deliverNotes(
-					{
-						customType: PROACTIVE_NOTE_CUSTOM_TYPE,
-						content: renderNoteMessage(notes),
-						display: true,
-						details: { notes },
-					},
-					settings.delivery,
-				);
-				this.deps.emit({ type: "proactive_review", outcome: "raised", noteCount: notes.length });
-				return { started: true, delivered: notes };
-			} catch (error) {
-				this.deps.emit({ type: "proactive_review", outcome: "failed", noteCount: 0 });
-				throw error;
-			} finally {
-				this._isRunning = false;
-				deregisterInFlight();
+				assertCurrent();
+			} catch {
+				invalidate();
 			}
+		};
+		const unsubscribe = [
+			// Activity also reports runtime availability; only changed review inputs invalidate the run.
+			this.deps.subscribeForegroundActivity(checkChange),
+			settingsSource.subscribeChanges(checkChange),
+			manager.onEntriesPersisted((event) => {
+				if (event.rewritten || event.entryIds.some((id) => manager.getEntry(id)?.type === "message")) invalidate();
+				else checkChange();
+			}),
+		];
+		const stopObserving = () => {
+			for (const off of unsubscribe.splice(0)) off();
+		};
+		this._isRunning = true;
+		let runtimeLease: RuntimeWorkLease | undefined;
+		let usage: BoundedCompletionUsage | undefined;
+		let deregisterInFlight: (() => void) | undefined;
+		let started = false;
+		try {
+			assertCurrent();
+			const runUsage = new BoundedCompletionUsage(usageOwner, "proactivity", maxUsd, 2);
+			usage = runUsage;
+			runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+				kind: "lane",
+				label: "proactive review",
+				signal,
+			});
+			runtimeLease.assertCurrent();
+			assertCurrent();
+			started = true;
+			this._runs++;
+			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
+			deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${this._runs}`);
+			const capture: { raised: ProactiveNote[] } = { raised: [] };
+			const completion = await this.deps.runIsolatedCompletion({
+				systemPrompt: REVIEW_SYSTEM_PROMPT,
+				messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+				model,
+				thinkingLevel: resolveModelThinkingLevel(model, "low"),
+				maxTokens: capability.laneMaxOutputTokens,
+				tools: [createRaiseNoteTool(capture, settings.maxNotesPerRun)],
+				maxTurns: 2,
+				signal,
+				requestPreflight: (request) => {
+					assertCurrent();
+					return runUsage.preflight(request);
+				},
+				requestGuard: () => {
+					assertCurrent();
+					runUsage.assertHealthy();
+				},
+				onMessage: (message, origin) => {
+					if (origin !== "local") runUsage.record(message);
+				},
+				cacheRetention: "short",
+				laneKind: "proactivity",
+			});
+			runUsage.assertHealthy();
+			assertCurrent();
+			if (completion.stopReason === "error" || completion.stopReason === "aborted")
+				throw new Error(completion.errorMessage ?? `Proactive review ${completion.stopReason}.`);
+			const notes = selectNotesToDeliver(
+				capture.raised,
+				priorNotes(getActiveSessionBranchEntries(this.deps.getSessionManager())).digests,
+				settings.maxNotesPerRun,
+			);
+			if (notes.length === 0) {
+				this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
+				return { started: true, delivered: [] };
+			}
+			await this.deps.deliverNotes(
+				{
+					customType: PROACTIVE_NOTE_CUSTOM_TYPE,
+					content: renderNoteMessage(notes),
+					display: true,
+					details: { notes },
+				},
+				settings.delivery,
+				runtimeLease,
+				() => {
+					assertCurrent();
+					stopObserving();
+				},
+			);
+			this.deps.emit({ type: "proactive_review", outcome: "raised", noteCount: notes.length });
+			return { started: true, delivered: notes };
+		} catch (error) {
+			if (started) this.deps.emit({ type: "proactive_review", outcome: "failed", noteCount: 0 });
+			usage?.assertHealthy();
+			if (signal.aborted) return { started, delivered: [], skipReason: "review_context_changed" };
+			throw error;
 		} finally {
-			runtimeLease.release();
+			stopObserving();
+			this._isRunning = false;
+			usage?.release();
+			deregisterInFlight?.();
+			runtimeLease?.release();
+			if (signal.aborted && !this._aborted && !this.deps.isDisposed()) this.scheduleFromIdle();
 		}
 	}
 }

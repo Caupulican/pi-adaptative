@@ -39,7 +39,7 @@ export interface SystemOneStatus {
  * Where a paid response's usage is charged from. Absent is a System One review; `system_one_tool` is the root systemone tool's
  * review (counted in the session statistics); history and maintenance routes identify their actual summary responses.
  */
-export type MaintenanceUsageRoute = "compaction" | "branch_summary";
+export type MaintenanceUsageRoute = "compaction" | "branch_summary" | "proactivity";
 export type SystemOneUsageRoute = "system_one_tool" | "history_summary" | MaintenanceUsageRoute;
 
 export interface HistoryUsageCall {

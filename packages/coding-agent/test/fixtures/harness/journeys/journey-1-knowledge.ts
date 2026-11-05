@@ -196,6 +196,30 @@ export async function runJourney1KnowledgePhase(world: HarnessWorld): Promise<vo
 			revision: 4,
 			text: "Uses tabs again.",
 		});
+		root.settingsManager.setProactivitySettings({
+			...root.settingsManager.getProactivitySettings(),
+			enabled: true,
+			minOwnerTurnsBetweenRuns: 1,
+		});
+		world.provider.enqueue("root", {
+			name: "knowledge-proactive-review",
+			check: (request) => {
+				const context = JSON.stringify(request.context.messages);
+				expect(context, "continuous-chat review reads current accepted owner knowledge").toContain(
+					"Uses tabs again.",
+				);
+				expect(context, "superseded values are not current knowledge").not.toContain("Uses spaces.");
+				expect(context).toContain("Current accepted knowledge, revision");
+			},
+			reply: { content: [{ type: "text", text: "none" }] },
+		});
+		expect(
+			await withDeadline(
+				world.trace,
+				"continuous-chat proactive review",
+				root.session.backgroundLanes.runProactiveReviewOnce(),
+			),
+		).toMatchObject({ started: true, delivered: [] });
 		world.trace.mark("root", "knowledge.admission-replay");
 	} finally {
 		store.close();

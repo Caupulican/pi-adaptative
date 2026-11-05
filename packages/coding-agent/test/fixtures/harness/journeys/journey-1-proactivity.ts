@@ -1,6 +1,8 @@
 import type { Context } from "@caupulican/pi-ai";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -178,7 +180,173 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	// The per-session cap is spent: the next idle arms no review.
 	expect(world.timers.armedDelays("proactivity"), "no review is armed past the cap").toEqual([]);
 	expect(lanes.getLastProactivitySkipReason(), "the cap names itself as the reason").toBe("max_runs_reached");
+
+	// Interrupt a real review after it captured a note, while its second provider response is held.
+	created.settingsManager.setProactivitySettings({
+		...created.settingsManager.getProactivitySettings(),
+		maxRunsPerSession: 12,
+	});
+	const staleNote = "This note was prepared before the owner changed the context.";
+	const receipts = () =>
+		created.sessionManager.getEntries().flatMap((entry) => {
+			const receipt = resolveSemanticUsageEntry(entry)?.report;
+			return receipt?.route === "proactivity" ? [receipt] : [];
+		});
+	const interruptReview = async (label: string, change: () => Promise<void> | void): Promise<void> => {
+		lanes.clearResearchLaneTimer();
+		const reached = createBarrier();
+		const release = createBarrier();
+		const beforeReceipts = receipts().length;
+		const outcomes: string[] = [];
+		const unsubscribe = session.subscribe((event) => {
+			if (event.type === "proactive_review") outcomes.push(event.outcome);
+		});
+		const usage = { ...createEmptyUsage(), input: 16, output: 8, totalTokens: 24 };
+		usage.cost.total = 0.001;
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-note`, [
+				{
+					id: `${label}-note`,
+					name: "raise_note",
+					arguments: { kind: "reminder", text: staleNote, why: "Earlier context." },
+				},
+			]),
+			{
+				name: `${label}-late`,
+				check: () => reached.release(),
+				gate: release.promise,
+				ignoresAbort: true,
+				reply: { content: [{ type: "text", text: "none" }], usage },
+			},
+		);
+		const pending = lanes.runProactiveReviewOnce().then(
+			(value) => ({ value }),
+			(error: unknown) => ({ error }),
+		);
+		try {
+			await withDeadline(trace, `${label} second request reached`, reached.promise);
+			await change();
+		} finally {
+			release.release();
+		}
+		const settled = await withDeadline(trace, `${label} settled`, pending);
+		unsubscribe();
+		expect("value" in settled ? settled.value.delivered : [], "a stale review delivers no captured note").toEqual([]);
+		expect(outcomes, "each interrupted review reports exactly one failed terminal").toEqual(["failed"]);
+		const added = receipts().slice(beforeReceipts);
+		expect(added, "both paid responses survive cancellation without an aggregate duplicate").toHaveLength(2);
+		expect(added.reduce((total, receipt) => total + receipt.usage.cost.total, 0)).toBe(0.001);
+		expect(added.every((receipt) => receipt.origin?.sessionId === created.sessionManager.getSessionId())).toBe(true);
+	};
+	await interruptReview("proactivity-settings-stale", () => {
+		created.settingsManager.setProactivitySettings({
+			...created.settingsManager.getProactivitySettings(),
+			enabled: false,
+		});
+	});
+	await ownerTurn("proactivity-after-settings", "I have completed the changelog now.");
+	expect(ownerRequests.at(-1)).not.toContain(staleNote);
+	created.settingsManager.setProactivitySettings({
+		...created.settingsManager.getProactivitySettings(),
+		enabled: true,
+	});
+	await interruptReview("proactivity-owner-stale", () =>
+		ownerTurn("proactivity-during-review", "Please wait; I am changing direction."),
+	);
+	await interruptReview("proactivity-branch-stale", () => {
+		const leaf = created.sessionManager.getLeafId();
+		expect(leaf).not.toBeNull();
+		created.sessionManager.resetLeaf();
+		created.sessionManager.branch(leaf!);
+	});
+	await ownerTurn("proactivity-after-branch", "The current task is settled.");
+	expect(ownerRequests.at(-1)).not.toContain(staleNote);
+	created.settingsManager.setProactivitySettings({
+		...created.settingsManager.getProactivitySettings(),
+		delivery: "turn",
+	});
+	lanes.clearResearchLaneTimer();
+	const currentNote = "The current review can wake its own parent turn.";
+	world.systemOne.enterPhase("proactivity-turn-delivery", PREVIOUS_TURN_JUDGMENTS);
+	world.provider.enqueue(
+		"root",
+		calls("proactivity-turn-note", [
+			{
+				id: "current-note",
+				name: "raise_note",
+				arguments: { kind: "follow_up", text: currentNote, why: "Current conversation." },
+			},
+		]),
+		text("proactivity-turn-done", "none"),
+		{
+			...text("proactivity-turn-parent", "Understood."),
+			check: (request) => expect(JSON.stringify(request.context.messages)).toContain(currentNote),
+		},
+	);
+	const deliveredTurn = await withDeadline(trace, "proactivity parent turn delivery", lanes.runProactiveReviewOnce());
+	expect(
+		deliveredTurn.delivered.map((note) => note.text),
+		"own parent wake does not invalidate committed delivery",
+	).toEqual([currentNote]);
 	expect(await world.disposeSessionInBody(session), "the proactivity session closes cleanly").toBeUndefined();
+
+	// The actual transport receives a reduced output cap; exhausting it prevents the second call and note delivery.
+	const budgetDir = `${world.agentDir}-proactivity-budget`;
+	const budget = await world.createRootSession("root", {
+		agentDir: budgetDir,
+		sessionManager: world.createSessionManager(budgetDir),
+		model: { ...world.provider.model("root"), cost: { input: 0, output: 1_000, cacheRead: 0, cacheWrite: 0 } },
+		systemOneEnabled: false,
+		settings: {
+			memorySystem: "okf",
+			autoLearn: { enabled: false },
+			proactivity: { enabled: true, minOwnerTurnsBetweenRuns: 1, maxUsd: 0.01 },
+		},
+	});
+	world.provider.enqueue("root", text("proactivity-budget-owner", "Understood."));
+	await withDeadline(trace, "budget owner turn", budget.session.prompt("Remind me about this unfinished task."));
+	budget.session.backgroundLanes.clearResearchLaneTimer();
+	const consumed = { ...createEmptyUsage(), input: 16, output: 10, totalTokens: 26 };
+	consumed.cost.output = 0.01;
+	consumed.cost.total = 0.01;
+	world.provider.enqueue("root", {
+		name: "proactivity-budget-note",
+		check: (request) =>
+			expect(request.options?.maxTokens, "the provider receives the affordable output cap").toBe(10),
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: "budget-note",
+					name: "raise_note",
+					arguments: { kind: "reminder", text: staleNote, why: "Unfinished task." },
+				},
+			],
+			stopReason: "toolUse",
+			usage: consumed,
+		},
+	});
+	const requestsAtBudget = world.provider.requests.length;
+	await expect(
+		withDeadline(trace, "budget review", budget.session.backgroundLanes.runProactiveReviewOnce()),
+	).rejects.toThrow();
+	expect(world.provider.requests.length - requestsAtBudget, "exhausted allowance prevents another transport").toBe(1);
+	expect(
+		budget.sessionManager
+			.getEntries()
+			.some((entry) => entry.type === "custom_message" && entry.customType === "proactive-note"),
+	).toBe(false);
+	world.provider.enqueue("root", {
+		...text("proactivity-budget-next-owner", "Understood."),
+		check: (request) =>
+			expect(
+				JSON.stringify(request.context.messages),
+				"exhausted review queued no note for the next turn",
+			).not.toContain(staleNote),
+	});
+	await withDeadline(trace, "owner after exhausted review", budget.session.prompt("I have finished that task."));
+	expect(await world.disposeSessionInBody(budget.session)).toBeUndefined();
 
 	// The owner can turn it off: no timer, no review request.
 	const offDir = `${world.agentDir}-proactivity-off`;

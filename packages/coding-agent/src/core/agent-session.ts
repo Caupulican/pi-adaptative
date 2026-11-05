@@ -104,7 +104,6 @@ import type { SessionCostSummary, SessionTaskAndModelSummary } from "./cost/cost
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
 import { CostGuardController } from "./cost-guard-controller.ts";
-import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import type { ManagedLaneView } from "./delegation/managed-lane-views.ts";
 import type {
 	PersistentBotRecord,
@@ -758,7 +757,7 @@ export class AgentSession {
 			cwd: config.cwd,
 			resourceLoader: config.resourceLoader,
 			ownerRules: this._ownerRules,
-			getDecisionEngine: () => this._recordingSemanticEngine(),
+			getDecisionEngine: () => this._semanticPlane.recordingSemanticEngine(),
 			sessionManager: config.sessionManager,
 			emit: (event) => this._emit(event),
 			getSystemOneController: () => this._semanticPlane.controller,
@@ -1148,8 +1147,15 @@ export class AgentSession {
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
-			deliverNotes: (message, delivery) =>
-				this.sendCustomMessage(message, delivery === "turn" ? { triggerTurn: true } : { deliverAs: "nextTurn" }),
+			deliverNotes: (message, delivery, lease, commit) =>
+				this._sendCustomMessageWithRuntimeLease(
+					message,
+					delivery === "turn" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
+					lease,
+					commit,
+				),
+			captureReviewContext: (maxChars) => this._memory.captureReviewContext(maxChars),
+			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
 			createLaneMemoryBroker: (capacity) => this._memory.createLaneMemoryBroker(capacity),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
@@ -1312,7 +1318,7 @@ export class AgentSession {
 				activeBranch: new ActiveBranchProbe(this.sessionManager),
 				// The judge that admits model summaries is the session's one recording System One engine, so its
 				// usage reaches the session ledger and its judgments the Jev ledger like every other evaluation.
-				getAdmissionEngine: () => this._recordingSemanticEngine(),
+				getAdmissionEngine: () => this._semanticPlane.recordingSemanticEngine(),
 				recordUsage: (receipt) => {
 					// Admission keeps its receipt until this confirms the identical row; a pending one stays owed.
 					const outcome = this._semanticUsage.confirm(receipt);
@@ -2490,16 +2496,6 @@ export class AgentSession {
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
 		return this._adaptiveReadiness;
-	}
-
-	/**
-	 * The one way this session hands its semantic decision engine to anything: the plane's engine
-	 * wrapped so every evaluation it runs is recorded. Every in-session consumer goes through here,
-	 * so the POV bar's Jev indicator reports the whole plane's work and not one subsystem's.
-	 * Memoized per underlying engine so collaborators wired once keep a stable engine identity.
-	 */
-	private _recordingSemanticEngine(): SemanticDecisionEngine | undefined {
-		return this._semanticPlane.recordingSemanticEngine();
 	}
 
 	/** The recorded engine in the retention planner's batched-question shape. */

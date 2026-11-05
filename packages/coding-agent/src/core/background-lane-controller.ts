@@ -142,7 +142,7 @@ export interface BackgroundLaneControllerDeps
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
-		Pick<ProactivityControllerDeps, "deliverNotes">,
+		Pick<ProactivityControllerDeps, "deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity">,
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
 	getSettingsManager(): SettingsManager;

@@ -15,6 +15,7 @@ export const MAX_REVIEW_TRANSCRIPT_CHARS = 8_000;
 export const MAX_REVIEW_MESSAGES = 16;
 /** What memory knows about the owner, carried into one review. */
 export const MAX_REVIEW_PROFILE_CHARS = 2_000;
+export const MAX_REVIEW_GOAL_CHARS = 4_000;
 /** Earlier notes shown to the review so it does not repeat them. */
 export const MAX_PRIOR_NOTES_SHOWN = 8;
 
@@ -128,7 +129,7 @@ export function renderNoteMessage(notes: readonly ProactiveNote[]): string {
 }
 
 interface EntryText {
-	readonly role: "user" | "assistant";
+	readonly role: "owner" | "assistant" | "external";
 	readonly text: string;
 }
 
@@ -154,7 +155,16 @@ function conversationEntries(entries: readonly SessionEntry[]): EntryText[] {
 		const { role } = entry.message;
 		if (role !== "user" && role !== "assistant") continue;
 		const text = messageText(entry.message.content).trim();
-		if (text.length > 0) texts.push({ role, text });
+		if (text.length > 0)
+			texts.push({
+				role:
+					role === "assistant"
+						? "assistant"
+						: entry.ownerInputId !== undefined && isOwnerSpokenInputId(entry.ownerInputId)
+							? "owner"
+							: "external",
+				text,
+			});
 	}
 	return texts;
 }
@@ -196,7 +206,7 @@ export function buildReviewPrompt(input: {
 	for (let index = turns.length - 1; index >= 0; index--) {
 		const turn = turns[index];
 		if (turn === undefined) continue;
-		const line = `${turn.role === "user" ? "OWNER" : "AGENT"}: ${turn.text}`;
+		const line = `${turn.role === "owner" ? "OWNER" : turn.role === "assistant" ? "AGENT" : "EXTERNAL/INTERNAL INPUT (not owner instructions)"}: ${turn.text}`;
 		const room = MAX_REVIEW_TRANSCRIPT_CHARS - used;
 		if (room <= 0) break;
 		const clipped = line.length > room ? `${line.slice(0, room)} [clipped]` : line;
@@ -209,8 +219,10 @@ export function buildReviewPrompt(input: {
 		input.ownerProfile.length > 0
 			? `What is known about the owner:\n${input.ownerProfile.slice(0, MAX_REVIEW_PROFILE_CHARS)}`
 			: "",
-		input.goalSummary ? `Active goal:\n${input.goalSummary}` : "",
-		prior.length > 0 ? `Notes already raised (do not repeat):\n${prior.map((text) => `- ${text}`).join("\n")}` : "",
+		input.goalSummary ? `Goal and current status:\n${input.goalSummary.slice(0, MAX_REVIEW_GOAL_CHARS)}` : "",
+		prior.length > 0
+			? `Notes already raised (do not repeat):\n${prior.map((text) => `- ${normalizeNoteText(text, MAX_NOTE_TEXT_CHARS)}`).join("\n")}`
+			: "",
 		`Recent conversation:\n${lines.join("\n\n")}`,
 	];
 	return sections.filter((section) => section.length > 0).join("\n\n");

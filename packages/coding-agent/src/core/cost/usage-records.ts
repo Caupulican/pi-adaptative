@@ -11,7 +11,7 @@ export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
 
 export function isMaintenanceUsageRoute(route: SystemOneUsageRoute | undefined): route is MaintenanceUsageRoute {
-	return route === "compaction" || route === "branch_summary";
+	return route === "compaction" || route === "branch_summary" || route === "proactivity";
 }
 
 /** A recorded charge can be known while its model-specific API equivalent remains unattributable. */

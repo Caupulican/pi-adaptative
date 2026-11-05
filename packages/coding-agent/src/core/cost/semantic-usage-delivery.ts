@@ -104,6 +104,8 @@ export interface SemanticUsageSnapshot {
 /** One session's usage owner: the reviewer's sink, admission's confirmation, and the session's pending journal. */
 export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	captureOrigin(): AccountingOrigin;
+	/** Reserve the explicit maximum number of provider responses before maintenance work starts. */
+	beginMaintenance(route: MaintenanceUsageRoute, maxResponses: number, origin?: AccountingOrigin): SystemOneUsageLease;
 	readonly disposed: boolean;
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
@@ -163,6 +165,7 @@ const UNCERTAIN_LEDGER_CAUSE = "Session persistence state is uncertain after a f
 function usageSubject(route: SystemOneUsageRoute | undefined): string {
 	if (route === "compaction") return "A compaction usage report";
 	if (route === "branch_summary") return "A branch summary usage report";
+	if (route === "proactivity") return "A proactive review usage report";
 	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
 }
 
@@ -455,6 +458,24 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	}
 
 	begin(route?: SystemOneUsageRoute, origin = this.captureOrigin()): SystemOneUsageLease {
+		return this.reserveResponses(SYSTEM_ONE_RESPONSES_PER_EVALUATION, route, origin);
+	}
+
+	beginMaintenance(
+		route: MaintenanceUsageRoute,
+		maxResponses: number,
+		origin = this.captureOrigin(),
+	): SystemOneUsageLease {
+		return this.reserveResponses(maxResponses, route, origin);
+	}
+
+	private reserveResponses(
+		maxResponses: number,
+		route: SystemOneUsageRoute | undefined,
+		origin: AccountingOrigin,
+	): SystemOneUsageLease {
+		if (!Number.isSafeInteger(maxResponses) || maxResponses < 1 || maxResponses > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS)
+			throw new SystemOneUsageRefusal("Usage reservation requires a bounded positive response count");
 		if (this.isDisposed) {
 			throw new SystemOneUsageRefusal(
 				"System One usage cannot be recorded: the session has ended, so no evaluation starts",
@@ -467,13 +488,13 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (!sameIdentity(identity, this.bound)) {
 			throw new SystemOneUsageRefusal("System One usage cannot be recorded: the session identity changed");
 		}
-		if (this.held.size + this.reserved + SYSTEM_ONE_RESPONSES_PER_EVALUATION > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS) {
+		if (this.held.size + this.reserved + maxResponses > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS) {
 			throw new SystemOneUsageRefusal(
 				"System One usage journal is full: unconfirmed usage fills its bound, so no paid evaluation starts",
 			);
 		}
-		this.reserved += SYSTEM_ONE_RESPONSES_PER_EVALUATION;
-		return new SemanticUsageLease(this, identity, SYSTEM_ONE_RESPONSES_PER_EVALUATION, origin, route);
+		this.reserved += maxResponses;
+		return new SemanticUsageLease(this, identity, maxResponses, origin, route);
 	}
 
 	returnSlots(count: number): void {

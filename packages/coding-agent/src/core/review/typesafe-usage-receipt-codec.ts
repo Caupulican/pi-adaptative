@@ -57,7 +57,8 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 		route !== "system_one_tool" &&
 		route !== "history_summary" &&
 		route !== "compaction" &&
-		route !== "branch_summary"
+		route !== "branch_summary" &&
+		route !== "proactivity"
 	)
 		return undefined;
 	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;

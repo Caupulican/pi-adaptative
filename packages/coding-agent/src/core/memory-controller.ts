@@ -42,6 +42,7 @@ import {
 	type TranscriptMemoryDiagnostics,
 } from "./context/memory-diagnostics.ts";
 import {
+	charBoundedMemoryPromptBudget,
 	LANE_READ_MAX_ESTIMATED_TOKENS,
 	type MemoryPromptBudget,
 	memoryShareAllowanceBytes,
@@ -1945,6 +1946,32 @@ export class MemoryController {
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		if (!settings.enabled || !settings.includeInPrompt) return undefined;
 		return this.getFileStoreWriter()?.getHandoffPersonaGuidance();
+	}
+
+	/** Current owner-facing knowledge for an isolated review, with whole-record framing and freshness. */
+	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean } {
+		const generation = this._memoryGeneration;
+		const policy = this._retrievalPolicyKey();
+		const scope = this._knowledgeScope();
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		const reader = this._currentKnowledgeReader();
+		const projection =
+			settings.enabled && settings.includeInPrompt
+				? reader?.preview(scope, charBoundedMemoryPromptBudget(maxChars))
+				: undefined;
+		const legacy = reader ? "" : (this.getHandoffPersonaGuidance() ?? "");
+		return {
+			text:
+				projection?.text ??
+				(legacy.length <= maxChars ? legacy : "Owner guidance omitted: exceeds review allowance."),
+			isCurrent: () =>
+				generation === this._memoryGeneration &&
+				policy === this._retrievalPolicyKey() &&
+				reader === this._currentKnowledgeReader() &&
+				isDeepStrictEqual(scope, this._knowledgeScope()) &&
+				(projection?.isCurrent() ?? true) &&
+				(reader !== undefined || legacy === (this.getHandoffPersonaGuidance() ?? "")),
+		};
 	}
 
 	/**

@@ -44,6 +44,33 @@ export function estimateTurnCostUsd(args: {
 	return inputUsd + outputUsd;
 }
 
+/** Largest output allowance whose projected request cost fits the remaining budget; zero refuses transport. */
+export function affordableOutputTokenLimit(
+	args: Parameters<typeof estimateTurnCostUsd>[0] & { remainingUsd: number },
+): number {
+	if (
+		!Number.isSafeInteger(args.inputTokens) ||
+		args.inputTokens < 0 ||
+		!Number.isSafeInteger(args.maxOutputTokens) ||
+		args.maxOutputTokens < 1 ||
+		!Number.isFinite(args.remainingUsd) ||
+		args.remainingUsd < 0 ||
+		Object.values(args.cost).some((rate) => rate !== undefined && (!Number.isFinite(rate) || rate < 0)) ||
+		(args.longContextPricing !== undefined &&
+			Object.values(args.longContextPricing).some((value) => !Number.isFinite(value) || value < 0))
+	)
+		return 0;
+	let low = 0;
+	let high = args.maxOutputTokens;
+	while (low < high) {
+		const middle = low + Math.ceil((high - low) / 2);
+		const cost = estimateTurnCostUsd({ ...args, maxOutputTokens: middle });
+		if (Number.isFinite(cost) && cost <= args.remainingUsd) low = middle;
+		else high = middle - 1;
+	}
+	return low;
+}
+
 /** What to do when a turn's projected cost exceeds the threshold. */
 export type CostGuardAction = "warn" | "downgrade";
 
