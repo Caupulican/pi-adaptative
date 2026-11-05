@@ -33,6 +33,7 @@ import {
 } from "../../core/events/host-event-contract.ts";
 import {
 	type GithubThreadInterest,
+	githubInterestScopeKey,
 	HOST_EVENT_LISTENER_LIMITS,
 	parseGithubThreadInterest,
 } from "../../core/events/host-event-kinds.ts";
@@ -697,9 +698,9 @@ export class CiSourceStore {
 		this.change((state) => {
 			const consumer = activeConsumer(state, consumerId, activationId);
 			const now = new Date(this.now()).toISOString();
-			const scopeKey = (interest: GithubThreadInterest) => JSON.stringify({ ...interest, since: undefined });
 			consumer.interests = interests.map((interest) => {
-				const known = consumer.interests.find((entry) => scopeKey(entry) === scopeKey(interest));
+				const key = githubInterestScopeKey(interest);
+				const known = consumer.interests.find((entry) => githubInterestScopeKey(entry) === key);
 				return parseGithubThreadInterest({
 					...interest,
 					since: known?.since ?? (interest.since > now ? interest.since : now),
@@ -710,10 +711,17 @@ export class CiSourceStore {
 
 	/**
 	 * Retains one collection's thread occurrences and moves its repository's cursor in the same journal write, so a
-	 * crash neither repeats nor drops an occurrence. An occurrence already retained is not appended again.
+	 * crash neither repeats nor drops an occurrence. An occurrence already retained is not appended again. Compare-and-set:
+	 * when another writer moved the cursor since `expected` was read, nothing is written and `false` asks to re-collect.
 	 */
-	retainThreads(cursor: GithubThreadCursor, events: readonly GithubThreadEvent[]): void {
-		this.change((state) => {
+	retainThreads(
+		expected: GithubThreadCursor | undefined,
+		cursor: GithubThreadCursor,
+		events: readonly GithubThreadEvent[],
+	): boolean {
+		return this.change((state) => {
+			const stored = state.threads.find((entry) => entry.key === cursor.key);
+			if (JSON.stringify(stored) !== JSON.stringify(expected)) return false;
 			this.compact(state);
 			const retained = new Set(state.events.map((entry) => entry.event.eventId));
 			for (const event of [...events].sort(
@@ -733,6 +741,7 @@ export class CiSourceStore {
 			}
 			state.threads = [...state.threads.filter((entry) => entry.key !== cursor.key), cursor];
 			if (state.threads.length > MAX_THREAD_REPOSITORIES) throw new Error("GitHub thread cursor capacity reached.");
+			return true;
 		});
 	}
 

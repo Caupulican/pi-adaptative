@@ -891,10 +891,13 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 				}
 			}
 			signal.throwIfAborted();
-			this.store.retainThreads(
+			const moved = this.store.retainThreads(
+				previous,
 				next,
 				events.filter((event) => interests.some((interest) => githubInterestMatches(interest, event))),
 			);
+			// Another session moved this repository's cursor meanwhile: collect again from its position.
+			if (!moved) this.forced = true;
 			this.reported.delete("threads");
 		} catch (error) {
 			signal.throwIfAborted();

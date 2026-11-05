@@ -176,6 +176,16 @@ export function githubInterestMatches(interest: GithubThreadInterest, event: Git
 	return interest.authors === undefined || interest.authors.some((login) => login.toLowerCase() === author);
 }
 
+/** A listener's identity without its start: kinds and authors as sets, logins case-insensitive. */
+export function githubInterestScopeKey(interest: GithubThreadInterest): string {
+	return JSON.stringify([
+		[...interest.kinds].sort(),
+		interest.pullRequest ?? null,
+		interest.branch ?? null,
+		interest.authors ? [...new Set(interest.authors.map((login) => login.toLowerCase()))].sort() : null,
+	]);
+}
+
 export function parseGithubThreadInterest(value: unknown): GithubThreadInterest {
 	const entry = hostEventRecord(value, ["kinds", "pullRequest", "branch", "authors", "since"], "GitHub interest");
 	const kinds = hostEventArray(
