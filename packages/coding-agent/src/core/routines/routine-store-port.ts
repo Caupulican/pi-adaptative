@@ -1,5 +1,7 @@
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type {
+	AwayEventDecisionInput,
+	AwayEventDecisionResult,
 	RoutineClaimResult,
 	RoutineDefinitionView,
 	RoutineDelivery,
@@ -34,6 +36,10 @@ export interface RoutineStorePort {
 		refusals: readonly { readonly routineId: string; readonly reason: string }[];
 		nowMs: number;
 	}): void;
+	/** Clears the recorded away refusals starting with `reasonPrefix` (their cause ended); other reasons are kept. */
+	clearRoutineAwayRefusals(input: { routineIds: readonly string[]; reasonPrefix: string }): void;
+	/** Away: records a closed parent's decided event attempts as pending occurrences (see the store). */
+	decideAwayEventRoutines(input: AwayEventDecisionInput): AwayEventDecisionResult;
 	/** Returns a parent's away claims that lapsed before dispatch to pending without `executor`; whether any was. */
 	releaseLapsedAwayClaims(input: { parentSessionId: string; nowMs: number }): boolean;
 	claimManualRoutineOccurrence(input: {

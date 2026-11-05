@@ -43,6 +43,7 @@ import type { OrchestrationProfile } from "../../../src/core/orchestration/contr
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { getInFlightWorkUnits } from "../../../src/core/reload-blockers.ts";
 import { DefaultResourceLoader, type ResourceLoader } from "../../../src/core/resource-loader.ts";
+import type { AwayEventSourceFactory } from "../../../src/core/routines/away-event-feed.ts";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -2144,7 +2145,10 @@ export class HarnessProcesses {
 	private readonly table: VirtualProcessTable;
 	private readonly timers: TimerSource;
 	/** Journeys waiting for the next launched daemon to run; a launch nobody waits for exits before its first renewal. */
-	private readonly botDaemonWaiters: Array<(daemon: HarnessBotDaemon) => void> = [];
+	private readonly botDaemonWaiters: Array<{
+		readonly options: HarnessBotDaemonOptions;
+		resolve(daemon: HarnessBotDaemon): void;
+	}> = [];
 	private readonly runningBotDaemons = new Set<HarnessBotDaemon>();
 	/** The world's credential owners, which a daemon process reads from its agent directory as any session does. */
 	private readonly credentials: () => { authStorage: AuthStorage; modelRegistry: ModelRegistry };
@@ -2166,10 +2170,11 @@ export class HarnessProcesses {
 	/**
 	 * The next `pi --bot-daemon` a session launches runs the production daemon body in this process, on the world's
 	 * timers, as its own process would; resolves when it is launched. Every other launch is a process that exits before
-	 * its first renewal, so its lease goes stale on the routines clock.
+	 * its first renewal, so its lease goes stale on the routines clock. `eventSources` stands in for the process entry's
+	 * CI source factory (only upstream I/O is scripted).
 	 */
-	runNextBotDaemon(): Promise<HarnessBotDaemon> {
-		return new Promise((resolve) => this.botDaemonWaiters.push(resolve));
+	runNextBotDaemon(options: HarnessBotDaemonOptions = {}): Promise<HarnessBotDaemon> {
+		return new Promise((resolve) => this.botDaemonWaiters.push({ options, resolve }));
 	}
 
 	/** Joins every spawned child: its stdio has closed and its close has fired. Failures are aggregated, never dropped. */
@@ -2324,6 +2329,10 @@ export class HarnessProcesses {
 			detached: spawnOptions.detached === true,
 			deliver: () => void run?.stop(),
 		});
+		// What the starting session writes to the daemon's stdin (its gh credential handover).
+		const stdin = new PassThrough();
+		const stdinChunks: Buffer[] = [];
+		stdin.on("data", (chunk: Buffer) => stdinChunks.push(chunk));
 		const launch: HarnessBotDaemonLaunch = Object.freeze({
 			file,
 			args: Object.freeze([...args]),
@@ -2331,15 +2340,23 @@ export class HarnessProcesses {
 			agentDir,
 			token,
 			pid,
+			stdin: () => Buffer.concat(stdinChunks).toString("utf8"),
 		});
 		this.botDaemonLaunches.push(launch);
-		const child = Object.assign(new EventEmitter(), { pid, unref: () => undefined });
+		const child = Object.assign(new EventEmitter(), { pid, stdin, unref: () => undefined });
 		const waiter = this.botDaemonWaiters.shift();
 		if (!waiter) {
 			this.table.releaseChild(pid);
 			return child;
 		}
-		run = startBotDaemon({ agentDir, token, timers: this.timers, owner: ownProcessOwner(), ...this.credentials() });
+		run = startBotDaemon({
+			agentDir,
+			token,
+			timers: this.timers,
+			owner: ownProcessOwner(),
+			...this.credentials(),
+			...(waiter.options.eventSources ? { eventSources: waiter.options.eventSources } : {}),
+		});
 		let closed = false;
 		const daemon: HarnessBotDaemon = {
 			launch,
@@ -2355,7 +2372,7 @@ export class HarnessProcesses {
 			},
 		};
 		this.runningBotDaemons.add(daemon);
-		waiter(daemon);
+		waiter.resolve(daemon);
 		return child;
 	}
 }
@@ -2368,6 +2385,13 @@ export interface HarnessBotDaemonLaunch {
 	readonly agentDir: string;
 	readonly token: string;
 	readonly pid: number;
+	/** Everything the starting session wrote to the daemon's stdin so far. */
+	stdin(): string;
+}
+
+/** How the next in-process daemon is composed: the process entry's injected parts. */
+export interface HarnessBotDaemonOptions {
+	readonly eventSources?: AwayEventSourceFactory;
 }
 
 /** A launched daemon running its production body in process: `stop` sends its process SIGTERM and joins the stop. */

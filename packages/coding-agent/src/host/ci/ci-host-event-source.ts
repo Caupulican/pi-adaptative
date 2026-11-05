@@ -77,6 +77,8 @@ export interface CiHostRuntimeOptions {
 	/** This session's GitHub listeners; collection serves the union of every consumer's recorded ones. */
 	readonly getGithubInterests?: () => readonly GithubThreadInterest[];
 	readonly subscribeGithubInterests?: (listener: () => void) => () => void;
+	/** Variables only the default provider's gh commands carry (the away host's gh tokens). */
+	readonly commandCredentials?: Readonly<Record<string, string>>;
 }
 
 interface CiLocalInputs {
@@ -1050,7 +1052,7 @@ export async function createCiHostRuntime(options: CiHostRuntimeOptions): Promis
 	signal.throwIfAborted();
 	if (!paths) return undefined;
 	if (!options.provider && !existsSync(join(paths.root, ".github", "workflows", CI_WORKFLOW))) return undefined;
-	const port = createCiCommandPort(paths.root, options.onDiagnostic);
+	const port = createCiCommandPort(paths.root, options.onDiagnostic, options.commandCredentials);
 	return new CiHostEventSource(
 		paths,
 		options.provider ?? new GithubActionsCiProvider(port),

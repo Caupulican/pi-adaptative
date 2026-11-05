@@ -43,7 +43,16 @@ export function isCiCommandMissing(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-export function createCiCommandPort(cwd: string, onDiagnostic?: (message: string) => void): CiCommandPort {
+/**
+ * `credentials`: variables only these commands carry on top of this process's environment (the away host's gh tokens,
+ * which never enter its own environment).
+ */
+export function createCiCommandPort(
+	cwd: string,
+	onDiagnostic?: (message: string) => void,
+	credentials?: Readonly<Record<string, string>>,
+): CiCommandPort {
+	const env = credentials ? { ...process.env, ...credentials } : undefined;
 	return {
 		run: (executable, args, signal) =>
 			new Promise<string>((resolve, reject) => {
@@ -61,7 +70,7 @@ export function createCiCommandPort(cwd: string, onDiagnostic?: (message: string
 				const child = execFile(
 					executable,
 					[...args],
-					{ cwd, encoding: "utf8", windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 },
+					{ cwd, env, encoding: "utf8", windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 },
 					(error, stdout) => {
 						outcome = { error, stdout };
 						finish();
@@ -99,7 +108,12 @@ export function createCiCommandPort(cwd: string, onDiagnostic?: (message: string
 						);
 				};
 				// Output is never buffered: a long watch cannot exhaust memory or a buffer bound.
-				const child = spawn(executable, [...args], { cwd, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+				const child = spawn(executable, [...args], {
+					cwd,
+					env,
+					stdio: ["ignore", "ignore", "pipe"],
+					windowsHide: true,
+				});
 				child.stderr?.setEncoding("utf8");
 				child.stderr?.on("data", (chunk: string) => {
 					stderr = `${stderr}${chunk}`.slice(-2048);

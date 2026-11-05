@@ -30,6 +30,7 @@ import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/own
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { ModelRegistry } from "../model-registry.ts";
+import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
@@ -77,6 +78,8 @@ export interface BotDaemonInput {
 	 */
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
+	/** The event sources a closed parent's checkout has away (the CI source); without them event routines wait. */
+	readonly eventSources?: AwayEventSourceFactory;
 }
 
 export interface BotDaemonRun {
@@ -129,6 +132,8 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		report,
 		...(input.authStorage ? { authStorage: input.authStorage } : {}),
 		...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
+		...(input.eventSources ? { eventSources: input.eventSources } : {}),
+		ciEvents: () => settings.getProactivitySettings().ciEvents,
 	});
 	const leaseFile = daemonLeasePath(routineStore.getStoreFilePath());
 	let watcher: FSWatcher | undefined;
@@ -220,8 +225,14 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	return { exited, stop: (end = { reason: "signal" }) => stop(end) };
 }
 
-/** Runs the daemon for `pi --bot-daemon <agentDir> <token>`; resolves with the process exit code once it stops. */
-export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
+/**
+ * Runs the daemon for `pi --bot-daemon <agentDir> <token>`; resolves with the process exit code once it stops. The
+ * process entry supplies the event sources (core builds no host source).
+ */
+export function runBotDaemonCommand(
+	args: readonly string[],
+	options: { readonly eventSources?: AwayEventSourceFactory } = {},
+): Promise<number> {
 	const [agentDir, token] = args;
 	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
 		return Promise.resolve(2);
@@ -235,6 +246,7 @@ export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
 		owner: ownProcessOwner(),
 		authStorage,
 		modelRegistry,
+		...(options.eventSources ? { eventSources: options.eventSources } : {}),
 	});
 	process.once("SIGTERM", () => void run.stop());
 	process.once("SIGINT", () => void run.stop());

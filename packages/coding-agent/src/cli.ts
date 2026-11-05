@@ -35,8 +35,8 @@ if (firstArg === CI_STATUS_COMMAND) {
 // The detached bot daemon is pi's own routine process, started by a session through the stable self-launch target.
 // It never parses as a session launch and never binds a supervisor channel it may have inherited.
 if (firstArg === BOT_DAEMON_COMMAND) {
-	const { runBotDaemonCommand } = await import("./core/delegation/bot-daemon.ts");
-	process.exit(await runBotDaemonCommand(cliArgs.slice(1)));
+	const { runBotDaemonEntry } = await import("./host/bot-daemon-entry.ts");
+	process.exit(await runBotDaemonEntry(cliArgs.slice(1)));
 }
 
 // An interactive launch owns the terminal from here: keys typed while the program loads stay raw

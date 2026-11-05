@@ -33,7 +33,7 @@ import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/l
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
-import { daemonBaselineEnvironment } from "./daemon-environment.ts";
+import { daemonBaselineEnvironment, daemonGhCredentialPayload } from "./daemon-environment.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
@@ -1743,13 +1743,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			]),
 			...target.environment,
 		};
+		// gh's tokens travel on stdin, never in the daemon's environment its workers' commands could read.
 		const child = spawnProcess(target.executable, args, {
 			cwd: agentDir,
 			detached: true,
-			stdio: "ignore",
+			stdio: ["pipe", "ignore", "ignore"],
 			windowsHide: true,
 			env,
 		});
+		child.stdin?.once("error", (error) =>
+			this._safeWarn(`Detached bot daemon did not receive the gh credentials: ${error.message}`),
+		);
+		child.stdin?.end(daemonGhCredentialPayload(process.env));
 		child.once("error", (error) => {
 			this._safeWarn(`Detached bot daemon failed to start: ${error.message}`);
 			// The daemon never ran, so its claim is released now rather than left to go stale.

@@ -12,6 +12,10 @@
  *   open retry) and `wake()` from its owner (the daemon's lease tick, which is when a parent's holder can have died).
  * - A host is closed when it has nothing left to run; the parent's file stamp and its due work at that moment are
  *   remembered, so the same parent is not reopened until one of them changes.
+ * - A closed parent with an event routine that may run away gets one event feed (`AwayEventFeed`), never one per
+ *   routine: the parent's own event consumer, followed by the sources `eventSources` builds for its checkout. A decided
+ *   attempt is a pending occurrence, which a host then claims like any recoverable run. The feed closes when the parent
+ *   opens, its session file is gone or no such routine remains.
  */
 
 import { randomUUID } from "node:crypto";
@@ -25,6 +29,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { ResolvedRoutineAwaySettings } from "../settings/settings-schema.ts";
 import { alarmAt, type TimerSource, type WallAlarm } from "../util/timer-port.ts";
+import { AwayEventFeed, AwayEventFeedUnavailable, type AwayEventSourceFactory } from "./away-event-feed.ts";
 import { type AwayParentContext, AwayParentUnavailable, openAwayParentContext } from "./away-parent-context.ts";
 import {
 	AWAY_LEASES_UNREADABLE_REASON,
@@ -65,6 +70,10 @@ export interface AwayRoutineSupervisorDeps {
 	/** Shared credential owners, when the caller has them; otherwise each parent builds them as the SDK does. */
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
+	/** Builds a closed parent's event sources away; without it, event routines wait for their session. */
+	readonly eventSources?: AwayEventSourceFactory;
+	/** The owner's global `proactivity.ciEvents`; off, no CI source is followed away. */
+	ciEvents?(): boolean;
 }
 
 /** One closed parent held open away: its context and the routine scheduler that runs its routines on it. */
@@ -85,12 +94,22 @@ interface ParentWork {
 	dueWithoutRoom: boolean;
 	/** The due routines among `due`, which a refusal of the whole parent is recorded on. */
 	readonly dueRoutines: string[];
+	/** Event routines that may run away: the parent's event feed decides them. */
+	readonly eventRoutines: string[];
 	/** Due routines no host could run, with why; recorded only while the parent is closed. */
 	readonly refusals: { readonly routineId: string; readonly reason: string; readonly current?: string }[];
 }
 
 function emptyParentWork(): ParentWork {
-	return { sessionFile: undefined, active: false, due: [], dueWithoutRoom: false, dueRoutines: [], refusals: [] };
+	return {
+		sessionFile: undefined,
+		active: false,
+		due: [],
+		dueWithoutRoom: false,
+		dueRoutines: [],
+		eventRoutines: [],
+		refusals: [],
+	};
 }
 
 function errorText(error: unknown): string {
@@ -182,7 +201,7 @@ async function openAwayRoutineHost(args: {
 					routineHostEventFeed(context.lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
 						context.lifecycle.ledger.runtime.hostEvents.isSourceReady(sourceId),
 					),
-				// Event routines need the open session's sealed sources; a host away never schedules one.
+				// A host schedules no event routine: the parent's event feed decides them, and a host claims their runs.
 				subscribe: () => () => {},
 			},
 			subscribeCapacity: (listener) => context.workers.getAgentControl().subscribeStateChanges(listener),
@@ -205,6 +224,11 @@ async function openAwayRoutineHost(args: {
 export class AwayRoutineSupervisor {
 	private readonly deps: AwayRoutineSupervisorDeps;
 	private readonly hosts = new Map<string, AwayRoutineHost>();
+	/** Per closed parent, its one event feed, and the event routines it decides (read by the feed at each decision). */
+	private readonly feeds = new Map<string, AwayEventFeed>();
+	private readonly feedRoutines = new Map<string, readonly string[]>();
+	/** Per parent, when a feed that failed to open is tried again. */
+	private readonly feedRetryAt = new Map<string, number>();
 	/** Per parent, the file stamp, due work and journal room its last host closed idle on, or its last refusal was recorded for. */
 	private readonly idle = new Map<string, string>();
 	/** Per parent, when a failed open is tried again. */
@@ -245,6 +269,10 @@ export class AwayRoutineSupervisor {
 		this.alarm?.stop();
 		this.alarm = undefined;
 		await this.pass;
+		await this.closeFeeds(
+			[...this.feeds.keys()],
+			"the away host stopped; the session or the next away host resumes from the saved position",
+		);
 		await this.closeHosts([...this.hosts.keys()]);
 	}
 
@@ -273,6 +301,7 @@ export class AwayRoutineSupervisor {
 		if (!settings.enabled) {
 			this.alarm?.stop();
 			this.alarm = undefined;
+			await this.closeFeeds([...this.feeds.keys()], "routines away are off in the owner's settings");
 			await this.closeHosts([...this.hosts.keys()]);
 			return;
 		}
@@ -296,7 +325,7 @@ export class AwayRoutineSupervisor {
 		let waitingForRoom = false;
 
 		for (const routine of store.listRoutines()) {
-			if (!routine.enabled || routine.target.kind !== "session" || routine.schedule.kind === "event") continue;
+			if (!routine.enabled || routine.target.kind !== "session") continue;
 			if (routineEnded(routine, nowMs) !== undefined) continue;
 			const snapshot = routine.executionSnapshot;
 			const sessionFile = snapshot?.savedIntent.receiptOrigin.sessionFile;
@@ -304,6 +333,20 @@ export class AwayRoutineSupervisor {
 				? AWAY_UNPINNED_REASON
 				: (awayRunRefusal(snapshot.savedIntent, this.deps.modelRegistry) ??
 					(sessionFile === undefined ? AWAY_NO_SESSION_FILE_REASON : undefined));
+			// An event routine is due whenever its source delivers: its parent's feed decides it, no slot is due here. With
+			// no sources or CI events off (the owner's own switch, which stops CI in the session too) nothing is followed.
+			if (routine.schedule.kind === "event") {
+				if (!this.deps.eventSources || this.deps.ciEvents?.() === false) continue;
+				const entry = work(routine.target.parentSessionId);
+				const current = routine.awayRefusal?.reason;
+				if (reason !== undefined)
+					entry.refusals.push({ routineId: routine.routineId, reason, ...(current ? { current } : {}) });
+				else {
+					entry.sessionFile ??= sessionFile;
+					entry.eventRoutines.push(routine.routineId);
+				}
+				continue;
+			}
 			if (routine.nextRunAt > nowMs) {
 				// A routine due later wakes the supervisor then, to run it or to record why it cannot.
 				next = Math.min(next, routine.nextRunAt);
@@ -506,6 +549,8 @@ export class AwayRoutineSupervisor {
 			await afterClaim(opened, entry);
 		}
 
+		next = Math.min(next, await this.reconcileFeeds(parents, refusals, nowMs));
+		if (this.disposed) return;
 		if (refusals.length > 0) {
 			store.recordRoutineAwayRefusals({ refusals, nowMs });
 			for (const { routineId, reason } of refusals)
@@ -522,6 +567,105 @@ export class AwayRoutineSupervisor {
 		else {
 			this.alarm?.stop();
 			this.alarm = undefined;
+		}
+	}
+
+	/**
+	 * Keeps one event feed per closed parent with an event routine that may run away, and closes every other. Returns
+	 * when a feed that failed to open is tried again; a parent with nothing to follow is refused on its routines.
+	 */
+	private async reconcileFeeds(
+		parents: ReadonlyMap<string, ParentWork>,
+		refusals: { routineId: string; reason: string }[],
+		nowMs: number,
+	): Promise<number> {
+		let next = Number.POSITIVE_INFINITY;
+		const eventSources = this.deps.eventSources;
+		for (const parentSessionId of new Set([...parents.keys(), ...this.feeds.keys()])) {
+			if (this.disposed) break;
+			const entry = parents.get(parentSessionId);
+			const routineIds = entry?.eventRoutines ?? [];
+			const sessionFile = entry?.sessionFile;
+			const retire = async (reason: string): Promise<void> => {
+				this.feedRoutines.delete(parentSessionId);
+				this.feedRetryAt.delete(parentSessionId);
+				await this.closeFeeds([parentSessionId], reason);
+			};
+			if (!eventSources || routineIds.length === 0 || sessionFile === undefined) {
+				await retire("no event routine of it may run away now");
+				continue;
+			}
+			const open = this.parentOpen(parentSessionId);
+			const stop =
+				fileStamp(sessionFile) === "missing"
+					? "its session file is gone"
+					: open === true
+						? "its session opened, so the session follows its events"
+						: open === "unknown"
+							? AWAY_LEASES_UNREADABLE_REASON
+							: undefined;
+			if (stop !== undefined) {
+				await retire(stop);
+				continue;
+			}
+			this.feedRoutines.set(parentSessionId, routineIds);
+			if (this.feeds.has(parentSessionId)) continue;
+			const retryAt = this.feedRetryAt.get(parentSessionId);
+			if (retryAt !== undefined && retryAt > nowMs) {
+				next = Math.min(next, retryAt);
+				continue;
+			}
+			try {
+				const feed = await AwayEventFeed.open({
+					agentDir: this.deps.agentDir,
+					parentSessionId,
+					sessionFile,
+					timers: this.deps.timers,
+					store: this.deps.store,
+					sources: eventSources,
+					isParentOpen: () => this.parentOpen(parentSessionId) !== false,
+					eventRoutineIds: () => this.feedRoutines.get(parentSessionId) ?? [],
+					report: (message) => this.deps.report(message),
+				});
+				if (this.disposed) {
+					await feed.close();
+					break;
+				}
+				this.feeds.set(parentSessionId, feed);
+				this.feedRetryAt.delete(parentSessionId);
+				this.reported.delete(`feed|${parentSessionId}`);
+			} catch (error) {
+				this.feedRetryAt.set(parentSessionId, nowMs + OPEN_RETRY_MS);
+				next = Math.min(next, nowMs + OPEN_RETRY_MS);
+				if (error instanceof AwayEventFeedUnavailable)
+					for (const routineId of routineIds)
+						refusals.push({ routineId, reason: `${error.message} It waits for the session to open.` });
+				else
+					this.reportOnce(
+						`feed|${parentSessionId}`,
+						`Event routines of session ${parentSessionId} could not be followed away: ${errorText(error)}`,
+					);
+			}
+		}
+		return next;
+	}
+
+	/** The feed's terminal signal: one report of why its events are no longer followed away, after its sources parked. */
+	private async closeFeeds(parentSessionIds: readonly string[], reason: string): Promise<void> {
+		for (const parentSessionId of parentSessionIds) {
+			const feed = this.feeds.get(parentSessionId);
+			if (!feed) continue;
+			this.feeds.delete(parentSessionId);
+			try {
+				await feed.close();
+				this.reported.delete(`feed-close|${parentSessionId}`);
+				this.deps.report(`Events of session ${parentSessionId} are no longer followed away: ${reason}`);
+			} catch (error) {
+				this.reportOnce(
+					`feed-close|${parentSessionId}`,
+					`Event routines of session ${parentSessionId} did not stop cleanly away: ${errorText(error)}`,
+				);
+			}
 		}
 	}
 

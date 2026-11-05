@@ -81,7 +81,7 @@ function endedSourceNotice(sourceId: string, reason: HostEventSourceEndReason): 
 }
 
 /** One serialized, level-triggered drain: a request during a pass schedules exactly one more pass. */
-class DeliveryLane {
+export class DeliveryLane {
 	private readonly run: () => Promise<void>;
 	private readonly isActive: () => boolean;
 	private readonly fail: (error: unknown) => void;

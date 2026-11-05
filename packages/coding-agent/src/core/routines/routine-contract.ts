@@ -849,6 +849,26 @@ export interface RoutineOccurrenceClaimInput {
 	readonly away?: RoutineAwayClaimGate;
 }
 
+/** A closed parent's event routines its away feed asks the store to decide; the store rechecks each under its lock. */
+export interface AwayEventDecisionInput {
+	readonly nowMs: number;
+	readonly parentSessionId: string;
+	readonly routineIds: readonly string[];
+	/** The host events the away feed holds sealed for this parent. */
+	readonly hostEvents: RoutineHostEventFeed;
+}
+
+export interface AwayEventDecisionResult {
+	/** Pending occurrences recorded for decided attempts. */
+	readonly decided: readonly string[];
+	/** Routines whose earlier run away is not yet delivered: their attempts wait for the session. */
+	readonly held: readonly string[];
+	/** A new attempt stays undecided until delivered results make journal room. */
+	readonly journalFull: boolean;
+	/** Routines holding their whole journal share; their new attempts stay undecided. */
+	readonly shareFull: readonly string[];
+}
+
 /** The ended routines one session asks the store to remove; the store rechecks each under its lock. */
 export interface RoutineRetireInput {
 	readonly nowMs: number;

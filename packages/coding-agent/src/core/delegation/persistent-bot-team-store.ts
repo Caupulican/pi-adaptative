@@ -15,6 +15,8 @@ import {
 	MAX_CALENDAR_MISSED_COUNT,
 } from "../routines/calendar-schedule.ts";
 import {
+	type AwayEventDecisionInput,
+	type AwayEventDecisionResult,
 	decideRoutineEvents,
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
@@ -839,6 +841,21 @@ export class PersistentBotTeamStore {
 		nowMs: number,
 		parentOrigin: WorkerReceiptOrigin,
 	): RoutineOccurrence {
+		return {
+			...this.createPendingOccurrence(definition, occurrenceId, trigger, nowMs, parentOrigin),
+			phase: "claimed",
+			claim: { token: randomUUID(), owner, leaseUntil: nowMs + leaseMs },
+		};
+	}
+
+	/** An accepted occurrence no host has claimed yet: whichever host may run it claims it through recovery. */
+	private createPendingOccurrence(
+		definition: RoutineDefinitionView,
+		occurrenceId: string,
+		trigger: RoutineOccurrence["trigger"],
+		nowMs: number,
+		parentOrigin: WorkerReceiptOrigin,
+	): RoutineOccurrence {
 		if (!this.routineJournalHasRoom(nowMs))
 			throw new Error("Routine occurrence journal is full of active, uncertain or undelivered entries.");
 		const definitionSnapshot: PersistentRoutineDefinition = {
@@ -862,10 +879,9 @@ export class PersistentBotTeamStore {
 			parentOrigin,
 			target: definition.target,
 			trigger,
-			phase: "claimed",
+			phase: "pending",
 			createdAt: nowMs,
 			updatedAt: nowMs,
-			claim: { token: randomUUID(), owner, leaseUntil: nowMs + leaseMs },
 		};
 	}
 
@@ -1058,7 +1074,8 @@ export class PersistentBotTeamStore {
 
 	/**
 	 * Records why routines a host running away cannot run (no pinned origin, an origin off the branch, an unreadable
-	 * parent); only a routine already due is recorded, and the same reason only once.
+	 * parent, a CI source the away host cannot follow); only a routine already due is recorded, and the same reason only
+	 * once. An event routine has no due time: it is due whenever its source delivers, so it is recorded while enabled.
 	 */
 	recordRoutineAwayRefusals(input: {
 		refusals: readonly { readonly routineId: string; readonly reason: string }[];
@@ -1068,9 +1085,24 @@ export class PersistentBotTeamStore {
 			let changed = false;
 			for (const { routineId, reason } of input.refusals) {
 				const routine = this.routines.get(routineId);
-				if (!routine?.enabled || routine.nextRunAt > input.nowMs) continue;
+				if (!routine?.enabled || (routine.schedule.kind !== "event" && routine.nextRunAt > input.nowMs)) continue;
 				const bounded = reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "This routine cannot run away.";
 				if (this.recordAwayRefusal(routineId, bounded, input.nowMs)) changed = true;
+			}
+			if (changed) this.save();
+		});
+	}
+
+	/** Clears the recorded away refusals whose cause ended (a CI source followed again); another reason is kept. */
+	clearRoutineAwayRefusals(input: { routineIds: readonly string[]; reasonPrefix: string }): void {
+		this.mutate(() => {
+			let changed = false;
+			for (const routineId of input.routineIds) {
+				const routine = this.routines.get(routineId);
+				if (!routine?.awayRefusal?.reason.startsWith(input.reasonPrefix)) continue;
+				const { awayRefusal: _refusal, ...cleared } = routine;
+				this.routines.set(routineId, cleared);
+				changed = true;
 			}
 			if (changed) this.save();
 		});
@@ -2149,7 +2181,10 @@ export class PersistentBotTeamStore {
 				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
 				if (stored.schedule.kind === "event") {
 					const decided = input.hostEvents
-						? this.decideEventRoutine(stored, input, input.hostEvents, output)
+						? this.decideEventRoutine(stored, input, input.hostEvents, output, {
+								owner: input.owner,
+								leaseMs: input.leaseMs,
+							})
 						: "unchanged";
 					if (decided === "changed") changed = true;
 					else if (decided === "journal-full") journalFull = true;
@@ -2182,6 +2217,44 @@ export class PersistentBotTeamStore {
 				...(awayRetryAt === undefined ? {} : { awayRetryAt }),
 				awayHeld,
 			};
+		});
+	}
+
+	/**
+	 * Away: decides a closed parent's event routines against the host events its away feed sealed. A decided attempt is
+	 * recorded as a pending occurrence with no claim and no executor, so its first claim admits it under the rules of the
+	 * host that makes it: the away host's spend bound, or the session's own scheduler once it opens. A routine whose
+	 * earlier run away is not yet delivered is held: its attempts stay undecided for the session.
+	 */
+	decideAwayEventRoutines(input: AwayEventDecisionInput): AwayEventDecisionResult {
+		return this.mutate(() => {
+			const output: RoutineOccurrence[] = [];
+			const held: string[] = [];
+			const shareFull: string[] = [];
+			let journalFull = false;
+			let changed = false;
+			for (const routineId of input.routineIds) {
+				const stored = this.routines.get(routineId);
+				if (
+					!stored?.enabled ||
+					stored.schedule.kind !== "event" ||
+					stored.target.kind !== "session" ||
+					stored.target.parentSessionId !== input.parentSessionId ||
+					routineEnded(stored, input.nowMs) ||
+					input.nowMs < Date.parse(stored.updatedAt)
+				)
+					continue;
+				if (routineAwayHeld(this.routineOccurrences.values(), stored, input.nowMs)) {
+					held.push(routineId);
+					continue;
+				}
+				const decided = this.decideEventRoutine(stored, input, input.hostEvents, output, undefined);
+				if (decided === "changed") changed = true;
+				else if (decided === "journal-full") journalFull = true;
+				else if (decided === "share-full") shareFull.push(routineId);
+			}
+			if (changed) this.save();
+			return { decided: output.map((item) => item.occurrenceId), held, journalFull, shareFull };
 		});
 	}
 
@@ -2359,13 +2432,14 @@ export class PersistentBotTeamStore {
 	 * Decides one event routine against its session's retained host events. At most one undispatched run exists per
 	 * routine: the latest new attempt runs, older new attempts and superseded ones become its missed count. Returns
 	 * whether the cursor or the journal changed, or that a new attempt stays undecided because the journal is full; a
-	 * new occurrence is appended to `output`.
+	 * new occurrence is appended to `output`, claimed under `claim`, or pending without it.
 	 */
 	private decideEventRoutine(
 		routine: RoutineDefinitionView,
-		input: RoutineOccurrenceClaimInput,
+		input: { readonly nowMs: number; readonly parentSessionId?: string },
 		feed: RoutineHostEventFeed,
 		output: RoutineOccurrence[],
+		claim: { readonly owner: string; readonly leaseMs: number } | undefined,
 	): "changed" | "unchanged" | "journal-full" | "share-full" {
 		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return "unchanged";
 		for (const occurrence of this.routineOccurrences.values())
@@ -2404,15 +2478,17 @@ export class PersistentBotTeamStore {
 				Math.min(MAX_ROUTINE_EVENT_MISSED_COUNT, (decision.cursor.skipped ?? 0) + coalesced),
 			);
 			const occurrenceId = routineOccurrenceId(routine, trigger);
-			const occurrence = this.createClaimedOccurrence(
-				routine,
-				occurrenceId,
-				trigger,
-				input.owner,
-				input.leaseMs,
-				input.nowMs,
-				parentOrigin,
-			);
+			const occurrence = claim
+				? this.createClaimedOccurrence(
+						routine,
+						occurrenceId,
+						trigger,
+						claim.owner,
+						claim.leaseMs,
+						input.nowMs,
+						parentOrigin,
+					)
+				: this.createPendingOccurrence(routine, occurrenceId, trigger, input.nowMs, parentOrigin);
 			this.routineOccurrences.set(occurrenceId, occurrence);
 			const cursor: RoutineCursor = {
 				kind: "event",

@@ -12,7 +12,16 @@
  *   and every variable the owner's global `auth.json`/`models.json` reference as `$NAME`;
  * - the secret-manager session the credential bootstrap reads;
  * - proxy and TLS trust settings: provider requests go through them, and without them every unattended run fails on a
- *   proxied network. A proxy already sees the same provider traffic from the foreground.
+ *   proxied network. A proxy already sees the same provider traffic from the foreground;
+ * - gh's configuration location and host (`GH_CONFIG_DIR`, `GH_HOST`), which name no secret, so the CI source the
+ *   daemon follows for a closed session finds the owner's gh sign-in.
+ *
+ * gh's tokens are not added to the daemon's environment (only an owner model or credential file referencing one as a
+ * provider key keeps it, as for every provider key). A process environment is readable by every command the daemon's
+ * workers start (`/proc/<pid>/environ` for the same user, whatever a shell strips), so the starting session writes
+ * them once to the daemon's stdin instead (`daemonGhCredentialPayload`), and the daemon hands them only to the `gh`
+ * processes its CI source runs. A keyring sign-in is not reachable away (no desktop bus is kept): such a source is
+ * reported once on its routines as waiting for the session.
  */
 
 import { readFileSync } from "node:fs";
@@ -93,7 +102,48 @@ const PLATFORM_NAMES = new Set([
 	"SSL_CERT_DIR",
 	// How pi itself was launched (its package and TypeScript config); a supervised target sets them again.
 	...HARNESS_LAUNCH_ENV_KEYS.map((name) => name.toUpperCase()),
+	// gh's configuration directory and host; neither is a secret.
+	"GH_CONFIG_DIR",
+	"GH_HOST",
 ]);
+
+/** gh's token variables: carried to the daemon on its stdin, never in its environment. */
+export const GH_CREDENTIAL_NAMES: readonly string[] = [
+	"GH_TOKEN",
+	"GITHUB_TOKEN",
+	"GH_ENTERPRISE_TOKEN",
+	"GITHUB_ENTERPRISE_TOKEN",
+];
+/** Bound on the credential payload a daemon reads from its stdin. */
+export const MAX_DAEMON_CREDENTIAL_BYTES = 64 * 1024;
+
+/** The gh tokens of `source`, as the payload the starting session writes to the daemon's stdin. */
+export function daemonGhCredentialPayload(source: NodeJS.ProcessEnv): string {
+	const credentials: Record<string, string> = {};
+	for (const name of GH_CREDENTIAL_NAMES) {
+		const value = source[name];
+		if (value) credentials[name] = value;
+	}
+	return JSON.stringify(credentials);
+}
+
+/**
+ * The gh tokens a daemon read from its stdin: an empty payload (a starter that sent none) holds none. Throws on a
+ * payload that is not the starter's object of gh token names.
+ */
+export function parseDaemonGhCredentials(text: string): Readonly<Record<string, string>> {
+	if (text.trim() === "") return {};
+	const parsed: unknown = JSON.parse(text);
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+		throw new Error("the gh credential payload is not an object.");
+	const credentials: Record<string, string> = {};
+	for (const [name, value] of Object.entries(parsed)) {
+		if (!GH_CREDENTIAL_NAMES.includes(name) || typeof value !== "string" || value.length === 0)
+			throw new Error(`the gh credential payload holds an unexpected entry (${name.slice(0, 64)}).`);
+		credentials[name] = value;
+	}
+	return credentials;
+}
 
 const KEPT_PREFIXES = [
 	"LC_",
