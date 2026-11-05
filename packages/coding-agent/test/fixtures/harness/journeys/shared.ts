@@ -1441,12 +1441,13 @@ export type KnowledgeJudgmentAnswer =
 	| { readonly id: string; readonly selected: string; readonly confidence: number };
 
 /**
- * One session-model knowledge judgment: an isolated request that carries only the program and state as
- * data, offers only the structured submission, and is answered by exactly one submission call.
+ * One session-model judgment (knowledge, or routine intake through the same runner): an isolated request that
+ * carries only the program and state as data, offers only the structured submission, and is answered by exactly
+ * one submission call.
  */
 export function knowledgeJudgment(
 	name: string,
-	program: "knowledge.admission" | "knowledge.identity",
+	program: "knowledge.admission" | "knowledge.identity" | "routine.intake",
 	answers: readonly KnowledgeJudgmentAnswer[],
 	evidence: () => string,
 ): ScriptStep {

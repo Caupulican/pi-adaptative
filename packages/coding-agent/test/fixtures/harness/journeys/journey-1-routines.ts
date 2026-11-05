@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { expect } from "vitest";
+import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshotForAttempt,
@@ -10,18 +11,27 @@ import {
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
 import {
+	getOwnerEvidenceSnapshots,
+	OWNER_EVIDENCE_CUSTOM_TYPE,
+} from "../../../../src/core/learning/owner-evidence-ledger.ts";
+import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 	toJsonObject,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
-import { MAX_ROUTINE_INSTANT_MS } from "../../../../src/core/routines/routine-contract.ts";
+import {
+	MAX_ROUTINE_INSTANT_MS,
+	type RoutineIntakeBatch,
+	routineScheduleInputOf,
+} from "../../../../src/core/routines/routine-contract.ts";
+import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
 import type { SessionManager } from "../../../../src/kernel/node.ts";
 import { parentInputMessage, parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
-import { calls, createBarrier, type ScriptedRequest, text } from "../scripted-provider.ts";
+import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, latestBatchResults } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, knowledgeJudgment, latestBatchResults } from "./shared.ts";
 
 /** Saved intent, native execution, daemon due-time ownership and one durable parent delivery. */
 export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<void> {
@@ -716,6 +726,303 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		release.release();
 		scheduledRelease.release();
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		await world.provider.waitForProducers();
+		for (const track of tracks) world.provider.retireOptional(track);
+	}
+	await runJourney1RoutineIntake(world, profile);
+}
+
+/**
+ * Hands-off intake through the real root: after the turn settles, the owner's stated request becomes a read-only
+ * routine announced on the next turn, while a pasted request is never grounded. Words the model already answered with
+ * a routine save are passed over unread, and a pass replayed after the owner removed its routine creates nothing.
+ */
+async function runJourney1RoutineIntake(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
+	const agentDir = `${world.agentDir}-routine-intake`;
+	new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(profile, "global");
+	const settings = icmContinuousSettings("worker-c", {
+		autoLearn: { enabled: false },
+		proactivity: { enabled: false },
+	});
+	let root = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings,
+	});
+	let open = true;
+	const tracks: string[] = [];
+	for (let size = 1; size <= 16; size *= 2)
+		for (let first = 0; first + size <= 16; first += size) {
+			const task =
+				size === 1
+					? `Compaction: compress message ${first} into`
+					: `Compaction: merge lines ${first}+${size / 2} and ${first + size / 2}+${size / 2},`;
+			const name = `routine-intake-compaction-${first}+${size}`;
+			tracks.push(name);
+			world.provider.enqueueTrack(
+				name,
+				"worker-c",
+				(request) => JSON.stringify(request.context.messages.at(-1)).includes(task),
+				{
+					name,
+					optional: true,
+					reply: {
+						content: [{ type: "text", text: "Owner requests and saved routines; see the original turns." }],
+					},
+				},
+			);
+		}
+	const parentSessionId = root.sessionManager.getSessionId();
+	const store = () => root.session.backgroundLanes.getBotTeamStore();
+	const intakeState = () => store().getRoutineIntakeSession(parentSessionId);
+	const notices = () =>
+		root.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === "routine-intake");
+	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
+	const latestSource = () =>
+		getOwnerEvidenceSnapshots(root.sessionManager.getCustomEntriesOnBranch([OWNER_EVIDENCE_CUSTOM_TYPE])).at(-1)!;
+	// A pass has ended once its retained batch is cleared and the notices it owes are persisted, in either order.
+	const passEnded = (expectedNotices: number): Promise<void> =>
+		new Promise((resolve) => {
+			const stops: Array<() => void> = [];
+			const check = () => {
+				if (intakeState()?.batch !== undefined || notices().length !== expectedNotices) return;
+				for (const stop of stops.splice(0)) stop();
+				resolve();
+			};
+			stops.push(store().subscribe(check), root.sessionManager.onEntriesPersisted(check));
+			check();
+		});
+	const owner =
+		"My colleague wrote:\n> Check the release notes every hour.\nEvery morning, summarize the open review comments.";
+	const instruction = "summarize the open review comments";
+	try {
+		world.systemOne.enterPhase("routine-intake-owner", {});
+		world.provider.enqueue("root", text("routine-intake-owner-reply", "Noted."));
+		await withDeadline(world.trace, "routine intake owner words", root.session.prompt(owner));
+		const source = latestSource();
+		expect(source.text).toBe(owner);
+
+		world.systemOne.enterPhase("routine-intake-pass", {
+			requests_automation: { kind: "noul", probability: 0.98 },
+			explicit: { kind: "noul", probability: 0.98 },
+			faithful: { kind: "noul", probability: 0.98 },
+		});
+		world.provider.enqueue(
+			"root",
+			{
+				name: "routine-intake-extraction",
+				check: (request) => {
+					expect(request.context.tools?.map((tool) => tool.name)).toEqual([ROUTINE_INTAKE_SUBMISSION_TOOL_NAME]);
+					expect(
+						request.context.messages,
+						"extraction carries the owner's original as its only message",
+					).toHaveLength(1);
+					expect(JSON.stringify(request.context.messages)).toContain(instruction);
+				},
+				reply: {
+					content: [
+						{
+							type: "toolCall",
+							id: "routine-intake-extraction",
+							name: ROUTINE_INTAKE_SUBMISSION_TOOL_NAME,
+							arguments: {
+								messages: [
+									{
+										id: "m1",
+										requests: [
+											// The pasted line: the host finds it only as shown text, so it is never judged.
+											{
+												instruction: "Check the release notes",
+												when: "every hour",
+												schedule: { kind: "interval", intervalMs: 3_600_000 },
+											},
+											{
+												instruction,
+												when: "Every morning",
+												schedule: { kind: "calendar", cron: "0 9 * * *" },
+											},
+										],
+									},
+								],
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+			},
+			...(world.systemOne.enabled
+				? []
+				: [
+						knowledgeJudgment(
+							"routine-intake-judgment",
+							"routine.intake",
+							[
+								{ id: "explicit", value: true, confidence: 0.98 },
+								{ id: "faithful", value: true, confidence: 0.98 },
+							],
+							() => instruction,
+						),
+					]),
+		);
+		const retained: { batch?: RoutineIntakeBatch } = {};
+		const stopRetaining = store().subscribe(() => {
+			const batch = intakeState()?.batch;
+			if (!retained.batch && batch?.requests && batch.requests.every((request) => request.done !== true))
+				retained.batch = batch;
+		});
+		const beforePass = rootRequests();
+		const decodedBeforePass = world.systemOne.decoded.length;
+		const created = passEnded(1);
+		try {
+			expect(
+				await withDeadline(world.trace, "routine intake idle delay", world.timers.whenArmed("routine-intake")),
+				"intake reads the owner's words after the turn settles",
+			).toBe(2_000);
+			expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
+			await withDeadline(world.trace, "routine intake pass created its routine", created);
+		} finally {
+			stopRetaining();
+		}
+		const automatic = store()
+			.listRoutines()
+			.filter((routine) => routine.origin !== undefined);
+		expect(automatic, "only the owner's stated request becomes a routine").toHaveLength(1);
+		const routine = automatic[0]!;
+		expect(routine.origin?.sourceId).toBe(source.sourceId);
+		expect(routine.prompt, "the routine runs the owner's own words").toBe(instruction);
+		expect(routineScheduleInputOf(routine.schedule)).toMatchObject({ kind: "calendar", cron: "0 9 * * *" });
+		expect(
+			routine.executionSnapshot?.savedIntent.executionContract.worker.profile.readOnly,
+			"intake grants no write authority",
+		).toBe(true);
+		expect(retained.batch?.requests?.map((request) => request.prompt)).toEqual([instruction]);
+		expect(store().hasRoutineIntakeOrigin(retained.batch!.requests![0]!.key)).toBe(true);
+		expect(intakeState()?.through, "the pass ends at the source it read").toBe(Date.parse(source.createdAt));
+		const notice = notices()[0]!;
+		const content = notice.type === "custom_message" && typeof notice.content === "string" ? notice.content : "";
+		expect(content).toContain("Scheduled (read-only): ");
+		expect(content).toContain(` - ${JSON.stringify(instruction)}\nRoutine ${routine.routineId} was created`);
+		expect(parentInputOf(notice)?.metadata.mode, "the notice waits for the owner's next turn").toBe(
+			"next-owner-turn",
+		);
+		expect(root.sessionManager.getPendingParentInputs("turn"), "a notice never wakes the parent").toHaveLength(0);
+		const providerRequests = world.systemOne.enabled ? 1 : 2;
+		expect(rootRequests() - beforePass, "one extraction; the session model judges only with System One off").toBe(
+			providerRequests,
+		);
+		expect(world.systemOne.decoded.length - decodedBeforePass, "System One gates the source and judges once").toBe(
+			world.systemOne.enabled ? 2 : 0,
+		);
+		const receipts = root.sessionManager.getEntries().flatMap((entry) => {
+			const report = resolveSemanticUsageEntry(entry)?.report;
+			return report?.route === "routine_intake" ? [report] : [];
+		});
+		expect(receipts, "every intake request is accounted to the pass").toHaveLength(providerRequests);
+		for (const receipt of receipts) expect(receipt.origin?.operationId).toBe(retained.batch?.operationId);
+		expect(root.session.backgroundLanes.getRoutineIntakeStatus()).toMatchObject({
+			state: "active",
+			...(world.systemOne.enabled ? {} : { judge: `structured-llm (${HARNESS_PROVIDER}/root)` }),
+			last: { status: "completed", sources: 1, created: 1, refused: 0 },
+		});
+
+		// The model answers the next request with a routine save; intake passes those words over unread.
+		const handled = "Also check the changelog every day.";
+		world.systemOne.enterPhase("routine-intake-tool-save", {
+			...ICM_INTAKE_JUDGMENTS,
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue(
+			"root",
+			{
+				...calls("routine-intake-tool-save-call", [
+					{
+						id: "routine-intake-tool-save",
+						name: "routine",
+						arguments: {
+							action: "create",
+							routineId: "changelog-review",
+							prompt: "Check the changelog.",
+							schedule: { kind: "interval", intervalMs: 86_400_000 },
+							profileId: profile.profileId,
+						},
+					},
+				]),
+				check: (request) =>
+					expect(JSON.stringify(request.context.messages), "the notice reaches the owner's next turn").toContain(
+						"Scheduled (read-only): ",
+					),
+			},
+			{
+				...text("routine-intake-tool-save-done", "The changelog routine is saved."),
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
+					expect(result?.isError, result?.text).toBe(false);
+				},
+			},
+		);
+		await withDeadline(world.trace, "routine intake tool save", root.session.prompt(handled));
+		const toolSource = latestSource();
+		expect(toolSource.text).toBe(handled);
+		expect(store().getRoutine("changelog-review")).toBeDefined();
+		world.systemOne.enterPhase("routine-intake-handled", {});
+		const beforeHandled = rootRequests();
+		expect(
+			await withDeadline(
+				world.trace,
+				"routine intake after the tool save",
+				world.timers.whenArmed("routine-intake"),
+			),
+		).toBe(2_000);
+		// A pass with nothing to read ends before its first await.
+		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
+		expect(intakeState()?.through, "words the model answered with a routine save are not read").toBe(
+			Date.parse(toolSource.createdAt),
+		);
+		expect(intakeState()?.batch).toBeUndefined();
+		expect(rootRequests()).toBe(beforeHandled);
+		expect(world.timers.armedDelays("routine-intake"), "nothing is left to read").toEqual([]);
+
+		// The owner removes the routine while the session is closed, and the first pass is replayed as a stop between its
+		// creation and its done mark leaves it: the consumed origin creates and announces nothing.
+		const replay = retained.batch!;
+		const offlineStore = store();
+		const file = root.sessionManager.getSessionFile()!;
+		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		open = false;
+		const removed = offlineStore.getRoutine(routine.routineId)!;
+		expect(offlineStore.deleteRoutine(routine.routineId, removed.revision, world.timers.port("routines").now())).toBe(
+			true,
+		);
+		offlineStore.recordRoutineIntake(parentSessionId, world.timers.port("routine-intake").now(), { batch: replay });
+		world.systemOne.enterPhase("routine-intake-replay", {});
+		const beforeReplay = rootRequests();
+		root = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.openSessionManager(file, agentDir),
+			settings,
+		});
+		open = true;
+		const replayed = passEnded(1);
+		expect(await withDeadline(world.trace, "replayed routine intake", world.timers.whenArmed("routine-intake"))).toBe(
+			2_000,
+		);
+		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
+		await withDeadline(world.trace, "replayed routine intake pass ended", replayed);
+		expect(store().getRoutine(routine.routineId), "a removed routine is never recreated").toBeUndefined();
+		expect(notices(), "a replay announces nothing").toHaveLength(1);
+		expect(rootRequests(), "a decided request is not extracted or judged again").toBe(beforeReplay);
+		expect(root.session.backgroundLanes.getRoutineIntakeStatus()?.last).toEqual({
+			status: "completed",
+			sources: 1,
+			created: 0,
+			refused: 0,
+		});
+		expect(world.timers.armedDelays("routine-intake")).toEqual([]);
+		world.trace.mark("root", "routine.owner-intake");
+	} finally {
+		if (open) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}

@@ -457,6 +457,20 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 
 **Owner control.** `/proactivity status` shows the settings, the last rolling-day measurement, the gate that last kept a review from running, and whether the last accepted notes woke a parent turn or wait for the owner's next turn and why. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. The root model can also read or propose changes through the `proactivity` tool. Every change requires confirmation on the owner's screen; cancellation, refusal, a conflicting edit during confirmation, or an unattended session prevents the write. Workers do not receive this tool. See [Proactivity](proactivity.md).
 
+### Routines
+
+```json
+{
+  "routines": {
+    "automaticIntake": true
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `automaticIntake` | `true` | After an owner turn settles, the host reads the owner's new messages and creates a read-only routine for each explicit recurring, scheduled or CI-conditioned request, announced on the next turn (see [Proactivity](proactivity.md#scheduled-work)). `false` stops it; messages written while it is off are never read later. The `routine` tool is unaffected. |
+
 ### Cost Guard
 
 | Setting | Type | Default | Description |

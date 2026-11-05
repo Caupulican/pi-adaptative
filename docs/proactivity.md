@@ -117,6 +117,20 @@ attempt runs when finished, delivered results free room. The failure note does n
 routine's result is not counted toward `maxTurnWakesPerDay`; a run whose worker reports no owner
 update is carried with the owner's next turn without starting one.
 
+Routine intake turns the owner's own words into routines without a model tool call. It is owned by
+the routine session (`core/routines/routine-intake.ts`) and writes only through the routine owner,
+so an automatic routine has the same parent check, authority capture and store limits as a tool
+save, with read-only worker authority. After an owner turn settles and the foreground stays idle,
+one pass reads at most four unread complete originals from the owner-evidence ledger. With System
+One bound, each original passes a cheap gate first; one bounded extraction request then proposes
+requests with verbatim excerpts, and the host keeps only proposals whose excerpts it finds as the
+owner's stated (not shown) words. Each proposal is judged for being an explicit request and for a
+faithful schedule, by System One or else the session model, and is created only when both hold at
+0.9 probability and confidence. A notice rides with the owner's next turn. The pass, its extracted
+requests and the origin of every created routine are retained in the routine store, so a restart
+resumes the pass without a second extraction, and a decided request is never created twice, even
+after its routine is deleted. Messages the model answered with a `routine` save are passed over.
+
 The `delegate` tool exposes bounded event recall and task subscriptions:
 
 - `events` with `eventView: "sources"` lists exact subjects and their workflow thread keys.
