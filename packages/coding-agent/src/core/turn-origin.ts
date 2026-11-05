@@ -150,7 +150,7 @@ export function isThirdPartyOrigin(origin: TurnOriginRecord | undefined): boolea
 }
 
 /** The owner's typed words and a third party's words decide a run's authority; the owner's automation does not. */
-function isDecisive(origin: TurnOriginRecord): boolean {
+export function isDecisiveOrigin(origin: TurnOriginRecord): boolean {
 	return origin.thirdParty === true || origin.k === "owner-typed";
 }
 
@@ -162,7 +162,7 @@ export function latestDecisiveEntry(
 	for (let index = Math.min(before, branch.length) - 1; index >= 0; index--) {
 		const entry = branch[index];
 		const origin = entry === undefined ? undefined : entryTurnOrigin(entry);
-		if (entry && origin && isDecisive(origin)) return { index, entry, origin };
+		if (entry && origin && isDecisiveOrigin(origin)) return { index, entry, origin };
 	}
 	return undefined;
 }
@@ -194,7 +194,7 @@ export class RunTurnOrigin {
 	note(message: AgentMessage): void {
 		if (!this.active) return;
 		const origin = turnOriginOf(message);
-		if (origin && isDecisive(origin)) this.latest = origin;
+		if (origin && isDecisiveOrigin(origin)) this.latest = origin;
 	}
 
 	end(): void {

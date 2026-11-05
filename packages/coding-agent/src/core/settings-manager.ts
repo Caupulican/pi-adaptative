@@ -9,6 +9,7 @@ import { stripBom } from "../utils/text.ts";
 import { configFile } from "./agent-paths.ts";
 import { EDGE_CLASSES, isEdgeClass } from "./autonomy/edge-policy.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
+import { type ChannelPolicyResolution, resolveChannelPolicies } from "./channels/channel-policy.ts";
 import { resolveSelfCompactionSettings, type SelfCompactionSettings } from "./compaction/self-compaction.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
@@ -3893,6 +3894,17 @@ export class SettingsManager {
 			thirdPartyAllow,
 			deny: [...new Set((configuredDeny ?? []).map((value) => value.trim()))],
 		};
+	}
+
+	/**
+	 * Channel admission policies, read like standing grants: only from the layers the owner writes under the agent
+	 * directory (directory profile first, then global), never the project's own settings. Any settings load error
+	 * withholds every policy, so no channel starts.
+	 */
+	getChannelPolicies(): ReadonlyMap<string, ChannelPolicyResolution> {
+		if (this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError)
+			return new Map();
+		return resolveChannelPolicies([this.directoryProfileSettings.channels, this.globalSettings.channels]);
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {

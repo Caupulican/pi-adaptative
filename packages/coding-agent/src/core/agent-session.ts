@@ -61,7 +61,7 @@ import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
-import { BackgroundLaneController } from "./background-lane-controller.ts";
+import { BackgroundLaneController, type SessionChannelsView } from "./background-lane-controller.ts";
 import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
@@ -149,7 +149,7 @@ import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
-import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
+import type { ChannelProvider, JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
@@ -499,9 +499,6 @@ export class AgentSession {
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
-	private readonly _gatewayRegistry = new GatewayRegistry({
-		onDiagnostic: (message) => this._emit({ type: "warning", message }),
-	});
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
@@ -1156,6 +1153,7 @@ export class AgentSession {
 			},
 			canRunRoutines: () => !this._isChildSession,
 			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
+			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
 			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
@@ -1239,6 +1237,7 @@ export class AgentSession {
 			},
 			subscribeSystemSwitchLeaseAvailability: (listener) => this._subscribeSystemSwitchAvailability(listener),
 			getSettingsManager: () => this.settingsManager,
+			isThirdPartyRun: () => this._foregroundRecovery.turnOrigin.authority() === "third-party",
 			getTurnIndex: () => this._turnIndex,
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
@@ -1927,6 +1926,7 @@ export class AgentSession {
 			getProactivityTool: () =>
 				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
 			getRoutineTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createRoutineToolDefinition()),
+			getChannelReplyTool: () => this._backgroundLanes.createChannelReplyToolDefinition(),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
@@ -3988,7 +3988,7 @@ export class AgentSession {
 		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 		safely(() => this._skillVault.unload());
 		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
-		track(() => this._gatewayRegistry.stop());
+		track(() => this._backgroundLanes.channels.stop());
 		trackRequired(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
 		safely(() => this._localRuntimeController.dispose());
@@ -5203,7 +5203,7 @@ export class AgentSession {
 	startBackgroundInputs(): void {
 		if (this._isChildSession) return;
 		this._durableCustomMessageTurns.startParentInputs();
-		this._backgroundLanes.startPersistentRoutines();
+		this._backgroundLanes.startSessionInputs();
 	}
 
 	getMemorySystem(): MemorySystem {
@@ -5260,19 +5260,19 @@ export class AgentSession {
 		);
 	}
 
-	/** The gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
-	get gateways(): GatewayRegistry {
-		return this._gatewayRegistry;
+	/** Registered channels: registration for a deployment wrapper and their read-only states; the session starts them. */
+	get channels(): SessionChannelsView {
+		return this._backgroundLanes.channels;
 	}
 
-	/** Register a deployment-supplied transport channel (gateway). */
+	/** Register a deployment-supplied transport channel; it starts only under its `channels.<name>` policy. */
 	registerChannelProvider(provider: ChannelProvider): void {
-		this._gatewayRegistry.registerChannel(provider);
+		this._backgroundLanes.channels.registerChannel(provider);
 	}
 
 	/** Register a deployment-supplied job scheduler (cron). */
 	registerJobScheduler(provider: JobSchedulerProvider): void {
-		this._gatewayRegistry.registerScheduler(provider);
+		this._backgroundLanes.channels.registerScheduler(provider);
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {

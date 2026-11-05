@@ -479,8 +479,6 @@ const THIRD_PARTY_READ_ONLY_ACTIONS: ReadonlyMap<string, ReadonlySet<string | un
 	],
 	["goal", new Set(["get"])],
 	["routine", new Set(["list", "get"])],
-	["knowledge", new Set(["search", "read", "history", "evidence"])],
-	["memory", new Set(["history_search", "history_source", "history_expand"])],
 	["proactivity", new Set(["view"])],
 	["repo_read", new Set(["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"])],
 	["decision_ledger_read", new Set(["sessions", "stages", "evaluations", "failures", "replay"])],
@@ -683,7 +681,8 @@ export function classifyOutwardEdgeOperations(input: ClassifyEdgeInput): EdgeOpe
 }
 
 /**
- * Why a tool call is the owner's own decision, which a run carrying a third party's words never makes: an action
+ * Why a tool call is the owner's own decision, which a run carrying a third party's words never makes: any action of
+ * `knowledge`, `memory` (the owner's private records) and `channel_reply` (the owner's channel replies); an action
  * outside `THIRD_PARTY_READ_ONLY_ACTIONS` (a tool not listed there may take no action at all), other than a delegation
  * launch, which is prepared instead; and a knowledge grant to another agent.
  */
@@ -692,6 +691,10 @@ export function ownerOnlyToolCallReason(toolName: string, args: unknown): string
 	// A knowledge grant hands owner knowledge values to another agent, whatever grant covers the launch itself.
 	if ((toolName === "delegate" || toolName === "pi_collaboration") && record.knowledge !== undefined)
 		return `${toolName} knowledge hands the owner's recorded knowledge to another agent`;
+	// The owner's private records stay out of a run that serves a third party's words, read or written: every action.
+	if (toolName === "knowledge" || toolName === "memory")
+		return `${toolName} reads and changes the owner's private records`;
+	if (toolName === "channel_reply") return "channel_reply releases or discards the owner's channel replies";
 	const action = typeof record.action === "string" ? record.action : undefined;
 	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
 	const readOnly = THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName);

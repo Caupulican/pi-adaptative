@@ -23,6 +23,8 @@ import type { MemoryProviderRetrievalStatus, MemoryRetrievalReport } from "./mem
 export type MemoryPromptInclusionStatus =
 	| "disabled"
 	| "include_disabled"
+	/** The run carries a third party's words; the owner's records are not projected into it. */
+	| "withheld"
 	| "no_results"
 	| "empty_block"
 	| "included"

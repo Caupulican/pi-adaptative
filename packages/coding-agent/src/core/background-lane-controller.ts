@@ -31,6 +31,8 @@ import type {
 } from "./agent-session-contracts.ts";
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
+import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
+import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { daemonBaselineEnvironment, daemonGhCredentialPayload } from "./daemon-environment.ts";
@@ -116,7 +118,7 @@ import type {
 } from "./events/host-event-control.ts";
 import { HostEventSessionController } from "./events/host-event-session-controller.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
-import type { ToolDefinition } from "./extensions/types.ts";
+import type { SendUserMessageOptions, ToolDefinition } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -181,6 +183,7 @@ import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
+export type { SessionChannelsView } from "./channels/session-channels.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
@@ -224,6 +227,8 @@ export interface BackgroundLaneControllerDeps
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
+	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
+	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
 	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
 	getOwnerEvidence(): Pick<
 		OwnerEvidenceLedger,
@@ -243,6 +248,8 @@ export type RunningAttemptWaitOutcome =
 export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
 	private readonly _laneTracker = new LaneTracker({ onChange: () => this._laneRecordsChanged() });
+	/** The session's registered channel providers, their admission and reply routing. */
+	readonly channels: SessionChannels;
 	private readonly _laneRecordListeners = new Set<(records: readonly LaneRecord[]) => void>();
 	private _laneRecordsNotifyQueued = false;
 	/** The projected bot roster, dropped by every input change. */
@@ -313,6 +320,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
+		this.channels = new SessionChannels({
+			getAgentDir: () => deps.getAgentDir(),
+			getSessionManager: () => deps.getSessionManager(),
+			getChannelPolicies: () => deps.getSettingsManager().getChannelPolicies(),
+			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
+			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
+			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
+			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read),
+			warn: (message) => this._safeWarn(message),
+			isDisposed: () => deps.isDisposed(),
+			isChildSession: () => deps.isChildSession(),
+		});
 		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
 		this._laneModels = new LaneModelResolver(deps);
 		this._research = new ResearchLaneController(
@@ -1617,6 +1636,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			scheduler.start();
 			intake.start();
 		}
+	}
+
+	/** The hands-off inputs a root session starts once it binds: persistent routines and the registered channels. */
+	startSessionInputs(): void {
+		this.startPersistentRoutines();
+		this.channels.start();
+	}
+
+	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy. */
+	createChannelReplyToolDefinition(): ToolDefinition | undefined {
+		return !this.deps.isChildSession() && this.channels.hasExplicitPolicy()
+			? createChannelReplyToolDefinition(this.channels)
+			: undefined;
 	}
 
 	startPersistentRoutines(): void {

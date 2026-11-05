@@ -8,17 +8,50 @@
  * first-class, uniform extension point.
  */
 
+/** What an inbound event is. Any other kind a provider reports is journaled and ignored. */
+export type ChannelMessageKind = "message" | "reaction";
+
+/** Who wrote an inbound event, as the provider knows it. */
+export interface ChannelSender {
+	/** The provider's stable sender id; `channels.<name>.allowedSenders` lists these. */
+	id: string;
+	/** A display label; self-declared on most transports, so it is shown, never trusted. */
+	label?: string;
+	/** Whether the provider itself authenticated the sender (a signed webhook, a bot API's user id). */
+	verified: boolean;
+}
+
 /** A message arriving from / sent to an external channel (gateway). */
 export interface ChannelMessage {
 	/** Stable conversation/session key for this channel (e.g. `slack_C123`). */
 	conversationKey: string;
 	/** Message text. */
 	text: string;
-	/** Optional opaque metadata the provider round-trips. */
+	/** Optional opaque metadata the provider round-trips. It never reaches the model. */
 	meta?: Record<string, unknown>;
+	/** The provider's stable id of this event. Required inbound: the admission journal is keyed by (channel, eventId). */
+	eventId?: string;
+	/** Required inbound. */
+	sender?: ChannelSender;
+	/** Opaque reply address only the provider resolves. Required inbound; the reply goes back to the same address. */
+	address?: string;
+	/** Defaults to `message`. */
+	kind?: ChannelMessageKind;
+	/** When the provider received the event, epoch milliseconds; defaults to admission time. */
+	receivedAt?: number;
 }
 
-/** Handler the core supplies to a channel for inbound messages. */
+/** What the transport accepts outbound; replies are split and formatted to it. */
+export interface ChannelCapabilities {
+	/** The longest text one outbound message may carry; longer replies are sent in parts. */
+	maxMessageChars?: number;
+	/** Whether the transport renders markdown; otherwise replies are sent as plain text. */
+	markdown?: boolean;
+	/** Whether an address can name a thread inside a conversation. */
+	threads?: boolean;
+}
+
+/** Handler the core supplies to a channel for inbound messages. It resolves once the event is held; a rejection means "redeliver". */
 export type ChannelInboundHandler = (message: ChannelMessage) => void | Promise<void>;
 
 /**
@@ -28,13 +61,17 @@ export type ChannelInboundHandler = (message: ChannelMessage) => void | Promise<
  */
 export interface ChannelProvider {
 	readonly name: string;
+	readonly capabilities?: ChannelCapabilities;
 	/** Begin listening; deliver inbound messages to `onInbound`. */
 	start(onInbound: ChannelInboundHandler): void | Promise<void>;
-	/** Send an outbound message on this channel. */
+	/** Send an outbound message on this channel: a reply carries the inbound `address` and a reply `eventId`. */
 	send(message: ChannelMessage): void | Promise<void>;
 	/** Stop listening and release resources. */
 	stop(): void | Promise<void>;
 }
+
+/** The core's handler for every channel: the registry binds each provider's own name to its events. */
+export type GatewayInboundHandler = (channel: string, message: ChannelMessage) => void | Promise<void>;
 
 /** A scheduled job definition. */
 export interface ScheduledJob {
@@ -60,6 +97,10 @@ export interface GatewayRegistryOptions {
 	/** Bound for each provider lifecycle callback. */
 	lifecycleTimeoutMs?: number;
 	onDiagnostic?: (message: string) => void;
+	/** Whether a registered channel may start; one it does not admit is never started. Defaults to every channel. */
+	admitChannel?: (name: string) => boolean;
+	/** How each channel start ended: a rejected or timed-out start is stopped again. */
+	onChannelStart?: (name: string, outcome: LifecycleOutcome) => void;
 }
 
 export const DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS = 30_000;
@@ -67,7 +108,7 @@ export const DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS = 30_000;
 type LifecycleProvider = ChannelProvider | JobSchedulerProvider;
 type LifecyclePhase = "start" | "stop";
 type LifecycleSettlement = "fulfilled" | "rejected";
-type LifecycleOutcome = LifecycleSettlement | "timed_out";
+export type LifecycleOutcome = LifecycleSettlement | "timed_out";
 
 interface LifecycleRun {
 	settlement: Promise<LifecycleSettlement>;
@@ -107,12 +148,14 @@ export class GatewayRegistry {
 	private readonly channels = new Map<string, ChannelProvider>();
 	private readonly schedulers = new Map<string, JobSchedulerProvider>();
 	private started = false;
-	private inboundHandler: ChannelInboundHandler = () => {};
+	private inboundHandler: GatewayInboundHandler = () => {};
 	private readonly pendingLifecycle = new Set<Promise<void>>();
 	private readonly providerLifecycle = new WeakMap<LifecycleProvider, ProviderLifecycleState>();
 	private nextStartRequestId = 0;
 	private readonly lifecycleTimeoutMs: number;
 	private readonly onDiagnostic: (message: string) => void;
+	private readonly admitChannel: (name: string) => boolean;
+	private readonly onChannelStart: (name: string, outcome: LifecycleOutcome) => void;
 
 	constructor(options: GatewayRegistryOptions = {}) {
 		this.lifecycleTimeoutMs = options.lifecycleTimeoutMs ?? DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS;
@@ -120,6 +163,41 @@ export class GatewayRegistry {
 			throw new TypeError("Gateway lifecycle timeout must be a positive safe integer.");
 		}
 		this.onDiagnostic = options.onDiagnostic ?? (() => {});
+		this.admitChannel = options.admitChannel ?? (() => true);
+		this.onChannelStart = options.onChannelStart ?? (() => {});
+	}
+
+	/** A channel start bound to the provider's own name, admitted only while `admitChannel` holds and it is the registered one. */
+	private requestChannelStart(channel: ChannelProvider): Promise<void> {
+		if (!this.admitChannel(channel.name)) return Promise.resolve();
+		return this.requestProviderStart(
+			channel,
+			() => channel.start((message) => this.inboundHandler(channel.name, message)),
+			() => this.channels.get(channel.name) === channel && this.admitChannel(channel.name),
+		);
+	}
+
+	private reportChannelStart(provider: LifecycleProvider, outcome: LifecycleOutcome): void {
+		if (this.channels.get(provider.name) !== provider) return;
+		try {
+			this.onChannelStart(provider.name, outcome);
+		} catch {}
+	}
+
+	/**
+	 * Re-read `admitChannel` for every registered channel while started: a newly admitted one starts, one no longer
+	 * admitted stops. A start already wanted is not repeated; a start that failed is no longer wanted, so it is tried again.
+	 */
+	refreshChannels(): Promise<void> {
+		if (!this.started) return Promise.resolve();
+		const pending: Promise<void>[] = [];
+		for (const channel of this.channels.values()) {
+			const wanted = this.providerLifecycle.get(channel)?.desiredStart !== undefined;
+			const admitted = this.admitChannel(channel.name);
+			if (admitted && !wanted) pending.push(this.requestChannelStart(channel));
+			else if (!admitted && wanted) pending.push(this.requestProviderStop(channel));
+		}
+		return Promise.all(pending).then(() => {});
 	}
 
 	private beginLifecycle(
@@ -216,6 +294,7 @@ export class GatewayRegistry {
 		boundedOutcome: Promise<LifecycleOutcome>,
 	): Promise<void> {
 		const outcome = await boundedOutcome;
+		if (state.desiredStart?.id === attempt.request.id) this.reportChannelStart(provider, outcome);
 		if (outcome === "timed_out") {
 			void attempt.settlement.then((settlement) => {
 				this.trackLifecycle(this.finishProviderStart(provider, state, attempt, settlement, true));
@@ -240,6 +319,8 @@ export class GatewayRegistry {
 			attempt.request.isCurrent() &&
 			!state.stopAttempt;
 		if (!stillDesired || settlement === "rejected" || timedOut) {
+			// A failed start is no longer wanted: the next registration or `refreshChannels` asks again.
+			if (state.desiredStart?.id === attempt.request.id) state.desiredStart = undefined;
 			await this.startProviderStop(provider, state);
 		}
 		await this.startDesiredProvider(provider, state);
@@ -308,12 +389,7 @@ export class GatewayRegistry {
 		if (existing === provider) return;
 		if (existing) void this.requestProviderStop(existing);
 		this.channels.set(provider.name, provider);
-		if (this.started)
-			void this.requestProviderStart(
-				provider,
-				() => provider.start(this.inboundHandler),
-				() => this.channels.get(provider.name) === provider,
-			);
+		if (this.started) void this.requestChannelStart(provider);
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {
@@ -337,12 +413,16 @@ export class GatewayRegistry {
 		return this.channels.size;
 	}
 
+	get channelNames(): string[] {
+		return [...this.channels.keys()];
+	}
+
 	get schedulerCount(): number {
 		return this.schedulers.size;
 	}
 
-	/** Start every registered provider; inbound channel messages are routed to `onInbound`. */
-	async start(onInbound: ChannelInboundHandler): Promise<void> {
+	/** Start every registered provider the registry admits; each channel's inbound messages reach `onInbound` under its name. */
+	async start(onInbound: GatewayInboundHandler): Promise<void> {
 		if (this.started) {
 			await this.drainLifecycle();
 			return;
@@ -350,13 +430,7 @@ export class GatewayRegistry {
 		this.started = true;
 		this.inboundHandler = onInbound;
 		await Promise.all([
-			...[...this.channels.values()].map((channel) =>
-				this.requestProviderStart(
-					channel,
-					() => channel.start(onInbound),
-					() => this.channels.get(channel.name) === channel,
-				),
-			),
+			...[...this.channels.values()].map((channel) => this.requestChannelStart(channel)),
 			...[...this.schedulers.values()].map((scheduler) =>
 				this.requestProviderStart(
 					scheduler,

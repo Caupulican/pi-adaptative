@@ -505,6 +505,8 @@ export type MemoryActivationEvent =
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
 	getSettingsManager(): MemoryControllerSettingsSource;
+	/** True while the foreground run carries a third party's words: the owner's private records are withheld from it. */
+	isThirdPartyRun?(): boolean;
 	/** Current turn index, stamped into a retrieval request's `createdAtTurn`. */
 	getTurnIndex(): number;
 	/** Agent root — the durable OKF memory docs live under `<agentDir>/okf-memory`. */
@@ -1396,6 +1398,7 @@ export class MemoryController {
 			});
 			if (!settings.enabled) return cleared("disabled");
 			if (!settings.includeInPrompt) return cleared("include_disabled");
+			if (this.deps.isThirdPartyRun?.() === true) return cleared("withheld");
 			if (candidates.length === 0) {
 				if (!queryPass && hasInclusionReport) return { records: [] };
 				return cleared("no_results");
@@ -1557,7 +1560,9 @@ export class MemoryController {
 		const visible = [...wireMessages, ...messages];
 		const budget = this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(visible));
 		let projection: KnowledgeProjection | undefined;
-		if (reader && settings.enabled && settings.includeInPrompt) {
+		// A run that carries a third party's words never holds the owner's records; its request reads the cleared form.
+		const withheld = this.deps.isThirdPartyRun?.() === true;
+		if (reader && settings.enabled && settings.includeInPrompt && !withheld) {
 			try {
 				projection = reader.preview(scope, budget);
 				this._knowledgeReadFailure = undefined;
@@ -1582,6 +1587,7 @@ export class MemoryController {
 			],
 			isCurrent: () =>
 				context.isCurrent() &&
+				(this.deps.isThirdPartyRun?.() === true) === withheld &&
 				!this.deps.isChildSession() &&
 				this.deps.getSettingsManager().getMemorySystem() === "icm" &&
 				!this._legacyMemoryEnabled() &&
@@ -1599,11 +1605,13 @@ export class MemoryController {
 						? "disabled"
 						: !settings.includeInPrompt
 							? "include_disabled"
-							: !projection
-								? "failed"
-								: projection.includedCount > 0
-									? "included"
-									: "empty_block",
+							: withheld
+								? "withheld"
+								: !projection
+									? "failed"
+									: projection.includedCount > 0
+										? "included"
+										: "empty_block",
 					includedCount: projection?.includedCount ?? 0,
 					omittedCount: projection?.omittedCount ?? 0,
 					blockChars: projection?.text.length ?? 0,
@@ -1970,6 +1978,14 @@ export class MemoryController {
 			const writer = this.getFileStoreWriter();
 			if (writer === undefined) return [];
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			if (this.deps.isThirdPartyRun?.() === true)
+				return [
+					this._hostTransient(
+						USER_PERSONA_CUSTOM_TYPE,
+						"USER PERSONA: withheld from this run, which carries a third party's words; earlier persona records are stale.",
+						true,
+					),
+				];
 			if (!settings.enabled || !settings.includeInPrompt) {
 				return [
 					this._hostTransient(

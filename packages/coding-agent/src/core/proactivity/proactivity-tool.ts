@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "../extensions/types.ts";
 import { MAX_PROACTIVITY_PREFERENCES_CHARS } from "../settings/settings-rules.ts";
 import type { ProactivitySettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
+import { operationTextResult as result } from "../tools/operation-result.ts";
 import { withProactivityChange } from "./proactivity-settings.ts";
 
 export const PROACTIVITY_TOOL_NAME = "proactivity";
@@ -34,14 +35,6 @@ const parameters = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-function result(text: string, refused = false) {
-	return {
-		content: [{ type: "text" as const, text }],
-		details: undefined,
-		...(refused ? { isError: true, errorKind: "operation_outcome" as const } : {}),
-	};
-}
 
 function describe(settings: ResolvedProactivitySettings): string {
 	return `Proactive review: ${settings.enabled ? "on" : "off"}. Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}.`;

@@ -4,6 +4,7 @@
  */
 
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
+import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
@@ -44,6 +45,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	SELF_COMPACT_TOOL_NAME,
 	PROACTIVITY_TOOL_NAME,
 	ROUTINE_TOOL_NAME,
+	CHANNEL_REPLY_TOOL_NAME,
 ]);
 
 /**

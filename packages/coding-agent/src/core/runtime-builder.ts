@@ -73,6 +73,7 @@ import {
 	buildWorkerSessionPrivatePathEnvelope,
 } from "./autonomy/worker-session-private-scope.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
+import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -458,6 +459,8 @@ export interface RuntimeBuilderDeps {
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
 	getRoutineTool?(): ToolDefinition | undefined;
+	/** The owner's release of channel reply drafts; undefined while no channel has an explicit policy. */
+	getChannelReplyTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -1720,6 +1723,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows(ROUTINE_TOOL_NAME)) {
 				const definition = this.deps.getRoutineTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(CHANNEL_REPLY_TOOL_NAME)) {
+				const definition = this.deps.getChannelReplyTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {
