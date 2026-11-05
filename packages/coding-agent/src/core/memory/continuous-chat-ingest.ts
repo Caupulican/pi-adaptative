@@ -11,6 +11,7 @@ import { resolveParentInputConsumption } from "../../kernel/session/parent-input
 import { type ParentInputConsumptionSource, parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
+import { isExternalEvidenceMessage, parseWorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -123,7 +124,7 @@ function wholeMessagePart(
 export function continuousChatMessageParts(message: AgentMessage): ContinuousChatMessagePart[] {
 	switch (message.role) {
 		case "user":
-			return wholeMessagePart("user", message.content);
+			return wholeMessagePart(isExternalEvidenceMessage(message) ? "work" : "user", message.content);
 		case "assistant": {
 			const parts: ContinuousChatMessagePart[] = [];
 			message.content.forEach((block, index) => {
@@ -154,6 +155,14 @@ export function continuousChatEntryParts(entry: SessionEntry): ContinuousChatMes
 		return [];
 	}
 	if (entry.type === "message") {
+		const control = parseWorkerControlRecord(entry.workerControl);
+		if (entry.message.role === "user" && control?.hostEvent) {
+			return wholeMessagePart("work", entry.message.content).map((part) => ({
+				...part,
+				sourceEntryId: entry.id,
+				sourceKey: `host-event:${control.hostEvent!.bindingDigest}:${part.part}`,
+			}));
+		}
 		if (entry.origin !== "local") return continuousChatMessageParts(entry.message);
 		return entry.message.role === "assistant" ? assistantFailureParts(entry.message) : [];
 	}

@@ -43,6 +43,19 @@ export class BuiltinBoundary {
 		this.active.set(kind, exports);
 	}
 
+	/** Scope one external operation to a journey witness without replacing the world's other adapters. */
+	replace(kind: BuiltinKind, name: string, implementation: (...args: unknown[]) => unknown): () => void {
+		const current = this.active.get(kind);
+		const previous = current?.[name];
+		if (!current || typeof previous !== "function") throw new Error(`No active adapter for ${kind}.${name}`);
+		current[name] = implementation;
+		return () => {
+			if (this.active.get(kind) !== current || current[name] !== implementation)
+				throw new Error(`Adapter ownership changed for ${kind}.${name}`);
+			current[name] = previous;
+		};
+	}
+
 	clear(): void {
 		this.active.clear();
 	}

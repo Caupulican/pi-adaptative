@@ -95,6 +95,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts";
 import { getBoundWorktreeLaneKey } from "./core/worktree-sync/lane-binding.ts";
+import { CiSessionResource } from "./host/ci/ci-session-resource.ts";
 import { probeProcessLiveness } from "./kernel/reliability/process-tree.ts";
 import { assertValidSessionId, SessionManager } from "./kernel/session/session-manager.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
@@ -1291,8 +1292,14 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		runtime.registerSessionResource(nativePiRuntime);
 		await nativePiRuntime.start(session, runtime);
+		const ciEvents =
+			getSessionRole() === "main"
+				? new CiSessionResource((message) => console.error(chalk.yellow(message)))
+				: undefined;
+		if (ciEvents) runtime.registerSessionResource(ciEvents);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
+			ciStatus: ciEvents,
 			terminalWarnings,
 			migratedProviders,
 			modelFallbackMessage,
@@ -1322,6 +1329,13 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
+		await interactiveMode.init();
+		// The registered resource retains and joins startup; remote discovery must not delay owner input.
+		void ciEvents?.start(session, runtime).catch((error: unknown) => {
+			console.error(
+				chalk.yellow(`CI event startup failed: ${error instanceof Error ? error.message : String(error)}`),
+			);
+		});
 		printTimings();
 		if (!options?.extensionFactories?.length) {
 			await bindInteractiveRuntimeRestart(runtime, () => {

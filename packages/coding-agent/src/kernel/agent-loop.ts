@@ -92,6 +92,7 @@ import {
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 import { retainedVerificationDetails, VerificationObligationTracker } from "./verification-obligations.ts";
+import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
 export {
 	composeRequestSystemPrompt,
@@ -542,7 +543,7 @@ async function runLoop(
 		// follow-up messages must not re-admit a known-bad unchanged operation. Count every owner
 		// message so live admission stays byte-for-byte aligned with transcript restoration.
 		for (const message of pendingMessages) {
-			if (message.role === "user") {
+			if (message.role === "user" && !isExternalEvidenceMessage(message)) {
 				toolFailureRecoveryGate.noteWorldAdvance();
 				// An owner turn mid-run is a new subject: earlier failures stay active but stop
 				// marking this subject's answer as unresolved (see beginSubject).

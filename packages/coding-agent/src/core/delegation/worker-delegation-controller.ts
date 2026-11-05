@@ -52,6 +52,12 @@ import { sameTaskBrief } from "../comms/comms-records.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import {
+	type HostEventSubscriptionInput,
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
 import { buildCapabilityCard, describeModelCard } from "../expert-routing/capability-card.ts";
 import {
 	chooseHostRouteProfile,
@@ -649,6 +655,7 @@ type WorkerAdmission =
 			executionPlan: WorkerExecutionPlan;
 			knowledgeGrant?: KnowledgeGrant;
 			knowledgeReferences: readonly KnowledgeGrantReference[];
+			subscriptions: readonly HostEventSubscriptionInput[];
 			/** Existing task identity, revalidated after asynchronous fitness admission. */
 			admittedAttemptId?: string;
 			/** Who chose the admitted model (never the router): recorded on the dispatch for the operator. */
@@ -2025,7 +2032,8 @@ export class WorkerDelegationController {
 		if (
 			request.savedIntent &&
 			(request.savedIntent.receiptOrigin.sessionId !== this.deps.getSessionId() ||
-				!isDeepStrictEqual(request.savedIntent.knowledgeReferences, request.knowledge ?? []))
+				!isDeepStrictEqual(request.savedIntent.knowledgeReferences, request.knowledge ?? []) ||
+				!isDeepStrictEqual(request.savedIntent.subscriptions, request.subscriptions ?? []))
 		)
 			return { ok: false, skipReason: "worker_saved_intent_mismatch" };
 		if (this.deps.isDisposed() || this.workerAbort.signal.aborted)
@@ -2034,6 +2042,17 @@ export class WorkerDelegationController {
 		// worker receives is exactly the caller's text.
 		const instructions = request.instructions;
 		if (!instructions.trim()) return { ok: false, skipReason: "missing_instructions" };
+		let subscriptions: readonly HostEventSubscriptionInput[];
+		try {
+			subscriptions = hostEventArray(
+				request.subscriptions ?? [],
+				MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+				parseHostEventSubscriptionInput,
+				"worker subscriptions",
+			);
+		} catch {
+			return { ok: false, skipReason: "worker_subscriptions_invalid" };
+		}
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
@@ -2237,6 +2256,8 @@ export class WorkerDelegationController {
 				? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 				: currentExecutionPlan;
 		const retainedAttempt = admittedAttempt ?? this.replayedWorkerAttempt(request.messageReplayKey);
+		if (retainedAttempt && !isDeepStrictEqual(retainedAttempt.dispatch.subscriptions ?? [], subscriptions))
+			return { ok: false, skipReason: "worker_subscription_task_mismatch" };
 		if (
 			retainedAttempt &&
 			(this.lifecycle.getTaskRuntimeSnapshot().attempts[retainedAttempt.attemptId]?.taskId !==
@@ -2326,6 +2347,7 @@ export class WorkerDelegationController {
 			...(verifierShipment ? { verifierShipment } : {}),
 			resourcePointerIds: selectedResources.pointers.map((pointer) => pointer.id),
 			knowledgeReferences: request.knowledge ?? [],
+			subscriptions,
 			...(knowledgeGrant ? { knowledgeGrant } : {}),
 			...(retainedAttempt ? { admittedAttemptId: retainedAttempt.attemptId } : {}),
 			executionContract,
@@ -3219,6 +3241,7 @@ export class WorkerDelegationController {
 		// The rendered text can read the same for different fields, so a structured task is compared field for field.
 		if (!sameTaskBrief(admitted.dispatch.brief, request.brief)) return false;
 		if (!isDeepStrictEqual(admitted.dispatch.knowledgeReferences ?? [], request.knowledge ?? [])) return false;
+		if (!isDeepStrictEqual(admitted.dispatch.subscriptions ?? [], request.subscriptions ?? [])) return false;
 		const admittedContract = admitted.dispatch.executionContract;
 		if (!admittedContract) return false;
 		const admittedSpecialization = describeWorkerSpecialization(
@@ -3353,6 +3376,7 @@ export class WorkerDelegationController {
 				{
 					instructions: admission.instructions,
 					knowledgeReferences: admission.knowledgeReferences,
+					subscriptions: admission.subscriptions,
 					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
@@ -3461,6 +3485,7 @@ export class WorkerDelegationController {
 						attempt !== undefined &&
 						attempt.dispatch.instructions === admission.instructions &&
 						isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], admission.knowledgeReferences) &&
+						isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], admission.subscriptions) &&
 						sameTaskBrief(attempt.dispatch.brief, request.brief) &&
 						attempt.dispatch.parentAgentId === request.parentAgentId &&
 						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
@@ -4113,6 +4138,7 @@ export class WorkerDelegationController {
 					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 					newTask: {
 						knowledgeReferences,
+						subscriptions: request.subscriptions ?? [],
 						controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
 						...(goal ? { goal } : {}),
 						...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
@@ -4684,6 +4710,13 @@ export class WorkerDelegationController {
 	private captureWorkerRequest(request: WorkerDelegationRequest, existing = false): WorkerDelegationRequest {
 		const { assertReceiptAdmission, ...cloneable } = request;
 		const capturedRequest = structuredClone(cloneable);
+		if (capturedRequest.subscriptions !== undefined)
+			capturedRequest.subscriptions = hostEventArray(
+				capturedRequest.subscriptions,
+				MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+				parseHostEventSubscriptionInput,
+				"worker subscriptions",
+			);
 		if (capturedRequest.knowledge !== undefined) {
 			capturedRequest.knowledge = parseKnowledgeGrantReferences(capturedRequest.knowledge);
 			if (
@@ -4759,6 +4792,7 @@ export class WorkerDelegationController {
 				instructions: input.instructions,
 				savedIntent: intent,
 				knowledge: intent.knowledgeReferences,
+				subscriptions: intent.subscriptions,
 				receiptOrigin: intent.receiptOrigin,
 				profileId: intent.executionContract.worker.profile.profileId,
 				messageReplayKey: input.dispatchKey,

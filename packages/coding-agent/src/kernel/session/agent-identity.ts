@@ -4,6 +4,8 @@ import { isPlainRecord } from "../utils/value-guards.ts";
 
 /** Shared bound for durable orchestration identity fields. */
 export const MAX_ORCHESTRATION_IDENTIFIER_LENGTH = 512;
+/** Shared bound for paths carried by durable worker authority and receipts. */
+export const MAX_WORKER_AUTHORITY_PATH_LENGTH = 4 * 1024;
 
 export interface AgentResumeContext {
 	provider: "pi" | "external";

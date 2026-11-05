@@ -59,6 +59,27 @@ export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/coll
 export * from "./core/decision/index.ts";
 export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
+export {
+	type CiAttemptIdentity,
+	type CiAttemptTerminalEvent,
+	type CiCurrentObservation,
+	type CiSubject,
+	ciThreadKey,
+	createCiAttemptTerminalEvent,
+	type HostEventCatchUp,
+	type HostEventCatchUpSeal,
+	type HostEventConsumerCheckpoint,
+	type HostEventEnvelope,
+	HostEventError,
+	type HostEventReceipt,
+	type HostEventReplayGap,
+	type HostEventReplayHorizon,
+	type HostEventSink,
+	type HostEventSource,
+	type HostEventSourceRegistration,
+	type HostEventSubscriptionInput,
+} from "./core/events/host-event-contract.ts";
+export type { HostEventPage, HostEventQuery, HostEventSubscriptionView } from "./core/events/host-event-control.ts";
 // Harness Mixture of Experts (H-MoE) Expert Routing Substrate
 export * from "./core/expert-routing/index.ts";
 // Extension system
@@ -551,6 +572,12 @@ export {
 } from "./core/tools/skill-audit.ts";
 export { hasProjectTrustInputs, type ProjectTrustDecision, ProjectTrustStore } from "./core/trust-manager.ts";
 export { WORKER_FORBIDDEN_TOOLS } from "./core/worker-tool-ceiling.ts";
+export { CiSessionResource } from "./host/ci/ci-session-resource.ts";
+export {
+	type HostEventSessionBinding,
+	HostEventSessionResource,
+	type HostEventSessionResourceOptions,
+} from "./host/host-event-session-resource.ts";
 export { convertToLlm } from "./kernel/index.ts";
 // Compaction
 export {

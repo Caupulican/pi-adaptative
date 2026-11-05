@@ -1,5 +1,6 @@
 import type { Agent, CustomMessage } from "../kernel/index.ts";
 import {
+	type ParentInputAppendReceipt,
 	type ParentInputMode,
 	type PersistedParentInput,
 	parentInputMessage,
@@ -25,6 +26,8 @@ export interface ParentInputDelivery {
 export interface ParentInputDeliveryOptions {
 	readonly runtimeLease?: RuntimeWorkLease;
 	readonly beforeOwnership?: () => void;
+	/** Called under the canonical transcript lock for a new append, after replay lookup. */
+	readonly withAppend?: (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt;
 	readonly signal?: AbortSignal;
 }
 
@@ -139,7 +142,7 @@ export class ParentInputDeliveryController {
 		try {
 			assertAcceptance();
 			this.foreground.assertSubmissionCurrent(lease);
-			const appended = manager.appendParentInput(message);
+			const appended = manager.appendParentInput(message, options.withAppend);
 			const entry = appended.entries[0];
 			if (appended.durability !== "persisted" || appended.entries.length !== 1 || !entry)
 				throw new Error("Parent input has no physical canonical receipt.");

@@ -1,3 +1,5 @@
+import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
+import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
 import type {
 	AcceptanceCriterion,
@@ -114,7 +116,7 @@ export interface ApprovalRuntimeState {
 	resolution?: ApprovalResolutionContract;
 }
 
-export interface TaskRuntimeProjection {
+export interface TaskRuntimeProjection extends HostEventProjection {
 	lastOrdinal: number;
 	agents: Readonly<Record<string, AgentBindingContract>>;
 	objectives: Readonly<Record<string, ObjectiveRuntimeState>>;
@@ -126,6 +128,10 @@ export interface TaskRuntimeProjection {
 }
 
 export interface OrchestrationProjectionSlotCounts {
+	eventSources: number;
+	hostEvents: number;
+	threadSubscriptions: number;
+	eventDeliveries: number;
 	agents: number;
 	objectives: number;
 	tasks: number;
@@ -191,6 +197,7 @@ export interface CreateObjectiveInput {
 }
 
 export interface CreateTaskInput {
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	taskId?: string;
 	objectiveId: string;
 	title: string;

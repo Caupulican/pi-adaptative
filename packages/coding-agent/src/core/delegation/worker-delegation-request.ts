@@ -1,5 +1,6 @@
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
+import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
@@ -210,6 +211,8 @@ export interface WorkerDelegationRequest {
 	instructions: string;
 	/** Exact canonical references for this task only; omission grants no owner knowledge. */
 	knowledge?: readonly KnowledgeGrantReference[];
+	/** Exact event subjects admitted atomically with this task, never inherited from an earlier task. */
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	/** The structured task `instructions` was rendered from; stored beside it on the dispatch. */
 	brief?: TaskBrief;
 	/** Host-captured parent lineage. Never exposed in the model-facing schema. */

@@ -5,6 +5,7 @@
 
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
+import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
@@ -53,6 +54,8 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
  * ask-question, tool-task, skill-authoring and extension-authoring tools are on neither surface.
  */
 export const WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+	// Installed only by the task executor with its exact admitted identity, never by a generic tool adapter.
+	TASK_EVENTS_TOOL_NAME,
 	...WORKER_MEMORY_BROKER_TOOL_NAMES,
 	"get_goal",
 	"update_goal",

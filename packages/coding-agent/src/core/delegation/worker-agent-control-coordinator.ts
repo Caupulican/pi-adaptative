@@ -7,6 +7,18 @@ import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
+import { HostEventError } from "../events/host-event-contract.ts";
+import {
+	type HostEventControlScope,
+	type HostEventPage,
+	type HostEventQuery,
+	type HostEventSubscriptionChange,
+	type HostEventSubscriptionView,
+	hostEventSubscriptionView,
+	readHostEventPage,
+} from "../events/host-event-control.ts";
+import { assertHostEventWorkerScope } from "../events/host-event-reducer.ts";
+import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
@@ -91,6 +103,7 @@ import {
 } from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
+import { WorkerHostEventTransport, workerHostEventMessage } from "./worker-host-event-transport.ts";
 import { attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
@@ -322,6 +335,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly sessionRootReconciliationFailures = new Map<string, string>();
 	private readonly workerReplyReconciliationFailures = new Map<string, string>();
 	private readonly laneHalts = new WorkerLaneHalts();
+	private readonly hostEventTransport: WorkerHostEventTransport;
 	private readonly runtimeWaiters = new Map<string, () => void>();
 	private disposed = false;
 
@@ -333,6 +347,82 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			agentDir: options.agentDir,
 			parentSessionId: options.parentSessionId,
 		});
+		this.hostEventTransport = new WorkerHostEventTransport({
+			agentDir: options.agentDir,
+			conversations: this.conversations,
+			lifecycle: () => options.getLifecycle(),
+			mailbox: (agentId) => this.getMailbox(agentId),
+			claim: (agent) => options.getConversationClaim?.(agent),
+			admit: (agent, operation) =>
+				options.withConversationAdmission ? options.withConversationAdmission(agent, operation) : operation(),
+			resume: (agentId) => this.resumeWorkerAgent(agentId).started,
+			available: () => !this.disposed && options.isControlAvailable(),
+		});
+	}
+
+	readHostEvents(query: HostEventQuery, scope: HostEventControlScope = {}): HostEventPage {
+		this.requireControl();
+		const runtime = this.options.getLifecycle().ledger.runtime;
+		const snapshot = runtime.getSnapshot();
+		const caller = this.hostEventCaller(snapshot, scope);
+		return readHostEventPage(snapshot, query, caller?.taskId, (sourceId) =>
+			runtime.hostEvents.isSourceReady(sourceId),
+		);
+	}
+
+	changeHostEventSubscriptions(
+		input: HostEventSubscriptionChange,
+		scope: HostEventControlScope = {},
+	): HostEventSubscriptionView {
+		this.requireControl();
+		const runtime = this.options.getLifecycle().ledger.runtime;
+		const caller = this.hostEventCaller(runtime.getSnapshot(), scope);
+		if (caller && caller.taskId !== input.taskId)
+			throw new HostEventError("authority", "A worker may change only its current task subscriptions.");
+		runtime.hostEvents.replaceSubscriptions(
+			input.taskId,
+			input.expectedRevision,
+			input.subscriptions,
+			caller ? { agentId: caller.agentId!, ...scope.execution! } : undefined,
+		);
+		return hostEventSubscriptionView(runtime.getSnapshot(), input.taskId);
+	}
+
+	private hostEventCaller(
+		snapshot: TaskRuntimeProjection,
+		scope: HostEventControlScope,
+	): AttemptRuntimeState | undefined {
+		if (scope.callerAgentId === undefined) return undefined;
+		if (!scope.execution)
+			throw new HostEventError(
+				"authority",
+				"Host event controls require the worker's current live task and execution lease.",
+			);
+		return assertHostEventWorkerScope(snapshot, { agentId: scope.callerAgentId, ...scope.execution }, Date.now());
+	}
+
+	async deliverHostEvent(
+		delivery: HostEventDelivery,
+		signal: AbortSignal,
+	): Promise<"queued" | "dormant" | "unavailable"> {
+		return this.hostEventTransport.deliver(delivery, signal);
+	}
+
+	reconcileHostEventDelivery(delivery: HostEventDelivery): void {
+		this.hostEventTransport.reconcileDelivery(delivery);
+	}
+
+	/** Called synchronously after fitness/abort admission. Ordinary controls retain their next boundary. */
+	consumeHostEventMessages(
+		agentId: string,
+		conversation: WorkerConversation,
+		candidates: readonly WorkerMailboxConversationMessage[],
+	): WorkerMailboxConversationMessage[] {
+		const events = candidates.filter(({ message }) => workerControlOf(message)?.k === "host_event");
+		const accepted = events.filter(({ message }) => this.hostEventTransport.consume(agentId, conversation, message));
+		return accepted.length
+			? accepted
+			: candidates.filter(({ message }) => workerControlOf(message)?.k !== "host_event");
 	}
 
 	getProcessOwnerId(): string {
@@ -673,6 +763,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						...(options.newTask.knowledgeReferences
 							? { knowledgeReferences: options.newTask.knowledgeReferences }
 							: {}),
+						...(options.newTask.subscriptions ? { subscriptions: options.newTask.subscriptions } : {}),
 						...(options.newTask.controlForkMode ? { controlForkMode: options.newTask.controlForkMode } : {}),
 						...(options.newTask.requirementIds ? { requirementIds: options.newTask.requirementIds } : {}),
 						...(options.newTask.acceptanceCriterionIds
@@ -962,7 +1053,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			// The selected resources are part of the same declaration; a different selection is
 			// different work even when goal and requirements match.
 			isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...(newTask.resourcePointerIds ?? [])]) &&
-			isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], newTask.knowledgeReferences ?? [])
+			isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], newTask.knowledgeReferences ?? []) &&
+			isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], newTask.subscriptions ?? [])
 		);
 	}
 
@@ -1972,18 +2064,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const pending = mailbox.pending();
 		if (pending.length === 0) return [];
 		const delivered = conversation.findDeliveredWorkerControlMessageIds(
-			pending.map((message) => {
-				const projected = this.mailboxMessage(message);
-				if (typeof projected.content !== "string") {
-					throw new Error("Worker control transcript projection is not textual.");
-				}
-				return { messageId: message.messageId, content: projected.content };
-			}),
+			pending
+				.filter((message) => message.task?.kind !== "host_event")
+				.map((message) => {
+					const projected = this.mailboxMessage(message);
+					if (typeof projected.content !== "string") {
+						throw new Error("Worker control transcript projection is not textual.");
+					}
+					return { messageId: message.messageId, content: projected.content };
+				}),
 		);
 		for (const messageId of delivered) this.acknowledgeDeliveredMailboxMessage(agentId, messageId);
 		return mailbox
 			.pending()
-			.filter((message) => message.kind === "steer" || includeFollowUp)
+			.filter((message) => message.task?.kind === "host_event" || message.kind === "steer" || includeFollowUp)
 			.map((message) => ({
 				messageId: message.messageId,
 				instructions: message.content,
@@ -1996,6 +2090,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (message.role !== "user") return;
 		const control = workerControlOf(message);
 		if (control !== undefined) {
+			if (control.k === "host_event")
+				throw new HostEventError(
+					"authority",
+					"Host event acknowledgement requires its canonical consumed receipt.",
+				);
 			if (control.k !== "task") this.acknowledgeDeliveredMailboxMessage(agentId, control.id);
 			return;
 		}
@@ -2015,7 +2114,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	reconcileTaskBearingMailboxTurns(): void {
 		const agents = this.replyReconciliationAgents();
 		this.reconcileWorkerReplyOutboxes(agents);
-		for (const agent of agents) this.reconcileTaskBearingMailbox(agent.agentId);
+		for (const agent of agents) {
+			this.hostEventTransport.reconcileInactive(agent.agentId);
+			this.reconcileTaskBearingMailbox(agent.agentId);
+		}
 	}
 
 	private replyReconciliationAgents(): AgentBindingContract[] {
@@ -2345,6 +2447,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 										...(newTask.knowledgeReferences
 											? { knowledgeReferences: newTask.knowledgeReferences }
 											: {}),
+										...(newTask.subscriptions ? { subscriptions: newTask.subscriptions } : {}),
 										taskContext: {
 											...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
 											...(newTask.acceptanceCriterionIds
@@ -2667,6 +2770,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	releaseQuiescentContext(agentId: string, release: () => void): boolean {
+		this.hostEventTransport.reconcileInactive(agentId);
 		return this.getMailbox(agentId).withQuiescentMailbox(release);
 	}
 
@@ -2920,6 +3024,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	private mailboxMessage(message: WorkerAgentMessage): UserMessage {
+		if (message.task?.kind === "host_event") return workerHostEventMessage(message.task.binding, message.content);
 		const metadata = [
 			message.senderAgentId ? `from=${message.senderAgentId}` : undefined,
 			message.threadId ? `thread=${message.threadId}` : undefined,

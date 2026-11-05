@@ -67,6 +67,13 @@ import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
 import {
+	createDelegateEventParameterSchemas,
+	DELEGATE_EVENT_ACTIONS,
+	type DelegateEventToolDetails,
+	delegateEventPanelModel,
+	executeDelegateEventAction,
+} from "./delegate-events.ts";
+import {
 	delegateRejection,
 	delegateStartRejection,
 	isSpecialistStateRefusal,
@@ -118,6 +125,7 @@ export const DELEGATE_ACTIONS = [
 	...DELEGATE_WORKER_CONTROL_ACTIONS,
 	...DELEGATE_STATUS_ACTIONS,
 	...DELEGATE_PROFILE_ACTIONS,
+	...DELEGATE_EVENT_ACTIONS,
 ] as const;
 
 export type DelegateAction = (typeof DELEGATE_ACTIONS)[number];
@@ -133,6 +141,9 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			: undefined,
 		actions.includes("status") ? "status reads bounded claims" : undefined,
 		actions.includes("review") ? "review acknowledges a worker's mutations" : undefined,
+		actions.includes("events")
+			? "events recalls exact CI evidence and discovers source subjects; subscriptions reads or replaces task-bound event subscriptions"
+			: undefined,
 		actions.includes("profile_create") ? "profile_inspect/profile_create manage narrowed session presets" : undefined,
 		actions.includes("send")
 			? "send/broadcast post non-waking peer evidence, follow_up starts an idle worker or steers an active one"
@@ -436,6 +447,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				}),
 			),
 			...createDelegateProfileParameterSchemas(),
+			...createDelegateEventParameterSchemas(),
 		},
 		{ additionalProperties: false },
 	);
@@ -463,6 +475,8 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 		review: ["laneId"],
 		profile_inspect: [],
 		profile_create: ["task"],
+		events: [],
+		subscriptions: ["taskId"],
 	} satisfies Record<DelegateAction, readonly (keyof typeof schema.properties)[]>;
 	return {
 		...schema,
@@ -506,6 +520,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 		"writePaths",
 		"toolNames",
 		"knowledge",
+		"subscriptions",
 		"readOnly",
 		"instructions",
 		"goal",
@@ -542,6 +557,8 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	review: ["action", "laneId", "agentId"],
 	profile_inspect: ["action"],
 	profile_create: ["action", "task", "baseProfileId", "model", "thinkingLevel", "path", "toolNames"],
+	events: ["action", "taskId", "eventId", "eventView", "cursor", "maxMessages"],
+	subscriptions: ["action", "taskId", "expectedRevision", "subscriptions", "cursor", "maxMessages"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
 /**
@@ -911,6 +928,7 @@ export type DelegateToolDetails = (
 	| DelegateDispatchToolDetails
 	| DelegateStatusToolDetails
 	| DelegateProfileToolDetails
+	| DelegateEventToolDetails
 ) &
 	DelegateDispatchDetailProjection &
 	CommsResultEnvelope;
@@ -1065,6 +1083,7 @@ function delegatePanelModel(details: DelegateToolDetails | undefined): Orchestra
 		};
 	}
 	if ("kind" in details) {
+		if (details.kind === "events") return delegateEventPanelModel(details);
 		return details.kind === "profile" ? delegateProfilePanelModel(details) : delegateStatusPanelModel(details);
 	}
 	if (!details.started) {
@@ -1122,6 +1141,8 @@ function availableDelegateActions(caller: DelegateCaller, deps: DelegateToolDepe
 	const actions: DelegateAction[] = caller.kind === "session_root" ? ["start"] : [];
 	if (deps.workerAgentControl) {
 		actions.push(...DELEGATE_CONTROL_ACTIONS);
+		if (deps.workerAgentControl.readHostEvents && deps.workerAgentControl.changeHostEventSubscriptions)
+			actions.push(...DELEGATE_EVENT_ACTIONS);
 		if (deps.resolveMessageReplayScope) actions.push(...DELEGATE_MESSAGE_ACTIONS);
 		if (caller.kind === "session_root") actions.push(...DELEGATE_ROOT_CONTROL_ACTIONS);
 		else actions.push(...DELEGATE_WORKER_CONTROL_ACTIONS);
@@ -1452,6 +1473,7 @@ function buildDelegateStartRequest(input: {
 	return {
 		instructions: input.instructions,
 		...(tool.knowledge !== undefined ? { knowledge: parseKnowledgeGrantReferences(tool.knowledge) } : {}),
+		...(tool.subscriptions !== undefined ? { subscriptions: tool.subscriptions } : {}),
 		...(input.brief ? { brief: input.brief } : {}),
 		...(input.messageReplayKey ? { messageReplayKey: input.messageReplayKey } : {}),
 		...(input.reuseAgentId ? { reuseAgentId: input.reuseAgentId } : {}),
@@ -1882,6 +1904,20 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			};
 			const workerScope = caller.kind === "worker" ? { callerAgentId: caller.agentId } : undefined;
 			try {
+				if (action === "events" || action === "subscriptions") {
+					const control = deps.workerAgentControl;
+					if (!control?.readHostEvents || !control.changeHostEventSubscriptions)
+						throw new Error("Task event controls are unavailable.");
+					return executeDelegateEventAction(
+						action,
+						input,
+						{
+							readHostEvents: control.readHostEvents.bind(control),
+							changeHostEventSubscriptions: control.changeHostEventSubscriptions.bind(control),
+						},
+						workerScope,
+					);
+				}
 				if (action === "status" || action === "review") {
 					if (caller.kind !== "session_root") {
 						return invalid(`delegate ${action} is available only to the session root`, {
@@ -2677,6 +2713,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							["profileId", input.profileId],
 							["forkTurns", input.forkTurns],
 							["knowledge", input.knowledge],
+							["subscriptions", input.subscriptions],
 						] as const
 					)
 						.filter((entry) => entry[1] !== undefined)

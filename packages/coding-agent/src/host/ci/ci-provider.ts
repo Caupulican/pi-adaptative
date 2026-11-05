@@ -1,0 +1,42 @@
+import type {
+	CiAttemptIdentity,
+	CiAttemptTerminalEvent,
+	CiCurrentObservation,
+	CiSubject,
+} from "../../core/events/host-event-contract.ts";
+
+export interface CiRepository {
+	readonly host: string;
+	readonly repositoryId: number;
+	readonly nameWithOwner: string;
+	readonly workflowId: number;
+	readonly workflowPath: string;
+}
+
+export interface CiProviderCollection {
+	readonly subject: CiSubject;
+	readonly events: readonly CiAttemptTerminalEvent[];
+	readonly current?: CiCurrentObservation;
+}
+
+export interface CiRetiredRunRange {
+	readonly from: number;
+	readonly through: number;
+}
+
+/** Only the adapter knows GitHub or starts a process; reconciliation consumes typed facts. */
+export interface CiProvider {
+	repository(signal: AbortSignal): Promise<CiRepository>;
+	collect(
+		headSha: string,
+		signal: AbortSignal,
+		retainedAttempts?: ReadonlyMap<number, number>,
+		retiredRuns?: readonly CiRetiredRunRange[],
+	): Promise<CiProviderCollection>;
+	failedJobs(identity: CiAttemptIdentity, signal: AbortSignal): Promise<readonly string[]>;
+	waitForRun(runId: number, signal: AbortSignal): Promise<void>;
+}
+
+export interface CiCommandPort {
+	run(executable: string, args: readonly string[], signal: AbortSignal): Promise<string>;
+}

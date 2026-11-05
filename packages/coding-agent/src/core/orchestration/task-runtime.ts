@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
+import { HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
@@ -148,11 +150,13 @@ export interface DurableTaskRuntimeOptions {
 }
 
 export class DurableTaskRuntime {
+	readonly hostEvents: HostEventRuntime;
 	private readonly store: OrchestrationEventStore;
 	private readonly now: () => number;
 	private readonly createId: () => string;
 	/** Immutable once adopted: every assignment deep-freezes it, so getSnapshot() shares it. */
 	private state: TaskRuntimeProjection;
+	private hostTransactionActive = false;
 
 	constructor(options: DurableTaskRuntimeOptions) {
 		this.store = options.store;
@@ -160,6 +164,13 @@ export class DurableTaskRuntime {
 		this.createId = options.createId ?? randomUUID;
 		this.state = deepFreeze(readTaskRuntimeProjection(this.store));
 		this.compactCurrentProjection();
+		this.hostEvents = new HostEventRuntime({
+			parentSessionId: this.store.sessionId,
+			read: () => this.getSnapshot(),
+			transact: (operation) => this.transactHostEvents(operation),
+			now: this.now,
+			subscribe: (listener) => this.store.subscribe(() => listener()),
+		});
 	}
 
 	/**
@@ -185,6 +196,11 @@ export class DurableTaskRuntime {
 	assertProjectionHeadroom(required: OrchestrationProjectionHeadroomRequest): OrchestrationProjectionCapacity {
 		this.refresh();
 		const capacity = projectionCapacity(this.state);
+		for (const field of HOST_EVENT_RECORD_FIELDS) {
+			const slots = requestedProjectionSlots(required[field], field);
+			if (slots > capacity.headroom[field])
+				throw new DurableTaskRuntimeError(`Orchestration ${field} lacks ${slots} required slots.`);
+		}
 		const agents = requestedProjectionSlots(required.agents, "Agent binding");
 		const objectives = requestedProjectionSlots(required.objectives, "Objective");
 		const tasks = requestedProjectionSlots(required.tasks, "Task");
@@ -525,7 +541,7 @@ export class DurableTaskRuntime {
 			aggregateId: task.objectiveId,
 			actor: "runtime",
 			idempotencyKey: `task-created:${task.taskId}`,
-			payload: toJsonObject({ task }),
+			payload: toJsonObject({ task, ...(input.subscriptions ? { subscriptions: input.subscriptions } : {}) }),
 		});
 		return structuredClone(this.state.tasks[task.taskId]!.task);
 	}
@@ -556,6 +572,7 @@ export class DurableTaskRuntime {
 					attemptId,
 					taskId: task.taskId,
 					dispatch: normalizedDispatch,
+					...(input.subscriptions ? { subscriptions: input.subscriptions } : {}),
 					...(grantId ? { grantId } : {}),
 				}),
 			},
@@ -1406,6 +1423,8 @@ export class DurableTaskRuntime {
 	}
 
 	private refresh(lockOptions?: Readonly<AtomicFileLockOptions>): void {
+		if (this.hostTransactionActive)
+			throw new DurableTaskRuntimeError("Cannot refresh or re-enter a borrowed host event transaction.");
 		this.state = deepFreeze(readTaskRuntimeProjection(this.store, this.state));
 		this.compactCurrentProjection(lockOptions);
 	}
@@ -1442,6 +1461,37 @@ export class DurableTaskRuntime {
 		if (this.state.lastOrdinal > 0) {
 			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions);
 		}
+	}
+
+	private transactHostEvents<T>(operation: (transaction: HostEventRuntimeTransaction) => T): T {
+		this.refresh();
+		return this.store.transact(this.state.lastOrdinal, (transaction) => {
+			this.hostTransactionActive = true;
+			let active = true;
+			const runtime = this;
+			try {
+				return operation({
+					get snapshot() {
+						if (!active) throw new DurableTaskRuntimeError("Host event transaction capability expired.");
+						return runtime.state;
+					},
+					commit: (input) => {
+						if (!active) throw new DurableTaskRuntimeError("Host event transaction capability expired.");
+						let next: TaskRuntimeProjection | undefined;
+						transaction.append(input, {
+							expectedLastOrdinal: this.state.lastOrdinal,
+							validateBeforeCommit: (candidate) => {
+								next = reduceOrchestrationEvent(this.state, candidate);
+							},
+						});
+						if (next) this.state = deepFreeze(next);
+					},
+				});
+			} finally {
+				active = false;
+				this.hostTransactionActive = false;
+			}
+		});
 	}
 
 	private nowIso(): string {

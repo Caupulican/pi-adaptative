@@ -37,6 +37,7 @@ import {
 	detectCacheMissNotice,
 	observeCacheStateFromMessages,
 } from "../../core/cache-miss-notice.ts";
+import type { CiStatusSource } from "../../core/ci-status-view.ts";
 import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
@@ -193,6 +194,8 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
  * Options for InteractiveMode initialization.
  */
 export interface InteractiveModeOptions {
+	/** CI projection supplied by the session's host resource. */
+	ciStatus?: CiStatusSource;
 	/**
 	 * Where the closing warnings go. Held while the TUI runs, so they never land on the screen; written to stderr once the terminal is
 	 * restored (stop()).
@@ -635,6 +638,7 @@ export class InteractiveMode {
 		});
 		this.layout = new InteractiveLayout({
 			hasHumanAudience: this.hasHumanAudience,
+			ciStatus: options.ciStatus,
 			ui: this.ui,
 			headerContainer: this.headerContainer,
 			chatContainer: this.chatContainer,

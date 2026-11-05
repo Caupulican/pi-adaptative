@@ -3,6 +3,12 @@ import { isDeepStrictEqual } from "node:util";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
+import {
+	type HostEventSubscriptionInput,
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
@@ -42,6 +48,7 @@ export interface DelegationLedgerOptions {
 
 export interface PrepareDelegationInput {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	laneId: string;
 	instructions: string;
@@ -90,6 +97,7 @@ export interface StartedDelegationAttempt {
 export interface PrepareAgentTurnInput {
 	/** A new task starts empty; only an explicit current selection grants knowledge. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	agentId: string;
 	instructions: string;
@@ -157,6 +165,23 @@ function withoutRouteProvenance(
 	return identity;
 }
 
+function dispatchEvidence(
+	input: Pick<PrepareDelegationInput, "knowledgeReferences" | "subscriptions" | "receiptOrigin">,
+): Pick<OrchestrationDispatchRequest, "knowledgeReferences" | "subscriptions" | "receiptOrigin"> {
+	const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
+	const subscriptions = hostEventArray(
+		input.subscriptions ?? [],
+		MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+		parseHostEventSubscriptionInput,
+		"task subscriptions",
+	);
+	return {
+		...(knowledgeReferences.length ? { knowledgeReferences } : {}),
+		...(subscriptions.length ? { subscriptions } : {}),
+		...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+	};
+}
+
 export class DelegationOrchestrationLedger {
 	readonly runtime: DurableTaskRuntime;
 	private readonly sessionId: string;
@@ -177,7 +202,7 @@ export class DelegationOrchestrationLedger {
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
 		const profile = input.executionContract.worker.profile;
-		const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
+		const evidence = dispatchEvidence(input);
 		return this.prepareNormalized({
 			laneId: input.laneId,
 			instructions: input.instructions,
@@ -196,8 +221,7 @@ export class DelegationOrchestrationLedger {
 				: {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
-				...(knowledgeReferences.length ? { knowledgeReferences } : {}),
-				...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+				...evidence,
 				logicalLaneId: input.laneId,
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
 				...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
@@ -289,7 +313,7 @@ export class DelegationOrchestrationLedger {
 		const resourcePointerIds = declaresNewWork
 			? (input.taskContext?.resourcePointerIds ?? [])
 			: prior.dispatch.resourcePointerIds;
-		const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
+		const evidence = dispatchEvidence(input);
 		const dependencyTaskIds = validateTaskDependencyIds(
 			snapshot.tasks,
 			existingTask?.objectiveId ?? objectiveId,
@@ -324,7 +348,8 @@ export class DelegationOrchestrationLedger {
 					attempt.dispatch.controlMessageId !== controlMessageId ||
 					attempt.dispatch.instructions !== instructions ||
 					attempt.dispatch.controlForkMode !== input.controlForkMode ||
-					!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], knowledgeReferences) ||
+					!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], evidence.knowledgeReferences ?? []) ||
+					!isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], evidence.subscriptions ?? []) ||
 					(declaresNewWork &&
 						!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds])) ||
 					(declaresNewWork &&
@@ -368,8 +393,7 @@ export class DelegationOrchestrationLedger {
 				},
 				executionContract: contract,
 				dispatchMetadata: {
-					...(knowledgeReferences.length ? { knowledgeReferences } : {}),
-					...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+					...evidence,
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
 					...(controlMessageId ? { controlMessageId } : {}),
@@ -414,12 +438,13 @@ export class DelegationOrchestrationLedger {
 			| "modelRouteSource"
 			| "modelPinSource"
 			| "knowledgeReferences"
+			| "subscriptions"
 		>;
 	}): AttemptRuntimeState {
 		let birthContextForkReference: WorkerContextForkReference | undefined;
 		try {
-			if (input.dispatchMetadata?.knowledgeReferences !== undefined)
-				parseKnowledgeGrantReferences(input.dispatchMetadata.knowledgeReferences);
+			dispatchEvidence(input.dispatchMetadata ?? {});
+			assertWorkerReceiptAdmission(input.dispatchMetadata?.receiptOrigin);
 			birthContextForkReference =
 				input.dispatchMetadata?.birthContextForkReference === undefined
 					? undefined
@@ -464,6 +489,13 @@ export class DelegationOrchestrationLedger {
 			if (!isDeepStrictEqual(durableReference, birthContextForkReference)) {
 				throw new DurableTaskRuntimeError(`Task '${input.laneId}' has a conflicting birth context fork reference.`);
 			}
+			if (
+				!isDeepStrictEqual(
+					snapshot.attempts[attemptId]?.dispatch.subscriptions ?? [],
+					input.dispatchMetadata?.subscriptions ?? [],
+				)
+			)
+				throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting initial event subscriptions.`);
 		}
 		const projectedEvidence =
 			input.goal && objectiveId === projectedGoal?.objectiveId ? projectGoalAcceptanceEvidence(input.goal) : [];
@@ -472,6 +504,7 @@ export class DelegationOrchestrationLedger {
 			objectives: snapshot.objectives[objectiveId] ? 0 : 1,
 			tasks: taskStateBeforeWrites ? 0 : 1,
 			attempts: activeAttemptBeforeWrites ? 0 : 1,
+			threadSubscriptions: taskStateBeforeWrites ? 0 : (input.dispatchMetadata?.subscriptions?.length ?? 0),
 		});
 		if (input.goal && objectiveId === projectedGoal?.objectiveId) {
 			this.synchronizeGoalState(input.goal);
@@ -496,6 +529,7 @@ export class DelegationOrchestrationLedger {
 			requiredCapabilities: input.requiredCapabilities,
 			acceptanceCriterionIds: input.taskContext?.acceptanceCriterionIds ?? [],
 			riskBudget: input.riskBudget,
+			...(input.dispatchMetadata?.subscriptions ? { subscriptions: input.dispatchMetadata.subscriptions } : {}),
 			...(input.verificationOfTaskId
 				? {
 						verificationOfTaskId: input.verificationOfTaskId,
@@ -537,7 +571,6 @@ export class DelegationOrchestrationLedger {
 		) {
 			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
 		}
-		assertWorkerReceiptAdmission(input.dispatchMetadata?.receiptOrigin);
 		if (!snapshot.tasks[input.laneId]) {
 			return this.runtime.prepareTaskAttempt(
 				{

@@ -24,6 +24,7 @@ import type {
 	AgentToolFailureRecoveryTarget,
 } from "./types.ts";
 import { isAgentToolFailureRecoveryAuthority } from "./types.ts";
+import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
 const MAX_TRACKED_OPERATIONS = 64;
 const SEEN_EXECUTION_FILTER_BYTES = 64 * 1024;
@@ -618,7 +619,7 @@ function walkTranscript(
 	let worldCursor = 0;
 	for (const message of messages) {
 		if (message.role === "user") {
-			worldCursor++;
+			if (!isExternalEvidenceMessage(message)) worldCursor++;
 			continue;
 		}
 		if (message.role === "assistant") {

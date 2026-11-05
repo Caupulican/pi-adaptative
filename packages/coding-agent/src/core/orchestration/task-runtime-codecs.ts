@@ -1,5 +1,12 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
+import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
+import {
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
+import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
@@ -106,7 +113,13 @@ export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
 
 export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
 	const label = "orchestration projection snapshot";
-	const candidate = exactRecord(projection, label, ["lastOrdinal", ...PROJECTION_RECORD_FIELDS]);
+	const raw = exactRecord(projection, label, ["lastOrdinal", ...PROJECTION_RECORD_FIELDS]);
+	// Explicit migration of the complete pre-event snapshot shape. Partially missing new maps
+	// are corruption, never a reason to silently discard event custody during recovery.
+	const eventFieldsPresent = HOST_EVENT_RECORD_FIELDS.filter((field) => Object.hasOwn(raw, field)).length;
+	if (eventFieldsPresent !== 0 && eventFieldsPresent !== HOST_EVENT_RECORD_FIELDS.length)
+		throw new DurableTaskRuntimeError("Orchestration snapshot contains a partial host event projection.");
+	const candidate = eventFieldsPresent === 0 ? { ...raw, ...emptyHostEventProjection() } : raw;
 	if (
 		!Number.isSafeInteger(candidate.lastOrdinal) ||
 		Number(candidate.lastOrdinal) < 0 ||
@@ -134,6 +147,9 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 	);
 	projectionSerializedBytes(candidate as unknown as TaskRuntimeProjection);
 	const normalized: TaskRuntimeProjection = {
+		...parseHostEventProjection(
+			Object.fromEntries(HOST_EVENT_RECORD_FIELDS.map((field) => [field, candidate[field]])),
+		),
 		lastOrdinal: throughOrdinal,
 		agents: Object.fromEntries(
 			Object.entries(snapshotRecords.agents).map(([agentId, value]) => [
@@ -179,6 +195,7 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 		),
 	};
 	validateSnapshotTaskGraph(normalized);
+	validateHostEventGraph(normalized);
 	projectionSerializedBytes(normalized);
 	return normalized;
 }
@@ -321,6 +338,7 @@ export function validateTaskDependencyIds(
 
 const DISPATCH_FIELDS = new Set([
 	"knowledgeReferences",
+	"subscriptions",
 	"receiptOrigin",
 	"taskId",
 	"profileId",
@@ -386,7 +404,17 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	let birthContextForkReference: OrchestrationDispatchRequest["birthContextForkReference"];
 	let brief: TaskBrief | undefined;
 	let knowledgeReferences: OrchestrationDispatchRequest["knowledgeReferences"];
+	let subscriptions: OrchestrationDispatchRequest["subscriptions"];
 	try {
+		subscriptions =
+			dispatch.subscriptions === undefined
+				? undefined
+				: hostEventArray(
+						dispatch.subscriptions,
+						MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+						parseHostEventSubscriptionInput,
+						"dispatch subscriptions",
+					);
 		knowledgeReferences =
 			dispatch.knowledgeReferences === undefined
 				? undefined
@@ -417,6 +445,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	return {
 		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
 		...(knowledgeReferences !== undefined ? { knowledgeReferences } : {}),
+		...(subscriptions !== undefined ? { subscriptions } : {}),
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
 		instructions,
 		...(brief ? { brief } : {}),

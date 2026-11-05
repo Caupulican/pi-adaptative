@@ -16,6 +16,7 @@ import { sanitizeToolFailureContext } from "../../kernel/tool-failure-memory.ts"
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
+import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerCommandReceipt, WorkerHostVerdict, WorkerRequest } from "../autonomy/contracts.ts";
@@ -23,6 +24,8 @@ import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
 import { frozenPrefixLength } from "../context/prefix-stability.ts";
+import { TASK_EVENTS_TOOL_NAME } from "../events/host-event-tool-names.ts";
+import { createTaskEventsTool } from "../events/task-events-tool.ts";
 import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 
@@ -241,7 +244,13 @@ export interface WorkerAttemptExecutorOptions {
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	agentControl: Pick<
 		WorkerAgentControlCoordinator,
-		"acknowledgeMailboxMessage" | "mailboxMessagesForConversation" | "takeLaneHalt" | "deliveredLaneHalt"
+		| "acknowledgeMailboxMessage"
+		| "mailboxMessagesForConversation"
+		| "consumeHostEventMessages"
+		| "readHostEvents"
+		| "changeHostEventSubscriptions"
+		| "takeLaneHalt"
+		| "deliveredLaneHalt"
 	>;
 	applyActions?(actions: readonly WorkerAction[], actionJournal?: WorkerActionJournal): AppliedActionsReport;
 	warn(message: string): void;
@@ -417,6 +426,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	): Promise<void> => {
 		if (messages.length === 0 || !options.assertTaskFitness) return;
 		const continuations = messages.flatMap((message) => {
+			if (workerControlOf(message.message)?.k === "host_event") return [];
 			if (message.messageId === options.controlMessageId) {
 				if (message.instructions !== options.request.instructions)
 					throw new WorkerCompletionProtocolError(
@@ -526,6 +536,26 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			return executor.execute(...args);
 		},
 	}));
+	const withEventControl = <T>(operation: () => T): T => {
+		options.signal?.throwIfAborted();
+		options.toolSurface.assertHealthy();
+		if (physicalAdmissionClosed) throw new WorkerCompletionProtocolError("Worker event control admission is closed.");
+		return options.conversation.withHostEventControl(options.parentSessionId, operation);
+	};
+	const taskEventsTool = createTaskEventsTool({
+		callerAgentId: options.agentId,
+		taskId: options.durableHandle.taskId,
+		execution: {
+			attemptId: options.durableHandle.attemptId,
+			leaseId: options.durableHandle.leaseId,
+			fencingToken: options.durableHandle.fencingToken,
+		},
+		port: {
+			readHostEvents: (query, scope) => withEventControl(() => options.agentControl.readHostEvents(query, scope)),
+			changeHostEventSubscriptions: (input, scope) =>
+				withEventControl(() => options.agentControl.changeHostEventSubscriptions(input, scope)),
+		},
+	});
 	let reportRequests = 0;
 	let emptyReplyRequests = 0;
 	let needsMoreRounds = 0;
@@ -1058,6 +1088,20 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							const historyLength = history.length;
 							const transcriptCursor = transcriptCommit.cursor;
 							const durableCallbackMessages: WorkerTranscriptMessage[] = [];
+							const consumedHostMessages = new WeakSet<object>();
+							const admitMailboxMessages = (
+								messages: readonly WorkerMailboxConversationMessage[],
+							): AgentMessage[] => {
+								const accepted = options.agentControl.consumeHostEventMessages(
+									options.agentId,
+									options.conversation,
+									messages,
+								);
+								return accepted.map(({ message }) => {
+									if (workerControlOf(message)?.k === "host_event") consumedHostMessages.add(message);
+									return message;
+								});
+							};
 							let currentRequest:
 								| {
 										requestId: string;
@@ -1190,8 +1234,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											availableTokens ?? Number.POSITIVE_INFINITY,
 										),
 										tools: reportHandshake
-											? [...options.toolSurface.tools, submitReportTool]
-											: options.toolSurface.tools,
+											? [...options.toolSurface.tools, submitReportTool, taskEventsTool]
+											: [...options.toolSurface.tools, taskEventsTool],
 										requestPreflight: () => providerTurn.requestPreflight(),
 										// One durable request_snapshot per accepted provider request, so the worker's
 										// request start and reasoning level survive in its own conversation.
@@ -1236,7 +1280,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												persistToolRequest(context.assistantMessage, context.requestId);
 												options.toolSurface.assertHealthy();
 												// The report tool records arguments and ends the run; it is not a granted tool.
-												if (context.toolCall.name === SUBMIT_REPORT_TOOL_NAME) return undefined;
+												if (
+													context.toolCall.name === SUBMIT_REPORT_TOOL_NAME ||
+													context.toolCall.name === TASK_EVENTS_TOOL_NAME
+												)
+													return undefined;
 												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 												signal.throwIfAborted();
 												requireRequest(context.requestId);
@@ -1383,8 +1431,15 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													// Tool service usage is separate from assistant reservation epochs.
 													options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
 												}
-												options.conversation.appendMessage(message, origin);
-												options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
+												if (workerControlOf(message)?.k === "host_event") {
+													if (!consumedHostMessages.delete(message))
+														throw new WorkerCompletionProtocolError(
+															"Worker host event was not durably admitted at this boundary.",
+														);
+												} else {
+													options.conversation.appendMessage(message, origin);
+													options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
+												}
 												if (message.role === "assistant" && origin !== "local") {
 													checkpointUsage(
 														"Persisted worker assistant response and its cumulative provider usage.",
@@ -1411,7 +1466,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												);
 												await checkParentMessages(messages, signal);
 												signal.throwIfAborted();
-												return messages.map(({ message }) => message);
+												return admitMailboxMessages(messages);
 											} catch (error) {
 												retainCallbackFailure(error);
 												throw error;
@@ -1429,10 +1484,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												);
 												await checkParentMessages(messages, signal);
 												signal.throwIfAborted();
+												const accepted = admitMailboxMessages(messages);
 												// The parent's messages come first. Otherwise a worker about to stop is asked for a
 												// checkable report, once, and never when the run has no provider budget left for it.
-												if (messages.length > 0 || !reportHandshake)
-													return messages.map(({ message }) => message);
+												if (accepted.length > 0 || !reportHandshake) return accepted;
 												return reportFollowUp(followUpState);
 											} catch (error) {
 												retainCallbackFailure(error);

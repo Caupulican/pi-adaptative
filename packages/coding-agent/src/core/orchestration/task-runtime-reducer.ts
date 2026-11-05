@@ -1,5 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import {
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
+import { applyHostEvent, replaceHostEventSubscriptions } from "../events/host-event-reducer.ts";
+import type {
+	AcceptedHostEvent,
+	HostEventDelivery,
+	HostEventSourceState,
+	HostEventSubscription,
+} from "../events/host-event-state.ts";
 import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { selectedTaskAttempt } from "./attempt-ordering.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
@@ -484,7 +496,7 @@ function refreshReadyTasks(state: TaskRuntimeProjection, objectiveId: string, at
 	}
 }
 
-function applyTaskCreated(state: TaskRuntimeProjection, task: TaskContract, occurredAt: string): void {
+function applyTaskCreated(state: TaskRuntimeProjection, task: TaskContract, event: OrchestrationEvent): void {
 	const objectives = state.objectives as Record<string, ObjectiveRuntimeState>;
 	const tasks = state.tasks as Record<string, TaskRuntimeState>;
 	const objective = objectives[task.objectiveId];
@@ -495,7 +507,20 @@ function applyTaskCreated(state: TaskRuntimeProjection, task: TaskContract, occu
 	assertIdentifierListHasCapacity(objective.taskIds, MAX_ORCHESTRATION_TASKS, "objective task list");
 	tasks[task.taskId] = { task, attemptIds: [] };
 	objectives[task.objectiveId] = { ...objective, taskIds: [...objective.taskIds, task.taskId] };
-	refreshReadyTasks(state, task.objectiveId, occurredAt);
+	refreshReadyTasks(state, task.objectiveId, event.occurredAt);
+	if (event.payload.subscriptions !== undefined)
+		replaceHostEventSubscriptions(
+			state,
+			task.taskId,
+			hostEventArray(
+				event.payload.subscriptions,
+				MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+				parseHostEventSubscriptionInput,
+				"subscriptions",
+			),
+			0,
+			event.ordinal,
+		);
 }
 
 function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, occurredAt: string): void {
@@ -1121,6 +1146,10 @@ export function reduceOrchestrationEvent(
 		checkpoints: { ...projection.checkpoints },
 		approvals: { ...projection.approvals },
 		notifications: { ...projection.notifications },
+		eventSources: { ...projection.eventSources },
+		hostEvents: { ...projection.hostEvents },
+		threadSubscriptions: { ...projection.threadSubscriptions },
+		eventDeliveries: { ...projection.eventDeliveries },
 	};
 	const byteTracker = new ProjectionByteTracker(projection);
 	const rawAgents = state.agents as Record<string, AgentBindingContract>;
@@ -1144,6 +1173,14 @@ export function reduceOrchestrationEvent(
 	state.checkpoints = checkpoints;
 	state.approvals = approvals;
 	state.notifications = notifications;
+	const rawEventSources = state.eventSources as Record<string, HostEventSourceState>;
+	const rawHostEvents = state.hostEvents as Record<string, AcceptedHostEvent>;
+	const rawSubscriptions = state.threadSubscriptions as Record<string, HostEventSubscription>;
+	const rawDeliveries = state.eventDeliveries as Record<string, HostEventDelivery>;
+	state.eventSources = byteTracker.track("eventSources", rawEventSources);
+	state.hostEvents = byteTracker.track("hostEvents", rawHostEvents);
+	state.threadSubscriptions = byteTracker.track("threadSubscriptions", rawSubscriptions);
+	state.eventDeliveries = byteTracker.track("eventDeliveries", rawDeliveries);
 
 	switch (event.type) {
 		case "objective.created": {
@@ -1206,7 +1243,7 @@ export function reduceOrchestrationEvent(
 		case "task.created": {
 			const task = taskFromPayload(event.payload);
 			assertEventAggregateId(event, task.objectiveId, "Created task objective");
-			applyTaskCreated(state, task, event.occurredAt);
+			applyTaskCreated(state, task, event);
 			break;
 		}
 		case "task.attempt_prepared": {
@@ -1214,7 +1251,7 @@ export function reduceOrchestrationEvent(
 			if (event.aggregateId !== task.taskId) {
 				throw new DurableTaskRuntimeError(`Prepared task '${task.taskId}' does not match its aggregate.`);
 			}
-			applyTaskCreated(state, task, event.occurredAt);
+			applyTaskCreated(state, task, event);
 			applyAttemptQueued(state, event.payload, event.occurredAt);
 			break;
 		}
@@ -1744,7 +1781,10 @@ export function reduceOrchestrationEvent(
 			});
 			const task = tasks[attempt.taskId];
 			if (task)
-				tasks[attempt.taskId] = { ...task, task: { ...task.task, status: "ready", updatedAt: event.occurredAt } };
+				tasks[attempt.taskId] = {
+					...task,
+					task: { ...task.task, status: "ready", updatedAt: event.occurredAt },
+				};
 			break;
 		}
 		case "approval.requested": {
@@ -1834,6 +1874,8 @@ export function reduceOrchestrationEvent(
 			notifications[notificationId] = { ...notification, status: "delivered", deliveredAt: event.occurredAt };
 			break;
 		}
+		default:
+			applyHostEvent(state, event);
 	}
 
 	const serializedBytes = byteTracker.finish(event.ordinal);
@@ -1844,8 +1886,13 @@ export function reduceOrchestrationEvent(
 	state.checkpoints = rawCheckpoints;
 	state.approvals = rawApprovals;
 	state.notifications = rawNotifications;
+	state.eventSources = rawEventSources;
+	state.hostEvents = rawHostEvents;
+	state.threadSubscriptions = rawSubscriptions;
+	state.eventDeliveries = rawDeliveries;
 	const result = { ...state, lastOrdinal: event.ordinal };
 	cacheProjectionSerializedBytes(result, serializedBytes);
+	assertProjectionWithinLimits(result);
 	return result;
 }
 

@@ -150,6 +150,15 @@ export interface AppendOrchestrationEventOptions {
 	lockOptions?: Readonly<AtomicFileLockOptions>;
 }
 
+/** Borrowed synchronous append capability; invalid as soon as its transaction returns. */
+export interface OrchestrationEventTransaction {
+	readonly lastOrdinal: number;
+	append(
+		input: AppendOrchestrationEventInput,
+		options?: Omit<AppendOrchestrationEventOptions, "lockOptions">,
+	): OrchestrationEvent;
+}
+
 export class OrchestrationEventStoreError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -458,7 +467,7 @@ function positiveSafeInteger(value: number | undefined, fallback: number, maximu
  */
 export class OrchestrationEventStore {
 	private readonly agentDir: string;
-	private readonly sessionId: string;
+	readonly sessionId: string;
 	readonly rootDir: string;
 	readonly eventsDir: string;
 	readonly idempotencyDir: string;
@@ -477,6 +486,7 @@ export class OrchestrationEventStore {
 	private synchronizedIndexes: SynchronizedIndexes | undefined;
 	private cursorRead: SignedRead<EventCursor | undefined> | undefined;
 	private baselineRead: SignedRead<SnapshotBaseline> | undefined;
+	private transactionActive = false;
 
 	constructor(options: OrchestrationEventStoreOptions) {
 		this.agentDir = options.agentDir;
@@ -512,6 +522,88 @@ export class OrchestrationEventStore {
 	}
 
 	append(input: AppendOrchestrationEventInput, options: AppendOrchestrationEventOptions = {}): OrchestrationEvent {
+		return this.transact(undefined, (transaction) => transaction.append(input, options), options.lockOptions);
+	}
+
+	/**
+	 * One non-reentrant lock scope. Callers may hold outer mailbox/transcript locks, then borrow this
+	 * capability for exact authority checks and append-after-effect receipts without reacquiring it.
+	 */
+	transact<T>(
+		expectedLastOrdinal: number | undefined,
+		operation: (transaction: OrchestrationEventTransaction) => T,
+		options?: Readonly<AtomicFileLockOptions>,
+	): T {
+		if (this.transactionActive)
+			throw new OrchestrationEventStoreError("Orchestration transaction cannot be re-entered.");
+		if (expectedLastOrdinal !== undefined && (!Number.isSafeInteger(expectedLastOrdinal) || expectedLastOrdinal < 0))
+			throw new OrchestrationEventStoreError("Expected orchestration ordinal is invalid.");
+		const committed: OrchestrationEvent[] = [];
+		const lockOptions = this.withLockSleep(options);
+		try {
+			return withSessionBundleAdmission(
+				this.agentDir,
+				this.sessionId,
+				() =>
+					withFileLockSync(
+						this.cursorPath,
+						() => {
+							const indexes = this.synchronizeIndexesUnlocked();
+							if (expectedLastOrdinal !== undefined && indexes.lastOrdinal !== expectedLastOrdinal)
+								throw new OrchestrationConcurrencyError(expectedLastOrdinal, indexes.lastOrdinal);
+							let active = true;
+							let appends = 0;
+							this.transactionActive = true;
+							try {
+								const result = operation({
+									get lastOrdinal() {
+										return indexes.lastOrdinal;
+									},
+									append: (input, appendOptions = {}) => {
+										if (!active || ++appends > 64)
+											throw new OrchestrationEventStoreError(
+												"Orchestration transaction capability expired or exceeded its append bound.",
+											);
+										const outcome = this.appendUnlocked(input, appendOptions, indexes);
+										if (outcome.appended) committed.push(outcome.event);
+										return structuredClone(outcome.event);
+									},
+								});
+								if (
+									result &&
+									(typeof result === "object" || typeof result === "function") &&
+									"then" in result
+								) {
+									void Promise.resolve(result).catch(() => undefined);
+									throw new OrchestrationEventStoreError("Orchestration transaction must be synchronous.");
+								}
+								return result;
+							} finally {
+								active = false;
+								this.transactionActive = false;
+							}
+						},
+						lockOptions,
+					),
+				lockOptions,
+			);
+		} finally {
+			for (const event of committed)
+				for (const listener of [...this.listeners]) {
+					try {
+						observeListenerResult(listener(structuredClone(event)) as unknown);
+					} catch {
+						/* Durable commits survive observer failure. */
+					}
+				}
+		}
+	}
+
+	private appendUnlocked(
+		input: AppendOrchestrationEventInput,
+		options: Omit<AppendOrchestrationEventOptions, "lockOptions">,
+		indexes: SynchronizedIndexes,
+	): { event: OrchestrationEvent; appended: boolean } {
 		const normalizedInput = normalizeAppendInput(input);
 		if (
 			options.expectedLastOrdinal !== undefined &&
@@ -519,84 +611,58 @@ export class OrchestrationEventStore {
 		) {
 			throw new OrchestrationEventStoreError("Expected orchestration ordinal must be a non-negative safe integer.");
 		}
-		const lockOptions = this.withLockSleep(options.lockOptions);
-		const committed = withSessionBundleAdmission(
-			this.agentDir,
-			this.sessionId,
-			() =>
-				withFileLockSync(
-					this.cursorPath,
-					(): { event: OrchestrationEvent; appended: boolean } => {
-						const indexes = this.synchronizeIndexesUnlocked();
-						const actual = indexes.lastOrdinal;
-						if (normalizedInput.idempotencyKey) {
-							const existing = indexes.idempotencyEvents.get(normalizedInput.idempotencyKey);
-							if (existing) {
-								assertExactIdempotentReplay(existing, normalizedInput);
-								return { event: existing, appended: false };
-							}
-						}
-						if (options.expectedLastOrdinal !== undefined) {
-							if (actual !== options.expectedLastOrdinal) {
-								throw new OrchestrationConcurrencyError(options.expectedLastOrdinal, actual);
-							}
-						}
-
-						const ordinal = actual + 1;
-						const next: OrchestrationEvent = {
-							schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-							ordinal,
-							eventId: this.createEventId(),
-							type: normalizedInput.type,
-							aggregateId: normalizedInput.aggregateId,
-							actor: normalizedInput.actor,
-							occurredAt: this.now(),
-							...(normalizedInput.correlationId ? { correlationId: normalizedInput.correlationId } : {}),
-							...(normalizedInput.causationId ? { causationId: normalizedInput.causationId } : {}),
-							...(normalizedInput.idempotencyKey ? { idempotencyKey: normalizedInput.idempotencyKey } : {}),
-							payload: normalizedInput.payload,
-						};
-						assertCanonicalOrchestrationEvent(next);
-						const serializedEvent = serializeBounded(
-							next,
-							this.maxTailBytes,
-							"Orchestration event",
-							"Orchestration event exceeds its configured tail byte limit.",
-						);
-						options.validateBeforeCommit?.(next);
-						const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
-						const serializedCursor = serializeBounded(
-							{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
-							MAX_CURSOR_BYTES,
-							"Orchestration cursor",
-						);
-						writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
-						indexes.lastOrdinal = ordinal;
-						indexes.tailBytes = nextTailBytes;
-						if (normalizedInput.idempotencyKey)
-							indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
-						// The immutable event is authoritative. The cursor is only a corruption high-water mark,
-						// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
-						// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
-						this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
-						this.cursorRead = undefined;
-						return { event: next, appended: true };
-					},
-					lockOptions,
-				),
-			lockOptions,
-		);
-
-		if (committed.appended) {
-			for (const listener of [...this.listeners]) {
-				try {
-					observeListenerResult(listener(structuredClone(committed.event)) as unknown);
-				} catch {
-					// The event is already durable. Observer failures cannot turn a committed transition into a reported failure.
-				}
+		const actual = indexes.lastOrdinal;
+		if (normalizedInput.idempotencyKey) {
+			const existing = indexes.idempotencyEvents.get(normalizedInput.idempotencyKey);
+			if (existing) {
+				assertExactIdempotentReplay(existing, normalizedInput);
+				return { event: existing, appended: false };
 			}
 		}
-		return structuredClone(committed.event);
+		if (options.expectedLastOrdinal !== undefined) {
+			if (actual !== options.expectedLastOrdinal) {
+				throw new OrchestrationConcurrencyError(options.expectedLastOrdinal, actual);
+			}
+		}
+
+		const ordinal = actual + 1;
+		const next: OrchestrationEvent = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			ordinal,
+			eventId: this.createEventId(),
+			type: normalizedInput.type,
+			aggregateId: normalizedInput.aggregateId,
+			actor: normalizedInput.actor,
+			occurredAt: this.now(),
+			...(normalizedInput.correlationId ? { correlationId: normalizedInput.correlationId } : {}),
+			...(normalizedInput.causationId ? { causationId: normalizedInput.causationId } : {}),
+			...(normalizedInput.idempotencyKey ? { idempotencyKey: normalizedInput.idempotencyKey } : {}),
+			payload: normalizedInput.payload,
+		};
+		assertCanonicalOrchestrationEvent(next);
+		const serializedEvent = serializeBounded(
+			next,
+			this.maxTailBytes,
+			"Orchestration event",
+			"Orchestration event exceeds its configured tail byte limit.",
+		);
+		options.validateBeforeCommit?.(next);
+		const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
+		const serializedCursor = serializeBounded(
+			{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
+			MAX_CURSOR_BYTES,
+			"Orchestration cursor",
+		);
+		writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
+		indexes.lastOrdinal = ordinal;
+		indexes.tailBytes = nextTailBytes;
+		if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
+		// The immutable event is authoritative. The cursor is only a corruption high-water mark,
+		// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
+		// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
+		this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
+		this.cursorRead = undefined;
+		return { event: next, appended: true };
 	}
 
 	readAll(): OrchestrationEvent[] {
@@ -651,6 +717,8 @@ export class OrchestrationEventStore {
 		projection: () => JsonObject,
 		lockOptions?: Readonly<AtomicFileLockOptions>,
 	): boolean {
+		if (this.transactionActive)
+			throw new OrchestrationEventStoreError("Cannot compact inside an active orchestration transaction.");
 		const baselineBeforeLock = this.readBaselineUnlocked();
 		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
 		const cachedIndexes = this.synchronizedIndexes;

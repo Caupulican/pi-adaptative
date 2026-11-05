@@ -1,6 +1,7 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
 import { BOT_MESSAGE_TOOL_NAME } from "./delegation/bot-message-contract.ts";
+import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import {
@@ -91,6 +92,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[CONTINUOUS_CHAT_DATE_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
 	["secret_store", policy([["credentials.use"]], ["service-proxy", "path-scope"])],
 	["delegate", DELEGATE_POLICY],
+	// An admitted worker may inspect or narrow its own task's subscriptions; it gains no new authority.
+	[TASK_EVENTS_TOOL_NAME, policy([], "control-plane")],
 	["model_fitness", policy([["research.execute"]], "control-plane")],
 	["task_steps", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
 	["task_directory", policy([["workflow.plan", "memory.mutate"]], "control-plane")],

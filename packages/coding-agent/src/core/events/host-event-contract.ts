@@ -1,0 +1,583 @@
+import { createHash } from "node:crypto";
+import { parseWorkerHostEventRecord, type WorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
+import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH, MAX_WORKER_AUTHORITY_PATH_LENGTH } from "../orchestration/contracts.ts";
+
+export const MAX_HOST_EVENT_SOURCES = 32;
+export const MAX_HOST_EVENTS = 256;
+export const MAX_HOST_EVENT_SUBSCRIPTIONS = 512;
+export const MAX_HOST_EVENT_DELIVERIES = 2_048;
+export const MAX_HOST_EVENT_SUBJECTS = 64;
+export const MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK = 8;
+export const MAX_HOST_EVENT_TARGETS = 64;
+export const MAX_HOST_EVENT_DOMAIN_BYTES = 8 * 1024 * 1024;
+export const HOST_EVENT_RECALL_MS = 7 * 24 * 60 * 60 * 1000;
+export const CI_TERMINAL_CONCLUSIONS = [
+	"success",
+	"failure",
+	"cancelled",
+	"skipped",
+	"neutral",
+	"timed_out",
+	"action_required",
+	"stale",
+	"startup_failure",
+] as const;
+export type CiTerminalConclusion = (typeof CI_TERMINAL_CONCLUSIONS)[number];
+
+export interface CiSubject {
+	readonly host: string;
+	readonly repositoryId: number;
+	readonly workflowId: number;
+	readonly headSha: string;
+}
+
+/** Captured authority for task-scoped reads and subscription changes. */
+export interface HostEventWorkerScope {
+	readonly agentId: string;
+	readonly attemptId: string;
+	readonly leaseId: string;
+	readonly fencingToken: number;
+}
+
+export interface CiAttemptIdentity {
+	readonly provider: "github-actions";
+	readonly host: string;
+	readonly repositoryId: number;
+	readonly workflowId: number;
+	readonly runId: number;
+	readonly runAttempt: number;
+	readonly runNumber: number;
+}
+
+export interface CiAttemptTerminalEvent {
+	readonly version: 1;
+	readonly kind: "ci-attempt-terminal";
+	readonly eventId: string;
+	readonly identity: CiAttemptIdentity;
+	readonly headSha: string;
+	readonly conclusion: CiTerminalConclusion;
+	readonly workflowPath: string;
+	readonly observedAt: string;
+	readonly runUrl: string;
+	readonly payloadDigest: string;
+}
+
+export interface HostEventEnvelope {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly sourceSequence: number;
+	readonly event: CiAttemptTerminalEvent;
+}
+
+export interface HostEventSourceRegistration {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly scopeVersion: number;
+	readonly subjects: readonly CiSubject[];
+	/** Current root checkout applicability, distinct from historical task subjects. */
+	readonly rootSubjects: readonly CiSubject[];
+	/** First sequence this durable consumer is entitled to replay. */
+	readonly startingSequence: number;
+}
+
+export interface HostEventCatchUp {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly scopeVersion: number;
+	readonly generation: number;
+}
+
+export interface CiCurrentObservation {
+	readonly subject: CiSubject;
+	readonly runId: number;
+	readonly runNumber: number;
+	readonly runAttempt: number;
+	readonly status: "queued" | "in_progress" | "completed";
+	readonly conclusion?: CiTerminalConclusion;
+	readonly eventId?: string;
+}
+
+/** Absent subjects have no matching run. Failed/incomplete collection must never seal. */
+export interface HostEventCatchUpSeal extends HostEventCatchUp {
+	readonly throughSequence: number;
+	readonly observations: readonly CiCurrentObservation[];
+	/** Exact current terminal envelopes below this consumer's stream replay floor. */
+	readonly snapshots?: readonly HostEventEnvelope[];
+}
+
+/** Snapshot payloads transfer custody once; the retained frontier references canonical events. */
+export type HostEventSealedFrontier = Omit<HostEventCatchUpSeal, "snapshots">;
+
+export function hostEventSealedFrontier(seal: HostEventCatchUpSeal): HostEventSealedFrontier {
+	return {
+		sourceId: seal.sourceId,
+		sourceEpoch: seal.sourceEpoch,
+		scopeVersion: seal.scopeVersion,
+		generation: seal.generation,
+		throughSequence: seal.throughSequence,
+		observations: seal.observations,
+	};
+}
+
+/** The source guarantees retired positions can never be replayed under a new sequence. */
+export interface HostEventReplayHorizon {
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly throughSequence: number;
+}
+
+/** Source-attested unavailable history after this consumer released its replay entitlement. */
+export interface HostEventReplayGap extends HostEventCatchUp {
+	readonly afterSequence: number;
+	readonly throughSequence: number;
+	readonly reason: "consumer_inactive";
+}
+
+export interface HostEventReceipt {
+	readonly consumerId: string;
+	readonly sourceId: string;
+	readonly sourceEpoch: string;
+	readonly sourceSequence: number;
+	readonly eventId: string;
+	readonly payloadDigest: string;
+	readonly canonicalReceiptId: string;
+}
+
+export interface HostEventConsumerCheckpoint {
+	readonly registration: HostEventSourceRegistration;
+	readonly acceptedThrough: number;
+	readonly catchUpGeneration: number;
+	readonly replayFloor: number;
+	readonly lastReplayGap?: HostEventReplayGap;
+}
+
+export interface HostEventSink {
+	readonly consumerId: string;
+	checkpoint(sourceId: string, signal: AbortSignal): Promise<HostEventConsumerCheckpoint | undefined>;
+	register(source: HostEventSourceRegistration, signal: AbortSignal): Promise<void>;
+	beginCatchUp(catchUp: HostEventCatchUp, signal: AbortSignal): Promise<void>;
+	resumeGap(gap: HostEventReplayGap, signal: AbortSignal): Promise<void>;
+	accept(envelope: HostEventEnvelope, signal: AbortSignal): Promise<HostEventReceipt>;
+	seal(seal: HostEventCatchUpSeal, signal: AbortSignal): Promise<void>;
+	retireThrough(horizon: HostEventReplayHorizon, signal: AbortSignal): Promise<void>;
+	/** Revocation remains available after source cancellation. */
+	deactivate(sourceId: string): Promise<void>;
+	subscribeWritable(listener: () => void): () => void;
+}
+
+export interface HostEventSource {
+	start(sink: HostEventSink): Promise<void>;
+	stop(): Promise<void>;
+}
+
+export interface HostEventSubscriptionInput {
+	readonly threadKey: string;
+	readonly subject: CiSubject;
+	readonly wake: "never" | "resume_same_task";
+}
+
+export type { HostEventExecutionIdentity } from "../../kernel/host-event-stamp.ts";
+export type HostEventDeliveryBinding = WorkerHostEventRecord;
+
+export interface HostEventTranscriptReceipt {
+	readonly sessionId: string;
+	readonly sessionFile: string;
+	readonly entryId: string;
+	readonly taskId: string;
+	readonly attemptId: string;
+	readonly messageId: string;
+	readonly contentDigest: string;
+	readonly bindingDigest: string;
+}
+
+export class HostEventError extends Error {
+	readonly code: string;
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "HostEventError";
+		this.code = code;
+	}
+}
+
+export function hostEventRecord(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new HostEventError("invalid", `${label} must be an object.`);
+	const record = value as Record<string, unknown>;
+	if (Object.keys(record).some((field) => !fields.includes(field)))
+		throw new HostEventError("invalid", `${label} contains an unknown field.`);
+	return record;
+}
+
+export function hostEventString(
+	value: unknown,
+	label: string,
+	maxLength = MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+): string {
+	if (
+		typeof value !== "string" ||
+		!value ||
+		value.length > maxLength ||
+		value.trim() !== value ||
+		value.includes("\0")
+	)
+		throw new HostEventError("invalid", `${label} must be a bounded canonical string.`);
+	return value;
+}
+
+function sourceIdentifier(value: unknown): string {
+	const id = hostEventString(value, "sourceId");
+	if (Object.hasOwn(Object.prototype, id))
+		throw new HostEventError("invalid", "Source identity conflicts with record storage.");
+	return id;
+}
+
+export function hostEventInteger(value: unknown, label: string, minimum = 1): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum)
+		throw new HostEventError("invalid", `${label} must be a safe integer >= ${minimum}.`);
+	return value;
+}
+
+export function hostEventArray<T>(value: unknown, maximum: number, parse: (entry: unknown) => T, label: string): T[] {
+	if (!Array.isArray(value) || value.length > maximum)
+		throw new HostEventError("invalid", `${label} exceeds its collection bound.`);
+	return value.map(parse);
+}
+
+export function hostEventDigest(value: unknown, label: string): string {
+	const digest = hostEventString(value, label, 64);
+	if (!/^[a-f0-9]{64}$/.test(digest)) throw new HostEventError("invalid", `${label} must be SHA-256.`);
+	return digest;
+}
+
+export function hostEventHash(domain: string, value: unknown): string {
+	return createHash("sha256").update(domain).update("\0").update(JSON.stringify(value)).digest("hex");
+}
+
+export function hostEventDate(value: unknown, label: string): string {
+	const date = hostEventString(value, label, 32);
+	if (!Number.isFinite(Date.parse(date)) || new Date(date).toISOString() !== date)
+		throw new HostEventError("invalid", `${label} must be canonical ISO time.`);
+	return date;
+}
+
+function ciHost(value: unknown): string {
+	const host = hostEventString(value, "CI host", 253);
+	if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host) || host.includes(".."))
+		throw new HostEventError("invalid", "CI host must be a lowercase hostname.");
+	return host;
+}
+
+function ciSha(value: unknown): string {
+	const sha = hostEventString(value, "CI head SHA", 64);
+	if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha)) throw new HostEventError("invalid", "CI head SHA is invalid.");
+	return sha;
+}
+
+function ciConclusion(value: unknown): CiTerminalConclusion {
+	if (!CI_TERMINAL_CONCLUSIONS.some((conclusion) => conclusion === value))
+		throw new HostEventError("invalid", "Unknown CI conclusion.");
+	return value as CiTerminalConclusion;
+}
+
+export function parseCiSubject(value: unknown): CiSubject {
+	const entry = hostEventRecord(value, ["host", "repositoryId", "workflowId", "headSha"], "CI subject");
+	return {
+		host: ciHost(entry.host),
+		repositoryId: hostEventInteger(entry.repositoryId, "repositoryId"),
+		workflowId: hostEventInteger(entry.workflowId, "workflowId"),
+		headSha: ciSha(entry.headSha),
+	};
+}
+
+export function ciSubjectKey(subject: CiSubject): string {
+	return hostEventHash("pi-ci-subject-v1", [subject.host, subject.repositoryId, subject.workflowId, subject.headSha]);
+}
+
+/** One workflow thread spans revisions; every delivery still checks its exact subject SHA. */
+export function ciThreadKey(subject: Pick<CiSubject, "host" | "repositoryId" | "workflowId">): string {
+	return `ci-thread-${hostEventHash("pi-ci-thread-v1", [subject.host, subject.repositoryId, subject.workflowId])}`;
+}
+
+export function ciEventSubject(event: CiAttemptTerminalEvent): CiSubject {
+	return {
+		host: event.identity.host,
+		repositoryId: event.identity.repositoryId,
+		workflowId: event.identity.workflowId,
+		headSha: event.headSha,
+	};
+}
+
+export function parseCiAttemptIdentity(value: unknown): CiAttemptIdentity {
+	const entry = hostEventRecord(
+		value,
+		["provider", "host", "repositoryId", "workflowId", "runId", "runAttempt", "runNumber"],
+		"CI attempt identity",
+	);
+	if (entry.provider !== "github-actions") throw new HostEventError("invalid", "Unknown CI provider.");
+	return {
+		provider: "github-actions",
+		host: ciHost(entry.host),
+		repositoryId: hostEventInteger(entry.repositoryId, "repositoryId"),
+		workflowId: hostEventInteger(entry.workflowId, "workflowId"),
+		runId: hostEventInteger(entry.runId, "runId"),
+		runAttempt: hostEventInteger(entry.runAttempt, "runAttempt"),
+		runNumber: hostEventInteger(entry.runNumber, "runNumber"),
+	};
+}
+
+export function ciAttemptEventId(identity: CiAttemptIdentity): string {
+	return `ci-${hostEventHash("pi-ci-attempt-v1", [identity.host, identity.repositoryId, identity.workflowId, identity.runId, identity.runAttempt])}`;
+}
+
+export function createCiAttemptTerminalEvent(
+	input: Omit<CiAttemptTerminalEvent, "version" | "kind" | "eventId" | "payloadDigest">,
+): CiAttemptTerminalEvent {
+	const identity = parseCiAttemptIdentity(input.identity);
+	const event = {
+		version: 1 as const,
+		kind: "ci-attempt-terminal" as const,
+		eventId: ciAttemptEventId(identity),
+		identity,
+		headSha: ciSha(input.headSha),
+		conclusion: ciConclusion(input.conclusion),
+		workflowPath: hostEventString(input.workflowPath, "workflowPath", 2_048),
+		observedAt: hostEventDate(input.observedAt, "observedAt"),
+		runUrl: hostEventString(input.runUrl, "runUrl", 2_048),
+	};
+	const url = new URL(event.runUrl);
+	if (url.protocol !== "https:" || url.hostname !== identity.host || url.username || url.password)
+		throw new HostEventError("invalid", "CI run URL does not belong to its host.");
+	return { ...event, payloadDigest: hostEventHash("pi-ci-terminal-payload-v1", event) };
+}
+
+export function parseCiAttemptTerminalEvent(value: unknown): CiAttemptTerminalEvent {
+	const entry = hostEventRecord(
+		value,
+		[
+			"version",
+			"kind",
+			"eventId",
+			"identity",
+			"headSha",
+			"conclusion",
+			"workflowPath",
+			"observedAt",
+			"runUrl",
+			"payloadDigest",
+		],
+		"CI terminal event",
+	);
+	if (entry.version !== 1 || entry.kind !== "ci-attempt-terminal")
+		throw new HostEventError("invalid", "Unknown host event format.");
+	const event = createCiAttemptTerminalEvent({
+		identity: parseCiAttemptIdentity(entry.identity),
+		headSha: ciSha(entry.headSha),
+		conclusion: ciConclusion(entry.conclusion),
+		workflowPath: hostEventString(entry.workflowPath, "workflowPath", 2_048),
+		observedAt: hostEventDate(entry.observedAt, "observedAt"),
+		runUrl: hostEventString(entry.runUrl, "runUrl", 2_048),
+	});
+	if (entry.eventId !== event.eventId || entry.payloadDigest !== event.payloadDigest)
+		throw new HostEventError(
+			"identity_conflict",
+			"CI event identity or payload digest differs from canonical content.",
+		);
+	return event;
+}
+
+export function parseHostEventEnvelope(value: unknown): HostEventEnvelope {
+	const entry = hostEventRecord(value, ["sourceId", "sourceEpoch", "sourceSequence", "event"], "host event envelope");
+	return {
+		sourceId: sourceIdentifier(entry.sourceId),
+		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
+		sourceSequence: hostEventInteger(entry.sourceSequence, "sourceSequence"),
+		event: parseCiAttemptTerminalEvent(entry.event),
+	};
+}
+
+export function parseHostEventSourceRegistration(value: unknown): HostEventSourceRegistration {
+	const entry = hostEventRecord(
+		value,
+		["sourceId", "sourceEpoch", "scopeVersion", "subjects", "rootSubjects", "startingSequence"],
+		"host event source registration",
+	);
+	const subjects = hostEventArray(entry.subjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "source subjects");
+	if (subjects.length === 0 || new Set(subjects.map(ciSubjectKey)).size !== subjects.length)
+		throw new HostEventError("invalid", "Source subjects must be nonempty and unique.");
+	const rootSubjects = hostEventArray(entry.rootSubjects, MAX_HOST_EVENT_SUBJECTS, parseCiSubject, "root subjects");
+	const subjectKeys = new Set(subjects.map(ciSubjectKey));
+	if (
+		new Set(rootSubjects.map(ciSubjectKey)).size !== rootSubjects.length ||
+		rootSubjects.some((subject) => !subjectKeys.has(ciSubjectKey(subject)))
+	)
+		throw new HostEventError("invalid", "Root subjects must be a unique subset of the registered scope.");
+	return {
+		sourceId: sourceIdentifier(entry.sourceId),
+		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
+		scopeVersion: hostEventInteger(entry.scopeVersion, "scopeVersion"),
+		subjects,
+		rootSubjects,
+		startingSequence: hostEventInteger(entry.startingSequence, "startingSequence"),
+	};
+}
+
+export function parseHostEventCatchUp(value: unknown): HostEventCatchUp {
+	const entry = hostEventRecord(
+		value,
+		["sourceId", "sourceEpoch", "scopeVersion", "generation"],
+		"host event catch-up",
+	);
+	return {
+		sourceId: sourceIdentifier(entry.sourceId),
+		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
+		scopeVersion: hostEventInteger(entry.scopeVersion, "scopeVersion"),
+		generation: hostEventInteger(entry.generation, "generation"),
+	};
+}
+
+export function parseCiCurrentObservation(value: unknown): CiCurrentObservation {
+	const entry = hostEventRecord(
+		value,
+		["subject", "runId", "runNumber", "runAttempt", "status", "conclusion", "eventId"],
+		"CI current observation",
+	);
+	if (entry.status !== "queued" && entry.status !== "in_progress" && entry.status !== "completed")
+		throw new HostEventError("invalid", "Unknown CI observation status.");
+	if (
+		(entry.status === "completed") !== (entry.conclusion !== undefined && entry.eventId !== undefined) ||
+		(entry.status !== "completed" && (entry.conclusion !== undefined || entry.eventId !== undefined))
+	)
+		throw new HostEventError("invalid", "CI observation terminal fields are inconsistent.");
+	return {
+		subject: parseCiSubject(entry.subject),
+		runId: hostEventInteger(entry.runId, "runId"),
+		runNumber: hostEventInteger(entry.runNumber, "runNumber"),
+		runAttempt: hostEventInteger(entry.runAttempt, "runAttempt"),
+		status: entry.status,
+		...(entry.status === "completed"
+			? { conclusion: ciConclusion(entry.conclusion), eventId: hostEventString(entry.eventId, "eventId") }
+			: {}),
+	};
+}
+
+export function parseHostEventCatchUpSeal(value: unknown): HostEventCatchUpSeal {
+	const entry = hostEventRecord(
+		value,
+		["sourceId", "sourceEpoch", "scopeVersion", "generation", "throughSequence", "observations", "snapshots"],
+		"host event seal",
+	);
+	const identity = parseHostEventCatchUp({
+		sourceId: entry.sourceId,
+		sourceEpoch: entry.sourceEpoch,
+		scopeVersion: entry.scopeVersion,
+		generation: entry.generation,
+	});
+	const observations = hostEventArray(
+		entry.observations,
+		MAX_HOST_EVENT_SUBJECTS,
+		parseCiCurrentObservation,
+		"seal observations",
+	);
+	if (new Set(observations.map((observation) => ciSubjectKey(observation.subject))).size !== observations.length)
+		throw new HostEventError("invalid", "Seal observations must have unique subjects.");
+	const snapshots =
+		entry.snapshots === undefined
+			? undefined
+			: hostEventArray(entry.snapshots, MAX_HOST_EVENT_SUBJECTS, parseHostEventEnvelope, "seal snapshots");
+	if (snapshots && new Set(snapshots.map((snapshot) => snapshot.event.eventId)).size !== snapshots.length)
+		throw new HostEventError("invalid", "Seal snapshot identities must be unique.");
+	return {
+		...identity,
+		throughSequence: hostEventInteger(entry.throughSequence, "throughSequence", 0),
+		observations,
+		...(snapshots ? { snapshots } : {}),
+	};
+}
+
+export function parseHostEventReplayHorizon(value: unknown): HostEventReplayHorizon {
+	const entry = hostEventRecord(value, ["sourceId", "sourceEpoch", "throughSequence"], "host event replay horizon");
+	return {
+		sourceId: sourceIdentifier(entry.sourceId),
+		sourceEpoch: hostEventString(entry.sourceEpoch, "sourceEpoch"),
+		throughSequence: hostEventInteger(entry.throughSequence, "throughSequence", 0),
+	};
+}
+
+export function parseHostEventReplayGap(value: unknown): HostEventReplayGap {
+	const entry = hostEventRecord(
+		value,
+		["sourceId", "sourceEpoch", "scopeVersion", "generation", "afterSequence", "throughSequence", "reason"],
+		"host event replay gap",
+	);
+	if (entry.reason !== "consumer_inactive") throw new HostEventError("invalid", "Unknown replay gap reason.");
+	const afterSequence = hostEventInteger(entry.afterSequence, "afterSequence", 0);
+	const throughSequence = hostEventInteger(entry.throughSequence, "throughSequence");
+	if (throughSequence <= afterSequence || throughSequence === Number.MAX_SAFE_INTEGER)
+		throw new HostEventError("invalid", "Replay gap must advance to a bounded source position.");
+	return {
+		...parseHostEventCatchUp({
+			sourceId: entry.sourceId,
+			sourceEpoch: entry.sourceEpoch,
+			scopeVersion: entry.scopeVersion,
+			generation: entry.generation,
+		}),
+		afterSequence,
+		throughSequence,
+		reason: entry.reason,
+	};
+}
+
+export function parseHostEventSubscriptionInput(value: unknown): HostEventSubscriptionInput {
+	const entry = hostEventRecord(value, ["threadKey", "subject", "wake"], "host event subscription");
+	if (entry.wake !== "never" && entry.wake !== "resume_same_task")
+		throw new HostEventError("invalid", "Unknown host event wake policy.");
+	const subject = parseCiSubject(entry.subject);
+	const threadKey = hostEventString(entry.threadKey, "threadKey");
+	if (threadKey !== ciThreadKey(subject))
+		throw new HostEventError("invalid", "Subscription thread does not identify its CI workflow.");
+	return { threadKey, subject, wake: entry.wake };
+}
+
+export function hostEventSubscriptionId(taskId: string, threadKey: string): string {
+	return `hes-${hostEventHash("pi-host-event-subscription-v1", [taskId, threadKey])}`;
+}
+
+export function parseHostEventDeliveryBinding(value: unknown): HostEventDeliveryBinding {
+	const binding = parseWorkerHostEventRecord(value);
+	if (!binding) throw new HostEventError("invalid", "Host event delivery binding is invalid.");
+	return binding;
+}
+
+export function parseHostEventTranscriptReceipt(value: unknown): HostEventTranscriptReceipt {
+	const entry = hostEventRecord(
+		value,
+		["sessionId", "sessionFile", "entryId", "taskId", "attemptId", "messageId", "contentDigest", "bindingDigest"],
+		"host event transcript receipt",
+	);
+	return {
+		sessionId: hostEventString(entry.sessionId, "sessionId"),
+		sessionFile: hostEventString(entry.sessionFile, "sessionFile", MAX_WORKER_AUTHORITY_PATH_LENGTH),
+		entryId: hostEventString(entry.entryId, "entryId"),
+		taskId: hostEventString(entry.taskId, "taskId"),
+		attemptId: hostEventString(entry.attemptId, "attemptId"),
+		messageId: hostEventString(entry.messageId, "messageId"),
+		contentDigest: hostEventDigest(entry.contentDigest, "contentDigest"),
+		bindingDigest: hostEventDigest(entry.bindingDigest, "bindingDigest"),
+	};
+}
+
+export function assertHostEventReceiptMatchesBinding(
+	receipt: HostEventTranscriptReceipt,
+	binding: HostEventDeliveryBinding,
+): void {
+	if (
+		receipt.bindingDigest !== binding.bindingDigest ||
+		receipt.contentDigest !== binding.contentDigest ||
+		receipt.messageId !== binding.messageId ||
+		receipt.taskId !== binding.execution.taskId ||
+		receipt.attemptId !== binding.execution.attemptId ||
+		receipt.sessionId !== binding.execution.sessionId ||
+		receipt.sessionFile !== binding.execution.sessionFile
+	)
+		throw new HostEventError("identity_conflict", "Transcript receipt differs from admitted binding.");
+}

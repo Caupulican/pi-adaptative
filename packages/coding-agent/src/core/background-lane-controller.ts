@@ -100,6 +100,13 @@ import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { SUBMIT_REPORT_TOOL_NAME, workerReportClaimText } from "./delegation/worker-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
+import type {
+	HostEventControlPort,
+	HostEventControlScope,
+	HostEventQuery,
+	HostEventSubscriptionChange,
+} from "./events/host-event-control.ts";
+import { HostEventSessionController } from "./events/host-event-session-controller.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
@@ -552,6 +559,67 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
 		return this._workerLifecycle?.getTaskRuntimeSnapshot();
+	}
+
+	getHostEventSubjects() {
+		return this._workerLifecycle?.ledger.runtime.hostEvents.subscribedSubjects() ?? [];
+	}
+
+	readHostEvents(query: HostEventQuery, scope?: HostEventControlScope) {
+		return this._getHostEventControl().readHostEvents(query, scope);
+	}
+
+	changeHostEventSubscriptions(input: HostEventSubscriptionChange, scope?: HostEventControlScope) {
+		return this._getHostEventControl().changeHostEventSubscriptions(input, scope);
+	}
+
+	private _getHostEventControl(): HostEventControlPort {
+		if (!this.deps.isDelegateToolActive())
+			throw new Error("Worker delegation control is unavailable in this UAC surface.");
+		const control = this._getWorkerController().getAgentControl();
+		if (!control.readHostEvents || !control.changeHostEventSubscriptions)
+			throw new Error("Host event control is unavailable.");
+		return control as HostEventControlPort;
+	}
+
+	/** Runtime resources own this binding's lifetime; every accepted event uses the shared task ledger. */
+	openHostEventSession(signal: AbortSignal): HostEventSessionController {
+		const manager = this.deps.getSessionManager();
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile();
+		const assertCurrent = () => {
+			signal.throwIfAborted();
+			if (
+				this.deps.isDisposed() ||
+				this.deps.getSessionManager() !== manager ||
+				manager.getSessionId() !== sessionId ||
+				manager.getSessionFile() !== sessionFile
+			)
+				throw new Error("Host events belong to a retired session.");
+		};
+		assertCurrent();
+		return new HostEventSessionController({
+			runtime: this._getWorkerLifecycle().ledger.runtime,
+			agentDir: this.deps.getAgentDir(),
+			sessionId,
+			signal,
+			assertCurrent,
+			captureOrigin: () => captureWorkerReceiptOrigin(manager, assertCurrent),
+			canDeliver: () => !this.deps.isDisposed() && this.deps.getSettingsManager().getProactivitySettings().enabled,
+			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
+			subscribeSettings: (listener) => this.deps.getSettingsManager().subscribeChanges(listener),
+			deliverParent: (input, options) => this.deps.deliverNotes(input, options),
+			deliverTask: async (delivery, active) => {
+				const control = this._getWorkerController().getAgentControl();
+				return control.deliverHostEvent ? control.deliverHostEvent(delivery, active) : "unavailable";
+			},
+			reconcileTask: (delivery) => {
+				const control = this._getWorkerController().getAgentControl();
+				if (!control.reconcileHostEventDelivery) throw new Error("Host event reconciliation is unavailable.");
+				control.reconcileHostEventDelivery(delivery);
+			},
+			warn: (message) => this._safeWarn(message),
+		});
 	}
 
 	getWorkerResult(laneId: string): WorkerResultContract | undefined {

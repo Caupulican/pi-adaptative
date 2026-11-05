@@ -3617,7 +3617,10 @@ export class SessionManager {
 	}
 
 	/** The physical parent-input boundary; lookup and append share the canonical transcript lock. */
-	appendParentInput(message: CustomMessage<unknown>): ParentInputAppendReceipt {
+	appendParentInput(
+		message: CustomMessage<unknown>,
+		withAppend?: (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt,
+	): ParentInputAppendReceipt {
 		const candidate = parentInputOf({
 			type: "custom_message",
 			id: "candidate",
@@ -3646,7 +3649,17 @@ export class SessionManager {
 			}
 			if (index.pendingInputs().length >= MAX_PENDING_PARENT_INPUTS)
 				throw new Error("Pending parent input capacity exceeded.");
-			return { ...this._appendParentMessage(message), created: true };
+			let admissionOpen = true;
+			const append = (): ParentInputAppendReceipt => {
+				if (!admissionOpen) throw new Error("Parent input append admission has ended.");
+				admissionOpen = false;
+				return { ...this._appendParentMessage(message), created: true };
+			};
+			try {
+				return withAppend ? withAppend(append) : append();
+			} finally {
+				admissionOpen = false;
+			}
 		});
 	}
 

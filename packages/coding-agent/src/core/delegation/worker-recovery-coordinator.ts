@@ -551,6 +551,7 @@ export class WorkerRecoveryCoordinator {
 			instructions: attempt.dispatch.instructions,
 			objectiveId: task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null,
 			...(attempt.dispatch.knowledgeReferences?.length ? { knowledge: attempt.dispatch.knowledgeReferences } : {}),
+			...(attempt.dispatch.subscriptions?.length ? { subscriptions: attempt.dispatch.subscriptions } : {}),
 			...(attempt.dispatch.receiptOrigin ? { receiptOrigin: attempt.dispatch.receiptOrigin } : {}),
 			profileId: attempt.dispatch.profileId,
 			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),

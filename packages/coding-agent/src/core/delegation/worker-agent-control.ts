@@ -1,7 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
+import { parseWorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import {
+	type HostEventDeliveryBinding,
+	type HostEventSubscriptionInput,
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
+import type { HostEventControlPort } from "../events/host-event-control.ts";
+import type { HostEventRuntime } from "../events/host-event-runtime.ts";
+import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import {
 	type KnowledgeGrantReference,
@@ -152,6 +163,7 @@ export interface WorkerAgentMessageEnvelope {
  */
 export interface WorkerAgentNewTaskCorrelation {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	/** Host-admitted command declaration; never re-derived from a later parent snapshot. */
 	controlForkMode?: string;
 	goalId?: string;
@@ -163,7 +175,8 @@ export interface WorkerAgentNewTaskCorrelation {
 
 export type WorkerAgentTaskMetadata =
 	| { kind: "agent_turn"; dependsOnTaskIds?: readonly string[]; newTask?: WorkerAgentNewTaskCorrelation }
-	| { kind: "terminal_handoff"; sourceAttemptId: string };
+	| { kind: "terminal_handoff"; sourceAttemptId: string }
+	| { kind: "host_event"; binding: HostEventDeliveryBinding };
 
 export interface WorkerAgentMessage {
 	/** Host-owned lineage captured at acceptance; excluded from replay intent and never recaptured. */
@@ -373,6 +386,7 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	 */
 	newTask?: {
 		knowledgeReferences?: readonly KnowledgeGrantReference[];
+		subscriptions?: readonly HostEventSubscriptionInput[];
 		controlForkMode?: string;
 		goal?: GoalState;
 		requirementIds?: readonly string[];
@@ -499,7 +513,10 @@ export interface WorkerAgentLaneResolution {
 }
 
 /** One canonical host port for model-facing logical-agent controls. */
-export interface WorkerAgentControlPort {
+export interface WorkerAgentControlPort extends Partial<HostEventControlPort> {
+	/** Host-only evidence transport; model tools never construct a delivery binding. */
+	deliverHostEvent?(delivery: HostEventDelivery, signal: AbortSignal): Promise<"queued" | "dormant" | "unavailable">;
+	reconcileHostEventDelivery?(delivery: HostEventDelivery): void;
 	/** Lifecycle and physical-release notifications; the subscriber owns detaching its listener. */
 	subscribeStateChanges(listener: () => void): () => void;
 	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
@@ -822,6 +839,24 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 					...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
 					...(newTask ? { newTask } : {}),
 				};
+			} else if (
+				taskRecord.kind === "host_event" &&
+				Object.keys(taskRecord).every((field) => field === "kind" || field === "binding")
+			) {
+				const binding = parseWorkerHostEventRecord(taskRecord.binding);
+				if (
+					!binding ||
+					typeof message.content !== "string" ||
+					binding.execution.agentId !== agentId ||
+					binding.messageId !== message.messageId ||
+					binding.contentDigest !== createHash("sha256").update(message.content).digest("hex") ||
+					message.expectReply ||
+					message.senderAgentId ||
+					message.threadId ||
+					message.replyToMessageId
+				)
+					throw new Error("Worker mailbox host-event binding differs from its message.");
+				task = { kind: "host_event", binding };
 			} else if (
 				taskRecord.kind === "terminal_handoff" &&
 				typeof taskRecord.sourceAttemptId === "string" &&
@@ -1146,6 +1181,7 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 				field === "requirementIds" ||
 				field === "acceptanceCriterionIds" ||
 				field === "resourcePointerIds" ||
+				field === "subscriptions" ||
 				field === "knowledgeReferences",
 		)
 	) {
@@ -1155,6 +1191,16 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
 	}
 	return normalizeWorkerAgentNewTaskCorrelation({
+		...(correlation.subscriptions === undefined
+			? {}
+			: {
+					subscriptions: hostEventArray(
+						correlation.subscriptions,
+						MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+						parseHostEventSubscriptionInput,
+						"new task subscriptions",
+					),
+				}),
 		...(correlation.knowledgeReferences === undefined
 			? {}
 			: { knowledgeReferences: parseKnowledgeGrantReferences(correlation.knowledgeReferences) }),
@@ -1214,7 +1260,17 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 		"new task resource pointer ids",
 	);
 	const knowledgeReferences = parseKnowledgeGrantReferences(value.knowledgeReferences ?? []);
+	const subscriptions =
+		value.subscriptions === undefined
+			? undefined
+			: hostEventArray(
+					value.subscriptions,
+					MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+					parseHostEventSubscriptionInput,
+					"new task subscriptions",
+				);
 	return {
+		...(subscriptions === undefined ? {} : { subscriptions }),
 		...(knowledgeReferences.length > 0 ? { knowledgeReferences } : {}),
 		...(goalId ? { goalId } : {}),
 		...(controlForkMode ? { controlForkMode } : {}),
@@ -1237,6 +1293,11 @@ export function normalizeWorkerAgentDependencyTaskIds(value: unknown): readonly 
 
 function normalizeTaskMetadata(task: WorkerAgentTaskMetadata | undefined): WorkerAgentTaskMetadata | undefined {
 	if (task === undefined) return undefined;
+	if (task.kind === "host_event") {
+		const binding = parseWorkerHostEventRecord(task.binding);
+		if (!binding) throw new TypeError("Worker host-event binding is invalid.");
+		return { kind: "host_event", binding };
+	}
 	if (task.kind === "agent_turn") {
 		const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(task.dependsOnTaskIds);
 		const newTask = normalizeWorkerAgentNewTaskCorrelation(task.newTask);
@@ -1268,11 +1329,17 @@ function sameTaskMetadata(
 	if (left?.kind === "terminal_handoff" && right?.kind === "terminal_handoff") {
 		return left.sourceAttemptId === right.sourceAttemptId;
 	}
+	if (left?.kind === "host_event" && right?.kind === "host_event")
+		return isDeepStrictEqual(left.binding, right.binding);
 	return true;
 }
 
 function hasExternalReplayAuthority(message: Pick<WorkerAgentMessage, "replyToMessageId" | "task">): boolean {
-	return message.replyToMessageId !== undefined || message.task?.kind === "terminal_handoff";
+	return (
+		message.replyToMessageId !== undefined ||
+		message.task?.kind === "terminal_handoff" ||
+		message.task?.kind === "host_event"
+	);
 }
 
 function isPendingMessage(message: Pick<WorkerAgentMessage, "deliveredAt" | "failedAt">): boolean {
@@ -1580,6 +1647,36 @@ export class WorkerAgentMailbox {
 		idempotencyKey?: string;
 		onAdmitted?: () => void;
 	}): WorkerAgentEnqueueReceipt {
+		if (input.task?.kind === "host_event")
+			throw new TypeError("Host events require their dedicated guarded mailbox admission.");
+		return this.enqueueMessage(input);
+	}
+
+	enqueueHostEvent(
+		binding: HostEventDeliveryBinding,
+		content: string,
+		hostEvents: HostEventRuntime,
+	): WorkerAgentEnqueueReceipt {
+		if (
+			binding.execution.agentId !== this.agentId ||
+			binding.contentDigest !== createHash("sha256").update(content).digest("hex")
+		)
+			throw new TypeError("Host event content or agent differs from its binding.");
+		return this.enqueueMessage(
+			{
+				kind: "follow_up",
+				content,
+				task: { kind: "host_event", binding },
+				receiptOrigin: hostEvents.getEvent(binding.eventId)?.origin,
+			},
+			{ binding, hostEvents },
+		);
+	}
+
+	private enqueueMessage(
+		input: Parameters<WorkerAgentMailbox["enqueueWithReceipt"]>[0],
+		hostEvent?: { binding: HostEventDeliveryBinding; hostEvents: HostEventRuntime },
+	): WorkerAgentEnqueueReceipt {
 		const task = normalizeTaskMetadata(input.task);
 		// A task-bearing message carries the worker's brief and is retained verbatim; ordinary peer
 		// coordination keeps its normalizing trim.
@@ -1602,9 +1699,11 @@ export class WorkerAgentMailbox {
 			throw new TypeError("Worker control idempotency key is invalid.");
 		}
 		const message: WorkerAgentMessage = {
-			messageId: idempotencyKey
-				? workerAgentMessageId(this.parentSessionId, idempotencyKey)
-				: `worker-message-${randomUUID()}`,
+			messageId:
+				hostEvent?.binding.messageId ??
+				(idempotencyKey
+					? workerAgentMessageId(this.parentSessionId, idempotencyKey)
+					: `worker-message-${randomUUID()}`),
 			kind: input.kind,
 			env: { v: 1, k: input.kind },
 			content,
@@ -1658,7 +1757,11 @@ export class WorkerAgentMailbox {
 						);
 					}
 					// A receipt-owned message that failed before delivery is reported as failed, never as accepted.
-					if (!externallyReplayOwned && existing.failedAt !== undefined && existing.deliveredAt === undefined) {
+					if (
+						(!externallyReplayOwned || hostEvent) &&
+						existing.failedAt !== undefined &&
+						existing.deliveredAt === undefined
+					) {
 						throw new WorkerControlDeadLetteredError(existing.messageId, existing.failureReason);
 					}
 					queued = existing;
@@ -1731,6 +1834,14 @@ export class WorkerAgentMailbox {
 					assertWorkerReceiptAdmission(input.receiptOrigin);
 				}
 			},
+			undefined,
+			hostEvent
+				? (write) =>
+						hostEvent.hostEvents.guardedDelivery(hostEvent.binding, "enqueue", (transaction) => {
+							write();
+							transaction.acknowledgeMailbox();
+						})
+				: undefined,
 		);
 		if (created) this.notify();
 		if (completedReplay) return { status: "completed_replay", messageId: message.messageId, created: false };
@@ -1750,7 +1861,7 @@ export class WorkerAgentMailbox {
 
 	/** Oldest-first executable intents that have not reached the durable transcript boundary. */
 	pendingTaskBearing(): WorkerAgentMessage[] {
-		return this.pending().filter((message) => message.task !== undefined);
+		return this.pending().filter((message) => message.task !== undefined && message.task.kind !== "host_event");
 	}
 
 	/** Cancellation eligibility shared with the durable ordinary-task transition. */
@@ -1760,6 +1871,61 @@ export class WorkerAgentMailbox {
 
 	acknowledgeDelivered(messageId: string): void {
 		this.markTimestamp(messageId, "deliveredAt");
+	}
+
+	/** Canonical consumption or locked no-append retirement releases only this exact transport copy. */
+	settleHostEvent(binding: HostEventDeliveryBinding, hostEvents: HostEventRuntime): void {
+		let changed = false;
+		const consumed = hostEvents.getDelivery(binding.deliveryId)?.transcriptReceipt !== undefined;
+		// A settled/absent physical copy needs no authority to mutate a project transcript that may
+		// already have a new owner. Its exact durable mailbox state is still inspected under lock.
+		const alreadySettled = withSessionBundleFileInspection(this.agentDir, this.parentSessionId, this.file, () => {
+			const message = this.read().messages.find((candidate) => candidate.messageId === binding.messageId);
+			if (message && (message.task?.kind !== "host_event" || !isDeepStrictEqual(message.task.binding, binding)))
+				throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
+			if (message && message.deliveredAt === undefined && message.failedAt === undefined) return false;
+			hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
+				if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
+					throw new Error("Host event transport still owns an unconsumed binding.");
+				transaction.acknowledgeMailboxSettlement();
+			});
+			return true;
+		});
+		if (alreadySettled) return;
+		this.update(
+			(state) => ({
+				...state,
+				messages: state.messages.map((message) => {
+					if (message.messageId !== binding.messageId || message.task?.kind !== "host_event") return message;
+					if (!isDeepStrictEqual(message.task.binding, binding))
+						throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
+					if (message.deliveredAt || message.failedAt) return message;
+					changed = true;
+					// Authority is checked under the store lock immediately around this write.
+					return consumed
+						? { ...message, deliveredAt: transitionTimestamp(message.createdAt) }
+						: {
+								...message,
+								failedAt: transitionTimestamp(message.createdAt),
+								failureReason: "host_event_binding_retired",
+							};
+				}),
+			}),
+			false,
+			false,
+			undefined,
+			undefined,
+			(write) =>
+				hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
+					if ((transaction.delivery.transcriptReceipt !== undefined) !== consumed)
+						throw new Error("Host event consumption changed during transport settlement; retry reconciliation.");
+					if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
+						throw new Error("Host event transport still owns an unconsumed binding.");
+					write();
+					transaction.acknowledgeMailboxSettlement();
+				}),
+		);
+		if (changed) this.notify();
 	}
 
 	awaitingReplies(): WorkerAgentMessage[] {
@@ -2140,6 +2306,8 @@ export class WorkerAgentMailbox {
 		this.update((state) => {
 			let deliveredAt: string | undefined;
 			const messages: WorkerAgentMessage[] = state.messages.map((message) => {
+				if (message.messageId === normalized && message.task?.kind === "host_event")
+					throw new Error("Host event acknowledgement requires canonical consumption proof.");
 				if (message.messageId !== normalized || message[field] !== undefined || message.failedAt !== undefined) {
 					return message;
 				}
@@ -2247,6 +2415,7 @@ export class WorkerAgentMailbox {
 		replayEvidenceAdmission = false,
 		beforeWrite?: () => void,
 		retention?: SessionBundleDeletionReservation,
+		guardWrite?: (write: () => void) => void,
 	): void {
 		const mutate = () =>
 			withFileLockSync(this.file, () => {
@@ -2307,10 +2476,14 @@ export class WorkerAgentMailbox {
 						encodedStateBytes(next),
 						bytesWithoutAddedReceipt,
 					);
-					if (changed) {
-						beforeWrite?.();
-						writeWorkerMailboxRecord(this.file, next, record.reference);
-					}
+					const write = () => {
+						if (changed) {
+							beforeWrite?.();
+							writeWorkerMailboxRecord(this.file, next, record.reference);
+						}
+					};
+					if (guardWrite) guardWrite(write);
+					else write();
 				};
 				if (record.reference)
 					WorkerConversationStore.withProjectMailboxMutation(

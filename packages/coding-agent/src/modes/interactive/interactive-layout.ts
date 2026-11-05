@@ -6,7 +6,7 @@ import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { CacheClock } from "../../core/cache-clock.ts";
-import { onCiStatusChange, readCiStatusView } from "../../core/ci-status-view.ts";
+import type { CiStatusSource } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
@@ -45,6 +45,7 @@ export interface InteractiveLayoutSettingsSource {
 /** What the layout needs from the interactive host; everything else it owns itself. */
 export interface InteractiveLayoutPort {
 	readonly hasHumanAudience: boolean;
+	readonly ciStatus?: CiStatusSource;
 	readonly ui: TUI;
 	readonly headerContainer: Container;
 	readonly chatContainer: Container;
@@ -349,7 +350,7 @@ export class InteractiveLayout {
 		const unsubscribeForegroundActivity = session.subscribeForegroundActivity(() => this.settleCompletedGoal());
 		flow.observeLanes(session.getLaneRecords());
 		const unsubscribePullRequest = onPullRequestChange(() => port.ui.requestRender());
-		const unsubscribeCiStatus = onCiStatusChange(() => port.ui.requestRender());
+		const unsubscribeCiStatus = port.ciStatus?.subscribeStatus(() => port.ui.requestRender());
 		const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
 			flow.observeLanes(records);
 			this.settleCompletedGoal();
@@ -394,7 +395,7 @@ export class InteractiveLayout {
 			unsubscribeForegroundActivity();
 			unsubscribeLanes();
 			unsubscribePullRequest();
-			unsubscribeCiStatus();
+			unsubscribeCiStatus?.();
 			this.stopCacheTicker();
 			port.activityLane?.setExternalClock("decision-graph", false);
 			this.disposeOperatorProjection = undefined;
@@ -459,7 +460,7 @@ export class InteractiveLayout {
 			},
 			getSessionWorkState: () => port.getSession().getSessionWorkState(),
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
-			getCiStatus: () => readCiStatusView(port.getSessionManager().getCwd()),
+			getCiStatus: () => port.ciStatus?.readStatus(),
 			getTokensPerSecond: () => this.generationRate.tokensPerSecond,
 			getCacheRemainingMs: () => this.cacheClock.remainingMs(),
 			getPeerFindingCount: () => port.getSession().getSemanticVerificationObligations().length,

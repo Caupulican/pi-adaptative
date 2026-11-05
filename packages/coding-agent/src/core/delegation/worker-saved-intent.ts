@@ -1,4 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
+import {
+	type HostEventSubscriptionInput,
+	hostEventArray,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
 import type { KnowledgeGrant, KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import {
@@ -20,6 +26,7 @@ import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 export interface WorkerSavedIntent {
 	readonly executionContract: WorkerExecutionContract;
 	readonly knowledgeReferences: readonly KnowledgeGrantReference[];
+	readonly subscriptions: readonly HostEventSubscriptionInput[];
 	/** null deliberately binds this task to no goal, including goals created in the future. */
 	readonly objectiveId: string | null;
 	readonly receiptOrigin: WorkerReceiptOrigin;
@@ -28,7 +35,13 @@ export interface WorkerSavedIntent {
 export function parseWorkerSavedIntent(value: unknown): WorkerSavedIntent {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["executionContract", "knowledgeReferences", "objectiveId", "receiptOrigin"]) ||
+		!hasOnlyKeys(value, [
+			"executionContract",
+			"knowledgeReferences",
+			"subscriptions",
+			"objectiveId",
+			"receiptOrigin",
+		]) ||
 		(value.objectiveId !== null &&
 			(typeof value.objectiveId !== "string" ||
 				!isGoalObjectiveId(value.objectiveId) ||
@@ -46,6 +59,12 @@ export function parseWorkerSavedIntent(value: unknown): WorkerSavedIntent {
 	return {
 		executionContract,
 		knowledgeReferences: parseKnowledgeGrantReferences(value.knowledgeReferences),
+		subscriptions: hostEventArray(
+			value.subscriptions ?? [],
+			MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+			parseHostEventSubscriptionInput,
+			"saved worker subscriptions",
+		),
 		objectiveId: value.objectiveId,
 		receiptOrigin,
 	};
@@ -55,6 +74,7 @@ interface SavedIntentAdmission {
 	readonly executionContract: WorkerExecutionContract;
 	readonly knowledgeGrant?: KnowledgeGrant;
 	readonly resourcePointerIds: readonly string[];
+	readonly subscriptions: readonly HostEventSubscriptionInput[];
 }
 
 function comparableContract(contract: WorkerExecutionContract) {
@@ -90,6 +110,7 @@ export async function captureWorkerSavedIntent(deps: {
 			comparableContract(current.executionContract),
 		) ||
 		!isDeepStrictEqual(initial.resourcePointerIds, current.resourcePointerIds) ||
+		!isDeepStrictEqual(initial.subscriptions, current.subscriptions) ||
 		(initial.knowledgeGrant && !initial.knowledgeGrant.isCurrent())
 	)
 		throw new Error("Saved worker intent changed during admission.");
@@ -104,6 +125,7 @@ export async function captureWorkerSavedIntent(deps: {
 			worker: { ...executionContract.worker, resourcePointers: resources.pointers },
 		},
 		knowledgeReferences: initial.knowledgeGrant?.references ?? [],
+		subscriptions: initial.subscriptions,
 		objectiveId,
 		receiptOrigin: deps.receiptOrigin,
 	});

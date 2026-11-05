@@ -74,6 +74,7 @@ export class RoutineWorkerExecutor {
 			if (
 				attempt.dispatch.instructions !== request.instructions ||
 				!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], request.intent.knowledgeReferences) ||
+				!isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], request.intent.subscriptions) ||
 				!isDeepStrictEqual(attempt.dispatch.receiptOrigin, request.intent.receiptOrigin)
 			)
 				throw new Error("Routine dispatch identity has conflicting saved intent.");

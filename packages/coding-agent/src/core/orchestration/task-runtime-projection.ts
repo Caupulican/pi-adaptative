@@ -1,3 +1,5 @@
+import { HOST_EVENT_RECORD_LIMITS, hostEventCapacity } from "../events/host-event-capacity.ts";
+import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import {
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
@@ -23,6 +25,7 @@ import {
 
 export function emptyProjection(): TaskRuntimeProjection {
 	return {
+		...emptyHostEventProjection(),
 		lastOrdinal: 0,
 		agents: {},
 		objectives: {},
@@ -35,6 +38,7 @@ export function emptyProjection(): TaskRuntimeProjection {
 }
 
 export const PROJECTION_RECORD_FIELDS = [
+	...HOST_EVENT_RECORD_FIELDS,
 	"agents",
 	"objectives",
 	"tasks",
@@ -88,6 +92,7 @@ function retainedRecordKeyBytes(key: string, label: string): number {
 function emptyProjectionSerializedBytes(lastOrdinal: number): number {
 	return serializedJsonBytes(
 		{
+			...emptyHostEventProjection(),
 			lastOrdinal,
 			agents: {},
 			objectives: {},
@@ -165,6 +170,18 @@ export class ProjectionByteTracker {
 	track<Value>(field: ProjectionRecordField, target: Record<string, Value>): Record<string, Value> {
 		this.entryCounts.set(field, countRecordEntries(target));
 		return new Proxy(target, {
+			deleteProperty: (record, property) => {
+				if (typeof property !== "string" || !Object.hasOwn(record, property))
+					return Reflect.deleteProperty(record, property);
+				const count = this.entryCounts.get(field) ?? 0;
+				this.bytes -=
+					retainedRecordKeyBytes(property, field) +
+					1 +
+					retainedRecordSerializedBytes(record[property], field) +
+					(count > 1 ? 1 : 0);
+				this.entryCounts.set(field, count - 1);
+				return Reflect.deleteProperty(record, property);
+			},
 			set: (record, property, value) => {
 				if (typeof property !== "string") {
 					throw new DurableTaskRuntimeError(`Orchestration projection.${field} record key is invalid.`);
@@ -361,6 +378,7 @@ export function assertRetainedProjectionNestedCollections(
 }
 
 export function assertProjectionWithinLimits(projection: TaskRuntimeProjection): void {
+	const eventCapacity = hostEventCapacity(projection);
 	assertRecordWithinLimit(projection.agents, MAX_ORCHESTRATION_AGENT_BINDINGS, "agent binding");
 	assertRecordWithinLimit(projection.objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective");
 	assertRecordWithinLimit(projection.tasks, MAX_ORCHESTRATION_TASKS, "task");
@@ -375,7 +393,8 @@ export function assertProjectionWithinLimits(projection: TaskRuntimeProjection):
 		projection.checkpoints,
 		"orchestration projection",
 	);
-	projectionSerializedBytes(projection);
+	if (projectionSerializedBytes(projection) + eventCapacity.reservedBytes > MAX_ORCHESTRATION_PROJECTION_BYTES)
+		throw new DurableTaskRuntimeError("Orchestration projection lacks reserved host event settlement bytes.");
 }
 
 function countRecordEntries(values: Readonly<Record<string, unknown>>): number {
@@ -395,6 +414,10 @@ export function projectionCapacity(projection: TaskRuntimeProjection): Orchestra
 		"orchestration projection",
 	);
 	const counts = {
+		eventSources: countRecordEntries(projection.eventSources),
+		hostEvents: countRecordEntries(projection.hostEvents),
+		threadSubscriptions: countRecordEntries(projection.threadSubscriptions),
+		eventDeliveries: countRecordEntries(projection.eventDeliveries),
 		agents: countRecordEntries(projection.agents),
 		objectives: countRecordEntries(projection.objectives),
 		tasks: countRecordEntries(projection.tasks),
@@ -405,6 +428,7 @@ export function projectionCapacity(projection: TaskRuntimeProjection): Orchestra
 		evidence,
 	};
 	const limits = {
+		...HOST_EVENT_RECORD_LIMITS,
 		agents: MAX_ORCHESTRATION_AGENT_BINDINGS,
 		objectives: MAX_ORCHESTRATION_OBJECTIVES,
 		tasks: MAX_ORCHESTRATION_TASKS,
@@ -418,6 +442,10 @@ export function projectionCapacity(projection: TaskRuntimeProjection): Orchestra
 		counts,
 		limits,
 		headroom: {
+			eventSources: limits.eventSources - counts.eventSources,
+			hostEvents: limits.hostEvents - counts.hostEvents,
+			threadSubscriptions: limits.threadSubscriptions - counts.threadSubscriptions,
+			eventDeliveries: limits.eventDeliveries - counts.eventDeliveries,
 			agents: limits.agents - counts.agents,
 			objectives: limits.objectives - counts.objectives,
 			tasks: limits.tasks - counts.tasks,

@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { projectPath } from "../session-fixture.ts";
 import { runJourney1CollectionPhase } from "./journey-1-collection.ts";
 import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
+import { runJourney1HostEventsPhase } from "./journey-1-host-events.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1KnowledgePhase } from "./journey-1-knowledge.ts";
@@ -116,6 +117,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1PiChatPhase(world);
 			await runJourney1ProactivityPhase(world);
 			await runJourney1RoutinesPhase(world);
+			await runJourney1HostEventsPhase(world);
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},

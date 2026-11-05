@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, opendirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -66,6 +67,8 @@ import {
 	workerControlOf,
 } from "../../kernel/worker-control-stamp.ts";
 import { workerConversationSessionsDir } from "../agent-paths.ts";
+import type { HostEventDeliveryBinding, HostEventTranscriptReceipt } from "../events/host-event-contract.ts";
+import type { HostEventRuntime } from "../events/host-event-runtime.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import {
 	usageDeltaFromProviderUsage,
@@ -392,7 +395,7 @@ function assertWorkerSessionHeadContent(
  */
 function workerControlMessageId(entry: Readonly<{ workerControl?: unknown }>, content: string): string | undefined {
 	const record = parseWorkerControlRecord(entry.workerControl);
-	if (record) return record.k === "task" ? undefined : record.id;
+	if (record) return record.k === "task" || record.k === "host_event" ? undefined : record.id;
 	// comms-legacy-decoder: an entry persisted before entries carried `workerControl` names its mailbox message only in the rendered header.
 	return /^\[Worker control (worker-message-[^\]\s]+)(?: [^\]]+)?\]\n/.exec(content)?.[1];
 }
@@ -1437,6 +1440,8 @@ export class WorkerConversation {
 		message: Message,
 		appendIfMissing: boolean,
 	): WorkerControlTranscriptReconciliation {
+		if (workerControlOf(message)?.k === "host_event")
+			throw new TypeError("Host events require guarded transcript consumption.");
 		if (message.role !== "user" || typeof message.content !== "string" || message.content !== expectation.content) {
 			throw new TypeError("Worker control transcript message does not match its expectation.");
 		}
@@ -1452,6 +1457,112 @@ export class WorkerConversation {
 			},
 			true,
 			appendIfMissing ? "mutation" : "inspection",
+		);
+	}
+
+	/** The transcript lock and runtime lock jointly fence physical append, receipt recovery and rebind. */
+	withHostEventControl<T>(parentSessionId: string, operation: () => T): T {
+		if (!this.agentDir)
+			throw new WorkerConversationOwnershipError("Host event control requires a durable worker conversation.");
+		return withSessionBundleAdmission(this.agentDir, parentSessionId, () =>
+			this.withCanonicalSessionLock(() => operation()),
+		);
+	}
+
+	reconcileHostEvent(
+		binding: HostEventDeliveryBinding,
+		message: Message,
+		hostEvents: HostEventRuntime,
+		mode: "consume" | "reconcile",
+	): WorkerControlTranscriptReconciliation {
+		const control = workerControlOf(message);
+		if (
+			message.role !== "user" ||
+			typeof message.content !== "string" ||
+			control?.k !== "host_event" ||
+			!isDeepStrictEqual(control.hostEvent, binding) ||
+			createHash("sha256").update(message.content).digest("hex") !== binding.contentDigest ||
+			this.resumeContext.sessionId !== binding.execution.sessionId ||
+			this.resumeContext.sessionFile !== binding.execution.sessionFile ||
+			!this.agentDir
+		)
+			throw new TypeError("Host event does not belong to this exact worker transcript.");
+		if (mode === "consume" && !isDeepStrictEqual(this.projectClaim, binding.execution.contextClaim))
+			throw new WorkerConversationOwnershipError("Host event specialist context claim changed.");
+		const agentDir = this.agentDir;
+		const transcriptReceipt = (entryId: string): HostEventTranscriptReceipt => ({
+			sessionId: binding.execution.sessionId,
+			sessionFile: binding.execution.sessionFile,
+			entryId,
+			taskId: binding.execution.taskId,
+			attemptId: binding.execution.attemptId,
+			messageId: binding.messageId,
+			contentDigest: binding.contentDigest,
+			bindingDigest: binding.bindingDigest,
+		});
+		return withSessionBundleAdmission(agentDir, hostEvents.parentSessionId, () =>
+			this.withCanonicalSessionLock(
+				(sessionManager) => {
+					const boundary = attemptUsageBoundaryIndex(sessionManager, binding.execution.attemptId);
+					if (
+						boundary >= 0 &&
+						attemptUsageBoundaryIndex(sessionManager, binding.execution.attemptId, boundary + 1) >= 0
+					)
+						throw new WorkerConversationOwnershipError("Host event attempt has repeated transcript boundaries.");
+					const nextBoundary =
+						boundary < 0 ? -1 : attemptUsageBoundaryIndex(sessionManager, undefined, boundary + 1);
+					const end = nextBoundary < 0 ? sessionManager.getEntryCount() : nextBoundary;
+					let receipt: HostEventTranscriptReceipt | undefined;
+					visitWorkerSessionEntries(
+						sessionManager,
+						0,
+						sessionManager.getEntryCount(),
+						(entry, index, persistedBytes) => {
+							if (entry.type !== "message" || entry.message.role !== "user") return;
+							const stored = parseWorkerControlRecord(entry.workerControl);
+							if (isPlainRecord(entry.workerControl) && entry.workerControl.k === "host_event" && !stored)
+								throw new WorkerConversationOwnershipError(
+									"Worker transcript contains malformed host-event proof.",
+								);
+							if (stored?.k !== "host_event" || stored.id !== binding.messageId) return;
+							if (
+								receipt ||
+								persistedBytes !== undefined ||
+								boundary < 0 ||
+								index <= boundary ||
+								index >= end ||
+								!isDeepStrictEqual(stored.hostEvent, binding) ||
+								exactUserText(entry.message) !== message.content
+							)
+								throw new WorkerConversationOwnershipError(
+									"Host event physical receipt conflicts with its exact binding or attempt window.",
+								);
+							receipt = transcriptReceipt(entry.id);
+						},
+					);
+					if (receipt || mode === "reconcile")
+						return hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
+							if (receipt) transaction.consume(receipt);
+							else transaction.retireUnconsumedBinding();
+							return { delivered: receipt !== undefined, appended: false };
+						});
+					if (boundary < 0 || nextBoundary >= 0)
+						throw new WorkerConversationOwnershipError(
+							"Host event cannot append outside its current attempt boundary.",
+						);
+					return hostEvents.guardedDelivery(binding, "consume", (transaction) => {
+						const entryId = this.appendSessionEntryLocked(sessionManager, (owner) =>
+							owner.appendMessage(
+								carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control),
+							),
+						);
+						transaction.consume(transcriptReceipt(entryId));
+						return { delivered: true, appended: true };
+					});
+				},
+				mode === "reconcile",
+				mode === "consume" ? "mutation" : "inspection",
+			),
 		);
 	}
 
@@ -1551,6 +1662,7 @@ export class WorkerConversation {
 	/** Append one already-authorized worker message to the canonical transcript. */
 	appendMessage(message: WorkerTranscriptMessage, origin?: AgentMessageOrigin): string {
 		const control = workerControlOf(message);
+		if (control?.k === "host_event") throw new TypeError("Host events require guarded transcript consumption.");
 		return this.appendSessionEntry((sessionManager) =>
 			sessionManager.appendMessage(
 				carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control),
@@ -1855,6 +1967,10 @@ export class WorkerConversation {
 			}
 			for (let index = persistedMessages; index < normalizedSuffix.length; index += 1) {
 				const control = workerControlOf(suffix[index]!);
+				if (control?.k === "host_event")
+					throw new WorkerConversationOwnershipError(
+						"Missing host event consumption cannot be appended through generic transcript reconciliation.",
+					);
 				this.appendSessionEntryLocked(sessionManager, (owner) =>
 					owner.appendMessage(carryWorkerControl(structuredClone(normalizedSuffix[index]!), control)),
 				);

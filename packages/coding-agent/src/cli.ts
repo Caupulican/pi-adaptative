@@ -8,6 +8,7 @@
 import type { Args } from "./cli/args.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 import { BOT_DAEMON_COMMAND } from "./core/delegation/bot-daemon-command.ts";
+import { CI_STATUS_COMMAND, runCiStatusCommand } from "./host/ci/ci-status-command.ts";
 
 process.title = APP_NAME;
 process.env.PI_CODING_AGENT = "true";
@@ -23,6 +24,11 @@ const packageCommands = new Set(["install", "remove", "uninstall", "update", "li
 // Must run before HTTP/undici setup so a compiled `pi --version` cannot die on dispatcher init.
 if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
 	console.log(VERSION);
+	process.exit(0);
+}
+
+if (firstArg === CI_STATUS_COMMAND) {
+	await runCiStatusCommand(cliArgs.slice(1));
 	process.exit(0);
 }
 

@@ -1,4 +1,5 @@
 import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
+import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { WorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import type { WorkerResultReceipts } from "./worker-result-receipts.ts";
@@ -8,6 +9,7 @@ export {
 	type AgentResumeContext,
 	isResourcePointerKind,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	RESOURCE_POINTER_KINDS,
 	type ResourcePointer,
 	type ResourcePointerKind,
@@ -68,7 +70,6 @@ export const MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 /** Matches the bounded worker/process result contract retained by the execution plane. */
 export const MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES = 512 * 1024;
 export const MAX_WORKER_AUTHORITY_PATHS = 64;
-export const MAX_WORKER_AUTHORITY_PATH_LENGTH = 4 * 1024;
 export const MAX_WORKER_SOUL_LENGTH = 16 * 1024;
 
 export const WORKER_ROLES = [
@@ -322,6 +323,8 @@ export interface OrchestrationDispatchRequest {
 	taskId: string;
 	/** Owner-selected exact canonical references, scoped to this task rather than the persistent worker. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
+	/** Immutable initial task declaration, distinct from mutable runtime subscriptions. */
+	subscriptions?: readonly HostEventSubscriptionInput[];
 	/** Parent lineage captured for this dispatch, never inherited from worker birth identity. */
 	receiptOrigin?: WorkerReceiptOrigin;
 	profileId: string;
@@ -535,6 +538,21 @@ export const MANAGED_LANE_LIFETIMES = ["retained", "retired"] as const;
 export type ManagedLaneLifetime = (typeof MANAGED_LANE_LIFETIMES)[number];
 
 export const ORCHESTRATION_EVENT_TYPES = [
+	"host_source.registered",
+	"host_source.catchup_started",
+	"host_source.sealed",
+	"host_source.retired",
+	"host_source.replay_gap",
+	"host_event.accepted",
+	"host_event.delivery_bound",
+	"host_event.binding_retired",
+	"host_event.mailbox_accepted",
+	"host_event.mailbox_settled",
+	"host_event.consumed",
+	"host_event.root_consumed",
+	"host_event.settled",
+	"host_event.pruned",
+	"task.subscriptions_replaced",
 	"objective.created",
 	"objective.updated",
 	"objective.evidence_recorded",
