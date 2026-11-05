@@ -709,6 +709,8 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	expect(control.deliveryHold, "nothing holds a delivery within both bounds").toBeUndefined();
 	await withDeadline(trace, "daily bounds: the woken parent turn settles", wakeSettled.promise);
 	stopWake();
+	// The note is consumed at its request's terminal; the woken turn ends before the owner's next prompt.
+	await withDeadline(trace, "daily bounds: the woken parent turn ends", first.session.agent.waitForIdle());
 	expect(acceptedMode(first, wokenNote), "the note was accepted as a parent wake").toBe("turn");
 	expect(lanes.getProactivityDailyState()).toMatchObject({
 		measured: { reviewUsd: 0, turnWakes: 0 },
