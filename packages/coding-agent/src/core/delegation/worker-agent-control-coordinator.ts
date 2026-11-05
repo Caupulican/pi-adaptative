@@ -2115,7 +2115,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const agents = this.replyReconciliationAgents();
 		this.reconcileWorkerReplyOutboxes(agents);
 		for (const agent of agents) {
-			this.hostEventTransport.reconcileInactive(agent.agentId);
+			try {
+				this.hostEventTransport.reconcileInactive(agent.agentId);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				try {
+					this.options.warn?.(`Worker host-event transport reconciliation failed for ${agent.agentId}: ${reason}`);
+				} catch {
+					// Diagnostics are observers; the unsettled binding and its physical copy remain the retry source.
+				}
+			}
 			this.reconcileTaskBearingMailbox(agent.agentId);
 		}
 	}

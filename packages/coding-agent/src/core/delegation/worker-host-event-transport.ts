@@ -178,9 +178,17 @@ export class WorkerHostEventTransport {
 		)
 			return false;
 		try {
-			const result = conversation.reconcileHostEvent(binding, message, events, "consume");
-			mailbox.settleHostEvent(binding, events);
-			return result.appended;
+			let appended = false;
+			mailbox.settleHostEvent(binding, events, (pending) => {
+				// A copy settled by another owner is only reconciled; it is never appended again.
+				appended = conversation.reconcileHostEvent(
+					binding,
+					message,
+					events,
+					pending ? "consume" : "reconcile",
+				).appended;
+			});
+			return appended;
 		} catch (error) {
 			if (deliveryFenceChanged(error)) {
 				const current = events.getDelivery(binding.deliveryId);
@@ -209,12 +217,11 @@ export class WorkerHostEventTransport {
 			},
 			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 		});
-		conversation.reconcileHostEvent(
-			binding,
-			workerHostEventMessage(binding, content),
-			runtime.hostEvents,
-			"reconcile",
-		);
-		this.port.mailbox(binding.execution.agentId).settleHostEvent(binding, runtime.hostEvents);
+		const message = workerHostEventMessage(binding, content);
+		this.port
+			.mailbox(binding.execution.agentId)
+			.settleHostEvent(binding, runtime.hostEvents, () =>
+				conversation.reconcileHostEvent(binding, message, runtime.hostEvents, "reconcile"),
+			);
 	}
 }

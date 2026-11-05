@@ -41,7 +41,7 @@ import {
 	type WorkerReceiptOrigin,
 	workerReceiptOriginFromValue,
 } from "../orchestration/worker-receipt-origin.ts";
-import { withFileLockSync } from "../util/atomic-file.ts";
+import { currentSynchronousFileLockScope, withFileLockSync } from "../util/atomic-file.ts";
 import type { SteerDecision } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 import type {
@@ -1873,57 +1873,71 @@ export class WorkerAgentMailbox {
 		this.markTimestamp(messageId, "deliveredAt");
 	}
 
-	/** Canonical consumption or locked no-append retirement releases only this exact transport copy. */
-	settleHostEvent(binding: HostEventDeliveryBinding, hostEvents: HostEventRuntime): void {
+	/**
+	 * Settle this exact transport copy in one mailbox -> transcript -> canonical scope. The caller's
+	 * transcript step consumes or proves absence in the original transcript; no other process can
+	 * consume, retire or rebind this copy before its physical settlement and canonical receipt land.
+	 * `pending` reports whether the locked physical copy is still open.
+	 */
+	settleHostEvent(
+		binding: HostEventDeliveryBinding,
+		hostEvents: HostEventRuntime,
+		reconcileTranscript: (pending: boolean) => void,
+	): void {
 		let changed = false;
-		const consumed = hostEvents.getDelivery(binding.deliveryId)?.transcriptReceipt !== undefined;
-		// A settled/absent physical copy needs no authority to mutate a project transcript that may
-		// already have a new owner. Its exact durable mailbox state is still inspected under lock.
-		const alreadySettled = withSessionBundleFileInspection(this.agentDir, this.parentSessionId, this.file, () => {
-			const message = this.read().messages.find((candidate) => candidate.messageId === binding.messageId);
-			if (message && (message.task?.kind !== "host_event" || !isDeepStrictEqual(message.task.binding, binding)))
-				throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
-			if (message && message.deliveredAt === undefined && message.failedAt === undefined) return false;
-			hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
-				if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
-					throw new Error("Host event transport still owns an unconsumed binding.");
-				transaction.acknowledgeMailboxSettlement();
-			});
-			return true;
-		});
-		if (alreadySettled) return;
-		this.update(
-			(state) => ({
-				...state,
-				messages: state.messages.map((message) => {
-					if (message.messageId !== binding.messageId || message.task?.kind !== "host_event") return message;
-					if (!isDeepStrictEqual(message.task.binding, binding))
-						throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
-					if (message.deliveredAt || message.failedAt) return message;
-					changed = true;
-					// Authority is checked under the store lock immediately around this write.
-					return consumed
-						? { ...message, deliveredAt: transitionTimestamp(message.createdAt) }
-						: {
-								...message,
-								failedAt: transitionTimestamp(message.createdAt),
-								failureReason: "host_event_binding_retired",
-							};
-				}),
+		withSessionBundleAdmission(this.agentDir, this.parentSessionId, () =>
+			withFileLockSync(this.file, () => {
+				const message = this.read().messages.find((candidate) => candidate.messageId === binding.messageId);
+				if (message && (message.task?.kind !== "host_event" || !isDeepStrictEqual(message.task.binding, binding)))
+					throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
+				const pending =
+					message !== undefined && message.deliveredAt === undefined && message.failedAt === undefined;
+				reconcileTranscript(pending);
+				if (!pending) {
+					// A settled or absent physical copy needs no project-transcript authority to acknowledge.
+					hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
+						if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
+							throw new Error("Host event transport still owns an unconsumed binding.");
+						transaction.acknowledgeMailboxSettlement();
+					});
+					return;
+				}
+				const consumed = hostEvents.getDelivery(binding.deliveryId)?.transcriptReceipt !== undefined;
+				this.update(
+					(state) => ({
+						...state,
+						messages: state.messages.map((candidate) => {
+							if (candidate.messageId !== binding.messageId || candidate.task?.kind !== "host_event")
+								return candidate;
+							if (!isDeepStrictEqual(candidate.task.binding, binding))
+								throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
+							if (candidate.deliveredAt || candidate.failedAt) return candidate;
+							changed = true;
+							return consumed
+								? { ...candidate, deliveredAt: transitionTimestamp(candidate.createdAt) }
+								: {
+										...candidate,
+										failedAt: transitionTimestamp(candidate.createdAt),
+										failureReason: "host_event_binding_retired",
+									};
+						}),
+					}),
+					false,
+					false,
+					undefined,
+					undefined,
+					(write) =>
+						hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
+							// The mailbox lock excludes every consumer and retirer of this copy since the transcript step.
+							if ((transaction.delivery.transcriptReceipt !== undefined) !== consumed)
+								throw new Error("Host event consumption changed inside its mailbox settlement scope.");
+							if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
+								throw new Error("Host event transport still owns an unconsumed binding.");
+							write();
+							transaction.acknowledgeMailboxSettlement();
+						}),
+				);
 			}),
-			false,
-			false,
-			undefined,
-			undefined,
-			(write) =>
-				hostEvents.guardedDelivery(binding, "reconcile", (transaction) => {
-					if ((transaction.delivery.transcriptReceipt !== undefined) !== consumed)
-						throw new Error("Host event consumption changed during transport settlement; retry reconciliation.");
-					if (!transaction.delivery.transcriptReceipt && !transaction.delivery.bindingRetired)
-						throw new Error("Host event transport still owns an unconsumed binding.");
-					write();
-					transaction.acknowledgeMailboxSettlement();
-				}),
 		);
 		if (changed) this.notify();
 	}
@@ -2418,83 +2432,88 @@ export class WorkerAgentMailbox {
 		guardWrite?: (write: () => void) => void,
 	): void {
 		const mutate = () =>
-			withFileLockSync(this.file, () => {
-				const record = this.readRecord();
-				const update = () => {
-					const state = this.read();
-					const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
-					const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
-					const mutated = mutator(state);
-					const retained = pruneDeliveredHistory(
-						this.parentSessionId,
-						this.agentId,
-						mutated.messages,
-						mutated.replyAcknowledgements,
-						mutated.replayReceipts,
-						ordinaryAdmission,
-					);
-					const next = {
-						...mutated,
-						messages: retained.messages,
-						replayReceipts: retained.replayReceipts,
-					};
-					const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
-					const bytesWithoutAddedReceipt = addedReplayReceipt
-						? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
-						: undefined;
-					const changed = JSON.stringify(next) !== JSON.stringify(state);
-					const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
-					if (
-						ordinaryAdmission &&
-						changed &&
-						nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
-						nextOrdinaryBytes > previousOrdinaryBytes
-					) {
-						throw new Error(
-							addedReplayReceipt
-								? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
-								: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+			withFileLockSync(
+				this.file,
+				() => {
+					const record = this.readRecord();
+					const update = () => {
+						const state = this.read();
+						const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
+						const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
+						const mutated = mutator(state);
+						const retained = pruneDeliveredHistory(
+							this.parentSessionId,
+							this.agentId,
+							mutated.messages,
+							mutated.replyAcknowledgements,
+							mutated.replayReceipts,
+							ordinaryAdmission,
 						);
-					}
-					const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
-					if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
-						throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
-					}
-					if (
-						replayEvidenceAdmission &&
-						nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
-						nextReplayEvidenceSlots > previousReplayEvidenceSlots
-					) {
-						throw new Error(
-							`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
-						);
-					}
-					assertWorkerAgentMailboxBounds(
-						next.messages.length,
-						next.replayReceipts.length,
-						state.replayReceipts.length,
-						encodedStateBytes(next),
-						bytesWithoutAddedReceipt,
-					);
-					const write = () => {
-						if (changed) {
-							beforeWrite?.();
-							writeWorkerMailboxRecord(this.file, next, record.reference);
+						const next = {
+							...mutated,
+							messages: retained.messages,
+							replayReceipts: retained.replayReceipts,
+						};
+						const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
+						const bytesWithoutAddedReceipt = addedReplayReceipt
+							? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
+							: undefined;
+						const changed = JSON.stringify(next) !== JSON.stringify(state);
+						const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
+						if (
+							ordinaryAdmission &&
+							changed &&
+							nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
+							nextOrdinaryBytes > previousOrdinaryBytes
+						) {
+							throw new Error(
+								addedReplayReceipt
+									? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
+									: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+							);
 						}
+						const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
+						if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
+							throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
+						}
+						if (
+							replayEvidenceAdmission &&
+							nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
+							nextReplayEvidenceSlots > previousReplayEvidenceSlots
+						) {
+							throw new Error(
+								`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
+							);
+						}
+						assertWorkerAgentMailboxBounds(
+							next.messages.length,
+							next.replayReceipts.length,
+							state.replayReceipts.length,
+							encodedStateBytes(next),
+							bytesWithoutAddedReceipt,
+						);
+						const write = () => {
+							if (changed) {
+								beforeWrite?.();
+								writeWorkerMailboxRecord(this.file, next, record.reference);
+							}
+						};
+						if (guardWrite) guardWrite(write);
+						else write();
 					};
-					if (guardWrite) guardWrite(write);
-					else write();
-				};
-				if (record.reference)
-					WorkerConversationStore.withProjectMailboxMutation(
-						this.agentDir,
-						record.reference,
-						this.parentSessionId,
-						this.projectClaim,
-						update,
-					);
-				else update();
-			});
+					if (record.reference)
+						WorkerConversationStore.withProjectMailboxMutation(
+							this.agentDir,
+							record.reference,
+							this.parentSessionId,
+							this.projectClaim,
+							update,
+						);
+					else update();
+				},
+				// Host-event settlement holds this exact mailbox lock across its transcript proof.
+				{ borrowedScope: currentSynchronousFileLockScope(this.file) },
+			);
 		if (retention) withSessionBundleRetention(this.agentDir, this.parentSessionId, retention, mutate);
 		else withSessionBundleAdmission(this.agentDir, this.parentSessionId, mutate);
 	}
