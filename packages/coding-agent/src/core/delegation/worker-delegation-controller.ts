@@ -706,6 +706,8 @@ export class WorkerDelegationController {
 								(attempt) => attempt.agentId === agentId && this.runsParentAttempt(attempt),
 							);
 						},
+						// A host that names no mailbox turn of its own takes none.
+						runsControlMessage: (messageId: string) => this.deps.runsControlMessage?.(messageId) === true,
 					}
 				: {}),
 			getLifecycle: () => this.getWorkerLifecycle(),

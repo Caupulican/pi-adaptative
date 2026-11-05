@@ -71,6 +71,9 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		sessionManager: world.createSessionManager(agentDir),
 		settings,
 	});
+	// Whether `root` is still owned by the world: a disposal in the body ends that ownership before it is awaited, so the
+	// cleanup below never disposes a closed parent again and a failure while it is closed surfaces as itself.
+	let open = true;
 	const tracks: string[] = [];
 	for (let size = 1; size <= 128; size *= 2)
 		for (let first = 0; first + size <= 128; first += size) {
@@ -592,6 +595,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		const offlineStore = store();
 		const file = root.sessionManager.getSessionFile()!;
 		const requests = world.provider.requests.filter((request) => request.model.id !== "worker-c").length;
+		open = false;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		const manualClaim = {
 			routineId: recycledId,
@@ -630,6 +634,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			sessionManager: world.openSessionManager(file, agentDir),
 			settings,
 		});
+		open = true;
 		const recoveredSettled = parentSettled(7);
 		world.timers.advance("routines", 120_000);
 		await root.session.backgroundLanes.tickPersistentRoutines();
@@ -650,6 +655,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 2);
 		// Stop after canonical acceptance but before a live parent can run: startup must
 		// process selected exact inputs without pulling the unselected tail into that request.
+		open = false;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		const pendingManager = world.openSessionManager(file, agentDir);
 		const origin = captureWorkerReceiptOrigin(pendingManager);
@@ -688,8 +694,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			},
 		);
 		root = await world.createRootSession("root", { agentDir, sessionManager: pendingManager, settings });
+		open = true;
 		await withDeadline(world.trace, "all recovered parent input batches settled", parentSettled(40));
 		expect(world.provider.requests.filter((request) => request.model.id !== "worker-c")).toHaveLength(requests + 4);
+		open = false;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		// Another host records parent writes in the attempt's outbox while this parent is closed. The first one landed
 		// before its acknowledgement was recorded (a stop between import and acknowledgement); the second never landed.
@@ -743,6 +751,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			parentWriteId: "away-claim-landed",
 		});
 		root = await world.createRootSession("root", { agentDir, sessionManager: awayManager, settings });
+		open = true;
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(parentInputs(), "recovered inputs retain their original canonical identity").toHaveLength(40);
 		expect(root.sessionManager.getPendingParentInputs()).toHaveLength(0);
@@ -796,6 +805,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(firstDaemon.launch.args.slice(-3)).toEqual([BOT_DAEMON_COMMAND, agentDir, firstDaemon.launch.token]);
 		for (const name of ["PI_SESSION_ROLE", "PI_PARENT_PID", "PI_PARENT_SESSION", "PI_WORKTREE_LANE"])
 			expect(firstDaemon.launch.env[name], `the daemon carries no session identity (${name})`).toBeUndefined();
+		open = false;
 		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		const fileWhileAway = world.io.peekFile(file);
 		const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
@@ -891,6 +901,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				sessionManager: world.openSessionManager(file, agentDir),
 				settings,
 			});
+			open = true;
 			const awaySettled = parentSettled(41);
 			await root.session.backgroundLanes.tickPersistentRoutines();
 			await withDeadline(world.trace, "the run away is delivered on reopen", awaySettled);
@@ -983,7 +994,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 	} finally {
 		release.release();
 		scheduledRelease.release();
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		if (open) {
+			open = false;
+			expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		}
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}
@@ -1302,8 +1316,8 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		const replay = retained.batch!;
 		const offlineStore = store();
 		const file = root.sessionManager.getSessionFile()!;
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		open = false;
+		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 		const removed = offlineStore.getRoutine(routine.routineId)!;
 		expect(offlineStore.deleteRoutine(routine.routineId, removed.revision, world.timers.port("routines").now())).toBe(
 			true,
@@ -1367,7 +1381,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 		).toEqual(["expiry"]);
 		world.trace.mark("root", "routine.owner-intake");
 	} finally {
-		if (open) expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		if (open) {
+			open = false;
+			expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		}
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}

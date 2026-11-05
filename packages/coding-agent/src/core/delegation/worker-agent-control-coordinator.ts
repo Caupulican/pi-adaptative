@@ -126,10 +126,16 @@ export interface WorkerAgentControlCoordinatorOptions {
 	withConversationAdmission?<T>(agent: AgentBindingContract, operation: () => T): T;
 	isControlAvailable(): boolean;
 	/**
-	 * Present on a host that runs only part of its parent's work (a parent opened away): the mailbox turns, replies and
-	 * root replies of other agents are left durable for the parent.
+	 * Present on a host that runs only part of its parent's work (a parent opened away): the replies and root replies of
+	 * other agents are left durable for the parent.
 	 */
 	runsAgent?(agentId: string): boolean;
+	/**
+	 * Present with `runsAgent`: whether this host takes the mailbox turn of this control message. A turn is judged by its
+	 * own message, since its attempt exists only once the turn is taken; every other turn, and each turn queued behind
+	 * one, stays pending for the parent.
+	 */
+	runsControlMessage?(messageId: string): boolean;
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
@@ -2387,12 +2393,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		try {
 			const agent = this.options.getLifecycle().getAgent(agentId);
 			if (!agent) return { started: false, skipReason: "unknown_agent" };
-			if (this.options.runsAgent?.(agentId) === false)
-				return { started: false, skipReason: "worker_agent_runs_in_parent" };
 			const mailbox = this.getMailbox(agentId);
 			for (let settlement = 0; settlement < 64; settlement++) {
 				const message = mailbox.pendingTaskBearing()[0];
 				if (!message) return { started: false };
+				if (this.options.runsControlMessage?.(message.messageId) === false)
+					return { started: false, skipReason: "worker_agent_runs_in_parent" };
 				if (this.reconcileTaskBearingTranscriptDelivery(agent, message)) {
 					if (expectedMessageId === message.messageId) {
 						return { started: false, skipReason: "worker_control_transcript_delivery_reconciled" };

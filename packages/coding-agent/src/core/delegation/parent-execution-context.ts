@@ -267,6 +267,12 @@ export interface ParentExecutionPolicy {
 	 */
 	runsAttempt?(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): boolean;
 	/**
+	 * Present with `runsAttempt`: whether a pending worker mailbox turn, named by its control message id, is a run this
+	 * host runs. A turn has no attempt until it is taken, so it is admitted by its message; every other turn stays
+	 * pending for the parent.
+	 */
+	runsControlMessage?(controlMessageId: string): boolean;
+	/**
 	 * Present on a host that bounds one run's whole spend: every attempt of the run (subject, retries and verifier) that
 	 * returns the same `runId` shares one cost budget of `maxCostUsd`, checked before each provider request on top of
 	 * the attempt's own agent tree budget. Absent, or undefined for an attempt, only the agent tree budget applies.

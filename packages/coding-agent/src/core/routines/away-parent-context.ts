@@ -13,8 +13,9 @@
  * - Policy is the foreground's with System One off: no route judge, reviews or settlement ladder, an operation gate
  *   without an engine (the deterministic gates decide, as in a session with System One off), the branch's edge grants
  *   and model-pool policy, model exhaustion from the shared provider-admission store, and no memory.
- * - The worker controller runs only the parent's routine runs (`runsAttempt`): every other attempt, mailbox turn and
- *   reply of the parent stays durable for the parent. Terminal notices stay pending for the parent's own delivery.
+ * - The worker controller runs only the parent's routine runs (`runsAttempt`, and `runsControlMessage` for a run's
+ *   mailbox turn before its attempt exists): every other attempt, mailbox turn and reply of the parent stays durable
+ *   for the parent. Terminal notices stay pending for the parent's own delivery.
  */
 
 import { statSync } from "node:fs";
@@ -302,16 +303,19 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			warn: (message) => input.report(message),
 			markDurableDelivered: () => {},
 		});
-		// The routine run an attempt serves: its own dispatch, or for a verifier its subject's. The keys are read at each
-		// call, so a run marked dispatching a moment ago is already this host's.
-		const awayRunKey = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): string | undefined => {
-			const task = snapshot.tasks[attempt.taskId]?.task;
-			const subject = task?.verificationOfTaskId ? verificationSubjectAttempt(snapshot, task) : attempt;
-			const controlMessageId = subject?.dispatch.controlMessageId;
+		// The routine run a worker control message dispatches. The keys are read at each call, so a run marked dispatching
+		// a moment ago is already this host's, and so is its mailbox turn before any attempt carries it.
+		const awayRunKeyOf = (controlMessageId: string | undefined): string | undefined => {
 			if (controlMessageId === undefined) return undefined;
 			for (const dispatchKey of input.awayDispatchKeys())
 				if (workerAgentMessageId(parentSessionId, dispatchKey) === controlMessageId) return dispatchKey;
 			return undefined;
+		};
+		// The routine run an attempt serves: its own dispatch, or for a verifier its subject's.
+		const awayRunKey = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): string | undefined => {
+			const task = snapshot.tasks[attempt.taskId]?.task;
+			const subject = task?.verificationOfTaskId ? verificationSubjectAttempt(snapshot, task) : attempt;
+			return awayRunKeyOf(subject?.dispatch.controlMessageId);
 		};
 		const runsAttempt = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): boolean =>
 			awayRunKey(attempt, snapshot) !== undefined;
@@ -357,6 +361,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 					localCommitBranch: () => undefined,
 				}),
 				runsAttempt,
+				runsControlMessage: (controlMessageId) => awayRunKeyOf(controlMessageId) !== undefined,
 				runCostBound,
 				getModel: () => parentModel ?? modelCalls.model,
 				isDelegateToolActive: () => true,
