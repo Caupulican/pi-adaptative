@@ -18,7 +18,7 @@ import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/k
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
-import { createBarrier } from "../scripted-provider.ts";
+import { createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmContinuousSettings } from "./shared.ts";
 
@@ -289,14 +289,29 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 			onError: (error) => errors.push(`${error.event}: ${error.error}`),
 		});
 		const handoff = createBarrier();
-		let parentContext = "";
+		let parentMessages: ScriptedRequest["context"]["messages"] = [];
+		// The parent's request legitimately carries its owner's own knowledge view (request-only, rebuilt from its store,
+		// listing every current record, ungranted ones included). The grant's block uses the same renderer, so the view is
+		// told apart by position (a message that starts with the header), by count, and by an ungranted value no block
+		// carries; every other message is what the host composed, the lane's delivery path included.
+		const parentContext = () => {
+			const own = (message: (typeof parentMessages)[number]) => {
+				const first = typeof message.content === "string" ? message.content : message.content[0];
+				const text = typeof first === "string" ? first : first?.type === "text" ? first.text : "";
+				return message.role === "user" && text.startsWith("Current accepted knowledge, revision ");
+			};
+			return {
+				views: parentMessages.filter(own).map((message) => JSON.stringify(message)),
+				composed: JSON.stringify(parentMessages.filter((message) => !own(message))),
+			};
+		};
 		// The tool runs outside any owner turn, and the parent's only turn is the managed terminal's tool-free wake:
 		// no owner turn is judged, so this phase declares nothing and any judgment request here is unscripted.
 		world.systemOne.enterPhase(label, {});
 		world.provider.enqueue("root", {
 			name: `${label}-handoff`,
 			check: (request) => {
-				parentContext = JSON.stringify(request.context.messages);
+				parentMessages = request.context.messages;
 				handoff.release();
 			},
 			reply: { content: [{ type: "text", text: answer }] },
@@ -359,8 +374,15 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 		).not.toContain(granted.text);
 		await withDeadline(world.trace, `${label} parent receives the managed terminal`, handoff.promise);
 		await withDeadline(world.trace, `${label} parent response settled`, session.waitForForegroundIdle());
-		expect(parentContext, "the parent receives the lane's terminal").toContain(`- ${laneId}: succeeded`);
-		expect(parentContext, "the parent's context holds no granted value").not.toContain(granted.text);
+		const delivered = parentContext();
+		expect(delivered.composed, "the parent receives the lane's terminal").toContain(`- ${laneId}: succeeded`);
+		expect(delivered.views, "the parent's request carries one view of its own knowledge").toHaveLength(1);
+		expect(delivered.views[0], "that view is the owner's own, which lists an ungranted record").toContain(
+			ungranted.text,
+		);
+		expect(delivered.composed, "no host-composed message of the parent holds a granted value").not.toContain(
+			granted.text,
+		);
 		expect(session.getLastAssistantText()).toBe(answer);
 
 		// A record forgotten after the next task's reservation and before its helper's ask is never delivered.
@@ -368,7 +390,7 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 		world.provider.enqueue("root", {
 			name: `${label}-withdrawn-handoff`,
 			check: (request) => {
-				parentContext = JSON.stringify(request.context.messages);
+				parentMessages = request.context.messages;
 				withdrawnHandoff.release();
 			},
 			reply: { content: [{ type: "text", text: withdrawnAnswer }] },
@@ -414,6 +436,15 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 			expect(text, "a withdrawn record reaches neither the lane nor any record").not.toContain(late.text);
 		await withDeadline(world.trace, `${label} parent receives the withdrawn terminal`, withdrawnHandoff.promise);
 		await withDeadline(world.trace, `${label} withdrawn response settled`, session.waitForForegroundIdle());
+		const afterWithdrawal = parentContext();
+		expect(afterWithdrawal.views, "the parent's request carries one view of its own knowledge").toHaveLength(1);
+		expect(afterWithdrawal.views[0], "the owner's own view no longer lists the forgotten record").not.toContain(
+			late.text,
+		);
+		for (const value of [granted.text, late.text])
+			expect(afterWithdrawal.composed, "no host-composed message of the parent holds a granted value").not.toContain(
+				value,
+			);
 		expect(session.getLastAssistantText()).toBe(withdrawnAnswer);
 		expect(errors, "the managed leg reports no extension error").toEqual([]);
 		expect(notices, "the managed leg emits no collaboration failure notice").toEqual([]);
