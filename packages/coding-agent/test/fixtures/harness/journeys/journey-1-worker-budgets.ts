@@ -43,7 +43,11 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	// The second response exhausts the 5,500 budget, so its read is refused and no third provider request reaches the scripted provider.
 	// The same first response also asks the read-only shell for a network client and for a redirection into the project: the lane's
 	// production admission refuses both before the shell (no network grant; writes only inside the worker's scratch directory), while
-	// the plain read in the same batch runs.
+	// the plain read in the same batch runs. The read is one command line of the reads a code-reading worker runs most (a search
+	// without a file filter, a git history search for a word, a wrapped git command, an input redirection): the read-only line and the
+	// deny-mode credential check both admit it. Five more calls carry bypass shapes the gate refuses before the shell, each with the
+	// cause it names: a configuration file named by an environment assignment, a line continuation that walks a write out of
+	// scratch, an awk program that reads through ARGV, a harness storage root named before `-e`, and a tsc build-info write.
 	const E8_BUDGET_PROFILE: OrchestrationProfile = {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profileId: "e8-budget",
@@ -74,9 +78,39 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	const e8Session = e8Created.session;
 	const e8Wake = createBarrier();
 	const E8_USAGE = { ...createEmptyUsage(), input: 1_000, cacheRead: 20_000, totalTokens: 21_000 };
+	const E8_READS =
+		"echo e8-bash && rg e8-marker src && git log -S apply --oneline && timeout 30 git log -1 --oneline && wc -l < package.json";
+	// Each refused call: its command and the cause its refusal must name.
+	const E8_REFUSALS = [
+		{
+			id: "e8-env-1",
+			command: "RIPGREP_CONFIG_PATH=$TMPDIR/e8-rgrc rg e8-marker src",
+			cause: "it sets RIPGREP_CONFIG_PATH",
+		},
+		{
+			id: "e8-continuation-1",
+			command: "echo e8-pwned | tee -a $TMPDIR/\\\n../\\\n../e8-escape.txt",
+			cause: "it writes",
+		},
+		{
+			id: "e8-awk-1",
+			command: `awk 'BEGIN{ARGV[1]=ENVIRON["HOME"] "/e8-secret.json";ARGC=2}{print}'`,
+			cause: "awk ",
+		},
+		{
+			id: "e8-storage-1",
+			command: `rg '${world.agentDir}' -e e8-token -g '*.jsonl'`,
+			cause: "which holds the private harness path",
+		},
+		{
+			id: "e8-tsc-1",
+			command: "tsc --noEmit --incremental --tsBuildInfoFile e8.tsbuildinfo",
+			cause: "tsc is not a command the read-only line admits",
+		},
+	];
 	world.shell.enqueue({
 		name: "e8-echo",
-		command: "echo e8-bash",
+		command: E8_READS,
 		cwd: HARNESS_PROJECT_CWD,
 		output: "e8-bash\n",
 		exitCode: 0,
@@ -127,7 +161,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			},
 			reply: {
 				content: [
-					{ type: "toolCall", id: "e8-bash-1", name: "bash", arguments: { command: "echo e8-bash" } },
+					{ type: "toolCall", id: "e8-bash-1", name: "bash", arguments: { command: E8_READS } },
 					{
 						type: "toolCall",
 						id: "e8-net-1",
@@ -140,6 +174,12 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 						name: "bash",
 						arguments: { command: "echo e8-note > e8-notes.txt" },
 					},
+					...E8_REFUSALS.map((refusal) => ({
+						type: "toolCall" as const,
+						id: refusal.id,
+						name: "bash",
+						arguments: { command: refusal.command },
+					})),
 				],
 				stopReason: "toolUse",
 				usage: E8_USAGE,
@@ -161,6 +201,12 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 				const write = batchResultById(request, "e8-write-1");
 				if (!write?.isError || !write.text.includes("Read-only worker: it writes")) {
 					throw new Error(`the read-only shell did not refuse the project write: ${write?.text ?? "no result"}`);
+				}
+				for (const refusal of E8_REFUSALS) {
+					const result = batchResultById(request, refusal.id);
+					if (!result?.isError || !result.text.includes(`Read-only worker: ${refusal.cause}`)) {
+						throw new Error(`the read-only shell did not refuse ${refusal.id}: ${result?.text ?? "no result"}`);
+					}
 				}
 			},
 			reply: {
@@ -191,12 +237,14 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		"the budget refuses the second effect before it reaches the shell",
 	).toHaveLength(0);
 	expect(
-		world.shell.requests.filter((request) => request.command === "echo e8-bash").length,
-		"the worker's bash ran exactly once through the shell",
+		world.shell.requests.filter((request) => request.command === E8_READS).length,
+		"the worker's reads ran exactly once through the shell",
 	).toBe(1);
 	expect(
-		world.shell.requests.filter((request) => /curl|e8-notes/u.test(request.command)),
-		"the read-only shell's network client and project write never reach the shell",
+		world.shell.requests.filter((request) =>
+			/curl|e8-notes|e8-rgrc|e8-escape|ARGV|e8-token|tsBuildInfo/u.test(request.command),
+		),
+		"the read-only shell's network client, project write and refused bypass shapes never reach the shell",
 	).toHaveLength(0);
 	expect(
 		Object.values(e8Session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).map(
