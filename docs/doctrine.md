@@ -571,9 +571,13 @@ commands that edit nothing that exists, create files only inside the worker's ow
 (`$TMPDIR`, removed when the worker ends), reach no network without a `network.http` grant (which
 `readOnly` never keeps) and read no private harness or credential path; every command the shared
 read/write line calls mutating, including a listed reader whose options or program text run another
-program or write a file, is refused with the reason. The rules hold through wrappers, chains and
-nested `bash -c`/`powershell -c`; they judge the command text, a policy gate rather than OS
-isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
+program or write a file, is refused with the reason. The rules hold through wrappers, chains,
+line continuations and nested `bash -c`/`powershell -c`: one tokenizer walk judges a command for
+every caller, an assignment must be on a short allowlist (locale, time zone, terminal and colour),
+and a path is judged where the shell would land, through symbolic links and `..`. A worker may
+search its project recursively without a file filter; a search whose root holds harness storage
+or a credential store, or a descent that may read dotenv files, is refused. These rules judge the
+command text, a policy gate rather than OS isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
 credential prompt, pager and filesystem monitor. The machine's credential stores (SSH, GPG, cloud,
 cluster, registry and git credentials, keychains) are private paths for every worker, and a worker
 of a routine run away reads only its session's working directory, its profile's workspace and
@@ -1091,3 +1095,4 @@ measurement gains no new surface.
 | 2026-10-04 | No invariant moved (third batch of the same change): the last contract tests also take their scratch directories from `tempDir`; their assertions are untouched. |
 | 2026-10-04 | The test suite (1,741 product test files and the destructive suite) is removed so it can be rebuilt by area from git history; the contract list in `contracts.json` is empty, CI is one build-and-check job per OS, and `release-ci-proof.mjs` requires those jobs by name. This supersedes every earlier row that pins a deleted test file. |
 | 2026-11-05 | A `readOnly` worker's shell creates files only inside its own scratch directory (no new file elsewhere), reaches no network without `network.http`, and reads no private harness or credential path through operands, `cd`, globs or recursive searches; listed readers whose options or program text run programs or write files (`sort -o`, `rg --pre`, awk `system()`, sed `w`) are refused for every caller of the read/write line. |
+| 2026-11-05 | The read-only shell line is one walk over one tokenizer for the router, System One's observational line, requirement checks and worker lanes: line continuations, comments, expansions and PowerShell blocks are structural, assignments follow an allowlist, paths are judged lexically and physically, `tsc` leaves the read-only list, and a worker's project search runs without a glob while storage roots and dotenv descents are refused. |
