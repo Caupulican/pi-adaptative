@@ -1,4 +1,8 @@
+import { resolveModelCost } from "@caupulican/pi-ai/usage";
+import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
+import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
+import { affordableOutputTokenLimit } from "../cost-guard.ts";
 import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	attemptUsageFromGatewayUsage,
@@ -45,6 +49,8 @@ export class WorkerTreeBudgetExceededError extends BoundedCompletionFailureError
 
 interface TreeBudgetState {
 	budget: RiskBudget;
+	/** Each reservation is priced against the remaining `maxCostUsd` (see `createPort`). */
+	pricesRequests: boolean;
 	attempts: Map<string, AttemptUsageSnapshot>;
 	generationUsage: Map<string, AttemptUsageAccounting>;
 	reservations: Map<string, { maxTokens: number }>;
@@ -56,6 +62,7 @@ interface ProviderBudgetWaiter {
 	requestedMaxTokens: number;
 	subject: string;
 	signal?: AbortSignal;
+	request?: RequestPreflightContext;
 	resolve(reservation: ProviderBudgetReservation): void;
 	reject(error: unknown): void;
 	onAbort?: () => void;
@@ -121,11 +128,11 @@ export function boundedByRunBudget(tree: SharedCapabilityBudget, run: SharedCapa
 			run.recordAttemptUsage(usage, accounting);
 		},
 		remainingTokens: () => tree.remainingTokens(),
-		reserveProviderBudget: async (requestedMaxTokens, subject, signal) => {
-			const treeReservation = await tree.reserveProviderBudget(requestedMaxTokens, subject, signal);
+		reserveProviderBudget: async (requestedMaxTokens, subject, signal, request) => {
+			const treeReservation = await tree.reserveProviderBudget(requestedMaxTokens, subject, signal, request);
 			let runReservation: ProviderBudgetReservation;
 			try {
-				runReservation = await run.reserveProviderBudget(treeReservation.maxTokens, subject, signal);
+				runReservation = await run.reserveProviderBudget(treeReservation.maxTokens, subject, signal, request);
 			} catch (error) {
 				treeReservation.release();
 				throw error;
@@ -145,21 +152,41 @@ function abortReason(signal: AbortSignal): unknown {
 	return signal.reason ?? new Error("Worker provider budget reservation was aborted.");
 }
 
+/**
+ * A run's cost bound refused a request before it was sent (`budget_exhausted`, terminal: a retry would price the same
+ * request against the same remainder).
+ */
+export class WorkerRunCostRefusal extends BoundedCompletionFailureError {
+	constructor(reasonCode: "worker_run_model_unpriced" | "worker_run_cost_budget_exhausted", message: string) {
+		super("budget_exhausted", reasonCode, message);
+		this.name = "WorkerRunCostRefusal";
+	}
+}
+
 /** One in-memory aggregate reconstructed from durable checkpoints whenever a root is first used. */
 export class WorkerTreeBudgetCoordinator {
 	private readonly trees = new Map<string, TreeBudgetState>();
 
+	/**
+	 * `pricesRequests`: the aggregate bounds one run's real spend. Each provider request is priced before it is sent:
+	 * an unpriced model is refused, a request whose input alone costs more than the remaining `maxCostUsd` is refused,
+	 * and the granted output tokens are capped so input plus the whole output fits the remainder. A cost-bounded
+	 * aggregate holds one reservation at a time, so the remainder is exact. Without it, `maxCostUsd` is checked against
+	 * settled spend only, as it always was.
+	 */
 	createPort(args: {
 		rootAgentId: string;
 		attemptId: string;
 		budget: RiskBudget;
 		seeds: readonly WorkerTreeBudgetSeed[];
 		initialUsage: AttemptUsageSnapshot;
+		pricesRequests?: boolean;
 	}): SharedCapabilityBudget {
 		let state = this.trees.get(args.rootAgentId);
 		if (!state) {
 			state = {
 				budget: structuredClone(args.budget),
+				pricesRequests: args.pricesRequests === true,
 				attempts: new Map(),
 				generationUsage: new Map(),
 				reservations: new Map(),
@@ -190,8 +217,8 @@ export class WorkerTreeBudgetCoordinator {
 					? undefined
 					: Math.max(0, maximum - this.budgetedTokens(tree) - this.reservedTokens(tree));
 			},
-			reserveProviderBudget: (requestedMaxTokens, subject, signal) =>
-				this.reserveProviderBudget(tree, args.attemptId, requestedMaxTokens, subject, signal),
+			reserveProviderBudget: (requestedMaxTokens, subject, signal, request) =>
+				this.reserveProviderBudget(tree, args.attemptId, requestedMaxTokens, subject, signal, request),
 		};
 	}
 
@@ -232,6 +259,7 @@ export class WorkerTreeBudgetCoordinator {
 		requestedMaxTokens: number,
 		subject: string,
 		signal?: AbortSignal,
+		request?: RequestPreflightContext,
 	): Promise<ProviderBudgetReservation> {
 		if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
 			return Promise.reject(new Error("Worker provider token reservation must be a positive safe integer."));
@@ -243,6 +271,7 @@ export class WorkerTreeBudgetCoordinator {
 				requestedMaxTokens,
 				subject,
 				...(signal ? { signal } : {}),
+				...(request ? { request } : {}),
 				resolve,
 				reject,
 			};
@@ -285,7 +314,19 @@ export class WorkerTreeBudgetCoordinator {
 					? waiter.requestedMaxTokens
 					: Math.max(0, state.budget.maxTokens - this.budgetedTokens(state) - this.reservedTokens(state));
 			if (availableTokens <= 0) return;
-			const maxTokens = Math.min(waiter.requestedMaxTokens, availableTokens);
+			let maxTokens = Math.min(waiter.requestedMaxTokens, availableTokens);
+			if (state.pricesRequests && state.budget.maxCostUsd !== undefined) {
+				let affordable: number;
+				try {
+					affordable = this.affordableOutputTokens(state, state.budget.maxCostUsd, waiter);
+				} catch (error) {
+					state.waiters.shift();
+					this.detachAbort(waiter);
+					waiter.reject(error);
+					continue;
+				}
+				maxTokens = Math.min(maxTokens, affordable);
+			}
 			state.waiters.shift();
 			this.detachAbort(waiter);
 			const reservationState = { maxTokens };
@@ -303,6 +344,39 @@ export class WorkerTreeBudgetCoordinator {
 				},
 			});
 		}
+	}
+
+	/**
+	 * The most output tokens the request can be granted under the remaining cost bound; throws when it cannot be sent
+	 * at all. Called with no other reservation held, so settled spend is the whole spend so far.
+	 */
+	private affordableOutputTokens(state: TreeBudgetState, maxCostUsd: number, waiter: ProviderBudgetWaiter): number {
+		const request = waiter.request;
+		if (!request)
+			throw new WorkerRunCostRefusal(
+				"worker_run_cost_budget_exhausted",
+				`The run's cost bound cannot price ${waiter.subject}: the request was not offered for pricing.`,
+			);
+		if (request.model.costDefaulted)
+			throw new WorkerRunCostRefusal(
+				"worker_run_model_unpriced",
+				`The run's cost bound cannot be enforced for ${request.model.provider}/${request.model.id}: the model has no declared price. A run with a cost bound needs a priced model.`,
+			);
+		const spentUsd = [...state.attempts.values()].reduce((total, usage) => total + usage.costUsd, 0);
+		const remainingUsd = Math.max(0, maxCostUsd - spentUsd);
+		const inputTokens = estimateProviderRequestTokens(request.context, request.model);
+		const affordable = affordableOutputTokenLimit({
+			inputTokens,
+			maxOutputTokens: Math.min(request.maxTokens ?? request.model.maxTokens, request.model.maxTokens),
+			cost: resolveModelCost(request.model, inputTokens),
+			remainingUsd,
+		});
+		if (affordable < 1)
+			throw new WorkerRunCostRefusal(
+				"worker_run_cost_budget_exhausted",
+				`The run's remaining cost bound ($${remainingUsd.toFixed(4)}) cannot cover ${waiter.subject}: its input alone (about ${inputTokens} tokens) costs more.`,
+			);
+		return affordable;
 	}
 
 	private detachAbort(waiter: ProviderBudgetWaiter): void {

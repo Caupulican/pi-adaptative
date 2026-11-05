@@ -781,7 +781,10 @@ export interface ReadOnlyShellLaneScope {
 	readonly cdPath: readonly string[];
 	/** Absolute harness storage paths (credentials, memory, sessions, state) no recursive search may descend into. */
 	readonly harnessStoragePaths: readonly string[];
-	/** The credential guard's path policy over the lane's denied paths (canonical paths, case rules, dotenv names). */
+	/**
+	 * The credential guard's path policy over the lane's denied paths (canonical paths, case rules, dotenv names), plus
+	 * everything outside the lane's read scope when its host confines reads.
+	 */
 	isDeniedPath(absolutePath: string): boolean;
 }
 
@@ -1373,7 +1376,8 @@ function globMatches(pattern: string, cwd: string): string[] | undefined {
 
 function deniedPathViolation(target: string, recursive: boolean, lane: ReadOnlyShellLaneScope): string | undefined {
 	if (insideScratch(target, lane)) return undefined;
-	if (lane.isDeniedPath(target)) return `it reads ${target}, a private harness or credential path`;
+	if (lane.isDeniedPath(target))
+		return `it reads ${target}, a private harness or credential path or one outside its read scope`;
 	if (!recursive) return undefined;
 	let canonical: string;
 	try {

@@ -281,6 +281,12 @@ export interface ParentExecutionPolicy {
 		attempt: AttemptRuntimeState,
 		snapshot: TaskRuntimeProjection,
 	): { readonly runId: string; readonly maxCostUsd: number } | undefined;
+	/**
+	 * Present on a host whose workers must read inside one directory (a parent opened away: the parent's own): every
+	 * worker's read scope is that directory, whatever its profile or the edge mode, and a read-only worker's shell reads
+	 * nothing outside it but its own scratch directory. Absent, a worker reads what its profile and mode grant.
+	 */
+	workerReadRoot?(): string;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;
 	/** The best model the policy allows, for a worker whose own binding it disallows. */

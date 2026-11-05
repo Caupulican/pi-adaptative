@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact, estimateContextTokens } from "../../kernel/compaction/compaction.ts";
 import type { AgentContextPlan, AgentContextPlanRequest, AgentContextWire } from "../../kernel/index.ts";
-import type { FollowUpState } from "../../kernel/loop-config.ts";
+import type { FollowUpState, RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import {
 	classifyFailure,
@@ -821,14 +821,16 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	// A worker turn is capped by the model's own output limit, never by the lane summary cap: a
 	// claim envelope with findings, or a write tool call carrying a file, does not fit 2048 tokens.
 	const workerOutputTokenCeiling = resolveWorkerOutputTokenCeiling(options.model);
+	// The request about to be sent rides with each reservation: a budget that bounds a run's spend prices it.
 	const reserveProviderBudget = async (
 		requestedMaxTokens: number,
 		subject: string,
 		signal?: AbortSignal,
+		request?: RequestPreflightContext,
 	): Promise<ProviderBudgetReservation> => {
 		options.toolSurface.assertHealthy();
 		if (options.toolSurface.gateway) {
-			return options.toolSurface.gateway.reserveProviderBudget(requestedMaxTokens, subject, signal);
+			return options.toolSurface.gateway.reserveProviderBudget(requestedMaxTokens, subject, signal, request);
 		}
 		if (signal?.aborted) throw signal.reason;
 		return { maxTokens: requestedMaxTokens, release: () => undefined };
@@ -895,8 +897,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							let preflightFailed = false;
 							let preflightFailure: unknown;
 							const providerTurn = new WorkerProviderTurnProtocol({
-								acquireReservation: () =>
-									reserveProviderBudget(maxTokens, "worker_compaction_provider_completion", requestSignal),
+								acquireReservation: (request) =>
+									reserveProviderBudget(
+										maxTokens,
+										"worker_compaction_provider_completion",
+										requestSignal,
+										request,
+									),
 								signal: requestSignal,
 								onFailure: (error) => {
 									if (preflightFailed) return;
@@ -921,7 +928,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										model: options.model,
 										thinkingLevel: options.thinkingLevel,
 										maxTokens,
-										requestPreflight: () => providerTurn.requestPreflight(),
+										requestPreflight: (request) => providerTurn.requestPreflight(request),
 										signal: requestSignal,
 										...(structured
 											? {
@@ -1119,8 +1126,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								callbackFailure = error;
 							};
 							const providerTurn = new WorkerProviderTurnProtocol({
-								acquireReservation: () =>
-									reserveProviderBudget(workerOutputTokenCeiling, "worker_provider_completion", signal),
+								acquireReservation: (request) =>
+									reserveProviderBudget(
+										workerOutputTokenCeiling,
+										"worker_provider_completion",
+										signal,
+										request,
+									),
 								signal,
 								onFailure: retainCallbackFailure,
 								...(options.toolSurface.gateway
@@ -1237,7 +1249,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										tools: reportHandshake
 											? [...options.toolSurface.tools, submitReportTool, taskEventsTool]
 											: [...options.toolSurface.tools, taskEventsTool],
-										requestPreflight: () => providerTurn.requestPreflight(),
+										requestPreflight: (request) => providerTurn.requestPreflight(request),
 										// One durable request_snapshot per accepted provider request, so the worker's
 										// request start and reasoning level survive in its own conversation.
 										onProviderRequestSnapshot: (context) => {

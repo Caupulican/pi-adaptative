@@ -65,7 +65,7 @@ import type { CapabilityEnvelope } from "./contracts.ts";
 import { projectLaneSettingsPath } from "./lane-private-paths.ts";
 import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admission.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
-import { safeRealpathSync } from "./path-scope.ts";
+import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
@@ -172,6 +172,11 @@ export interface LaneToolSurfaceOptions {
 	 * worker's scratch directory, reach the network without `network.http` or read a denied path.
 	 */
 	shellReadOnly?: boolean;
+	/**
+	 * A host that confines its workers' reads (a parent opened away): a read-only shell reads nothing outside these
+	 * directories and its own scratch directory. Absent, it reads anything but a denied path.
+	 */
+	shellReadRoots?: readonly string[];
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
@@ -243,6 +248,21 @@ function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
 	// Strict UAC: a shipped profile is the complete authority grant. Grant-all must be explicit.
 	if (allow.length === 0 && block.length === 0) return { allow: [], block: ["*"] };
 	return { allow, block };
+}
+
+/**
+ * Whether a confined lane's shell may read `target`: the path as written and the file it resolves to both lie inside
+ * a read root, so a link inside the project cannot carry a read outside it. A path whose links cannot be resolved is
+ * outside.
+ */
+function insideReadRoots(target: string, roots: readonly string[]): boolean {
+	let canonical: string;
+	try {
+		canonical = safeRealpathSync(target);
+	} catch {
+		return false;
+	}
+	return [target, canonical].every((candidate) => roots.some((root) => isPathWithinScope(candidate, root)));
 }
 
 function resolveWriteRoots(cwd: string, writePaths: readonly string[]): string[] {
@@ -551,25 +571,35 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.shellSessionKey !== undefined ||
 		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
 		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
+	// A read-only lane without `network.http` reaches no network through git's implicit paths either.
+	const networkGranted = options.grant?.capabilities.includes("network.http") === true;
 	const runEnvironment = runsProcesses
 		? createWorkerRunEnvironment(
 				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
 				options.onWorkerProcessesReaped,
+				{ offline: options.readOnly === true && !networkGranted },
 			)
 		: undefined;
 	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
 	// recursive project search may pass through; everything else denied is harness storage.
 	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
+	const shellReadRoots = options.shellReadRoots?.flatMap((entry) => {
+		const root = path.resolve(entry);
+		return [...new Set([root, safeRealpathSync(root)])];
+	});
 	const readOnlyShell: ReadOnlyShellLaneScope | undefined = options.shellReadOnly
 		? {
-				network: options.grant?.capabilities.includes("network.http") === true,
+				network: networkGranted,
 				scratchRoots: runEnvironment
 					? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
 					: [],
 				homeDir: homedir(),
 				cdPath: (process.env.CDPATH ?? "").split(path.delimiter).filter((entry) => entry.length > 0),
 				harnessStoragePaths: (deniedPaths ?? []).filter((entry) => entry !== projectSettingsPath),
-				isDeniedPath: (target) => isProtectedCredentialPath(target, options.cwd, privatePathBoundary),
+				// Scratch is admitted before this is asked; a confined lane reads nothing outside its roots.
+				isDeniedPath: (target) =>
+					isProtectedCredentialPath(target, options.cwd, privatePathBoundary) ||
+					(shellReadRoots !== undefined && !insideReadRoots(target, shellReadRoots)),
 			}
 		: undefined;
 

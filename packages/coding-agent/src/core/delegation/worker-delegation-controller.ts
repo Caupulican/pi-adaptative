@@ -2294,6 +2294,7 @@ export class WorkerDelegationController {
 			rootAgentId: bound.runId,
 			attemptId,
 			budget: { maxCostUsd: bound.maxCostUsd },
+			pricesRequests: true,
 			seeds,
 			initialUsage,
 		});
@@ -2994,6 +2995,7 @@ export class WorkerDelegationController {
 			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 			workerToolAdapterNames: this.workerToolAdapterNames(),
+			...(this.deps.workerReadRoot ? { readRoot: this.deps.workerReadRoot() } : {}),
 		});
 	}
 
@@ -5369,6 +5371,7 @@ export class WorkerDelegationController {
 			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
 			readOnly: executionPlan.readOnly,
 			shellReadOnly: executionPlan.shellReadOnly,
+			...(this.deps.workerReadRoot ? { shellReadRoots: executionPlan.readPaths } : {}),
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),

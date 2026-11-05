@@ -160,14 +160,22 @@ export function buildWorkerExecutionPlan(args: {
 	foregroundMaxCostUsd?: number;
 	memoryEnabled: boolean;
 	workerToolAdapterNames?: readonly string[];
+	/** The host confines every worker's reads to this directory (`ParentExecutionPolicy.workerReadRoot`). */
+	readRoot?: string;
 }): WorkerExecutionPlan {
 	const parentCwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
 	const cwd = args.profile.workspacePath
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
-	// Reads keep the host's machine scope unless an explicit workspace focuses them. Writes never default to
-	// the machine: a worker writes inside its own cwd, plus only the extra roots the root's grant names.
-	const readScopes = args.yolo || !args.profile.workspacePath ? workerMachinePathRoots(parentCwd) : [cwd];
+	// Reads keep the host's machine scope unless an explicit workspace focuses them, or the host confines them (in YOLO
+	// too: YOLO removes permission prompts, never the host's scope). Writes never default to the machine: a worker
+	// writes inside its own cwd, plus only the extra roots the root's grant names.
+	const readScopes =
+		args.readRoot !== undefined
+			? [resolveWorkerWorkspacePath(parentCwd, args.readRoot)]
+			: args.yolo || !args.profile.workspacePath
+				? workerMachinePathRoots(parentCwd)
+				: [cwd];
 	const grantedWriteRoots = (args.profile.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(cwd, entry));
 	const writeScopes = [...new Set([cwd, ...grantedWriteRoots])];
 	// Only an explicit workspace or granted root fences other lanes; the bare cwd default does not.

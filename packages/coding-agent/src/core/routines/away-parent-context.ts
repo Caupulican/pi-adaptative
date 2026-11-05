@@ -5,8 +5,10 @@
  * - The parent transcript is read only, through a read-only manager reopened when the file changes; every write the
  *   parent must see goes through the away write port (`createAwayParentWrites`), which records it on the attempt for the
  *   parent to import on open. Nothing here holds a session writer.
- * - The parent bundle is held with a lifetime lease (never claimed by a session), so its stores are not reclaimed
- *   while the host runs.
+ * - The parent bundle is held with a lifetime lease (never claimed by a session) in the `away-host` role, so its stores
+ *   are not reclaimed while the host runs, and the hold never counts as the parent's open session (it takes back no
+ *   collaboration job).
+ * - Every worker reads only inside the parent's directory (`workerReadRoot`), plus its own scratch directory.
  * - Model calls go through ONE ephemeral in-process `AgentSession` built by the public `createAgentSession` (in-memory
  *   manager, child session, no extensions, no tools, System One off): only its `runIsolatedCompletion` is used, so
  *   credentials resolve through the existing auth storage exactly as in every other session.
@@ -167,7 +169,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		return current.reader;
 	};
 
-	const hold: SessionBundleLease = acquireSessionBundleLease(agentDir, parentSessionId);
+	const hold: SessionBundleLease = acquireSessionBundleLease(agentDir, parentSessionId, { role: "away-host" });
 	const holdToken = sessionBundleLeaseToken(hold);
 	let ephemeral: AgentSession | undefined;
 	let closed = false;
@@ -363,6 +365,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				runsAttempt,
 				runsControlMessage: (controlMessageId) => awayRunKeyOf(controlMessageId) !== undefined,
 				runCostBound,
+				workerReadRoot: () => cwd,
 				getModel: () => parentModel ?? modelCalls.model,
 				isDelegateToolActive: () => true,
 				getCapabilityEnvelope: () => undefined,

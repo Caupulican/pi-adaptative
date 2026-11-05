@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
@@ -90,10 +91,15 @@ export interface SharedCapabilityBudget {
 	getAttemptUsage(): AttemptUsageSnapshot;
 	recordAttemptUsage(usage: GatewayUsageSnapshot, accounting?: AttemptUsageAccounting): void;
 	remainingTokens(): number | undefined;
+	/**
+	 * `request` is the provider request about to be dispatched (its model and materialized context). A budget that bounds
+	 * spend prices it (the priced ports of `WorkerTreeBudgetCoordinator`).
+	 */
 	reserveProviderBudget(
 		requestedMaxTokens: number,
 		subject: string,
 		signal?: AbortSignal,
+		request?: RequestPreflightContext,
 	): Promise<ProviderBudgetReservation>;
 }
 
@@ -384,6 +390,7 @@ export class CapabilityGateway {
 		requestedMaxTokens: number,
 		subject = "provider",
 		signal?: AbortSignal,
+		request?: RequestPreflightContext,
 	): Promise<ProviderBudgetReservation> {
 		if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
 			throw new Error("CapabilityGateway: provider token reservation must be a positive safe integer.");
@@ -394,7 +401,7 @@ export class CapabilityGateway {
 		if (maxTokens <= 0) {
 			this.deny(subject, "token_budget_exhausted", "Token budget exhausted.");
 		}
-		if (this.sharedBudget) return this.sharedBudget.reserveProviderBudget(maxTokens, subject, signal);
+		if (this.sharedBudget) return this.sharedBudget.reserveProviderBudget(maxTokens, subject, signal, request);
 		if (signal?.aborted) throw signal.reason;
 		return {
 			maxTokens,

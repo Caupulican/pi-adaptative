@@ -53,15 +53,28 @@ export function hasCurrentSessionBundleAdmission(agentDir: string, parentSession
 	return scope !== undefined && admittedBundles.get(scope.lockfilePath) === scope;
 }
 
+/**
+ * What a hold serves: `session`, an open session of the parent (the foreground, or an SDK session); `away-host`, the
+ * bot daemon running the parent's routine runs while it is closed. An away host keeps the bundle alive but is no session:
+ * it never takes back a collaboration job, so it never blocks another session's adoption of one.
+ */
+export type SessionLeaseRole = "session" | "away-host";
+
 interface BundleHolder {
 	token: string;
 	/** The holding process, judged by {@link judgeOwner}; only a `dead` holder stops serving the session. */
 	owner: ProcessOwner;
 	processInstanceId: string;
+	role: SessionLeaseRole;
 }
 
-/** Schema 2 records each holder as a {@link ProcessOwner}; schema 1 (`host` + `pid`) is still read. */
+/**
+ * Schema 2 records each holder as a {@link ProcessOwner}; schema 1 (`host` + `pid`) is still read. Schema 3 adds a
+ * `role` key to an away-host holder; the registry is written as schema 3 only while it holds one, so a build that
+ * predates roles refuses (as needing inspection) only a parent an away host holds right now.
+ */
 const HOLDERS_SCHEMA_VERSION = 2;
+const ROLE_HOLDERS_SCHEMA_VERSION = 3;
 const OWNER_KEYS: readonly string[] = ["pid", "startTime", "hostname", "machineId"];
 
 /**
@@ -114,21 +127,26 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 	if (
 		!isPlainRecord(value) ||
 		Object.keys(value).length !== 3 ||
-		(value.schemaVersion !== 1 && value.schemaVersion !== HOLDERS_SCHEMA_VERSION) ||
+		(value.schemaVersion !== 1 &&
+			value.schemaVersion !== HOLDERS_SCHEMA_VERSION &&
+			value.schemaVersion !== ROLE_HOLDERS_SCHEMA_VERSION) ||
 		value.parentSessionId !== parentSessionId ||
 		!Array.isArray(value.holders) ||
 		value.holders.length > MAX_BUNDLE_HOLDERS
 	)
 		throw new Error("Session bundle lifetime leases require inspection.");
 	const legacy = value.schemaVersion === 1;
+	const roles = value.schemaVersion === ROLE_HOLDERS_SCHEMA_VERSION;
 	const tokens = new Set<string>();
 	const holders: BundleHolder[] = [];
 	for (const holder of value.holders) {
 		const owner = isPlainRecord(holder) ? parseRecordedOwner(holder, legacy) : undefined;
+		// Only an away host records its role; a holder without one is a session.
+		const awayHost = roles && isPlainRecord(holder) && holder.role === "away-host";
 		if (
 			!isPlainRecord(holder) ||
 			!owner ||
-			Object.keys(holder).length !== (legacy ? 4 : 3) ||
+			Object.keys(holder).length !== (legacy || awayHost ? 4 : 3) ||
 			typeof holder.token !== "string" ||
 			!UUID_PATTERN.test(holder.token) ||
 			tokens.has(holder.token) ||
@@ -137,7 +155,12 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 		)
 			throw new Error("Session bundle lifetime lease identity is invalid.");
 		tokens.add(holder.token);
-		holders.push({ token: holder.token, owner, processInstanceId: holder.processInstanceId });
+		holders.push({
+			token: holder.token,
+			owner,
+			processInstanceId: holder.processInstanceId,
+			role: awayHost ? "away-host" : "session",
+		});
 	}
 	return holders;
 }
@@ -147,7 +170,12 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 		unlinkSync(file);
 		return;
 	}
-	const text = `${JSON.stringify({ schemaVersion: HOLDERS_SCHEMA_VERSION, parentSessionId, holders })}\n`;
+	const roles = holders.some((holder) => holder.role === "away-host");
+	const text = `${JSON.stringify({
+		schemaVersion: roles ? ROLE_HOLDERS_SCHEMA_VERSION : HOLDERS_SCHEMA_VERSION,
+		parentSessionId,
+		holders: holders.map(({ role, ...holder }) => (role === "away-host" ? { ...holder, role } : holder)),
+	})}\n`;
 	if (Buffer.byteLength(text) > MAX_HOLDER_BYTES) throw new Error("Session bundle lifetime leases are too large.");
 	writeFileAtomicSync(file, text);
 }
@@ -166,6 +194,8 @@ export interface SessionLeaseHolder {
 	readonly token: string;
 	readonly owner: ProcessOwner;
 	readonly processInstanceId: string;
+	/** What the hold serves: an open session, or an away host running the closed parent's routine runs. */
+	readonly role: SessionLeaseRole;
 	/** {@link judgeOwner}'s standing. Only `dead` proves the holder no longer serves the session. */
 	readonly standing: OwnerStanding;
 	/** The holder is this very process. */
@@ -184,6 +214,7 @@ export function readSessionLeaseHolders(agentDir: string, parentSessionId: strin
 		token: holder.token,
 		owner: holder.owner,
 		processInstanceId: holder.processInstanceId,
+		role: holder.role,
 		standing: judgeOwner(holder.owner),
 		self: holder.processInstanceId === PROCESS_INSTANCE_ID,
 	}));
@@ -208,7 +239,11 @@ function releaseBundleLease(state: BundleLeaseState): void {
 	});
 }
 
-export function acquireSessionBundleLease(agentDir: string, parentSessionId: string): SessionBundleLease {
+export function acquireSessionBundleLease(
+	agentDir: string,
+	parentSessionId: string,
+	options: { role?: SessionLeaseRole } = {},
+): SessionBundleLease {
 	const directory = resolve(agentDir);
 	const tombstone = orchestrationSessionDeletionFile(directory, parentSessionId);
 	const file = `${tombstone}.leases.json`;
@@ -216,6 +251,7 @@ export function acquireSessionBundleLease(agentDir: string, parentSessionId: str
 		token: randomUUID(),
 		owner: ownProcessOwner(),
 		processInstanceId: PROCESS_INSTANCE_ID,
+		role: options.role ?? "session",
 	};
 	withSessionBundleAdmission(directory, parentSessionId, () => {
 		const holders = liveHolders(file, parentSessionId);

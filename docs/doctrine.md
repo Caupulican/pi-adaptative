@@ -573,7 +573,11 @@ commands that edit nothing that exists, create files only inside the worker's ow
 read/write line calls mutating, including a listed reader whose options or program text run another
 program or write a file, is refused with the reason. The rules hold through wrappers, chains and
 nested `bash -c`/`powershell -c`; they judge the command text, a policy gate rather than OS
-isolation. `readOnly` also drops write, interpreter, script, network and service
+isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
+credential prompt, pager and filesystem monitor. The machine's credential stores (SSH, GPG, cloud,
+cluster, registry and git credentials, keychains) are private paths for every worker, and a worker
+of a routine run away reads only its session's working directory and its scratch directory.
+`readOnly` also drops write, interpreter, script, network and service
 tools, holds in YOLO, and defaults the worker's role to `explorer`. A profile that grants process
 execution without file writes keeps an unrestricted shell: only `readOnly` restricts commands. In guarded mode a worker's shell and code calls go through the same System One
 operation review as the root's, except under the standing `operation.irreversible` grant, where the

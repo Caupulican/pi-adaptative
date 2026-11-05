@@ -225,6 +225,38 @@ function parseInvocationCommand(invocation: readonly string[], index: number): P
 	};
 }
 
+const DIRECTORY_CHANGE_COMMANDS = new Set(["cd", "chdir", "pushd", "set-location", "sl", "push-location"]);
+const MAX_SHELL_WORKING_DIRECTORIES = 64;
+
+/**
+ * The directories later commands of one command line may resolve relative paths from, after `invocation` ran: a
+ * `cd`/`pushd` (or PowerShell's `Set-Location`) adds its target, written with any home spelling. A change inside a
+ * conditional or a subshell may or may not hold for what follows, so every earlier directory stays a candidate and a
+ * path is judged from all of them. A group's `(`/`{` and `)` stay attached to the words they touch, so they are peeled
+ * off. `cd -` returns to a directory already a candidate. Undefined when the line changes to more distinct directories
+ * than the bound, which is judged as a credential read.
+ */
+function workingDirectoriesAfter(
+	invocation: readonly string[],
+	policies: readonly CredentialPathPolicy[],
+): readonly CredentialPathPolicy[] | undefined {
+	const words = invocation
+		.map((word) => word.replace(/^[({]+/u, "").replace(/\)+$/u, ""))
+		.filter((word) => word.length > 0);
+	if (words.length === 0) return policies;
+	const command = (words[0].split(/[\\/]/u).at(-1) ?? "").toLowerCase().replace(/\.exe$/u, "");
+	if (!DIRECTORY_CHANGE_COMMANDS.has(command)) return policies;
+	const operands = words.slice(1);
+	if (operands.includes("-")) return policies;
+	const target = operands.find((operand) => !operand.startsWith("-")) ?? "~";
+	const next = [...policies];
+	for (const policy of policies) {
+		const moved = policy.withCwd(target);
+		if (!next.some((known) => known.workingDirectory === moved.workingDirectory)) next.push(moved);
+	}
+	return next.length > MAX_SHELL_WORKING_DIRECTORIES ? undefined : next;
+}
+
 function shellCredentialRisk(
 	command: string,
 	paths: CredentialPathPolicy,
@@ -240,18 +272,24 @@ function shellCredentialRisk(
 		return undefined;
 	}
 
+	let policies: readonly CredentialPathPolicy[] = [paths];
 	for (const segment of parseShellInvocations(shellTokens)) {
 		for (let i = 0; i < segment.invocation.length; i++) {
 			const cmd = parseInvocationCommand(segment.invocation, i);
 			if (cmd.envRisk) return cmd.envRisk;
 			if (!cmd.isInspectionCommand) continue;
-			if (cmd.searchTool) {
-				const searchRisk = searchCredentialRisk(cmd.searchTool, cmd.args, segment.readsPipe, paths, true);
-				if (searchRisk) return searchRisk;
-				continue;
+			for (const policy of policies) {
+				if (cmd.searchTool) {
+					const searchRisk = searchCredentialRisk(cmd.searchTool, cmd.args, segment.readsPipe, policy, true);
+					if (searchRisk) return searchRisk;
+					continue;
+				}
+				if (hasProtectedArgumentToken(cmd.args, policy)) return "credential_path";
 			}
-			if (hasProtectedArgumentToken(cmd.args, paths)) return "credential_path";
 		}
+		const moved = workingDirectoriesAfter(segment.invocation, policies);
+		if (!moved) return "credential_path";
+		policies = moved;
 	}
 	return undefined;
 }
@@ -449,26 +487,32 @@ async function shellCredentialRiskAsync(
 		return undefined;
 	}
 
+	let policies: readonly CredentialPathPolicy[] = [paths];
 	for (const segment of parseShellInvocations(shellTokens)) {
 		for (let i = 0; i < segment.invocation.length; i++) {
 			signal?.throwIfAborted();
 			const cmd = parseInvocationCommand(segment.invocation, i);
 			if (cmd.envRisk) return cmd.envRisk;
 			if (!cmd.isInspectionCommand) continue;
-			if (cmd.searchTool) {
-				const searchRisk = await searchCredentialRiskAsync(
-					cmd.searchTool,
-					cmd.args,
-					segment.readsPipe,
-					paths,
-					true,
-					signal,
-				);
-				if (searchRisk) return searchRisk;
-				continue;
+			for (const policy of policies) {
+				if (cmd.searchTool) {
+					const searchRisk = await searchCredentialRiskAsync(
+						cmd.searchTool,
+						cmd.args,
+						segment.readsPipe,
+						policy,
+						true,
+						signal,
+					);
+					if (searchRisk) return searchRisk;
+					continue;
+				}
+				if (await hasProtectedArgumentTokenAsync(cmd.args, policy, signal)) return "credential_path";
 			}
-			if (await hasProtectedArgumentTokenAsync(cmd.args, paths, signal)) return "credential_path";
 		}
+		const moved = workingDirectoriesAfter(segment.invocation, policies);
+		if (!moved) return "credential_path";
+		policies = moved;
 	}
 	return undefined;
 }

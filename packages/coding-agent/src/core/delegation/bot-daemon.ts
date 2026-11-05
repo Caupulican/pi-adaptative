@@ -12,6 +12,10 @@
  * in the shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`), reloads the owner's settings and
  * wakes the away supervisor, which is when a parent session's holder can have died.
  *
+ * The daemon process owns ONE credential store and ONE model registry, shared by every parent it hosts away. Each tick
+ * reloads them when the owner's `auth.json` or `models.json` changed on disk; an OAuth refresh always reads the stored
+ * credential under the file lock, so a long-lived store never posts a superseded refresh token.
+ *
  * The daemon reports into its lease record (bounded), and every end is recorded there: `signal` when its process is
  * asked to stop, `failed` with the error that ended it, `released` by the session that stopped it. A lease another
  * start took is that daemon's, so this one exits without writing it. A stop is joined: the renewal and the watch end,
@@ -20,11 +24,12 @@
  * A lock held by another process through every bounded retry (`ELOCKED`) skips one renewal or report write: renewal
  * recurs well inside the lease's stale window, due routines stay due and reports are written on the next tick.
  */
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, statSync, watch } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
 import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
-import type { AuthStorage } from "../auth-storage.ts";
-import type { ModelRegistry } from "../model-registry.ts";
+import { configFile } from "../agent-paths.ts";
+import { AuthStorage } from "../auth-storage.ts";
+import { ModelRegistry } from "../model-registry.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
@@ -48,6 +53,16 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/** Size and modification time of each owner credential file, or `absent`: a changed stamp means the owner edited one. */
+function credentialFilesStamp(agentDir: string): string {
+	return ["auth.json", "models.json"]
+		.map((name) => {
+			const stat = statSync(configFile(agentDir, name), { throwIfNoEntry: false });
+			return stat ? `${stat.size}:${stat.mtimeMs}` : "absent";
+		})
+		.join("|");
+}
+
 export interface BotDaemonInput {
 	readonly agentDir: string;
 	/** The lease token the starting session claimed and passed in argv: the daemon's identity. */
@@ -56,7 +71,10 @@ export interface BotDaemonInput {
 	readonly timers: TimerSource;
 	/** The identity each renewal records. */
 	readonly owner: ProcessOwner;
-	/** Shared credential owners, when the host has them; otherwise each parent run away builds them as the SDK does. */
+	/**
+	 * Shared credential owners, when the host has them (the daemon process always does); otherwise each parent run away
+	 * builds them as the SDK does. Shared ones are reloaded when the owner's files change.
+	 */
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
 }
@@ -114,6 +132,9 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	});
 	const leaseFile = daemonLeasePath(routineStore.getStoreFilePath());
 	let watcher: FSWatcher | undefined;
+	// The settings reload a tick started; it never rejects (a failure stops the daemon) and a stop joins it.
+	let reloading: Promise<void> | undefined;
+	let credentialStamp = credentialFilesStamp(agentDir);
 
 	const stop = (end?: Omit<BotDaemonEnd, "at">): Promise<number> => {
 		stopping ??= (async () => {
@@ -122,6 +143,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			watcher = undefined;
 			let code = end?.reason === "failed" ? 1 : 0;
 			let ended = end;
+			await reloading;
 			try {
 				await supervisor.close();
 			} catch (error) {
@@ -161,10 +183,23 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			}
 		}
 		flushReports();
-		// An owner's settings change applies from the next pass.
-		void settings.reload().then(() => {
-			if (!stopping) supervisor.wake();
-		}, fail);
+		// An owner's credential or model change applies to the next request of every hosted parent.
+		const stamp = credentialFilesStamp(agentDir);
+		if (stamp !== credentialStamp) {
+			credentialStamp = stamp;
+			input.authStorage?.reload();
+			input.modelRegistry?.refresh();
+		}
+		// An owner's settings change applies from the next pass; a reload still running covers this tick too.
+		if (reloading) return;
+		reloading = settings
+			.reload()
+			.then(() => {
+				if (!stopping) supervisor.wake();
+			}, fail)
+			.finally(() => {
+				reloading = undefined;
+			});
 	};
 	// The renewal is this process's whole life, so it alone keeps the process alive; every other alarm is unreferenced.
 	const ticker = repeatEvery(clock, DAEMON_TICK_MS, tick, { keepAlive: true });
@@ -190,11 +225,22 @@ export function runBotDaemonCommand(args: readonly string[]): Promise<number> {
 	const [agentDir, token] = args;
 	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
 		return Promise.resolve(2);
-	const run = startBotDaemon({ agentDir, token, timers: SYSTEM_TIMER_SOURCE, owner: ownProcessOwner() });
+	// One credential owner for the whole process: every parent hosted away shares this store and registry.
+	const authStorage = AuthStorage.create(configFile(agentDir, "auth.json"));
+	const modelRegistry = ModelRegistry.create(authStorage, configFile(agentDir, "models.json"));
+	const run = startBotDaemon({
+		agentDir,
+		token,
+		timers: SYSTEM_TIMER_SOURCE,
+		owner: ownProcessOwner(),
+		authStorage,
+		modelRegistry,
+	});
 	process.once("SIGTERM", () => void run.stop());
 	process.once("SIGINT", () => void run.stop());
-	// An error nothing caught ends the daemon with its terminal record instead of a silent exit.
-	process.once("uncaughtException", (error) => void run.stop({ reason: "failed", detail: errorText(error) }));
-	process.once("unhandledRejection", (reason) => void run.stop({ reason: "failed", detail: errorText(reason) }));
+	// An error nothing caught ends the daemon with its terminal record instead of a silent exit. The handlers stay for
+	// the whole stop: a second error while stopping joins the same idempotent stop instead of crashing it.
+	process.on("uncaughtException", (error) => void run.stop({ reason: "failed", detail: errorText(error) }));
+	process.on("unhandledRejection", (reason) => void run.stop({ reason: "failed", detail: errorText(reason) }));
 	return run.exited;
 }

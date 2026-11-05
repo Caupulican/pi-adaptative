@@ -1,4 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
@@ -37,7 +38,7 @@ function hasUsage(delta: Required<GatewayUsageDelta>): boolean {
  * for persisting the assistant and checkpoint between accounting and consuming an epoch.
  */
 export class WorkerProviderTurnProtocol {
-	private readonly acquireReservation: () => Promise<ProviderBudgetReservation>;
+	private readonly acquireReservation: (request?: RequestPreflightContext) => Promise<ProviderBudgetReservation>;
 	private readonly recordUsage: ((delta: GatewayUsageDelta) => void) | undefined;
 	private readonly signal: AbortSignal;
 	private readonly onFailure: (error: unknown) => void;
@@ -54,7 +55,8 @@ export class WorkerProviderTurnProtocol {
 	private consumedPreflights = 0;
 
 	constructor(options: {
-		acquireReservation(): Promise<ProviderBudgetReservation>;
+		/** `request`: the provider request about to be sent, offered to a budget that prices it. */
+		acquireReservation(request?: RequestPreflightContext): Promise<ProviderBudgetReservation>;
 		recordUsage?(delta: GatewayUsageDelta): void;
 		signal: AbortSignal;
 		onFailure(error: unknown): void;
@@ -65,7 +67,7 @@ export class WorkerProviderTurnProtocol {
 		this.onFailure = options.onFailure;
 	}
 
-	async requestPreflight(): Promise<{ maxTokens: number }> {
+	async requestPreflight(request?: RequestPreflightContext): Promise<{ maxTokens: number }> {
 		if (this.closed || this.inFlight || (this.held && !this.heldConsumed)) {
 			const error = new WorkerCompletionProtocolError(
 				"Worker completion attempted an overlapping or out-of-order provider preflight.",
@@ -82,7 +84,7 @@ export class WorkerProviderTurnProtocol {
 		const generation = ++this.generation;
 		let acquired: ProviderBudgetReservation | undefined;
 		try {
-			acquired = await this.acquireReservation();
+			acquired = await this.acquireReservation(request);
 			this.signal.throwIfAborted();
 			if (this.closed || generation !== this.generation) {
 				throw new WorkerCompletionProtocolError(

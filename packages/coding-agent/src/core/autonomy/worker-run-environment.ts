@@ -135,13 +135,34 @@ function describeProcess(pid: number): string {
 }
 
 /**
+ * Git settings for a worker that may reach no network: no lazy fetch of a partial clone's missing objects (git 2.44 and
+ * later), no credential prompt, no pager program and no filesystem-monitor hook from the repository's config (both run
+ * a configured program). The monitor override is appended to any command-line config the environment already carries.
+ */
+function offlineGitEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	const count = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
+	const index = Number.isSafeInteger(count) && count > 0 ? count : 0;
+	return {
+		GIT_NO_LAZY_FETCH: "1",
+		GIT_TERMINAL_PROMPT: "0",
+		GIT_PAGER: "cat",
+		GIT_CONFIG_COUNT: String(index + 1),
+		[`GIT_CONFIG_KEY_${index}`]: "core.fsmonitor",
+		[`GIT_CONFIG_VALUE_${index}`]: "false",
+	};
+}
+
+/**
  * `onReaped` receives a description of every process still running when the worker ended. Workers are
  * zero-footprint, so those processes are ended, but never silently: the owner is told what was left
  * running and that a durable long-running process belongs to the root's own background runs.
+ * `offline`: the worker holds no network grant and edits nothing, so git's implicit network and program paths are
+ * closed in its commands' environment too (see {@link offlineGitEnvironment}).
  */
 export function createWorkerRunEnvironment(
 	label: string,
 	onReaped?: (processes: readonly string[]) => void,
+	options: { offline?: boolean } = {},
 ): WorkerRunEnvironment {
 	const workerLabel = sanitizeWorkerLabel(label);
 	const marker = randomUUID();
@@ -158,12 +179,16 @@ export function createWorkerRunEnvironment(
 		[PI_PARENT_PID_ENV]: String(process.pid),
 		[WORKER_LABEL_ENV]: workerLabel,
 		...workerCommitterEnvironment(workerLabel),
+		...(options.offline ? offlineGitEnvironment(process.env) : {}),
 	};
 	const spawnHook: BashSpawnHook = (context) => {
 		const env: NodeJS.ProcessEnv = { ...context.env };
 		const stripped = new Set(secretEnvironmentNames(env));
 		for (const name of Object.keys(env)) if (stripped.has(name)) delete env[name];
-		return { ...context, env: { ...env, ...attributionEnvironment } };
+		return {
+			...context,
+			env: { ...env, ...attributionEnvironment, ...(options.offline ? offlineGitEnvironment(env) : {}) },
+		};
 	};
 	return {
 		marker,

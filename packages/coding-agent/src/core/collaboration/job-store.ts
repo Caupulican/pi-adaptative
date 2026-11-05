@@ -139,7 +139,8 @@ function judgeBinding(
 			reason: `Controller pid ${owner.pid} is alive; the lease registry of session ${serving} is unreadable (${String(error).slice(0, 160)}).`,
 		};
 	}
-	return holders.some((holder) => isSameProcess(holder.owner, owner))
+	// An away host holds a closed parent for its routine runs; it serves no collaboration job.
+	return holders.some((holder) => holder.role === "session" && isSameProcess(holder.owner, owner))
 		? { state: "live", reason: `Live pid ${owner.pid} serves the job for session ${serving}.` }
 		: { state: "gone", reason: `Controller pid ${owner.pid} is alive but no longer holds session ${serving}.` };
 }
@@ -548,7 +549,8 @@ export class CollaborationJobStore {
 				};
 			}
 			for (const holder of holders) {
-				if (holder.self || holder.standing === "dead") continue;
+				// An away host runs the closed parent's routine runs and never takes a job back: no session is open.
+				if (holder.self || holder.standing === "dead" || holder.role === "away-host") continue;
 				return holder.standing === "alive"
 					? {
 							control: "awaiting_session",

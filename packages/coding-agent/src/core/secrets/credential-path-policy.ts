@@ -23,6 +23,10 @@ export interface CredentialPathProbe {
 	readonly harnessFiles?: readonly string[];
 }
 
+/** `~`, `$HOME`/`${HOME}` (POSIX shells) and `$USERPROFILE`/`$env:USERPROFILE`/`%USERPROFILE%` (Windows shells) at a path's start. */
+const HOME_PREFIX_RE = /^(?:~|\$HOME|\$\{HOME\})(?=$|[\\/])/u;
+const WINDOWS_HOME_PREFIX_RE = /^(?:\$USERPROFILE|\$\{USERPROFILE\}|\$env:USERPROFILE|%USERPROFILE%)(?=$|[\\/])/iu;
+
 /** One path-classification owner for file, process, shell, Python and search credential checks. */
 export class CredentialPathPolicy {
 	private readonly cwd: string;
@@ -48,6 +52,33 @@ export class CredentialPathPolicy {
 		this.caseSensitive = options.caseSensitive;
 		this.probe = options.probe;
 		this.protectionCwd = options.protectionCwd;
+	}
+
+	/** The same policy judging paths from `cwd` instead: a command line that changed directory before naming a path. */
+	withCwd(cwd: string): CredentialPathPolicy {
+		return new CredentialPathPolicy({
+			cwd: resolveExecutionPath(this.expandHome(cwd), this.cwd, this.flavor),
+			flavor: this.flavor,
+			caseSensitive: this.caseSensitive,
+			protection: this.protection,
+			protectionCwd: this.protectionCwd,
+			probe: this.probe,
+		});
+	}
+
+	/** Where this policy resolves relative paths. */
+	get workingDirectory(): string {
+		return this.cwd;
+	}
+
+	/**
+	 * A path written with the home directory's shell spelling, expanded the way the shell that runs it expands it. With
+	 * no known home (a foreign backend), the path stays literal.
+	 */
+	private expandHome(rawPath: string): string {
+		const home = this.probe.homeDir;
+		if (home === undefined) return rawPath;
+		return rawPath.replace(HOME_PREFIX_RE, home).replace(WINDOWS_HOME_PREFIX_RE, home);
 	}
 
 	private samePath(first: string, second: string): boolean {
@@ -95,15 +126,17 @@ export class CredentialPathPolicy {
 	}
 
 	/** Opaque argv/code literals are not declared file requests. Never invent a drive cwd for them. */
-	isProtectedToken(token: string): boolean {
+	isProtectedToken(rawToken: string): boolean {
+		const token = this.expandHome(rawToken);
 		const root = this.paths.parse(token).root;
 		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
 			return this.isProtected(token);
 		return this.isLexicallyProtectedToken(token, root);
 	}
 
-	async isProtectedTokenAsync(token: string, signal?: AbortSignal): Promise<boolean> {
+	async isProtectedTokenAsync(rawToken: string, signal?: AbortSignal): Promise<boolean> {
 		signal?.throwIfAborted();
+		const token = this.expandHome(rawToken);
 		const root = this.paths.parse(token).root;
 		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
 			return this.isProtectedAsync(token, signal);
@@ -111,7 +144,7 @@ export class CredentialPathPolicy {
 	}
 
 	isProtected(rawPath: string): boolean {
-		const candidates = this.candidates(resolveExecutionPath(rawPath, this.cwd, this.flavor));
+		const candidates = this.candidates(resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor));
 		const roots = (values: readonly string[] | undefined) =>
 			(values ?? []).flatMap((path) => {
 				if (this.protectionCwd === undefined) {
@@ -134,7 +167,7 @@ export class CredentialPathPolicy {
 
 	async isProtectedAsync(rawPath: string, signal?: AbortSignal): Promise<boolean> {
 		signal?.throwIfAborted();
-		const resolvedTarget = resolveExecutionPath(rawPath, this.cwd, this.flavor);
+		const resolvedTarget = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
 		const candidates = await this.candidatesAsync(resolvedTarget, signal);
 		const roots = async (values: readonly string[] | undefined) => {
 			const collected: string[] = [];
@@ -178,22 +211,21 @@ export class CredentialPathPolicy {
 
 	isFile(rawPath: string): boolean | undefined {
 		const result = requireSynchronousPreflight(
-			this.probe.isFile(resolveExecutionPath(rawPath, this.cwd, this.flavor)),
+			this.probe.isFile(resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor)),
 		);
 		return typeof result === "boolean" ? result : undefined;
 	}
 
 	async isFileAsync(rawPath: string, signal?: AbortSignal): Promise<boolean | undefined> {
 		signal?.throwIfAborted();
-		const resolved = resolveExecutionPath(rawPath, this.cwd, this.flavor);
+		const resolved = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
 		const result = await this.probe.isFile(resolved, signal);
 		signal?.throwIfAborted();
 		return typeof result === "boolean" ? result : undefined;
 	}
 
 	isHarnessOwnedSearchTarget(rawPath: string): boolean {
-		const path = this.probe.homeDir === undefined ? rawPath : rawPath.replace(/^~(?=$|[\\/])/u, this.probe.homeDir);
-		const target = resolveExecutionPath(path, this.cwd, this.flavor);
+		const target = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
 		return (
 			(this.probe.harnessRoots ?? []).some((root) => this.isInside(root, target)) ||
 			(this.probe.harnessFiles ?? []).some((file) => this.samePath(target, file))

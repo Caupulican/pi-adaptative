@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
@@ -10,14 +11,50 @@ import {
 	sessionsDir,
 	stateDir,
 } from "../agent-paths.ts";
+import { getMachineCredentialBootstrapFiles } from "../secrets/credential-machine-session.ts";
 
 /** The project's own harness settings file: denied to a lane's file tools, but a file of the project, not harness storage. */
 export function projectLaneSettingsPath(cwd: string): string {
 	return path.join(cwd, ".pi", "settings.json");
 }
 
+/**
+ * The machine's standard credential stores, in their default locations on every platform: SSH and GPG keys, cloud
+ * and cluster credentials, package-registry and git tokens, and the OS keychains. A lane never reads them; git, ssh and
+ * the cloud clients a write worker runs still read them themselves (the boundary judges a command's own arguments).
+ */
+export function machineCredentialStorePaths(home: string = homedir()): string[] {
+	return [
+		path.join(home, ".ssh"),
+		path.join(home, ".gnupg"),
+		path.join(home, ".aws"),
+		path.join(home, ".azure"),
+		path.join(home, ".config", "gcloud"),
+		path.join(home, ".kube"),
+		path.join(home, ".docker"),
+		path.join(home, ".netrc"),
+		path.join(home, "_netrc"),
+		path.join(home, ".npmrc"),
+		path.join(home, ".git-credentials"),
+		path.join(home, ".config", "git", "credentials"),
+		path.join(home, ".config", "gh"),
+		path.join(home, "Library", "Keychains"),
+		path.join(home, ".local", "share", "keyrings"),
+		path.join(home, "AppData", "Roaming", "Microsoft", "Credentials"),
+		path.join(home, "AppData", "Local", "Microsoft", "Credentials"),
+		path.join(home, "AppData", "Roaming", "Microsoft", "Protect"),
+		path.join(home, "AppData", "Roaming", "GitHub CLI"),
+	];
+}
+
+/**
+ * Everything a lane (worker, research, managed or proactivity read authority) must never read: the harness's own
+ * private storage, the owner's secret-manager bootstrap files and the machine's credential stores.
+ */
 export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
 	return [
+		...machineCredentialStorePaths(),
+		...getMachineCredentialBootstrapFiles(agentDir),
 		configFile(agentDir, "auth.json"),
 		configFile(agentDir, "MEMORY.md"),
 		configFile(agentDir, "USER.md"),

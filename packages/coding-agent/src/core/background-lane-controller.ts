@@ -21,7 +21,7 @@ import type { SessionManager } from "../kernel/node.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { spawnProcess } from "../utils/child-process.ts";
-import { orchestrationEventStoreDir } from "./agent-paths.ts";
+import { configFile, orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
@@ -33,6 +33,7 @@ import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/l
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
+import { daemonBaselineEnvironment } from "./daemon-environment.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { botDaemonCommandArgs } from "./delegation/bot-daemon-command.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
@@ -148,12 +149,6 @@ import {
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
-import {
-	PI_ORCHESTRATION_AGENT_ID_ENV,
-	PI_PARENT_PID_ENV,
-	PI_PARENT_SESSION_ENV,
-	PI_TASK_REF_ENV,
-} from "./process-identity.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -175,27 +170,16 @@ import { RoutineSessionController } from "./routines/routine-session-controller.
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
-import { getSessionRole, PI_SESSION_ROLE_ENV } from "./session-role.ts";
+import { getSessionRole } from "./session-role.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
-import { PI_WORKTREE_LANE_ENV } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
-
-/** The starting process's session identity: the detached daemon serves the agent directory and is nobody's child. */
-const DAEMON_DROPPED_ENV = [
-	PI_SESSION_ROLE_ENV,
-	PI_PARENT_PID_ENV,
-	PI_PARENT_SESSION_ENV,
-	PI_ORCHESTRATION_AGENT_ID_ENV,
-	PI_TASK_REF_ENV,
-	PI_WORKTREE_LANE_ENV,
-] as const;
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
@@ -1711,10 +1695,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._safeWarn(
 				`The detached bot daemon stopped on an error${previousEnd.detail ? `: ${previousEnd.detail}` : ""}. It is started again.`,
 			);
-		const args = [...target.argsPrefix, ...botDaemonCommandArgs(this.deps.getAgentDir(), token)];
-		const env: NodeJS.ProcessEnv = { ...process.env, ...target.environment };
-		for (const name of DAEMON_DROPPED_ENV) delete env[name];
+		const agentDir = this.deps.getAgentDir();
+		const args = [...target.argsPrefix, ...botDaemonCommandArgs(agentDir, token)];
+		// An explicit baseline, run from the agent directory: nothing scoped to this session's shell or project reaches
+		// a daemon that serves every project (see daemon-environment.ts).
+		const env: NodeJS.ProcessEnv = {
+			...daemonBaselineEnvironment(process.env, this.deps.getCwd(), [
+				configFile(agentDir, "auth.json"),
+				configFile(agentDir, "models.json"),
+			]),
+			...target.environment,
+		};
 		const child = spawnProcess(target.executable, args, {
+			cwd: agentDir,
 			detached: true,
 			stdio: "ignore",
 			windowsHide: true,

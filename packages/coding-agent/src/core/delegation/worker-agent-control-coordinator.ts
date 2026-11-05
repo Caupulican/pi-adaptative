@@ -126,14 +126,16 @@ export interface WorkerAgentControlCoordinatorOptions {
 	withConversationAdmission?<T>(agent: AgentBindingContract, operation: () => T): T;
 	isControlAvailable(): boolean;
 	/**
-	 * Present on a host that runs only part of its parent's work (a parent opened away): the replies and root replies of
-	 * other agents are left durable for the parent.
+	 * Present on a host that runs only part of its parent's work (a parent opened away): whether this host runs an
+	 * attempt of this agent, so it reconciles the agent's inactive host-event transport. Everything else is judged per
+	 * message by `runsControlMessage`.
 	 */
 	runsAgent?(agentId: string): boolean;
 	/**
-	 * Present with `runsAgent`: whether this host takes the mailbox turn of this control message. A turn is judged by its
-	 * own message, since its attempt exists only once the turn is taken; every other turn, and each turn queued behind
-	 * one, stays pending for the parent.
+	 * Present with `runsAgent`: whether this host owns this control message. A turn, a reply to it and a root reply to it
+	 * are judged by the request message, since its attempt exists only once the turn is taken. Every other turn, each
+	 * turn queued behind one, every other reply and every message another turn would read stays durable and pending for
+	 * the parent; a task for an agent with such a turn pending is deferred as busy instead of queued behind it.
 	 */
 	runsControlMessage?(messageId: string): boolean;
 	getLifecycle(): WorkerLifecycle;
@@ -835,6 +837,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				skipReason: this.cleanupPendingSkipReason(agent.agentId),
 			};
 		}
+		// A turn this host does not own (the parent's) is pending first on this agent: the agent is the parent's until that
+		// turn runs, so nothing is queued behind it here.
+		const runsControlMessage = this.options.runsControlMessage;
+		if (
+			runsControlMessage &&
+			this.getMailbox(agent.agentId)
+				.pendingTaskBearing()
+				.some((pending) => !runsControlMessage(pending.messageId))
+		) {
+			return { started: false, steering: false, messageId: "", skipReason: "worker_specialist_busy" };
+		}
 		return this.startIdleAgentTask(
 			agent,
 			message,
@@ -1445,7 +1458,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			return;
 		}
 		for (const reply of replies) {
-			if (this.options.runsAgent?.(reply.sourceAgentId) === false) continue;
+			if (this.options.runsControlMessage?.(reply.requestMessageId) === false) continue;
 			this.reconcileSessionRootReply(reply);
 		}
 	}
@@ -2092,7 +2105,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		includeFollowUp: boolean,
 	): WorkerMailboxConversationMessage[] {
 		const mailbox = this.getMailbox(agentId);
-		const pending = mailbox.pending();
+		const runsControlMessage = this.options.runsControlMessage;
+		// A host running part of its parent's work reads host events and the messages it owns; the rest stays pending.
+		const admitted = (message: WorkerAgentMessage) =>
+			!runsControlMessage || message.task?.kind === "host_event" || runsControlMessage(message.messageId);
+		const pending = mailbox.pending().filter(admitted);
 		if (pending.length === 0) return [];
 		const delivered = conversation.findDeliveredWorkerControlMessageIds(
 			pending
@@ -2108,6 +2125,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		for (const messageId of delivered) this.acknowledgeDeliveredMailboxMessage(agentId, messageId);
 		return mailbox
 			.pending()
+			.filter(admitted)
 			.filter((message) => message.task?.kind === "host_event" || message.kind === "steer" || includeFollowUp)
 			.map((message) => ({
 				messageId: message.messageId,
@@ -2146,27 +2164,29 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const agents = this.replyReconciliationAgents();
 		this.reconcileWorkerReplyOutboxes(agents);
 		for (const agent of agents) {
-			try {
-				this.hostEventTransport.reconcileInactive(agent.agentId);
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				try {
-					this.options.warn?.(`Worker host-event transport reconciliation failed for ${agent.agentId}: ${reason}`);
-				} catch {
-					// Diagnostics are observers; the unsettled binding and its physical copy remain the retry source.
-				}
-			}
+			if (this.options.runsAgent?.(agent.agentId) !== false) this.reconcileInactiveHostEvents(agent);
 			this.reconcileTaskBearingMailbox(agent.agentId);
 		}
 	}
 
+	private reconcileInactiveHostEvents(agent: AgentBindingContract): void {
+		try {
+			this.hostEventTransport.reconcileInactive(agent.agentId);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			try {
+				this.options.warn?.(`Worker host-event transport reconciliation failed for ${agent.agentId}: ${reason}`);
+			} catch {
+				// Diagnostics are observers; the unsettled binding and its physical copy remain the retry source.
+			}
+		}
+	}
+
+	/** Every agent: each turn and reply on it is judged by its own request message (`runsControlMessage`). */
 	private replyReconciliationAgents(): AgentBindingContract[] {
-		const runsAgent = this.options.runsAgent;
-		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents)
-			.filter((agent) => !runsAgent || runsAgent(agent.agentId))
-			.sort(
-				(left, right) => left.createdAt.localeCompare(right.createdAt) || left.agentId.localeCompare(right.agentId),
-			);
+		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).sort(
+			(left, right) => left.createdAt.localeCompare(right.createdAt) || left.agentId.localeCompare(right.agentId),
+		);
 	}
 
 	private reconcileWorkerReplyOutboxes(agents: readonly AgentBindingContract[]): void {
@@ -2199,6 +2219,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			return;
 		}
 		for (const acknowledgement of acknowledgements) {
+			if (this.options.runsControlMessage?.(acknowledgement.messageId) === false) continue;
 			const failureKey = `reply:${source.agentId}:${acknowledgement.messageId}`;
 			try {
 				const request = sourceMailbox.getMessage(acknowledgement.messageId);
