@@ -246,6 +246,12 @@ export const DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION = 4;
 
 export const DEFAULT_PROACTIVITY_MAX_USD = 0.05;
 
+/** Five reviews at the full per-review bound; most reviews are quiet and cost less. */
+export const DEFAULT_PROACTIVITY_MAX_USD_PER_DAY = 0.25;
+
+/** A handful of unprompted parent turns a day; later accepted notes still reach the owner's next turn. */
+export const DEFAULT_PROACTIVITY_MAX_TURN_WAKES_PER_DAY = 3;
+
 export const DEFAULT_PROACTIVITY_MAX_NOTES = 2;
 
 export const DEFAULT_PROACTIVITY_DELIVERY: "note" | "turn" = "turn";
@@ -257,6 +263,10 @@ export const MAX_PROACTIVITY_MIN_OWNER_TURNS = 100;
 export const MAX_PROACTIVITY_MAX_RUNS_PER_SESSION = 50;
 
 export const MAX_PROACTIVITY_MAX_USD = 1;
+
+export const MAX_PROACTIVITY_MAX_USD_PER_DAY = 10;
+
+export const MAX_PROACTIVITY_MAX_TURN_WAKES_PER_DAY = 100;
 
 export const MAX_PROACTIVITY_MAX_NOTES = 5;
 

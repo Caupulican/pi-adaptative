@@ -3,9 +3,12 @@ import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Usage } from "@caupulican/pi-ai";
+import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
+import { PROACTIVE_NOTE_CUSTOM_TYPE } from "../proactivity/proactivity-review.ts";
+import { isMissingFileError } from "../util/atomic-file.ts";
 import { accountingProjectionPath } from "./accounting-evidence.ts";
 import { accountingFragmentPath } from "./accounting-fragments.ts";
 import {
@@ -41,6 +44,10 @@ export type DailyUsageTotals = {
 	spawnedCost: number;
 	/** The ICM history-summary share of `spawnedCost`. */
 	historySummaryCost: number;
+	/** The proactive-review share of `ownCost`. */
+	proactivityCost: number;
+	/** Accepted proactive-note deliveries that start a parent turn without an owner message. */
+	proactiveTurnWakes: number;
 	totalCost: number;
 	reportedTotalCost?: number;
 	input: number;
@@ -59,6 +66,8 @@ function createZeroTotals(): DailyUsageTotals {
 		reportedTotalCost: 0,
 		spawnedCost: 0,
 		historySummaryCost: 0,
+		proactivityCost: 0,
+		proactiveTurnWakes: 0,
 		totalCost: 0,
 		input: 0,
 		output: 0,
@@ -110,6 +119,11 @@ function addDailyUsageRecord(
 	semantic: Set<string>,
 ): boolean {
 	if (!isInsideWindow(Date.parse(record.timestamp), window)) return false;
+	// A wake is an event, not spend: it does not make its session one that spent in the window.
+	if (record.kind === "proactive_wake") {
+		totals.proactiveTurnWakes++;
+		return false;
+	}
 	const seen = record.kind === "spawned" ? spawned : record.kind === "semantic" ? semantic : undefined;
 	if (record.reportId && seen?.has(record.reportId)) return false;
 	const resolved = resolveEffectiveEntryCost(record.usage, {
@@ -133,6 +147,7 @@ function addDailyUsageRecord(
 		totals.reports++;
 	} else totals.ownCost += costTotal;
 	if (record.historySummary) totals.historySummaryCost += costTotal;
+	if (record.proactivity) totals.proactivityCost += costTotal;
 	if (resolved?.estimated) totals.costEstimate = "base-rates";
 	addUsage(totals, record.usage);
 	return true;
@@ -165,9 +180,16 @@ function shouldReadSessionFile(filePath: string, window: DailyUsageWindow): bool
 export function aggregateDailyUsageFromEntries(
 	entries: readonly SessionEntry[],
 	window: DailyUsageWindow,
+	pending: readonly SemanticUsageReport[] = [],
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
-	const hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set(), new Set());
+	const semantic = new Set<string>();
+	let hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set(), semantic);
+	for (const report of pending)
+		if (
+			addDailyUsageRecord(totals, semanticUsageRecord(report, new Date().toISOString()), window, new Set(), semantic)
+		)
+			hasUsage = true;
 	totals.sessions = hasUsage ? 1 : 0;
 	return finishTotals(totals);
 }
@@ -188,7 +210,7 @@ function getSessionEntries(
 	);
 }
 
-interface DailyUsageRecord {
+interface DailyUsageSpendRecord {
 	costStatus?: SemanticUsageReport["costStatus"];
 	timestamp: string;
 	usage: Usage;
@@ -198,6 +220,30 @@ interface DailyUsageRecord {
 	perResponse?: boolean;
 	reportId?: string;
 	historySummary: boolean;
+	proactivity: boolean;
+}
+
+/** An accepted proactive note whose delivery starts a parent turn, at its acceptance time. */
+interface ProactiveWakeRecord {
+	kind: "proactive_wake";
+	timestamp: string;
+}
+
+type DailyUsageRecord = DailyUsageSpendRecord | ProactiveWakeRecord;
+
+/** Persisted and held semantic receipts map to one record shape, so the report-id dedupe sees them as the same charge. */
+function semanticUsageRecord(report: SemanticAccountingReport, timestamp: string): DailyUsageSpendRecord {
+	return {
+		timestamp: report.responseTimestamp ?? timestamp,
+		usage: report.usage,
+		kind: "semantic",
+		costStatus: report.costStatus,
+		...(typeof report.model === "string" ? { model: report.model } : {}),
+		...(typeof report.provider === "string" ? { provider: report.provider } : {}),
+		reportId: report.reportId,
+		historySummary: report.route === "history_summary",
+		proactivity: report.route === "proactivity",
+	};
 }
 
 function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
@@ -210,15 +256,22 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			model: part.model,
 			provider: part.provider,
 			historySummary: false,
+			proactivity: false,
 		}));
+	if (entry.type === "custom_message" && entry.customType === PROACTIVE_NOTE_CUSTOM_TYPE)
+		return parentInputOf(entry)?.metadata.mode === "turn"
+			? [{ kind: "proactive_wake", timestamp: entry.timestamp }]
+			: [];
 	if (entry.type !== "custom") return [];
-	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE && entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return [];
-	const data = entry.data as SemanticAccountingReport | SpawnedUsageReport | undefined;
+	if (entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
+		const report = entry.data as SemanticAccountingReport | undefined;
+		return report?.usage && report.reportId ? [semanticUsageRecord(report, entry.timestamp)] : [];
+	}
+	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) return [];
+	const data = entry.data as SpawnedUsageReport | undefined;
 	if (!data?.usage) return [];
-	const semantic = entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE;
-	if (semantic && !data.reportId) return [];
-	if (!semantic && (data as SpawnedUsageReport).usageComponents !== undefined)
-		return getSpawnedUsageComponents(data as SpawnedUsageReport, entry.timestamp).map((part) => ({
+	if (data.usageComponents !== undefined)
+		return getSpawnedUsageComponents(data, entry.timestamp).map((part) => ({
 			timestamp: part.timestamp,
 			usage: part.usage,
 			kind: "spawned",
@@ -227,20 +280,19 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			perResponse: true,
 			reportId: `${data.reportId ?? entry.id}:${part.sourceId}`,
 			historySummary: false,
+			proactivity: false,
 		}));
 	return [
 		{
-			timestamp: semantic
-				? ((data as SemanticAccountingReport).responseTimestamp ?? entry.timestamp)
-				: entry.timestamp,
+			timestamp: entry.timestamp,
 			usage: data.usage,
-			kind: semantic ? "semantic" : "spawned",
-			...(semantic ? { costStatus: (data as SemanticAccountingReport).costStatus } : {}),
+			kind: "spawned",
 			...(typeof data.model === "string" ? { model: data.model } : {}),
 			...(typeof data.provider === "string" ? { provider: data.provider } : {}),
-			...(!semantic && (data as SpawnedUsageReport).costBasis === "response" ? { perResponse: true } : {}),
+			...(data.costBasis === "response" ? { perResponse: true } : {}),
 			reportId: data.reportId,
-			historySummary: semantic && (data as SemanticAccountingReport).route === "history_summary",
+			historySummary: false,
+			proactivity: false,
 		},
 	];
 }
@@ -297,23 +349,42 @@ async function retainUsageRecords(
 	cachedUsageBytes += bytes;
 }
 
-/** Entire scan is asynchronous; retained cache entries contain usage only, never conversation payloads. */
+/** A session directory that does not exist yet holds no sessions. */
+async function readSessionDirectory(directory: string) {
+	try {
+		return await readdir(directory, { withFileTypes: true });
+	} catch (error) {
+		if (isMissingFileError(error)) return [];
+		throw error;
+	}
+}
+
+/** A wake line carries no usage, so the usage prefilter also admits proactive-note lines. */
+const PROACTIVE_NOTE_LINE = `"${PROACTIVE_NOTE_CUSTOM_TYPE}"`;
+
+/**
+ * Entire scan is asynchronous; retained cache entries contain usage only, never conversation payloads. The live session
+ * counts even before its file is listed, and `pending` adds its held semantic receipts the ledger does not carry yet,
+ * once by report id.
+ */
 export async function aggregateDailyUsageAsync(
 	scope: string,
 	root: boolean,
 	window: DailyUsageWindow,
 	liveSession?: LiveSessionDailyUsageSource,
+	pending: readonly SemanticUsageReport[] = [],
 ): Promise<DailyUsageTotals> {
 	const totals = createZeroTotals();
 	const spawned = new Set<string>();
 	const semantic = new Set<string>();
+	let liveCounted = false;
 	const directories = root
-		? (await readdir(scope, { withFileTypes: true }))
+		? (await readSessionDirectory(scope))
 				.filter((entry) => entry.isDirectory())
 				.map((entry) => join(scope, entry.name))
 		: [scope];
 	for (const directory of directories) {
-		for (const name of await readdir(directory)) {
+		for (const { name } of await readSessionDirectory(directory)) {
 			if (!name.endsWith(".jsonl")) continue;
 			const filePath = join(directory, name);
 			const revision = await stat(filePath);
@@ -333,11 +404,8 @@ export async function aggregateDailyUsageAsync(
 			const key = `${revision.dev}:${revision.ino}:${revision.size}:${revision.mtimeMs}:${revision.ctimeMs}:${projectionRevision?.mtimeMs ?? 0}:${fragmentRevision?.mtimeMs ?? 0}`;
 			let records: DailyUsageRecord[];
 			if (liveSession && resolve(filePath) === resolve(liveSession.filePath)) {
-				records = [];
-				for (let index = 0; index < liveSession.entries.length; index++) {
-					if (index % 256 === 0) await yieldToEventLoop();
-					records.push(...usageRecords(liveSession.entries[index]!));
-				}
+				liveCounted = true;
+				records = await liveUsageRecords(liveSession);
 			} else {
 				const materialized = projectionRevision ? await readAccountingRevision(filePath) : undefined;
 				if (projectionRevision && !materialized) totals.pending = true;
@@ -354,7 +422,7 @@ export async function aggregateDailyUsageAsync(
 					} else
 						await visitSessionEntriesAsync(
 							filePath,
-							(line) => line.includes('"usage"'),
+							(line) => line.includes('"usage"') || line.includes(PROACTIVE_NOTE_LINE),
 							(entry) => {
 								records.push(...usageRecords(entry));
 							},
@@ -374,7 +442,24 @@ export async function aggregateDailyUsageAsync(
 			}
 		}
 	}
+	let liveUsed = false;
+	if (liveSession && !liveCounted)
+		for (const record of await liveUsageRecords(liveSession))
+			if (addDailyUsageRecord(totals, record, window, spawned, semantic)) liveUsed = true;
+	for (const report of pending)
+		if (addDailyUsageRecord(totals, semanticUsageRecord(report, new Date().toISOString()), window, spawned, semantic))
+			liveUsed = true;
+	if (liveUsed && !liveCounted) totals.sessions++;
 	return finishTotals(totals);
+}
+
+async function liveUsageRecords(liveSession: LiveSessionDailyUsageSource): Promise<DailyUsageRecord[]> {
+	const records: DailyUsageRecord[] = [];
+	for (let index = 0; index < liveSession.entries.length; index++) {
+		if (index % 256 === 0) await yieldToEventLoop();
+		records.push(...usageRecords(liveSession.entries[index]!));
+	}
+	return records;
 }
 
 function addDailyUsageFile(

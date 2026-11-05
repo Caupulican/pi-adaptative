@@ -11,6 +11,8 @@ export function withProactivityChange(
 		minOwnerTurnsBetweenRuns: settings.minOwnerTurnsBetweenRuns,
 		maxRunsPerSession: settings.maxRunsPerSession,
 		maxUsd: settings.maxUsd,
+		maxUsdPerDay: settings.maxUsdPerDay,
+		maxTurnWakesPerDay: settings.maxTurnWakesPerDay,
 		maxNotesPerRun: settings.maxNotesPerRun,
 		delivery: settings.delivery,
 		preferences: settings.preferences,

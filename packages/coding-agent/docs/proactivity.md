@@ -14,7 +14,7 @@ A review retains the conversation branch, settings, goal and memory revision it 
 
 ## Owner controls
 
-- `/proactivity status` shows the resolved settings and the last reason a review did not start.
+- `/proactivity status` shows the resolved settings, the last rolling-day measurement, the last reason a review did not start, and how the last accepted notes were delivered.
 - `/proactivity off` disables idle reviews; `/proactivity on` enables them.
 - `/proactivity prefs <text>` replaces the standing preferences.
 - `/proactivity prefs clear` removes the standing preferences.
@@ -42,8 +42,15 @@ The owning session must currently be running for execution. The bot daemon recor
 
 The defaults allow one review after two idle minutes, require three new owner turns between reviews, permit four reviews per running session and allow two notes per review. The review uses at most two provider requests. See the [settings reference](settings.md#proactivity) for all fields.
 
-Before each review provider request, the host estimates the complete request cost, including tools and long-context pricing, and reduces the output allowance to fit the remaining `maxUsd`. If even one output token cannot fit, it sends no request. This is an estimate, not a guarantee of the provider's eventual bill; measured overspend stops further review requests and note delivery. `maxUsd` caps only the isolated review. A parent turn uses normal session accounting and budgets and can incur additional inference cost.
+Two bounds hold across sessions and restarts over the last rolling 24 hours. They count every session stored with the current one: all projects under the agent directory, or only the custom session directory when one is configured. They are measured from recorded usage when a review is admitted, so they survive a restart and opening more sessions.
+
+- `maxUsdPerDay` (default `$0.25`) bounds review spend. Once the recorded review spend reaches it, no review starts and the gate reads `max_usd_per_day_reached`. Below it, a review's bound is the smaller of `maxUsd` and what remains of the day.
+- `maxTurnWakesPerDay` (default `3`) bounds note deliveries that start a parent turn. Past it, the review still runs, but its accepted notes wait for the owner's next turn, and the status reads `max_turn_wakes_per_day_reached`. No accepted note is dropped.
+
+`0` is a valid value for either bound; `enabled` remains the off switch. Sessions that admit reviews at the same moment can each pass the same measurement, so concurrent sessions can exceed a bound by one review or one wake each. Only proactive notes count toward the wake bound; CI event deliveries are separate.
+
+Before each review provider request, the host estimates the complete request cost, including tools and long-context pricing, and reduces the output allowance to fit the review's remaining bound. If even one output token cannot fit, it sends no request and the started review ends as failed. This is an estimate, not a guarantee of the provider's eventual bill; measured overspend stops further review requests and note delivery. These bounds cover the isolated review. A parent turn uses normal session accounting and budgets and can incur additional inference cost; `maxTurnWakesPerDay` bounds how many such turns start without an owner message.
 
 Custom models need declared prices for these background reviews. An explicitly configured zero price is valid; omitted prices are unknown and prevent a review request. Tiered prices use the same rate selection as measured usage.
 
-The review reserves usage-journal capacity before starting. Each dispatched request retains its original accounting identity until the provider reports usage, including after cancellation. Cancellation can finish the review immediately while the provider request remains in flight; it does not release that request's accounting or admission capacity. Unresolved requests stay visible in the session journal with unknown usage, without an invented charge or automatic replay. Measured responses replace those entries and remain attributed to the starting session. Missing usage or failed receipt retention stops further spending. A restarted session starts a new per-session review count.
+The review reserves usage-journal capacity before starting. Each dispatched request retains its original accounting identity until the provider reports usage, including after cancellation. Cancellation can finish the review immediately while the provider request remains in flight; it does not release that request's accounting or admission capacity. Unresolved requests stay visible in the session journal with unknown usage, without an invented charge or automatic replay. Measured responses replace those entries and remain attributed to the starting session. Missing usage or failed receipt retention stops further spending. A restarted session starts a new per-session review count; the rolling-day bounds read recorded session usage and do not reset. Receipts a closed session could not record in its session file are not visible to other sessions' measurement.

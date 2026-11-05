@@ -418,7 +418,7 @@ A rejected `compaction.selfMonitor` value (a non-boolean `enabled`, a fraction o
 
 ### Proactivity
 
-A bounded idle review that raises notes the owner did not ask for. It is on by default and each review is a model request nobody asked for, so it is capped: a few reviews per session, a spend bound per review, and a minimum of new owner turns between reviews. `/proactivity off` or `"proactivity": { "enabled": false }` turns it off.
+A bounded idle review that raises notes the owner did not ask for. It is on by default and each review is a model request nobody asked for, so it is capped: a few reviews per session, a spend bound per review, a minimum of new owner turns between reviews, and two rolling-day bounds across sessions: review spend, and note deliveries that start a parent turn. `/proactivity off` or `"proactivity": { "enabled": false }` turns it off.
 
 ```json
 {
@@ -429,6 +429,8 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
     "maxRunsPerSession": 4,
     "maxNotesPerRun": 2,
     "maxUsd": 0.05,
+    "maxUsdPerDay": 0.25,
+    "maxTurnWakesPerDay": 3,
     "delivery": "turn",
     "preferences": "Raise only work I asked for that is still undone."
   }
@@ -444,12 +446,14 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | `maxRunsPerSession` | `4` | Reviews per running session, whether or not they raised anything. |
 | `maxNotesPerRun` | `2` | Notes one review may raise. |
 | `maxUsd` | `0.05` | Spend bound of the isolated review, limited to two provider requests. A parent wake uses normal session accounting and budgets and can incur additional inference cost. |
+| `maxUsdPerDay` | `0.25` | Review spend over the last rolling 24 hours, across every session stored with this one (all projects under the agent directory, or only the custom session directory). Once reached, no review starts (`max_usd_per_day_reached`); below it, a review's bound is the smaller of `maxUsd` and what remains. `0` allows no review spend. |
+| `maxTurnWakesPerDay` | `3` | Note deliveries that start a parent turn over the same rolling 24 hours and sessions. Past it, an accepted note waits for the owner's next turn instead (`max_turn_wakes_per_day_reached`); it is never dropped. `0` sends every note with the owner's next turn. |
 | `delivery` | `"turn"` | An accepted note starts a parent turn without another owner message. Explicit `"note"` carries it with the owner's next turn instead. Both explicit choices are preserved. |
 | `preferences` | empty | The owner's standing words about what to raise, how often and in what tone, at most 2000 characters. Every review reads them and they override the review's defaults. |
 
-**What the review can do.** The host decides whether a review may start (enabled, the per-session cap, enough new owner turns, an idle foreground) and what it may do: its one tool records a note. The model only judges whether the conversation shows a need, so the behavior does not depend on a particular model. The host then drops notes that are empty, malformed or repeats of a note already raised on the branch, and delivers at most `maxNotesPerRun`. A review that raises nothing, the usual outcome, leaves no trace in the conversation.
+**What the review can do.** The host decides whether a review may start (enabled, the per-session cap, enough new owner turns, an idle foreground, the rolling-day spend) and what it may do: its one tool records a note. The model only judges whether the conversation shows a need, so the behavior does not depend on a particular model. The host then drops notes that are empty, malformed or repeats of a note already raised on the branch, and delivers at most `maxNotesPerRun`. A review that raises nothing, the usual outcome, leaves no trace in the conversation.
 
-**Owner control.** `/proactivity status` shows the settings and the gate that last kept a review from running. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. The root model can also read or propose changes through the `proactivity` tool. Every change requires confirmation on the owner's screen; cancellation, refusal, a conflicting edit during confirmation, or an unattended session prevents the write. Workers do not receive this tool. See [Proactivity](proactivity.md).
+**Owner control.** `/proactivity status` shows the settings, the last rolling-day measurement, the gate that last kept a review from running, and whether the last accepted notes woke a parent turn or wait for the owner's next turn and why. `/proactivity prefs <text>` replaces the standing preferences and `/proactivity prefs clear` removes them. `/proactivity review` runs one review now, still subject to every gate except the idle delay. The root model can also read or propose changes through the `proactivity` tool. Every change requires confirmation on the owner's screen; cancellation, refusal, a conflicting edit during confirmation, or an unattended session prevents the write. Workers do not receive this tool. See [Proactivity](proactivity.md).
 
 ### Cost Guard
 

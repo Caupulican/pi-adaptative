@@ -28,13 +28,26 @@ const USAGE = "Usage: /proactivity [status|on|off|review|prefs <text>|prefs clea
 
 export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsManager" | "session">): string {
 	const settings = host.settingsManager.getProactivitySettings();
-	const skip = host.session.backgroundLanes.getLastProactivitySkipReason();
+	const lanes = host.session.backgroundLanes;
+	const skip = lanes.getLastProactivitySkipReason();
+	const { measured, lastDelivery } = lanes.getProactivityDailyState();
 	return [
 		`Proactivity: ${settings.enabled ? "on" : "off"}`,
 		`Review after ${Math.round(settings.idleDelayMs / 1000)}s idle, at least ${settings.minOwnerTurnsBetweenRuns} new owner turn(s) apart, ${settings.maxRunsPerSession} per session, up to ${settings.maxNotesPerRun} note(s), $${settings.maxUsd.toFixed(2)} bound per review.`,
+		`Rolling 24 h across the sessions stored with this one: $${settings.maxUsdPerDay.toFixed(2)} review spend, ${settings.maxTurnWakesPerDay} parent-turn wake(s); past the wake bound, notes wait for the owner's next turn.`,
 		`Delivery: ${settings.delivery === "turn" ? "wakes a turn" : "a visible note with the next turn"}`,
 		`Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}`,
+		...(measured === undefined
+			? []
+			: [
+					`Last measured: $${measured.reviewUsd.toFixed(4)} review spend, ${measured.turnWakes} parent-turn wake(s) in the rolling 24 h`,
+				]),
 		...(skip === undefined ? [] : [`Last gate: ${skip}`]),
+		...(lastDelivery === undefined
+			? []
+			: [
+					`Last note delivery: ${lastDelivery.mode === "turn" ? "woke a parent turn" : `waits for the owner's next turn${lastDelivery.hold === undefined ? "" : ` (${lastDelivery.hold})`}`}`,
+				]),
 	].join("\n");
 }
 
@@ -64,7 +77,7 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 				host.showStatus(
 					outcome.delivered.length === 0
 						? "Proactive review: nothing to raise."
-						: `Proactive review raised ${outcome.delivered.length} note(s).`,
+						: `Proactive review raised ${outcome.delivered.length} note(s)${outcome.deliveryHold === undefined ? "." : `; they wait for your next turn (${outcome.deliveryHold}).`}`,
 				);
 			})
 			.catch((error: unknown) => {

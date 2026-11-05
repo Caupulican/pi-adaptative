@@ -10,7 +10,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Model, Usage } from "@caupulican/pi-ai";
-import { getSessionsDir } from "../config.ts";
 import { calculateContextTokens, estimateContextTokens } from "../kernel/compaction/compaction.ts";
 import { messageRevision } from "../kernel/message-revision.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
@@ -45,6 +44,7 @@ import {
 	aggregateDailyUsageAsync,
 	aggregateDailyUsageFromEntries,
 	type DailyUsageTotals,
+	type DailyUsageWindow,
 	formatDailyUsageBreakdown,
 	getLocalDayWindow,
 } from "./cost/daily-usage.ts";
@@ -85,6 +85,15 @@ export interface SessionAnalyticsSettingsSource {
 }
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
+
+/**
+ * The sessions cross-session totals cover: every project's default directory under this session's own agent dir (the
+ * parent of its default session dir, which may differ from the process-global agent dir), or only a custom session dir.
+ */
+function usageScope(sessionManager: SessionManager): string {
+	const sessionDir = sessionManager.getSessionDir();
+	return sessionManager.usesDefaultSessionDir() ? dirname(sessionDir) : sessionDir;
+}
 
 export interface SessionAnalyticsDeps {
 	getGoalState?(): TaskMetricsGoalInput | undefined;
@@ -652,8 +661,7 @@ export class SessionAnalytics {
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
 		const sessionManager = this.getAccountingSession();
-		const sessionDir = sessionManager.getSessionDir();
-		const scope = sessionManager.usesDefaultSessionDir() ? getSessionsDir() : sessionDir;
+		const scope = usageScope(sessionManager);
 		const nowMs = now.getTime();
 		const window = getLocalDayWindow(now);
 		if (
@@ -738,6 +746,26 @@ export class SessionAnalytics {
 
 	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {
 		return formatDailyUsageBreakdown(this.getDailyUsageTotals(now), formatLabel);
+	}
+
+	/**
+	 * Spend and proactive wakes inside `window` across the sessions the daily totals cover, counting this session's held
+	 * paid receipts its ledger does not carry yet. Uncached: an admission decision reads current evidence, and the
+	 * aggregator's per-file cache keeps the rescan of unchanged files cheap.
+	 */
+	aggregateUsageWindow(window: DailyUsageWindow): Promise<DailyUsageTotals> {
+		const sessionManager = this.getAccountingSession();
+		const sessionFile = sessionManager.getSessionFile();
+		const entries = this.getAccountingEntries();
+		const pending = this.deps.getPendingSemanticUsage().reports;
+		if (!sessionFile) return Promise.resolve(aggregateDailyUsageFromEntries(entries, window, pending));
+		return aggregateDailyUsageAsync(
+			usageScope(sessionManager),
+			sessionManager.usesDefaultSessionDir(),
+			window,
+			{ filePath: sessionFile, entries },
+			pending,
+		);
 	}
 
 	private getPostCompactionUsageState(): { hasCompaction: boolean; hasPostCompactionUsage: boolean } {

@@ -1,8 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { ParentInputMode } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
+import type { DailyUsageTotals, DailyUsageWindow } from "../cost/daily-usage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -36,11 +38,24 @@ export interface ProactivityControllerSettingsSource {
 	subscribeChanges(listener: () => void): () => void;
 }
 
-/** What a review run ended as; `skipReason` names the first gate that kept it from running. */
+/**
+ * What a review run ended as; `skipReason` names the first gate that kept it from running, and `deliveryHold` names the
+ * bound that made a configured parent wake wait for the owner's next turn instead.
+ */
 export interface ProactivityRunOutcome {
 	readonly started: boolean;
 	readonly skipReason?: string;
 	readonly delivered: readonly ProactiveNote[];
+	readonly deliveryHold?: string;
+}
+
+/** The rolling day the daily bounds count: everything recorded since one day before the measurement. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The last rolling-day measurement across the owner's sessions, and how the last accepted notes were delivered. */
+export interface ProactivityDailyState {
+	readonly measured?: { readonly reviewUsd: number; readonly turnWakes: number; readonly atMs: number };
+	readonly lastDelivery?: { readonly mode: ParentInputMode; readonly hold?: string };
 }
 
 export interface ProactivityControllerDeps extends ProactivityInvestigationHost {
@@ -55,6 +70,10 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
+	/** Review spend and proactive parent wakes inside a window across the owner's sessions, from the daily-usage owner. */
+	aggregateUsageWindow(
+		window: DailyUsageWindow,
+	): Promise<Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes">>;
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Resolves after canonical acceptance; consumption is owned by the mode-aware parent ledger. */
@@ -78,8 +97,9 @@ function goalSummary(goal: GoalState): string {
 /**
  * Owns the idle review that raises notes the owner would want to hear. The host decides everything that has a cost or a
  * consequence: whether a review may start (enabled, per-session cap, enough new owner turns, an idle
- * foreground), which bounded source reads its current authority permits, and what is delivered
- * (well-formed, new, within the limit, with current evidence). The model judges whether the conversation shows a need;
+ * foreground, the rolling-day review spend across the owner's sessions), which bounded source reads its current authority
+ * permits, and what is delivered (well-formed, new, within the limit, with current evidence) and how (a parent wake only
+ * within the rolling-day wake bound, otherwise with the owner's next turn). The model judges whether the conversation shows a need;
  * the host admits reads and validates their evidence before any note reaches the owner.
  */
 export class ProactivityController {
@@ -89,6 +109,7 @@ export class ProactivityController {
 	private _runs = 0;
 	private _ownerTurnsAtLastRun = 0;
 	private _lastSkipReason: string | undefined;
+	private _daily: ProactivityDailyState = {};
 	private _unsubscribeActivity: (() => void) | undefined;
 	private readonly abortController = new AbortController();
 	private readonly deps: ProactivityControllerDeps;
@@ -101,6 +122,10 @@ export class ProactivityController {
 
 	getLastSkipReason(): string | undefined {
 		return this._lastSkipReason;
+	}
+
+	getDailyState(): ProactivityDailyState {
+		return this._daily;
 	}
 
 	abort(): void {
@@ -249,7 +274,26 @@ export class ProactivityController {
 		let started = false;
 		try {
 			assertCurrent();
-			const runUsage = new BoundedCompletionUsage(usageOwner, "proactivity", maxUsd, 2);
+			// The daily bounds count every session of this owner over the last rolling day, measured once at admission: a
+			// session runs one review at a time, so only another session admitting concurrently can pass the same measurement.
+			const atMs = Date.now();
+			const day = await this.deps.aggregateUsageWindow({ startMs: atMs - DAY_MS, endMs: Number.POSITIVE_INFINITY });
+			this._daily = {
+				...this._daily,
+				measured: { reviewUsd: day.proactivityCost, turnWakes: day.proactiveTurnWakes, atMs },
+			};
+			assertCurrent();
+			const remainingDayUsd = settings.maxUsdPerDay - day.proactivityCost;
+			if (remainingDayUsd <= 0) {
+				this._lastSkipReason = "max_usd_per_day_reached";
+				return { started: false, skipReason: "max_usd_per_day_reached", delivered: [] };
+			}
+			// Past the wake bound the review still runs; its accepted notes wait for the owner's next turn.
+			const deliveryHold =
+				settings.delivery === "turn" && day.proactiveTurnWakes >= settings.maxTurnWakesPerDay
+					? "max_turn_wakes_per_day_reached"
+					: undefined;
+			const runUsage = new BoundedCompletionUsage(usageOwner, "proactivity", Math.min(maxUsd, remainingDayUsd), 2);
 			usage = runUsage;
 			runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
 				kind: "lane",
@@ -328,7 +372,8 @@ export class ProactivityController {
 				display: true,
 				details: { notes, evidence: reviewInvestigation.evidenceDetails() },
 			};
-			const mode = settings.delivery === "turn" ? "turn" : "next-owner-turn";
+			const mode: ParentInputMode =
+				settings.delivery === "turn" && deliveryHold === undefined ? "turn" : "next-owner-turn";
 			const payloadDigest = canonicalDigest({ message, mode });
 			await this.deps.deliverNotes(
 				{
@@ -349,8 +394,9 @@ export class ProactivityController {
 					},
 				},
 			);
+			this._daily = { ...this._daily, lastDelivery: { mode, ...(deliveryHold ? { hold: deliveryHold } : {}) } };
 			this.deps.emit({ type: "proactive_review", outcome: "raised", noteCount: notes.length });
-			return { started: true, delivered: notes };
+			return { started: true, delivered: notes, ...(deliveryHold ? { deliveryHold } : {}) };
 		} catch (error) {
 			if (started) this.deps.emit({ type: "proactive_review", outcome: "failed", noteCount: 0 });
 			usage?.assertHealthy();

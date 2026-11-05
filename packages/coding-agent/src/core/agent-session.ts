@@ -1153,6 +1153,7 @@ export class AgentSession {
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			captureReviewContext: (maxChars) => this._memory.captureReviewContext(maxChars),
+			aggregateUsageWindow: (window) => this._analytics.aggregateUsageWindow(window),
 			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
 			createLaneMemoryBroker: (capacity, references) => this._memory.createLaneMemoryBroker(capacity, references),

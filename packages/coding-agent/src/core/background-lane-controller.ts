@@ -131,7 +131,11 @@ import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
-import { ProactivityController, type ProactivityControllerDeps } from "./proactivity/proactivity-controller.ts";
+import {
+	ProactivityController,
+	type ProactivityControllerDeps,
+	type ProactivityDailyState,
+} from "./proactivity/proactivity-controller.ts";
 import { getStableSelfLaunchTarget } from "./process-matrix/self-launch-target.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -157,7 +161,10 @@ export interface BackgroundLaneControllerDeps
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
-		Pick<ProactivityControllerDeps, "deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity">,
+		Pick<
+			ProactivityControllerDeps,
+			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
+		>,
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
 	getSettingsManager(): SettingsManager;
@@ -797,6 +804,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getLastProactivitySkipReason(): string | undefined {
 		return this._proactivity.getLastSkipReason();
+	}
+
+	getProactivityDailyState(): ProactivityDailyState {
+		return this._proactivity.getDailyState();
 	}
 
 	resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined {
