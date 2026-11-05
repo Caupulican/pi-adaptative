@@ -127,7 +127,7 @@ export function routineIntakeNotice(
 		display: true,
 		content:
 			"created" in outcome
-				? `Scheduled (read-only): ${request.cadence} - ${JSON.stringify(request.prompt)}\nRoutine ${outcome.created} was created from the owner's own words without write authority. The owner can ask to change, widen or cancel it.${defaults}`
+				? `Scheduled (read-only): ${request.cadence} - ${JSON.stringify(request.prompt)}\nRoutine ${outcome.created} was created from the owner's own words. Its worker cannot edit existing files, create files outside its scratch area or use the network. The owner can ask to change, widen or cancel it.${defaults}`
 				: `Not scheduled: ${outcome.refused} - ${JSON.stringify(request.prompt)}\nThe owner's request was recognized but no routine was created.`,
 		details: {
 			routineIntakeKey: request.key,

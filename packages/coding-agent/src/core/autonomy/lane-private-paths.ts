@@ -11,6 +11,11 @@ import {
 	stateDir,
 } from "../agent-paths.ts";
 
+/** The project's own harness settings file: denied to a lane's file tools, but a file of the project, not harness storage. */
+export function projectLaneSettingsPath(cwd: string): string {
+	return path.join(cwd, ".pi", "settings.json");
+}
+
 export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
 	return [
 		configFile(agentDir, "auth.json"),
@@ -23,7 +28,7 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		sessionsDir(agentDir),
 		stateDir(agentDir),
 		getWorkRoot(agentDir),
-		path.join(cwd, ".pi", "settings.json"),
+		projectLaneSettingsPath(cwd),
 	];
 }
 

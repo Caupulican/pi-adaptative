@@ -1,5 +1,5 @@
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
-import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
+import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
 import type { ToolCapabilityManifest } from "../orchestration/contracts.ts";
 import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
@@ -25,7 +25,11 @@ interface LaneToolAdmissionOptions {
 	readonly manifests: ReadonlyMap<string, ToolCapabilityManifest>;
 	readonly gateway?: CapabilityGateway;
 	readonly yolo?: boolean;
-	readonly shellReadOnly?: boolean;
+	/**
+	 * Present for a `readOnly` grant's shell: its commands are judged by the read/write line plus this lane's
+	 * network grant, scratch directory and private paths (`readOnlyShellViolation`).
+	 */
+	readonly readOnlyShell?: ReadOnlyShellLaneScope;
 	readonly denyCommands?: readonly string[];
 	readonly readEnvelope: CapabilityEnvelope;
 	readonly writeEnvelope: CapabilityEnvelope;
@@ -72,13 +76,19 @@ export class LaneToolAdmission {
 		options.assertOpen();
 		if (!options.allowedTools.has(toolName))
 			return { block: true, reason: `Lane tool '${toolName}' is outside the materialized UAC surface.` };
-		if (options.shellReadOnly && READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) {
+		if (options.readOnlyShell && READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) {
 			const command = (args as { command?: unknown } | undefined)?.command;
-			const violation = typeof command === "string" ? readOnlyShellViolation(command, options.cwd) : undefined;
+			const violation =
+				typeof command === "string"
+					? readOnlyShellViolation(command, options.cwd, {
+							lane: options.readOnlyShell,
+							dialect: toolName.toLowerCase() === "powershell" ? "powershell" : "posix",
+						})
+					: undefined;
 			if (violation)
 				return {
 					block: true,
-					reason: `Read-only worker: ${violation}. Read, search and inspect freely, and redirect output into a new file if needed; report any change that is required to the parent instead of making it.`,
+					reason: `Read-only worker: ${violation}. Read, search and inspect freely; write scratch output only under $TMPDIR (this worker's own scratch directory, removed when it ends); report any change, network access or private file that is needed to the parent instead of reaching it.`,
 				};
 		}
 		if (options.writeProtectionEnvelope && WRITE_TOOLS.has(toolName)) {

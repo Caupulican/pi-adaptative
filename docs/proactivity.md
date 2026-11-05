@@ -124,7 +124,8 @@ update is carried with the owner's next turn without starting one.
 Routine intake turns the owner's own words into routines without a model tool call. It is owned by
 the routine session (`core/routines/routine-intake.ts`) and writes only through the routine owner,
 so an automatic routine has the same parent check, authority capture and store limits as a tool
-save, with read-only worker authority. After an owner turn settles and the foreground stays idle,
+save, with read-only worker authority: the worker cannot edit existing files, create files outside its
+scratch area or use the network. After an owner turn settles and the foreground stays idle,
 one pass reads at most four unread complete originals from the owner-evidence ledger. With System
 One bound, each original passes a cheap gate first; one bounded extraction request then proposes
 at most two requests per original, each with two verbatim excerpts (what and when) and timing slots,

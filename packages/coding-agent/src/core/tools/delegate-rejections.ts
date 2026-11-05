@@ -268,7 +268,7 @@ export function delegateStartRejection(reason: string): CommsErrRecord {
 			f: "toolNames",
 			h: "DROP_FIELD",
 			x: reason,
-			m: "The compiled grant has no capability for that tool: readOnly keeps reads (read, grep, find, ls, repo_read, skill, memory query) and bash limited to commands that edit nothing, and a base profile's ceiling can exclude more. Drop the tool, drop readOnly, or choose a base profile that grants it.",
+			m: "The compiled grant has no capability for that tool: readOnly keeps reads (read, grep, find, ls, repo_read, skill, memory query) and bash limited to commands that edit nothing, write only into its scratch directory and use no network, and a base profile's ceiling can exclude more. Drop the tool, drop readOnly, or choose a base profile that grants it.",
 		});
 	}
 	const capabilityRemedy = laneWorkerRefusalSkipRemedy(reason);

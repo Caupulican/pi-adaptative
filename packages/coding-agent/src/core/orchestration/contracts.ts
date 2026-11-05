@@ -249,7 +249,8 @@ export interface OrchestrationProfile {
 	toolNames: readonly string[];
 	/**
 	 * The worker edits nothing that exists: its shell runs only commands that change no existing file,
-	 * and no write, interpreter or script tool is granted. Absent means an ordinary grant.
+	 * create files only inside its scratch directory, reach no network and read no private harness file,
+	 * and no write, interpreter, script or network tool is granted. Absent means an ordinary grant.
 	 */
 	readOnly?: boolean;
 	/** Optional worker cwd and symmetric filesystem focus. Omitted means host-level machine scope. */

@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import path from "node:path";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
@@ -22,6 +23,7 @@ import {
 	type WorkerMemoryBroker,
 	type WorkerMemoryReadOptions,
 } from "../memory/worker-memory-tools.ts";
+import type { ReadOnlyShellLaneScope } from "../model-router/tool-escalation.ts";
 import {
 	CapabilityGateway,
 	type GatewayInitialUsage,
@@ -35,6 +37,7 @@ import type {
 import type { NormalizedProfile } from "../profile-registry.ts";
 import {
 	type CredentialExposureBoundary,
+	isProtectedCredentialPath,
 	wrapToolWithCredentialExposureGuard,
 } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
@@ -59,8 +62,10 @@ import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
+import { projectLaneSettingsPath } from "./lane-private-paths.ts";
 import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admission.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
+import { safeRealpathSync } from "./path-scope.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
@@ -162,7 +167,10 @@ export interface LaneToolSurfaceOptions {
 	 * `shellReadOnly`, which is about the shell tool's own commands and is false for a lane without a shell.
 	 */
 	readOnly?: boolean;
-	/** A `readOnly` grant: shell commands may not edit anything that exists. */
+	/**
+	 * A `readOnly` grant's shell: commands may not edit anything that exists, create a file outside the
+	 * worker's scratch directory, reach the network without `network.http` or read a denied path.
+	 */
 	shellReadOnly?: boolean;
 	cwd: string;
 	profile?: NormalizedProfile;
@@ -533,27 +541,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			}
 		: undefined;
 
-	const admission = new LaneToolAdmission({
-		cwd: options.cwd,
-		allowedTools: allowedToolSet,
-		manifests: manifestsByName,
-		gateway,
-		yolo: options.yolo,
-		shellReadOnly: options.shellReadOnly,
-		denyCommands: options.denyCommands,
-		readEnvelope,
-		writeEnvelope,
-		writeProtectionEnvelope,
-		yoloWriteScopeEnvelope,
-		assertOpen: () => toolUsage.assertOpen(),
-		checkEdge: options.checkEdge,
-	});
-
 	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
 	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
 	// the scratch directory, so a shell lane leaves nothing behind.
 	// Every route a worker has to a process (bash, python, run_process) gets the same environment, so no tool is
 	// the unattributed or credential-bearing one; a worker with none of them has nothing to run and no scratch.
+	// Created before admission: a read-only shell may write only inside this scratch directory.
 	const runsProcesses =
 		options.shellSessionKey !== undefined ||
 		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
@@ -564,6 +557,38 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				options.onWorkerProcessesReaped,
 			)
 		: undefined;
+	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
+	// recursive project search may pass through; everything else denied is harness storage.
+	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
+	const readOnlyShell: ReadOnlyShellLaneScope | undefined = options.shellReadOnly
+		? {
+				network: options.grant?.capabilities.includes("network.http") === true,
+				scratchRoots: runEnvironment
+					? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
+					: [],
+				homeDir: homedir(),
+				cdPath: (process.env.CDPATH ?? "").split(path.delimiter).filter((entry) => entry.length > 0),
+				harnessStoragePaths: (deniedPaths ?? []).filter((entry) => entry !== projectSettingsPath),
+				isDeniedPath: (target) => isProtectedCredentialPath(target, options.cwd, privatePathBoundary),
+			}
+		: undefined;
+
+	const admission = new LaneToolAdmission({
+		cwd: options.cwd,
+		allowedTools: allowedToolSet,
+		manifests: manifestsByName,
+		gateway,
+		yolo: options.yolo,
+		readOnlyShell,
+		denyCommands: options.denyCommands,
+		readEnvelope,
+		writeEnvelope,
+		writeProtectionEnvelope,
+		yoloWriteScopeEnvelope,
+		assertOpen: () => toolUsage.assertOpen(),
+		checkEdge: options.checkEdge,
+	});
+
 	const sharedToolOptions: SharedLaneToolOptions | undefined = runEnvironment
 		? {
 				...options.sharedToolOptions,

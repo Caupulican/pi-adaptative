@@ -68,7 +68,10 @@ export interface WorkerExecutionPlan {
 	processEnabled: boolean;
 	/** A `readOnly` grant: the lane keeps only tools that edit nothing, in every mode, whether or not it has a shell. */
 	readOnly: boolean;
-	/** A `readOnly` grant: the lane's shell may run only commands that edit nothing that exists. */
+	/**
+	 * A `readOnly` grant: the lane's shell may run only commands that edit nothing that exists, create files
+	 * only inside the worker's scratch directory and reach no network (`readOnlyShellViolation`).
+	 */
 	shellReadOnly: boolean;
 	budget: RiskBudget;
 }

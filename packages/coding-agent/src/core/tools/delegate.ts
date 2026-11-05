@@ -240,7 +240,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			readOnly: Type.Optional(
 				Type.Boolean({
 					description:
-						"True: the worker edits nothing. It keeps read tools and bash, but a command that changes files or repository state is refused (redirecting output into a new file is fine); write/edit, python, scripts and network tools are excluded. A named specialist must already match its persisted grant.",
+						"True: the worker edits nothing. It keeps read tools and bash, but a command that changes files or repository state, creates a file outside its scratch directory ($TMPDIR), uses the network or reads private harness files is refused; write/edit, python, scripts and network tools are excluded. A named specialist must already match its persisted grant.",
 				}),
 			),
 			instructions: Type.Optional(
@@ -2888,7 +2888,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const { excluded } = partitionToolsForReadOnly(input.toolNames);
 					if (excluded.length > 0) {
 						return invalid(
-							`delegate start readOnly excludes ${excluded.join(", ")}: readOnly keeps reads (read, grep, find, ls, repo_read for git history and diffs, skill, memory query) and bash limited to commands that edit nothing. Drop readOnly to grant them, or drop them from toolNames.`,
+							`delegate start readOnly excludes ${excluded.join(", ")}: readOnly keeps reads (read, grep, find, ls, repo_read for git history and diffs, skill, memory query) and bash limited to commands that edit nothing, write only into its scratch directory and use no network. Drop readOnly to grant them, or drop them from toolNames.`,
 							{ started: false, action, skipReason: "read_only_tool_conflict" },
 						);
 					}

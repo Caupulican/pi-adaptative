@@ -10,7 +10,7 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../../../../src/core/security/secret-text.ts";
-import { calls, createBarrier, fail } from "../scripted-provider.ts";
+import { calls, createBarrier, fail, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-generation.ts";
 /**
@@ -23,11 +23,27 @@ import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.
 
 const e4Judgments = ICM_INTAKE_JUDGMENTS;
 
+/** One call's result in the latest tool batch: calls of the same tool are told apart by their id, not their name. */
+function batchResultById(request: ScriptedRequest, toolCallId: string): { isError: boolean; text: string } | undefined {
+	const messages = request.context.messages;
+	let start = messages.length;
+	while (start > 0 && messages[start - 1]?.role !== "assistant") start--;
+	for (const message of messages.slice(start)) {
+		if (message.role !== "toolResult" || message.toolCallId !== toolCallId) continue;
+		const text = message.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n");
+		return { isError: message.isError, text };
+	}
+	return undefined;
+}
+
 export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
 	// E8 (worker budget and bash): a read-only worker runs its bash through the scripted shell. Each provider response is charged to the
 	// preset's token budget, with cache reads at the cache-read weight: 1,000 input and 20,000 cache-read tokens charge 3,000, not 21,000.
 	// The second response exhausts the 5,500 budget, so its read is refused and no third provider request reaches the scripted provider.
+	// The same first response also asks the read-only shell for a network client and for a redirection into the project: the lane's
+	// production admission refuses both before the shell (no network grant; writes only inside the worker's scratch directory), while
+	// the plain read in the same batch runs.
 	const E8_BUDGET_PROFILE: OrchestrationProfile = {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profileId: "e8-budget",
@@ -110,7 +126,21 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 				}
 			},
 			reply: {
-				content: [{ type: "toolCall", id: "e8-bash-1", name: "bash", arguments: { command: "echo e8-bash" } }],
+				content: [
+					{ type: "toolCall", id: "e8-bash-1", name: "bash", arguments: { command: "echo e8-bash" } },
+					{
+						type: "toolCall",
+						id: "e8-net-1",
+						name: "bash",
+						arguments: { command: "curl -s https://example.invalid/e8-status" },
+					},
+					{
+						type: "toolCall",
+						id: "e8-write-1",
+						name: "bash",
+						arguments: { command: "echo e8-note > e8-notes.txt" },
+					},
+				],
 				stopReason: "toolUse",
 				usage: E8_USAGE,
 			},
@@ -118,9 +148,19 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		{
 			name: "e8-worker-read",
 			check: (request) => {
-				const bash = latestBatchResults(request).find((result) => result.toolName === "bash");
+				const bash = batchResultById(request, "e8-bash-1");
 				if (bash?.isError || !bash?.text.includes("e8-bash")) {
 					throw new Error(`the bash call did not run through the shell: ${bash?.text ?? "no result"}`);
+				}
+				const network = batchResultById(request, "e8-net-1");
+				if (!network?.isError || !network.text.includes("Read-only worker: curl reaches the network")) {
+					throw new Error(
+						`the read-only shell did not refuse the network client: ${network?.text ?? "no result"}`,
+					);
+				}
+				const write = batchResultById(request, "e8-write-1");
+				if (!write?.isError || !write.text.includes("Read-only worker: it writes")) {
+					throw new Error(`the read-only shell did not refuse the project write: ${write?.text ?? "no result"}`);
 				}
 			},
 			reply: {
@@ -154,6 +194,10 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		world.shell.requests.filter((request) => request.command === "echo e8-bash").length,
 		"the worker's bash ran exactly once through the shell",
 	).toBe(1);
+	expect(
+		world.shell.requests.filter((request) => /curl|e8-notes/u.test(request.command)),
+		"the read-only shell's network client and project write never reach the shell",
+	).toHaveLength(0);
 	expect(
 		Object.values(e8Session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).map(
 			(attempt) => attempt.status,

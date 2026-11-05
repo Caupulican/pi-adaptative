@@ -567,9 +567,13 @@ Read is read: a parent with `bash` lends the catalog read tools (`grep`, `find`,
 git (`repo_read`, capability `repo.read`) natively. Every worker also receives `bash` and
 `process.exec`, including `readOnly: true`, named profiles, narrow tool lists, and a foreground
 session without bash. A `readOnly` grant, persisted on the worker's profile, holds that shell to
-commands that edit nothing that exists: output may still be redirected or `tee`d into a new file,
-while a redirect onto an existing path and every command the shared read/write line calls mutating
-are refused with the reason. `readOnly` also drops write, interpreter, script, network and service
+commands that edit nothing that exists, create files only inside the worker's own scratch directory
+(`$TMPDIR`, removed when the worker ends), reach no network without a `network.http` grant (which
+`readOnly` never keeps) and read no private harness or credential path; every command the shared
+read/write line calls mutating, including a listed reader whose options or program text run another
+program or write a file, is refused with the reason. The rules hold through wrappers, chains and
+nested `bash -c`/`powershell -c`; they judge the command text, a policy gate rather than OS
+isolation. `readOnly` also drops write, interpreter, script, network and service
 tools, holds in YOLO, and defaults the worker's role to `explorer`. A profile that grants process
 execution without file writes keeps an unrestricted shell: only `readOnly` restricts commands. In guarded mode a worker's shell and code calls go through the same System One
 operation review as the root's, except under the standing `operation.irreversible` grant, where the
@@ -1081,3 +1085,4 @@ measurement gains no new surface.
 | 2026-10-04 | No invariant moved (second batch of the same change): the remaining contract tests also take their scratch directories from `tempDir`; their assertions are untouched. |
 | 2026-10-04 | No invariant moved (third batch of the same change): the last contract tests also take their scratch directories from `tempDir`; their assertions are untouched. |
 | 2026-10-04 | The test suite (1,741 product test files and the destructive suite) is removed so it can be rebuilt by area from git history; the contract list in `contracts.json` is empty, CI is one build-and-check job per OS, and `release-ci-proof.mjs` requires those jobs by name. This supersedes every earlier row that pins a deleted test file. |
+| 2026-11-05 | A `readOnly` worker's shell creates files only inside its own scratch directory (no new file elsewhere), reaches no network without `network.http`, and reads no private harness or credential path through operands, `cd`, globs or recursive searches; listed readers whose options or program text run programs or write files (`sort -o`, `rg --pre`, awk `system()`, sed `w`) are refused for every caller of the read/write line. |
