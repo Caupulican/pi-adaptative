@@ -1339,16 +1339,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				return;
 			}
 		} else if (this._parentWriteHolds.size > 0) {
-			// Writes that could not land before (no persisted transcript yet, a busy lock) are retried here; a terminal
-			// notice held behind them is offered once they land.
-			const held = this._parentWriteHolds;
-			this._parentWriteHolds = this._importParentWrites(this._workerLifecycle);
-			this._replayPendingTerminals(
-				this._workerLifecycle,
-				(attemptId) => attemptId !== undefined && held.has(attemptId),
-			);
+			// Writes that could not land before (no persisted transcript yet, a busy lock) are retried here.
+			this._landRecordedParentWrites(this._workerLifecycle);
 		}
 		this._workerReceipts?.signal();
+	}
+
+	/** Lands the writes other hosts recorded for this parent, then offers the terminal notices held behind them. */
+	private _landRecordedParentWrites(lifecycle: WorkerLifecycle): void {
+		const held = this._parentWriteHolds;
+		this._parentWriteHolds = this._importParentWrites(lifecycle);
+		this._replayPendingTerminals(lifecycle, (attemptId) => attemptId !== undefined && held.has(attemptId));
 	}
 
 	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */
@@ -1361,6 +1362,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir(), (message) => this._safeWarn(message));
 			this._botTeamStore.subscribe(() => {
 				this._botViews = undefined;
+				// A routine run away commits its occurrence after recording its parent writes; this store's change is the
+				// cross-process signal, so an open parent lands those writes now, before its scheduler (subscribed after
+				// this listener) delivers the run's result.
+				const lifecycle = this._workerLifecycle;
+				if (!lifecycle || this.deps.isDisposed()) return;
+				try {
+					this._landRecordedParentWrites(lifecycle);
+				} catch (error) {
+					this._safeWarn(
+						`Parent writes recorded away could not be read: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
 			});
 			this._ensureRoutineScheduler();
 		}
