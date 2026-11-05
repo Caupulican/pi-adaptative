@@ -59,6 +59,23 @@ function resolveSafely(absolutePath: string, hops: number): string {
 	return path.join(resolvedParent, path.basename(absolutePath));
 }
 
+/**
+ * The path the kernel reaches when a process in `base` opens `word`: components are walked one at a time from the
+ * physical `base`, so a `..` that follows a symbolic link leaves the link's target, not the link's lexical parent
+ * (`node_modules/linked/../../x`). Missing components are appended as written. Throws on a symbolic link cycle.
+ */
+export function physicalPathSync(base: string, word: string): string {
+	const absolute = path.isAbsolute(word);
+	const root = absolute ? path.parse(path.resolve(word)).root : "";
+	let current = safeRealpathSync(absolute ? root : base);
+	const rest = absolute ? word.slice(path.parse(word).root.length) : word;
+	for (const component of rest.split(path.sep === "\\" ? /[\\/]+/u : /\/+/u)) {
+		if (component === "" || component === ".") continue;
+		current = component === ".." ? path.dirname(current) : safeRealpathSync(path.join(current, component));
+	}
+	return current;
+}
+
 export function usesWindowsPath(value: string): boolean {
 	return /^[a-zA-Z]:([\\/]|$)/.test(value) || value.startsWith("\\\\") || value.startsWith("//");
 }

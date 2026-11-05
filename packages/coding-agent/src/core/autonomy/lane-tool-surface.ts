@@ -23,7 +23,7 @@ import {
 	type WorkerMemoryBroker,
 	type WorkerMemoryReadOptions,
 } from "../memory/worker-memory-tools.ts";
-import type { ReadOnlyShellLaneScope } from "../model-router/tool-escalation.ts";
+import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import {
 	CapabilityGateway,
 	type GatewayInitialUsage,

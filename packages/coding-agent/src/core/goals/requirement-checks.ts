@@ -13,7 +13,7 @@ import { type KillTreeOutcome, killTree } from "../../kernel/reliability/process
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getShellConfig } from "../../utils/shell.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
-import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
+import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import type { RequirementCheck } from "./goal-state.ts";
 
 export const REQUIREMENT_CHECK_TIMEOUT_MS = 30_000;

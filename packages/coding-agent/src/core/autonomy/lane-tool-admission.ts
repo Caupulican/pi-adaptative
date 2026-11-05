@@ -1,5 +1,5 @@
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
-import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/tool-escalation.ts";
+import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
 import type { ToolCapabilityManifest } from "../orchestration/contracts.ts";
 import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
