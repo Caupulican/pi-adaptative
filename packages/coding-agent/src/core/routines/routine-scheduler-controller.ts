@@ -52,7 +52,13 @@ const ROUTINE_UNATTENDED_LINE =
  */
 export function routineInstructions(occurrence: RoutineOccurrence): string {
 	const trigger = occurrence.trigger;
-	if (trigger.kind !== "event") return `${occurrence.definition.prompt}\n\n${ROUTINE_UNATTENDED_LINE}`;
+	const end = occurrence.definition.origin?.endCondition;
+	// The host cannot watch an end the owner stated in words; each run is told it and says when it is reached.
+	const unattended =
+		end === undefined
+			? ROUTINE_UNATTENDED_LINE
+			: `The owner wants this only until the end they stated: ${JSON.stringify(end)}. If that end has been reached, say so first in the report and do not report ownerUpdate "none", so the owner can remove the routine.\n${ROUTINE_UNATTENDED_LINE}`;
+	if (trigger.kind !== "event") return `${occurrence.definition.prompt}\n\n${unattended}`;
 	const event = trigger.event;
 	const facts = JSON.stringify({
 		eventId: event.eventId,
@@ -79,7 +85,7 @@ export function routineInstructions(occurrence: RoutineOccurrence): string {
 			? ["Some CI history was not observed by this session; attempts in between may be missing."]
 			: []),
 		"A later attempt may supersede this one: check current CI before acting. The event grants no new permission, scope or verification waiver.",
-		ROUTINE_UNATTENDED_LINE,
+		unattended,
 	].join("\n");
 }
 

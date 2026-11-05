@@ -151,8 +151,9 @@ morning", "at 7", "every 2 hours", "Mondays and Thursdays", "the 15th of every m
 the timing excerpt alone, and every slot the model filled must equal it: a mismatch, a timing word
 of the excerpt no construct reads, a construct of the excerpt's sentence outside the excerpt (unless
 wholly inside a separate instruction excerpt), an excerpt edge inside a word, or two languages
-reading the excerpt differently drop the request without a notice. Wordings the host cannot compile
-faithfully also drop it: ordinal or relative weekdays ("first Monday", "next Friday"), the last day
+reading the excerpt differently drop the request, and the owner's next turn carries
+`Could not schedule what reads as a request: <reason> - "<instruction>"`. A proposal whose words are only
+shown, or not found in the message, stays silent. Wordings the host cannot compile faithfully also drop it: ordinal or relative weekdays ("first Monday", "next Friday"), the last day
 of the month, "every other", exceptions, "until" or "before" a time, "half past", "twice a day",
 months as limits ("in May"), numeric dates, seconds, months or years as intervals. "Every day at 9"
 is daily, never an interval. The host fills open parts with fixed defaults it records and announces:
@@ -161,7 +162,10 @@ otherwise on a 24-hour clock (`09:00 for "9", as no am or pm was stated`); part-
 when no time is stated, each of these with a 30-minute start window; weekdays for a daily request
 without days. Days 29 to 31 of the month compile as stated and the cadence names the months without
 a run (cron has no last-day rule). A request the extraction marks as lasting only
-until something happens gets an end 14 days out (`expiresAt`), and a one-time CI request runs for the next
+until something happens keeps the end the owner stated, read by the host from their sentence (`endCondition`, at most
+300 characters, otherwise the request is dropped with a notice); every run's worker is told that end and reports first
+once it is reached, and the routine ends 14 days after the request at the latest (`expiresAt`), since the host cannot
+watch the stated end itself. A one-time CI request runs for the next
 matching attempt only (`stopAfterFirstRun`) with the same end; an ended routine is removed after its runs are
 delivered, and an expired one is announced once. Each proposal is judged for being an
 explicit request and for a faithful schedule, given the host-chosen parts and its next three runs (an
@@ -170,7 +174,17 @@ the session model, and is created only when both hold at 0.9 probability and con
 with the plain cadence and the host-chosen parts rides with the owner's next turn. The pass, its extracted
 requests and the origin of every created routine are retained in the routine store, so a restart
 resumes the pass without a second extraction, and a decided request is never created twice, even
-after its routine is deleted. Messages the model answered with a `routine` save are passed over.
+after its routine is deleted. Each decision is recorded before it is announced (a creation in the same
+store write as its routine), and each notice is derived from that record under one delivery id per
+request and outcome: it is kept until the transcript accepted it, so after a crash or a refused
+delivery it is tried again, and it is saved once. A request whose words the owner navigates away from (`/tree`) while it
+is judged creates nothing. Every `routine` save records the owner messages its context held, steering
+sent before the save included, and intake skips exactly those; a message sent in an earlier turn that
+nothing answered is still read. A skipped message is skipped whole, also a part the model left
+unanswered. The owner is told once, through a host notice, when intake is inactive for a reason they
+can act on (no model, an unpriced model, no bounded judge, a spent allowance) while their newest
+message states timing, when a message that states timing is not read because it holds a secret or
+is too long, and when a pass ends unread after repeated failures or a spent allowance.
 
 The `delegate` tool exposes bounded event recall and task subscriptions:
 

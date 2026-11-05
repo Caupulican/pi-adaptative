@@ -1,7 +1,9 @@
 /**
  * Hands-off routine intake. After an owner turn settles, the host reads the owner's own new words once: an explicit
  * recurring, scheduled or conditional request becomes a read-only routine through the routine owner, under the same
- * authority capture and store caps as a tool save, with one accounted spending allowance per pass.
+ * authority capture and store caps as a tool save, with one accounted spending allowance per pass. Every decision is
+ * final in the store write that records it, before the owner is told; the owner is told each one exactly once, with
+ * their next turn, from the recorded decision alone.
  */
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -12,6 +14,7 @@ import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine
 import { StructuredLlmDecisionEngine } from "../decision/engines/structured-llm-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import type { HarnessNotice, HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import {
 	locateOwnerQuote,
 	normalizeOwnerRanges,
@@ -27,18 +30,29 @@ import type { TimerPort } from "../util/timer-port.ts";
 import { countCalendarSlots, hostTimeZone, nextCalendarSlotAfter } from "./calendar-schedule.ts";
 import {
 	MAX_ROUTINE_INTAKE_BATCH_SOURCES,
+	MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS,
 	MAX_ROUTINE_INTAKE_SOURCE_REQUESTS,
+	MAX_ROUTINE_INTAKE_UNANNOUNCED,
 	MAX_ROUTINE_PROMPT_CHARS,
 	ROUTINE_INTAKE_OPERATION_PREFIX,
 	type RoutineIntakeBatch,
+	RoutineIntakeBranchChanged,
+	type RoutineIntakeChange,
+	type RoutineIntakeDecision,
+	type RoutineIntakeDrop,
+	type RoutineIntakeNoticeRecord,
 	type RoutineIntakeRequest,
 	type RoutineIntakeSession,
 	type RoutineScheduleInput,
 } from "./routine-contract.ts";
 import { extractRoutineRequests } from "./routine-intake-extractor.ts";
 import { compileIntakeTiming, statesIntakeTiming } from "./routine-intake-timing.ts";
-import { routineIntakeNotice } from "./routine-parent-input.ts";
-import { type RoutineSessionController, routineIntakeRoutineId } from "./routine-session-controller.ts";
+import { routineIntakeNotice, routineIntakeNoticeId } from "./routine-parent-input.ts";
+import {
+	type RoutineIntakeCreation,
+	type RoutineSessionController,
+	routineIntakeRoutineId,
+} from "./routine-session-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 
 /** Spending bound of one owner source within a pass, and of all intake in one session. */
@@ -47,9 +61,11 @@ export const ROUTINE_INTAKE_SESSION_MAX_USD = 0.3;
 const IDLE_DELAY_MS = 2_000;
 const PASS_DEADLINE_MS = 120_000;
 const RETRY_DELAY_MS = 60_000;
-/** A pass that fails this often ends unread rather than retrying without bound. */
+/** A pass that fails this often ends rather than retrying without bound; the owner is told. */
 const MAX_PASS_FAILURES = 3;
 const MAX_BATCH_CHARS = 32_000;
+/** Deliveries one announcement tries for a notice whose branch moved while it waited, before it waits for activity. */
+const MAX_ANNOUNCE_ATTEMPTS = 3;
 /** An automatic routine never runs more often than this; a faster request is refused with a notice. */
 const MIN_INTAKE_INTERVAL_MS = 15 * 60_000;
 const MAX_INTAKE_SLOTS_PER_DAY = 96;
@@ -83,7 +99,7 @@ const JUDGE_PROGRAM = createDecisionProgram({
 			kind: "boolean",
 			id: "faithful",
 			instruction:
-				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check. How long it runs must match too: a one-time request must not run every time, a request meant to last only until something happens must have an end, and a standing request must not end.",
+				"Does the proposed routine match the owner's request exactly? Its instruction must be the owner's own description of the work, without anything added or dropped that changes what is done, and its timing and upcoming runs must be the timing the owner stated, in the right time zone. hostDefaults lists the timing parts the owner left open that the host filled with its fixed defaults, announced to the owner; those parts are not a mismatch, but a default that contradicts anything the owner did state is. A request about CI results must be an event, never a repeated check. How long it runs must match too: a one-time request must not run every time, a request meant to last only until something happens must have an end (statedEnd holds the owner's words for it), and a standing request must not end.",
 		},
 	],
 });
@@ -97,6 +113,68 @@ export type RoutineIntakeInactiveReason =
 	| "no_engine"
 	| "budget_exhausted"
 	| "accounting_unresolved";
+
+/** Intake states the owner is told about once per episode, through the harness notice channel. */
+export type RoutineIntakeNoticeReason =
+	| Extract<RoutineIntakeInactiveReason, "no_model" | "model_unpriced" | "no_engine" | "budget_exhausted">
+	| "source_not_read:secret"
+	| "source_not_read:oversize"
+	| "sources_not_read:failed"
+	| "sources_not_read:spent";
+
+/** The disabled setting and an unsaved session are the owner's own choices; an unsettled spend is transient. */
+function isNoticedInactive(
+	reason: RoutineIntakeInactiveReason | undefined,
+): reason is Extract<RoutineIntakeInactiveReason, RoutineIntakeNoticeReason> {
+	return (
+		reason === "no_model" || reason === "model_unpriced" || reason === "no_engine" || reason === "budget_exhausted"
+	);
+}
+
+/** The one line the owner reads for an intake state they can act on. */
+export function routineIntakeHarnessNotice(reason: RoutineIntakeNoticeReason): HarnessNotice {
+	const inactive = "Automatic routine intake is inactive:";
+	const unread =
+		"Requests for automatic work in the owner's messages are not read while this lasts; the routine tool still works.";
+	const restate = "Any request for automatic work in it was not scheduled; the owner can restate it";
+	const restateAll = "Any request for automatic work in them was not scheduled; the owner can restate it.";
+	switch (reason) {
+		case "no_model":
+			return { reason, text: `${inactive} no model is available to read the owner's messages. ${unread}` };
+		case "model_unpriced":
+			return {
+				reason,
+				text: `${inactive} the session model declares no prices, so intake cannot bound its spending. ${unread}`,
+			};
+		case "no_engine":
+			return { reason, text: `${inactive} no judge that can bound its spending is available. ${unread}` };
+		case "budget_exhausted":
+			return {
+				reason,
+				text: `${inactive} its spending allowance for this session (at most $${ROUTINE_INTAKE_SESSION_MAX_USD.toFixed(2)}, within the session's cost bound) is spent. ${unread}`,
+			};
+		case "source_not_read:secret":
+			return {
+				reason,
+				text: `Routine intake did not read an owner message that states timing because it contains text that looks like a secret. ${restate} without the secret.`,
+			};
+		case "source_not_read:oversize":
+			return {
+				reason,
+				text: `Routine intake did not read an owner message that states timing because it is longer than the ${MAX_BATCH_CHARS.toLocaleString("en-US")} characters intake reads. ${restate} in a shorter message.`,
+			};
+		case "sources_not_read:failed":
+			return {
+				reason,
+				text: `Routine intake stopped reading the owner's latest messages after repeated failures. ${restateAll}`,
+			};
+		case "sources_not_read:spent":
+			return {
+				reason,
+				text: `Routine intake's spending allowance for the owner's latest messages ran out before they were read. ${restateAll}`,
+			};
+	}
+}
 
 export interface RoutineIntakeOutcome {
 	readonly status: "completed" | "cancelled" | "failed";
@@ -134,7 +212,13 @@ export interface RoutineIntakeDeps {
 	/** Foreground activity: every change that can end a busy foreground. */
 	subscribeActivity(listener: () => void): () => void;
 	captureOrigin(): WorkerReceiptOrigin;
-	deliver(notice: ParentInputDelivery): Promise<unknown>;
+	/** A check that throws once the session, its branch or its runtime changed after this call. */
+	captureBranchGuard(): () => void;
+	/** Saves a notice with the owner's next turn; resolves once the transcript accepted it. */
+	deliver(notice: ParentInputDelivery, signal: AbortSignal): Promise<unknown>;
+	/** Whether the session's transcript already holds the parent input with this delivery id. */
+	isDelivered(deliveryId: string): boolean;
+	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	warn(message: string): void;
 }
@@ -146,19 +230,31 @@ interface Configuration {
 }
 
 type IntakeRequestOptions = Required<Pick<DecisionOptions, "budget" | "origin">>;
+type PassCounts = { sources: number; created: number; refused: number };
 
-/** No timer or listener survives stop; the pass in flight is retained in the routine store and resumes after restart. */
+/**
+ * No timer or listener survives stop, and stop joins the pass and the announcement in flight. The pass in flight and
+ * every notice not yet accepted are retained in the routine store and resume after restart.
+ */
 export class RoutineIntake {
 	private readonly deps: RoutineIntakeDeps;
 	private active = false;
 	private alarm: unknown;
 	private running: Promise<void> | undefined;
-	private abort: AbortController | undefined;
+	private lifetime: AbortController | undefined;
 	private readonly subscriptions: Array<() => void> = [];
 	private retryAt: number | undefined;
 	private failures: { operationId: string; count: number } | undefined;
 	private last: RoutineIntakeOutcome | undefined;
 	private judge: { key: string; usageOwner: SessionSemanticUsageDelivery; engine: SemanticDecisionEngine } | undefined;
+	/**
+	 * The newest owner source this runtime finished with. The store keeps a bounded number of sessions; when another
+	 * session's progress displaced this one's, intake still never reads these sources again while it runs.
+	 */
+	private floor: number | undefined;
+	/** A notice could not be saved: only an outside change (owner words, activity, spending) tries again. */
+	private announceBlocked = false;
+	private announceFailure: string | undefined;
 
 	constructor(deps: RoutineIntakeDeps) {
 		this.deps = deps;
@@ -171,6 +267,7 @@ export class RoutineIntake {
 	start(): void {
 		if (this.active) return;
 		this.active = true;
+		this.lifetime = new AbortController();
 		try {
 			if (this.deps.hostInactiveReason() !== "ephemeral_session") {
 				this.deps.store.reload();
@@ -181,19 +278,20 @@ export class RoutineIntake {
 			this.warn("Routine intake could not record where it starts", error);
 		}
 		this.subscriptions.push(
-			this.deps.evidence.subscribe(() => this.schedule()),
-			this.deps.usageOwner().subscribeSpending(() => this.schedule()),
-			this.deps.subscribeActivity(() => this.schedule()),
+			this.deps.evidence.subscribe(() => this.wake()),
+			this.deps.usageOwner().subscribeSpending(() => this.wake()),
+			this.deps.subscribeActivity(() => this.wake()),
 		);
 		this.schedule();
 	}
 
+	/** Resolves once the pass and the announcement in flight joined; both are retained for the next start. */
 	stop(): Promise<void> {
 		this.active = false;
 		for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
 		if (this.alarm !== undefined) this.deps.time.clearTimeout(this.alarm);
 		this.alarm = undefined;
-		this.abort?.abort(new Error("Routine intake stopped."));
+		this.lifetime?.abort(new Error("Routine intake stopped."));
 		return this.running ?? Promise.resolve();
 	}
 
@@ -264,8 +362,16 @@ export class RoutineIntake {
 		return this.deps.store.getRoutineIntakeSession(this.deps.parentSessionId);
 	}
 
-	private record(change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null }): void {
+	/** The newest owner source intake finished with: the stored progress, never below what this runtime reached. */
+	private through(state: RoutineIntakeSession | undefined): number | undefined {
+		if (state?.through === undefined) return this.floor;
+		return this.floor === undefined ? state.through : Math.max(state.through, this.floor);
+	}
+
+	private record(change: RoutineIntakeChange): void {
 		this.deps.store.recordRoutineIntake(this.deps.parentSessionId, this.deps.time.now(), change);
+		if (change.through !== undefined && (this.floor === undefined || change.through > this.floor))
+			this.floor = change.through;
 	}
 
 	private newestSourceAt(): number | undefined {
@@ -273,56 +379,82 @@ export class RoutineIntake {
 		return newest ? Date.parse(newest.createdAt) : undefined;
 	}
 
+	private notice(observation: () => HarnessNoticeObservation | undefined): void {
+		this.deps.observeHarnessNotice?.("routine-intake", observation);
+	}
+
+	/** An outside change: a notice that could not be saved is tried again, and a pass starts when there is work. */
+	private wake(): void {
+		this.announceBlocked = false;
+		this.schedule();
+	}
+
 	private schedule(): void {
 		if (!this.active || this.running || this.alarm !== undefined) return;
 		try {
 			const state = this.state();
-			const newest = this.newestSourceAt();
-			const unread = newest !== undefined && newest > (state?.through ?? -1);
-			if (!unread && !state?.batch) return;
-			const host = this.deps.hostInactiveReason();
+			const announce = state?.unannounced !== undefined && !this.announceBlocked;
+			const newest = this.deps.evidence.listOwnerEvidence().at(-1);
+			const newestAt = newest ? Date.parse(newest.createdAt) : undefined;
+			const unread = newestAt !== undefined && newestAt > (this.through(state) ?? -1);
+			if (!announce && !unread && !state?.batch) return;
+			const config = this.configuration();
 			// Words the owner wrote while intake was off are never read later as new requests.
-			if (host === "disabled" && unread && !state?.batch) this.record({ through: newest });
-			if (host || this.deps.isForegroundBusy() || this.configuration().reason) return;
+			if (config.reason === "disabled" && unread && !state?.batch) this.record({ through: newestAt });
+			const reason = config.reason;
+			if (isNoticedInactive(reason))
+				// Told once per episode, and only while words that state timing (or a pass in flight) wait unread.
+				this.notice(() =>
+					state?.batch !== undefined ||
+					(unread && newest?.sessionId === this.deps.parentSessionId && statesIntakeTiming(newest))
+						? routineIntakeHarnessNotice(reason)
+						: undefined,
+				);
+			const work = reason === undefined && (unread || state?.batch !== undefined);
+			if (this.deps.isForegroundBusy() || (!work && !announce)) return;
+			if (work) this.notice(() => "clear");
 			this.alarm = this.deps.time.setTimeout(
 				() => {
 					this.alarm = undefined;
 					if (!this.active || this.deps.isForegroundBusy()) return;
 					this.running = this.run().finally(() => {
 						this.running = undefined;
-						this.abort = undefined;
 						this.schedule();
 					});
 				},
-				Math.max(IDLE_DELAY_MS, (this.retryAt ?? 0) - this.deps.time.now()),
+				Math.max(IDLE_DELAY_MS, work ? (this.retryAt ?? 0) - this.deps.time.now() : 0),
 			);
 		} catch (error) {
 			this.warn("Routine intake could not read its state", error);
 		}
 	}
 
+	/** One pass under its deadline, then every notice still owed under the runtime's lifetime only. */
 	private async run(): Promise<void> {
-		const controller = new AbortController();
-		this.abort = controller;
+		const lifetime = this.lifetime!;
+		const pass = new AbortController();
+		const signal = AbortSignal.any([lifetime.signal, pass.signal]);
 		const deadline = this.deps.time.setTimeout(
-			() => controller.abort(new Error("Routine intake deadline reached.")),
+			() => pass.abort(new Error("Routine intake deadline reached.")),
 			PASS_DEADLINE_MS,
 		);
-		const outcome = { sources: 0, created: 0, refused: 0 };
+		const counts: PassCounts = { sources: 0, created: 0, refused: 0 };
 		let status: RoutineIntakeOutcome["status"] = "completed";
 		let batch: RoutineIntakeBatch | undefined;
 		try {
 			this.deps.store.reload();
 			const config = this.configuration();
-			if (config.reason || !config.model || !config.engine) return;
-			batch = this.state()?.batch ?? this.open();
-			if (!batch) return;
-			outcome.sources = batch.sourceIds.length;
-			await this.decide(batch, config.model, config.engine, controller.signal, outcome);
+			if (!config.reason && config.model && config.engine) {
+				batch = this.state()?.batch ?? this.open();
+				if (batch) {
+					counts.sources = batch.sourceIds.length;
+					await this.decide(batch, config.model, config.engine, signal, counts);
+				}
+			}
 			this.retryAt = undefined;
 			this.failures = undefined;
 		} catch (error) {
-			status = controller.signal.aborted && !this.active ? "cancelled" : "failed";
+			status = lifetime.signal.aborted ? "cancelled" : "failed";
 			if (status === "failed") {
 				this.warn("Routine intake pass failed", error);
 				this.retryAt = this.deps.time.now() + RETRY_DELAY_MS;
@@ -330,10 +462,12 @@ export class RoutineIntake {
 			}
 		} finally {
 			this.deps.time.clearTimeout(deadline);
-			if (outcome.sources > 0 || status !== "completed") this.last = { ...outcome, status };
+			if (counts.sources > 0 || status !== "completed") this.last = { ...counts, status };
 		}
+		await this.announce(lifetime.signal);
 	}
 
+	/** After repeated failures the pass ends: its undecided requests are refused with a notice, unread sources noticed. */
 	private giveUpAfterRepeatedFailure(batch: RoutineIntakeBatch | undefined): void {
 		if (!batch) return;
 		const count = this.failures?.operationId === batch.operationId ? this.failures.count + 1 : 1;
@@ -342,7 +476,10 @@ export class RoutineIntake {
 		this.failures = undefined;
 		this.retryAt = undefined;
 		try {
-			this.record({ through: batch.through, batch: null });
+			this.deps.store.reload();
+			const current = this.state()?.batch;
+			if (current?.operationId !== batch.operationId) return;
+			this.close(current, "reading it failed repeatedly", "sources_not_read:failed");
 		} catch (error) {
 			this.warn("Routine intake could not end a failing pass", error);
 		}
@@ -350,19 +487,21 @@ export class RoutineIntake {
 
 	/**
 	 * Opens the next pass over the owner's unread sources, oldest first: at most four complete, secret-free sources of
-	 * this session within one character bound. Sources the model already answered with a routine tool save, copies from
-	 * another session, secret-bearing or oversized sources, and sources whose stated words carry no timing the host
-	 * grammar reads (no request could compile from them) are passed over unread. The batch is retained before any
-	 * request starts.
+	 * this session within one character bound. Sources that were in the model's context when it saved a routine with the
+	 * tool, copies from another session, secret-bearing or oversized sources, and sources whose stated words carry no
+	 * timing the host grammar reads (no request could compile from them) are passed over unread; the owner is told once
+	 * when a source that states timing is skipped for a secret or its size. The batch is retained before any request
+	 * starts.
 	 */
 	private open(): RoutineIntakeBatch | undefined {
 		const state = this.state();
-		const through = state?.through ?? -1;
-		const handled = state?.toolAuthoredThrough ?? -1;
+		const through = this.through(state) ?? -1;
+		const answered = new Set(state?.answered);
 		const sourceIds: string[] = [];
 		let reached: number | undefined;
 		let chars = 0;
 		let cursor: string | undefined;
+		let skipped: RoutineIntakeNoticeReason | undefined;
 		scan: for (;;) {
 			const page = this.deps.evidence.readSources(cursor);
 			if (page.length === 0) break;
@@ -370,22 +509,29 @@ export class RoutineIntake {
 				cursor = source.recordId;
 				const at = Date.parse(source.createdAt);
 				if (!(at > through)) continue;
-				if (
-					source.sessionId === this.deps.parentSessionId &&
-					source.complete &&
-					at > handled &&
-					source.chars <= MAX_BATCH_CHARS
-				) {
-					if (sourceIds.length >= MAX_ROUTINE_INTAKE_BATCH_SOURCES || chars + source.chars > MAX_BATCH_CHARS)
+				if (source.sessionId === this.deps.parentSessionId && source.complete && !answered.has(source.sourceId)) {
+					const fits = source.chars <= MAX_BATCH_CHARS;
+					if (
+						fits &&
+						(sourceIds.length >= MAX_ROUTINE_INTAKE_BATCH_SOURCES || chars + source.chars > MAX_BATCH_CHARS)
+					)
 						break scan;
 					const original = this.deps.evidence.findSource(source.sourceId);
-					if (original && !hasMaskableSecretText(original.text) && statesIntakeTiming(original)) {
-						sourceIds.push(source.sourceId);
-						chars += source.chars;
+					if (original && statesIntakeTiming(original)) {
+						if (!fits) skipped ??= "source_not_read:oversize";
+						else if (hasMaskableSecretText(original.text)) skipped ??= "source_not_read:secret";
+						else {
+							sourceIds.push(source.sourceId);
+							chars += source.chars;
+						}
 					}
 				}
 				reached = at;
 			}
+		}
+		if (skipped !== undefined) {
+			const reason = skipped;
+			this.notice(() => routineIntakeHarnessNotice(reason));
 		}
 		if (reached === undefined) return undefined;
 		if (sourceIds.length === 0) {
@@ -394,7 +540,6 @@ export class RoutineIntake {
 		}
 		const batch: RoutineIntakeBatch = {
 			operationId: `${ROUTINE_INTAKE_OPERATION_PREFIX}${randomUUID()}`,
-			origin: this.deps.captureOrigin(),
 			sourceIds,
 			through: reached,
 		};
@@ -402,13 +547,17 @@ export class RoutineIntake {
 		return batch;
 	}
 
-	/** Extracts once per pass (retained), then decides each request at most once, and ends the pass in one write. */
+	/**
+	 * Extracts once per pass (retained), then decides each request at most once, each decision in its own write. A
+	 * request whose branch moved while it was judged stays undecided for the next pass. Once every request is decided,
+	 * or the pass's allowance is spent, the pass ends in one write that also keeps every notice it owes.
+	 */
 	private async decide(
 		opened: RoutineIntakeBatch,
 		model: Model<Api>,
 		engine: SemanticDecisionEngine,
 		signal: AbortSignal,
-		outcome: { created: number; refused: number },
+		counts: PassCounts,
 	): Promise<void> {
 		let batch = opened;
 		const usageOwner = this.deps.usageOwner();
@@ -420,37 +569,66 @@ export class RoutineIntake {
 			ROUTINE_INTAKE_SESSION_MAX_USD - spending.totalUsd,
 			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
 		);
-		if (remaining > 0) {
-			const request: IntakeRequestOptions = {
-				budget: new RequestSpendBudget(remaining),
-				origin: { ...usageOwner.captureOrigin(), operationId: batch.operationId },
-			};
-			if (!batch.requests) {
-				batch = { ...batch, requests: await this.extract(batch, model, engine, request, signal) };
-				this.record({ batch });
-			}
-			for (const [index, intake] of (batch.requests ?? []).entries()) {
-				if (intake.done) continue;
-				const decided = await this.decideRequest(intake, batch.origin, engine, request, signal);
-				if (decided === "created") outcome.created++;
-				else if (decided === "refused") outcome.refused++;
-				const requests = [...(batch.requests ?? [])];
-				requests[index] = { ...intake, done: true };
-				batch = { ...batch, requests };
-				this.record({ batch });
-			}
+		if (remaining <= 0) {
+			this.close(batch, "the spending allowance for reading it ran out", "sources_not_read:spent");
+			return;
 		}
-		// The pass's allowance is spent or every request is decided: its sources are finished either way.
-		this.record({ through: batch.through, batch: null });
+		const request: IntakeRequestOptions = {
+			budget: new RequestSpendBudget(remaining),
+			origin: { ...usageOwner.captureOrigin(), operationId: batch.operationId },
+		};
+		if (!batch.requests) {
+			const extracted = await this.extract(batch, model, engine, request, signal);
+			batch = {
+				...batch,
+				requests: extracted.requests,
+				...(extracted.dropped.length > 0 ? { dropped: extracted.dropped } : {}),
+			};
+			this.record({ batch });
+		}
+		for (const intake of batch.requests ?? []) {
+			if (intake.outcome) continue;
+			const outcome = await this.decideRequest(intake, engine, request, signal, counts);
+			if (!outcome) continue;
+			batch = {
+				...batch,
+				requests: batch.requests?.map((entry) => (entry.key === intake.key ? { ...entry, outcome } : entry)),
+			};
+			// A creation already wrote its decision with the routine; this write repeats it unchanged.
+			this.record({ batch });
+		}
+		if (batch.requests?.every((intake) => intake.outcome)) this.close(batch);
+	}
+
+	/**
+	 * Ends a pass in one write: its sources are finished, any undecided request is refused for `undecided` (a pass that
+	 * cannot finish), and the notices it owes are kept until the transcript accepts them. A pass that ends before its
+	 * extraction tells the owner once that its sources were not read.
+	 */
+	private close(batch: RoutineIntakeBatch, undecided?: string, unread?: RoutineIntakeNoticeReason): void {
+		const requests = batch.requests?.map((intake) =>
+			intake.outcome || undecided === undefined
+				? intake
+				: { ...intake, outcome: { kind: "refused" as const, reason: undecided } },
+		);
+		const announce = noticeRecords(requests ?? [], batch.dropped ?? []);
+		const owed = (this.state()?.unannounced?.length ?? 0) + announce.length;
+		if (owed > MAX_ROUTINE_INTAKE_UNANNOUNCED)
+			this.warn(
+				"Routine intake notices could not all be kept",
+				new Error(`${owed - MAX_ROUTINE_INTAKE_UNANNOUNCED} of the oldest were dropped unsaved.`),
+			);
+		this.record({ through: batch.through, batch: null, ...(announce.length > 0 ? { announce } : {}) });
+		if (!requests && unread !== undefined) this.notice(() => routineIntakeHarnessNotice(unread));
 	}
 
 	/**
 	 * With System One bound, each source passes its pre-gate first; one extraction request covers every remaining
 	 * source. A proposal survives only when both excerpts are the owner's stated (not shown) words of at least two words
-	 * each, the instruction is more than the timing words, and the host grammar, reading the whole stated message,
-	 * derives exactly the proposed timing from the timing excerpt; the host then compiles the schedule. Pasted ranges
-	 * reach neither the gate nor the extraction. The routine prompt is the owner's original instruction span, and its identity is
-	 * the grounded spans' offsets. At most two requests per source survive.
+	 * each and the instruction is more than the timing words; the host grammar, reading the whole stated message, must
+	 * then derive exactly the proposed timing from the timing excerpt, or the request is dropped and the owner told.
+	 * Pasted ranges reach neither the gate nor the extraction. The routine prompt is the owner's original instruction
+	 * span, and its identity is the grounded spans' offsets. At most two requests per source are kept or dropped.
 	 */
 	private async extract(
 		batch: RoutineIntakeBatch,
@@ -458,7 +636,7 @@ export class RoutineIntake {
 		engine: SemanticDecisionEngine,
 		request: IntakeRequestOptions,
 		signal: AbortSignal,
-	): Promise<RoutineIntakeRequest[]> {
+	): Promise<{ requests: RoutineIntakeRequest[]; dropped: RoutineIntakeDrop[] }> {
 		const sources = batch.sourceIds.flatMap((sourceId) => {
 			const original = this.deps.evidence.findSource(sourceId);
 			return original && original.chars === original.text.length ? [original] : [];
@@ -476,7 +654,9 @@ export class RoutineIntake {
 			}
 			candidates.push(source);
 		}
-		if (candidates.length === 0) return [];
+		const requests: RoutineIntakeRequest[] = [];
+		const dropped: RoutineIntakeDrop[] = [];
+		if (candidates.length === 0) return { requests, dropped };
 		const proposals = await extractRoutineRequests({
 			messages: candidates.map((source) => ({ text: typedWords(source), sentAt: source.createdAt })),
 			timeZone: hostTimeZone(),
@@ -487,7 +667,6 @@ export class RoutineIntake {
 			signal,
 			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
 		});
-		const requests: RoutineIntakeRequest[] = [];
 		const keys = new Set<string>();
 		for (const [index, source] of candidates.entries()) {
 			let accepted = 0;
@@ -506,6 +685,16 @@ export class RoutineIntake {
 					prompt.includes("\0")
 				)
 					continue;
+				const key = canonicalDigest({
+					parentSessionId: this.deps.parentSessionId,
+					sourceId: source.sourceId,
+					digest: source.digest,
+					instruction: [instruction.start, instruction.end],
+					when: [when.start, when.end],
+				});
+				if (keys.has(key)) continue;
+				keys.add(key);
+				accepted++;
 				const timing = compileIntakeTiming(
 					proposal.timing,
 					{
@@ -518,17 +707,16 @@ export class RoutineIntake {
 					},
 					proposal.lasts,
 				);
-				if (!timing) continue;
-				const key = canonicalDigest({
-					parentSessionId: this.deps.parentSessionId,
-					sourceId: source.sourceId,
-					digest: source.digest,
-					instruction: [instruction.start, instruction.end],
-					when: [when.start, when.end],
-				});
-				if (keys.has(key)) continue;
-				keys.add(key);
-				accepted++;
+				if (!timing) {
+					// Grounded in the owner's stated words, yet not compiled: the owner hears which words were not scheduled.
+					dropped.push({
+						key,
+						sourceId: source.sourceId,
+						excerpt: displayed(prompt),
+						reason: "the host could not read its timing exactly from the owner's words",
+					});
+					continue;
+				}
 				requests.push({
 					key,
 					sourceId: source.sourceId,
@@ -536,31 +724,37 @@ export class RoutineIntake {
 					schedule: timing.schedule,
 					cadence: timing.cadence,
 					...(timing.defaults.length > 0 ? { defaults: [...timing.defaults] } : {}),
+					...(timing.endCondition === undefined ? {} : { endCondition: timing.endCondition }),
 				});
 			}
 		}
-		return requests;
+		return { requests, dropped };
 	}
 
-	/** A consumed origin is never judged again: its live routine is announced once more, a deleted one stays gone. */
+	/**
+	 * Decides one request. Undefined when the owner's branch moved while it was judged: the next pass decides it again,
+	 * and a source no longer on the branch passes. A consumed origin is never judged again: its live routine is the
+	 * decision, a deleted one passes. A request that is not explicit passes silently; an explicit one the host could not
+	 * schedule faithfully or within its bounds is refused with a notice.
+	 */
 	private async decideRequest(
 		intake: RoutineIntakeRequest,
-		origin: WorkerReceiptOrigin,
 		engine: SemanticDecisionEngine,
 		request: IntakeRequestOptions,
 		signal: AbortSignal,
-	): Promise<"created" | "refused" | "rejected" | "consumed"> {
-		const identity = {
-			key: intake.key,
-			sourceId: intake.sourceId,
-			...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
-		};
-		if (this.deps.store.hasRoutineIntakeOrigin(intake.key)) {
-			this.announceExisting(intake, origin);
-			return "consumed";
-		}
+		counts: PassCounts,
+	): Promise<RoutineIntakeDecision | undefined> {
+		if (this.deps.store.hasRoutineIntakeOrigin(intake.key)) return this.existing(intake);
 		const source = this.deps.evidence.findSource(intake.sourceId);
-		if (!source) return "rejected";
+		if (!source) return { kind: "passed" };
+		const raw = this.deps.captureBranchGuard();
+		const guard = (): void => {
+			try {
+				raw();
+			} catch (error) {
+				throw new RoutineIntakeBranchChanged(error instanceof Error ? error.message : String(error));
+			}
+		};
 		const judged = await engine.evaluate(
 			JUDGE_PROGRAM,
 			{
@@ -572,55 +766,108 @@ export class RoutineIntake {
 					timing: intake.cadence,
 					upcomingRuns: upcomingRuns(intake.schedule, Date.parse(source.createdAt), this.deps.time.now()),
 					hostDefaults: intake.defaults ?? [],
+					...(intake.endCondition === undefined ? {} : { statedEnd: intake.endCondition }),
 				},
 			},
 			{ ...request, signal, consequence: "high", occupancy: "background" },
 		);
-		if (!holds(judged, "explicit") || !holds(judged, "faithful")) return "rejected";
-		const now = this.deps.time.now();
-		const frequency = scheduleRefusal(intake.schedule, now);
-		if (frequency) {
-			this.notify(intake, origin, { refused: frequency });
-			return "refused";
+		let decision: RoutineIntakeDecision;
+		const refusal = scheduleRefusal(intake.schedule, this.deps.time.now());
+		if (!holds(judged, "explicit")) decision = { kind: "passed" };
+		else if (!holds(judged, "faithful"))
+			decision = { kind: "refused", reason: "the schedule the host read was not confirmed as the one asked for" };
+		else if (refusal) decision = { kind: "refused", reason: refusal };
+		else {
+			let created: RoutineIntakeCreation;
+			try {
+				created = await this.deps.routines.createFromIntake(
+					{ prompt: intake.prompt, schedule: intake.schedule },
+					{
+						key: intake.key,
+						sourceId: intake.sourceId,
+						...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
+						...(intake.endCondition === undefined ? {} : { endCondition: intake.endCondition }),
+					},
+					guard,
+					signal,
+				);
+			} catch (error) {
+				if (error instanceof RoutineIntakeBranchChanged) return undefined;
+				throw error;
+			}
+			if ("created" in created) {
+				counts.created++;
+				return { kind: "created", routineId: created.created.routineId };
+			}
+			if (created.refused === "consumed") return this.existing(intake);
+			decision = {
+				kind: "refused",
+				reason:
+					created.refused === "admission"
+						? "its read-only worker authority could not be admitted"
+						: created.reason.replace(/\.$/u, ""),
+			};
 		}
-		const created = await this.deps.routines.createFromIntake(
-			{ prompt: intake.prompt, schedule: intake.schedule },
-			identity,
-			signal,
-		);
-		if ("created" in created) {
-			this.notify(intake, origin, { created: created.created.routineId });
-			return "created";
+		// A decision about words the owner navigated away from meanwhile is not recorded; the next pass reads the branch.
+		try {
+			guard();
+		} catch {
+			return undefined;
 		}
-		if (created.refused === "consumed") {
-			this.announceExisting(intake, origin);
-			return "consumed";
-		}
-		this.notify(intake, origin, {
-			refused:
-				created.refused === "admission"
-					? "its read-only worker authority could not be admitted"
-					: created.reason.replace(/\.$/u, ""),
-		});
-		return "refused";
+		if (decision.kind === "refused") counts.refused++;
+		return decision;
 	}
 
-	private announceExisting(intake: RoutineIntakeRequest, origin: WorkerReceiptOrigin): void {
+	private existing(intake: RoutineIntakeRequest): RoutineIntakeDecision {
 		const routine = this.deps.store.getRoutine(
 			routineIntakeRoutineId({ key: intake.key, sourceId: intake.sourceId }),
 		);
-		if (routine?.origin?.sourceId === intake.sourceId) this.notify(intake, origin, { created: routine.routineId });
+		return routine?.origin?.sourceId === intake.sourceId
+			? { kind: "created", routineId: routine.routineId }
+			: { kind: "passed" };
 	}
 
-	/** Notices ride with the owner's next turn; a notice that cannot be accepted is reported, never retried blindly. */
-	private notify(
-		intake: RoutineIntakeRequest,
-		origin: WorkerReceiptOrigin,
-		outcome: { readonly created: string } | { readonly refused: string },
-	): void {
-		void this.deps
-			.deliver(routineIntakeNotice(intake, origin, outcome))
-			.catch((error: unknown) => this.warn("A routine intake notice was not delivered", error));
+	/**
+	 * Tells the owner every recorded decision still owed, oldest first, with their next turn: one notice per decision,
+	 * whose identity and payload derive from the record, at the branch the session is on now. A notice the transcript
+	 * already holds is only marked; one whose branch moved while it waited is tried again at once, a bounded number of
+	 * times; any other failure waits for the owner's next activity.
+	 */
+	private async announce(signal: AbortSignal): Promise<void> {
+		let attempts = 0;
+		while (!this.announceBlocked && !signal.aborted) {
+			let record: RoutineIntakeNoticeRecord | undefined;
+			let guard: (() => void) | undefined;
+			try {
+				this.deps.store.reload();
+				record = this.state()?.unannounced?.[0];
+				if (!record) return;
+				guard = this.deps.captureBranchGuard();
+				if (!this.deps.isDelivered(routineIntakeNoticeId(record)))
+					await this.deps.deliver(routineIntakeNotice(record, this.deps.captureOrigin()), signal);
+				this.record({ announced: [record.key] });
+				this.announceFailure = undefined;
+				attempts = 0;
+			} catch (error) {
+				if (signal.aborted) return;
+				let moved = false;
+				try {
+					guard?.();
+				} catch {
+					moved = true;
+				}
+				if (moved && ++attempts < MAX_ANNOUNCE_ATTEMPTS) continue;
+				this.announceBlocked = true;
+				const detail = error instanceof Error ? error.message : String(error);
+				if (detail !== this.announceFailure)
+					this.warn(
+						"A routine intake notice is not saved yet; it is tried again on the owner's next activity",
+						error,
+					);
+				this.announceFailure = detail;
+				return;
+			}
+		}
 	}
 
 	private warn(message: string, error: unknown): void {
@@ -631,6 +878,47 @@ export class RoutineIntake {
 			// Diagnostics never fail the pass.
 		}
 	}
+}
+
+/** The notices a closed pass owes, in the order the extraction found them: creations, refusals and drops. */
+function noticeRecords(
+	requests: readonly RoutineIntakeRequest[],
+	dropped: readonly RoutineIntakeDrop[],
+): RoutineIntakeNoticeRecord[] {
+	const records: RoutineIntakeNoticeRecord[] = [];
+	for (const intake of requests) {
+		const outcome = intake.outcome;
+		if (outcome?.kind === "created")
+			records.push({
+				key: intake.key,
+				sourceId: intake.sourceId,
+				prompt: displayed(intake.prompt),
+				...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
+				outcome: { kind: "created", routineId: outcome.routineId, cadence: intake.cadence },
+			});
+		else if (outcome?.kind === "refused")
+			records.push({
+				key: intake.key,
+				sourceId: intake.sourceId,
+				prompt: displayed(intake.prompt),
+				outcome: { kind: "refused", reason: outcome.reason },
+			});
+	}
+	for (const drop of dropped)
+		records.push({
+			key: drop.key,
+			sourceId: drop.sourceId,
+			prompt: drop.excerpt,
+			outcome: { kind: "dropped", reason: drop.reason },
+		});
+	return records;
+}
+
+/** The owner's words as a notice shows them: whole up to the display bound, otherwise cut with an ellipsis. */
+function displayed(words: string): string {
+	return words.length <= MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS
+		? words
+		: `${words.slice(0, MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS - 1).trimEnd()}…`;
 }
 
 function substantial(text: string): boolean {

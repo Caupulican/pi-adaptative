@@ -5,7 +5,11 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
-import { MAX_ROUTINE_EVENT_MISSED_COUNT, type RoutineDelivery, type RoutineIntakeRequest } from "./routine-contract.ts";
+import {
+	MAX_ROUTINE_EVENT_MISSED_COUNT,
+	type RoutineDelivery,
+	type RoutineIntakeNoticeRecord,
+} from "./routine-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Why a result that would start a parent turn rides with the owner's next turn instead. */
@@ -117,38 +121,50 @@ function routineExpiryNotice(delivery: RoutineDelivery, expiresAt: number): Pare
 }
 
 /**
- * The owner-visible notice of one intake decision, carried with the owner's next turn: the host's plain cadence and
- * every timing part the host chose because the owner left it open. Its identity derives from the request alone and
- * its anchor is the pass's retained one, so a redelivery after restart is the same input.
+ * The owner-visible notice of one decided intake request, carried with the owner's next turn: the host's plain cadence
+ * and every timing part the host chose because the owner left it open, why a request was refused, or which words read
+ * as a request the host could not compile. Its identity and payload derive from the retained record alone (the
+ * request and how it ended), so a redelivery after restart is the same input; `origin` is captured per delivery.
  */
 export function routineIntakeNotice(
-	request: RoutineIntakeRequest,
+	record: RoutineIntakeNoticeRecord,
 	origin: WorkerReceiptOrigin,
-	outcome: { readonly created: string } | { readonly refused: string },
 ): ParentInputDelivery {
-	const defaults = request.defaults?.length
-		? `\nThe owner did not state everything, so the host chose: ${request.defaults.join("; ")}. The owner can change it in plain words.`
+	const { outcome } = record;
+	const defaults = record.defaults?.length
+		? `\nThe owner did not state everything, so the host chose: ${record.defaults.join("; ")}. The owner can change it in plain words.`
 		: "";
+	let content: string;
+	if (outcome.kind === "created")
+		content = `Scheduled (read-only): ${outcome.cadence} - ${JSON.stringify(record.prompt)}\nRoutine ${outcome.routineId} was created from the owner's own words. Its worker cannot edit existing files, create files outside its scratch area or use the network. The owner can ask to change, widen or cancel it.${defaults}`;
+	else if (outcome.kind === "refused")
+		content = `Not scheduled: ${outcome.reason} - ${JSON.stringify(record.prompt)}\nThe owner's request was recognized but no routine was created.`;
+	else
+		content = `Could not schedule what reads as a request: ${outcome.reason} - ${JSON.stringify(record.prompt)}\nNo routine was created. If it was meant, the owner can restate it.`;
 	const message = {
 		customType: ROUTINE_INTAKE_NOTICE_TYPE,
 		display: true,
-		content:
-			"created" in outcome
-				? `Scheduled (read-only): ${request.cadence} - ${JSON.stringify(request.prompt)}\nRoutine ${outcome.created} was created from the owner's own words. Its worker cannot edit existing files, create files outside its scratch area or use the network. The owner can ask to change, widen or cancel it.${defaults}`
-				: `Not scheduled: ${outcome.refused} - ${JSON.stringify(request.prompt)}\nThe owner's request was recognized but no routine was created.`,
+		content,
 		details: {
-			routineIntakeKey: request.key,
-			sourceId: request.sourceId,
-			...("created" in outcome ? { routineId: outcome.created } : { refused: outcome.refused }),
+			routineIntakeKey: record.key,
+			sourceId: record.sourceId,
+			...(outcome.kind === "created" ? { routineId: outcome.routineId } : { [outcome.kind]: outcome.reason }),
 		},
 	};
 	return {
-		deliveryId: `${ROUTINE_INTAKE_NOTICE_TYPE}:${createHash("sha256").update(request.key).digest("hex")}`,
+		deliveryId: routineIntakeNoticeId(record),
 		payloadDigest: createHash("sha256").update(JSON.stringify(message)).digest("hex"),
 		message,
 		origin,
 		mode: "next-owner-turn",
 	};
+}
+
+/** One notice per request and outcome: a request's record always delivers under the same id. */
+export function routineIntakeNoticeId(record: RoutineIntakeNoticeRecord): string {
+	return `${ROUTINE_INTAKE_NOTICE_TYPE}:${createHash("sha256")
+		.update(JSON.stringify([record.key, record.outcome.kind]))
+		.digest("hex")}`;
 }
 
 /**

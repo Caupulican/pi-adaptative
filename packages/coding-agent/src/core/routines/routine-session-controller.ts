@@ -34,10 +34,11 @@ interface RoutineSessionDeps {
 	/** The session ledger's current position; read only when an event routine is saved. */
 	eventAnchor(): RoutineEventAnchor;
 	/**
-	 * Owner-evidence instant (ms) of the first owner source recorded in the current run; undefined when the owner said
-	 * nothing in it (a routine result, CI event or other host input opened it) or no run is active.
+	 * Owner sources recorded in the current run: the model's context holds every one of them while a tool call of the
+	 * run executes. Empty when the owner said nothing in it (a routine result, CI event or other host input opened it)
+	 * or no run is active.
 	 */
-	ownerTurnSourceAt(): number | undefined;
+	ownerTurnSources(): readonly string[];
 	now(): number;
 	isDisposed(): boolean;
 }
@@ -162,11 +163,14 @@ export class RoutineSessionController implements RoutineToolPort {
 	/**
 	 * Creates a routine the host derived from the owner's own words: the same parent check, zone default, event
 	 * anchor and store write as a tool save, with read-only worker authority and the origin consumed in that write.
+	 * `guard` throws {@link RoutineIntakeBranchChanged} once the owner's branch changed since the request was judged;
+	 * it is checked after admission and again under the store lock, so a request navigated away from creates nothing.
 	 * Widening its authority is a later routine tool update, never intake.
 	 */
 	async createFromIntake(
 		spec: { readonly prompt: string; readonly schedule: RoutineScheduleInput },
 		origin: RoutineIntakeOrigin,
+		guard: () => void,
 		signal?: AbortSignal,
 	): Promise<RoutineIntakeCreation> {
 		this.check(signal);
@@ -177,16 +181,18 @@ export class RoutineSessionController implements RoutineToolPort {
 				signal,
 			);
 		} catch (error) {
-			// An abort or a disposed session is not the admission's answer; the caller retries or stops.
+			// An abort, a disposed session or a branch change is not the admission's answer; the caller retries or stops.
 			this.check(signal);
+			guard();
 			return { refused: "admission", reason: error instanceof Error ? error.message : String(error) };
 		}
 		this.check(signal);
+		guard();
 		try {
 			const created = this.persist(
 				{ routineId: routineIntakeRoutineId(origin), prompt: spec.prompt, schedule: spec.schedule, knowledge: [] },
 				savedIntent,
-				{ enabled: true, intakeOrigin: origin },
+				{ enabled: true, intakeOrigin: origin, intakeGuard: guard },
 			);
 			return { created };
 		} catch (error) {
@@ -202,8 +208,8 @@ export class RoutineSessionController implements RoutineToolPort {
 		signal?: AbortSignal,
 	): Promise<RoutineToolView> {
 		this.check(signal);
-		// Read before admission waits: the stamp is the owner source this run answers, never words sent meanwhile.
-		const toolAuthoredThrough = author === "tool" ? this.requireOwnerTurn() : undefined;
+		// Read before admission waits: the sources in this call's context, never words the owner sends meanwhile.
+		const toolAnsweredSources = author === "tool" ? this.requireOwnerTurn() : undefined;
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
 		const sameIntent =
 			prior?.executionSnapshot &&
@@ -226,15 +232,15 @@ export class RoutineSessionController implements RoutineToolPort {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
 			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
-			...(toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough }),
+			...(toolAnsweredSources === undefined ? {} : { toolAnsweredSources }),
 		});
 	}
 
 	/**
 	 * The one write of a saved routine for every creation path: the parent check, the calendar zone default, the
 	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces. A calendar
-	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's. A tool save stamps the
-	 * owner source that opened its run; an intake creation carries the origin it consumes.
+	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's. A tool save records the
+	 * owner sources its model's context held; an intake creation carries the origin it consumes and its branch guard.
 	 */
 	private persist(
 		input: RoutineToolInput,
@@ -243,8 +249,9 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly enabled: boolean;
 			readonly expectedRevision?: number;
 			readonly timeZone?: string;
-			readonly toolAuthoredThrough?: number;
+			readonly toolAnsweredSources?: readonly string[];
 			readonly intakeOrigin?: RoutineIntakeOrigin;
+			readonly intakeGuard?: () => void;
 		},
 	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
@@ -271,24 +278,25 @@ export class RoutineSessionController implements RoutineToolPort {
 				...(extras.expectedRevision === undefined
 					? { createOnly: true }
 					: { expectedRevision: extras.expectedRevision }),
-				...(extras.toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough: extras.toolAuthoredThrough }),
+				...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
 				...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
+				...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 			}),
 		);
 	}
 
 	/**
-	 * The owner source the current run answers. Standing work is created, changed, restarted or run only on the owner's
+	 * The owner sources the current run answers. Standing work is created, changed, restarted or run only on the owner's
 	 * own words: a run a routine result, CI event or other host input opened cannot extend or re-trigger the automation
 	 * that woke it.
 	 */
-	private requireOwnerTurn(): number {
-		const at = this.deps.ownerTurnSourceAt();
-		if (at === undefined)
+	private requireOwnerTurn(): readonly string[] {
+		const sources = this.deps.ownerTurnSources();
+		if (sources.length === 0)
 			throw new Error(
 				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume and run wait for the owner's request; pause and delete still work. Tell the owner what to change.",
 			);
-		return at;
+		return sources;
 	}
 
 	private owns(routine: RoutineDefinitionView): boolean {

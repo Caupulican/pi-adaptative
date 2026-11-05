@@ -584,13 +584,13 @@ export class OwnerEvidenceLedger {
 	}
 
 	/**
-	 * The first owner source recorded during the current run: the owner input that opened it, or the first one the owner
-	 * sent into a run something else opened. Undefined when the owner has said nothing in this run (a routine result,
-	 * CI event or other wake opened it) or no run is active.
+	 * Every owner source recorded during the current run, in order: empty when the owner has said nothing in it (a
+	 * routine result, CI event or other wake opened it) or no run is active. A source is recorded where its message is
+	 * persisted, which is where the run takes it into the model's context, before the model call that reads it; so while
+	 * a tool call of the run executes, the context that issued it held every one of them.
 	 */
-	currentTurnOpeningSource(): OwnerEvidenceRecord | undefined {
-		const first = this.currentTurn.values().next();
-		return first.done ? undefined : this.findSource(first.value);
+	currentTurnSources(): readonly string[] {
+		return [...this.currentTurn];
 	}
 
 	/**

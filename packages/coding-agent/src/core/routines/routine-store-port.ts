@@ -3,7 +3,7 @@ import type {
 	RoutineClaimResult,
 	RoutineDefinitionView,
 	RoutineDelivery,
-	RoutineIntakeBatch,
+	RoutineIntakeChange,
 	RoutineIntakeSession,
 	RoutineOccurrence,
 	RoutineOccurrenceClaimInput,
@@ -23,11 +23,7 @@ export interface RoutineStorePort {
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined;
 	hasRoutineIntakeOrigin(key: string): boolean;
-	recordRoutineIntake(
-		parentSessionId: string,
-		nowMs: number,
-		change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null },
-	): void;
+	recordRoutineIntake(parentSessionId: string, nowMs: number, change: RoutineIntakeChange): void;
 	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult;
 	retireEndedRoutines(input: RoutineRetireInput): {
 		readonly retired: readonly string[];

@@ -225,7 +225,7 @@ export interface BackgroundLaneControllerDeps
 	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
 	getOwnerEvidence(): Pick<
 		OwnerEvidenceLedger,
-		"subscribe" | "readSources" | "findSource" | "listOwnerEvidence" | "currentTurnOpeningSource"
+		"subscribe" | "readSources" | "findSource" | "listOwnerEvidence" | "currentTurnSources"
 	>;
 }
 
@@ -850,7 +850,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			unsubscribeHostEventState?.();
 			this._hostEventStateListeners.clear();
 		});
-		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they were told to stop.
+		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they
+		// were told to stop: intake awaits every notice it starts, and stopping aborts a notice still waiting to be saved.
 		return Promise.all([workerShutdown, routineShutdown, intakeShutdown]).then(() => undefined);
 	}
 
@@ -1546,10 +1547,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
-			ownerTurnSourceAt: () => {
-				const opening = this.deps.getOwnerEvidence().currentTurnOpeningSource();
-				return opening ? Date.parse(opening.createdAt) : undefined;
-			},
+			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
 		});
@@ -1571,7 +1569,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
 			subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			deliver: (notice) => this.deps.deliverParentInput(notice),
+			captureBranchGuard: () => {
+				const manager = this.deps.getSessionManager();
+				const assertBranch = manager.captureBranchContext();
+				return () => {
+					assertBranch();
+					if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
+						throw new Error("Routine intake session changed before its decision was saved.");
+				};
+			},
+			deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
+			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
 			warn: (message) => this._safeWarn(message),
 		});

@@ -19,8 +19,10 @@ import {
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
+	MAX_ROUTINE_INTAKE_ANSWERED,
 	MAX_ROUTINE_INTAKE_ORIGINS,
 	MAX_ROUTINE_INTAKE_SESSIONS,
+	MAX_ROUTINE_INTAKE_UNANNOUNCED,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
@@ -31,7 +33,6 @@ import {
 	parseLegacyRoutineDefinition,
 	parseRoutineDefinitionView,
 	parseRoutineExecutionSnapshot,
-	parseRoutineIntakeBatch,
 	parseRoutineIntakeConsumptions,
 	parseRoutineIntakeOrigin,
 	parseRoutineIntakeSessions,
@@ -52,7 +53,7 @@ import {
 	type RoutineDelivery,
 	type RoutineHostEventFact,
 	type RoutineHostEventFeed,
-	type RoutineIntakeBatch,
+	type RoutineIntakeChange,
 	type RoutineIntakeConsumption,
 	type RoutineIntakeOrigin,
 	RoutineIntakeRefusal,
@@ -1740,6 +1741,7 @@ export class PersistentBotTeamStore {
 									kind: "owner-intake" as const,
 									sourceId: intake.sourceId,
 									...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
+									...(intake.endCondition === undefined ? {} : { endCondition: intake.endCondition }),
 								},
 							}
 						: {}),
@@ -1775,17 +1777,9 @@ export class PersistentBotTeamStore {
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
-			if (intake) this.consumeRoutineIntake(intake.key, intake.parentSessionId, input.nowMs ?? Date.now());
-			if (input.toolAuthoredThrough !== undefined) {
-				if (definition.target.kind !== "session")
-					throw new Error("Only a session routine records the owner source it answered.");
-				const through = input.toolAuthoredThrough;
-				this.writeRoutineIntakeSession(definition.target.parentSessionId, input.nowMs ?? Date.now(), (current) =>
-					current?.toolAuthoredThrough !== undefined && current.toolAuthoredThrough >= through
-						? {}
-						: { toolAuthoredThrough: through },
-				);
-			}
+			if (intake) this.consumeRoutineIntake(intake, normalizedId, input.nowMs ?? Date.now());
+			if (input.toolAnsweredSources !== undefined)
+				this.recordRoutineToolAnswers(definition.target, input.toolAnsweredSources, input.nowMs ?? Date.now());
 			if (!view.enabled) this.cancelUndispatchedRoutineOccurrences(normalizedId, input.nowMs ?? Date.now());
 			this.save();
 			return structuredClone(view);
@@ -1798,6 +1792,8 @@ export class PersistentBotTeamStore {
 	 * window, or when it holds {@link ROUTINE_INTAKE_LIVE_CAP} live intake routines.
 	 */
 	private admitRoutineIntake(input: UpsertPersistentRoutineInput): RoutineIntakeOrigin & { parentSessionId: string } {
+		// The owner's branch is checked first, under the lock: a request navigated away from writes nothing.
+		input.intakeGuard?.();
 		const origin = parseRoutineIntakeOrigin(input.intakeOrigin);
 		if (input.target.kind !== "session" || !input.createOnly || input.expectedRevision !== undefined)
 			throw new Error("A routine intake creation is a create-only session routine.");
@@ -1834,35 +1830,40 @@ export class PersistentBotTeamStore {
 	}
 
 	/**
-	 * Records a session's intake progress in one write: the newest owner source it finished with (never moved back)
-	 * and the pass in flight (`null` ends it).
+	 * Records a session's intake progress in one write: the newest owner source it finished with (never moved back),
+	 * the pass in flight (`null` ends it), notices kept until accepted and notices the transcript accepted.
 	 */
-	recordRoutineIntake(
-		parentSessionId: string,
-		nowMs: number,
-		change: { readonly through?: number; readonly batch?: RoutineIntakeBatch | null },
-	): void {
+	recordRoutineIntake(parentSessionId: string, nowMs: number, change: RoutineIntakeChange): void {
 		this.mutate(() => {
-			const batch =
-				change.batch === undefined || change.batch === null
-					? change.batch
-					: parseRoutineIntakeBatch(change.batch, parentSessionId);
-			const through = change.through;
-			if (through !== undefined && (!Number.isSafeInteger(through) || through < 0))
-				throw new TypeError("Routine intake progress is invalid.");
-			this.writeRoutineIntakeSession(parentSessionId, nowMs, (current) => ({
-				...(through !== undefined && (current?.through === undefined || through > current.through)
-					? { through }
-					: {}),
-				...(batch === undefined ? {} : { batch: batch ?? undefined }),
-			}));
+			const { batch, through } = change;
+			const announced = new Set(change.announced ?? []);
+			this.writeRoutineIntakeSession(parentSessionId, nowMs, (current) => {
+				const records = [...(current?.unannounced ?? [])];
+				const kept = new Set(records.map((record) => record.key));
+				for (const record of change.announce ?? []) {
+					if (kept.has(record.key)) continue;
+					kept.add(record.key);
+					records.push(record);
+				}
+				const unannounced = records
+					.filter((record) => !announced.has(record.key))
+					.slice(-MAX_ROUTINE_INTAKE_UNANNOUNCED);
+				return {
+					...(through !== undefined && (current?.through === undefined || through > current.through)
+						? { through }
+						: {}),
+					...(batch === undefined ? {} : { batch: batch ?? undefined }),
+					unannounced: unannounced.length > 0 ? unannounced : undefined,
+				};
+			});
 			this.save();
 		});
 	}
 
 	/**
 	 * Applies one change to a session's intake state inside the caller's mutation and moves it to the newest
-	 * position; the least recently written session leaves first once the bound is reached.
+	 * position. Once the bound is reached the least recently written session with no pass in flight and no notice
+	 * owed leaves first, so another session's progress never displaces work this one still owes its owner.
 	 */
 	private writeRoutineIntakeSession(
 		parentSessionId: string,
@@ -1870,22 +1871,55 @@ export class PersistentBotTeamStore {
 		change: (current: RoutineIntakeSession | undefined) => Partial<Omit<RoutineIntakeSession, "parentSessionId">>,
 	): void {
 		const current = this.routineIntakeSessions.get(parentSessionId);
-		const next: RoutineIntakeSession = { ...current, ...change(current), parentSessionId, updatedAt: nowMs };
+		// Parsed as the next load reads it: a write never persists state that load would refuse.
+		const [next] = parseRoutineIntakeSessions([
+			JSON.parse(JSON.stringify({ ...current, ...change(current), parentSessionId, updatedAt: nowMs })),
+		]);
 		this.routineIntakeSessions.delete(parentSessionId);
-		this.routineIntakeSessions.set(parentSessionId, next);
-		for (const oldest of this.routineIntakeSessions.keys()) {
-			if (this.routineIntakeSessions.size <= MAX_ROUTINE_INTAKE_SESSIONS) break;
-			this.routineIntakeSessions.delete(oldest);
+		this.routineIntakeSessions.set(parentSessionId, next!);
+		while (this.routineIntakeSessions.size > MAX_ROUTINE_INTAKE_SESSIONS) {
+			let evicted: string | undefined;
+			for (const [id, session] of this.routineIntakeSessions)
+				if (id !== parentSessionId && !session.batch && !session.unannounced) {
+					evicted = id;
+					break;
+				}
+			this.routineIntakeSessions.delete(evicted ?? this.routineIntakeSessions.keys().next().value!);
 		}
 	}
 
-	/** Records a consumed origin in the creating write; the oldest entry leaves first once the journal is full. */
-	private consumeRoutineIntake(key: string, parentSessionId: string, at: number): void {
-		this.routineIntakeOrigins.set(key, { key, parentSessionId, at });
+	/**
+	 * Records a consumed origin and its request's decision in the creating write, so the creation and its outcome are
+	 * one durable fact; the oldest origin leaves first once the journal is full.
+	 */
+	private consumeRoutineIntake(
+		intake: RoutineIntakeOrigin & { parentSessionId: string },
+		routineId: string,
+		at: number,
+	): void {
+		this.routineIntakeOrigins.set(intake.key, { key: intake.key, parentSessionId: intake.parentSessionId, at });
 		for (const oldest of this.routineIntakeOrigins.keys()) {
 			if (this.routineIntakeOrigins.size <= MAX_ROUTINE_INTAKE_ORIGINS) break;
 			this.routineIntakeOrigins.delete(oldest);
 		}
+		const batch = this.routineIntakeSessions.get(intake.parentSessionId)?.batch;
+		if (!batch?.requests?.some((request) => request.key === intake.key)) return;
+		const requests = batch.requests.map((request) =>
+			request.key === intake.key ? { ...request, outcome: { kind: "created" as const, routineId } } : request,
+		);
+		this.writeRoutineIntakeSession(intake.parentSessionId, at, () => ({ batch: { ...batch, requests } }));
+	}
+
+	/** A routine tool save of a session marks the owner sources in its model's context as answered, in the same write. */
+	private recordRoutineToolAnswers(target: PersistentRoutineTarget, sourceIds: readonly string[], at: number): void {
+		if (target.kind !== "session") throw new Error("Only a session routine records the owner sources it answered.");
+		this.writeRoutineIntakeSession(target.parentSessionId, at, (current) => {
+			const fresh = new Set(sourceIds);
+			const answered = [...(current?.answered ?? []).filter((sourceId) => !fresh.has(sourceId)), ...fresh].slice(
+				-MAX_ROUTINE_INTAKE_ANSWERED,
+			);
+			return answered.length > 0 ? { answered } : {};
+		});
 	}
 
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs = Date.now()): boolean {

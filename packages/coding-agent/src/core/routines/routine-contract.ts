@@ -68,6 +68,12 @@ export const MAX_ROUTINE_INTAKE_SOURCE_REQUESTS = 2;
 /** Host-chosen timing parts recorded per intake request and routine origin, and the bound of each description. */
 const MAX_ROUTINE_INTAKE_DEFAULTS = 4;
 export const MAX_ROUTINE_INTAKE_TEXT_CHARS = 300;
+/** Owner sources routine tool saves answered, kept per session (the newest stay) so intake never reads them. */
+export const MAX_ROUTINE_INTAKE_ANSWERED = 64;
+/** Decided intake notices one session keeps until its transcript accepted them; the oldest leaves first. */
+export const MAX_ROUTINE_INTAKE_UNANNOUNCED = 16;
+/** Bound of the owner's words a retained notice shows; the routine itself keeps the whole prompt. */
+export const MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS = 600;
 /** Every intake spend is accounted under this operation prefix, one operation per pass. */
 export const ROUTINE_INTAKE_OPERATION_PREFIX = "routine-intake:";
 const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
@@ -277,6 +283,8 @@ export interface RoutineOrigin {
 	readonly sourceId: string;
 	/** Timing parts the owner left open that the host filled with its fixed defaults, as announced. */
 	readonly defaults?: readonly string[];
+	/** The end the owner stated, in their own words, for a request meant only until something happens; told to each run. */
+	readonly endCondition?: string;
 }
 
 /** The identity of one owner request the host turned into a routine: consumed once, never recreated. */
@@ -289,6 +297,8 @@ export interface RoutineIntakeOrigin {
 	readonly sourceId: string;
 	/** Host-chosen timing parts, recorded on the routine's origin; not part of the identity. */
 	readonly defaults?: readonly string[];
+	/** The owner's stated end, recorded on the routine's origin; not part of the identity. */
+	readonly endCondition?: string;
 }
 
 /** One owner request an intake pass extracted and grounded, decided at most once. */
@@ -303,20 +313,56 @@ export interface RoutineIntakeRequest {
 	readonly cadence: string;
 	/** Timing parts the owner left open that the host filled with its fixed defaults. */
 	readonly defaults?: readonly string[];
-	/** Created, refused or rejected; never judged again. */
-	readonly done?: true;
+	/** The owner's stated end of a request meant only until something happens, in their own words. */
+	readonly endCondition?: string;
+	/**
+	 * The decision, written in the same store write that makes it final (a creation writes it with its routine); a
+	 * decided request is never judged again.
+	 */
+	readonly outcome?: RoutineIntakeDecision;
+}
+
+/** How one intake request ended: a routine, a refusal the owner is told about, or nothing to tell (no request). */
+export type RoutineIntakeDecision =
+	| { readonly kind: "created"; readonly routineId: string }
+	| { readonly kind: "refused"; readonly reason: string }
+	| { readonly kind: "passed" };
+
+/** A request the extraction found in the owner's stated words that the host could not compile; the owner is told. */
+export interface RoutineIntakeDrop {
+	readonly key: string;
+	readonly sourceId: string;
+	/** The owner's instruction words, bounded for display. */
+	readonly excerpt: string;
+	readonly reason: string;
+}
+
+/**
+ * One decided request the owner is told about, kept until the transcript accepted its notice. Its delivery identity
+ * and payload derive from this record alone, so every redelivery is the same input.
+ */
+export interface RoutineIntakeNoticeRecord {
+	readonly key: string;
+	readonly sourceId: string;
+	/** The owner's words for the work, bounded for display. */
+	readonly prompt: string;
+	/** Timing parts the host chose, told with a creation. */
+	readonly defaults?: readonly string[];
+	readonly outcome:
+		| { readonly kind: "created"; readonly routineId: string; readonly cadence: string }
+		| { readonly kind: "refused" | "dropped"; readonly reason: string };
 }
 
 /** The intake pass in flight, retained so a restart neither re-reads its sources nor spends on them twice. */
 export interface RoutineIntakeBatch {
 	readonly operationId: string;
-	/** The parent anchor every notice of this pass is delivered at, so a redelivery carries the same identity. */
-	readonly origin: WorkerSavedIntent["receiptOrigin"];
 	readonly sourceIds: readonly string[];
 	/** The owner-evidence instant the session's intake reaches once this batch ends. */
 	readonly through: number;
 	/** Present once extraction and grounding finished: the retained result the pass decides from. */
 	readonly requests?: readonly RoutineIntakeRequest[];
+	/** Requests the same extraction found but the host could not compile, retained with the requests. */
+	readonly dropped?: readonly RoutineIntakeDrop[];
 }
 
 /** One consumed intake origin, kept for replay refusal and the per-session window cap. */
@@ -330,14 +376,36 @@ export interface RoutineIntakeConsumption {
 export interface RoutineIntakeSession {
 	readonly parentSessionId: string;
 	/**
-	 * Instant (ms, owner-evidence clock) of the newest owner source a routine tool create or update answered. The
-	 * model already handled every source at or before it, so intake never reads them.
+	 * Owner sources that were in the model's context when a routine tool create or update of this session was saved,
+	 * oldest first, bounded by {@link MAX_ROUTINE_INTAKE_ANSWERED}. The model already handled them; intake never reads them.
 	 */
-	readonly toolAuthoredThrough?: number;
+	readonly answered?: readonly string[];
 	/** Instant (ms, owner-evidence clock) of the newest owner source intake has finished with; it never reads older ones. */
 	readonly through?: number;
 	readonly batch?: RoutineIntakeBatch;
+	/** Decided requests whose notices the session's transcript has not accepted yet, oldest first. */
+	readonly unannounced?: readonly RoutineIntakeNoticeRecord[];
 	readonly updatedAt: number;
+}
+
+/** One write of a session's intake state; its parts apply together. */
+export interface RoutineIntakeChange {
+	/** The newest owner source intake finished with; never moved back. */
+	readonly through?: number;
+	/** The pass in flight; `null` ends it. */
+	readonly batch?: RoutineIntakeBatch | null;
+	/** Notices kept until accepted, appended in order; a request already kept is not repeated. */
+	readonly announce?: readonly RoutineIntakeNoticeRecord[];
+	/** Request keys whose notices the transcript accepted. */
+	readonly announced?: readonly string[];
+}
+
+/** A host intake creation whose parent branch changed after its request was judged; nothing was written. */
+export class RoutineIntakeBranchChanged extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RoutineIntakeBranchChanged";
+	}
 }
 
 /** Why the store refused a host intake creation; anything else thrown is not a refusal and may be retried. */
@@ -397,10 +465,15 @@ export interface UpsertPersistentRoutineInput {
 	 */
 	readonly intakeOrigin?: RoutineIntakeOrigin;
 	/**
-	 * A routine tool save: the owner-evidence instant of the newest owner source when it ran, recorded on the
-	 * session's intake state in the same write. Session targets only.
+	 * Run under the store lock before an intake creation writes anything; throws {@link RoutineIntakeBranchChanged}
+	 * when the owner's branch changed since the request was judged, so a request navigated away from creates nothing.
 	 */
-	readonly toolAuthoredThrough?: number;
+	readonly intakeGuard?: () => void;
+	/**
+	 * A routine tool save: the owner sources in the model's context when it ran, recorded on the session's intake state
+	 * in the same write so intake never reads them. Session targets only.
+	 */
+	readonly toolAnsweredSources?: readonly string[];
 }
 
 export type RoutineOccurrencePhase = "pending" | "claimed" | "dispatching" | "running" | "uncertain" | "terminal";
@@ -1669,13 +1742,24 @@ function isRoutineDigest(value: unknown): value is string {
 }
 
 function parseRoutineOrigin(value: unknown): RoutineOrigin {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["kind", "sourceId", "defaults"]) || value.kind !== "owner-intake")
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["kind", "sourceId", "defaults", "endCondition"]) ||
+		value.kind !== "owner-intake"
+	)
 		throw new TypeError("Routine origin is invalid.");
 	return {
 		kind: "owner-intake",
 		sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
 		...parseIntakeDefaults(value.defaults),
+		...parseEndCondition(value.endCondition),
 	};
+}
+
+function parseEndCondition(value: unknown): { endCondition?: string } {
+	return value === undefined
+		? {}
+		: { endCondition: boundedString(value, MAX_ROUTINE_INTAKE_TEXT_CHARS, "intake end condition") };
 }
 
 /** Optional host-chosen timing parts: a bounded, non-empty list of bounded descriptions. */
@@ -1690,12 +1774,17 @@ function parseIntakeDefaults(value: unknown): { defaults?: readonly string[] } {
 
 /** The host's intake identity for one creation; a malformed one is a programming error, not a refusal. */
 export function parseRoutineIntakeOrigin(value: unknown): RoutineIntakeOrigin {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["key", "sourceId", "defaults"]) || !isRoutineDigest(value.key))
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["key", "sourceId", "defaults", "endCondition"]) ||
+		!isRoutineDigest(value.key)
+	)
 		throw new TypeError("Routine intake origin is invalid.");
 	return {
 		key: value.key,
 		sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
 		...parseIntakeDefaults(value.defaults),
+		...parseEndCondition(value.endCondition),
 	};
 }
 
@@ -1728,9 +1817,19 @@ export function parseRoutineIntakeSessions(value: unknown): RoutineIntakeSession
 		throw new TypeError("Routine intake sessions have an invalid size.");
 	const sessions = new Set<string>();
 	return value.map((entry: unknown) => {
+		// `toolAuthoredThrough` is the unreleased instant watermark `answered` replaced; it is read and dropped so a store
+		// an earlier build of this release wrote still loads.
 		if (
 			!isPlainRecord(entry) ||
-			!hasOnlyKeys(entry, ["parentSessionId", "toolAuthoredThrough", "through", "batch", "updatedAt"])
+			!hasOnlyKeys(entry, [
+				"parentSessionId",
+				"answered",
+				"toolAuthoredThrough",
+				"through",
+				"batch",
+				"unannounced",
+				"updatedAt",
+			])
 		)
 			throw new TypeError("Routine intake session state is invalid.");
 		const parentSessionId = boundedString(entry.parentSessionId, 200, "parent session id");
@@ -1738,25 +1837,91 @@ export function parseRoutineIntakeSessions(value: unknown): RoutineIntakeSession
 			sessions.has(parentSessionId) ||
 			!validInstant(entry.updatedAt) ||
 			(entry.toolAuthoredThrough !== undefined && !validInstant(entry.toolAuthoredThrough)) ||
-			(entry.through !== undefined && !validInstant(entry.through))
+			(entry.through !== undefined && !validInstant(entry.through)) ||
+			(entry.answered !== undefined &&
+				(!Array.isArray(entry.answered) ||
+					entry.answered.length === 0 ||
+					entry.answered.length > MAX_ROUTINE_INTAKE_ANSWERED)) ||
+			(entry.unannounced !== undefined &&
+				(!Array.isArray(entry.unannounced) ||
+					entry.unannounced.length === 0 ||
+					entry.unannounced.length > MAX_ROUTINE_INTAKE_UNANNOUNCED))
 		)
 			throw new TypeError("Routine intake session state is invalid or repeated.");
 		sessions.add(parentSessionId);
+		const answered = (entry.answered as unknown[] | undefined)?.map((sourceId) =>
+			boundedString(sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "answered source id"),
+		);
+		if (answered && new Set(answered).size !== answered.length)
+			throw new TypeError("Routine intake answered sources repeat.");
+		const unannounced = (entry.unannounced as unknown[] | undefined)?.map(parseRoutineIntakeNoticeRecord);
+		if (unannounced && new Set(unannounced.map((record) => record.key)).size !== unannounced.length)
+			throw new TypeError("Routine intake notices repeat a request.");
 		return {
 			parentSessionId,
-			...(entry.toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough: entry.toolAuthoredThrough }),
+			...(answered === undefined ? {} : { answered }),
 			...(entry.through === undefined ? {} : { through: entry.through }),
 			...(entry.batch === undefined ? {} : { batch: parseRoutineIntakeBatch(entry.batch, parentSessionId) }),
+			...(unannounced === undefined ? {} : { unannounced }),
 			updatedAt: entry.updatedAt,
 		};
 	});
 }
 
-/** One retained intake pass of `parentSessionId`; its notices' anchor must belong to that session. */
+/** One retained intake notice; a malformed one rejects the session state. */
+export function parseRoutineIntakeNoticeRecord(value: unknown): RoutineIntakeNoticeRecord {
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["key", "sourceId", "prompt", "defaults", "outcome"]) ||
+		!isRoutineDigest(value.key) ||
+		!isPlainRecord(value.outcome)
+	)
+		throw new TypeError("Routine intake notice is invalid.");
+	const outcome = value.outcome;
+	let parsed: RoutineIntakeNoticeRecord["outcome"];
+	if (outcome.kind === "created" && hasOnlyKeys(outcome, ["kind", "routineId", "cadence"]))
+		parsed = {
+			kind: "created",
+			routineId: boundedString(outcome.routineId, 128, "routine id"),
+			cadence: boundedString(outcome.cadence, MAX_ROUTINE_INTAKE_TEXT_CHARS, "cadence"),
+		};
+	else if ((outcome.kind === "refused" || outcome.kind === "dropped") && hasOnlyKeys(outcome, ["kind", "reason"]))
+		parsed = {
+			kind: outcome.kind,
+			reason: boundedString(outcome.reason, MAX_ROUTINE_INTAKE_TEXT_CHARS, "intake reason"),
+		};
+	else throw new TypeError("Routine intake notice outcome is invalid.");
+	return {
+		key: value.key,
+		sourceId: boundedString(value.sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
+		prompt: boundedString(value.prompt, MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS, "intake notice words"),
+		...parseIntakeDefaults(value.defaults),
+		outcome: parsed,
+	};
+}
+
+function parseIntakeDecision(value: unknown): RoutineIntakeDecision {
+	if (isPlainRecord(value)) {
+		if (value.kind === "created" && hasOnlyKeys(value, ["kind", "routineId"]))
+			return { kind: "created", routineId: boundedString(value.routineId, 128, "routine id") };
+		if (value.kind === "refused" && hasOnlyKeys(value, ["kind", "reason"]))
+			return {
+				kind: "refused",
+				reason: boundedString(value.reason, MAX_ROUTINE_INTAKE_TEXT_CHARS, "intake reason"),
+			};
+		if (value.kind === "passed" && hasOnlyKeys(value, ["kind"])) return { kind: "passed" };
+	}
+	throw new TypeError("Routine intake decision is invalid.");
+}
+
+/**
+ * One retained intake pass of `parentSessionId`; every source must be one of that session's. `origin` is the
+ * unreleased notice anchor notices no longer use (each delivery captures its own); it is read and dropped.
+ */
 export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string): RoutineIntakeBatch {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["operationId", "origin", "sourceIds", "through", "requests"]) ||
+		!hasOnlyKeys(value, ["operationId", "origin", "sourceIds", "through", "requests", "dropped"]) ||
 		typeof value.operationId !== "string" ||
 		!value.operationId.startsWith(ROUTINE_INTAKE_OPERATION_PREFIX) ||
 		value.operationId.length > ROUTINE_INTAKE_OPERATION_PREFIX.length + 64 ||
@@ -1766,28 +1931,47 @@ export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string)
 		!validInstant(value.through) ||
 		(value.requests !== undefined &&
 			(!Array.isArray(value.requests) ||
-				value.requests.length > MAX_ROUTINE_INTAKE_BATCH_SOURCES * MAX_ROUTINE_INTAKE_SOURCE_REQUESTS))
+				value.requests.length > MAX_ROUTINE_INTAKE_BATCH_SOURCES * MAX_ROUTINE_INTAKE_SOURCE_REQUESTS)) ||
+		(value.dropped !== undefined &&
+			(value.requests === undefined ||
+				!Array.isArray(value.dropped) ||
+				value.dropped.length === 0 ||
+				value.dropped.length > MAX_ROUTINE_INTAKE_BATCH_SOURCES * MAX_ROUTINE_INTAKE_SOURCE_REQUESTS))
 	)
 		throw new TypeError("Routine intake batch is invalid.");
-	const origin = workerReceiptOriginFromValue(value.origin);
 	const sourceIds = value.sourceIds.map((sourceId: unknown) =>
 		boundedString(sourceId, MAX_ROUTINE_SOURCE_ID_CHARS, "source id"),
 	);
-	if (origin.sessionId !== parentSessionId || new Set(sourceIds).size !== sourceIds.length)
+	if (
+		sourceIds.some((sourceId) => !sourceId.startsWith(`${parentSessionId}/`)) ||
+		new Set(sourceIds).size !== sourceIds.length
+	)
 		throw new TypeError("Routine intake batch belongs to another session or repeats a source.");
 	const keys = new Set<string>();
 	const requests = (value.requests as unknown[] | undefined)?.map((entry): RoutineIntakeRequest => {
+		// `done` is the unreleased marker `outcome` replaced; a decided request it marks is kept decided, with no notice.
 		if (
 			!isPlainRecord(entry) ||
-			!hasOnlyKeys(entry, ["key", "sourceId", "prompt", "schedule", "cadence", "defaults", "done"]) ||
+			!hasOnlyKeys(entry, [
+				"key",
+				"sourceId",
+				"prompt",
+				"schedule",
+				"cadence",
+				"defaults",
+				"endCondition",
+				"outcome",
+				"done",
+			]) ||
 			!isRoutineDigest(entry.key) ||
 			keys.has(entry.key) ||
 			typeof entry.sourceId !== "string" ||
 			!sourceIds.includes(entry.sourceId) ||
-			(entry.done !== undefined && entry.done !== true)
+			(entry.done !== undefined && (entry.done !== true || entry.outcome !== undefined))
 		)
 			throw new TypeError("Routine intake request is invalid or repeated.");
 		keys.add(entry.key);
+		const outcome = entry.done ? { kind: "passed" as const } : entry.outcome;
 		return {
 			key: entry.key,
 			sourceId: entry.sourceId,
@@ -1795,15 +1979,34 @@ export function parseRoutineIntakeBatch(value: unknown, parentSessionId: string)
 			schedule: parseRoutineScheduleInput(entry.schedule),
 			cadence: boundedString(entry.cadence, MAX_ROUTINE_INTAKE_TEXT_CHARS, "cadence"),
 			...parseIntakeDefaults(entry.defaults),
-			...(entry.done ? { done: true as const } : {}),
+			...parseEndCondition(entry.endCondition),
+			...(outcome === undefined ? {} : { outcome: parseIntakeDecision(outcome) }),
+		};
+	});
+	const dropped = (value.dropped as unknown[] | undefined)?.map((entry): RoutineIntakeDrop => {
+		if (
+			!isPlainRecord(entry) ||
+			!hasOnlyKeys(entry, ["key", "sourceId", "excerpt", "reason"]) ||
+			!isRoutineDigest(entry.key) ||
+			keys.has(entry.key) ||
+			typeof entry.sourceId !== "string" ||
+			!sourceIds.includes(entry.sourceId)
+		)
+			throw new TypeError("Routine intake drop is invalid or repeated.");
+		keys.add(entry.key);
+		return {
+			key: entry.key,
+			sourceId: entry.sourceId,
+			excerpt: boundedString(entry.excerpt, MAX_ROUTINE_INTAKE_NOTICE_PROMPT_CHARS, "intake excerpt"),
+			reason: boundedString(entry.reason, MAX_ROUTINE_INTAKE_TEXT_CHARS, "intake reason"),
 		};
 	});
 	return {
 		operationId: value.operationId,
-		origin,
 		sourceIds,
 		through: value.through,
 		...(requests === undefined ? {} : { requests }),
+		...(dropped === undefined ? {} : { dropped }),
 	};
 }
 

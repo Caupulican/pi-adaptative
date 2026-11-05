@@ -150,6 +150,8 @@ export interface CompiledIntakeTiming {
 	readonly cadence: string;
 	/** Parts the owner left open that the host filled with its fixed defaults, in plain words. */
 	readonly defaults: readonly string[];
+	/** For a request meant only until something happens: the end the owner stated, in their own words. */
+	readonly endCondition?: string;
 }
 
 /** Original offsets of a grounded excerpt, end exclusive. */
@@ -176,7 +178,8 @@ export interface IntakeTimingContext {
 
 /**
  * Compiles the slots when the owner's stated timing words, read by the host grammar, yield exactly the schedule the
- * slots describe; otherwise undefined, and the request is dropped before any judgment.
+ * slots describe; otherwise undefined, and the request is dropped before any judgment. A request meant only until
+ * something happens also needs the end stated in the owner's words next to its timing.
  */
 export function compileIntakeTiming(
 	timing: IntakeTiming,
@@ -197,10 +200,39 @@ export function compileIntakeTiming(
 					...base.defaults,
 					`stops watching on ${end}, 14 days after the request, if that has not happened, as no end was stated`,
 				]);
-	return compiled({ ...base.schedule, expiresAt }, `${base.cadence}, until ${end}`, [
+	// The host cannot watch an end stated in words: the routine keeps the owner's words for it and tells each run.
+	const endCondition = statedEnd(context);
+	if (endCondition === undefined) return undefined;
+	const compiledWatch = compiled({ ...base.schedule, expiresAt }, `${base.cadence}, for at most 14 days`, [
 		...base.defaults,
-		`ends on ${end}, 14 days after the request, as no end was stated`,
+		`ends on ${end} at the latest, 14 days after the request, since the host cannot watch the end the owner stated; each run is told that end and reports first once it is reached`,
 	]);
+	return compiledWatch && { ...compiledWatch, endCondition };
+}
+
+/**
+ * The end the owner stated for a request meant only until something happens, in their own stated words: from the
+ * first until-word of the timing excerpt's sentences to the end of that sentence's stated run, cut where a separate
+ * instruction excerpt begins. Undefined when no until-word with words after it is stated there, or the end is longer
+ * than a retained description.
+ */
+function statedEnd(context: IntakeTimingContext): string | undefined {
+	const tokens = tokenize(context.owner);
+	const span = excerptSpan(tokens, context.when);
+	if (!span) return undefined;
+	const sentences = new Set(tokens.slice(span.first, span.last).map((token) => token.sentence));
+	const untilWords = new Set(LANGUAGES.flatMap((language) => language.until));
+	const at = tokens.findIndex((token) => sentences.has(token.sentence) && untilWords.has(token.text));
+	if (at < 0) return undefined;
+	const first = tokens[at]!;
+	const cut = context.instruction.start > first.start ? context.instruction.start : Number.POSITIVE_INFINITY;
+	let end = first.end;
+	for (const token of tokens.slice(at + 1)) {
+		if (token.sentence !== first.sentence || token.run !== first.run || token.end > cut) break;
+		end = token.end;
+	}
+	const text = context.owner.text.slice(first.start, end);
+	return end > first.end && text.length <= MAX_ROUTINE_INTAKE_TEXT_CHARS ? text : undefined;
 }
 
 /**
