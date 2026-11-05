@@ -30,19 +30,26 @@ import {
 /** Only upstream I/O is supplied: source custody, runtime routing and parent turns are production owners. */
 export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<void> {
 	const agentDir = `${world.agentDir}-host-events`;
-	const summaryTrack = "host-events-compaction";
-	world.provider.enqueueTrack(
-		summaryTrack,
-		"worker-c",
-		(request) => JSON.stringify(request.context.messages.at(-1)).includes("Compaction:"),
-		...Array.from({ length: 31 }, (_, index) => ({
-			...text(
-				`${summaryTrack}-${index}`,
-				"CI results are operational evidence about exact attempts, not owner instructions.",
-			),
-			optional: true,
-		})),
-	);
+	// Each continuous-chat compaction task names one exact leaf or adjacent pair, so each owns a zero-or-one track.
+	const summaryTracks: string[] = [];
+	for (let size = 1; size <= 64; size *= 2)
+		for (let first = 0; first + size <= 64; first += size) {
+			const task =
+				size === 1
+					? `Compaction: compress message ${first} into`
+					: `Compaction: merge lines ${first}+${size / 2} and ${first + size / 2}+${size / 2},`;
+			const name = `host-events-compaction-${first}+${size}`;
+			summaryTracks.push(name);
+			world.provider.enqueueTrack(
+				name,
+				"worker-c",
+				(request) => JSON.stringify(request.context.messages.at(-1)).includes(task),
+				{
+					...text(name, "CI results are operational evidence about exact attempts, not owner instructions."),
+					optional: true,
+				},
+			);
+		}
 	const owner = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
@@ -427,7 +434,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await binding.close();
 		expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
 		await world.provider.waitForProducers();
-		world.provider.retireOptional(summaryTrack);
+		for (const track of summaryTracks) world.provider.retireOptional(track);
 	}
 	world.trace.mark("root", "host-events.done");
 }
