@@ -10,6 +10,7 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../../../../src/core/security/secret-text.ts";
+import { getManagedToolBinaryPath } from "../../../../src/utils/tools-manager.ts";
 import { calls, createBarrier, fail, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-generation.ts";
@@ -22,6 +23,18 @@ import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-gener
 import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
 const e4Judgments = ICM_INTAKE_JUDGMENTS;
+
+/**
+ * The diagnostic a refused call's `[harness]` failure record carries: the record is JSON, so a Windows path in the
+ * refusal reads with its separators escaped in the raw text and is compared only after the record is parsed.
+ */
+function refusalDiagnostic(text: string): string | undefined {
+	if (!text.startsWith("[harness] ")) return undefined;
+	const record: unknown = JSON.parse(text.slice("[harness] ".length));
+	const diagnostic =
+		typeof record === "object" && record !== null ? (record as { diagnostic?: unknown }).diagnostic : undefined;
+	return typeof diagnostic === "string" ? diagnostic : undefined;
+}
 
 /** One call's result in the latest tool batch: calls of the same tool are told apart by their id, not their name. */
 function batchResultById(request: ScriptedRequest, toolCallId: string): { isError: boolean; text: string } | undefined {
@@ -48,6 +61,9 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	// deny-mode credential check both admit it. Five more calls carry bypass shapes the gate refuses before the shell, each with the
 	// cause it names: a configuration file named by an environment assignment, a line continuation that walks a write out of
 	// scratch, an awk program that reads through ARGV, a harness storage root named before `-e`, and a tsc build-info write.
+	// The read line runs rg, so the host has it installed: Pi's managed rg sits where the managed tools resolve it, as the
+	// installed uv does. The Windows engine path prepares rg for the line before it runs (POSIX runs through the world's shell
+	// operations, which need no preparation); with rg installed nothing is downloaded. The file is removed when the leg ends.
 	const E8_BUDGET_PROFILE: OrchestrationProfile = {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profileId: "e8-budget",
@@ -100,7 +116,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		{
 			id: "e8-storage-1",
 			command: `rg '${world.agentDir}' -e e8-token -g '*.jsonl'`,
-			cause: "which holds the private harness path",
+			cause: `it searches ${world.agentDir}, which holds the private harness path`,
 		},
 		{
 			id: "e8-tsc-1",
@@ -108,6 +124,8 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			cause: "tsc is not a command the read-only line admits",
 		},
 	];
+	const e8InstalledRipgrep = getManagedToolBinaryPath("rg");
+	world.io.seed(e8InstalledRipgrep, "virtual managed rg\n");
 	world.shell.enqueue({
 		name: "e8-echo",
 		command: E8_READS,
@@ -192,20 +210,28 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 				if (bash?.isError || !bash?.text.includes("e8-bash")) {
 					throw new Error(`the bash call did not run through the shell: ${bash?.text ?? "no result"}`);
 				}
-				const network = batchResultById(request, "e8-net-1");
-				if (!network?.isError || !network.text.includes("Read-only worker: curl reaches the network")) {
+				const refusedWith = (toolCallId: string, cause: string): boolean => {
+					const result = batchResultById(request, toolCallId);
+					return (
+						result?.isError === true &&
+						refusalDiagnostic(result.text)?.startsWith(`Read-only worker: ${cause}`) === true
+					);
+				};
+				if (!refusedWith("e8-net-1", "curl reaches the network")) {
 					throw new Error(
-						`the read-only shell did not refuse the network client: ${network?.text ?? "no result"}`,
+						`the read-only shell did not refuse the network client: ${batchResultById(request, "e8-net-1")?.text ?? "no result"}`,
 					);
 				}
-				const write = batchResultById(request, "e8-write-1");
-				if (!write?.isError || !write.text.includes("Read-only worker: it writes")) {
-					throw new Error(`the read-only shell did not refuse the project write: ${write?.text ?? "no result"}`);
+				if (!refusedWith("e8-write-1", "it writes")) {
+					throw new Error(
+						`the read-only shell did not refuse the project write: ${batchResultById(request, "e8-write-1")?.text ?? "no result"}`,
+					);
 				}
 				for (const refusal of E8_REFUSALS) {
-					const result = batchResultById(request, refusal.id);
-					if (!result?.isError || !result.text.includes(`Read-only worker: ${refusal.cause}`)) {
-						throw new Error(`the read-only shell did not refuse ${refusal.id}: ${result?.text ?? "no result"}`);
+					if (!refusedWith(refusal.id, refusal.cause)) {
+						throw new Error(
+							`the read-only shell did not refuse ${refusal.id}: ${batchResultById(request, refusal.id)?.text ?? "no result"}`,
+						);
 					}
 				}
 			},
@@ -253,6 +279,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		"the budget denial terminalizes the worker's only attempt",
 	).toEqual(["partial"]);
 	expect(await world.disposeSessionInBody(e8Session), "the E8 owner disposes cleanly").toBeUndefined();
+	world.io.rmSync(e8InstalledRipgrep);
 	trace.mark("root", "e8.budget");
 
 	// E8 (transient provider failures): a worker's provider request that fails transiently is retried inside the attempt, three attempts
