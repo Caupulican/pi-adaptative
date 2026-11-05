@@ -31,7 +31,7 @@ export function dispatchGuardedProviderRequest<
 			throw new TypeError("Provider request guards must return undefined synchronously.");
 		}
 		options?.signal?.throwIfAborted();
-		ticket = observer?.begin(model);
+		ticket = observer?.begin(model, options.signal);
 	} catch (error) {
 		const stream = new AssistantMessageEventStream();
 		const output = createAssistantMessage(model);

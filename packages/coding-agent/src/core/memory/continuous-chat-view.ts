@@ -15,6 +15,7 @@ export {
 } from "../../kernel/session/continuous-chat-view-limits.ts";
 
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { ContinuousChatViewProjection, RenderedContinuousChatView } from "./continuous-chat-cache.ts";
 import {
 	CONTINUOUS_CHAT_NOT_MERGED,
 	CONTINUOUS_CHAT_NOT_SUMMARIZED,
@@ -197,10 +198,17 @@ export function advanceContinuousChatView(
 interface RenderedLine extends ContinuousChatNodeCoordinate {
 	text: string;
 	bytes: number;
+	built: boolean;
 }
 
-function renderedLine(coordinate: ContinuousChatNodeCoordinate, text: string): RenderedLine {
-	return { level: coordinate.level, ordinal: coordinate.ordinal, text, bytes: Buffer.byteLength(`${text}\n`, "utf8") };
+function renderedLine(coordinate: ContinuousChatNodeCoordinate, text: string, built: boolean): RenderedLine {
+	return {
+		level: coordinate.level,
+		ordinal: coordinate.ordinal,
+		text,
+		bytes: Buffer.byteLength(`${text}\n`, "utf8"),
+		built,
+	};
 }
 
 /** A coordinate's line: its node's summary, or the pending line for the reason it has none. */
@@ -213,6 +221,7 @@ function renderedLineFor(
 	return renderedLine(
 		coordinate,
 		node === undefined ? renderContinuousChatPendingLine(coordinate, reason) : renderContinuousChatViewLine(node),
+		node !== undefined,
 	);
 }
 
@@ -257,10 +266,29 @@ function viewRows(state: ContinuousChatViewState, nodes: ReadonlyMap<string, Con
 export function renderContinuousChatView(
 	state: ContinuousChatViewState,
 	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): string {
+	projection: ContinuousChatViewProjection,
+): RenderedContinuousChatView {
 	validateCompletePartition(state);
-	const lines = viewRows(state, nodes).map((row) => row.text);
-	return `<chat>\n${lines.join("\n")}\n</chat>`;
+	const rows = viewRows(state, nodes);
+	const firstPending = rows.findIndex((row) => !row.built);
+	return Object.freeze({
+		text: `<chat>\n${rows.map((row) => row.text).join("\n")}\n</chat>`,
+		cache: Object.freeze({
+			authority: projection.identity,
+			stablePrefixLineCount: firstPending < 0 ? rows.length : firstPending,
+			lines: Object.freeze(
+				rows.map((row) =>
+					Object.freeze({
+						level: row.level,
+						ordinal: row.ordinal,
+						projectionRevision: projection.requiredRevision(
+							continuousChatNodeFirstMessage(row) + continuousChatNodeMessageCount(row.level),
+						),
+					}),
+				),
+			),
+		}),
+	});
 }
 
 export function parseContinuousChatView(

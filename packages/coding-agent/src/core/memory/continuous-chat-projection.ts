@@ -8,6 +8,7 @@ import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { ContinuousChatAudit } from "../extensions/builtin.ts";
+import type { ContinuousChatCacheTextContent, ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
 export const CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE = "continuous_chat_view";
@@ -28,21 +29,30 @@ export function renderContinuousChatTurnState(handle: Pick<IcmTurnHandle, "start
 }
 
 /**
- * Splits a `<chat>` view into text blocks of four whole lines. Only the last whole block carries the cache boundary:
- * the closing tag and the partial remainder stay outside it, so the marked prefix is byte-identical while the view
- * grows at its end.
+ * Splits a `<chat>` view into text blocks of four whole lines. The boundary stops at the last whole block before
+ * the first unresolved row. The closing tag and partial remainder remain outside it. Host provenance explicitly
+ * represents an empty stable prefix, so a missing boundary never falls back to a guessed stability threshold.
  */
-export function renderContinuousChatViewBlocks(view: string): TextContent[] {
+export function renderContinuousChatViewBlocks(view: string, cache: ContinuousChatViewCache): TextContent[] {
 	const lines = view.split("\n");
 	if (lines.pop() !== VIEW_CLOSING_TAG) throw new TypeError("Continuous-chat view must end with its closing tag.");
 	if (lines.shift() !== "<chat>") throw new TypeError("Continuous-chat view must start with its opening tag.");
+	if (cache.lines.length === 0 && lines.length === 1 && lines[0] === "") lines.pop();
+	if (
+		cache.lines.length !== lines.length ||
+		!Number.isSafeInteger(cache.stablePrefixLineCount) ||
+		cache.stablePrefixLineCount < 0 ||
+		cache.stablePrefixLineCount > lines.length
+	)
+		throw new TypeError("Continuous-chat cache provenance does not match its rendered view.");
 	const wholeBlocks = Math.floor(lines.length / VIEW_BLOCK_LINES);
+	const stableBlocks = Math.floor(cache.stablePrefixLineCount / VIEW_BLOCK_LINES);
 	const blocks: TextContent[] = [];
 	for (let index = 0; index < wholeBlocks; index++) {
 		const start = index * VIEW_BLOCK_LINES;
 		const body = lines.slice(start, start + VIEW_BLOCK_LINES).join("\n");
-		const block: TextContent = { type: "text", text: index === 0 ? `<chat>\n${body}` : body };
-		if (index === wholeBlocks - 1) block.cacheBoundary = true;
+		const block: TextContent = { type: "text", text: `${index === 0 ? "<chat>\n" : ""}${body}\n` };
+		if (index === stableBlocks - 1) block.cacheBoundary = true;
 		blocks.push(block);
 	}
 	const remainder = [
@@ -51,6 +61,8 @@ export function renderContinuousChatViewBlocks(view: string): TextContent[] {
 		VIEW_CLOSING_TAG,
 	];
 	blocks.push({ type: "text", text: remainder.join("\n") });
+	const first: ContinuousChatCacheTextContent = { ...blocks[0]!, icmCache: cache };
+	blocks[0] = first;
 	return blocks;
 }
 
@@ -78,15 +90,20 @@ export function continuousChatFrameMessages(
 	handle: Pick<IcmTurnHandle, "boundary" | "startedAt">,
 	stateText: string,
 ): AgentMessage[] {
-	return continuousChatViewFrameMessages(handle.boundary.view, handle.startedAt, stateText);
+	return continuousChatViewFrameMessages(handle.boundary.view, handle.boundary.viewCache, handle.startedAt, stateText);
 }
 
-function continuousChatViewFrameMessages(view: string, startedAt: number, stateText: string): AgentMessage[] {
+function continuousChatViewFrameMessages(
+	view: string,
+	cache: ContinuousChatViewCache,
+	startedAt: number,
+	stateText: string,
+): AgentMessage[] {
 	const timestamp = new Date(startedAt).toISOString();
 	return [
 		createCustomMessage(
 			CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
-			renderContinuousChatViewBlocks(view),
+			renderContinuousChatViewBlocks(view, cache),
 			false,
 			undefined,
 			timestamp,
@@ -127,6 +144,7 @@ export function splitContinuousChatRequest(
 				? []
 				: continuousChatViewFrameMessages(
 						next.view,
+						next.viewCache,
 						next.timestamp,
 						renderContinuousChatTurnState({ startedAt: next.timestamp }),
 					),

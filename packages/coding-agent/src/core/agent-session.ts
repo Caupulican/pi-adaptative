@@ -1280,7 +1280,7 @@ export class AgentSession {
 			},
 			continuousChat: {
 				compaction: createContinuousChatCompactionAdapter({
-					captureUsageOrigin: () => this._semanticUsage.captureOrigin(),
+					usage: () => this._semanticUsage,
 					timers: config.timers.port("continuous-chat"),
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
@@ -1288,7 +1288,6 @@ export class AgentSession {
 						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), {
 							resolveModel: (reference) => historyModels.resolveModel(reference),
 						}),
-					recordUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
 					onModelFailure: (model, errorMessage) => {
 						const message = errorMessage ?? "";
 						const classified = classifyFailure({ message, provider: model.provider });

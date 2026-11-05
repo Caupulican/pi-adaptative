@@ -8,6 +8,7 @@
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import {
 	ContinuousChatCompactionCoordinator,
 	type ContinuousChatCompactionOutcome,
@@ -42,8 +43,10 @@ export interface ContinuousChatTurnBoundary {
 	readonly viewRevision: number;
 	/** Rendered `<chat>` of messages [0, totalMessages). It excludes the arriving user message. */
 	readonly view: string;
+	readonly viewCache: ContinuousChatViewCache;
 	/** `view` collapsed to the causal view's budget: the view a worker is born with. */
 	readonly birthView: string;
+	readonly birthViewCache: ContinuousChatViewCache;
 	/** Idempotent no-op release hook retained on the boundary handle. */
 	release(): void;
 }
@@ -376,7 +379,9 @@ export class ContinuousChatRuntime {
 			totalMessages: snapshot.totalMessages,
 			viewRevision: snapshot.viewRevision,
 			view: snapshot.view,
+			viewCache: snapshot.viewCache,
 			birthView: snapshot.birthView,
+			birthViewCache: snapshot.birthViewCache,
 			release: () => undefined,
 		};
 	}
@@ -520,7 +525,7 @@ export class ContinuousChatRuntime {
 		});
 		return coordinator.run({
 			target,
-			prefix: { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text },
+			prefix: { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text, viewCache: causal.cache },
 			signal: this.abort.signal,
 		});
 	}

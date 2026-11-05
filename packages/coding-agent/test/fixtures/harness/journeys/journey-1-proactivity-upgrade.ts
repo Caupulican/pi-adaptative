@@ -1,6 +1,8 @@
 import { basename, join, sep } from "node:path";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { resolveSemanticUsageEntry, SEMANTIC_USAGE_CUSTOM_TYPE } from "../../../../src/core/cost/usage-records.ts";
 import type { ContinuousChatRecord } from "../../../../src/core/memory/continuous-chat-contracts.ts";
 import {
 	createContinuousChatLegacyImportMarker,
@@ -11,6 +13,7 @@ import {
 	createContinuousChatLeaf,
 	createContinuousChatParent,
 } from "../../../../src/core/memory/continuous-chat-tree.ts";
+import { MAX_PERSISTED_CUSTOM_ENTRY_BYTES } from "../../../../src/core/session-entry-persistence.ts";
 import { runAsyncReleaseSteps } from "../../../../src/core/util/resource-release.ts";
 import {
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
@@ -95,6 +98,7 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 		const ordinaryUnavailable = `Ordinary history with an unavailable source (${tag}).`;
 		const store = new ContinuousChatStore({ agentDir, projectKey: layout.projectKey });
 		const tracks: string[] = [];
+		const compactionReplies: AssistantMessage[] = [];
 		let active: AgentSession | undefined;
 		let held = false;
 		let primary: { error: unknown } | undefined;
@@ -216,6 +220,7 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 						{
 							...text(name, "Ordinary history and verified background consumption."),
 							optional: true,
+							onTerminal: (_request, message) => compactionReplies.push(message),
 							check: (request) => {
 								const body = JSON.stringify(request.context.messages);
 								expect(body, "rebuilt summaries never reuse an obsolete causal suffix").not.toContain(leak);
@@ -231,6 +236,7 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 			let countAfterFirstOpen: number | undefined;
 			for (const pass of [0, 1]) {
 				const warningMark = world.warnings.length;
+				const startupReplyMark = compactionReplies.length;
 				const root = await world.createRootSession("root", {
 					agentDir,
 					sessionManager: pass === 0 ? manager : world.createSessionManager(agentDir),
@@ -245,6 +251,67 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 					beforeNavigation,
 					(records) => records.length === beforeNavigation,
 				);
+				const startupReplies = compactionReplies.slice(startupReplyMark);
+				const startupUsage = root.sessionManager.getEntries().flatMap((entry) => {
+					const report = resolveSemanticUsageEntry(entry)?.report;
+					return report?.route === "history_summary" ? [{ entry, report }] : [];
+				});
+				if (pass === 0) {
+					expect(startupReplies.length, "startup rebuild reaches the physical summary provider").toBeGreaterThan(
+						0,
+					);
+					expect(
+						root.sessionManager.hasDurableSessionFile(),
+						"paid startup has a durable session before an owner prompt",
+					).toBe(true);
+				}
+				expect(startupUsage, "every physical startup summary is recorded exactly once").toHaveLength(
+					startupReplies.length,
+				);
+				expect(new Set(startupUsage.map(({ report }) => report.reportId)).size).toBe(startupUsage.length);
+				expect(
+					startupUsage
+						.map(({ report }) =>
+							JSON.stringify([
+								report.responseTimestamp,
+								report.provider,
+								report.model,
+								report.usage.input,
+								report.usage.output,
+								report.usage.cacheRead,
+								report.usage.cacheWrite,
+								report.usage.totalTokens,
+							]),
+						)
+						.sort(),
+					"receipts preserve every physical response's time, model and token categories",
+				).toEqual(
+					startupReplies
+						.map((reply) =>
+							JSON.stringify([
+								new Date(reply.timestamp).toISOString(),
+								reply.provider,
+								reply.model,
+								reply.usage.input,
+								reply.usage.output,
+								reply.usage.cacheRead,
+								reply.usage.cacheWrite,
+								reply.usage.totalTokens,
+							]),
+						)
+						.sort(),
+				);
+				for (const { entry, report } of startupUsage) {
+					expect(report.origin).toMatchObject({ sessionId: root.session.sessionId });
+					const physical = root.sessionManager.readEntryJsonPrefix(entry.id, MAX_PERSISTED_CUSTOM_ENTRY_BYTES);
+					expect(physical, "a startup receipt is physically readable before the owner speaks").toBeDefined();
+					expect(JSON.parse(physical!)).toMatchObject({
+						id: entry.id,
+						type: "custom",
+						customType: SEMANTIC_USAGE_CUSTOM_TYPE,
+						data: report,
+					});
+				}
 				expect(
 					world.warnings.slice(warningMark),
 					"unavailable background source is retained without blocking ordinary history",
@@ -277,7 +344,8 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 					},
 					{
 						...text(`upgrade-${tag}-${pass}-reply`, "History inspected."),
-						check: (request) => expect(icmLatestResult(request, "date")).toEqual({ isError: false, text: date }),
+						check: (request) =>
+							expect(icmLatestResult(request, "date")).toEqual({ toolName: "date", isError: false, text: date }),
 					},
 				);
 				await withDeadline(
@@ -294,6 +362,9 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 				const disposal = await world.disposeSessionInBody(active);
 				active = undefined;
 				expect(disposal).toBeUndefined();
+				expect(world.warnings.slice(warningMark), "startup usage leaves no unmatched handoff at shutdown").toEqual(
+					[],
+				);
 				await store.acquireRuntimeLease({
 					label: `inspect upgrade ${tag}`,
 					onLost: () => {

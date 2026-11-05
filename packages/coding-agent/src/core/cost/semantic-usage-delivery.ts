@@ -7,6 +7,7 @@ import { addUsage } from "../../kernel/usage.ts";
 import { MaintenanceUsageRetentionError, type UsageComponent } from "../../kernel/usage-components.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import {
+	type CompletionUsageRoute,
 	type HistoryUsageCall,
 	type MaintenanceUsageRoute,
 	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
@@ -116,6 +117,8 @@ export interface SemanticUsageSnapshot {
 }
 
 export interface MaintenanceUsageLease extends SystemOneUsageLease {
+	/** Recheck the captured session after callback-bearing admission work. */
+	assertCurrent(): void;
 	/** Transfers a reserved slot to a durable request identity before dispatch. */
 	beginRequest(request: UnresolvedUsageRequest): void;
 	cancelUndispatchedRequest(requestId: string): void;
@@ -126,7 +129,7 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	captureOrigin(): AccountingOrigin;
 	/** Reserve the explicit maximum number of provider responses before maintenance work starts. */
 	beginMaintenance(
-		route: MaintenanceUsageRoute,
+		route: CompletionUsageRoute,
 		maxResponses: number,
 		origin?: AccountingOrigin,
 	): MaintenanceUsageLease;
@@ -392,10 +395,11 @@ function conflictWarning(cause: string): string {
 
 /** Leases hand their unused slots back through this, so the owner's reservation count stays exact. */
 interface LeaseOwner {
+	assertCurrent(identity: SemanticUsageLedgerIdentity): void;
 	beginRequest(identity: SemanticUsageLedgerIdentity, request: UnresolvedUsageRequest): void;
 	cancelUndispatchedRequest(identity: SemanticUsageLedgerIdentity, requestId: string): void;
 	recordLease(identity: SemanticUsageLedgerIdentity, receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
-	returnSlots(count: number): void;
+	returnSlots(count: number, route: SystemOneUsageRoute | undefined): void;
 }
 
 class SemanticUsageLease implements MaintenanceUsageLease {
@@ -405,6 +409,7 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 	private readonly origin: AccountingOrigin;
 	private unused: number;
 	private released = false;
+	private admitting = false;
 	private readonly requests = new Set<string>();
 	private readonly cancelledRequests = new Set<string>();
 
@@ -423,12 +428,34 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 	}
 
 	beginRequest(request: UnresolvedUsageRequest): void {
-		if (this.released || this.unused < 1 || this.requests.has(request.requestId))
+		if (this.released || this.admitting || this.unused < 1 || this.requests.has(request.requestId))
 			throw new SystemOneUsageRefusal("No reserved usage slot is available for this request");
-		this.owner.beginRequest(this.identity, { ...request, route: this.route ?? request.route, origin: this.origin });
-		this.requests.add(request.requestId);
+		// Hold this slot separately while callbacks can release the lease's other unused slots.
+		this.admitting = true;
 		this.unused -= 1;
-		this.owner.returnSlots(1);
+		let transferred = false;
+		try {
+			this.owner.beginRequest(this.identity, {
+				...request,
+				route: this.route ?? request.route,
+				origin: this.origin,
+			});
+			transferred = true;
+			if (this.released) {
+				this.owner.cancelUndispatchedRequest(this.identity, request.requestId);
+				throw new SystemOneUsageRefusal("The usage lease ended during request admission");
+			}
+			this.requests.add(request.requestId);
+		} finally {
+			this.admitting = false;
+			if (transferred || this.released) this.owner.returnSlots(1, this.route);
+			else this.unused += 1;
+		}
+	}
+
+	assertCurrent(): void {
+		if (this.released) throw new SystemOneUsageRefusal("The usage lease has ended");
+		this.owner.assertCurrent(this.identity);
 	}
 
 	cancelUndispatchedRequest(requestId: string): void {
@@ -446,7 +473,7 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 		}
 		if (!this.requests.delete(receipt.receiptId) && this.unused > 0) {
 			this.unused -= 1;
-			this.owner.returnSlots(1);
+			this.owner.returnSlots(1, this.route);
 		}
 		return this.owner.recordLease(this.identity, {
 			...receipt,
@@ -458,7 +485,7 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 	release(): void {
 		if (this.released) return;
 		this.released = true;
-		this.owner.returnSlots(this.unused);
+		this.owner.returnSlots(this.unused, this.route);
 		this.unused = 0;
 	}
 }
@@ -488,6 +515,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	/** Confirmed rows whose journal copy is still in the sidecar, keyed by identity with the payload that copy names. */
 	private readonly staleCopies = new Map<string, TypeSafeUsageReceipt>();
 	private reserved = 0;
+	private historyReserved = 0;
 	private revision = 0;
 	private projectionMatches = true;
 	private fenceCause: string | undefined;
@@ -560,7 +588,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	}
 
 	beginMaintenance(
-		route: MaintenanceUsageRoute,
+		route: CompletionUsageRoute,
 		maxResponses: number,
 		origin = this.captureOrigin(),
 	): MaintenanceUsageLease {
@@ -591,12 +619,19 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				"System One usage journal is full: unconfirmed usage fills its bound, so no paid evaluation starts",
 			);
 		}
+		if (
+			route === "history_summary" &&
+			this.historyObligations + this.historyReserved + maxResponses > HISTORY_SUMMARY_SHARE_RECORDS
+		)
+			throw new SystemOneUsageRefusal("History summary usage has filled its reserved journal share");
 		this.reserved += maxResponses;
+		if (route === "history_summary") this.historyReserved += maxResponses;
 		return new SemanticUsageLease(this, identity, maxResponses, origin, route);
 	}
 
-	returnSlots(count: number): void {
+	returnSlots(count: number, route: SystemOneUsageRoute | undefined): void {
 		this.reserved -= count;
+		if (route === "history_summary") this.historyReserved -= count;
 	}
 
 	private get obligations(): number {
@@ -605,11 +640,16 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		return count;
 	}
 
+	private get historyObligations(): number {
+		const ids = new Set<string>();
+		for (const [id, entry] of this.held) if (entry.payload.route === "history_summary") ids.add(id);
+		for (const [id, request] of this.unresolved) if (request.route === "history_summary") ids.add(id);
+		return ids.size;
+	}
+
 	beginRequest(identity: SemanticUsageLedgerIdentity, request: UnresolvedUsageRequest): void {
+		this.assertCurrent(identity);
 		if (
-			this.isDisposed ||
-			this.baselineUncertain ||
-			!sameIdentity(identity, this.ledger.identity()) ||
 			!parseUnresolvedUsageRequest(request) ||
 			request.origin.sessionId !== identity.sessionId ||
 			this.unresolved.has(request.requestId)
@@ -617,6 +657,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			throw new SystemOneUsageRefusal("Request usage identity is invalid or no longer active");
 		const slot = journalSlotOf(identity);
 		if (identity.persisted && !slot) throw new SystemOneUsageRefusal("Request usage has no durable journal");
+		this.ledger.materialize();
+		// Persistence listeners can synchronously replace or end the originating session.
+		this.assertCurrent(identity);
 		if (slot)
 			this.writeJournal(
 				"retain",
@@ -634,9 +677,31 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			);
 		this.unresolved.set(request.requestId, structuredClone(request));
 		this.notifySpending();
-		// A corrupt file discovered under the write lock invalidates a prior spending projection.
-		if (this.baselineUncertain)
-			throw new SystemOneUsageRefusal("Request spending baseline became uncertain before dispatch");
+		try {
+			// Journal recovery and spending listeners can invalidate admission after the write.
+			this.assertCurrent(identity);
+		} catch (error) {
+			try {
+				this.cancelUndispatchedRequest(identity, request.requestId);
+			} catch (cleanupError) {
+				throw new AggregateError(
+					[error, cleanupError],
+					"Request admission ended before dispatch; retirement failed",
+				);
+			}
+			throw error;
+		}
+	}
+
+	assertCurrent(identity: SemanticUsageLedgerIdentity): void {
+		if (
+			this.isDisposed ||
+			this.baselineUncertain ||
+			!sameIdentity(identity, this.bound) ||
+			!sameIdentity(identity, this.ledger.identity()) ||
+			this.ledger.persistenceUncertain()
+		)
+			throw new SystemOneUsageRefusal("Request usage identity is invalid or no longer active");
 	}
 
 	cancelUndispatchedRequest(identity: SemanticUsageLedgerIdentity, requestId: string): void {
@@ -712,10 +777,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			this.retainAfterEnd(receipt);
 			return;
 		}
-		const historyHeld = [...this.held.values()].filter((entry) => entry.payload.route === "history_summary").length;
 		if (
 			this.obligations + this.reserved + 1 > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS ||
-			historyHeld >= HISTORY_SUMMARY_SHARE_RECORDS
+			this.historyObligations + this.historyReserved >= HISTORY_SUMMARY_SHARE_RECORDS
 		) {
 			this.keepOverflow(receipt.usage);
 			return;

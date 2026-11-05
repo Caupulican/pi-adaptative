@@ -21,6 +21,8 @@ export interface SemanticUsageCanonicalRow {
 /** The session ledger the usage owner writes through: identity, the canonical append and its physical evidence. */
 export interface SemanticUsageLedgerPort {
 	identity(): SemanticUsageLedgerIdentity;
+	/** Materialize the canonical session prefix before dispatch can incur a paid obligation. */
+	materialize(): void;
 	/** The first canonical row (in memory, buffered rows included) that carries this report identity. */
 	findCanonical(reportId: string): SemanticUsageCanonicalRow | undefined;
 	/** Iterate the same first-row index used by identity lookup, including buffered reports. */
@@ -74,6 +76,7 @@ export function createSessionManagerLedgerPort(manager: SessionManager): Semanti
 		indexedCount = count;
 	};
 	return {
+		materialize: () => manager.flushBufferedEntries(),
 		identity: () => {
 			const sessionFile = manager.getSessionFile();
 			return {

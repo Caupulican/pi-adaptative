@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { Api, Context, Message, Model } from "@caupulican/pi-ai";
+import {
+	type ContinuousChatCacheComparison,
+	type ContinuousChatCacheFingerprint,
+	type ContinuousChatCacheRewrite,
+	compareContinuousChatCache,
+	fingerprintContinuousChatCache,
+} from "./memory/continuous-chat-cache.ts";
 
 /**
  * Prompt-prefix stability. A provider caches the longest byte-identical prefix of a request, so a
@@ -45,6 +52,7 @@ interface RequestFingerprint {
 	viewText: string | undefined;
 	/** Text blocks through the last explicit cache marker; their boundaries are part of the prefix. */
 	viewCacheBlocks: readonly string[] | undefined;
+	viewCache: ContinuousChatCacheFingerprint | undefined;
 	tools: SegmentFingerprint[];
 	messages: SegmentFingerprint[];
 }
@@ -55,16 +63,22 @@ const CHAT_VIEW_CLOSING = "</chat>";
 const CHAT_VIEW_TAIL_FRACTION = 0.1;
 
 /** The text of the ICM chat view when the request's first message is that view; undefined otherwise. */
-function chatView(messages: readonly Message[]): { text: string; cacheBlocks?: readonly string[] } | undefined {
+function chatView(
+	messages: readonly Message[],
+): { text: string; cacheBlocks?: readonly string[]; cache?: ContinuousChatCacheFingerprint } | undefined {
 	const first = messages[0];
 	if (first?.role !== "user" || typeof first.content === "string") return undefined;
 	const text = first.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 	if (!text.startsWith(CHAT_VIEW_OPENING)) return undefined;
 	const marker = first.content.findLastIndex((block) => block.type === "text" && block.cacheBoundary === true);
 	const blocks = first.content.slice(0, marker + 1);
+	const cache = first.content.every((block) => block.type === "text")
+		? fingerprintContinuousChatCache(first.content)
+		: undefined;
 	return {
 		text,
-		...(marker >= 0 && blocks.every((block) => block.type === "text")
+		...(cache ? { cache } : {}),
+		...((marker >= 0 || cache !== undefined) && blocks.every((block) => block.type === "text")
 			? { cacheBlocks: blocks.map((block) => block.text) }
 			: {}),
 	};
@@ -94,6 +108,7 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		systemText: context.systemPrompt ?? "",
 		viewText: view?.text,
 		viewCacheBlocks: view?.cacheBlocks,
+		viewCache: view?.cache,
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
@@ -116,7 +131,11 @@ function describeTextChange(before: string, after: string): string {
 }
 
 /** Why `current` does not extend `previous`'s cached prefix, or undefined when it does. */
-function prefixChange(previous: RequestFingerprint, current: RequestFingerprint): string | undefined {
+function prefixChange(
+	previous: RequestFingerprint,
+	current: RequestFingerprint,
+	viewChange: ContinuousChatCacheComparison | undefined,
+): string | undefined {
 	if (previous.model !== current.model) return undefined;
 	if (previous.system[1] !== current.system[1]) {
 		return `system prompt changed (${previous.system[2]} to ${current.system[2]} chars) ${describeTextChange(previous.systemText, current.systemText)}`;
@@ -135,6 +154,8 @@ function prefixChange(previous: RequestFingerprint, current: RequestFingerprint)
 		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
 		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
 	}
+	if (viewChange?.warning) return viewChange.warning;
+	if (viewChange?.rewrite) return undefined;
 	// A shorter causal view can reuse the overlapping marked blocks. Pending lines after the marker
 	// were never declared stable; replacing them does not rewrite that prefix.
 	if (previous.viewCacheBlocks && current.viewCacheBlocks) {
@@ -155,13 +176,24 @@ function prefixChange(previous: RequestFingerprint, current: RequestFingerprint)
 export class PromptPrefixMonitor {
 	private readonly previous = new Map<string, RequestFingerprint>();
 	private readonly reports = new Map<string, number>();
+	private readonly viewRewrites = new Map<string, ContinuousChatCacheRewrite>();
+
+	/** Latest bounded, sanctioned ICM rewrite; ordinary append and node-publication changes do not replace it. */
+	lastChatRewrite(sessionId: string | undefined): ContinuousChatCacheRewrite | undefined {
+		return this.viewRewrites.get(sessionId ?? "");
+	}
 
 	/** Fingerprint a request, optionally trace it, and describe how it broke the previous request's prefix. */
 	check(model: Model<Api>, context: Context, sessionId: string | undefined): string | undefined {
 		const key = sessionId ?? "";
 		const current = fingerprintRequest(model, context);
-		this.writeTrace(sessionId, current);
 		const previous = this.previous.get(key);
+		const viewChange =
+			previous?.viewCache && current.viewCache && previous.model === current.model
+				? compareContinuousChatCache(previous.viewCache, current.viewCache)
+				: undefined;
+		if (viewChange?.rewrite) this.viewRewrites.set(key, viewChange.rewrite);
+		this.writeTrace(sessionId, current, viewChange?.rewrite);
 		this.previous.delete(key);
 		this.previous.set(key, current);
 		while (this.previous.size > MAX_TRACKED_SESSIONS) {
@@ -169,9 +201,10 @@ export class PromptPrefixMonitor {
 			if (oldest === undefined) break;
 			this.previous.delete(oldest);
 			this.reports.delete(oldest);
+			this.viewRewrites.delete(oldest);
 		}
 		if (previous === undefined) return undefined;
-		const change = prefixChange(previous, current);
+		const change = prefixChange(previous, current, viewChange);
 		if (change === undefined) return undefined;
 		const reported = (this.reports.get(key) ?? 0) + 1;
 		this.reports.set(key, reported);
@@ -180,15 +213,23 @@ export class PromptPrefixMonitor {
 		return `Prompt cache prefix changed between requests: ${change}. Cache reuse may be reduced from that point.${suffix}`;
 	}
 
-	private writeTrace(sessionId: string | undefined, fingerprint: RequestFingerprint): void {
+	private writeTrace(
+		sessionId: string | undefined,
+		fingerprint: RequestFingerprint,
+		viewRewrite: ContinuousChatCacheRewrite | undefined,
+	): void {
 		const path = process.env.PI_CACHE_TRACE;
 		if (!path) return;
 		const {
 			systemText: _systemText,
 			viewText: _viewText,
 			viewCacheBlocks: _viewCacheBlocks,
+			viewCache: _viewCache,
 			...traced
 		} = fingerprint;
-		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced })}\n`);
+		appendFileSync(
+			path,
+			`${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced, ...(viewRewrite ? { viewRewrite } : {}) })}\n`,
+		);
 	}
 }

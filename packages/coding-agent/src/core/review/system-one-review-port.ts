@@ -40,7 +40,9 @@ export interface SystemOneStatus {
  * review (counted in the session statistics); history and maintenance routes identify their actual summary responses.
  */
 export type MaintenanceUsageRoute = "compaction" | "branch_summary" | "proactivity" | "knowledge_collection";
-export type SystemOneUsageRoute = "system_one_tool" | "history_summary" | MaintenanceUsageRoute;
+/** Physical completion accounting includes ICM while preserving its separate analytics category. */
+export type CompletionUsageRoute = "history_summary" | MaintenanceUsageRoute;
+export type SystemOneUsageRoute = "system_one_tool" | CompletionUsageRoute;
 
 /** A dispatched request whose measured response has not yet reached the usage ledger. */
 export interface UnresolvedUsageRequest {

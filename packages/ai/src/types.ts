@@ -146,8 +146,12 @@ export interface ProviderResponseTicket {
 }
 
 export interface ProviderResponseObserver {
-	/** Called once at actual dispatch. Throwing prevents transport. */
-	begin(model: Model<Api>): ProviderResponseTicket;
+	/**
+	 * Called once immediately before transport. Recheck the request signal after synchronous
+	 * admission callbacks and retire any undispatched reservation before throwing. A returned
+	 * ticket owns the physical response; later cancellation does not settle it.
+	 */
+	begin(model: Model<Api>, signal?: AbortSignal): ProviderResponseTicket;
 }
 
 export interface StreamOptions {

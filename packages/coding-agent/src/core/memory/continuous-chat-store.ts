@@ -11,6 +11,11 @@ import { boundedLine } from "../util/bounded-line.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { isNonNegativeSafeInteger } from "../util/value-guards.ts";
+import type {
+	ContinuousChatViewCache,
+	ContinuousChatViewProjection,
+	RenderedContinuousChatView,
+} from "./continuous-chat-cache.ts";
 import {
 	CONTINUOUS_CHAT_SCHEMA_VERSION,
 	type ContinuousChatAppendInput,
@@ -128,13 +133,16 @@ export interface ContinuousChatTurnSnapshot {
 	totalMessages: number;
 	viewRevision: number;
 	view: string;
+	viewCache: ContinuousChatViewCache;
 	/** The same view collapsed to the causal view's budget: what a worker is born with, so a new worker does not pay for the root's whole view. */
 	birthView: string;
+	birthViewCache: ContinuousChatViewCache;
 }
 
 /** The built part of the causal view: `<chat>` text covering messages [0, viewedMessages), collapsed past its high-water mark. */
 export interface ContinuousChatCausalPrefix {
 	text: string;
+	cache: ContinuousChatViewCache;
 	viewedMessages: number;
 }
 
@@ -434,8 +442,8 @@ export class ContinuousChatStore {
 	/** Views caught up to the root revision they name. Undefined after a failed locked step. */
 	private settled: SettledViews | undefined;
 	/** The rendered turn view for one root revision. */
-	private rendered: { revision: number; text: string } | undefined;
-	private renderedBirth: { revision: number; text: string } | undefined;
+	private rendered: { revision: number; view: RenderedContinuousChatView } | undefined;
+	private renderedBirth: { revision: number; view: RenderedContinuousChatView } | undefined;
 
 	constructor(options: ContinuousChatStoreOptions) {
 		if (!PROJECT_KEY_PATTERN.test(options.projectKey)) {
@@ -718,12 +726,16 @@ export class ContinuousChatStore {
 		return this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();
 			const [turn] = state.views;
+			const view = await this.renderTurnLocked(state.root.revision, turn);
+			const birthView = await this.renderBirthLocked(state.root.revision, turn);
 			return {
 				queue: state.queue,
 				totalMessages: state.root.nextId,
 				viewRevision: turn.revision,
-				view: await this.renderTurnLocked(state.root.revision, turn),
-				birthView: await this.renderBirthLocked(state.root.revision, turn),
+				view: view.text,
+				viewCache: view.cache,
+				birthView: birthView.text,
+				birthViewCache: birthView.cache,
 			};
 		});
 	}
@@ -865,7 +877,10 @@ export class ContinuousChatStore {
 		const viewed = Math.min(endMessage, built);
 		if (viewed === 0) {
 			const empty = new Map<string, ContinuousChatTreeNode>();
-			return { text: renderContinuousChatView(createContinuousChatView("causal"), empty), viewedMessages: 0 };
+			return {
+				...renderContinuousChatView(createContinuousChatView("causal"), empty, this.viewProjection()),
+				viewedMessages: 0,
+			};
 		}
 		const filePath = join(this.rootDir, CAUSAL_VIEW_FILE);
 		const view = await readViewFile(this.rootDir, "causal");
@@ -877,7 +892,7 @@ export class ContinuousChatStore {
 		const causal = { ...view, totalMessages: viewed, batchPending: false, entries };
 		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
 		const nodes = await this.presentNodes(entries, continuousChatViewBytes(causal) > causal.highBytes);
-		return { text: renderContinuousChatView(causal, nodes), viewedMessages: viewed };
+		return { ...renderContinuousChatView(causal, nodes, this.viewProjection()), viewedMessages: viewed };
 	}
 
 	async readView(kind: ContinuousChatViewKind): Promise<ContinuousChatViewState> {
@@ -1647,31 +1662,44 @@ export class ContinuousChatStore {
 	}
 
 	/** The turn view collapsed to the causal view's budget, rendered once per root revision. */
-	private async renderBirthLocked(revision: number, turn: ContinuousChatViewState): Promise<string> {
+	private async renderBirthLocked(
+		revision: number,
+		turn: ContinuousChatViewState,
+	): Promise<RenderedContinuousChatView> {
 		const rendered = this.renderedBirth;
-		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
+		if (rendered !== undefined && rendered.revision === revision) return rendered.view;
 		const nodes = await this.presentNodes(turn.entries, true);
-		const text = renderContinuousChatView(
+		const view = renderContinuousChatView(
 			{
 				...turn,
 				lowBytes: CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
 				highBytes: CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
 			},
 			nodes,
+			this.viewProjection(),
 		);
-		this.renderedBirth = { revision, text };
-		return text;
+		this.renderedBirth = { revision, view };
+		return view;
 	}
 
 	/** The turn view's text, rendered once per root revision. */
-	private async renderTurnLocked(revision: number, turn: ContinuousChatViewState): Promise<string> {
+	private async renderTurnLocked(
+		revision: number,
+		turn: ContinuousChatViewState,
+	): Promise<RenderedContinuousChatView> {
 		const rendered = this.rendered;
-		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
+		if (rendered !== undefined && rendered.revision === revision) return rendered.view;
 		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
 		const nodes = await this.presentNodes(turn.entries, continuousChatViewBytes(turn) > turn.highBytes);
-		const text = renderContinuousChatView(turn, nodes);
-		this.rendered = { revision, text };
-		return text;
+		const view = renderContinuousChatView(turn, nodes, this.viewProjection());
+		this.rendered = { revision, view };
+		return view;
+	}
+
+	private viewProjection(): ContinuousChatViewProjection {
+		const projection = this.projection;
+		if (!projection) throw new Error("Continuous-chat view has no projection authority.");
+		return { identity: projection.meta().identity, requiredRevision: (end) => projection.requiredRevision(end) };
 	}
 
 	/** The location of one indexed message. A missing entry for an id below the published count is corruption. */

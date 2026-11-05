@@ -521,9 +521,9 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 			inner = await streamFn(model, context, {
 				...options,
 				providerResponseObserver: {
-					begin: (requestModel) => {
+					begin: (requestModel, signal) => {
 						if (released) throw new Error("Provider admission ended before dispatch.");
-						const parent = options?.providerResponseObserver?.begin(requestModel);
+						const parent = options?.providerResponseObserver?.begin(requestModel, signal);
 						dispatched = true;
 						return {
 							complete: (message) => {

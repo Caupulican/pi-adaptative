@@ -7,15 +7,14 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import type { Api, Message, Model, Tool, Usage } from "@caupulican/pi-ai";
+import type { Api, Message, Model, Tool } from "@caupulican/pi-ai";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
 import { classifyFailure } from "../../kernel/reliability/classifier.ts";
 import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../kernel/reliability/retry.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
-import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
-import type { HistoryUsageCall } from "../review/system-one-review-port.ts";
-import { hasReportableUsage } from "../spawned-usage.ts";
+import { CompletionResponseUsage } from "../cost/completion-response-usage.ts";
+import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type {
 	ContinuousChatCompactionConversation,
@@ -26,9 +25,6 @@ import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts"
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
 import type { ContinuousChatSummaryModelResolution } from "./continuous-chat-settings.ts";
 import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
-
-/** Report-id prefix of a compaction reply's paid spend in the history-usage owner. */
-const CONTINUOUS_CHAT_USAGE_KIND = "memory-continuous-chat-compaction";
 
 /** The model a request ran on, as far as a provider's prompt cache tells models apart. */
 export type ContinuousChatPrefixModel = Pick<Model<Api>, "provider" | "id" | "api" | "baseUrl">;
@@ -100,9 +96,8 @@ export interface ContinuousChatCompactionAdapterDeps {
 	prefixHead(): ContinuousChatPrefixSnapshot;
 	/** The configured summary model, checked now: setting, registry, egress and thinking level. */
 	summary(): ContinuousChatSummaryModelResolution;
-	/** Records one reply's paid spend in the history-usage owner. Must not throw. */
-	recordUsage(usage: Usage, call: HistoryUsageCall): void;
-	captureUsageOrigin?(): AccountingOrigin;
+	/** Resolved once when a job opens, so physical responses retain their original session owner. */
+	usage(): SessionSemanticUsageDelivery;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
@@ -167,125 +162,129 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is, when the summary model
 	 * shares its cache, and the chat's stable system prompt without tools otherwise. Every send is an independent request:
 	 * the node's causal view, its task, and only the latest correction note when the send carries one. No earlier reply
-	 * (thinking included) and no earlier note is replayed. Every paid call's report id names the job, the node it
-	 * builds, the reply and the attempt, so one ledger row maps to exactly one call.
+	 * (thinking included) and no earlier note is replayed. Every physical request reserves its own durable receipt
+	 * before dispatch, bound to the job and node, even if the logical completion is cancelled.
 	 */
 	open(
 		prefix: ContinuousChatCompactionPrefix,
 		target: ContinuousChatNodeCoordinate,
 	): ContinuousChatCompactionConversation {
 		const jobId = randomUUID();
-		const capturedOrigin = this.deps.captureUsageOrigin?.();
+		const usageOwner = this.deps.usage();
+		const capturedOrigin = usageOwner.captureOrigin();
 		const node = `node-${target.level}-${target.ordinal}`;
 		// A background node can summarize several tasks. Its execution-time goal is not its billing owner.
-		const origin = capturedOrigin
-			? { sessionId: capturedOrigin.sessionId, operationId: `${jobId}:${node}` }
-			: undefined;
-		let replyIndex = 0;
+		const origin = { sessionId: capturedOrigin.sessionId, operationId: `${jobId}:${node}` };
 		const head = this.deps.prefixHead();
 		this.validate();
 		const view: Message = {
 			role: "user",
-			content: renderContinuousChatViewBlocks(prefix.view),
+			content: renderContinuousChatViewBlocks(prefix.view, prefix.viewCache),
 			timestamp: Date.now(),
 		};
 		return {
 			send: async ({ task, correction }, signal) => {
-				const replyNumber = ++replyIndex;
-				let attempt = 0;
-				const request: Message[] = [view, userText(task)];
-				if (correction !== undefined) request.push(userText(correction));
-				const runTurn = async (toolFree = false) => {
-					signal?.throwIfAborted();
-					const { model, thinkingLevel } = this.summaryResolution();
-					const sharesCache = head.model !== undefined && sameCacheModel(head.model, model);
-					const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
-					const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
-					let guardRejected = false;
-					const requestGuard = (requestModel: Model<Api>, requestSignal: AbortSignal | undefined): undefined => {
-						try {
-							return this.guardSummaryRequest(requestModel, requestSignal);
-						} catch (error) {
-							guardRejected = true;
-							throw error;
-						}
-					};
-					const attemptNumber = ++attempt;
-					const completion = await this.deps.complete({
-						systemPrompt,
-						messages: [],
-						requestContext: { systemPrompt, tools: activeTools, messages: request },
-						model,
-						thinkingLevel,
-						cacheRetention: "short",
-						laneKind: "continuous-chat",
-						requestPreflight: ({ model: requestModel }, requestSignal) =>
-							requestGuard(requestModel, requestSignal),
-						requestGuard,
-						signal,
-					});
-					const reply = completion.messages?.at(-1);
-					const assistant = reply?.role === "assistant" ? reply : undefined;
-					// Every reply is paid: record it before any check below can throw, even one with no assistant message.
-					if (hasReportableUsage(completion.usage)) {
-						this.deps.recordUsage(completion.usage, {
-							reportId: `${CONTINUOUS_CHAT_USAGE_KIND}:${jobId}:${node}:reply-${replyNumber}:attempt-${attemptNumber}`,
-							provider: assistant?.provider ?? model.provider,
-							model: assistant?.model ?? model.id,
-							attempt: attemptNumber,
-							...(origin ? { origin } : {}),
+				signal?.throwIfAborted();
+				const usage = new CompletionResponseUsage(
+					usageOwner,
+					"history_summary",
+					DEFAULT_RETRY_POLICY.maxAttempts,
+					origin,
+				);
+				try {
+					let attempt = 0;
+					const request: Message[] = [view, userText(task)];
+					if (correction !== undefined) request.push(userText(correction));
+					const runTurn = async (toolFree = false) => {
+						signal?.throwIfAborted();
+						const { model, thinkingLevel } = this.summaryResolution();
+						const sharesCache = head.model !== undefined && sameCacheModel(head.model, model);
+						const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
+						const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
+						let guardRejected = false;
+						const requestGuard = (
+							requestModel: Model<Api>,
+							requestSignal: AbortSignal | undefined,
+						): undefined => {
+							try {
+								usage.assertAvailable();
+								return this.guardSummaryRequest(requestModel, requestSignal);
+							} catch (error) {
+								guardRejected = true;
+								throw error;
+							}
+						};
+						attempt++;
+						const completion = await this.deps.complete({
+							systemPrompt,
+							messages: [],
+							requestContext: { systemPrompt, tools: activeTools, messages: request },
+							model,
+							thinkingLevel,
+							cacheRetention: "short",
+							laneKind: "continuous-chat",
+							requestPreflight: ({ model: requestModel }, requestSignal) =>
+								requestGuard(requestModel, requestSignal),
+							requestGuard,
+							providerResponseObserver: usage,
+							signal,
 						});
-					}
-					return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };
-				};
-				let { completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn();
-				let toolFree = false;
-				while (true) {
-					signal?.throwIfAborted();
-					if (guardRejected) break;
-					const failed = result.stopReason === "error";
-					if (failed) this.deps.onModelFailure?.(summaryModel, result.errorMessage);
-					if (attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
-					if (failed) {
-						const nextSummary = this.deps.summary();
-						if (!nextSummary.ok) break;
-						if (sameCacheModel(summaryModel, nextSummary.model)) {
-							const failure = classifyFailure({
-								message: result.errorMessage ?? "",
-								provider: summaryModel.provider,
-							});
-							if (!failure.retryable) break;
-							await sleepAbortable(
-								computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, { retryAfterMs: failure.retryAfterMs }),
-								signal,
-								this.deps.timers,
-							);
+						usage.assertHealthy();
+						const reply = completion.messages?.at(-1);
+						const assistant = reply?.role === "assistant" ? reply : undefined;
+						return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };
+					};
+					let { completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn();
+					let toolFree = false;
+					while (true) {
+						signal?.throwIfAborted();
+						if (guardRejected) break;
+						const failed = result.stopReason === "error";
+						if (failed) this.deps.onModelFailure?.(summaryModel, result.errorMessage);
+						if (attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
+						if (failed) {
+							const nextSummary = this.deps.summary();
+							if (!nextSummary.ok) break;
+							if (sameCacheModel(summaryModel, nextSummary.model)) {
+								const failure = classifyFailure({
+									message: result.errorMessage ?? "",
+									provider: summaryModel.provider,
+								});
+								if (!failure.retryable) break;
+								await sleepAbortable(
+									computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, { retryAfterMs: failure.retryAfterMs }),
+									signal,
+									this.deps.timers,
+								);
+							}
+						} else if (
+							sentTools &&
+							(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
+						) {
+							toolFree = true;
+						} else {
+							break;
 						}
-					} else if (
-						sentTools &&
-						(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
-					) {
-						toolFree = true;
-					} else {
-						break;
+						({
+							completion: result,
+							assistant,
+							model: summaryModel,
+							guardRejected,
+							sentTools,
+						} = await runTurn(toolFree));
 					}
-					({
-						completion: result,
-						assistant,
-						model: summaryModel,
-						guardRejected,
-						sentTools,
-					} = await runTurn(toolFree));
+					if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
+					if (result.stopReason !== "stop") {
+						const reason = result.errorMessage ?? "no error message";
+						throw new Error(`Continuous-chat compaction stopped (${result.stopReason}): ${reason}`);
+					}
+					if (assistant.content.some((block) => block.type === "toolCall")) {
+						throw new Error("Continuous-chat compaction called a tool; compactions are tool-free.");
+					}
+					return result.text;
+				} finally {
+					usage.release();
 				}
-				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
-				if (result.stopReason !== "stop") {
-					const reason = result.errorMessage ?? "no error message";
-					throw new Error(`Continuous-chat compaction stopped (${result.stopReason}): ${reason}`);
-				}
-				if (assistant.content.some((block) => block.type === "toolCall")) {
-					throw new Error("Continuous-chat compaction called a tool; compactions are tool-free.");
-				}
-				return result.text;
 			},
 		};
 	}

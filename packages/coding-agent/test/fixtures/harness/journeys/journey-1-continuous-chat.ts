@@ -26,6 +26,17 @@ import {
 	icmWaitForChatIdle,
 } from "./shared.ts";
 
+function chatBlocks(request: ScriptedRequest) {
+	const view = request.context.messages[0];
+	if (
+		view?.role !== "user" ||
+		typeof view.content === "string" ||
+		!view.content.every((block) => block.type === "text")
+	)
+		throw new Error("The ICM provider request must start with its text-block view.");
+	return view.content;
+}
+
 export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
 	// ICM continuous chat (Pi-adaptative-memory): summaryModel refusal that warns without stopping the chat, append-only daily logs + 16-byte index,
@@ -250,6 +261,14 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			{
 				name: "icm-turn-1-call",
 				check: (request) => {
+					const blocks = chatBlocks(request);
+					expect(blocks[0], "an empty chat declares zero stable rows explicitly").toMatchObject({
+						icmCache: { stablePrefixLineCount: 0, lines: [] },
+					});
+					expect(
+						blocks.some((block) => block.cacheBoundary),
+						"an empty chat has no cache marker",
+					).toBe(false);
 					turn1SystemPrompt = request.context.systemPrompt ?? "";
 					turn1ToolNames = (request.context.tools ?? []).map((tool) => tool.name);
 					const projected = currentKnowledge(request);
@@ -364,6 +383,18 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			{
 				name: "icm-turn-2-zoom-tree",
 				check: (request) => {
+					const blocks = chatBlocks(request);
+					expect(blocks[0], "normal-order summaries expose five stable rows").toMatchObject({
+						icmCache: { stablePrefixLineCount: 5 },
+					});
+					expect(
+						blocks.map((block) => block.text).join(""),
+						"text-block boundaries preserve the fifth row's newline",
+					).toContain("\n4+1|");
+					expect(
+						blocks.map((block) => block.cacheBoundary ?? false),
+						"only the complete four-row prefix is marked",
+					).toEqual([true, false]);
 					const raw = JSON.stringify(request.context.messages);
 					expect(currentKnowledge(request), "the corrected fact survives the turn boundary").toContain(
 						"K-CORRECTED-PREFERENCE",
@@ -739,18 +770,42 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 
 	// Turn C is the next arrival: it makes the blocked leaf eligible again and its retry publishes the summary.
 	const turnCMark = world.provider.reached.length;
+	const recoveryHeld = createBarrier();
 	world.provider.enqueue("worker-c", {
 		name: `${label}-recovered`,
 		check: leafTask,
+		gate: recoveryHeld.promise,
 		reply: { content: [{ type: "text", text: "pi: R10s spacing reply." }] },
 	});
 	world.provider.enqueue("root", {
 		name: `${label}-turn-c`,
+		check: (request) => {
+			const blocks = chatBlocks(request);
+			expect(blocks[0], "a held summary interrupts the stable prefix inside a complete block").toMatchObject({
+				icmCache: {
+					stablePrefixLineCount: 1,
+					lines: [
+						{ level: 0, ordinal: 0 },
+						{ level: 0, ordinal: 1 },
+						{ level: 0, ordinal: 2 },
+						{ level: 0, ordinal: 3 },
+					],
+				},
+			});
+			expect(
+				blocks.some((block) => block.cacheBoundary),
+				"no marked block may include the pending summary",
+			).toBe(false);
+		},
 		reply: { content: [{ type: "text", text: "Done again." }] },
 	});
 	// Turn B used no tool: its owner words are settled by this submission.
 	world.systemOne.enterPhase(`${label}-turn-c`, turnBJudgments);
-	await withDeadline(trace, "R10s turn C", root.session.prompt("Answer after the R10s recovery."));
+	try {
+		await withDeadline(trace, "R10s turn C", root.session.prompt("Answer after the R10s recovery."));
+	} finally {
+		recoveryHeld.release();
+	}
 	await icmWaitForChatIdle(world, agentDir, 6, (_records, nodes) =>
 		nodes.some((node) => node.level === 0 && node.ordinal === 1),
 	);

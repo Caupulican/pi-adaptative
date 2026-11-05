@@ -1,6 +1,7 @@
 /** Provider-neutral coordinator that builds one node of the permanent chat's summary tree. */
 
 import { safeErrorMessage } from "../../kernel/types.ts";
+import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
 import {
 	renderContinuousChatLeafTask,
@@ -27,6 +28,7 @@ export interface ContinuousChatCompactionPrefix {
 	systemPrompt: string;
 	tools: readonly ContinuousChatStableToolDefinition[];
 	view: string;
+	viewCache: ContinuousChatViewCache;
 }
 
 /** Provider-neutral declaration projected from the exact foreground tool set accepted for this chat. */

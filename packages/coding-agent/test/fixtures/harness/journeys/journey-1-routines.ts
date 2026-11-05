@@ -85,7 +85,34 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			.getEntries()
 			.filter((entry) => entry.type === "custom_message" && entry.customType === "routine-completion");
 	const command = async (label: string, input: Record<string, unknown>, error = false, callId = label) => {
-		world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS);
+		const classified: string[] = [];
+		world.systemOne.enterPhase(
+			label,
+			label === "routine-forged-target"
+				? {}
+				: {
+						...ICM_INTAKE_JUDGMENTS,
+						...(label === "routine-invalid-interval"
+							? { carries_0: { kind: "noul" as const, probability: 0.02 } }
+							: {}),
+					},
+			label === "routine-invalid-interval"
+				? {
+						expect: (request) => {
+							if ("carries_0" in request.questions)
+								expect(request.state).toMatchObject({
+									owner_messages: ["Apply the routine-forged-target routine command."],
+								});
+							else if ("changes_model_pools" in request.questions) {
+								const state = request.state;
+								if (typeof state !== "object" || state === null || !("user_request" in state))
+									throw new Error("Routine owner classification has no request text.");
+								classified.push(String(state.user_request));
+							}
+						},
+					}
+				: {},
+		);
 		world.provider.enqueue("root", calls(`${label}-call`, [{ id: callId, name: "routine", arguments: input }]), {
 			...text(`${label}-done`, "The routine command is recorded."),
 			check: (request) => {
@@ -94,6 +121,11 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			},
 		});
 		await withDeadline(world.trace, label, root.session.prompt(`Apply the ${label} routine command.`));
+		if (label === "routine-invalid-interval" && world.systemOne.enabled)
+			expect(classified, "the rejected arguments leave owner words for the next executable command").toEqual([
+				"Apply the routine-forged-target routine command.",
+				"Apply the routine-invalid-interval routine command.",
+			]);
 	};
 	const parentSettled = (count: number): Promise<void> =>
 		new Promise((resolve) => {
@@ -268,7 +300,38 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		world.provider.enqueue("worker-a", workerReply("scheduled-routine", replacement));
 		world.provider.enqueue("root", {
 			...text("routine-scheduled-parent", "The revised scheduled review completed."),
-			check: (request) => expect(JSON.stringify(request.context.messages)).toContain("scheduled-routine completed."),
+			check: (request) => {
+				const wire = JSON.stringify(request.context.messages);
+				const snapshot = root.session.backgroundLanes.getTaskRuntimeSnapshot();
+				const diagnostic = wire.includes("scheduled-routine completed.")
+					? undefined
+					: JSON.stringify({
+							occurrences: occurrences().map((occurrence) => ({
+								occurrenceId: occurrence.occurrenceId,
+								phase: occurrence.phase,
+								trigger: occurrence.trigger,
+								claim: occurrence.claim,
+								executionRef: occurrence.executionRef,
+								result: occurrence.result,
+							})),
+							tasks: Object.entries(snapshot?.tasks ?? {}).map(([id, task]) => ({
+								id,
+								attemptIds: task.attemptIds,
+							})),
+							attempts: Object.values(snapshot?.attempts ?? {}).map((attempt) => ({
+								attemptId: attempt.attemptId,
+								taskId: attempt.taskId,
+								status: attempt.status,
+								reasonCode: attempt.reasonCode,
+								reasonDetail: attempt.reasonDetail,
+								result: attempt.result,
+							})),
+							notifications: snapshot?.notifications,
+							parentInputs: parentInputs().slice(-4),
+							request: wire.slice(-8_000),
+						}).slice(0, 24_000);
+				expect(wire, diagnostic).toContain("scheduled-routine completed.");
+			},
 		});
 		const scheduledSettled = parentSettled(3);
 		const beforeDaemon = store().getRoutine(routineId)!;

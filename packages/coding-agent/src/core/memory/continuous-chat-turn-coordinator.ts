@@ -5,6 +5,7 @@
  */
 
 import type { AgentMessage } from "../../kernel/index.ts";
+import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
 import type { ContinuousChatRuntime, ContinuousChatTurnBoundary } from "./continuous-chat-runtime.ts";
 
@@ -124,7 +125,7 @@ export class IcmTurnCoordinator {
 	private turn: IcmTurn | undefined;
 	private turnCount = 0;
 	/** The view the latest turn pinned, kept after it ends: the persisted view a worker is born with between turns. */
-	private pinned: { view: string; timestamp: number } | undefined;
+	private pinned: { view: string; viewCache: ContinuousChatViewCache; timestamp: number } | undefined;
 	private detachAbort: (() => void) | undefined;
 	private readonly listeners = new Set<(phase: IcmTurnPhase) => void>();
 
@@ -158,7 +159,7 @@ export class IcmTurnCoordinator {
 		}
 		const turn = new IcmTurn(++this.turnCount, boundary, Date.now());
 		this.turn = turn;
-		this.pinned = { view: boundary.birthView, timestamp: turn.startedAt };
+		this.pinned = { view: boundary.birthView, viewCache: boundary.birthViewCache, timestamp: turn.startedAt };
 		if (signal) {
 			const onAbort = () => {
 				if (this.turn === turn && this.currentPhase === "running") this.setPhase("stopping");
@@ -185,9 +186,15 @@ export class IcmTurnCoordinator {
 	}
 
 	/** The chat view a worker is born with: the running turn's pinned view, else the view the latest turn pinned, each collapsed to the causal budget. */
-	birthView(): { view: string; timestamp: number } | undefined {
+	birthView(): { view: string; viewCache: ContinuousChatViewCache; timestamp: number } | undefined {
 		const running = this.turn;
-		return running ? { view: running.boundary.birthView, timestamp: running.startedAt } : this.pinned;
+		return running
+			? {
+					view: running.boundary.birthView,
+					viewCache: running.boundary.birthViewCache,
+					timestamp: running.startedAt,
+				}
+			: this.pinned;
 	}
 
 	phase(): IcmTurnPhase {
