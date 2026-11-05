@@ -1309,6 +1309,8 @@ export class AgentSession {
 				entryIds: () => this.sessionManager.getEntries().map((entry) => entry.id),
 				isEntryPersisted: (entryId) => this.sessionManager.isEntryPersisted(entryId),
 				timers: config.timers.port("continuous-chat"),
+				// The signal `runIsolatedCompletion` admits every compaction under; dispose aborts it before the chat stops.
+				closing: this._reflectionAbort.signal,
 			},
 			hierarchy: {
 				// The configured summary model resolves through the one lane-model boundary: configured and

@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Closing a session while the ICM chat still has summaries to build no longer reports `Continuous-chat compaction <node> failed: This operation was aborted` or records those summaries as failed. The closing session starts no new summary, and one its close interrupts is left for the next session to build.
 - A routine result that coalesces missed scheduled slots now states how many in the result delivered to the session (`missedCount` in its details); the count was recorded but not delivered.
 - A routine's `lastStatus` in `list` and `get` now follows its most recently claimed run to that run's outcome (succeeded, failed, cancelled or uncertain), including manual runs; it no longer stays `running` after the run ends. `get` also shows the finished run's summary.
 - The day's cross-session usage total reads the sessions under the session's own agent directory instead of the process default, and counts a running session whose file is not written yet.

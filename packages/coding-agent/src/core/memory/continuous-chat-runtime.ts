@@ -69,6 +69,13 @@ export interface ContinuousChatRuntimeOptions {
 	label?: string;
 	/** Retained work-claim releases' backoff; absent means `SYSTEM_TIMER_PORT`. */
 	timers?: TimerPort;
+	/**
+	 * Aborts when the owning session closes, before `stop()`; the port admits no compaction request after it. From then
+	 * on nothing new is claimed, and a port error of a compaction already running is its cancellation: the claim is
+	 * released for the next owner, never recorded as a failure. A request already admitted still completes and publishes,
+	 * and appends stay open until `stop()`, so queued records still finish.
+	 */
+	closing?: AbortSignal;
 }
 
 type AppendAttempt = { status: "appended"; results: ContinuousChatAppendResult[] };
@@ -90,6 +97,7 @@ export class ContinuousChatRuntime {
 	private readonly listeners = new Set<(event: ContinuousChatRuntimeEvent) => void>();
 	private readonly jobs = new Map<string, Promise<void>>();
 	private readonly abort = new AbortController();
+	private readonly closing: AbortSignal | undefined;
 	private serialTail: Promise<void> = Promise.resolve();
 	private nextBoundaryId = 0;
 	private started = false;
@@ -116,6 +124,7 @@ export class ContinuousChatRuntime {
 		this.port = options.port;
 		this.prefixHead = options.prefixHead;
 		this.warn = options.warn;
+		this.closing = options.closing;
 		this.stopped = new Promise<void>((resolve) => {
 			this.resolveStopped = () => resolve();
 		});
@@ -396,9 +405,14 @@ export class ContinuousChatRuntime {
 		}
 	}
 
+	/** New claims may be dispatched: the runtime is not stopping, no restart holds it, and its owning session is not closing. */
+	private dispatchOpen(): boolean {
+		return !this.stopping && this.dispatchHolds === 0 && this.closing?.aborted !== true;
+	}
+
 	/** Starts a dispatch pass unless one is running. A pass that is running re-checks once more before it exits. */
 	private requestPump(): void {
-		if (!this.started || this.stopping || this.dispatchHolds > 0) return;
+		if (!this.started || !this.dispatchOpen()) return;
 		this.pumpRequested = true;
 		if (this.pumping) return;
 		this.pumping = true;
@@ -411,7 +425,7 @@ export class ContinuousChatRuntime {
 			do {
 				this.pumpRequested = false;
 				await this.claimReady();
-			} while (this.pumpRequested && !this.stopping && this.dispatchHolds === 0);
+			} while (this.pumpRequested && this.dispatchOpen());
 		} catch (error) {
 			// A lost lease was already reported by `handleLeaseLost`.
 			if (!this.leaseLost) {
@@ -432,17 +446,13 @@ export class ContinuousChatRuntime {
 	private async claimReady(): Promise<void> {
 		// A claim that could not be recorded still holds its slot: every dispatch pass retries it first.
 		if (this.workReleases.size > 0) await this.workReleases.retry({ report: false });
-		while (
-			!this.stopping &&
-			this.dispatchHolds === 0 &&
-			this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS
-		) {
+		while (this.dispatchOpen() && this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) {
 			const item = await this.store.claimWork();
 			if (item === undefined) {
 				if (this.jobs.size === 0) this.emit({ type: "idle" });
 				return;
 			}
-			if (this.stopping || this.dispatchHolds > 0) {
+			if (!this.dispatchOpen()) {
 				// After a lost lease the claim stays persisted for the next owner's recovery to requeue.
 				if (!this.leaseLost) await this.recordOrRetain(item, { kind: "release" });
 				return;
@@ -527,6 +537,7 @@ export class ContinuousChatRuntime {
 			target,
 			prefix: { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text, viewCache: causal.cache },
 			signal: this.abort.signal,
+			closing: this.closing,
 		});
 	}
 

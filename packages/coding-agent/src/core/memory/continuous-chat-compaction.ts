@@ -83,6 +83,11 @@ export interface ContinuousChatCompactionJob {
 	target: ContinuousChatCompactionTarget;
 	prefix: ContinuousChatCompactionPrefix;
 	signal?: AbortSignal;
+	/**
+	 * Aborts when the run's owner closes: its port admits no further request, while a request already admitted still
+	 * completes. A port error raised after it is a cancellation, like one raised after `signal`.
+	 */
+	closing?: AbortSignal;
 }
 
 /** Why a run failed. A sink error may follow partial publication; the store reconciles before abandoning work. */
@@ -146,7 +151,7 @@ export class ContinuousChatCompactionCoordinator {
 		try {
 			conversation = this.port.open(job.prefix, targetCoordinate(target));
 		} catch (error) {
-			return portFailure(signal, 0, error);
+			return portFailure(job, 0, error);
 		}
 		const task =
 			target.kind === "leaf"
@@ -160,7 +165,7 @@ export class ContinuousChatCompactionCoordinator {
 			try {
 				reply = await conversation.send(correction === undefined ? { task } : { task, correction }, signal);
 			} catch (error) {
-				return portFailure(signal, replies, error, shortest);
+				return portFailure(job, replies, error, shortest);
 			}
 			replies++;
 			if (signal?.aborted) return { status: "cancelled", replies };
@@ -275,13 +280,16 @@ function failure(
 	return { status: "failed", reason, replies, message, shortest };
 }
 
-/** A port error raised after cancellation is a cancellation: the caller stopped the run, not the model. */
+/**
+ * A port error raised after cancellation, or after the owner closed, is a cancellation: the caller stopped the run, or
+ * its owner's port refused the next request, not the model.
+ */
 function portFailure(
-	signal: AbortSignal | undefined,
+	job: Pick<ContinuousChatCompactionJob, "signal" | "closing">,
 	replies: number,
 	error: unknown,
 	shortest?: ContinuousChatCompactionCandidate,
 ): ContinuousChatCompactionOutcome {
-	if (signal?.aborted) return { status: "cancelled", replies };
+	if (job.signal?.aborted || job.closing?.aborted) return { status: "cancelled", replies };
 	return failure("port-error", replies, safeErrorMessage(error, "Continuous-chat port failed."), shortest);
 }

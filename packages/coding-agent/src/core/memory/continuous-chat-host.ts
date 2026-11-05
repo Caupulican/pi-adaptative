@@ -52,6 +52,12 @@ export interface ContinuousChatHostPorts {
 	isEntryPersisted(entryId: string): boolean;
 	/** The work-claim release backoff's timers. Absent: the system's. */
 	timers?: TimerPort;
+	/**
+	 * Aborts when the session closes; the compaction port admits no request after it. The runtime then claims nothing new
+	 * and releases a running compaction that the refusal ends, instead of recording it as failed
+	 * (see `ContinuousChatRuntimeOptions.closing`).
+	 */
+	closing: AbortSignal;
 }
 
 export interface ContinuousChatHostOptions extends ContinuousChatHostPorts {
@@ -152,6 +158,7 @@ export class ContinuousChatHost {
 				prefixHead: () => options.prefixHead(),
 				warn: options.warn,
 				label: options.sessionId,
+				closing: options.closing,
 				...(options.timers !== undefined ? { timers: options.timers } : {}),
 			},
 			signal,
