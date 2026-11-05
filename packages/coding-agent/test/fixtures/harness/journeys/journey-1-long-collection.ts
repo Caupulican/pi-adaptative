@@ -7,6 +7,9 @@ import {
 } from "../../../../src/core/learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { KNOWLEDGE_COLLECTION_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
+import { runAsyncReleaseSteps } from "../../../../src/core/util/resource-release.ts";
+import { isPlainRecord } from "../../../../src/kernel/utils/value-guards.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmContinuousSettings, icmWaitForChatIdle } from "./shared.ts";
@@ -48,6 +51,9 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 	});
 	const store = KnowledgeStore.open(agentDir);
 	const release = createBarrier();
+	let disposal: ReturnType<HarnessWorld["disposeSessionInBody"]> | undefined;
+	let primary: { error: unknown } | undefined;
+	let stopCancelled: (() => void) | undefined;
 	const terminal = (session: AgentSession) =>
 		new Promise<KnowledgeCollectionOutcome>((resolve) => {
 			const off = session.subscribe((event) => {
@@ -126,12 +132,14 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		expect(firstExtractions).toBe(1);
 		expect(store.list({ project: "", role: "", audience: "owner" })).toEqual([]);
 		const file = root.sessionManager.getSessionFile()!;
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		disposal = world.disposeSessionInBody(root.session);
+		expect(await disposal).toBeUndefined();
 		root = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: world.openSessionManager(file, agentDir),
 			settings: { ...base, autoLearn: { ...base.autoLearn, knowledgeMaxUsd: 1 } },
 		});
+		disposal = undefined;
 		const editor = { kind: "choice" as const, choice: "explicit", confidence: 0.98 };
 		const tabs = { kind: "choice" as const, choice: "explicit", confidence: 0.98 };
 		const inspected: number[] = [];
@@ -167,7 +175,25 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 			ignoresAbort: true,
 		});
 		await withDeadline(world.trace, "long resume armed", world.timers.whenArmed("knowledge-collection"));
-		const cancelled = terminal(root.session);
+		const cancelledManager = root.sessionManager;
+		// Disposal removes session listeners; the shutdown handoff is witnessed at its durable publication boundary.
+		const cancelled = new Promise<unknown>((resolve) => {
+			stopCancelled = cancelledManager.onEntriesPersisted((event) => {
+				for (const id of event.entryIds) {
+					const entry = cancelledManager.getEntry(id);
+					if (
+						entry?.type !== "custom" ||
+						entry.customType !== KNOWLEDGE_COLLECTION_CUSTOM_TYPE ||
+						!isPlainRecord(entry.data) ||
+						!isPlainRecord(entry.data.outcome) ||
+						entry.data.outcome.status !== "cancelled"
+					)
+						continue;
+					stopCancelled?.();
+					resolve({ data: entry.data, persisted: cancelledManager.isEntryPersisted(id) });
+				}
+			});
+		});
 		world.timers.advance("knowledge-collection", 1_000);
 		await withDeadline(world.trace, "long second window reached", reached.promise);
 		expect(inspected).toEqual([0, 8_000, 16_000]);
@@ -178,13 +204,21 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		expect(
 			store.list({ project: "", role: "", audience: "owner" }).some((record) => record.text === "Uses Emacs."),
 		).toBe(false);
-		const disposal = world.disposeSessionInBody(root.session);
+		const warningMark = world.warnings.length;
+		disposal = world.disposeSessionInBody(root.session);
 		expect(await withDeadline(world.trace, "long cancellation terminal", cancelled)).toMatchObject({
-			status: "cancelled",
-			handoff: { retained: true },
+			data: { version: 1, sessionId: cancelledManager.getSessionId(), outcome: { status: "cancelled" } },
+			persisted: true,
 		});
-		release.release();
 		expect(await disposal).toBeUndefined();
+		expect(
+			world.warnings.slice(warningMark),
+			"shutdown retains the gated request with explicit unknown usage",
+		).toEqual([
+			"Usage handoff: 0 usage report(s) pending in the session journal, 0 not retained, 0 confirmed row(s) with a journal copy left, 0 unmatched journal(s), 1 request(s) with unknown usage; none is charged to another session.",
+		]);
+		world.warnings.splice(warningMark);
+		release.release();
 		await world.provider.waitForProducers();
 		const requestsBefore = world.provider.requests.length;
 		const judgmentsBefore = world.systemOne.decoded.length;
@@ -193,6 +227,7 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 			sessionManager: world.openSessionManager(file, agentDir),
 			settings: { ...base, autoLearn: { ...base.autoLearn, knowledgeMaxUsd: 1 } },
 		});
+		disposal = undefined;
 		world.systemOne.enterPhase("long-unresolved-refuses-replay", {});
 		await withDeadline(world.trace, "long interrupted reopen armed", world.timers.whenArmed("knowledge-collection"));
 		const held = terminal(root.session);
@@ -205,12 +240,27 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		expect(world.provider.requests.length).toBe(requestsBefore);
 		expect(world.systemOne.decoded.length, "retained grounding pairs are not paid again").toBe(judgmentsBefore);
 		world.trace.mark("root", "knowledge.long-source-recovery");
+	} catch (error) {
+		primary = { error };
+		throw error;
 	} finally {
 		release.release();
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
-		store.close();
-		await world.provider.waitForProducers();
-		for (const track of compactTracks) world.provider.retireOptional(track);
+		stopCancelled?.();
+		await runAsyncReleaseSteps(
+			[
+				async () => {
+					disposal ??= world.disposeSessionInBody(root.session);
+					expect(await disposal).toBeUndefined();
+				},
+				() => store.close(),
+				async () => {
+					await world.provider.waitForProducers();
+					for (const track of compactTracks) world.provider.retireOptional(track);
+				},
+			],
+			"Long collection failed and cleanup reported evidence",
+			primary,
+		);
 	}
 	await runCompletedLongCollection(world);
 }
@@ -229,6 +279,8 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		sessionManager: world.createSessionManager(agentDir),
 	});
 	const store = KnowledgeStore.open(agentDir);
+	let disposal: ReturnType<HarnessWorld["disposeSessionInBody"]> | undefined;
+	let primary: { error: unknown } | undefined;
 	const ended = (session: AgentSession) =>
 		new Promise<KnowledgeCollectionOutcome>((resolve) => {
 			const off = session.subscribe((event) => {
@@ -398,13 +450,15 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 			),
 		).toBe(true);
 		const file = root.sessionManager.getSessionFile()!;
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		disposal = world.disposeSessionInBody(root.session);
+		expect(await disposal).toBeUndefined();
 		const before = world.provider.requests.length;
 		root = await world.createRootSession("root", {
 			agentDir,
 			settings,
 			sessionManager: world.openSessionManager(file, agentDir),
 		});
+		disposal = undefined;
 		world.systemOne.enterPhase("long-complete-reopen", {});
 		await withDeadline(world.trace, "complete long reopened armed", world.timers.whenArmed("knowledge-collection"));
 		const replay = ended(root.session);
@@ -416,10 +470,24 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		});
 		expect(world.provider.requests.length).toBe(before);
 		world.trace.mark("root", "knowledge.long-source-complete");
+	} catch (error) {
+		primary = { error };
+		throw error;
 	} finally {
-		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
-		store.close();
-		await world.provider.waitForProducers();
-		for (const track of compactTracks) world.provider.retireOptional(track);
+		await runAsyncReleaseSteps(
+			[
+				async () => {
+					disposal ??= world.disposeSessionInBody(root.session);
+					expect(await disposal).toBeUndefined();
+				},
+				() => store.close(),
+				async () => {
+					await world.provider.waitForProducers();
+					for (const track of compactTracks) world.provider.retireOptional(track);
+				},
+			],
+			"Completed collection failed and cleanup reported evidence",
+			primary,
+		);
 	}
 }
