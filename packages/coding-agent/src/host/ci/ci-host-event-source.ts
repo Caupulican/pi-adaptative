@@ -11,8 +11,10 @@ import {
 	type HostEventSealObservation,
 	type HostEventSink,
 	type HostEventSource,
+	type HostEventSourceConnection,
 	MAX_HOST_EVENT_SUBJECTS,
 } from "../../core/events/host-event-contract.ts";
+import { HOST_EVENT_KINDS } from "../../core/events/host-event-kinds.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import type { CiProvider, CiRepository } from "./ci-provider.ts";
@@ -40,6 +42,10 @@ import { createCiCommandPort, GithubActionsCiProvider, isCiCommandMissing } from
 
 // Discover upstream runs/reruns that have no local filesystem event. Known runs use terminal monitors.
 const CI_DISCOVERY_INTERVAL_MS = 2 * 60 * 1000;
+/** Consecutive failed reconciles double the discovery delay up to this bound. */
+const CI_DISCOVERY_MAX_INTERVAL_MS = 30 * 60 * 1000;
+/** Failed reconciles in a row, once the repository resolved, before the source reports itself suspended. */
+const CI_SUSPEND_AFTER_FAILURES = 3;
 const COMMIT_SHA = /^(?:[a-f\d]{40}|[a-f\d]{64})$/;
 const ACCEPT_BATCH = 32;
 
@@ -110,6 +116,9 @@ function errorText(error: unknown): string {
 	);
 }
 
+/** The repository could not be resolved upstream: the source waits for its connection. */
+class CiRepositoryUnavailableError extends Error {}
+
 /**
  * This resource's owner must stop it before disposing its session's durable event sink.
  *
@@ -143,8 +152,13 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private forced = false;
 	/** The sink refused for runtime replacement; its admission signal re-requests. */
 	private sinkBlocked = false;
-	/** The provider command is not installed or the journal belongs to a newer release. */
+	/** The journal belongs to a newer release. */
 	private dormant = false;
+	/** Failed reconciles in a row (backoff), and those after the repository resolved (suspension). */
+	private failures = 0;
+	private reconcileFailures = 0;
+	/** `state:reason` last reported to the sink; "" is armed, undefined nothing reported by this start. */
+	private connectionKey?: string;
 	private lastInputs?: string;
 	private watchRetry?: ReturnType<typeof setTimeout>;
 	private discoveryTimer?: ReturnType<typeof setTimeout>;
@@ -222,6 +236,9 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.forced = false;
 		this.sinkBlocked = false;
 		this.dormant = false;
+		this.failures = 0;
+		this.reconcileFailures = 0;
+		this.connectionKey = undefined;
 		this.lastInputs = undefined;
 		this.opened = false;
 		this.sealed = undefined;
@@ -354,10 +371,13 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			if (signal.aborted || this.dormant) return;
 			if (this.dirty || this.forced) this.request(this.forced);
 			else {
-				this.discoveryTimer = setTimeout(() => {
-					this.discoveryTimer = undefined;
-					this.request(true);
-				}, CI_DISCOVERY_INTERVAL_MS);
+				this.discoveryTimer = setTimeout(
+					() => {
+						this.discoveryTimer = undefined;
+						this.request(true);
+					},
+					Math.min(CI_DISCOVERY_INTERVAL_MS * 2 ** Math.max(0, this.failures - 1), CI_DISCOVERY_MAX_INTERVAL_MS),
+				);
 				this.discoveryTimer.unref();
 			}
 		});
@@ -373,24 +393,63 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			this.sinkBlocked = false;
 			try {
 				await this.reconcile(sink, signal);
+				this.failures = 0;
+				this.reconcileFailures = 0;
+				this.connect(undefined);
 			} catch (error) {
 				if (signal.aborted) return;
-				// Any later input change or the discovery timer retries; foreground activity does not.
+				// Any later input change or the discovery timer retries, with a growing delay; foreground activity does not.
 				this.lastInputs = undefined;
-				if (isCiCommandMissing(error)) {
-					// Without the provider command there is no CI source; the footer still reads local records.
-					this.dormant = true;
-					return;
-				}
 				if (error instanceof CiSourceVersionError) {
 					this.dormant = true;
 					this.report("source", `CI event source inactive: ${errorText(error)}`);
 					return;
 				}
-				if (error instanceof HostEventError && error.code === "runtime_replacing") this.sinkBlocked = true;
-				this.report("reconcile", `CI events remain pending: ${errorText(error)}`);
+				if (error instanceof HostEventError && error.code === "runtime_replacing") {
+					// Runtime replacement re-requests through the sink's admission signal; it is no upstream failure.
+					this.sinkBlocked = true;
+					this.report("reconcile", `CI events remain pending: ${errorText(error)}`);
+					continue;
+				}
+				this.failures++;
+				if (isCiCommandMissing(error))
+					// The footer still reads local records; installing the command resumes events at the next retry.
+					this.connect({
+						state: "waiting",
+						reason: "command-missing",
+						text: "CI results are not followed: the gh command is not installed. They start by themselves once gh is installed and signed in.",
+					});
+				else if (error instanceof CiRepositoryUnavailableError)
+					this.connect({
+						state: "waiting",
+						reason: "repository-unavailable",
+						text: `CI results are waiting for GitHub: the repository could not be resolved (${errorText(error)}). They resume by themselves when it answers.`,
+					});
+				else {
+					this.report("reconcile", `CI events remain pending: ${errorText(error)}`);
+					if (++this.reconcileFailures >= CI_SUSPEND_AFTER_FAILURES)
+						this.connect({
+							state: "suspended",
+							reason: "reconcile-failing",
+							text: `CI results are suspended after ${this.reconcileFailures} failed checks in a row (${errorText(error)}). They retry by themselves at most every 30 minutes.`,
+						});
+				}
 			}
 		}
+	}
+
+	/** One durable record and one sink report per connection transition. */
+	private connect(connection: HostEventSourceConnection | undefined): void {
+		const key = connection ? `${connection.state}:${connection.reason}` : "";
+		if (key === this.connectionKey) return;
+		this.connectionKey = key;
+		const claimed = this.claimed;
+		try {
+			if (claimed) this.store.recordConnection(claimed.consumerId, claimed.activationId, connection);
+		} catch (error) {
+			this.report("connection", `CI connection state was not saved: ${errorText(error)}`);
+		}
+		this.sink?.reportConnection(HOST_EVENT_KINDS["ci-attempt-terminal"].source, connection);
 	}
 
 	private fingerprint(): string | undefined {
@@ -428,7 +487,14 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		const inputs = this.inputs();
 		this.armWatchers(inputs.refDirectory);
 		const activationId = await this.activate(sink, signal);
-		const repository = await this.provider.repository(signal);
+		let repository: CiRepository;
+		try {
+			repository = await this.provider.repository(signal);
+		} catch (error) {
+			signal.throwIfAborted();
+			if (isCiCommandMissing(error)) throw error;
+			throw new CiRepositoryUnavailableError(errorText(error), { cause: error });
+		}
 		signal.throwIfAborted();
 		let snapshot = this.store.snapshot();
 		let consumer = this.consumer(snapshot, sink.consumerId, activationId);

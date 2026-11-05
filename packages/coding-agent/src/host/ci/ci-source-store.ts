@@ -73,6 +73,8 @@ interface Consumer {
 	/** Set exactly when no live host owns the consumer. Custody stays retained until expiry. */
 	parkedAt?: number;
 	pendingGap?: { afterSequence: number; throughSequence: number; cause: HostEventReplayGapReason };
+	/** The active host's last connection transition; absent while armed. Cleared by the next claim. */
+	connection?: { state: "waiting" | "suspended"; reason: string; since: number };
 }
 
 /** Why a consumer's custody was removed while no host owned it. */
@@ -136,6 +138,7 @@ function parseConsumer(value: unknown): Consumer {
 			"activation",
 			"parkedAt",
 			"pendingGap",
+			"connection",
 		],
 		"CI consumer",
 	);
@@ -158,6 +161,7 @@ function parseConsumer(value: unknown): Consumer {
 		...(entry.activation === undefined ? {} : { activation: parseConsumerActivation(entry.activation) }),
 		...(entry.parkedAt === undefined ? {} : { parkedAt: hostEventInteger(entry.parkedAt, "parkedAt", 0) }),
 		...(entry.pendingGap === undefined ? {} : { pendingGap: parseConsumerGap(entry.pendingGap) }),
+		...(entry.connection === undefined ? {} : { connection: parseConsumerConnection(entry.connection) }),
 	};
 	if ((consumer.activation === undefined) === (consumer.parkedAt === undefined))
 		throw new Error("CI consumer must be either active or parked.");
@@ -180,6 +184,17 @@ function parseConsumerGap(value: unknown): NonNullable<Consumer["pendingGap"]> {
 	const cause = entry.cause ?? "consumer_inactive";
 	if (!isHostEventReplayGapReason(cause)) throw new Error("CI consumer replay gap cause is unknown.");
 	return { afterSequence, throughSequence, cause };
+}
+
+function parseConsumerConnection(value: unknown): NonNullable<Consumer["connection"]> {
+	const entry = hostEventRecord(value, ["state", "reason", "since"], "CI consumer connection");
+	if (entry.state !== "waiting" && entry.state !== "suspended")
+		throw new Error("CI consumer connection state is unknown.");
+	return {
+		state: entry.state,
+		reason: hostEventString(entry.reason, "connection reason", 64),
+		since: hostEventInteger(entry.since, "since", 0),
+	};
 }
 
 function parseDeparted(value: unknown): DepartedConsumer {
@@ -568,6 +583,21 @@ export class CiSourceStore {
 			if (JSON.stringify(consumer.pendingStart) !== JSON.stringify(start))
 				throw new Error("CI consumer start acknowledgement differs from its pending handshake.");
 			delete consumer.pendingStart;
+		});
+	}
+
+	/** Durable record of a connection transition; a replaced activation records nothing. */
+	recordConnection(
+		consumerId: string,
+		activationId: string,
+		connection: Pick<NonNullable<Consumer["connection"]>, "state" | "reason"> | undefined,
+	): void {
+		this.change((state) => {
+			const consumer = state.consumers.find((entry) => entry.id === consumerId);
+			if (consumer?.activation?.id !== activationId) return;
+			if (connection)
+				consumer.connection = { state: connection.state, reason: connection.reason, since: this.now() };
+			else delete consumer.connection;
 		});
 	}
 

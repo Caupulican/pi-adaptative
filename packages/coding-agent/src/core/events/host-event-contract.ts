@@ -274,6 +274,16 @@ export interface HostEventConsumerCheckpoint {
 	readonly lastReplayGap?: HostEventReplayGap;
 }
 
+/** A source that cannot observe its upstream right now and retries by itself. No connection state means armed. */
+export interface HostEventSourceConnection {
+	/** `waiting`: the upstream is unreachable; `suspended`: it is reachable but repeated reconciles failed. */
+	readonly state: "waiting" | "suspended";
+	/** Stable class of the cause; one owner notice is told per state and reason. */
+	readonly reason: string;
+	/** One owner-readable line. */
+	readonly text: string;
+}
+
 export interface HostEventSink {
 	readonly consumerId: string;
 	checkpoint(sourceId: string, signal: AbortSignal): Promise<HostEventConsumerCheckpoint | undefined>;
@@ -286,6 +296,8 @@ export interface HostEventSink {
 	/** Revocation remains available after source cancellation. */
 	deactivate(sourceId: string): Promise<void>;
 	subscribeWritable(listener: () => void): () => void;
+	/** Each change of the named source's connection state; never throws into the source. */
+	reportConnection(source: string, connection: HostEventSourceConnection | undefined): void;
 }
 
 export interface HostEventSource {

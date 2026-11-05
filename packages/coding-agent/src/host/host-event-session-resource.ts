@@ -91,6 +91,9 @@ export class HostEventSessionResource implements AgentSessionRuntimeResource {
 			seal: (seal, caller) => invoke(caller, (active) => sink.seal(seal, active)),
 			retireThrough: (horizon, caller) => invoke(caller, (active) => sink.retireThrough(horizon, active)),
 			deactivate: (sourceId) => sink.deactivate(sourceId),
+			reportConnection: (source, connection) => {
+				if (!signal.aborted) sink.reportConnection(source, connection);
+			},
 			subscribeWritable: (listener) =>
 				sink.subscribeWritable(() => {
 					if (!signal.aborted) listener();

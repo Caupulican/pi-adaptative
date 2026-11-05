@@ -163,6 +163,15 @@ export class HostEventSessionController {
 					events.prune();
 				}),
 			deactivate: async (sourceId) => events.deactivateSource(sourceId, lifetime),
+			reportConnection: (source, connection) => {
+				if (!this.active()) return;
+				deps.observeNotice("host-event-source", () => ({
+					scope: source,
+					state: connection
+						? { reason: `${connection.state}:${connection.reason}`, text: connection.text }
+						: "clear",
+				}));
+			},
 			subscribeWritable: (listener) => {
 				const notify = () => {
 					if (!this.signal.aborted && !this.closed) listener();
