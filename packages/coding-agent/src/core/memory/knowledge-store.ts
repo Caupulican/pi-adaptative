@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { knowledgeDatabaseFile } from "../agent-paths.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
+import { KNOWLEDGE_COLLECTION_SCHEMA, KnowledgeCollectionJournal } from "./knowledge-collection-journal.ts";
 import {
 	isKnowledgeCitation,
 	isKnowledgeScope,
@@ -10,6 +11,8 @@ import {
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
 	type KnowledgeKind,
+	type KnowledgeMutationReceipt,
+	type KnowledgeOperation,
 	type KnowledgeRecord,
 	type KnowledgeRecordSnapshot,
 	type KnowledgeScope,
@@ -23,7 +26,7 @@ import {
 } from "./knowledge-record.ts";
 import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_QUERY_TERMS = 8;
 
 function terms(text: string): string[] {
@@ -57,10 +60,12 @@ function decode(row: Record<string, unknown>): KnowledgeRecord {
 
 export class KnowledgeStore implements KnowledgeStorePort {
 	private readonly db: SqliteDatabase;
+	readonly collection: KnowledgeCollectionJournal;
 	private closed = false;
 
 	private constructor(db: SqliteDatabase) {
 		this.db = db;
+		this.collection = new KnowledgeCollectionJournal(db);
 	}
 
 	static open(agentDir: string): KnowledgeStore {
@@ -71,7 +76,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION)
+			if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION)
 				throw new Error("Unsupported ICM knowledge schema");
 			const store = new KnowledgeStore(db);
 			if (version !== SCHEMA_VERSION)
@@ -81,11 +86,12 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					if (lockedVersion === 1) {
 						db.exec(`ALTER TABLE entries ADD COLUMN identity TEXT;
 						UPDATE entries SET identity=json_array(json_extract(body,'$.subject'),json_extract(body,'$.key')) WHERE body IS NOT NULL;
-						PRAGMA user_version=${SCHEMA_VERSION};`);
-						return;
+						`);
 					}
-					if (lockedVersion !== 0) throw new Error("ICM knowledge schema changed during initialization");
-					db.exec(`
+					if (lockedVersion !== 0 && lockedVersion !== 1 && lockedVersion !== 2)
+						throw new Error("ICM knowledge schema changed during initialization");
+					if (lockedVersion === 0)
+						db.exec(`
 					CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
 					INSERT INTO meta VALUES(1,0);
 					CREATE TABLE entries (
@@ -105,8 +111,11 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					 PRIMARY KEY(id,session,source)
 					) STRICT, WITHOUT ROWID;
 					CREATE TABLE forgotten_sources (id TEXT NOT NULL REFERENCES entries(id), session TEXT NOT NULL, source TEXT NOT NULL, PRIMARY KEY(id,session,source)) STRICT, WITHOUT ROWID;
-					PRAGMA user_version=${SCHEMA_VERSION};
 				`);
+					db.exec(`CREATE TABLE operation_receipts (
+					 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('remember','forget')),
+					 entry_id TEXT NOT NULL REFERENCES entries(id), revision INTEGER NOT NULL CHECK(revision>0)
+						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`);
 				});
 			return store;
 		});
@@ -122,6 +131,49 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	version(id: string): number {
 		requireId(id);
 		return requireVersion(this.db.prepare("SELECT revision FROM entries WHERE id=?").get(id)?.revision ?? 0);
+	}
+
+	operationReceipt(operation: KnowledgeOperation): KnowledgeMutationReceipt | undefined {
+		requireId(operation.id);
+		requireId(operation.digest);
+		const row = this.db
+			.prepare("SELECT digest,action,entry_id,revision FROM operation_receipts WHERE operation_id=?")
+			.get(operation.id);
+		if (!row) return undefined;
+		if (row.digest !== operation.digest) throw new Error("Knowledge operation identity has a different payload");
+		if ((row.action !== "remember" && row.action !== "forget") || typeof row.entry_id !== "string")
+			throw new Error("Invalid knowledge operation receipt");
+		requireId(row.entry_id);
+		const revision = requireVersion(row.revision);
+		if (revision < 1) throw new Error("Invalid knowledge operation receipt revision");
+		return { action: row.action, id: row.entry_id, revision };
+	}
+
+	private recordOperation(
+		receipt: KnowledgeMutationReceipt,
+		operation?: KnowledgeOperation,
+	): KnowledgeMutationReceipt {
+		if (operation)
+			this.db
+				.prepare("INSERT INTO operation_receipts VALUES(?,?,?,?,?)")
+				.run(operation.id, operation.digest, receipt.action, receipt.id, receipt.revision);
+		return receipt;
+	}
+
+	private mutate(
+		assertCurrent: () => void,
+		signal: AbortSignal | undefined,
+		operation: KnowledgeOperation | undefined,
+		write: (admission: MemoryMutationAdmission) => KnowledgeMutationReceipt,
+	): KnowledgeMutationReceipt {
+		const admission = new MemoryMutationAdmission(signal);
+		return this.transaction(() => {
+			admission.assertPending();
+			const replay = operation && this.operationReceipt(operation);
+			if (replay) return replay;
+			assertCurrent();
+			return write(admission);
+		});
 	}
 
 	/** Revision and all category pages describe one database snapshot, including concurrent writers. */
@@ -276,14 +328,17 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		);
 	}
 
-	put(input: KnowledgeRecord, expectedRevision: number, assertCurrent: () => void, signal?: AbortSignal): void {
+	put(
+		input: KnowledgeRecord,
+		expectedRevision: number,
+		assertCurrent: () => void,
+		signal?: AbortSignal,
+		operation?: KnowledgeOperation,
+	): KnowledgeMutationReceipt {
 		const record = parseKnowledgeRecord(input);
 		requireVersion(expectedRevision);
 		if (record.revision !== expectedRevision + 1) throw new Error("Knowledge revision must advance exactly once");
-		const admission = new MemoryMutationAdmission(signal);
-		this.transaction(() => {
-			admission.assertPending();
-			assertCurrent();
+		return this.mutate(assertCurrent, signal, operation, (admission) => {
 			if (this.version(record.id) !== expectedRevision) throw new Error("Knowledge changed before commit");
 			const previous = this.get(record.id);
 			const fence = this.db.prepare("SELECT evidence_after FROM entries WHERE id=?").get(record.id)?.evidence_after;
@@ -326,6 +381,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			const addSource = this.db.prepare("INSERT OR IGNORE INTO sources VALUES(?,?,?)");
 			for (const citation of record.citations) addSource.run(record.id, citation.sessionId, citation.sourceId);
 			this.db.prepare("UPDATE meta SET revision=revision+1 WHERE id=1").run();
+			return this.recordOperation({ action: "remember", id: record.id, revision: record.revision }, operation);
 		});
 	}
 
@@ -335,15 +391,13 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		citations: readonly KnowledgeCitation[],
 		assertCurrent: () => void,
 		signal?: AbortSignal,
-	): void {
+		operation?: KnowledgeOperation,
+	): KnowledgeMutationReceipt {
 		requireId(id);
 		requireVersion(expectedRevision);
 		if (citations.length < 1 || citations.length > MAX_KNOWLEDGE_CITATIONS || !citations.every(isKnowledgeCitation))
 			throw new TypeError("Forgetting requires bounded original owner evidence");
-		const admission = new MemoryMutationAdmission(signal);
-		this.transaction(() => {
-			admission.assertPending();
-			assertCurrent();
+		return this.mutate(assertCurrent, signal, operation, (admission) => {
 			if (expectedRevision === 0 || this.version(id) !== expectedRevision || !this.get(id))
 				throw new Error("Knowledge changed before forgetting");
 			requireVersion(expectedRevision + 1);
@@ -368,6 +422,9 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			this.db.prepare("DELETE FROM terms WHERE id=?").run(id);
 			this.db.prepare("DELETE FROM sources WHERE id=?").run(id);
 			this.db.prepare("UPDATE meta SET revision=revision+1 WHERE id=1").run();
+			const receipt = this.recordOperation({ action: "forget", id, revision: expectedRevision + 1 }, operation);
+			this.collection.discardPendingValues(barrier);
+			return receipt;
 		});
 	}
 

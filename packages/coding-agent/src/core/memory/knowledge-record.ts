@@ -56,6 +56,19 @@ export interface KnowledgeRecordSnapshot {
 	possiblyMore: KnowledgeKind[];
 }
 
+/** Host-owned identity of one immutable candidate; never supplied by a model tool. */
+export interface KnowledgeOperation {
+	readonly id: string;
+	readonly digest: string;
+}
+
+/** Content-free proof of a committed mutation; retained across corrections and forgetting. */
+export interface KnowledgeMutationReceipt {
+	readonly action: "remember" | "forget";
+	readonly id: string;
+	readonly revision: number;
+}
+
 export const MAX_KNOWLEDGE_TEXT_CHARS = 2_000;
 export const MAX_KNOWLEDGE_CITATIONS = 16;
 export const MAX_KNOWLEDGE_PAGE_SIZE = 100;
@@ -216,6 +229,7 @@ export function knowledgeAppliesTo(record: KnowledgeScope, scope: KnowledgeScope
 
 /** Mutation effects and evidence receipts commit together at this storage boundary. */
 export interface KnowledgeStorePort {
+	operationReceipt(operation: KnowledgeOperation): KnowledgeMutationReceipt | undefined;
 	revision(): number;
 	version(id: string): number;
 	snapshot(scope: KnowledgeScope, at: string): KnowledgeRecordSnapshot;
@@ -228,13 +242,20 @@ export interface KnowledgeStorePort {
 	): KnowledgeRecord[];
 	history(id: string, beforeRevision?: number): KnowledgeRecord[];
 	isSourceForgotten(id: string, sessionId: string, sourceId: string): boolean;
-	put(record: KnowledgeRecord, expectedRevision: number, assertCurrent: () => void, signal?: AbortSignal): void;
+	put(
+		record: KnowledgeRecord,
+		expectedRevision: number,
+		assertCurrent: () => void,
+		signal?: AbortSignal,
+		operation?: KnowledgeOperation,
+	): KnowledgeMutationReceipt;
 	forget(
 		id: string,
 		expectedRevision: number,
 		citations: readonly KnowledgeCitation[],
 		assertCurrent: () => void,
 		signal?: AbortSignal,
-	): void;
+		operation?: KnowledgeOperation,
+	): KnowledgeMutationReceipt;
 	close(): void;
 }
