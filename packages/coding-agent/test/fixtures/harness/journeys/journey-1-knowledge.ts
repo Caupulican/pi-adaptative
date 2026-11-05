@@ -461,4 +461,6 @@ async function runOwnerKnowledgeCommands(
 		root.session.prompt("What do you know about my formatting?"),
 	);
 	await icmWaitForChatIdle(world, agentDir, records, (chat) => chat.length === records);
+	// Normal-order control: the same counter moves by exactly the one request of a real owner turn.
+	expect(rootRequests(), "an owner turn after the commands reaches the model once").toBe(requestsBound + 1);
 }
