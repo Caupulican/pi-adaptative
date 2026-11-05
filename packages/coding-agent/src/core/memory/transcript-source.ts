@@ -162,6 +162,14 @@ function messageUnits(message: unknown, uncaptured: Record<string, number>): Cap
 }
 
 /**
+ * Whether an entry of this type can contribute to a session's capture (spans or uncaptured counts). Every other
+ * type is lineage structure only: appended at the leaf, it leaves every captured span and count as it was.
+ */
+export function capturesTranscriptEntryType(type: SessionEntry["type"]): boolean {
+	return type === "message" || type === "custom_message";
+}
+
+/**
  * Capture one session entry. Returns undefined for entries that are not conversation content
  * (lifecycle, model changes, labels, ...). Spans start labelled `selected`; the owning
  * {@link SessionCaptureState} relabels them from ancestry.
@@ -172,6 +180,7 @@ export function captureEntry(
 	sessionId: string,
 	checkpoint?: () => void,
 ): EntryCapture | undefined {
+	if (!capturesTranscriptEntryType(entry.type)) return undefined;
 	const uncaptured: Record<string, number> = {};
 	let reason: string | undefined;
 	const note = (why: TranscriptUncapturedReason, amount = 1): void => {

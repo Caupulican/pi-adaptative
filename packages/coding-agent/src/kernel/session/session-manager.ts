@@ -343,6 +343,12 @@ export interface SessionEntriesPersistedEvent {
 	readonly sessionFile: string;
 	readonly entryIds: readonly string[];
 	readonly rewritten: boolean;
+	/**
+	 * Present only for an append whose entries each descend from the entry written just before it, the first from
+	 * the entry that ended the file: the file's last-entry lineage grew at its leaf and nothing written earlier
+	 * moved. `types` lists the entry type of each id in `entryIds`, in order.
+	 */
+	readonly leafAppend?: { readonly types: readonly SessionEntry["type"][] };
 }
 
 export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
@@ -2484,6 +2490,15 @@ export class SessionManager {
 				);
 			throw error;
 		}
+		const tail = fileEntries.at(-1);
+		let parentId: string | null = tail === undefined || tail.type === "session" ? null : tail.id;
+		const leafAppend =
+			!initialFlush &&
+			entries.every((entry) => {
+				const extendsLeaf = entry.parentId === parentId;
+				parentId = entry.id;
+				return extendsLeaf;
+			});
 		return {
 			event: Object.freeze({
 				sessionId,
@@ -2494,6 +2509,9 @@ export class SessionManager {
 						: entries.map((entry) => entry.id),
 				),
 				rewritten: false,
+				...(leafAppend
+					? { leafAppend: Object.freeze({ types: Object.freeze(entries.map((entry) => entry.type)) }) }
+					: {}),
 			}),
 			...(recoveredFailure ? { recoveredFailure } : {}),
 		};

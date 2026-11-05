@@ -35,6 +35,7 @@ import {
 	type TranscriptSourcePageRequest,
 	type TranscriptSourcePageResult,
 } from "../transcript-memory-contracts.ts";
+import { capturesTranscriptEntryType } from "../transcript-source.ts";
 import {
 	isTranscriptRecallRangeCheck,
 	isTranscriptRecallWorkerResponse,
@@ -89,6 +90,13 @@ interface PendingRequest {
 interface QueuedIngest {
 	sessionId: string;
 	rewritten: boolean;
+	/** Every coalesced announcement only grew the lineage at its leaf with entries that capture nothing. */
+	captureNeutral: boolean;
+}
+
+/** An append at the leaf of entries that capture nothing cannot change any span, count or lineage position. */
+function isCaptureNeutral(event: SessionEntriesPersistedEvent): boolean {
+	return !event.rewritten && event.leafAppend?.types.every((type) => !capturesTranscriptEntryType(type)) === true;
 }
 
 /** What an initialized generation needs to start its worker; held until the one start consumes it. */
@@ -206,7 +214,13 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	private readonly indexListeners = new Set<(event: TranscriptIndexChangeEvent) => void>();
 	/** Ingest sequence of this generation, assigned when an ingest is posted (including the replay at ready). */
 	private ingestSeq = 0;
-	/** The last ingest sequence posted per session id, this generation. */
+	/**
+	 * The last ingest sequence posted, this generation, that may change captured content. A capture-neutral append
+	 * still travels in order (the worker reads from its offset), but no answer depends on it; should the worker find
+	 * captured content anyway (another writer's lines), its coverage change still moves the index revision.
+	 */
+	private contentIngestSeq = 0;
+	/** The last ingest sequence posted per session id, this generation, that may change captured content. */
 	private readonly lastIngestSeq = new Map<string, number>();
 	/** Lineage revision bumps learned from this generation's coverage messages, per session id. */
 	private readonly lineageBumps = new Map<string, SessionLineageBumps>();
@@ -325,15 +339,25 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 			this.queuedIngests.set(event.sessionFile, {
 				sessionId: event.sessionId,
 				rewritten: (queued?.rewritten ?? false) || event.rewritten,
+				captureNeutral: (queued?.captureNeutral ?? true) && isCaptureNeutral(event),
 			});
 			return;
 		}
-		this.postIngest(worker, event.sessionId, event.sessionFile, event.rewritten);
+		this.postIngest(worker, event.sessionId, event.sessionFile, event.rewritten, isCaptureNeutral(event));
 	}
 
-	private postIngest(worker: Worker, sessionId: string, sessionFile: string, rewritten: boolean): void {
+	private postIngest(
+		worker: Worker,
+		sessionId: string,
+		sessionFile: string,
+		rewritten: boolean,
+		captureNeutral: boolean,
+	): void {
 		const seq = ++this.ingestSeq;
-		this.lastIngestSeq.set(sessionId, seq);
+		if (!captureNeutral) {
+			this.contentIngestSeq = seq;
+			this.lastIngestSeq.set(sessionId, seq);
+		}
 		this.post(worker, this.generation, {
 			type: "ingest",
 			generation: this.generation,
@@ -496,8 +520,9 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	 * Judge an observation against what this process knows now, synchronously (no I/O, no await), in order:
 	 * 1. the backend that answered is gone, failed or replaced (one worker per generation, so the same generation
 	 *    with a live worker is the same worker): `unavailable` with the cause;
-	 * 2. an ingest of an observed session was posted after the answer's highest received one: `changed` (the parent
-	 *    cannot tell an append from a branch switch before the index applies it);
+	 * 2. an ingest of an observed session (any session, for a search) that may change captured content was posted
+	 *    after the answer's highest received one: `changed` (the parent cannot tell an append of conversation from a
+	 *    branch switch before the index applies it; a leaf append of entries that capture nothing is neither);
 	 * 3. an observed session's lineage revision moved with a change below the position the answer depended on:
 	 *    `changed`; a move older than the remembered bump history is judged changed too.
 	 * Freshness is against notified and indexed state only, and relies on the worker's messages arriving in post
@@ -513,7 +538,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		if (!this.worker) return { status: "unavailable", reason: this.failure ?? SHUT_DOWN_REASON };
 		if (
 			observation.indexRevision !== undefined &&
-			(observation.indexRevision !== this.indexRevision || observation.ingestSeq !== this.ingestSeq)
+			(observation.indexRevision !== this.indexRevision || observation.ingestSeq < this.contentIngestSeq)
 		)
 			return { status: "changed", reason: "The transcript search index changed after the answer." };
 		for (const session of observation.sessions) {
@@ -796,7 +821,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 				this.ready = true;
 				this.latestCoverage = message.coverage;
 				for (const [sessionFile, queued] of this.queuedIngests) {
-					this.postIngest(worker, queued.sessionId, sessionFile, queued.rewritten);
+					this.postIngest(worker, queued.sessionId, sessionFile, queued.rewritten, queued.captureNeutral);
 				}
 				this.queuedIngests.clear();
 				this.finishReady(undefined);
@@ -918,6 +943,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		this.queuedIngests.clear();
 		// Sequences and revisions belong to the generation that ends here.
 		this.ingestSeq = 0;
+		this.contentIngestSeq = 0;
 		this.lastIngestSeq.clear();
 		this.lineageBumps.clear();
 		this.indexRevision = 0;

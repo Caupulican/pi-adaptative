@@ -678,7 +678,13 @@ export class TranscriptRecallProcessor {
 		record.skip = skip;
 	}
 
-	private adoptState(record: SessionRecord, state: SessionCaptureState, capture: CaptureExtent): void {
+	/** `contentChanged` false: the state only advanced past lines that captured nothing, so no answer can differ. */
+	private adoptState(
+		record: SessionRecord,
+		state: SessionCaptureState,
+		capture: CaptureExtent,
+		contentChanged = true,
+	): void {
 		this.retainedBytes += state.retainedBytes - record.accountedBytes;
 		if (record.skip !== undefined && FAILURE_REASON.test(record.skip)) this.noteRecovery();
 		record.accountedBytes = state.retainedBytes;
@@ -687,7 +693,7 @@ export class TranscriptRecallProcessor {
 		record.observedSize = capture.size;
 		record.prefixProbe = capture.probe;
 		record.skip = undefined;
-		this.changedSessionIds.add(record.sessionId);
+		if (contentChanged) this.changedSessionIds.add(record.sessionId);
 		this.index.replaceSession(record.sessionId, state.spans(), { current: record.isCurrent });
 	}
 
@@ -931,6 +937,10 @@ export class TranscriptRecallProcessor {
 		const previousBranch = state.branchEntryIds;
 		// A rebuild in `finalize` replaces the selected list, so this keeps the previous one for comparison.
 		const previousSelected = state.selectedSpans();
+		// Growth extends that same list in place, so its length and the capture totals are taken now.
+		const previousSelectedCount = previousSelected.length;
+		const previousSpanCount = state.spanCount;
+		const previousUncaptured = JSON.stringify(state.uncaptured);
 		const capture = this.captureInto(record, state, record.offset, MAX_RETAINED_BYTES, "ingest", record.prefixProbe);
 		if (capture === undefined) return;
 		if (capture.diverged) {
@@ -941,10 +951,20 @@ export class TranscriptRecallProcessor {
 			return;
 		}
 		// A selected lineage that is no longer a prefix extension of the previous one is a branch switch.
-		if (!state.lineageExtends(previousBranch)) {
+		const extended = state.lineageExtends(previousBranch);
+		if (!extended) {
 			this.invalidate(record.sessionId, state.firstChangedPosition(previousSelected, this.checkpoint));
 		}
-		this.adoptState(record, state, capture);
+		// Lines that captured nothing at the leaf (accounting, labels, model changes) leave every answer as it was.
+		this.adoptState(
+			record,
+			state,
+			capture,
+			!extended ||
+				state.spanCount !== previousSpanCount ||
+				state.selectedSpans().length !== previousSelectedCount ||
+				JSON.stringify(state.uncaptured) !== previousUncaptured,
+		);
 		record.mtimeMs = metadata.mtimeMs;
 		this.evictFor(record);
 	}
