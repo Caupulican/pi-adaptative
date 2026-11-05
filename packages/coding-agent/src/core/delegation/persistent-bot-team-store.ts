@@ -1817,7 +1817,7 @@ export class PersistentBotTeamStore {
 							? routine.executionSnapshot?.savedIntent.receiptOrigin
 							: input.receiptOrigin;
 					if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
-					if (!this.routineJournalHasRoom()) {
+					if (!this.routineJournalHasRoom(input.nowMs)) {
 						journalFull = true;
 						continue;
 					}

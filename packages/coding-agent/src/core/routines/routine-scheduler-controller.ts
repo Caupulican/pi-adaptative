@@ -881,7 +881,9 @@ export class RoutineSchedulerController {
 			!routine.enabled ||
 			routine.target.kind !== "session" ||
 			routine.target.parentSessionId !== this.deps.parentSessionId ||
-			routine.schedule.kind === "event"
+			routine.schedule.kind === "event" ||
+			// An ended routine has no run left; the parent retires it when it opens.
+			routineEnded(routine.schedule, routine.cursor, this.deps.timers.now()) !== undefined
 		)
 			return undefined;
 		const snapshot = routine.executionSnapshot;
