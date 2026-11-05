@@ -13,6 +13,7 @@ import {
 	hostEventString,
 } from "./host-event-contract.ts";
 import { hostEventParentInput } from "./host-event-delivery.ts";
+import { hostEventSuperseded } from "./host-event-reducer.ts";
 import type { HostEventSourceLifetime } from "./host-event-runtime.ts";
 import type { HostEventDelivery } from "./host-event-state.ts";
 
@@ -34,6 +35,10 @@ export interface HostEventSessionControllerDeps {
 	/** Records how a root delivery was accepted, for `/proactivity status`. */
 	rootDelivered(delivery: ParentWakeDelivery): void;
 	deliverParent(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
+	/** Delivery ids of the parent inputs held for the owner's next turn and not yet selected by one. */
+	heldParentInputs(): readonly string[];
+	/** Records a held input as skipped; `false` when an owner turn took it first. */
+	skipParentInput(deliveryId: string, reason: string): boolean;
 	/**
 	 * `dormant` keeps the delivery pending until a state, readiness or control change re-drives it;
 	 * `unavailable` means the running execution can never hold the event and hands it back.
@@ -287,6 +292,18 @@ export class HostEventSessionController {
 	private async drainRoot(): Promise<void> {
 		this.assertCurrent();
 		const events = this.deps.runtime.hostEvents;
+		// A held result a later attempt of the same subject replaced would reach the owner stale: skip it with a record.
+		for (const deliveryId of this.deps.heldParentInputs()) {
+			const delivery = events.getDelivery(deliveryId);
+			const accepted = delivery?.target.kind === "root" ? events.getEvent(delivery.eventId) : undefined;
+			if (!accepted || !hostEventSuperseded(this.deps.runtime.getSnapshot(), accepted)) continue;
+			try {
+				this.assertCurrent();
+				this.deps.skipParentInput(deliveryId, "source_superseded");
+			} catch (error) {
+				this.report(deliveryId, error);
+			}
+		}
 		for (const delivery of events.pendingDeliveries()) {
 			if (delivery.target.kind !== "root") continue;
 			this.assertCurrent();

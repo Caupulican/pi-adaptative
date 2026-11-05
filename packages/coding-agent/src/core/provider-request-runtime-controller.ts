@@ -22,7 +22,10 @@ export interface ProviderRequestRuntimeControllerDeps {
 	agent: Agent;
 	compaction: Pick<CompactionController, "admitProviderRequest" | "measureLiveContextTokens">;
 	context: ProviderRequestContextController;
-	parentInputs: Pick<SessionManager, "captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds">;
+	parentInputs: Pick<
+		SessionManager,
+		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds" | "getSkippedParentInputIds"
+	>;
 	getSubmissionEpoch(): number | undefined;
 	admitGoalRequest(): number | undefined;
 	/** Session-wide per-response output cap; see SettingsManager.getMaxOutputTokens. */

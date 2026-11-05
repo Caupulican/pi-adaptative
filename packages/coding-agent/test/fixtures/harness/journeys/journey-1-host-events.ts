@@ -24,7 +24,11 @@ import {
 	readCiStatusFile,
 	writeCiStatus,
 } from "../../../../src/host/ci/ci-status-record.ts";
-import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import {
+	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
+	parentInputOf,
+	parentInputOriginalDetails,
+} from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -520,11 +524,11 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			const gapPaths: CiGitPaths = { ...paths, statusDir: join(gitDir, "pi-ci-gap") };
 			const gapStore = new CiSourceStore(gapPaths.statusDir, { now: () => Date.now() + gapClockSkew });
 			const gapSubject: CiSubject = { ...subject, workflowId: 602 };
-			const gapAttempt = (runAttempt: number) =>
+			const gapAttempt = (runAttempt: number, conclusion: "failure" | "success" = "success") =>
 				createCiAttemptTerminalEvent({
 					identity: { ...currentFailure.identity, workflowId: 602, runId: 702, runAttempt },
 					headSha: sha,
-					conclusion: "success",
+					conclusion,
 					workflowPath: repository.workflowPath,
 					observedAt: `2026-11-05T01:0${runAttempt}:00.000Z`,
 					runUrl: "https://github.com/harness/repository/actions/runs/702",
@@ -546,6 +550,8 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 							current: { ...observation(latest), subject: gapSubject },
 						};
 					},
+					// The red attempt's display record lives in this source's own status directory.
+					failedJobs: async () => ["gap job"],
 				},
 				store: gapStore,
 				onDiagnostic: (message) => gapDiagnostics.push(message),
@@ -574,6 +580,29 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 						details.kind === "host-event-gap"
 					);
 				});
+			const persisted = (done: () => boolean) =>
+				new Promise<void>((resolve) => {
+					const check = () => {
+						if (!done()) return;
+						off();
+						resolve();
+					};
+					const off = fresh.sessionManager.onEntriesPersisted(check);
+					check();
+				});
+			const heldEvents = () => {
+				const deliveries = fresh.session.backgroundLanes.getTaskRuntimeSnapshot()!.eventDeliveries;
+				return fresh.sessionManager.getPendingParentInputs("next-owner-turn").flatMap((input) => {
+					const delivery = deliveries[input.metadata.deliveryId];
+					return delivery ? [delivery.eventId] : [];
+				});
+			};
+			const skipRecords = () =>
+				fresh.sessionManager
+					.getEntries()
+					.flatMap((entry) =>
+						entry.type === "custom" && entry.customType === PARENT_INPUT_SKIPPED_CUSTOM_TYPE ? [entry.data] : [],
+					);
 			try {
 				const registered = gapSealed();
 				await gapSource.source.start(registered.sink);
@@ -587,15 +616,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				gapClockSkew = CI_PARKED_CONSUMER_TTL_MS + 60_000;
 				gapEvents = [gapAttempt(1), gapAttempt(2)];
 				gapStore.retain(gapEvents);
-				const noticed = new Promise<void>((resolve) => {
-					const check = () => {
-						if (gapNotices().length === 0) return;
-						off();
-						resolve();
-					};
-					const off = fresh.sessionManager.onEntriesPersisted(check);
-					check();
-				});
+				const noticed = persisted(() => gapNotices().length > 0);
 				const resumed = gapSealed();
 				await gapSource.source.start(resumed.sink);
 				await withDeadline(
@@ -613,6 +634,44 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				});
 				expect(gapNotices(), "one owner notice per gap").toHaveLength(1);
 				expect(fresh.sessionManager.getPendingParentInputs("turn"), "a gap notice never wakes a turn").toEqual([]);
+				expect(gapDiagnostics).toEqual([]);
+
+				// Past the wake bound a red attempt waits for the owner; a later attempt of the same run replaces it, so the
+				// held result is skipped with a record instead of reaching the owner stale.
+				fresh.settingsManager.setProactivitySettings({
+					...fresh.settingsManager.getProactivitySettings(),
+					maxTurnWakesPerDay: 0,
+				});
+				const red = gapAttempt(3, "failure");
+				gapEvents = [...gapEvents, red];
+				const redSealed = gapSealed();
+				const redHeld = persisted(() => heldEvents().includes(red.eventId));
+				await gapSource.source.start(redSealed.sink);
+				await withDeadline(
+					world.trace,
+					"a red attempt past the wake bound is held for the owner's next turn",
+					Promise.all([redSealed.sealed.promise, redHeld]),
+				);
+				await gapSource.source.stop();
+				const rerun = gapAttempt(4);
+				gapEvents = [...gapEvents, rerun];
+				const rerunSealed = gapSealed();
+				const replaced = persisted(() => skipRecords().length > 0 && heldEvents().includes(rerun.eventId));
+				await gapSource.source.start(rerunSealed.sink);
+				await withDeadline(
+					world.trace,
+					"a held red result a later attempt replaced is skipped with a record",
+					Promise.all([rerunSealed.sealed.promise, replaced]),
+				);
+				await gapSource.source.stop();
+				const redDelivery = Object.values(
+					fresh.session.backgroundLanes.getTaskRuntimeSnapshot()!.eventDeliveries,
+				).find((delivery) => delivery.eventId === red.eventId && delivery.target.kind === "root");
+				expect(skipRecords(), "one record names the skipped result and its cause").toEqual([
+					expect.objectContaining({ deliveryId: redDelivery?.deliveryId, reason: "source_superseded" }),
+				]);
+				expect(heldEvents(), "only the passing rerun waits for the owner").toEqual([rerun.eventId]);
+				expect(fresh.sessionManager.getPendingParentInputs("turn"), "held results never wake a turn").toEqual([]);
 				expect(gapDiagnostics).toEqual([]);
 			} finally {
 				await gapSource.source.stop();

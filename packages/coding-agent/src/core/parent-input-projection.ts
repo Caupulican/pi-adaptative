@@ -3,7 +3,10 @@ import { createCustomMessage } from "../kernel/messages.ts";
 import { parentInputMetadataOfMessage, parentNoteMarker } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 
-/** Pending note bodies stay out of ordinary history; consumed notes retain their canonical history position. */
+/**
+ * Pending and skipped note bodies stay out of ordinary history; consumed notes retain their canonical history
+ * position.
+ */
 function savedInputId(message: AgentMessage): string | false {
 	return message.role === "custom" ? (parentInputMetadataOfMessage(message)?.deliveryId ?? false) : false;
 }
@@ -11,13 +14,17 @@ function savedInputId(message: AgentMessage): string | false {
 /** One wrapper around the existing ICM/base plan: authorizes before filtering, projects only the selected batch. */
 export function projectParentInputs(
 	base: AgentContextPlanFn,
-	manager: Pick<SessionManager, "captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds">,
+	manager: Pick<
+		SessionManager,
+		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds" | "getSkippedParentInputIds"
+	>,
 	getSubmissionEpoch: () => number | undefined,
 ): AgentContextPlanFn {
 	return async (request, signal) => {
 		const epoch = getSubmissionEpoch();
 		const selection = manager.captureParentNotes(request.messages, epoch);
 		const pending = new Set(manager.getPendingParentInputs().map((input) => input.metadata.deliveryId));
+		const skipped = manager.getSkippedParentInputIds();
 		const active = manager.getActiveParentInputIds();
 		const isCurrent = (): boolean => {
 			if (getSubmissionEpoch() !== epoch) return false;
@@ -33,7 +40,7 @@ export function projectParentInputs(
 		};
 		const keep = (message: AgentMessage): boolean => {
 			const id = savedInputId(message);
-			return id === false || !pending.has(id) || active.has(id);
+			return id === false || (!pending.has(id) && !skipped.has(id)) || active.has(id);
 		};
 		const messages = request.messages.filter(keep);
 		const plan = await base(
@@ -56,7 +63,8 @@ export function projectParentInputs(
 					? [
 							createCustomMessage(
 								"parent-note-selection",
-								parentNoteMarker(selection.selectionId),
+								// Held notes may wait days for the owner: the saved time lets the model weigh their age.
+								`${parentNoteMarker(selection.selectionId)}\nHeld since ${new Date(Math.min(...selection.messages.map((message) => message.timestamp))).toISOString()}; check current state before acting on any of them.`,
 								false,
 								undefined,
 								new Date(selection.messages[0]!.timestamp).toISOString(),

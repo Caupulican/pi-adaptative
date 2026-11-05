@@ -6,6 +6,7 @@ import {
 	MAX_PENDING_PARENT_INPUTS,
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
 	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
@@ -3409,6 +3410,44 @@ export class SessionManager {
 	 */
 	getParentInput(deliveryId: string): PersistedParentInput | undefined {
 		return this._parentInputReceipt(deliveryId);
+	}
+
+	/** Held inputs their producer skipped on this branch; their saved bodies never reach the model. */
+	getSkippedParentInputIds(): ReadonlySet<string> {
+		return this._parentInputIndex().skippedInputs();
+	}
+
+	/**
+	 * Records that a held next-owner-turn input became stale before the owner saw it. An input an owner turn already
+	 * selected, or a provider request carries, is going to the owner and stays: the result is `false`, as for an input
+	 * that is not pending on this branch.
+	 */
+	skipPendingParentInput(deliveryId: string, reason: string): boolean {
+		const held = () =>
+			this._parentInputIndex()
+				.pendingInputs("next-owner-turn")
+				.find((input) => input.metadata.deliveryId === deliveryId);
+		const selected = () =>
+			[
+				this.plannedParentNotes,
+				...[...(this.parentNoteAdmission?.owners.values() ?? [])].map((owner) => owner.selection),
+			].some((selection) => selection?.inputs.some((input) => input.deliveryId === deliveryId)) ||
+			this._parentInputIndex().bound(deliveryId);
+		const input = held();
+		if (!input || selected()) return false;
+		return this._withParentInputMutation(input.metadata.origin, () => {
+			const current = held();
+			if (!current || selected()) return false;
+			const id = this.appendCustomEntry(PARENT_INPUT_SKIPPED_CUSTOM_TYPE, {
+				version: 1,
+				deliveryId,
+				entryId: current.entryId,
+				payloadDigest: current.metadata.payloadDigest,
+				reason,
+			});
+			if (!this.isEntryPersisted(id)) throw new Error("Parent input skip was not physically persisted.");
+			return true;
+		});
 	}
 
 	/** Indexed canonical source for both live ingestion and the same proof used by historical imports. */

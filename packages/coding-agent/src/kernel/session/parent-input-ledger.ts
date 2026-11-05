@@ -263,6 +263,47 @@ export function parentInputRequestBindingOf(entry: SessionEntry): ParentInputReq
 	return { kind: "wake", requestId: data.requestId, wakeId: data.wakeId };
 }
 
+export const PARENT_INPUT_SKIPPED_CUSTOM_TYPE = "parent_input_skipped";
+
+/**
+ * A held next-owner-turn input its producer proved stale before any owner turn selected it. It names the exact pending
+ * input; the input leaves the pending set and never reaches the model.
+ */
+export interface ParentInputSkip {
+	readonly version: 1;
+	readonly deliveryId: string;
+	readonly entryId: string;
+	readonly payloadDigest: string;
+	/** Stable producer reason, e.g. `superseded`. */
+	readonly reason: string;
+}
+
+export function parentInputSkipOf(entry: SessionEntry): ParentInputSkip | undefined {
+	if (entry.type !== "custom" || entry.customType !== PARENT_INPUT_SKIPPED_CUSTOM_TYPE) return undefined;
+	const data = entry.data;
+	if (
+		!isPlainRecord(data) ||
+		data.version !== 1 ||
+		typeof data.deliveryId !== "string" ||
+		!data.deliveryId ||
+		data.deliveryId.length > 256 ||
+		typeof data.entryId !== "string" ||
+		!data.entryId ||
+		typeof data.payloadDigest !== "string" ||
+		!/^[a-f0-9]{64}$/.test(data.payloadDigest) ||
+		typeof data.reason !== "string" ||
+		!/^[a-z][a-z_-]{0,63}$/.test(data.reason)
+	)
+		throw new Error("Parent input skip is invalid.");
+	return {
+		version: 1,
+		deliveryId: data.deliveryId,
+		entryId: data.entryId,
+		payloadDigest: data.payloadDigest,
+		reason: data.reason,
+	};
+}
+
 export interface ParentWakeSettlement {
 	readonly wakeId: string;
 	readonly requestId: string;
@@ -438,6 +479,7 @@ export function parentWakeOf(entry: SessionEntry): ParentInputWake | undefined {
 export class ParentInputIndex {
 	private readonly accepted = new Map<string, PersistedParentInput>();
 	private readonly pending = new Map<string, PersistedParentInput>();
+	private readonly skipped = new Set<string>();
 	private readonly wakes = new Map<string, ParentInputWake>();
 	private readonly settled = new Set<string>();
 	private currentRequestId: string | undefined;
@@ -511,6 +553,20 @@ export class ParentInputIndex {
 			if (consumption.mode === "turn" && this.openWake())
 				throw new Error("Parent wake must settle before its work projection.");
 			this.expectedConsumptions.delete(consumption.terminalEntryId);
+			return;
+		}
+		const skip = parentInputSkipOf(entry);
+		if (skip) {
+			const held = this.pending.get(skip.deliveryId);
+			if (
+				held?.metadata.mode !== "next-owner-turn" ||
+				held.entryId !== skip.entryId ||
+				held.metadata.payloadDigest !== skip.payloadDigest ||
+				this.bound(skip.deliveryId)
+			)
+				throw new Error("Parent input skip does not name an exact unselected held input.");
+			this.pending.delete(skip.deliveryId);
+			this.skipped.add(skip.deliveryId);
 			return;
 		}
 		const input = parentInputOf(entry);
@@ -647,6 +703,13 @@ export class ParentInputIndex {
 
 	find(deliveryId: string): PersistedParentInput | undefined {
 		return this.accepted.get(deliveryId);
+	}
+	/** A provider request on this branch carries the input and has not reached its terminal record. */
+	bound(deliveryId: string): boolean {
+		return [...this.requestNotes.values()].some((inputs) => inputs.some((item) => item.deliveryId === deliveryId));
+	}
+	skippedInputs(): ReadonlySet<string> {
+		return this.skipped;
 	}
 	pendingInputs(mode?: ParentInputMode): readonly PersistedParentInput[] {
 		return [...this.pending.values()].filter((input) => mode === undefined || input.metadata.mode === mode);

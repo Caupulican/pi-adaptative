@@ -740,6 +740,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				this._lastEventDelivery = delivery;
 			},
 			deliverParent: (input, options) => this.deps.deliverNotes(input, options),
+			heldParentInputs: () =>
+				manager.getPendingParentInputs("next-owner-turn").map((input) => input.metadata.deliveryId),
+			skipParentInput: (deliveryId, reason) => manager.skipPendingParentInput(deliveryId, reason),
 			deliverTask: async (delivery, active) => {
 				const control = this._getWorkerController().getAgentControl();
 				return control.deliverHostEvent ? control.deliverHostEvent(delivery, active) : "unavailable";

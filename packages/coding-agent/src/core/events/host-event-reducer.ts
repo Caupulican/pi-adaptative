@@ -86,6 +86,24 @@ export function hostEventIsCurrent(state: TaskRuntimeProjection, event: Accepted
 }
 
 /**
+ * A current seal observes this event's subject at a later run or attempt. A subject the seal no longer observes, or
+ * an unsealed source, proves nothing about the event.
+ */
+export function hostEventSuperseded(state: TaskRuntimeProjection, event: AcceptedHostEvent): boolean {
+	const source = state.eventSources[event.envelope.sourceId];
+	if (!source || !hostEventSealDigest(source)) return false;
+	const { identity } = event.envelope.event;
+	const observation = source.seal?.observations.find(
+		(candidate) => ciSubjectKey(candidate.subject) === ciSubjectKey(ciEventSubject(event.envelope.event)),
+	);
+	return (
+		observation !== undefined &&
+		(observation.runId > identity.runId ||
+			(observation.runId === identity.runId && observation.runAttempt > identity.runAttempt))
+	);
+}
+
+/**
  * A completed observation names an occurrence this consumer accepted and has since pruned: its position
  * is retired, accepted history and no retained event holds it. The seal then treats it as history.
  */
