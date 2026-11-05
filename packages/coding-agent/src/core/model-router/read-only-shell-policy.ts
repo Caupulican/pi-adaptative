@@ -715,8 +715,17 @@ function invocationEffect(commandArgs: readonly string[]): string | undefined {
 			effect = found((arg) => arg.startsWith("-v"));
 			break;
 		case "ps":
-			// The BSD `e` modifier prints every listed process's environment, the owner's processes included.
-			effect = found((arg) => !arg.startsWith("-") && /^[A-Za-z]+$/u.test(arg) && arg.includes("e"));
+			// The BSD `e` modifier prints every listed process's environment, the owner's processes included. The value
+			// of an option that takes one (`-u deploy`, `-o etime`) is a name, not a modifier word.
+			effect = rest.find(
+				(arg, index) =>
+					!arg.startsWith("-") &&
+					/^[A-Za-z]+$/u.test(arg) &&
+					arg.includes("e") &&
+					!/^-[A-Za-z]*[CGgOoptUu]$|^--(?:pid|ppid|user|group|format|sort|tty|cols|columns|rows)$/u.test(
+						rest[index - 1] ?? "",
+					),
+			);
 			break;
 		case "hostname":
 			// A positional name or a name file sets the host name.
@@ -1879,6 +1888,7 @@ function leafViolation(args: readonly string[], cwds: WorkingDirectories, contex
 		case "npm":
 		case "pnpm":
 		case "yarn":
+			if (rest.length === 1 && /^(?:-v|--version)$/u.test(rest[0]!)) break;
 			if (!subcommand || !READ_ONLY_NPM_SUBCOMMANDS.has(subcommand))
 				return `${name} ${subcommand ?? ""} is not a read-only ${name} subcommand`.replace("  ", " ");
 			break;

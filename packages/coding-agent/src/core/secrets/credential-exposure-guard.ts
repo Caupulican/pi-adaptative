@@ -95,10 +95,11 @@ const SHELL_INSPECTION_COMMANDS = new Set([
 /**
  * A dotenv path following a reading command in the same simple command, in the raw text: the backstop for what the
  * structural walk cannot see (a nested `sh -c` script, a command substitution). The `.env` must start a path
- * component or a word, so a pattern such as `process.env` is not one.
+ * component or a word, so a pattern such as `process.env` is not one, and it must not be an exclusion's value
+ * (`--exclude='.env*'`, `-Exclude .env*`): the exclusion the dotenv search rule asks for reads no dotenv file.
  */
 const SHELL_SECRET_READ_RE =
-	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:[\s\\/'"=(])\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
+	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:[\s\\/'"=(])(?<!--?exclude(?:-dir)?(?:=|\s+)['"]?)\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
 const DOTENV_GLOB_RE = /(?:^|[\\/])?\.env(?:\.|\*|$)/i;
@@ -491,9 +492,28 @@ function workingDirectoriesAfter(
 	return next.length > MAX_TRACKED_DIRECTORIES ? undefined : next;
 }
 
+const POSIX_SHELL_PROGRAMS = new Set(["bash", "dash", "sh", "zsh"]);
+
+/** The command line a shell program runs from its arguments (`bash -c '...'`, `pwsh -Command ...`), judged like its caller's. */
+function nestedShellScript(
+	toolName: string,
+	args: readonly string[],
+): { line: string; dialect: ShellCommandDialect } | undefined {
+	if (POSIX_SHELL_PROGRAMS.has(toolName)) {
+		const option = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg));
+		const line = option < 0 ? undefined : args[option + 1];
+		return line === undefined ? undefined : { line, dialect: "posix" };
+	}
+	if (toolName !== "powershell" && toolName !== "pwsh") return undefined;
+	const option = args.findIndex((arg) => /^-(?:c|command)$/iu.test(arg));
+	return option < 0 || option + 1 >= args.length
+		? undefined
+		: { line: args.slice(option + 1).join(" "), dialect: "powershell" };
+}
+
 /**
  * The credential walk over one shell command line, shared by the synchronous and asynchronous checks: nested command
- * lines (substitutions, PowerShell blocks), input redirections, every command that inspects files (at any word
+ * lines (substitutions, PowerShell blocks, `bash -c` and `pwsh -Command` scripts), input redirections, every command that inspects files (at any word
  * position, so a wrapper's program is judged too), every search, and `cd`/`pushd` tracking. A refusal ends the walk; a broad search is remembered and the walk goes on.
  */
 function* shellCredentialRisk(
@@ -513,13 +533,21 @@ function* shellCredentialRisk(
 	}
 	let policies: readonly CredentialPathPolicy[] = [paths];
 	let broad = false;
+	const nestedRisk = function* (
+		line: string,
+		lineDialect: ShellCommandDialect,
+	): CredentialWalk<CredentialRisk | undefined> {
+		for (const policy of policies) {
+			const risk = yield* shellCredentialRisk(line, lineDialect, policy);
+			if (risk === "broad_search") broad = true;
+			else if (risk) return risk;
+		}
+		return undefined;
+	};
 	for (const segment of parseShellInvocations(shellTokens)) {
 		for (const nested of segment.nested) {
-			for (const policy of policies) {
-				const risk = yield* shellCredentialRisk(nested, dialect, policy);
-				if (risk === "broad_search") broad = true;
-				else if (risk) return risk;
-			}
+			const risk = yield* nestedRisk(nested, dialect);
+			if (risk) return risk;
 		}
 		for (const input of segment.inputs) {
 			if (globMayNameDotenv(input) || (yield* anyDirectory("protected", input, policies))) return "credential_path";
@@ -527,6 +555,12 @@ function* shellCredentialRisk(
 		for (let index = 0; index < segment.invocation.length; index++) {
 			const cmd = parseInvocationCommand(segment.invocation, index);
 			if (cmd.envRisk) return cmd.envRisk;
+			const script = nestedShellScript(cmd.toolName, cmd.args);
+			if (script) {
+				const risk = yield* nestedRisk(script.line, script.dialect);
+				if (risk) return risk;
+				continue;
+			}
 			if (cmd.searchTool) {
 				const scope = parseShellSearchInvocationScope(cmd.searchTool, cmd.args, segment.readsPipe);
 				const risk = yield* searchCredentialRisk(scope, policies, true, true);
