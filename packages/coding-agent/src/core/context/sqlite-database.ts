@@ -116,6 +116,30 @@ export function openSqliteDatabase(options: OpenSqliteDatabaseOptions): SqliteDa
 	return isBunRuntime() ? openBunDatabase(options) : openNodeDatabase(options);
 }
 
+/** One synchronous transaction; read snapshots defer locking, and a failed rollback retains both errors. */
+export function withSqliteTransaction<T>(
+	database: SqliteDatabase,
+	run: () => T,
+	label: string,
+	mode: "read" | "write" = "write",
+): T {
+	database.exec(mode === "read" ? "BEGIN" : "BEGIN IMMEDIATE");
+	try {
+		const result = run();
+		database.exec("COMMIT");
+		return result;
+	} catch (error) {
+		if (database.isTransaction) {
+			try {
+				database.exec("ROLLBACK");
+			} catch (rollback) {
+				throw new AggregateError([error, rollback], `${label} transaction and rollback failed`);
+			}
+		}
+		throw error;
+	}
+}
+
 /** Retain a connection only after its owner's entire construction, including statement preparation, succeeds. */
 export function constructSqliteDatabase<T>(
 	options: OpenSqliteDatabaseOptions,

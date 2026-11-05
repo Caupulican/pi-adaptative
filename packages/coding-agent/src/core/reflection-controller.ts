@@ -8,7 +8,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { streamSimple } from "@caupulican/pi-ai/stream";
@@ -25,7 +25,6 @@ import type { Agent } from "../kernel/agent.ts";
 import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
 import type { AgentContext, AgentLoopConfig } from "../kernel/index.ts";
 import { resolveProviderRequestOptions, resolveRequestPreflightMaxTokens } from "../kernel/provider-request-planner.ts";
-import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { combineUsage } from "../kernel/usage.ts";
@@ -60,6 +59,7 @@ import { type DurableChangeLayer, evaluateLearningDecision } from "./learning/le
 import { LearningRollbackController, type PreparedLearningRollback } from "./learning/learning-rollback-controller.ts";
 import { type LearningApplicationGuard, LearningWriteJournal } from "./learning/learning-write-journal.ts";
 import { type EvidenceReceipt, ObservationStore, observationKey } from "./learning/observation-store.ts";
+import { locateOwnerQuote, OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -97,12 +97,6 @@ import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
 import { checkSkillEvolutionEligibility } from "./session-skill-policy.ts";
-import {
-	appendSessionSnapshot,
-	decodeSessionSnapshotPayload,
-	getSessionSnapshots,
-	type SessionSnapshotCodec,
-} from "./session-snapshot.ts";
 import type {
 	AutoLearnSettings,
 	AutonomySettings,
@@ -218,146 +212,9 @@ export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
 /** `internalContextType` of the one dedicated end-of-work reflection turn. */
 export const REFLECTION_TURN_TRIGGER_CUSTOM_TYPE = "reflection_turn_trigger";
 
-/**
- * Durable mark that one persisted user message was genuine owner input (typed or sent by the
- * operator through the session's prompt boundary), not an internal prompt, an extension message,
- * a worker report, a tool result or recalled text. The record carries identity only; the words
- * stay in the message entry it names, so the ledger is rebuilt from the branch after a restart
- * and survives compaction (custom entries are not messages).
- */
-export const OWNER_EVIDENCE_CUSTOM_TYPE = "owner_evidence";
-
-export interface OwnerEvidenceRecord {
-	/** `<session id prefix>/<session entry id>`: the citation a preference write carries. */
-	sourceId: string;
-	entryId: string;
-	/**
-	 * The owner's ORIGINAL words, bounded: what they typed before any input transform, skill or
-	 * template expansion rewrote the message the model received. Never reconstructed from the
-	 * persisted message content.
-	 */
-	text: string;
-	/** sha256 prefix of `text` as stored; a record whose text does not match on load is dropped. */
-	digest: string;
-	/** Length of the full original input (may exceed the stored bound). */
-	chars: number;
-	createdAt: string;
-}
-
-export interface OwnerEvidenceEntry extends Pick<OwnerEvidenceRecord, "sourceId" | "entryId" | "createdAt" | "text"> {}
-
-const MAX_OWNER_EVIDENCE_ENTRIES = 64;
-const MAX_OWNER_EVIDENCE_TEXT_CHARS = 4_000;
 const MAX_CUE_EVIDENCE_SOURCES = 3;
 const MAX_CUE_EVIDENCE_EXCERPT_CHARS = 100;
 const MAX_CITATIONS_PER_WRITE = 16;
-
-function evidenceTextDigest(text: string): string {
-	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
-}
-
-/** Shape and integrity: the stored words must carry the digest they were recorded with. */
-function isOwnerEvidenceRecord(value: unknown): value is OwnerEvidenceRecord {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	return (
-		typeof record.sourceId === "string" &&
-		record.sourceId.length > 0 &&
-		typeof record.entryId === "string" &&
-		typeof record.text === "string" &&
-		record.text.length <= MAX_OWNER_EVIDENCE_TEXT_CHARS &&
-		typeof record.digest === "string" &&
-		record.digest === evidenceTextDigest(record.text) &&
-		typeof record.chars === "number" &&
-		Number.isSafeInteger(record.chars) &&
-		record.chars >= record.text.length &&
-		typeof record.createdAt === "string"
-	);
-}
-
-const OWNER_EVIDENCE_CODEC: SessionSnapshotCodec<OwnerEvidenceRecord, "evidence"> = {
-	customType: OWNER_EVIDENCE_CUSTOM_TYPE,
-	valueKey: "evidence",
-	isValue: isOwnerEvidenceRecord,
-	clone: (record) => ({ ...record }),
-};
-
-export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): OwnerEvidenceRecord[] {
-	return getSessionSnapshots(entries, OWNER_EVIDENCE_CODEC);
-}
-
-/** Lowercase, plain quotes, collapsed horizontal whitespace; newlines are kept so line structure survives. */
-function normalizeQuoteText(text: string): string {
-	return text
-		.toLowerCase()
-		.replace(/[\u2018\u2019]/g, "'")
-		.replace(/[\u201c\u201d]/g, '"')
-		.replace(/\r\n?/g, "\n")
-		.split("\n")
-		.map((line) => line.replace(/[ \t]+/g, " ").trim())
-		.join("\n");
-}
-
-/**
- * Whether a span of the owner's text is text the owner SHOWED rather than said: inside quotation
- * marks or backticks, inside a fenced block, or on a blockquote line. A pasted excerpt is evidence
- * of what the owner showed, never automatically of what they believe; this is the host's
- * deterministic half of that judgment. The semantic half stays model work.
- */
-function isShownSpan(haystack: string, start: number, end: number): boolean {
-	const before = haystack.slice(0, start);
-	const fences = (before.match(/```/g) ?? []).length;
-	if ((fences & 1) === 1) return true;
-	const inlineTicks = (before.replace(/```/g, "").match(/`/g) ?? []).length;
-	if ((inlineTicks & 1) === 1) return true;
-	if (((before.match(/"/g) ?? []).length & 1) === 1) return true;
-	// Blockquote: any line the span touches starts with ">".
-	let lineStart = before.lastIndexOf("\n") + 1;
-	while (lineStart <= end && lineStart < haystack.length) {
-		if (haystack.slice(lineStart).startsWith(">")) return true;
-		const next = haystack.indexOf("\n", lineStart);
-		if (next < 0) break;
-		lineStart = next + 1;
-	}
-	return false;
-}
-
-/**
- * Where a cited quote sits in the owner's words. Every occurrence is tried: a quote that appears
- * first inside shown text and later as the owner's own statement is found as stated. Returns the
- * sentence around the first stated occurrence for the explicit/corrective wording check.
- */
-function locateQuote(ownerText: string, quote: string): { found: boolean; shown: boolean; sentence: string } {
-	const haystack = normalizeQuoteText(ownerText);
-	const needle = normalizeQuoteText(quote)
-		.replace(/\n/g, " ")
-		.replace(/^["'`]+|["'`.,;:!?]+$/g, "");
-	if (needle.length === 0) return { found: false, shown: false, sentence: "" };
-	// Newlines count as spaces for matching only; positions are preserved one to one.
-	const flat = haystack.replace(/\n/g, " ");
-	let index = flat.indexOf(needle);
-	let sawShown = false;
-	while (index >= 0) {
-		const end = index + needle.length;
-		if (!isShownSpan(haystack, index, end)) {
-			const before = haystack.slice(0, index);
-			const sentenceStart =
-				Math.max(
-					before.lastIndexOf("."),
-					before.lastIndexOf("!"),
-					before.lastIndexOf("?"),
-					before.lastIndexOf("\n"),
-				) + 1;
-			const after = haystack.slice(end);
-			const stop = after.search(/[.!?\n]/);
-			const sentenceEnd = stop < 0 ? haystack.length : end + stop;
-			return { found: true, shown: false, sentence: haystack.slice(sentenceStart, sentenceEnd).trim() };
-		}
-		sawShown = true;
-		index = flat.indexOf(needle, index + 1);
-	}
-	return { found: sawShown, shown: sawShown, sentence: "" };
-}
 
 export type CurrentTurnReflectionTrigger = "root-turn" | "version-change" | Exclude<DemandSignals["trigger"], "none">;
 
@@ -536,17 +393,7 @@ export class ReflectionController {
 
 	/** True only while the one dedicated reflection turn is running; gates cue visibility entirely. */
 	private reflectionTurnInFlight = false;
-	/** Bounded owner-evidence ledger for this branch; undefined until first read (rebuilt from entries). */
-	private ownerEvidence: OwnerEvidenceEntry[] | undefined;
-	/**
-	 * User messages the operator authored through the session's own prompt boundary (typed,
-	 * queued, or sent by an SDK caller as the operator), mapped to the operator's ORIGINAL words:
-	 * the text before any input-extension transform, skill or template expansion rewrote what the
-	 * model receives. Internal prompts, extension messages, worker reports, tool results and
-	 * recalled text never enter this map; only these messages become owner evidence when
-	 * persisted, and the evidence is the original text, never the expanded message content.
-	 */
-	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
+	readonly ownerEvidence: OwnerEvidenceLedger;
 	private readonly rollbacks: LearningRollbackController;
 	private readonly writes: LearningWriteJournal;
 	private readonly applicationContext = new AsyncLocalStorage<{
@@ -556,6 +403,10 @@ export class ReflectionController {
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
+		this.ownerEvidence = new OwnerEvidenceLedger({
+			getSessionManager: deps.getSessionManager,
+			warn: (message) => this.warnOnce("owner-evidence-persist-failed", message),
+		});
 		this.writes = new LearningWriteJournal(deps);
 		this.userPreferenceLearning = {
 			admit: (request) => this.admitUserPreference(request),
@@ -641,7 +492,7 @@ export class ReflectionController {
 		}
 		this.cueStateCacheInitialized = false;
 		this.cueStateCache = undefined;
-		this.ownerEvidence = undefined;
+		this.ownerEvidence.invalidate();
 		this.writes.recover();
 	}
 
@@ -1106,102 +957,18 @@ export class ReflectionController {
 		});
 	}
 
-	private ownerSourcePrefix(): string {
-		return this.deps.getSessionManager().getSessionId().slice(0, 8);
-	}
-
-	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
+	/** Original owner text is retained before transforms and admitted only after message persistence. */
 	markOwnerInput(message: AgentMessage, originalText: string): void {
-		this.ownerInputOriginals.set(message, originalText);
+		this.ownerEvidence.markOwnerInput(message, originalText);
 	}
 
-	/**
-	 * Persistence hook: a message reached durable history under `entryId`. Owner evidence is
-	 * recorded exactly here, with the original words; a withdrawn queued message is never
-	 * persisted and therefore never becomes evidence. Non-owner messages are ignored.
-	 */
 	noteOwnerInputPersisted(message: AgentMessage, entryId: string | undefined): void {
-		if (!entryId || message.role !== "user") return;
-		const originalText = this.ownerInputOriginals.get(message);
-		if (originalText === undefined || !originalText.trim()) return;
-		this.recordOwnerEvidence(entryId, originalText);
-	}
-
-	/**
-	 * Mark one persisted user message as genuine owner input and return its source id. Called by
-	 * the session at the persistence boundary of a prompt that came through its own owner input
-	 * path (never for internal, extension, worker, tool or recalled messages).
-	 */
-	recordOwnerEvidence(entryId: string, originalText: string): string {
-		const sourceId = `${this.ownerSourcePrefix()}/${entryId}`;
-		// Load before appending: a first read that scans the branch must not see this record twice.
-		const ledger = this.loadOwnerEvidence();
-		// Strictly increasing within the session, so evidence order is total even inside one millisecond.
-		let createdAtMs = Date.now();
-		const last = ledger.at(-1);
-		if (last) {
-			const lastMs = Date.parse(last.createdAt);
-			if (Number.isFinite(lastMs) && createdAtMs <= lastMs) createdAtMs = lastMs + 1;
-		}
-		const createdAt = new Date(createdAtMs).toISOString();
-		const text = originalText.slice(0, MAX_OWNER_EVIDENCE_TEXT_CHARS);
-		const record: OwnerEvidenceRecord = {
-			sourceId,
-			entryId,
-			text,
-			digest: evidenceTextDigest(text),
-			chars: originalText.length,
-			createdAt,
-		};
-		try {
-			appendSessionSnapshot(this.deps.getSessionManager(), OWNER_EVIDENCE_CODEC, record);
-		} catch {
-			this.warnOnce("owner-evidence-persist-failed", "Owner evidence could not be recorded durably for this turn.");
-		}
-		if (!ledger.some((entry) => entry.sourceId === sourceId)) {
-			ledger.push({ sourceId, entryId, text, createdAt });
-			if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
-		}
-		return sourceId;
-	}
-
-	/** The owner evidence this branch knows, oldest first, bounded. */
-	listOwnerEvidence(): readonly OwnerEvidenceEntry[] {
-		return [...this.loadOwnerEvidence()];
-	}
-
-	/**
-	 * One pass over the branch on first use (then incremental through `recordOwnerEvidence`):
-	 * owner marks name message entries, whose text is read back from the same branch, so the
-	 * ledger is identical after a reopen and unaffected by compaction.
-	 */
-	private loadOwnerEvidence(): OwnerEvidenceEntry[] {
-		if (this.ownerEvidence) return this.ownerEvidence;
-		const records: OwnerEvidenceRecord[] = [];
-		let entries: readonly SessionEntry[] = [];
-		try {
-			entries = this.deps.getSessionManager().getBranch();
-		} catch {
-			entries = [];
-		}
-		for (const entry of entries) {
-			if (entry.type !== "custom" || entry.customType !== OWNER_EVIDENCE_CUSTOM_TYPE) continue;
-			// The codec verifies shape and the stored digest; a tampered or legacy record is skipped.
-			const record = decodeSessionSnapshotPayload(entry.data, OWNER_EVIDENCE_CODEC);
-			if (record && !records.some((seen) => seen.sourceId === record.sourceId)) records.push(record);
-		}
-		this.ownerEvidence = records.slice(-MAX_OWNER_EVIDENCE_ENTRIES).map((record) => ({
-			sourceId: record.sourceId,
-			entryId: record.entryId,
-			text: record.text,
-			createdAt: record.createdAt,
-		}));
-		return this.ownerEvidence;
+		this.ownerEvidence.noteOwnerInputPersisted(message, entryId);
 	}
 
 	/** The cue's bounded evidence list: the newest owner sources, by id, with a short excerpt. */
 	private describeOwnerEvidenceForCue(): string {
-		const recent = this.loadOwnerEvidence().slice(-MAX_CUE_EVIDENCE_SOURCES);
+		const recent = this.ownerEvidence.listOwnerEvidence().slice(-MAX_CUE_EVIDENCE_SOURCES);
 		if (recent.length === 0) return "";
 		const lines = recent.map((entry) => {
 			const excerpt = redactKnownSecrets(entry.text).replace(/\s+/g, " ").trim();
@@ -1262,7 +1029,7 @@ export class ReflectionController {
 		// the storage owner on commit, so a correction whose commit failed leaves the fence where it
 		// was and the owner's still-valid correction can be retried.
 		const fenceAt = existingMeta?.evidenceAt;
-		const ledger = new Map(this.loadOwnerEvidence().map((entry) => [entry.sourceId, entry]));
+		const ledger = new Map(this.ownerEvidence.listOwnerEvidence().map((entry) => [entry.sourceId, entry]));
 		const counted: EvidenceReceipt[] = [];
 		const notes: string[] = [];
 		let explicitVerified = false;
@@ -1276,7 +1043,7 @@ export class ReflectionController {
 				notes.push(`${citation.source}: no cited span`);
 				continue;
 			}
-			const location = locateQuote(entry.text, citation.quote);
+			const location = locateOwnerQuote(entry.text, citation.quote);
 			if (!location.found) {
 				notes.push(`${citation.source}: quote not found in the owner's words`);
 				continue;

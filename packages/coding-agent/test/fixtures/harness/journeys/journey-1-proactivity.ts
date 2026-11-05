@@ -12,14 +12,18 @@ const NOTE_MARKER = "[proactive note]";
  * The judgments System One makes about the previous owner turn when the next one is prepared: whether its words carry
  * forward, what authority they grant, and whether they changed the optional tools. This phase grants nothing.
  */
-const PREVIOUS_TURN_JUDGMENTS = {
-	carries_0: { kind: "noul", probability: 0.02 },
+const OWNER_POLICY_JUDGMENTS = {
 	capabilities_authorized: { kind: "noul", probability: 0.02 },
 	changes_model_pools: { kind: "noul", probability: 0.02 },
 	local_commits_only: { kind: "noul", probability: 0.02 },
 	lifts_delivery_block: { kind: "noul", probability: 0.02 },
 	full_handoff: { kind: "noul", probability: 0.02 },
 	optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+} as const;
+
+const PREVIOUS_TURN_JUDGMENTS = {
+	carries_0: { kind: "noul", probability: 0.02 },
+	...OWNER_POLICY_JUDGMENTS,
 } as const;
 
 /**
@@ -195,13 +199,15 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 
 	// Preferences are a normal model tool, but only a settled owner confirmation may change them.
 	const settings = off.settingsManager;
+	let toolTurns = 0;
 	const toolTurn = async (
 		label: string,
 		action: string,
 		expected: string,
 		preferencesText?: string,
 	): Promise<void> => {
-		world.systemOne.enterPhase(label, PREVIOUS_TURN_JUDGMENTS);
+		// Only the first tool turn inherits the unscreened greeting. Each tool call then drains its own policy.
+		world.systemOne.enterPhase(label, toolTurns++ === 0 ? PREVIOUS_TURN_JUDGMENTS : OWNER_POLICY_JUDGMENTS);
 		world.provider.enqueue(
 			"root",
 			calls(`${label}-call`, [
@@ -276,7 +282,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 
 	// Abort after the confirmation boundary was reached, even if a late affirmative answer arrives.
 	decision = "cancel";
-	world.systemOne.enterPhase("preferences-cancel", PREVIOUS_TURN_JUDGMENTS);
+	world.systemOne.enterPhase("preferences-cancel", OWNER_POLICY_JUDGMENTS);
 	world.provider.enqueue(
 		"root",
 		calls("preferences-cancel-call", [

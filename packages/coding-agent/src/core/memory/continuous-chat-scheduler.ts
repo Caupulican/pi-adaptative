@@ -1,5 +1,10 @@
 import { existsSync } from "node:fs";
-import { constructSqliteDatabase, type SqliteDatabase, type SqliteStatement } from "../context/sqlite-database.ts";
+import {
+	constructSqliteDatabase,
+	type SqliteDatabase,
+	type SqliteStatement,
+	withSqliteTransaction,
+} from "../context/sqlite-database.ts";
 import { hasOnlyKeys, isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import { ContinuousChatCorruptError } from "./continuous-chat-index.ts";
 import type { LegacyQueueEntry, LegacyQueueHeader } from "./continuous-chat-queue-import.ts";
@@ -195,21 +200,7 @@ export class ContinuousChatScheduler {
 		return statement;
 	}
 	private transaction<T>(run: () => T): T {
-		this.db.exec("BEGIN IMMEDIATE");
-		try {
-			const result = run();
-			this.db.exec("COMMIT");
-			return result;
-		} catch (error) {
-			if (this.db.isTransaction) {
-				try {
-					this.db.exec("ROLLBACK");
-				} catch (rollback) {
-					throw new AggregateError([error, rollback], "ICM scheduler transaction and rollback failed");
-				}
-			}
-			throw error;
-		}
+		return withSqliteTransaction(this.db, run, "ICM scheduler");
 	}
 	private meta(): SchedulerMeta {
 		const body = this.sql("SELECT body FROM meta WHERE id=1").get()?.body;

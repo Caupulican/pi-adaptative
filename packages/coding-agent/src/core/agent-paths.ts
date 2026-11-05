@@ -147,6 +147,11 @@ export function projectMemoryRoot(agentDir: string): string {
 	return join(agentDir, "memory", "projects");
 }
 
+/** Canonical learned knowledge in the user ICM catalog; shared across project conversations. */
+export function knowledgeDatabaseFile(agentDir: string): string {
+	return join(agentDir, "memory", "knowledge.sqlite");
+}
+
 /** Managed-state sidecar for a project's MEMORY.md (drift detection, like the global files). */
 export function managedProjectMemoryStateFile(agentDir: string, projectKey: string): string {
 	return stateFile(
