@@ -2437,8 +2437,6 @@ export class AgentSession {
 			atColdMoment: (reason) => this._cache.atColdMoment(reason),
 			noteSystemOneTaskDirectoryUnavailable: (error) => this._noteSystemOneTaskDirectoryUnavailable(error),
 			getSystemOneController: () => this._semanticPlane.controller,
-			enableCapabilitiesAuthorizedByUser: (words, signal, trustedOwner, acceptedOrder) =>
-				this._edgeIntent.enableCapabilitiesAuthorizedByUser(words, signal, trustedOwner, acceptedOrder),
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
 			claimCorrection: (turnOpening) => this._unsettledLadder.claimCorrection(turnOpening),

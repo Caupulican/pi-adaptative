@@ -233,12 +233,8 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 						...(outcome === "committed" ? noDeliveryClaims : {}),
 						// The prior text-only owner greeting is screened aside at this turn's backlog boundary.
 						carries_0: { kind: "noul", probability: 0.97 },
-						// Extension input asks owner-policy questions without optional-tool intent.
-						changes_model_pools: { kind: "noul", probability: 0.02 },
-						local_commits_only: { kind: "noul", probability: 0.02 },
-						lifts_delivery_block: { kind: "noul", probability: 0.02 },
-						full_handoff: { kind: "noul", probability: 0.02 },
-						capabilities_authorized: { kind: "noul", probability: 0.02 },
+						// Extension input is not the owner's: it asks no owner-policy question (one asked here is unscripted and
+						// fails the journey), so it can grant, hand off or bind nothing.
 					},
 		);
 		trigger.release();

@@ -225,7 +225,14 @@ export function priorUserPromptText(
 	return undefined;
 }
 
-export function parseExplicitChatGoal(text: string, priorUserText?: string): ExplicitChatGoal | undefined {
+/**
+ * Which goal language `text` uses and the objective it names, without reading a token budget (so it never throws): undefined
+ * when `text` states no goal; an empty match when it states one with no objective (a standalone phrase with no prior prompt).
+ */
+function matchExplicitChatGoal(
+	text: string,
+	priorUserText: string | undefined,
+): { readonly objective?: string; readonly objectiveSpan?: { start: number; end: number } } | undefined {
 	for (const pattern of EXPLICIT_GOAL_PATTERNS) {
 		const match = pattern.exec(text);
 		const rawObjective = match?.[1];
@@ -237,12 +244,10 @@ export function parseExplicitChatGoal(text: string, priorUserText?: string): Exp
 			start: match.index + (match[0].length - (rawObjective?.length ?? 0)),
 			end: match.index + match[0].length,
 		};
-		const tokenBudget = parseRequestedTokenBudget(text, objectiveSpan);
-		return { objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
+		return { objective, objectiveSpan };
 	}
 	const remainder = standaloneGoalRemainder(text);
 	if (remainder === undefined) return undefined;
-	const tokenBudget = parseRequestedTokenBudget(text);
 	const inline = remainder && !isClassificationRemainder(remainder) ? remainder : undefined;
 	const prior = priorUserText?.trim();
 	const objective =
@@ -251,8 +256,33 @@ export function parseExplicitChatGoal(text: string, priorUserText?: string): Exp
 			: prior && prior !== text.trim() && prior.length <= MAX_GOAL_OBJECTIVE_LENGTH
 				? prior
 				: undefined;
+	return objective ? { objective } : {};
+}
+
+export function parseExplicitChatGoal(text: string, priorUserText?: string): ExplicitChatGoal | undefined {
+	const match = matchExplicitChatGoal(text, priorUserText);
+	if (!match) return undefined;
+	// A budget phrase that cannot be parsed throws even when no objective was found.
+	const tokenBudget = parseRequestedTokenBudget(text, match.objectiveSpan);
+	if (!match.objective) return undefined;
+	return { objective: match.objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
+}
+
+/**
+ * The explicit chat goal an owner's message starts. Whether it starts one, and its token budget, come only from
+ * `authority`, which `parseExplicitGoalStartAuthority` read from the owner's typed words: a pasted "set a goal: ..." starts
+ * nothing and a pasted budget sets none. The objective is read from the whole `text`, so a typed "set a goal: implement
+ * the spec below" keeps the pasted spec it points at. Without a paste this is `parseExplicitChatGoal(text, priorUserText)`.
+ */
+export function ownerChatGoal(
+	text: string,
+	authority: ExplicitGoalStartAuthority | undefined,
+	priorUserText: string | undefined,
+): ExplicitChatGoal | undefined {
+	if (!authority) return undefined;
+	const objective = matchExplicitChatGoal(text, priorUserText)?.objective;
 	if (!objective) return undefined;
-	return { objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
+	return { objective, ...(authority.tokenBudget !== undefined ? { tokenBudget: authority.tokenBudget } : {}) };
 }
 
 /** Exact owner authority for model-supplied token budgets; ordinary work carries no budget authority. */

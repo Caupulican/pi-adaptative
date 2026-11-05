@@ -813,29 +813,6 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
-	 * Classifies `words` now and applies what they authorize. The owner's (`trustedOwner`) are settled as delivered owner
-	 * words are; anything else (an extension's message) is classified and applied once. Pasted spans are judged as quoted data
-	 * (`ownerRequestForJudge`), and words with nothing typed decide nothing.
-	 */
-	async enableCapabilitiesAuthorizedByUser(
-		words: OwnerWords,
-		signal?: AbortSignal,
-		trustedOwner = true,
-		acceptedOrder?: number,
-	): Promise<string | undefined> {
-		const controller = this.deps.getSystemOneController();
-		const request = ownerRequestForJudge(words);
-		if (!controller || request === undefined) return undefined;
-		// The owner's words are settled as delivered words are: their optional-tool intent is committed now.
-		if (trustedOwner) return this.settleOwnerWords({ request, acceptedOrder, ...(signal ? { signal } : {}) });
-		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), {
-			capabilitiesPending: this.capabilitiesPending(),
-			...(signal ? { signal } : {}),
-		});
-		return this.applyOwnerRequestOutcome(request, outcome, acceptedOrder);
-	}
-
-	/**
 	 * Settles delivered owner words where the owner-policy queue reaches them, in owner order. An optional-tool entry that
 	 * already holds them (their own staged intent, or a newer one that read them) leaves only their owner policy: the
 	 * judgment they carry, or one asked for it alone. Otherwise their optional-tool intent is judged into the committed chain

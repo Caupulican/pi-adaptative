@@ -344,7 +344,10 @@ owner's, and the material only shows what it refers to. That paste-aware wording
 (catalog version `1.5.1+owner-paste.1`); a message with nothing pasted is asked the 1.5.1 questions
 unchanged, so the measurements below and their thresholds still describe it, while the paste-aware wording
 has not been measured live. A message with no typed words is never queued or classified, so it costs no
-System One request. A long paste is shortened inside its fence so the owner's typed words
+System One request. An extension's message (a peer agent's, say) is not the owner's at all: it is never
+classified and grants, hands off, binds or lifts nothing. An explicit chat goal starts only from typed goal
+words, with a token budget only from typed words; its objective is read from the whole message, so "set a
+goal: implement the spec below" keeps the pasted spec. A long paste is shortened inside its fence so the owner's typed words
 always reach the judgment whole. The same fenced request is what the gates, plan review and owner
 questions read as the turn's request. Paste provenance survives take-back to the editor, a failed send-now,
 a restart (the durable queued-input record keeps it), history recall and the external editor (an edit that

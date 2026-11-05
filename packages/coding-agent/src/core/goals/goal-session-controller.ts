@@ -66,8 +66,9 @@ import {
 } from "./goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "./goal-tool-core.ts";
 import {
+	type ExplicitChatGoal,
 	type ExplicitGoalStartAuthority,
-	parseExplicitChatGoal,
+	ownerChatGoal,
 	priorUserPromptText,
 } from "./natural-language-goal.ts";
 import {
@@ -408,12 +409,21 @@ export class GoalSessionController {
 	 * goal tool. This is intentionally narrower than task detection: ordinary work never starts a
 	 * goal, and an unfinished goal is never replaced implicitly.
 	 */
-	admitOwnerChatGoal(text: string, messages: readonly { role: string; content?: unknown }[]): ChatGoalAdmission {
-		return this.admitExplicitChatGoal(text, undefined, priorUserPromptText(messages, text));
+	admitOwnerChatGoal(
+		text: string,
+		authority: ExplicitGoalStartAuthority | undefined,
+		messages: readonly { role: string; content?: unknown }[],
+	): ChatGoalAdmission {
+		return this.admitExplicitChatGoal(ownerChatGoal(text, authority, priorUserPromptText(messages, text)));
 	}
 
-	startOwnerChatGoal(text: string, messages: readonly { role: string; content?: unknown }[]): string | undefined {
-		const admission = this.admitOwnerChatGoal(text, messages);
+	/** `authority`: what the owner's typed words of `text` grant (`parseExplicitGoalStartAuthority`); none starts nothing. */
+	startOwnerChatGoal(
+		text: string,
+		authority: ExplicitGoalStartAuthority | undefined,
+		messages: readonly { role: string; content?: unknown }[],
+	): string | undefined {
+		const admission = this.admitOwnerChatGoal(text, authority, messages);
 		if (admission.status === "started") return admission.state.goalId;
 		if (admission.status === "unfinished_goal_exists") {
 			this.deps.emitWarning(
@@ -440,7 +450,7 @@ export class GoalSessionController {
 		const queued = this.queuedOwnerChatGoals.get(message);
 		if (!queued) return;
 		this.queuedOwnerChatGoals.delete(message);
-		const goalId = this.startOwnerChatGoal(queued.text, messages);
+		const goalId = this.startOwnerChatGoal(queued.text, queued.authority, messages);
 		if (!goalId) return;
 		this.setStartAuthority(queued.authority);
 		// The submission running the delivery may hold an execution already: it works on the goal from here. Otherwise
@@ -459,13 +469,22 @@ export class GoalSessionController {
 	/**
 	 * The goal the owner's own prompt would resume (a system-stopped goal) or start (an explicit chat goal) if it were
 	 * delivered now, read without saving anything: the prompt changes the goal only when it is delivered (see
-	 * {@link applyDeliveredOwnerPrompt}). A token-budget phrase that cannot be parsed throws here, before the prompt runs.
+	 * {@link applyDeliveredOwnerPrompt}). Only the owner's typed words start a goal: `authority` is what they grant
+	 * (`parseExplicitGoalStartAuthority` over the typed words, which throws on a budget phrase it cannot parse).
 	 */
-	previewOwnerPromptGoal(text: string, messages: readonly { role: string; content?: unknown }[]): string | undefined {
+	previewOwnerPromptGoal(
+		text: string,
+		authority: ExplicitGoalStartAuthority | undefined,
+		messages: readonly { role: string; content?: unknown }[],
+	): string | undefined {
 		const now = new Date().toISOString();
 		const current = this.getState();
 		const resumed = current && this.planSystemResume(current, now, "owner");
-		const admission = this.planExplicitChatGoal(resumed ?? current, text, now, priorUserPromptText(messages, text));
+		const admission = this.planExplicitChatGoal(
+			resumed ?? current,
+			ownerChatGoal(text, authority, priorUserPromptText(messages, text)),
+			now,
+		);
 		return resumed?.goalId ?? (admission.status === "started" ? admission.state.goalId : undefined);
 	}
 
@@ -474,9 +493,13 @@ export class GoalSessionController {
 	 * recovery allowance restarts (goal-state.ts `resume_goal` without source "system"), or an explicit chat goal starts,
 	 * each against the goal state as it is now. The run that delivered the prompt works on that goal from here.
 	 */
-	applyDeliveredOwnerPrompt(text: string, messages: readonly { role: string; content?: unknown }[]): void {
+	applyDeliveredOwnerPrompt(
+		text: string,
+		authority: ExplicitGoalStartAuthority | undefined,
+		messages: readonly { role: string; content?: unknown }[],
+	): void {
 		const recoveredGoalId = this.resumeSystemBlockedGoal(undefined, "owner");
-		const goalId = this.startOwnerChatGoal(text, messages) ?? recoveredGoalId;
+		const goalId = this.startOwnerChatGoal(text, authority, messages) ?? recoveredGoalId;
 		const lease = this.executionLease;
 		if (goalId !== undefined && lease) this.bindExecution(lease, goalId);
 	}
@@ -500,22 +523,20 @@ export class GoalSessionController {
 		lease.goalId = goalId;
 	}
 
-	admitExplicitChatGoal(text: string, now?: string, priorUserText?: string): ChatGoalAdmission {
+	admitExplicitChatGoal(goal: ExplicitChatGoal | undefined, now?: string): ChatGoalAdmission {
 		const current = this.getState();
-		const admission = this.planExplicitChatGoal(current, text, now ?? new Date().toISOString(), priorUserText);
+		const admission = this.planExplicitChatGoal(current, goal, now ?? new Date().toISOString());
 		if (admission.status === "started")
 			this.saveState(admission.state, current ? getGoalStateRevision(current) : undefined);
 		return admission;
 	}
 
-	/** What `text` does as an explicit chat goal against `current`, read without saving anything. */
+	/** What starting `parsed` as an explicit chat goal does against `current`, read without saving anything. */
 	private planExplicitChatGoal(
 		current: GoalState | undefined,
-		text: string,
+		parsed: ExplicitChatGoal | undefined,
 		admittedAt: string,
-		priorUserText: string | undefined,
 	): ChatGoalAdmission {
-		const parsed = parseExplicitChatGoal(text, priorUserText);
 		if (!parsed) return { status: "not_explicit" };
 		if (current && isGoalUnfinishedStatus(current.status)) {
 			return { status: "unfinished_goal_exists", state: current };
