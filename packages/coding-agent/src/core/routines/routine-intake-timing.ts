@@ -697,7 +697,7 @@ function withLifetime(
 		`${cadence}, for at most 14 days`,
 		[
 			...defaults,
-			`ends on ${end} at the latest, 14 days after the request, since the host cannot watch the end the owner stated; each run is told that end and reports first once it is reached`,
+			`ends on ${end} at the latest, 14 days after the request, since the host cannot watch the end the owner stated; each run is told that end, and the routine ends once a run reports it reached`,
 		],
 		when,
 	);
