@@ -93,6 +93,60 @@ const SHELL_INSPECTION_COMMANDS = new Set([
 	"source",
 ]);
 /**
+ * Programs that never run their arguments or their input as a command. When every simple command of a POSIX line
+ * starts one of these, the words after each program are data (`echo grep -r x`), not a program the guard judges.
+ */
+const DATA_ONLY_PROGRAMS = new Set([
+	"echo",
+	"printf",
+	"true",
+	"false",
+	":",
+	"cd",
+	"pwd",
+	"ls",
+	"cat",
+	"head",
+	"tail",
+	"wc",
+	"uniq",
+	"cut",
+	"tr",
+	"grep",
+	"egrep",
+	"fgrep",
+	"nl",
+	"tac",
+	"basename",
+	"dirname",
+	"realpath",
+	"readlink",
+	"stat",
+	"test",
+	"[",
+	"date",
+	"whoami",
+	"id",
+	"uname",
+	"hostname",
+]);
+/** Unquoted words that open, continue or close a compound command where a program would otherwise start. */
+const COMPOUND_COMMAND_WORDS = new Set([
+	"!",
+	"{",
+	"}",
+	"if",
+	"then",
+	"elif",
+	"else",
+	"fi",
+	"while",
+	"until",
+	"do",
+	"done",
+	"esac",
+]);
+/**
  * A dotenv path following a reading command in the same simple command, in the raw text: the backstop for what the
  * structural walk cannot see (a nested `sh -c` script, a command substitution). The `.env` must start a path
  * component or a word, so a pattern such as `process.env` is not one, and it must not be an exclusion's value
@@ -275,6 +329,8 @@ type CredentialRisk =
 
 interface ShellInvocationSegment {
 	invocation: string[];
+	/** The index of the program word: after assignments and unquoted compound-command words; the length when none. */
+	program: number;
 	/** Files read through input redirections (`<`, `N<`, `<>`). */
 	inputs: string[];
 	/** Command lines nested in its words: command and process substitutions, PowerShell blocks and groups. */
@@ -294,15 +350,26 @@ function nestedCommandLines(token: ShellToken): string[] {
 function parseShellInvocations(tokens: readonly ShellToken[]): ShellInvocationSegment[] {
 	const segments: ShellInvocationSegment[] = [];
 	let invocation: string[] = [];
+	let program: number | undefined;
 	let inputs: string[] = [];
 	let nested: string[] = [];
 	let redirectTarget: "input" | "other" | undefined;
 	let readsPipe = false;
+	const push = () => {
+		if (invocation.length > 0 || inputs.length > 0)
+			segments.push({ invocation, program: program ?? invocation.length, inputs, nested, readsPipe });
+	};
 	for (const token of tokens) {
 		if (token.kind === "arg") {
 			nested.push(...nestedCommandLines(token));
 			if (redirectTarget === "input") inputs.push(token.value);
-			else if (redirectTarget === undefined) invocation.push(token.value);
+			else if (redirectTarget === undefined) {
+				const prefix =
+					/^[A-Za-z_][A-Za-z0-9_]*\+?=/u.test(token.value) ||
+					(!token.quoted && COMPOUND_COMMAND_WORDS.has(token.value));
+				if (program === undefined && !prefix) program = invocation.length;
+				invocation.push(token.value);
+			}
 			redirectTarget = undefined;
 			continue;
 		}
@@ -314,14 +381,15 @@ function parseShellInvocations(tokens: readonly ShellToken[]): ShellInvocationSe
 					: "other";
 			continue;
 		}
-		if (invocation.length > 0 || inputs.length > 0) segments.push({ invocation, inputs, nested, readsPipe });
+		push();
 		invocation = [];
+		program = undefined;
 		inputs = [];
 		nested = [];
 		redirectTarget = undefined;
 		readsPipe = token.kind === "pipe";
 	}
-	if (invocation.length > 0 || inputs.length > 0) segments.push({ invocation, inputs, nested, readsPipe });
+	push();
 	return segments;
 }
 
@@ -472,17 +540,14 @@ const DIRECTORY_CHANGE_COMMANDS = new Set(["cd", "chdir", "pushd", "set-location
  * The directories later commands of one command line may resolve relative paths from, after `invocation` ran: a
  * `cd`/`pushd` (or PowerShell's `Set-Location`) adds its target, written with any home spelling. A change inside a
  * conditional or a subshell may or may not hold for what follows, so every earlier directory stays a candidate and a
- * path is judged from all of them. A group's `(`/`{` and `)` stay attached to the words they touch, so they are peeled
- * off. `cd -` returns to a directory already a candidate. Undefined when the line changes to more distinct directories
- * than the bound the read-only shell line shares.
+ * path is judged from all of them. `invocation` starts at the program word (the tokenizer splits a subshell's `(` and
+ * `)` off, and a group's `{` comes before the program). `cd -` returns to a directory already a candidate. Undefined
+ * when the line changes to more distinct directories than the bound the read-only shell line shares.
  */
 function workingDirectoriesAfter(
-	invocation: readonly string[],
+	words: readonly string[],
 	policies: readonly CredentialPathPolicy[],
 ): readonly CredentialPathPolicy[] | undefined {
-	const words = invocation
-		.map((word) => word.replace(/^[({]+/u, "").replace(/\)+$/u, ""))
-		.filter((word) => word.length > 0);
 	if (words.length === 0) return policies;
 	const command = (words[0].split(/[\\/]/u).at(-1) ?? "").toLowerCase().replace(/\.exe$/u, "");
 	if (!DIRECTORY_CHANGE_COMMANDS.has(command)) return policies;
@@ -518,20 +583,25 @@ function nestedShellScript(
 
 /**
  * The credential walk over one shell command line, shared by the synchronous and asynchronous checks: nested command
- * lines (substitutions, PowerShell blocks, `bash -c` and `pwsh -Command` scripts), input redirections, every command that inspects files (at any word
- * position, so a wrapper's program is judged too), every search, and `cd`/`pushd` tracking. A refusal ends the walk; a broad search is remembered and the walk goes on.
+ * lines (substitutions, PowerShell blocks, `bash -c` and `pwsh -Command` scripts), input redirections, every command
+ * that inspects files, every search, and `cd`/`pushd` tracking. Every word of a simple command is judged as a possible
+ * program (so a wrapper's program is judged too), unless the line is POSIX and every simple command in it starts a
+ * `DATA_ONLY_PROGRAMS` program: then nothing in the line runs data as a command, and only each program word is judged
+ * (`echo grep -r x` prints, it does not search). A nested line is always judged at every word, since its output may
+ * become a command. A refusal ends the walk; a broad search is remembered and the walk goes on.
  */
 function* shellCredentialRisk(
 	command: string,
 	dialect: ShellCommandDialect,
 	paths: CredentialPathPolicy,
+	nested = false,
 ): CredentialWalk<CredentialRisk | undefined> {
 	if (SHELL_SECRET_READ_RE.test(command)) return "credential_path";
-	const shellTokens = tokenizeShellCommand(command, dialect);
+	const shellTokens = tokenizeShellCommand(command, dialect, { compound: true });
 	if (!shellTokens) {
 		for (const line of extractFallbackSearchLines(command)) {
 			if (!tokenizeShellCommand(line, dialect)) continue;
-			const risk = yield* shellCredentialRisk(line, dialect, paths);
+			const risk = yield* shellCredentialRisk(line, dialect, paths, true);
 			if (risk) return risk;
 		}
 		return undefined;
@@ -543,21 +613,31 @@ function* shellCredentialRisk(
 		lineDialect: ShellCommandDialect,
 	): CredentialWalk<CredentialRisk | undefined> {
 		for (const policy of policies) {
-			const risk = yield* shellCredentialRisk(line, lineDialect, policy);
+			const risk = yield* shellCredentialRisk(line, lineDialect, policy, true);
 			if (risk === "broad_search") broad = true;
 			else if (risk) return risk;
 		}
 		return undefined;
 	};
-	for (const segment of parseShellInvocations(shellTokens)) {
-		for (const nested of segment.nested) {
-			const risk = yield* nestedRisk(nested, dialect);
+	const segments = parseShellInvocations(shellTokens);
+	const programsOnly =
+		!nested &&
+		dialect === "posix" &&
+		segments.every(
+			(segment) =>
+				segment.program >= segment.invocation.length ||
+				DATA_ONLY_PROGRAMS.has(parseInvocationCommand(segment.invocation, segment.program).toolName),
+		);
+	for (const segment of segments) {
+		for (const line of segment.nested) {
+			const risk = yield* nestedRisk(line, dialect);
 			if (risk) return risk;
 		}
 		for (const input of segment.inputs) {
 			if (globMayNameDotenv(input) || (yield* anyDirectory("protected", input, policies))) return "credential_path";
 		}
-		for (let index = 0; index < segment.invocation.length; index++) {
+		const end = programsOnly ? Math.min(segment.program + 1, segment.invocation.length) : segment.invocation.length;
+		for (let index = programsOnly ? segment.program : 0; index < end; index++) {
 			const cmd = parseInvocationCommand(segment.invocation, index);
 			if (cmd.envRisk) return cmd.envRisk;
 			const script = nestedShellScript(cmd.toolName, cmd.args);
@@ -583,7 +663,7 @@ function* shellCredentialRisk(
 				if (yield* anyDirectory("storage", root, policies)) return "storage_search";
 			}
 		}
-		const moved = workingDirectoriesAfter(segment.invocation, policies);
+		const moved = workingDirectoriesAfter(segment.invocation.slice(segment.program), policies);
 		if (!moved) return "directory_overflow";
 		policies = moved;
 	}
