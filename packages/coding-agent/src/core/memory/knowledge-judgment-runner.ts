@@ -1,4 +1,4 @@
-/** The session model as a knowledge judge: one isolated, bounded and accounted structured submission. */
+/** The session model as a judge for knowledge and routine intake: one isolated, bounded and accounted structured submission. */
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
@@ -15,6 +15,7 @@ import {
 	StructuredLlmDecisionEngine,
 } from "../decision/engines/structured-llm-engine.ts";
 import { DecisionEngineProtocolError } from "../decision/protocol-error.ts";
+import type { MaintenanceUsageRoute } from "../review/system-one-review-port.ts";
 import type { AutoLearnSettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { KNOWLEDGE_COLLECTION_OPERATION_PREFIX } from "./knowledge-collector.ts";
@@ -26,6 +27,8 @@ const MAX_JUDGMENT_OUTPUT_TOKENS = 4_096;
 export interface KnowledgeJudgmentRunnerDeps {
 	readonly model: Model<Api>;
 	readonly usageOwner: SessionSemanticUsageDelivery;
+	/** The maintenance route every judgment is accounted to and the isolated lane it runs in. */
+	readonly route: Extract<MaintenanceUsageRoute, "knowledge_collection" | "routine_intake">;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
 
@@ -51,10 +54,10 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 		const budget = options?.budget;
 		const origin = options?.origin;
 		if (!budget || !origin)
-			throw new RequestSpendRefusal("A session-model knowledge judgment requires a bounded spending allowance.");
+			throw new RequestSpendRefusal("A session-model judgment requires a bounded spending allowance.");
 		options.signal?.throwIfAborted();
 		const { model } = this.deps;
-		const usage = new BoundedCompletionUsage(this.deps.usageOwner, "knowledge_collection", budget, 1, origin);
+		const usage = new BoundedCompletionUsage(this.deps.usageOwner, this.deps.route, budget, 1, origin);
 		const unsubscribe = options.onRequestAdmitted ? budget.subscribeAdmission(options.onRequestAdmitted) : undefined;
 		const capture: { answers?: unknown } = {};
 		// One fixed definition for every program: the offered tool never breaks the judge's cached prefix.
@@ -96,7 +99,7 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 				maxRetries: 0,
 				signal: options.signal,
 				cacheRetention: "short",
-				laneKind: "knowledge_collection",
+				laneKind: this.deps.route,
 				tools: [submit],
 				beforeToolCall: async (context) => {
 					usage.assertHealthy();
@@ -112,9 +115,9 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 			});
 			usage.assertHealthy();
 			if (result.stopReason === "error" || result.stopReason === "aborted")
-				throw new Error(result.errorMessage ?? `Knowledge judgment ${result.stopReason}.`);
+				throw new Error(result.errorMessage ?? `Session-model judgment ${result.stopReason}.`);
 			if (capture.answers === undefined)
-				throw new DecisionEngineProtocolError("The knowledge judgment ended without a submission.");
+				throw new DecisionEngineProtocolError("The session-model judgment ended without a submission.");
 			return capture.answers;
 		} finally {
 			unsubscribe?.();
@@ -155,6 +158,7 @@ export class SessionKnowledgeJudge {
 			const runner = new KnowledgeJudgmentRunner({
 				model,
 				usageOwner,
+				route: "knowledge_collection",
 				runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
 			});
 			this.current = {

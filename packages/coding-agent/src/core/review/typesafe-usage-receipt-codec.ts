@@ -43,7 +43,8 @@ export function isSystemOneUsageRoute(value: unknown): value is SystemOneUsageRo
 		value === "compaction" ||
 		value === "branch_summary" ||
 		value === "proactivity" ||
-		value === "knowledge_collection"
+		value === "knowledge_collection" ||
+		value === "routine_intake"
 	);
 }
 

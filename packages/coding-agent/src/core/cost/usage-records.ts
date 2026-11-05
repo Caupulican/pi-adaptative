@@ -15,7 +15,8 @@ export function isMaintenanceUsageRoute(route: SystemOneUsageRoute | undefined):
 		route === "compaction" ||
 		route === "branch_summary" ||
 		route === "proactivity" ||
-		route === "knowledge_collection"
+		route === "knowledge_collection" ||
+		route === "routine_intake"
 	);
 }
 

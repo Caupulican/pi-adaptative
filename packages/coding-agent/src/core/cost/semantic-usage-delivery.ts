@@ -202,6 +202,7 @@ function usageSubject(route: SystemOneUsageRoute | undefined): string {
 	if (route === "branch_summary") return "A branch summary usage report";
 	if (route === "proactivity") return "A proactive review usage report";
 	if (route === "knowledge_collection") return "A knowledge collection usage report";
+	if (route === "routine_intake") return "A routine intake usage report";
 	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
 }
 
