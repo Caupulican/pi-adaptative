@@ -13,10 +13,11 @@ import {
 } from "./knowledge-admission.ts";
 import { isKnowledgeScope, isKnowledgeTimestamp, type KnowledgeScope } from "./knowledge-record.ts";
 import { KnowledgeWindowJournal } from "./knowledge-window-journal.ts";
-import { eraseKnowledgeWorkValues } from "./knowledge-work-journal.ts";
+import { eraseKnowledgeWorkValues, retireKnowledgeExtraction } from "./knowledge-work-journal.ts";
 
 export const MAX_COLLECTION_CANDIDATES = 32;
 const MAX_MANIFEST_CHARS = 256_000;
+const MAX_CANDIDATE_CHARS = 64_000;
 const CLAIM_MS = 5 * 60_000;
 
 export interface KnowledgeCollectionSource {
@@ -96,6 +97,23 @@ function timestamp(value: unknown): number {
 /** Shared by extraction versions, so revisiting a source cannot rebind an operation to another job. */
 export function knowledgeCollectionSourceIdentity(source: KnowledgeCollectionSource): string {
 	return canonicalDigest({ source: source.sourceId, original: source.digest, scope: source.scope });
+}
+
+/** One submission contract for the extractor's tool boundary and the durable plan, so a retained answer can install. */
+export function validateCollectionCandidates(sourceId: string, changes: readonly unknown[]): KnowledgeChange[] {
+	if (
+		changes.length > MAX_COLLECTION_CANDIDATES ||
+		!changes.every((change) => Value.Check(knowledgeChangeSchema, change))
+	)
+		throw new Error("Invalid collection candidates");
+	const validated = changes.map(parseKnowledgeChange);
+	if (validated.some((change) => !change.evidence.some((citation) => citation.source === sourceId)))
+		throw new Error("A collection candidate must cite its claimed source");
+	if (validated.some((change) => JSON.stringify(change).length > MAX_CANDIDATE_CHARS))
+		throw new Error("A collection candidate exceeds its retained size");
+	const text = JSON.stringify(validated);
+	if (text.length > MAX_MANIFEST_CHARS || hasMaskableSecretText(text)) throw new Error("Unsafe collection manifest");
+	return validated;
 }
 
 export class KnowledgeCollectionJournal {
@@ -236,19 +254,16 @@ export class KnowledgeCollectionJournal {
 		return { digest: row.manifest_digest as string, candidates };
 	}
 
-	/** A current complete plan is immutable. Re-extraction restores only a missing/transient plan. */
-	install(claim: KnowledgeCollectionClaim, changes: readonly KnowledgeChange[]): KnowledgeCollectionPlan {
-		if (
-			changes.length > MAX_COLLECTION_CANDIDATES ||
-			!changes.every((change) => Value.Check(knowledgeChangeSchema, change))
-		)
-			throw new Error("Invalid collection candidates");
-		const validated = changes.map(parseKnowledgeChange);
-		if (validated.some((change) => !change.evidence.some((citation) => citation.source === claim.source.sourceId)))
-			throw new Error("A collection candidate must cite its claimed source");
-		const text = JSON.stringify(validated);
-		if (text.length > MAX_MANIFEST_CHARS || hasMaskableSecretText(text))
-			throw new Error("Unsafe collection manifest");
+	/**
+	 * A current complete plan is immutable. Re-extraction restores only a missing/transient plan. The plan becomes
+	 * the only owner of candidate bodies, so the window's full extraction payload is retired in the same transaction.
+	 */
+	install(
+		claim: KnowledgeCollectionClaim,
+		windowId: string,
+		changes: readonly KnowledgeChange[],
+	): KnowledgeCollectionPlan {
+		const validated = validateCollectionCandidates(claim.source.sourceId, changes);
 		return this.mutate(claim, () => {
 			if (this.read(claim)) throw new Error("Collection already has an immutable plan");
 			const barrier = this.db.prepare("SELECT forget_barrier FROM collection_meta WHERE id=1").get()?.forget_barrier;
@@ -292,6 +307,7 @@ export class KnowledgeCollectionJournal {
 			this.db
 				.prepare("UPDATE collection_sources SET manifest=?,manifest_digest=? WHERE id=?")
 				.run(JSON.stringify(ids), digest, claim.id);
+			retireKnowledgeExtraction(this.db, claim.id, windowId);
 			return { digest, candidates };
 		});
 	}
@@ -387,7 +403,10 @@ export class KnowledgeCollectionJournal {
 			.run(claim.id, claim.token);
 	}
 
-	/** Called inside forgetting's transaction, after its effect receipt is inserted. */
+	/**
+	 * Called inside forgetting's transaction, after its effect receipt is inserted. Completed window coverage holds no
+	 * pending value and survives; a held window loses its plan and is extracted again under the new barrier.
+	 */
 	discardPendingValues(barrier: string): void {
 		if (!isKnowledgeTimestamp(barrier)) throw new Error("Invalid forgetting barrier");
 		this.db
@@ -396,7 +415,7 @@ export class KnowledgeCollectionJournal {
 		eraseKnowledgeWorkValues(this.db);
 		this.db
 			.prepare(
-				"UPDATE collection_windows SET state=CASE WHEN state='split' THEN 'split' ELSE 'pending' END,manifest=NULL,manifest_digest=NULL WHERE source_id IN (SELECT id FROM collection_sources WHERE status<>'processed')",
+				"UPDATE collection_windows SET state='pending',manifest=NULL,manifest_digest=NULL WHERE state='held' AND source_id IN (SELECT id FROM collection_sources WHERE status<>'processed')",
 			)
 			.run();
 		this.db

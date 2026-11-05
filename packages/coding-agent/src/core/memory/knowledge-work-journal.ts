@@ -1,4 +1,11 @@
-/** Retained semantic work on the canonical knowledge connection; never a separate spend ledger. */
+/**
+ * Retained semantic work on the canonical knowledge connection; never a separate spend ledger.
+ *
+ * `started`: a physical request was admitted and no usable result was retained; automatic replay is refused.
+ * `complete`: the typed result is retained and reused without another request.
+ * `retired`: a content-free identity whose value is no longer retained (its owner finished with it, or forgetting
+ * erased it). Work that is needed again is new paid work, bounded by the caller's existing spending owner.
+ */
 import { type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
@@ -26,10 +33,14 @@ export function retireKnowledgeExtraction(db: SqliteDatabase, owner: string, win
 	).run(owner, window);
 }
 
-/** Forgetting erases values, never the identity of an unresolved physical request. */
+/**
+ * Forgetting erases retained extraction payloads, which may quote forgotten content. Grounding verdicts are
+ * content-free and keyed by their exact candidate, target revision and policy; the store's forgetting rules
+ * still refuse forgotten evidence at commit. Unresolved physical requests keep their identity.
+ */
 export function eraseKnowledgeWorkValues(db: SqliteDatabase): void {
 	db.prepare(
-		"UPDATE knowledge_work SET result=NULL,state=CASE WHEN state='started' THEN 'started' ELSE 'retired' END,outcome=CASE WHEN state='started' THEN outcome ELSE 'forgotten' END",
+		"UPDATE knowledge_work SET result=NULL,state='retired',outcome='forgotten' WHERE kind='extraction' AND state='complete'",
 	).run();
 }
 
@@ -37,6 +48,8 @@ export interface KnowledgeWorkCache {
 	read(id: string): unknown;
 	beginBatch(work: readonly KnowledgeWorkIdentity[], requestId: string): void;
 	complete(id: string, result: unknown, outcome?: "complete" | "subdivide" | "judged"): void;
+	/** Resolves a started request whose result must not be retained; it can be requested again later. */
+	discard(id: string): void;
 	barrier(): string | null;
 }
 
@@ -47,15 +60,14 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 	}
 	read(id: string): unknown {
 		const row = this.db.prepare("SELECT state,result,result_digest FROM knowledge_work WHERE id=?").get(id);
-		if (!row) return undefined;
-		if (row.state === "retired") throw new Error("Knowledge work payload was retired; automatic replay is refused");
+		if (!row || row.state === "retired") return undefined;
 		if (row.state !== "complete" || typeof row.result !== "string")
 			throw new Error("Knowledge work has an unresolved paid attempt; automatic replay is refused");
 		const result: unknown = JSON.parse(row.result);
 		if (canonicalDigest(result) !== row.result_digest) throw new Error("Knowledge work result integrity failed");
-		if (row.result === '{"discarded":true}') throw new Error("Knowledge work result was erased by forgetting");
 		return result;
 	}
+	/** All identities begin together or none does; only retired identities may begin again. */
 	beginBatch(work: readonly KnowledgeWorkIdentity[], requestId: string): void {
 		if (!work.length || work.length > 32 || new Set(work.map((item) => item.id)).size !== work.length)
 			throw new Error("Invalid knowledge work batch");
@@ -71,8 +83,16 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			this.db,
 			() => {
 				const barrier = this.barrier();
-				const insert = this.db.prepare("INSERT INTO knowledge_work VALUES(?,?,?,?,?,?,'started',NULL,NULL,NULL)");
-				for (const item of work) insert.run(item.id, requestId, item.owner, item.window, item.kind, barrier);
+				const existing = this.db.prepare("SELECT state,kind FROM knowledge_work WHERE id=?");
+				const insert = this.db.prepare(
+					"INSERT OR REPLACE INTO knowledge_work VALUES(?,?,?,?,?,?,'started',NULL,NULL,NULL)",
+				);
+				for (const item of work) {
+					const row = existing.get(item.id);
+					if (row && (row.state !== "retired" || row.kind !== item.kind))
+						throw new Error("Knowledge work already has a retained or unresolved attempt");
+					insert.run(item.id, requestId, item.owner, item.window, item.kind, barrier);
+				}
 			},
 			"Knowledge work batch admission",
 		);
@@ -84,14 +104,13 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 		withSqliteTransaction(
 			this.db,
 			() => {
-				const row = this.db.prepare("SELECT barrier FROM knowledge_work WHERE id=? AND state='started'").get(id);
+				const row = this.db
+					.prepare("SELECT kind,barrier FROM knowledge_work WHERE id=? AND state='started'")
+					.get(id);
 				if (!row) return;
-				if (row.barrier !== this.barrier()) {
-					this.db
-						.prepare(
-							"UPDATE knowledge_work SET state='retired',result=NULL,result_digest=?,outcome='forgotten' WHERE id=?",
-						)
-						.run(canonicalDigest(result), id);
+				// An extraction begun before a forget may quote what was forgotten; it is not retained.
+				if (row.kind === "extraction" && row.barrier !== this.barrier()) {
+					this.discard(id);
 					return;
 				}
 				this.db
@@ -102,6 +121,13 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			},
 			"Knowledge work result",
 		);
+	}
+	discard(id: string): void {
+		this.db
+			.prepare(
+				"UPDATE knowledge_work SET state='retired',result=NULL,result_digest=NULL,outcome='forgotten' WHERE id=? AND state='started'",
+			)
+			.run(id);
 	}
 	barrier(): string | null {
 		const value = this.db.prepare("SELECT forget_barrier FROM collection_meta WHERE id=1").get()?.forget_barrier;

@@ -474,11 +474,13 @@ export class KnowledgeCollector {
 											submission.candidates.every((change) =>
 												change.evidence.every((citation) => citation.source === original.sourceId),
 											));
-									this.deps.store.work.complete(
-										workId,
-										retain ? submission : { discarded: true },
-										submission.complete ? "complete" : "subdivide",
-									);
+									if (retain)
+										this.deps.store.work.complete(
+											workId,
+											submission,
+											submission.complete ? "complete" : "subdivide",
+										);
+									else this.deps.store.work.discard(workId);
 								},
 								model: config.model!,
 								maxTokens: Math.min(config.model!.maxTokens, 4_096),
@@ -501,7 +503,7 @@ export class KnowledgeCollector {
 						}
 					}
 					assertCurrent();
-					plan = journal.install(claim, changes);
+					plan = journal.install(claim, window.id, changes);
 				}
 				let candidateHold: string | undefined;
 				const batchAdmission = this.deps.getAdmission(request);

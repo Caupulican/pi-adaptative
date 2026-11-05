@@ -11,8 +11,8 @@ import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delive
 import type { OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import type { OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
-import { type KnowledgeChange, knowledgeChangeSchema, parseKnowledgeChange } from "./knowledge-admission.ts";
-import { MAX_COLLECTION_CANDIDATES } from "./knowledge-collection-journal.ts";
+import { type KnowledgeChange, knowledgeChangeSchema } from "./knowledge-admission.ts";
+import { MAX_COLLECTION_CANDIDATES, validateCollectionCandidates } from "./knowledge-collection-journal.ts";
 import { isKnowledgeTimestamp } from "./knowledge-record.ts";
 import { createKnowledgeTool, type KnowledgeReadSource } from "./knowledge-tool.ts";
 
@@ -138,7 +138,17 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 					"invalid_submission",
 					"Only a complete bounded candidate list is accepted.",
 				);
-			capture.submission = { complete: params.complete, candidates: params.candidates.map(parseKnowledgeChange) };
+			let candidates: KnowledgeChange[];
+			try {
+				candidates = validateCollectionCandidates(source.sourceId, params.candidates);
+			} catch (error) {
+				// Refused at the tool boundary, so the model can correct it and no uninstallable answer is retained.
+				throw new KnowledgeExtractionRefusal(
+					"invalid_submission",
+					error instanceof Error ? error.message : "Invalid knowledge candidates.",
+				);
+			}
+			capture.submission = { complete: params.complete, candidates };
 			input.onSubmission?.(capture.submission);
 			return {
 				content: [{ type: "text", text: "Proposal received for independent admission. No knowledge was stored." }],
