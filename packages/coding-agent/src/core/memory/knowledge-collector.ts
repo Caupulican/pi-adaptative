@@ -106,6 +106,8 @@ export interface KnowledgeCollectionHost {
 	 */
 	explicitRequest(engine: SemanticDecisionEngine | undefined): Pick<DecisionOptions, "budget" | "origin"> | undefined;
 	captureGuard(): () => string | undefined;
+	/** True while the session is not persisted: no collector can retain its terminal handoffs there. */
+	ephemeral(): boolean;
 	createCollector(binding: KnowledgeCollectionBinding): KnowledgeCollector | undefined;
 }
 

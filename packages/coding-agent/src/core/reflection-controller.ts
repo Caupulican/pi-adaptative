@@ -534,16 +534,21 @@ export class ReflectionController {
 		});
 		// One selection, re-read on every call: a bound System One always wins and never falls back.
 		const engine = () => runtime.engine() ?? judge.engine();
+		const ephemeral = () => {
+			const manager = this.deps.getSessionManager();
+			return !manager.isPersisted() || !manager.getSessionFile();
+		};
 		return {
 			time: runtime.time,
 			evidence: () => this.ownerEvidence,
 			engine,
 			explicitRequest: (selected) => judge.explicitRequest(selected),
 			captureGuard: () => this.captureLearningContext(),
+			ephemeral,
 			createCollector: (binding) => {
 				const manager = this.deps.getSessionManager();
 				if (this.deps.isChildSession()) return undefined;
-				if (!manager.isPersisted() || !manager.getSessionFile()) {
+				if (ephemeral()) {
 					const settings = this.deps.getSettingsManager();
 					if (
 						resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings()).enabled

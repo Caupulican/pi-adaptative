@@ -1751,11 +1751,12 @@ export class MemoryController {
 	getKnowledgeCollectionStatus(): KnowledgeCollectionStatus {
 		const collector = this._knowledgeCollector;
 		if (collector && !this._knowledgeStop) return collector.status();
+		// A collector that is still stopping belongs to a memory transition, not to an unpersisted session.
 		return {
 			state: "inactive",
 			reason: this.deps.isChildSession()
 				? "child_session"
-				: this._knowledgeHost && this._currentKnowledgeReader()
+				: this._knowledgeHost?.ephemeral() && this._currentKnowledgeReader()
 					? "ephemeral_session"
 					: "memory_unavailable",
 		};
