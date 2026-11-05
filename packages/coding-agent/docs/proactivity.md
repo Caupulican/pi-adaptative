@@ -2,7 +2,7 @@
 
 Pi can review an idle conversation for unfinished requests, risks, useful suggestions and reminders. The review is enabled by default, uses the session's model unless configured otherwise, and reads the recent conversation, current accepted owner knowledge, standing preferences and the goal's status and open requirements. Owner knowledge uses the same current records as ordinary requests and continuous chat, within a 2,000-character allowance. Internal and peer inputs are labeled separately from owner instructions.
 
-The review has one tool, `raise_note`. It cannot run commands, inspect files, modify memory or contact anyone. Ordinary review text stays private to the review. The host drops empty or repeated notes and limits how many notes can be delivered.
+The review's only write is `raise_note`. Before deciding, it may make up to three bounded, read-only evidence requests (current files, repository history or memory, limited to what its foreground session and policy already permit); each result carries a host-issued evidence ID that a later note must cite. It cannot run commands, modify files or memory, or contact anyone. The repository's proactive reviews guide describes the read allowances. Ordinary review text stays private to the review. The host drops empty or repeated notes and limits how many notes can be delivered.
 
 By default, an accepted note starts a parent turn without waiting for another owner message. The parent handles it under the session's existing authority and budgets. Set `proactivity.delivery` to `"note"` to carry it with the owner's next turn instead. An explicit delivery choice is preserved. Scheduled routines and goal continuation are separate features.
 
