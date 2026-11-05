@@ -92,6 +92,7 @@ export class ProactivityController {
 	private _runs = 0;
 	private _ownerTurnsAtLastRun = 0;
 	private _lastSkipReason: string | undefined;
+	private _unsubscribeActivity: (() => void) | undefined;
 	private readonly abortController = new AbortController();
 	private readonly deps: ProactivityControllerDeps;
 	private readonly models: LaneModelResolver;
@@ -108,6 +109,8 @@ export class ProactivityController {
 	abort(): void {
 		if (this._aborted) return;
 		this._aborted = true;
+		this._unsubscribeActivity?.();
+		this._unsubscribeActivity = undefined;
 		this.clearTimer();
 		this.abortController.abort();
 	}
@@ -121,6 +124,12 @@ export class ProactivityController {
 	/** Arms the review when every gate holds; otherwise records the first gate that did not and arms nothing. */
 	scheduleFromIdle(): void {
 		if (this._isRunning || this._aborted || this.deps.isDisposed() || this.deps.isChildSession()) return;
+		// The prompt tail can schedule while its outer submission still owns the foreground.
+		// Subscribe lazily: the composition root constructs lanes before the foreground owner.
+		this._unsubscribeActivity ??= this.deps.subscribeForegroundActivity(() => {
+			if (this.deps.isForegroundBusy()) this.clearTimer();
+			else if (this._timer === undefined) this.scheduleFromIdle();
+		});
 		const reason = this.gate();
 		this._lastSkipReason = reason;
 		if (reason !== undefined) {
