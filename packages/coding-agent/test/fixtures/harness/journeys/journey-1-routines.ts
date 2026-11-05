@@ -1213,8 +1213,10 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 	});
 	let open = true;
 	const tracks: string[] = [];
-	for (let size = 1; size <= 16; size *= 2)
-		for (let first = 0; first + size <= 16; first += size) {
+	// About sixteen chat records are written (owner words, replies, the steered run's calls and consumed notices); the
+	// optional summary tracks cover twice that, and the ones never reached are retired.
+	for (let size = 1; size <= 32; size *= 2)
+		for (let first = 0; first + size <= 32; first += size) {
 			const task =
 				size === 1
 					? `Compaction: compress message ${first} into`
