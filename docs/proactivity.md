@@ -126,7 +126,9 @@ The failure note does not depend on routines, and turning proactivity off does n
 A routine's result is not counted toward `maxTurnWakesPerDay`; it counts toward
 `routines.maxResultWakesPerDay`, past which it is carried with the owner's next turn. A run whose
 worker reports no owner update is carried with the owner's next turn without starting one and is
-never counted.
+never counted. A read-only routine run that comes due while its session is closed runs in the bot
+daemon within the `routines.away` bounds, at most one run away per routine; see
+[Scheduled work](../packages/coding-agent/docs/proactivity.md#scheduled-work).
 
 Routine intake turns the owner's own words into routines without a model tool call. It is owned by
 the routine session (`core/routines/routine-intake.ts`) and writes only through the routine owner,
