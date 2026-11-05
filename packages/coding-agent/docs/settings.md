@@ -462,7 +462,8 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 ```json
 {
   "routines": {
-    "automaticIntake": true
+    "automaticIntake": true,
+    "away": { "enabled": true, "maxUsdPerRun": 0.25, "maxUsdPerDay": 1, "maxParentHosts": 4 }
   }
 }
 ```
@@ -470,6 +471,12 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `automaticIntake` | `true` | After an owner turn settles, the host reads the owner's new messages and creates a read-only routine for each explicit recurring, scheduled or CI-conditioned request, announced on the next turn (see [Proactivity](proactivity.md#scheduled-work)). `false` stops it; messages written while it is off are never read later. The `routine` tool is unaffected. |
+| `away.enabled` | `true` | A due read-only routine run of a session that is not open runs in the background bot daemon (see [Proactivity](proactivity.md#scheduled-work)). `false` leaves it for the session's next open. |
+| `away.maxUsdPerRun` | `0.25` | Spend bound of one run away (0.01 to 5); a run is charged this until it finishes. |
+| `away.maxUsdPerDay` | `1.00` | Spend of runs away over any rolling 24 hours across the agent directory (0 to 50). A due run that would pass it waits for its session; `0` runs nothing away. |
+| `away.maxParentHosts` | `4` | Sessions the daemon holds open away at once (1 to 16). |
+
+A value outside its range is replaced by the default. The daemon reads `routines.away` from the global settings file only, and applies a change from its next renewal (every 10 seconds).
 
 ### Cost Guard
 
