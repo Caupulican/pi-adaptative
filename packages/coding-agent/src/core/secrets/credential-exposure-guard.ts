@@ -131,6 +131,11 @@ export interface CredentialExposureBoundary extends CredentialPathProtection {
 	getSensitiveValues?(): readonly string[] | Promise<readonly string[]>;
 	/** Explicit backend facts; errors never substitute native filesystem results. */
 	getPathProbe?(context?: ExecutionContext): CredentialPathProbe;
+	/**
+	 * The grep tool guarded with this boundary skips protected files in a directory search
+	 * (`GrepToolOptions.excludeFile`), so such a search reads no dotenv file and needs no file filter.
+	 */
+	grepToolSkipsProtectedFiles?: boolean;
 }
 
 /**
@@ -703,13 +708,14 @@ function* toolCredentialAssessment(
 	toolName: string,
 	args: Record<string, unknown>,
 	paths: CredentialPathPolicy,
+	grepSkipsProtectedFiles: boolean,
 ): CredentialWalk<CredentialExposureAssessment> {
 	const fileBlind: CredentialExposureAssessment = { kind: "content", reason: CREDENTIAL_BLOCK_REASONS.fileBlind };
 	switch (toolName) {
 		case "grep": {
 			const target = stringArgument(args, "path");
 			const glob = stringArgument(args, "glob");
-			// The grep tool descends into every directory and passes `--hidden`.
+			// The grep tool descends into every directory and passes `--hidden`; a lane's grep tool skips protected files.
 			const scope: ShellSearchInvocationScope = {
 				targets: target ? [target] : [],
 				positiveGlobs: glob ? [glob] : [],
@@ -717,7 +723,7 @@ function* toolCredentialAssessment(
 				metaOnly: false,
 				readsStdin: false,
 				recursive: true,
-				mayReadDotenv: true,
+				mayReadDotenv: !grepSkipsProtectedFiles,
 			};
 			return grepToolAssessment(yield* searchCredentialRisk(scope, [paths], false, false), glob);
 		}
@@ -792,7 +798,9 @@ export function credentialToolBlockReason(
 ): string | undefined {
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
 	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
-	return runCredentialWalk(toolCredentialAssessment(toolName, args, paths)).reason;
+	return runCredentialWalk(
+		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true),
+	).reason;
 }
 
 export async function assessCredentialExposureAsync(
@@ -807,7 +815,10 @@ export async function assessCredentialExposureAsync(
 	if (toolName === "secret_store" || !isRecord(args)) return NO_EXPOSURE;
 	signal?.throwIfAborted();
 	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
-	return runCredentialWalkAsync(toolCredentialAssessment(toolName, args, paths), signal);
+	return runCredentialWalkAsync(
+		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true),
+		signal,
+	);
 }
 
 export async function credentialToolBlockReasonAsync(

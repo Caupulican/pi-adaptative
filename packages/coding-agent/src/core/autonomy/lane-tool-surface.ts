@@ -292,7 +292,26 @@ function createLaneTools(
 		shared.artifactStore && names.includes("artifact_retrieve") ? { artifactStore: shared.artifactStore } : {};
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd, shared.read)],
-		["grep", () => createGrepTool(cwd, { ...shared.grep, ...packing })],
+		[
+			"grep",
+			() => {
+				// A judgment that cannot be made skips the file: a skipped file is reported nowhere, a read one is exposed.
+				const verdicts = new Map<string, boolean>();
+				const excludeFile = (file: string): boolean => {
+					let verdict = verdicts.get(file);
+					if (verdict === undefined) {
+						try {
+							verdict = isProtectedCredentialPath(file, cwd, privatePathBoundary);
+						} catch {
+							verdict = true;
+						}
+						verdicts.set(file, verdict);
+					}
+					return verdict;
+				};
+				return createGrepTool(cwd, { ...shared.grep, ...packing, excludeFile });
+			},
+		],
 		["find", () => createFindTool(cwd, { ...shared.find, ...packing })],
 		["ls", () => createLsTool(cwd, shared.ls)],
 		["repo_read", () => createRepoReadTool(cwd, shared.repoRead)],
@@ -511,15 +530,15 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
 	// recursive project search may pass through; everything else denied is harness storage.
 	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
-	const privatePathBoundary =
-		deniedPaths && deniedPaths.length > 0
-			? {
-					redactSensitiveText: redactKnownSecrets,
-					protectedFiles: deniedPaths,
-					protectedDirectories: deniedPaths,
-					searchableFiles: [projectSettingsPath],
-				}
-			: undefined;
+	// The lane's grep tool skips every protected file a directory search reaches (`excludeFile` below), so the
+	// boundary admits such a search without a file filter.
+	const privatePathBoundary: CredentialExposureBoundary = {
+		redactSensitiveText: redactKnownSecrets,
+		protectedFiles: deniedPaths ?? [],
+		protectedDirectories: deniedPaths ?? [],
+		searchableFiles: [projectSettingsPath],
+		grepToolSkipsProtectedFiles: true,
+	};
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
 		capabilities: [

@@ -137,6 +137,7 @@ export async function boundedGrep(
 	root: string,
 	input: { pattern: string; glob?: string; limit?: number; context?: number; ignoreCase?: boolean; literal?: boolean },
 	cwd: string,
+	excludeFile?: (absolutePath: string) => boolean,
 ): Promise<{ text: string; partial: boolean; publish(text: string, partial?: boolean): void }> {
 	if (input.pattern.length > 4096 || input.pattern.includes("\0") || input.pattern.includes("\n"))
 		throw new Error("Bounded grep requires a single-line pattern of at most 4096 characters");
@@ -157,6 +158,8 @@ export async function boundedGrep(
 				const name = relative(root, file).replaceAll("\\", "/") || basename(file);
 				if (input.glob && !minimatch(name, input.glob, { matchBase: true, dot: true, nobrace: true, noext: true }))
 					return true;
+				// A named file is searched as asked; only files a directory search reaches are skipped.
+				if (file !== resolve(root) && excludeFile?.(file)) return true;
 				const source = await readBoundedLocalText(io, file, cwd);
 				const args = ["--no-config", "--color=never", "--line-number", "--text", `--max-count=${limit - matches}`];
 				if (context > 0) args.push(`--context=${context}`);

@@ -70,6 +70,11 @@ export interface GrepToolOptions extends ManagedSearchToolOptions {
 	artifactStore?: ArtifactStore;
 	/** Opt-in tracker for repeated-broad-query "do not repeat" signals. Also default-off. */
 	broadQueryTracker?: BroadQueryTracker;
+	/**
+	 * Files a directory search skips (absolute path in, true to skip), applied before the match limit so a skipped
+	 * file uses none of it. A file named as the search path is searched regardless; its caller judges that read.
+	 */
+	excludeFile?: (absolutePath: string) => boolean;
 }
 
 function formatGrepCall(
@@ -266,6 +271,8 @@ function packGrepOutput(options: {
 
 function formatFffGrepResult(options: {
 	result: FffGrepResult;
+	cwd: string;
+	excludeFile?: (absolutePath: string) => boolean;
 	isDirectory: boolean;
 	searchPathRelativeToCwd: string;
 	effectiveLimit: number;
@@ -277,15 +284,17 @@ function formatFffGrepResult(options: {
 	rawPath?: string;
 	glob?: string;
 }): { text: string; details: GrepToolDetails } {
-	if (options.result.items.length === 0) return { text: "No matches found", details: {} };
+	const { excludeFile } = options;
+	const items =
+		excludeFile && options.isDirectory
+			? options.result.items.filter((match) => !excludeFile(path.resolve(options.cwd, match.relativePath)))
+			: options.result.items;
+	if (items.length === 0) return { text: "No matches found", details: {} };
 
 	const outputLines: string[] = [];
 	const linesTruncated = { value: false };
-	const resultLimitReached =
-		options.result.items.length > options.effectiveLimit || Boolean(options.result.nextCursor);
-	const displayedMatches = resultLimitReached
-		? options.result.items.slice(0, options.effectiveLimit)
-		: options.result.items;
+	const resultLimitReached = items.length > options.effectiveLimit || Boolean(options.result.nextCursor);
+	const displayedMatches = resultLimitReached ? items.slice(0, options.effectiveLimit) : items;
 	let currentPath = "";
 	for (const match of displayedMatches) {
 		const displayPath = fffDisplayPath(match, options);
@@ -326,6 +335,7 @@ export async function tryFffGrep(options: {
 	glob?: string;
 	ignoreCase?: boolean;
 	literal?: boolean;
+	excludeFile?: (absolutePath: string) => boolean;
 	contextValue: number;
 	effectiveLimit: number;
 	isDirectory: boolean;
@@ -368,6 +378,8 @@ export async function tryFffGrep(options: {
 	if (!result.ok || result.value.regexFallbackError) return undefined;
 	return formatFffGrepResult({
 		result: result.value,
+		cwd: options.cwd,
+		excludeFile: options.excludeFile,
 		isDirectory: options.isDirectory,
 		searchPathRelativeToCwd,
 		effectiveLimit: options.effectiveLimit,
@@ -423,6 +435,7 @@ export function createGrepToolDefinition(
 					resolveToCwd(searchDir || ".", cwd),
 					{ pattern, glob, ignoreCase, literal, context, limit },
 					cwd,
+					options.excludeFile,
 				);
 				const truncation = truncateHead(result.text);
 				const bounded = boundReadResult(
@@ -480,6 +493,7 @@ export function createGrepToolDefinition(
 								glob,
 								ignoreCase,
 								literal,
+								excludeFile: options?.excludeFile,
 								contextValue,
 								effectiveLimit,
 								isDirectory,
@@ -580,13 +594,14 @@ export function createGrepToolDefinition(
 								return;
 							}
 							if (event.type === "match") {
+								const filePath = event.data?.path?.text;
+								if (isDirectory && typeof filePath === "string" && options?.excludeFile?.(filePath)) return;
 								matchCount++;
 								if (matchCount > effectiveLimit) {
 									matchLimitReached = true;
 									stopChild(true);
 									return;
 								}
-								const filePath = event.data?.path?.text;
 								const lineNumber = event.data?.line_number;
 								const lineText = event.data?.lines?.text;
 								if (filePath && typeof lineNumber === "number")
