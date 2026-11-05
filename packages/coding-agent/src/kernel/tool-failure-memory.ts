@@ -59,7 +59,8 @@ const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
 const TOOL_FAILURE_RAW_KEY = Symbol("ToolFailureRawKey");
 const TOOL_FAILURE_EXECUTION_SCOPE = Symbol("ToolFailureExecutionScope");
 const MAX_OPERATION_CHARS = 240;
-const MAX_DIAGNOSTIC_CHARS = 240;
+/** A failure record keeps this much of a diagnostic, a policy refusal's reason included. */
+export const MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS = 240;
 const MAX_CORRECTION_CHARS = 480;
 export const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
 const MAX_TOOL_NAME_CHARS = 64;
@@ -900,14 +901,14 @@ function extractFailureDiagnostic(
 			);
 		if (stderrLines.length > 0) {
 			const classified = stderrLines.find((line) => strongDiagnosticPattern.test(line));
-			if (classified) return truncateMiddle(classified, MAX_DIAGNOSTIC_CHARS);
+			if (classified) return truncateMiddle(classified, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS);
 			// No stderr line carries a strong signal. Under requireStrongSignal, the caller has
 			// already decided uncatalogued output must never be fabricated into a diagnostic (see
 			// assessToolFailure) — falling back to the last raw stderr lines here would defeat that
 			// guarantee for the common bash case, so fall through to the same allowUnclassifiedFallback
 			// gate the no-stderr path below applies.
 			if (!requireStrongSignal) {
-				return truncateMiddle(stderrLines.slice(-4).join(" | "), MAX_DIAGNOSTIC_CHARS);
+				return truncateMiddle(stderrLines.slice(-4).join(" | "), MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS);
 			}
 		}
 	}
@@ -922,7 +923,7 @@ function extractFailureDiagnostic(
 		? lines.find((line) => diagnosticPattern.test(line))
 		: [...lines].reverse().find((line) => diagnosticPattern.test(line));
 	const diagnostic = classified ?? (allowUnclassifiedFallback ? lines.at(-1) : undefined);
-	return diagnostic ? truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
+	return diagnostic ? truncateMiddle(diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS) : undefined;
 }
 
 /**
@@ -1029,9 +1030,12 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		return undefined;
 	}
 	const diagnostic =
-		typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
+		typeof candidate.diagnostic === "string"
+			? truncate(candidate.diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS)
+			: undefined;
 	const outputSignature = isOutputSignature(candidate.outputSignature) ? candidate.outputSignature : undefined;
-	const note = typeof candidate.note === "string" ? truncate(candidate.note, MAX_DIAGNOSTIC_CHARS) : undefined;
+	const note =
+		typeof candidate.note === "string" ? truncate(candidate.note, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS) : undefined;
 	const evidence = sanitizeToolFailureEvidence(candidate.evidence);
 	const retainedCorrection =
 		typeof candidate.correction === "string" ? truncate(candidate.correction, MAX_CORRECTION_CHARS) : undefined;
@@ -1093,7 +1097,9 @@ function readFailureDirective(details: unknown): ToolFailureDirectiveDetails["pi
 			: inferToolFailurePhase("failed", candidate.failureCode),
 		failureCode: boundedFailureCode(candidate.failureCode),
 		diagnostic:
-			typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
+			typeof candidate.diagnostic === "string"
+				? truncate(candidate.diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS)
+				: undefined,
 		evidence: sanitizeToolFailureEvidence(candidate.evidence),
 		nextAction: truncate(candidate.nextAction, MAX_CORRECTION_CHARS),
 	};
@@ -1766,7 +1772,7 @@ export function rememberToolFailure(
 		outputSignature: isOutputSignature(outputIdentity?.outputSignature)
 			? outputIdentity.outputSignature
 			: structuredOutputSignature(outputIdentity?.output ?? ""),
-		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
+		diagnostic: diagnostic ? truncate(diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS) : undefined,
 		evidence: sanitizeToolFailureEvidence(evidence),
 		correction: truncate(correction, MAX_CORRECTION_CHARS),
 		...(isDiscard ? { attemptMemory: "discard" as const } : {}),
@@ -1810,7 +1816,7 @@ export function describeOperationOutcome(
 		state: "failed",
 		phase: "execution",
 		failureCode: boundedFailureCode(failureCode),
-		...(diagnostic ? { diagnostic: truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) } : {}),
+		...(diagnostic ? { diagnostic: truncate(diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS) } : {}),
 		correction: BLOCKED_REPLAY_CORRECTION,
 	};
 }
@@ -1922,7 +1928,7 @@ function blockedReplayVisibleRecord(
 		envelopeOnlyChange
 			? `Not executed: only resource-envelope fields (timeout/wait bounds) differ, so this is the same operation. Change the operation itself. ${TOOL_FAILURE_READMISSION_RULE}`
 			: `Not executed: unchanged. ${TOOL_FAILURE_READMISSION_RULE}`,
-		MAX_DIAGNOSTIC_CHARS,
+		MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 	);
 	return {
 		...retainedRecord,

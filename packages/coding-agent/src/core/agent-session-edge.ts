@@ -4,7 +4,7 @@
  * supplies these dependencies; the classification itself is `autonomy/edge-policy.ts`.
  */
 import { createHash } from "node:crypto";
-import type { BeforeToolCallResult } from "../kernel/index.ts";
+import { type BeforeToolCallResult, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../kernel/index.ts";
 import type { SessionEntry } from "../kernel/node.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
@@ -199,35 +199,61 @@ export function keepOutwardDraft(
 	}
 	const classes = [...new Set(operations.map((operation) => operation.class))].join(", ");
 	// A notice is one bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`): the action is shortened, never its origin or release.
-	const head = "Held, not run: ";
-	const tail = ` (${classes}), asked by ${originLabel(draft.origin)}. Approve it in your next message, or grant ${classes} in your own words.`;
 	const action = operations.map((operation) => operation.operation).join("; ");
-	const room = Math.max(16, MAX_RETAINED_DIAGNOSTIC_CHARS - head.length - tail.length);
-	return { id, kept, notice: `${head}${action.length <= room ? action : `${action.slice(0, room - 1)}…`}${tail}` };
+	return {
+		id,
+		kept,
+		notice: boundedActionLine(
+			"Held, not run: ",
+			action,
+			` (${classes}), asked by ${originLabel(draft.origin)}. Approve it in your next message, or grant ${classes} in your own words.`,
+			MAX_RETAINED_DIAGNOSTIC_CHARS,
+		),
+	};
+}
+
+/** One line of at most `bound` characters: the action is shortened, never the head or the tail. */
+function boundedActionLine(head: string, action: string, tail: string, bound: number): string {
+	const room = Math.max(16, bound - head.length - tail.length);
+	return `${head}${action.length <= room ? action : `${action.slice(0, room - 1)}…`}${tail}`;
+}
+
+/** A refusal of a run carrying a third party's words: what was held and why, and the model's next action. */
+interface ThirdPartyRefusal {
+	/** The tool result's diagnostic, bounded by the failure record (`MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS`). */
+	readonly reason: string;
+	readonly correction: string;
 }
 
 /**
  * The prepared form of operations a run carrying a third party's words may not run: one durable draft and one owner
- * notice (`prepareOutward`), and a tool result that says what was held, from whom, and how the owner releases it.
+ * notice (`prepareOutward`), and a tool result that says what was held and from whom (the bounded diagnostic) and how
+ * the owner releases it (the correction, shown as the record's next action).
  */
 function prepareOutward(
 	deps: SessionEdgeDeps,
 	origin: TurnOriginRecord,
 	toolName: string,
 	operations: readonly EdgeOperation[],
-): string {
+): ThirdPartyRefusal {
 	const draftId = deps.prepareOutward?.({ toolName, operations, origin });
 	const actions = operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`);
 	const classes = [...new Set(operations.map((operation) => operation.class))].join(", ");
-	return [
-		`Prepared, not run: ${actions.join("; ")}.`,
-		`This run carries words from ${originLabel(origin)}, and no standing grant of the owner covers ${classes}.`,
-		draftId
-			? `It is kept as draft ${draftId}, and the owner is told with their next turn.`
-			: "The session's draft list is full, so no draft was kept; report the action to the owner.",
-		`It runs once the owner approves it in their own words, or after they grant ${classes} in their own words (a goal grant_edge citing them, or edge.allow in settings).`,
-		"Do not retry it in this run.",
-	].join(" ");
+	return {
+		reason: boundedActionLine(
+			"Prepared, not run: ",
+			actions.join("; "),
+			`, asked by ${originLabel(origin)}; no standing grant of the owner covers ${classes}.`,
+			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
+		),
+		correction: [
+			`It runs once the owner approves it in their own words, or after they grant ${classes} in their own words (a goal grant_edge citing them, or edge.allow in settings).`,
+			"Do not retry it in this run.",
+			draftId
+				? `It is kept as draft ${draftId}, and the owner is told with their next turn.`
+				: "The session's draft list is full, so no draft was kept; report the action to the owner.",
+		].join(" "),
+	};
 }
 
 /**
@@ -247,7 +273,8 @@ async function enforceThirdPartyEdge(
 	if (ownerOnly) {
 		return {
 			block: true,
-			reason: `Refused: ${ownerOnly}, which only the owner's own turn decides. This run carries words from ${originLabel(origin)}. Tell the owner what was asked instead.`,
+			reason: `Refused: ${ownerOnly}, which only the owner's own turn decides. This run carries words from ${originLabel(origin)}.`,
+			correction: "Tell the owner what was asked instead.",
 		};
 	}
 	const scopeCwd = deps.getCwd();
@@ -256,9 +283,7 @@ async function enforceThirdPartyEdge(
 	const operations = await resolveEdgeConditions(deps, classified, signal);
 	const grants = effectiveEdgeGrants(deps);
 	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
-	return ungranted.length === 0
-		? undefined
-		: { block: true, reason: prepareOutward(deps, origin, toolName, ungranted) };
+	return ungranted.length === 0 ? undefined : { block: true, ...prepareOutward(deps, origin, toolName, ungranted) };
 }
 
 /** Revoke a session or instruction grant; a settings grant is the machine's. Returns whether one was removed. */
@@ -285,12 +310,12 @@ export async function enforceSessionEdgeOperation(
 	operation: EdgeOperation,
 	toolName = "operation",
 	signal?: AbortSignal,
-): Promise<{ authorized: boolean; decision?: EdgeDecision; reason?: string }> {
+): Promise<{ authorized: boolean; decision?: EdgeDecision; reason?: string; correction?: string }> {
 	const origin = thirdPartyRunOrigin(deps);
 	if (origin) {
 		return isEdgeOperationGranted(operation, effectiveEdgeGrants(deps))
 			? { authorized: true }
-			: { authorized: false, reason: prepareOutward(deps, origin, toolName, [operation]) };
+			: { authorized: false, ...prepareOutward(deps, origin, toolName, [operation]) };
 	}
 	if (deps.getMode?.() === "yolo") return { authorized: true };
 	const grants = sessionEdgeGrants(deps);
@@ -407,7 +432,7 @@ export async function enforceSessionEdge(
 		if (isEdgeOperationGranted(operation, sessionEdgeGrants(deps))) continue;
 		const result = await enforceSessionEdgeOperation(deps, operation, toolName, signal);
 		if (!result.authorized) {
-			return { block: true, reason: result.reason };
+			return { block: true, reason: result.reason, correction: result.correction };
 		}
 		if (result.decision === "allow-once") {
 			allowOnceOps.add(operation);

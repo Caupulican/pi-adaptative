@@ -67,7 +67,10 @@ export interface OperationGateDeps {
 	/** Whether the operator granted `operation.irreversible` (standing authority). */
 	isGranted(): boolean;
 	/** Ask the operator at the edge; never used for a worker, which is refused instead. */
-	askOperator?(operation: EdgeOperation, signal?: AbortSignal): Promise<{ authorized: boolean; reason?: string }>;
+	askOperator?(
+		operation: EdgeOperation,
+		signal?: AbortSignal,
+	): Promise<{ authorized: boolean; reason?: string; correction?: string }>;
 	notify(message: string): void;
 	/** Where effect readings are kept across sessions; absent keeps them for this process only. */
 	getEffectStore?(): OperationEffectDurableStore | undefined;
@@ -111,7 +114,7 @@ export class OperationGate {
 		cwd: string,
 		actor: "root" | "worker",
 		signal?: AbortSignal,
-	): Promise<{ block: true; reason: string } | undefined> {
+	): Promise<{ block: true; reason: string; correction?: string } | undefined> {
 		signal?.throwIfAborted();
 		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
@@ -158,7 +161,9 @@ export class OperationGate {
 			{ class: "operation.irreversible", operation: triage.operation, reason: verdict.finding },
 			signal,
 		);
-		return answer.authorized ? undefined : { block: true, reason: answer.reason ?? refusal };
+		return answer.authorized
+			? undefined
+			: { block: true, reason: answer.reason ?? refusal, correction: answer.correction };
 	}
 
 	/**

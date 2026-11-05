@@ -1794,7 +1794,7 @@ function createPolicyDeniedToolCallOutcome(denial: AgentToolPolicyDeniedError): 
 		isError: true,
 		phase: "policy",
 		failureCode: "blocked",
-		correction: "Choose an allowed approach or request the required authority before retrying.",
+		correction: denial.correction ?? "Choose an allowed approach or request the required authority before retrying.",
 		diagnostic,
 	};
 }
@@ -2254,7 +2254,7 @@ async function prepareToolCall(
 			if (beforeResult?.block) {
 				return {
 					...createPolicyDeniedToolCallOutcome(
-						new AgentToolPolicyDeniedError(beforeResult.reason, beforeResult.terminate),
+						new AgentToolPolicyDeniedError(beforeResult.reason, beforeResult.terminate, beforeResult.correction),
 					),
 					executionScope: binding?.executionScope,
 					validationEvent,

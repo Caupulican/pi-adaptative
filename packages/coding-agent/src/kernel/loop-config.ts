@@ -112,11 +112,14 @@ export interface ProviderRequestPrefixState {
  *
  * Returning `{ block: true }` prevents the tool from executing. The loop emits an error tool result instead.
  * `reason` becomes the text shown in that error result. If omitted, a default blocked message is used.
+ * `correction` is the policy's own next action for the model; absent, the result carries the generic policy guidance.
+ * The failure record bounds `reason` as a diagnostic, so the next action belongs in `correction`, not after the reason.
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
 	terminate?: boolean;
+	correction?: string;
 }
 
 /**

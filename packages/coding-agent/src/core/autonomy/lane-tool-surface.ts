@@ -725,7 +725,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					toolUsage.assertOpen();
 					admission.assertHealthy();
 					if (refused?.block) {
-						throw new AgentToolPolicyDeniedError(refused.reason, refused.terminate);
+						throw new AgentToolPolicyDeniedError(refused.reason, refused.terminate, refused.correction);
 					}
 					return executor.execute(toolCallId, args, signal, onUpdate);
 				}),

@@ -184,11 +184,14 @@ export type AgentToolErrorKind = ToolErrorKind;
  */
 export class AgentToolPolicyDeniedError extends Error {
 	readonly terminate: boolean | undefined;
+	/** The policy's own next action (`BeforeToolCallResult.correction`). */
+	readonly correction: string | undefined;
 
-	constructor(reason?: string, terminate?: boolean) {
+	constructor(reason?: string, terminate?: boolean, correction?: string) {
 		super(reason || "Tool execution was blocked");
 		this.name = "AgentToolPolicyDeniedError";
 		this.terminate = terminate;
+		this.correction = correction;
 	}
 }
 
@@ -199,7 +202,9 @@ export function readAgentToolPolicyDeniedError(error: unknown): AgentToolPolicyD
 	try {
 		const terminate = Reflect.get(identity.error, "terminate");
 		if (terminate !== undefined && typeof terminate !== "boolean") return undefined;
-		return new AgentToolPolicyDeniedError(identity.message, terminate);
+		const correction = Reflect.get(identity.error, "correction");
+		if (correction !== undefined && typeof correction !== "string") return undefined;
+		return new AgentToolPolicyDeniedError(identity.message, terminate, correction || undefined);
 	} catch {
 		return undefined;
 	}
