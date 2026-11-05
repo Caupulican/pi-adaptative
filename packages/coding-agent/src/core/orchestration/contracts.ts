@@ -15,6 +15,7 @@ export {
 	type ResourcePointerKind,
 } from "../../kernel/session/agent-identity.ts";
 
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { ExecutionContext } from "../../kernel/utils/paths.ts";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
@@ -330,6 +331,11 @@ export interface OrchestrationDispatchRequest {
 	subscriptions?: readonly HostEventSubscriptionInput[];
 	/** Parent lineage captured for this dispatch, never inherited from worker birth identity. */
 	receiptOrigin?: WorkerReceiptOrigin;
+	/**
+	 * Who wrote the words this dispatch carries, when not the owner: a third party's words (a routine run on a GitHub
+	 * comment) limit the worker's edge to the owner's standing grants. Absent for the owner's own work.
+	 */
+	turnOrigin?: TurnOriginRecord;
 	profileId: string;
 	instructions: string;
 	/**

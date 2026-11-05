@@ -13,7 +13,7 @@ import type { OperationGate } from "../system-one/operation-gate.ts";
 import type { ParentExecutionPolicy } from "./parent-execution-context.ts";
 
 export interface WorkerEdgeSource {
-	getEdgeGrants(): readonly EdgeGrantView[];
+	getEdgeGrants(standingOnly?: boolean): readonly EdgeGrantView[];
 	getOperationGate(): Pick<OperationGate, "check">;
 	getModelPolicy(): Pick<ModelPoolPolicyView, "allows">;
 	/** Whether the model can be allocated at all (the router's pool when it is on). */
@@ -30,7 +30,7 @@ export function createWorkerEdgePolicy(
 	Pick<ParentExecutionPolicy, "settleOwnerPolicy"> {
 	const settleOwnerPolicy = source.settleOwnerPolicy;
 	return {
-		getEdgeGrants: () => source.getEdgeGrants(),
+		getEdgeGrants: (standingOnly) => source.getEdgeGrants(standingOnly),
 		...(settleOwnerPolicy ? { settleOwnerPolicy: () => settleOwnerPolicy() } : {}),
 		checkOperation: (tool, args, cwd) => source.getOperationGate().check(tool, args, cwd, "worker"),
 		localCommitBranch: () => source.localCommitBranch(),

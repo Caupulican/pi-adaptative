@@ -31,7 +31,7 @@ import {
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { configFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { edgeRecordsOnBranch, sessionEdgeGrants } from "../agent-session-edge.ts";
+import { edgeRecordsOnBranch, sessionEdgeGrants, standingEdgeGrants } from "../agent-session-edge.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { ExhaustedProviderRegistry, expiryFromRetryAfter } from "../billing-failover-controller.ts";
 import { AwayParentWriteRefusal, createAwayParentWrites } from "../delegation/away-parent-writes.ts";
@@ -253,11 +253,14 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const exhausted = new ExhaustedProviderRegistry(join(providerAdmissionDir(agentDir), "exhausted"), () =>
 			admissionClock.now(),
 		);
-		const getEdgeGrants = () =>
-			sessionEdgeGrants({
-				getEdgeRecords: () => edgeRecordsOnBranch(readerNow()),
-				getSettingsAllow: () => settings.getEdgeSettings().allow,
-			});
+		// Away reads no standing settings grant, so a standing-only read is the owner's typed standing grants.
+		const getEdgeGrants = (standingOnly?: boolean) =>
+			standingOnly
+				? standingEdgeGrants({ getEdgeRecords: () => edgeRecordsOnBranch(readerNow()) })
+				: sessionEdgeGrants({
+						getEdgeRecords: () => edgeRecordsOnBranch(readerNow()),
+						getSettingsAllow: () => settings.getEdgeSettings().allow,
+					});
 		const operationGate = createSessionOperationGate({
 			getEngine: () => undefined,
 			// Never read without an engine; a run away carries no owner request.

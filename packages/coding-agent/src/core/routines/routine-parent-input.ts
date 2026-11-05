@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import { HOST_EVENT_KINDS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -9,12 +11,25 @@ import {
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
 	type RoutineDelivery,
 	type RoutineIntakeNoticeRecord,
+	type RoutineOccurrence,
 } from "./routine-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Why a result that would start a parent turn rides with the owner's next turn instead. */
 export const ROUTINE_RESULT_WAKES_HOLD = "max_result_wakes_per_day_reached";
 export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
+
+/**
+ * Who wrote the words a routine run carries, when not the owner: an event trigger of a third-party-authored kind. It
+ * travels with the run, in its worker dispatch and in its result, and derives from the occurrence alone, so a replay
+ * and a redelivery carry the same origin.
+ */
+export function routineTurnOrigin(occurrence: Pick<RoutineOccurrence, "trigger">): TurnOriginRecord | undefined {
+	const trigger = occurrence.trigger;
+	if (trigger.kind !== "event" || HOST_EVENT_KINDS[trigger.event.kind].authorship !== "third-party-authored")
+		return undefined;
+	return { v: 1, k: "host-event", thirdParty: true };
+}
 
 /**
  * Host identity is separate from the worker's untrusted summary. A quiet result rides with the owner's next turn; every
@@ -77,6 +92,8 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 				: {}),
 			...(quiet ? { ownerUpdate: "none" as const } : {}),
 			...(holds ? { deliveryHold: ROUTINE_RESULT_WAKES_HOLD } : {}),
+			// The run's report can quote the third party's words: the turn that reads it is a third party's run.
+			...(routineTurnOrigin(occurrence) ? { thirdParty: true as const } : {}),
 		},
 	};
 	return routineCompletionInput({ occurrence, result }, message, quiet || holds);

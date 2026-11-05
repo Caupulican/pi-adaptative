@@ -221,7 +221,9 @@ function attemptSpecialization(
 	namespaceKeyOf: (root: string | undefined) => string,
 ): WorkerSpecializationFingerprint | undefined {
 	const contract = attempt.dispatch.executionContract;
-	if (!contract || attempt.dispatch.executionKind === "managed-process") return undefined;
+	// A worker that read a third party's words is never reused for later work.
+	if (!contract || attempt.dispatch.executionKind === "managed-process" || attempt.dispatch.turnOrigin?.thirdParty)
+		return undefined;
 	return describeWorkerSpecialization(
 		contract,
 		attempt.dispatch.resourcePointerIds,

@@ -224,8 +224,11 @@ export interface ParentExecutionPolicy {
 	getSkillAuditSource?(): Pick<SkillAuditToolOptions, "getSkills"> &
 		Required<Pick<SkillAuditToolOptions, "redactPath">>;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
-	getEdgeGrants?(): readonly EdgeGrantView[];
+	/**
+	 * Parent admitted edge grants for worker edge authorization without interactive prompts; with `standingOnly`, only
+	 * the owner's standing grants, which alone cover a worker carrying a third party's words.
+	 */
+	getEdgeGrants?(standingOnly?: boolean): readonly EdgeGrantView[];
 	/** Settles the owner's queued words before a worker call reads the parent's grants or delivery limit. */
 	settleOwnerPolicy?(): Promise<void>;
 	/** System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted). */

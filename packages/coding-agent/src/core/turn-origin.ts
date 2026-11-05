@@ -23,6 +23,7 @@ import { HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE } from "./human-input.ts";
 import { isOwnerSpokenInputId } from "./owner-input-ledger.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "./proactivity/proactivity-review.ts";
 import { ROUTINE_COMPLETION_TYPE, ROUTINE_INTAKE_NOTICE_TYPE } from "./routines/routine-parent-input.ts";
+import { isPlainRecord } from "./util/value-guards.ts";
 
 export type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 
@@ -61,6 +62,9 @@ function customTurnOrigin(customType: string, details: unknown): TurnOriginRecor
 		case HARNESS_NOTICE_CUSTOM_TYPE:
 			return { v: 1, k: "harness" };
 		case ROUTINE_COMPLETION_TYPE:
+			return details && typeof details === "object" && Reflect.get(details, "thirdParty") === true
+				? { v: 1, k: "host-event", thirdParty: true }
+				: { v: 1, k: "routine" };
 		case ROUTINE_INTAKE_NOTICE_TYPE:
 			return { v: 1, k: "routine" };
 		case PROACTIVE_NOTE_CUSTOM_TYPE:
@@ -83,7 +87,14 @@ function customTurnOrigin(customType: string, details: unknown): TurnOriginRecor
 export function turnOriginOf(message: AgentMessage): TurnOriginRecord | undefined {
 	const stamped = turnOriginStampOf(message);
 	if (stamped) return stamped;
-	if (message.role === "custom") return customTurnOrigin(message.customType, message.details);
+	if (message.role === "custom") {
+		// A parent input keeps the message's own details under the ledger's wrapper (`parentInputMessage`).
+		const details = message.details;
+		return customTurnOrigin(
+			message.customType,
+			isPlainRecord(details) && "parentInput" in details ? details.originalDetails : details,
+		);
+	}
 	if (message.role !== "user") return undefined;
 	const control = workerControlOf(message);
 	if (control) return { v: 1, k: control.k === "host_event" ? "host-event" : "harness" };

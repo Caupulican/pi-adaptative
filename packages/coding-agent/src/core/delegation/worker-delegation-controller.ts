@@ -5,6 +5,7 @@ import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
 import { type AgentContextWire, type AgentMessage, decodeExecutionContext } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerClaim, WorkerHostFinding, WorkerRequest } from "../autonomy/contracts.ts";
@@ -13,6 +14,7 @@ import {
 	classifyAllEdgeOperations,
 	edgeBlockReason,
 	isEdgeOperationGranted,
+	thirdPartyEdgeRefusal,
 } from "../autonomy/edge-policy.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
@@ -2050,6 +2052,7 @@ export class WorkerDelegationController {
 				(admittedAttempt !== undefined &&
 					this.lifecycle.getActiveAttempt(retainedAttempt.taskId)?.attemptId !== retainedAttempt.attemptId) ||
 				retainedAttempt.dispatch.instructions !== request.instructions ||
+				!isDeepStrictEqual(retainedAttempt.dispatch.turnOrigin, request.turnOrigin) ||
 				!isDeepStrictEqual(retainedAttempt.dispatch.knowledgeReferences ?? [], request.knowledge ?? []))
 		)
 			return { ok: false, skipReason: "worker_knowledge_task_mismatch" };
@@ -2189,11 +2192,14 @@ export class WorkerDelegationController {
 						...artifacts,
 						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
 					];
-		const receiptOrigin =
-			this.lifecycle.getTaskRuntimeSnapshot().attempts[args.subjectAttemptId]?.dispatch.receiptOrigin;
+		const subject = this.lifecycle.getTaskRuntimeSnapshot().attempts[args.subjectAttemptId]?.dispatch;
+		const receiptOrigin = subject?.receiptOrigin;
+		// The verifier reads the subject's words and work, so it carries the subject's origin.
+		const turnOrigin = subject?.turnOrigin;
 		return {
 			profileId: args.verifierProfileId,
 			...(receiptOrigin ? { receiptOrigin } : {}),
+			...(turnOrigin ? { turnOrigin } : {}),
 			verificationOfTaskId: args.subjectTaskId,
 			verificationOfAttemptId: args.subjectAttemptId,
 			instructions: [...prefix, ...artifactSection].join("\n"),
@@ -3072,6 +3078,7 @@ export class WorkerDelegationController {
 		namespaceKeyOf: (root: string | undefined) => string,
 	): boolean {
 		if (admitted.dispatch.instructions !== request.instructions) return false;
+		if (!isDeepStrictEqual(admitted.dispatch.turnOrigin, request.turnOrigin)) return false;
 		// The rendered text can read the same for different fields, so a structured task is compared field for field.
 		if (!sameTaskBrief(admitted.dispatch.brief, request.brief)) return false;
 		if (!isDeepStrictEqual(admitted.dispatch.knowledgeReferences ?? [], request.knowledge ?? [])) return false;
@@ -3213,6 +3220,7 @@ export class WorkerDelegationController {
 					subscriptions: admission.subscriptions,
 					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
+					...(request.turnOrigin ? { turnOrigin: request.turnOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
 					...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
 					birthContextForkReference,
@@ -3698,6 +3706,11 @@ export class WorkerDelegationController {
 		return record ? { kind: "replay", record } : { kind: "conflict", skipReason: "orchestration_projection_missing" };
 	}
 
+	/** Whether the attempt's durable dispatch carries a third party's words. */
+	private carriesThirdPartyWords(attemptId: string): boolean {
+		return this.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin?.thirdParty === true;
+	}
+
 	/**
 	 * The one specialization decision every ordinary native entrance shares. It runs on the CURRENT
 	 * compiled contract -- after authority resolution and directory capture -- so what is compared is
@@ -3710,7 +3723,9 @@ export class WorkerDelegationController {
 	): Promise<WorkerSpecialistReuseDecision> {
 		// Runtime-owned verifier dispatches keep their pinned contract and their independence: a
 		// verifier is never matched against implementation work or a previous verification context.
-		if (request.verificationOfTaskId || request.parentAgentId) return { outcome: "fresh" };
+		// A third party's words never enter a specialist's standing conversation, where later owner work would read them.
+		if (request.verificationOfTaskId || request.parentAgentId || request.turnOrigin?.thirdParty)
+			return { outcome: "fresh" };
 		let independentParallelIntent: boolean;
 		try {
 			independentParallelIntent = this.independentParallelIntent(request);
@@ -4615,7 +4630,13 @@ export class WorkerDelegationController {
 	}
 
 	startSavedIntent(
-		input: { intent: WorkerSavedIntent; instructions: string; dispatchKey: string; assertAdmission?: () => void },
+		input: {
+			intent: WorkerSavedIntent;
+			instructions: string;
+			dispatchKey: string;
+			turnOrigin?: TurnOriginRecord;
+			assertAdmission?: () => void;
+		},
 		signal?: AbortSignal,
 	): Promise<QueuedWorkerAttemptOutcome> {
 		const intent = parseWorkerSavedIntent(input.intent);
@@ -4629,6 +4650,7 @@ export class WorkerDelegationController {
 				receiptOrigin: intent.receiptOrigin,
 				profileId: intent.executionContract.worker.profile.profileId,
 				messageReplayKey: input.dispatchKey,
+				...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
 				forkTurns: "none",
 			},
 			signal,
@@ -5315,7 +5337,9 @@ export class WorkerDelegationController {
 						signal,
 					}),
 				authorize: (request) => {
-					if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return { authorized: true };
+					const thirdParty = this.carriesThirdPartyWords(durableHandle.attemptId);
+					if (!thirdParty && this.deps.getSettingsManager().getEdgeSettings().mode === "yolo")
+						return { authorized: true };
 					if (!request.script.danger) {
 						return { authorized: true };
 					}
@@ -5324,13 +5348,13 @@ export class WorkerDelegationController {
 						script: request.script,
 						args: request.args,
 					});
-					const parentGrants = this.deps.getEdgeGrants?.() ?? [];
+					const parentGrants = this.deps.getEdgeGrants?.(thirdParty) ?? [];
 					if (isEdgeOperationGranted(operation, parentGrants)) {
 						return { authorized: true };
 					}
 					return {
 						authorized: false,
-						reason: edgeBlockReason(operation, false),
+						reason: thirdParty ? thirdPartyEdgeRefusal(operation) : edgeBlockReason(operation, false),
 					};
 				},
 			};
@@ -5428,8 +5452,10 @@ export class WorkerDelegationController {
 					args,
 				);
 				if (refusedPush) return refusedPush;
-				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
-				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
+				// YOLO is no grant: a run carrying a third party's words acts only under the owner's standing grants.
+				const thirdParty = this.carriesThirdPartyWords(durableHandle.attemptId);
+				if (!thirdParty && this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
+				const parentGrants = this.deps.getEdgeGrants?.(thirdParty) ?? [];
 				const operations = classifyAllEdgeOperations({
 					toolName,
 					args,
@@ -5438,7 +5464,10 @@ export class WorkerDelegationController {
 				});
 				for (const operation of operations) {
 					if (!isEdgeOperationGranted(operation, parentGrants)) {
-						return { block: true, reason: edgeBlockReason(operation, false) };
+						return {
+							block: true,
+							reason: thirdParty ? thirdPartyEdgeRefusal(operation) : edgeBlockReason(operation, false),
+						};
 					}
 				}
 				return this.deps.checkOperation?.(toolName, args, executionCwd);

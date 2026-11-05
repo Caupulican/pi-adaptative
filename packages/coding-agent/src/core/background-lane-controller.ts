@@ -166,7 +166,7 @@ import {
 	routineCiWorkflowPaths,
 	routineEventAnchor,
 	routineHostEventFeed,
-	routineInstructions,
+	routineWorkerRequest,
 } from "./routines/routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routines/routine-session-controller.ts";
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
@@ -1498,11 +1498,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
 					// result waits while one cannot land yet. A run of this session wrote its claims itself.
 					if (occurrence.executor === "away" && occurrence.dispatchKey && intent) {
-						const attemptIds = worker.notificationAttemptIds({
-							intent,
-							instructions: routineInstructions(occurrence),
-							dispatchKey: occurrence.dispatchKey,
-						});
+						const attemptIds = worker.notificationAttemptIds(
+							routineWorkerRequest(occurrence, intent, occurrence.dispatchKey),
+						);
 						this._landRecordedParentWrites(this._getWorkerLifecycle());
 						for (const attemptId of attemptIds)
 							if (this._parentWriteHolds.has(attemptId))
@@ -1536,11 +1534,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
 					if (!intent) return;
-					const attemptIds = worker.notificationAttemptIds({
-						intent,
-						instructions: routineInstructions(occurrence),
-						dispatchKey: occurrence.dispatchKey,
-					});
+					const attemptIds = worker.notificationAttemptIds(
+						routineWorkerRequest(occurrence, intent, occurrence.dispatchKey),
+					);
 					const lifecycle = this._getWorkerLifecycle();
 					const ids: string[] = [];
 					for (const attemptId of attemptIds) {

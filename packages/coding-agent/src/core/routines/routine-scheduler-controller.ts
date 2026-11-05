@@ -31,6 +31,7 @@ import {
 	routinePreviousSlot,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
+import { routineTurnOrigin } from "./routine-parent-input.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
 
@@ -50,6 +51,21 @@ const ROUTINE_UNATTENDED_LINE =
  * The exact brief an occurrence's worker receives; its dispatch and notification identity compare this text, so it
  * is derived only from the stored occurrence. An event run appends the deciding attempt as fenced data.
  */
+/** The one shape of a routine run's dispatch identity, also read back to find its attempts. */
+export function routineWorkerRequest(
+	occurrence: RoutineOccurrence,
+	intent: RoutineWorkerRequest["intent"],
+	dispatchKey: string,
+): RoutineWorkerRequest {
+	const turnOrigin = routineTurnOrigin(occurrence);
+	return {
+		intent,
+		instructions: routineInstructions(occurrence),
+		dispatchKey,
+		...(turnOrigin ? { turnOrigin } : {}),
+	};
+}
+
 export function routineInstructions(occurrence: RoutineOccurrence): string {
 	const trigger = occurrence.trigger;
 	const end = occurrence.definition.origin?.endCondition;
@@ -390,11 +406,7 @@ export class RoutineSchedulerController {
 	private request(occurrence: RoutineOccurrence): RoutineWorkerRequest {
 		const snapshot = occurrence.definition.executionSnapshot;
 		if (!snapshot || !occurrence.dispatchKey) throw new Error("Routine occurrence has no saved execution identity.");
-		return {
-			intent: snapshot.savedIntent,
-			instructions: routineInstructions(occurrence),
-			dispatchKey: occurrence.dispatchKey,
-		};
+		return routineWorkerRequest(occurrence, snapshot.savedIntent, occurrence.dispatchKey);
 	}
 
 	private assertClaim(occurrence: RoutineOccurrence): void {

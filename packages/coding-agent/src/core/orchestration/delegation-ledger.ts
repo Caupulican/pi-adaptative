@@ -50,6 +50,7 @@ export interface PrepareDelegationInput {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
+	turnOrigin?: OrchestrationDispatchRequest["turnOrigin"];
 	laneId: string;
 	instructions: string;
 	/** The structured task `instructions` was rendered from, when the root used fields. */
@@ -168,8 +169,8 @@ function withoutRouteProvenance(
 }
 
 function dispatchEvidence(
-	input: Pick<PrepareDelegationInput, "knowledgeReferences" | "subscriptions" | "receiptOrigin">,
-): Pick<OrchestrationDispatchRequest, "knowledgeReferences" | "subscriptions" | "receiptOrigin"> {
+	input: Pick<PrepareDelegationInput, "knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin">,
+): Pick<OrchestrationDispatchRequest, "knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin"> {
 	const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
 	const subscriptions = hostEventArray(
 		input.subscriptions ?? [],
@@ -181,6 +182,7 @@ function dispatchEvidence(
 		...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 		...(subscriptions.length ? { subscriptions } : {}),
 		...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+		...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
 	};
 }
 
@@ -427,6 +429,7 @@ export class DelegationOrchestrationLedger {
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
 			| "receiptOrigin"
+			| "turnOrigin"
 			| "executionKind"
 			| "logicalLaneId"
 			| "dispatchSequence"

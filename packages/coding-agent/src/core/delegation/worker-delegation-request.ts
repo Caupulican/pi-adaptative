@@ -1,4 +1,5 @@
 import type { ExecutionContext } from "../../kernel/index.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
@@ -217,6 +218,8 @@ export interface WorkerDelegationRequest {
 	brief?: TaskBrief;
 	/** Host-captured parent lineage. Never exposed in the model-facing schema. */
 	receiptOrigin?: WorkerReceiptOrigin;
+	/** Who wrote the words the task carries, when not the owner; see `OrchestrationDispatchRequest.turnOrigin`. */
+	turnOrigin?: TurnOriginRecord;
 	/** Process-local command fence, omitted from durable requests. */
 	assertReceiptAdmission?: () => void;
 	/** Storage-free original command position, before task-directory admission awaits. */

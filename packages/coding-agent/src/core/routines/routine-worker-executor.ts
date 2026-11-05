@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { projectWorkerAttemptLaneRecord, selectedWorkerAttempt } from "../delegation/worker-lane-projection.ts";
@@ -15,6 +16,8 @@ export interface RoutineWorkerRequest {
 	readonly intent: WorkerSavedIntent;
 	readonly instructions: string;
 	readonly dispatchKey: string;
+	/** Absent for the owner's own work; a third party's words when the run carries them (`routineTurnOrigin`). */
+	readonly turnOrigin?: TurnOriginRecord;
 }
 
 export interface RoutineWorkerState {
@@ -76,6 +79,7 @@ export class RoutineWorkerExecutor {
 		for (const attempt of matches) {
 			if (
 				attempt.dispatch.instructions !== request.instructions ||
+				!isDeepStrictEqual(attempt.dispatch.turnOrigin, request.turnOrigin) ||
 				!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], request.intent.knowledgeReferences) ||
 				!isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], request.intent.subscriptions) ||
 				!isDeepStrictEqual(attempt.dispatch.receiptOrigin, request.intent.receiptOrigin)

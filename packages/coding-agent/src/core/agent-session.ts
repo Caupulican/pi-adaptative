@@ -1137,7 +1137,7 @@ export class AgentSession {
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			...createWorkerEdgePolicy({
-				getEdgeGrants: () => this.getEdgeGrants(),
+				getEdgeGrants: (standingOnly) => this._edgeIntent.getEdgeGrants(standingOnly),
 				settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
 				getOperationGate: () => this._edgeIntent.operationGate,
 				localCommitBranch: () => this._edgeIntent.localCommitBranch(),

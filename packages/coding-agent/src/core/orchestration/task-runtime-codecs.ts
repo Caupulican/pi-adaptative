@@ -1,3 +1,4 @@
+import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
@@ -240,6 +241,12 @@ function stringArray(value: unknown, label: string): string[] {
 	return [...value];
 }
 
+function dispatchTurnOrigin(value: unknown, label: string): TurnOriginRecord {
+	const origin = parseTurnOriginRecord(value);
+	if (!origin) throw new DurableTaskRuntimeError(`${label}.turnOrigin is invalid.`);
+	return origin;
+}
+
 export function dispatchIdentifier(value: unknown, label: string): string {
 	const identifier = string(value, label);
 	if (identifier.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
@@ -343,6 +350,7 @@ const DISPATCH_FIELDS = new Set([
 	"knowledgeReferences",
 	"subscriptions",
 	"receiptOrigin",
+	"turnOrigin",
 	"taskId",
 	"profileId",
 	"instructions",
@@ -456,6 +464,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(dispatch.receiptOrigin === undefined
 			? {}
 			: { receiptOrigin: workerReceiptOriginFromValue(dispatch.receiptOrigin) }),
+		...(dispatch.turnOrigin === undefined ? {} : { turnOrigin: dispatchTurnOrigin(dispatch.turnOrigin, label) }),
 		...(parentAgentId ? { parentAgentId } : {}),
 		requirementIds:
 			dispatch.requirementIds === undefined

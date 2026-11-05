@@ -20,6 +20,7 @@ import {
 	recordEdgeRevoke,
 	type SessionEdgeDeps,
 	sessionEdgeGrants,
+	standingEdgeGrants,
 } from "./agent-session-edge.ts";
 import {
 	EDGE_CLASSES,
@@ -417,8 +418,9 @@ export class SessionEdgeIntentController {
 		this.edgeConfirmation = handler;
 	}
 
-	getEdgeGrants(): EdgeGrantView[] {
-		return sessionEdgeGrants(this.edgeDeps());
+	/** The session's grants, or with `standingOnly` the owner's standing grants alone. */
+	getEdgeGrants(standingOnly = false): EdgeGrantView[] {
+		return standingOnly ? standingEdgeGrants(this.edgeDeps()) : sessionEdgeGrants(this.edgeDeps());
 	}
 
 	writtenRuleText(): string {
