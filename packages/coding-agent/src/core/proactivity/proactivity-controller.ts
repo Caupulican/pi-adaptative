@@ -133,7 +133,9 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	/** Review spend and parent wakes inside a window across the owner's sessions, from the daily-usage owner. */
 	aggregateUsageWindow(
 		window: DailyUsageWindow,
-	): Promise<Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes" | "hostEventTurnWakes">>;
+	): Promise<
+		Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes" | "hostEventTurnWakes" | "routineResultTurnWakes">
+	>;
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Resolves after canonical acceptance; consumption is owned by the mode-aware parent ledger. */

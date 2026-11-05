@@ -312,6 +312,7 @@ export type ResolvedRoutineAwaySettings = Required<RoutineAwaySettings>;
 
 export interface RoutinesSettings {
 	automaticIntake?: boolean; // default: true — after an owner turn settles, explicit recurring, scheduled or conditional requests in the owner's own words become read-only routines; false leaves routine creation to the routine tool
+	maxResultWakesPerDay?: number; // default: 10 — routine results that start a parent turn in any rolling 24 h across the sessions stored together; later results ride with the owner's next turn (0 never starts one)
 	away?: RoutineAwaySettings; // Routines of sessions that are not open, run away by the daemon (on by default)
 }
 

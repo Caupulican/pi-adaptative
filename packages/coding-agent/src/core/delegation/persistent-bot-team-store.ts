@@ -40,9 +40,12 @@ import {
 	parseRoutineTarget,
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	ROUTINE_AWAY_SPEND_WINDOW_MS,
+	ROUTINE_FAILURE_PAUSE_THRESHOLD,
 	ROUTINE_INTAKE_CAP_WINDOW_MS,
 	ROUTINE_INTAKE_LIVE_CAP,
 	ROUTINE_INTAKE_WINDOW_CAP,
+	ROUTINE_JOURNAL_SHARE,
+	ROUTINE_UNCERTAIN_RETENTION_MS,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
@@ -76,6 +79,7 @@ import {
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
@@ -922,21 +926,76 @@ export class PersistentBotTeamStore {
 			routine.lastRunAt === routineTriggerAt(occurrence.trigger)
 		)
 			this.routines.set(routine.routineId, withRoutineRunState(routine, finished));
+		this.recordRoutineFailureStreak(finished, outcome, summary);
 		return finished;
 	}
 
 	/**
-	 * Prunes delivered history when the journal is at capacity; whether one more occurrence then fits. A run away inside
-	 * the away spend window is kept: the spend bound charges it until the window passes.
+	 * Counts failed results in a row on the routine, inside the write that records the result: a succeeded result clears
+	 * the count, a cancelled or uncertain one leaves it. The failed result that reaches the threshold pauses an enabled
+	 * routine in that same write, with the reason recorded and its undispatched runs cancelled, without moving the
+	 * revision the owner resumes against. A result is recorded exactly once, so the pause is written exactly once.
+	 */
+	private recordRoutineFailureStreak(
+		occurrence: RoutineOccurrence,
+		outcome: RoutineTerminalOutcome,
+		summary: string,
+	): void {
+		if (outcome !== "failed" && outcome !== "succeeded") return;
+		const routine = this.routines.get(occurrence.routineId);
+		if (routine?.incarnationId !== occurrence.definition.incarnationId) return;
+		const { failureStreak: previous, ...rest } = routine;
+		const streak = outcome === "failed" ? (previous ?? 0) + 1 : 0;
+		if (streak < ROUTINE_FAILURE_PAUSE_THRESHOLD || !routine.enabled) {
+			// An owner-paused routine keeps counting below the threshold; its resume starts the count again.
+			const kept = Math.min(streak, ROUTINE_FAILURE_PAUSE_THRESHOLD - 1);
+			this.routines.set(routine.routineId, kept > 0 ? { ...rest, failureStreak: kept } : rest);
+			return;
+		}
+		this.routines.set(routine.routineId, {
+			...rest,
+			enabled: false,
+			failurePause: {
+				after: streak,
+				at: occurrence.updatedAt,
+				occurrenceId: occurrence.occurrenceId,
+				lastError: boundedRedactedDiagnosticText(summary) ?? "No summary was provided.",
+			},
+		});
+		this.cancelUndispatchedRoutineOccurrences(routine.routineId, occurrence.updatedAt);
+	}
+
+	/**
+	 * Whether the journal may drop an entry: everything it owes was delivered, and it is finished, or uncertain past
+	 * {@link ROUTINE_UNCERTAIN_RETENTION_MS} since its last transition (its uncertainty was already delivered).
+	 */
+	private routineOccurrenceSettled(item: RoutineOccurrence, nowMs: number): boolean {
+		return (
+			item.result?.delivery === "acknowledged" &&
+			(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged") &&
+			(item.phase === "terminal" ||
+				(item.phase === "uncertain" && item.updatedAt <= nowMs - ROUTINE_UNCERTAIN_RETENTION_MS))
+		);
+	}
+
+	/** Whether a routine may admit one more run: it holds fewer than {@link ROUTINE_JOURNAL_SHARE} unsettled entries. */
+	private routineHasJournalShare(routineId: string, nowMs: number): boolean {
+		let held = 0;
+		for (const item of this.routineOccurrences.values())
+			if (item.routineId === routineId && !this.routineOccurrenceSettled(item, nowMs)) held++;
+		return held < ROUTINE_JOURNAL_SHARE;
+	}
+
+	/**
+	 * Prunes settled history when the journal is at capacity, oldest first; whether one more occurrence then fits. A run
+	 * away inside the away spend window is kept: the spend bound charges it until the window passes.
 	 */
 	private routineJournalHasRoom(nowMs: number): boolean {
 		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return true;
 		const removable = Array.from(this.routineOccurrences.values())
 			.filter(
 				(item) =>
-					item.phase === "terminal" &&
-					item.result?.delivery === "acknowledged" &&
-					(!item.priorUncertaintyResult || item.priorUncertaintyResult.delivery === "acknowledged") &&
+					this.routineOccurrenceSettled(item, nowMs) &&
 					!(item.executor === "away" && item.createdAt > nowMs - ROUTINE_AWAY_SPEND_WINDOW_MS),
 			)
 			.sort((a, b) => a.updatedAt - b.updatedAt);
@@ -1664,6 +1723,11 @@ export class PersistentBotTeamStore {
 				...(existing?.lastRunAt === undefined ? {} : { lastRunAt: existing.lastRunAt }),
 				...(existing?.lastStatus ? { lastStatus: existing.lastStatus } : {}),
 				...(existing?.lastSummary ? { lastSummary: existing.lastSummary } : {}),
+				// A write that leaves the routine paused keeps why; the owner's write that enables it starts the count again.
+				...(definition.enabled || existing?.failureStreak === undefined
+					? {}
+					: { failureStreak: existing.failureStreak }),
+				...(definition.enabled || !existing?.failurePause ? {} : { failurePause: existing.failurePause }),
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
@@ -1956,6 +2020,7 @@ export class PersistentBotTeamStore {
 				}
 			}
 			let journalFull = false;
+			const journalShareFull: string[] = [];
 			const unschedulable: { routineId: string; reason: string }[] = [];
 			for (const [id, stored] of this.routines) {
 				if (output.length >= limit) break;
@@ -1972,6 +2037,7 @@ export class PersistentBotTeamStore {
 						: "unchanged";
 					if (decided === "changed") changed = true;
 					else if (decided === "journal-full") journalFull = true;
+					else if (decided === "share-full") journalShareFull.push(id);
 					continue;
 				}
 				// One routine whose slots cannot be computed here is skipped and reported; the others are still claimed.
@@ -1980,6 +2046,7 @@ export class PersistentBotTeamStore {
 					if (admitted.changed) changed = true;
 					if (admitted.journalFull) journalFull = true;
 					if (admitted.refused) refuseAway(id);
+					if (admitted.shareFull) journalShareFull.push(id);
 				} catch (error) {
 					unschedulable.push({ routineId: id, reason: error instanceof Error ? error.message : String(error) });
 				}
@@ -1992,6 +2059,7 @@ export class PersistentBotTeamStore {
 			return {
 				claimed: output.map((item) => structuredClone(item)),
 				journalFull,
+				journalShareFull,
 				unschedulable,
 				awayRefused,
 				...(awayRetryAt === undefined ? {} : { awayRetryAt }),
@@ -2011,7 +2079,12 @@ export class PersistentBotTeamStore {
 		input: RoutineOccurrenceClaimInput,
 		output: RoutineOccurrence[],
 		admitRun: () => boolean,
-	): { readonly changed: boolean; readonly journalFull: boolean; readonly refused?: true } {
+	): {
+		readonly changed: boolean;
+		readonly journalFull: boolean;
+		readonly refused?: true;
+		readonly shareFull?: true;
+	} {
 		const schedule = stored.schedule;
 		const unchanged = { changed: false, journalFull: false };
 		if (schedule.kind === "event") return unchanged;
@@ -2113,6 +2186,8 @@ export class PersistentBotTeamStore {
 			);
 			return advance(this.routines.get(id) ?? routine, cursorAfter);
 		}
+		// A routine holding its whole journal share starts no run: the slot stays due, as for a full journal.
+		if (!this.routineHasJournalShare(id, input.nowMs)) return { changed, journalFull: false, shareFull: true };
 		if (!admitRun()) return { changed, journalFull: false, refused: true };
 		const created = this.createClaimedOccurrence(
 			routine,
@@ -2168,7 +2243,7 @@ export class PersistentBotTeamStore {
 		input: RoutineOccurrenceClaimInput,
 		feed: RoutineHostEventFeed,
 		output: RoutineOccurrence[],
-	): "changed" | "unchanged" | "journal-full" {
+	): "changed" | "unchanged" | "journal-full" | "share-full" {
 		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return "unchanged";
 		for (const occurrence of this.routineOccurrences.values())
 			if (
@@ -2195,8 +2270,9 @@ export class PersistentBotTeamStore {
 			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
 			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
 				return "unchanged";
-			// Without journal room the attempt stays undecided until delivered results make room.
+			// Without journal room, or with the routine's share held, the attempt stays undecided until results settle.
 			if (!this.routineJournalHasRoom(input.nowMs)) return "journal-full";
+			if (!this.routineHasJournalShare(routine.routineId, input.nowMs)) return "share-full";
 			const coalesced = fresh
 				.slice(0, -1)
 				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;
@@ -2287,6 +2363,10 @@ export class PersistentBotTeamStore {
 					: input.receiptOrigin;
 			if (!origin || (input.parentSessionId && origin.sessionId !== input.parentSessionId))
 				throw new Error("Routine parent receipt origin is unavailable.");
+			if (!this.routineHasJournalShare(routine.routineId, input.nowMs))
+				throw new Error(
+					`Routine ${routine.routineId} already holds ${ROUTINE_JOURNAL_SHARE} unfinished, uncertain or undelivered runs; run it again once its results are delivered.`,
+				);
 			const occurrence = this.createClaimedOccurrence(
 				routine,
 				id,
@@ -2470,6 +2550,8 @@ export class PersistentBotTeamStore {
 			if (!parseRoutineOccurrence(next))
 				throw new Error("Routine uncertainty resolution would produce invalid durable state.");
 			this.routineOccurrences.set(next.occurrenceId, next);
+			// The run's known outcome counts toward the failure streak now; its uncertainty did not.
+			this.recordRoutineFailureStreak(next, input.outcome, summary);
 			this.save();
 		});
 	}

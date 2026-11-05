@@ -13,6 +13,7 @@ import {
 } from "../../../../src/core/delegation/session-worker-claim.ts";
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeKind } from "../../../../src/core/harness-notice.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
@@ -31,8 +32,13 @@ import {
 	routineScheduleInputOf,
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
+import { ROUTINE_RESULT_WAKES_HOLD } from "../../../../src/core/routines/routine-parent-input.ts";
 import type { SessionManager } from "../../../../src/kernel/node.ts";
-import { parentInputMessage, parentInputOf } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import {
+	parentInputMessage,
+	parentInputOf,
+	parentInputOriginalDetails,
+} from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, SCRIPTED_TRACKS, withDeadline } from "../session-fixture.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, knowledgeJudgment, latestBatchResults } from "./shared.ts";
@@ -62,9 +68,11 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		updatedAt: "2026-11-05T00:00:00.000Z",
 	};
 	new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(profile, "global");
+	// The leg starts more routine-result turns in a day than the default wake bound; its own witness sets a tight one.
 	const settings = icmContinuousSettings("worker-c", {
 		autoLearn: { enabled: false },
 		proactivity: { enabled: false },
+		routines: { maxResultWakesPerDay: 1_000 },
 	});
 	let root = await world.createRootSession("root", {
 		agentDir,
@@ -75,8 +83,8 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 	// cleanup below never disposes a closed parent again and a failure while it is closed surfaces as itself.
 	let open = true;
 	const tracks: string[] = [];
-	for (let size = 1; size <= 128; size *= 2)
-		for (let first = 0; first + size <= 128; first += size) {
+	for (let size = 1; size <= 256; size *= 2)
+		for (let first = 0; first + size <= 256; first += size) {
 			const task =
 				size === 1
 					? `Compaction: compress message ${first} into`
@@ -172,12 +180,15 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		gate?: Promise<void>,
 		onEntered?: () => void,
 		ownerUpdate?: "none",
+		blocked = false,
 	) => ({
 		...calls(`${label}-report`, [
 			{
 				id: `${label}-report`,
 				name: "submit_report",
-				arguments: { status: "completed", summary: `${label} completed.`, ...(ownerUpdate ? { ownerUpdate } : {}) },
+				arguments: blocked
+					? { status: "blocked", summary: `${label} blocked.`, blockers: [`${label} cannot reach its source.`] }
+					: { status: "completed", summary: `${label} completed.`, ...(ownerUpdate ? { ownerUpdate } : {}) },
 			},
 		]),
 		check: (request: ScriptedRequest) => {
@@ -990,6 +1001,159 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		} finally {
 			awayStore.dispose();
 		}
+
+		// A routine whose runs keep failing pauses itself in the write of its third failed result in a row, keeps the
+		// revision the owner resumes against, tells the owner once and takes no further slot; a success restarts the count.
+		const harnessNotices = (kind: HarnessNoticeKind) =>
+			root.sessionManager.getEntries().filter((entry) => {
+				const details = parentInputOriginalDetails(entry);
+				return (
+					entry.type === "custom_message" &&
+					entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+					typeof details === "object" &&
+					details !== null &&
+					"kind" in details &&
+					details.kind === kind
+				);
+			});
+		const wakesSettled = (count: number): Promise<void> =>
+			new Promise((resolve) => {
+				const check = () => {
+					if (parentInputs().length === count && root.sessionManager.getPendingParentInputs("turn").length === 0) {
+						unsubscribe();
+						resolve();
+					}
+				};
+				const unsubscribe = root.sessionManager.onEntriesPersisted(check);
+				check();
+			});
+		const failingId = "failing-review";
+		const failingPrompt = "Inspect the failing review task and report its status.";
+		await command("routine-failing-create", {
+			action: "create",
+			routineId: failingId,
+			prompt: failingPrompt,
+			schedule: { kind: "interval", intervalMs: 3_600_000 },
+			profileId: profile.profileId,
+		});
+		const failingRevision = store().getRoutine(failingId)!.revision;
+		const failingRuns = () => store().listRoutineOccurrences({ routineId: failingId });
+		const pauseNoticed = createBarrier();
+		const stopObservingPause = root.sessionManager.onEntriesPersisted(() => {
+			if (harnessNotices("routine-paused").length > 0) pauseNoticed.release();
+		});
+		try {
+			for (const [run, blocked] of [true, true, false, true, true, true].entries()) {
+				const label = `routine-failing-${run}`;
+				world.provider.enqueue(
+					"worker-a",
+					workerReply(label, failingPrompt, undefined, undefined, undefined, blocked),
+				);
+				const settled = wakesSettled(parentInputs().length + 1);
+				const running = command(label, { action: "run", routineId: failingId, expectedRevision: failingRevision });
+				world.provider.enqueue("root", text(`${label}-parent`, `Failing run ${run} is reported.`));
+				await running;
+				await withDeadline(world.trace, label, settled);
+				await withDeadline(world.trace, `${label} turn ended`, root.session.agent.waitForIdle());
+				const failing = store().getRoutine(failingId)!;
+				if (run < 5) {
+					expect(failing.enabled, `${label}: fewer than three failures in a row keep the routine running`).toBe(
+						true,
+					);
+					expect(failing.failureStreak, `${label}: the count follows the results in a row`).toBe(
+						[1, 2, undefined, 1, 2][run],
+					);
+				}
+			}
+			await withDeadline(world.trace, "the pause notice is saved", pauseNoticed.promise);
+		} finally {
+			stopObservingPause();
+		}
+		expect(
+			failingRuns().map((entry) => entry.result?.outcome),
+			"a reported blocker is a failed result",
+		).toEqual(["failed", "failed", "succeeded", "failed", "failed", "failed"]);
+		const selfPaused = store().getRoutine(failingId)!;
+		expect(selfPaused.enabled, "the third failure in a row pauses the routine").toBe(false);
+		expect(selfPaused.revision, "the pause keeps the revision the owner resumes against").toBe(failingRevision);
+		expect(selfPaused.failurePause).toMatchObject({
+			after: 3,
+			occurrenceId: failingRuns().at(-1)!.occurrenceId,
+		});
+		expect(selfPaused.failurePause?.lastError).toContain("routine-failing-5 blocked.");
+		expect(
+			harnessNotices("routine-paused").map((entry) => parentInputOf(entry)?.metadata.mode),
+			"the owner is told once, with their next turn",
+		).toEqual(["next-owner-turn"]);
+		// The schedule's first slot passes while paused: nothing is claimed for it.
+		world.timers.advance("routines", 3_600_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(failingRuns(), "a paused routine takes no scheduled run").toHaveLength(6);
+		expect(harnessNotices("routine-paused"), "a later pass repeats no notice").toHaveLength(1);
+
+		// Past routines.maxResultWakesPerDay a result starts no turn: it is saved for the owner's next turn, with one
+		// notice naming the setting. The bound here is exactly the routine-result turns this session already started.
+		const wakeBound = parentInputs().filter((entry) => parentInputOf(entry)?.metadata.mode === "turn").length;
+		expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
+		root = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.openSessionManager(file, agentDir),
+			settings: { ...settings, routines: { maxResultWakesPerDay: wakeBound } },
+		});
+		const heldSummary = "routine-held-result completed.";
+		const heldEntries = () => parentInputs().filter((entry) => JSON.stringify(entry).includes(heldSummary));
+		const heldSaved = createBarrier();
+		const stopObservingHeld = root.sessionManager.onEntriesPersisted(() => {
+			if (heldEntries().length > 0 && harnessNotices("routine-result-wakes").length > 0) heldSaved.release();
+		});
+		const heldRelease = createBarrier();
+		try {
+			// The run reports only after the owner's turn ends. No parent reply is scripted for its result: a turn it
+			// started would find none.
+			world.provider.enqueue("worker-a", workerReply("routine-held-result", replacement, heldRelease.promise));
+			await command("routine-held-run", {
+				action: "run",
+				routineId,
+				expectedRevision: store().getRoutine(routineId)!.revision,
+			});
+			expect(
+				world.provider.requests
+					.filter((request) => request.model.id === "root")
+					.some((request) => JSON.stringify(request.context.messages).includes("was paused after 3 failed runs")),
+				"the owner's turn carried the pause notice",
+			).toBe(true);
+			heldRelease.release();
+			await withDeadline(world.trace, "the held result and its notice are saved", heldSaved.promise);
+		} finally {
+			heldRelease.release();
+			stopObservingHeld();
+		}
+		await withDeadline(world.trace, "nothing runs for the held result", root.session.agent.waitForIdle());
+		const rootRequestsBeforeOwner = world.provider.requests.filter((request) => request.model.id === "root").length;
+		expect(
+			heldEntries().map((entry) => [parentInputOf(entry)?.metadata.mode, parentInputOriginalDetails(entry)]),
+			"the result past the bound waits for the owner's next turn",
+		).toEqual([["next-owner-turn", expect.objectContaining({ deliveryHold: ROUTINE_RESULT_WAKES_HOLD })]]);
+		expect(root.sessionManager.getPendingParentInputs("turn"), "the held result starts no turn").toEqual([]);
+		expect(harnessNotices("routine-result-wakes"), "the hold is told once").toHaveLength(1);
+		world.systemOne.enterPhase("routine-held-owner-turn", ICM_INTAKE_JUDGMENTS);
+		world.provider.enqueue("root", {
+			...text("routine-held-owner-turn", "The held routine result is reported."),
+			check: (request) => {
+				const wire = JSON.stringify(request.context.messages);
+				expect(wire, "the owner's next turn carries the held result").toContain(heldSummary);
+				expect(wire, "and the notice naming the bound").toContain("routines.maxResultWakesPerDay");
+			},
+		});
+		await withDeadline(
+			world.trace,
+			"routine-held-owner-turn",
+			root.session.prompt("What did the scheduled review report?"),
+		);
+		expect(world.provider.requests.filter((request) => request.model.id === "root")).toHaveLength(
+			rootRequestsBeforeOwner + 1,
+		);
+		expect(root.sessionManager.getPendingParentInputs(), "the owner's turn consumed what was held").toEqual([]);
 		world.trace.mark("root", "routine.native-durable-delivery");
 	} finally {
 		release.release();

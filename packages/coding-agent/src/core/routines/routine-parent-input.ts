@@ -7,19 +7,23 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
 import { MAX_ROUTINE_EVENT_MISSED_COUNT, type RoutineDelivery, type RoutineIntakeRequest } from "./routine-contract.ts";
 
-const ROUTINE_COMPLETION_TYPE = "routine-completion";
+export const ROUTINE_COMPLETION_TYPE = "routine-completion";
+/** Why a result that would start a parent turn rides with the owner's next turn instead. */
+export const ROUTINE_RESULT_WAKES_HOLD = "max_result_wakes_per_day_reached";
 const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
 
 /**
- * Host identity is separate from the worker's untrusted summary. The delivery mode comes only from the persisted
- * result, so a redelivery after restart presents the same identity: a quiet result rides with the owner's next turn,
- * every other outcome starts a parent turn.
+ * Host identity is separate from the worker's untrusted summary. A quiet result rides with the owner's next turn; every
+ * other outcome starts a parent turn unless `held`: the routine-result wake bound was reached when it was first saved,
+ * so it rides with the owner's next turn too. The caller repeats a saved input's `held`, so a redelivery after restart
+ * presents the same identity and payload.
  */
-export function routineParentInput(delivery: RoutineDelivery): ParentInputDelivery {
+export function routineParentInput(delivery: RoutineDelivery, held = false): ParentInputDelivery {
 	const { occurrence, result } = delivery;
 	const trigger = occurrence.trigger;
 	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger.expiresAt);
 	const quiet = result.ownerUpdate === "none";
+	const holds = held && !quiet;
 	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
 	// A count recorded at its saturation bound stands for that many or more.
 	const saturated =
@@ -45,7 +49,9 @@ export function routineParentInput(delivery: RoutineDelivery): ParentInputDelive
 		display: true,
 		content: quiet
 			? `Routine ${occurrence.routineId} ended: succeeded with nothing for the owner.${missed}\n${evidence}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`
-			: `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`,
+			: holds
+				? `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nRoutine results reached the day's bound on parent turns (routines.maxResultWakesPerDay), so this one waited for the owner's turn. Use the saved task and this evidence to decide whether the owner needs an update or further work. Later results of this routine before the owner's next turn are recorded on the routine but not delivered.`
+				: `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`,
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
@@ -65,9 +71,10 @@ export function routineParentInput(delivery: RoutineDelivery): ParentInputDelive
 					}
 				: {}),
 			...(quiet ? { ownerUpdate: "none" as const } : {}),
+			...(holds ? { deliveryHold: ROUTINE_RESULT_WAKES_HOLD } : {}),
 		},
 	};
-	return routineCompletionInput({ occurrence, result }, message, quiet);
+	return routineCompletionInput({ occurrence, result }, message, quiet || holds);
 }
 
 /** One stored result's parent input: its identity is the occurrence and result digest, so a redelivery is the same. */
@@ -144,16 +151,20 @@ export function routineIntakeNotice(
 	};
 }
 
-/** Whether a canonical parent input is a quiet result of this routine, still carried for the owner's next turn. */
-export function isQuietRoutineCompletion(entry: SessionEntry | undefined, routineId: string): boolean {
+/**
+ * Whether a canonical parent input is a result of this routine carried for the owner's next turn for the same cause:
+ * a quiet result (`quiet`), or one the wake bound held (`held`).
+ */
+export function isCarriedRoutineCompletion(
+	entry: SessionEntry | undefined,
+	routineId: string,
+	cause: "quiet" | "held",
+): boolean {
 	if (entry?.type !== "custom_message" || entry.customType !== ROUTINE_COMPLETION_TYPE) return false;
 	const details = parentInputOriginalDetails(entry);
-	return (
-		typeof details === "object" &&
-		details !== null &&
-		"routineId" in details &&
-		details.routineId === routineId &&
-		"ownerUpdate" in details &&
-		details.ownerUpdate === "none"
-	);
+	if (typeof details !== "object" || details === null || !("routineId" in details) || details.routineId !== routineId)
+		return false;
+	return cause === "quiet"
+		? "ownerUpdate" in details && details.ownerUpdate === "none"
+		: "deliveryHold" in details && details.deliveryHold === ROUTINE_RESULT_WAKES_HOLD;
 }

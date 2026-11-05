@@ -10,9 +10,13 @@ four reviews per session. Each review permits two model responses, up to two not
 spending limit of $0.05. Across sessions and restarts, the last rolling 24 hours allow $0.25 of review
 spend (`maxUsdPerDay`) and three parent turns started without an owner message, by notes and CI
 events together (`maxTurnWakesPerDay`). At the spend bound no review starts; past the wake bound,
-accepted notes and CI events wait for the owner's next turn.
-When reviews or automatic knowledge collection stop for a reason the owner can change (a reached
-spending limit, a model that does not resolve or has no declared price, invalid limits), the
+accepted notes and CI events wait for the owner's next turn. Routine results have their own bound,
+ten parent turns in the same rolling 24 hours (`routines.maxResultWakesPerDay`); past it a result
+waits for the owner's next turn.
+When reviews, automatic knowledge collection or routines stop for a reason the owner can change (a
+reached spending limit or wake bound, a model that does not resolve or has no declared price,
+invalid limits, a routine paused after three failed runs in a row, a routine time zone the runtime
+does not support), the
 harness saves one notice that is shown with the owner's next turn and names the setting to change.
 It starts no turn and calls no model, and the same state is not reported twice.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
@@ -116,10 +120,13 @@ reconciled. A run is keyed by the attempt (provider, host, repository, run, atte
 or re-sealed attempt never runs twice, and consumed attempt keys outlive journal pruning. Superseded
 and coalesced attempts are counted in the next run, and a new source replay gap is stated in it.
 While the routine journal shared by the sessions of one agent directory has no room for another
-run, a new attempt stays undecided instead of being skipped; the session is warned once, and the
-attempt runs when finished, delivered results free room. The failure note does not depend on routines, and turning proactivity off does not stop a routine. A
-routine's result is not counted toward `maxTurnWakesPerDay`; a run whose worker reports no owner
-update is carried with the owner's next turn without starting one.
+run, or the routine already holds its share of that journal, a new attempt stays undecided instead
+of being skipped; the session is warned once, and the attempt runs when settled results free room.
+The failure note does not depend on routines, and turning proactivity off does not stop a routine.
+A routine's result is not counted toward `maxTurnWakesPerDay`; it counts toward
+`routines.maxResultWakesPerDay`, past which it is carried with the owner's next turn. A run whose
+worker reports no owner update is carried with the owner's next turn without starting one and is
+never counted.
 
 Routine intake turns the owner's own words into routines without a model tool call. It is owned by
 the routine session (`core/routines/routine-intake.ts`) and writes only through the routine owner,

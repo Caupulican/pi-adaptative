@@ -463,6 +463,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 {
   "routines": {
     "automaticIntake": true,
+    "maxResultWakesPerDay": 10,
     "away": { "enabled": true, "maxUsdPerRun": 0.25, "maxUsdPerDay": 1, "maxParentHosts": 4 }
   }
 }
@@ -471,6 +472,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `automaticIntake` | `true` | After an owner turn settles, the host reads the owner's new messages and creates a read-only routine for each explicit recurring, scheduled or CI-conditioned request, announced on the next turn (see [Proactivity](proactivity.md#scheduled-work)). `false` stops it; messages written while it is off are never read later. The `routine` tool is unaffected. |
+| `maxResultWakesPerDay` | `10` | Routine results that start a parent turn over any rolling 24 hours, across the sessions stored together (0 to 1000). Past it a result is saved to the conversation and carried with the owner's next turn instead, and the first one held adds one notice naming this setting; quiet results never count (see [Proactivity](proactivity.md#limits)). `0` starts no turn for a routine result. |
 | `away.enabled` | `true` | A due read-only routine run of a session that is not open runs in the background bot daemon (see [Proactivity](proactivity.md#scheduled-work)). `false` leaves it for the session's next open. |
 | `away.maxUsdPerRun` | `0.25` | Spend bound of one run away (0.01 to 5); a run is charged this until it finishes. |
 | `away.maxUsdPerDay` | `1.00` | Spend of runs away over any rolling 24 hours across the agent directory (0 to 50). A due run that would pass it waits for its session; `0` runs nothing away. |

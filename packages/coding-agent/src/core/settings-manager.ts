@@ -83,6 +83,7 @@ import {
 	DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
 	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
 	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
+	DEFAULT_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
 	DEFAULT_TOOL_EXECUTION_CONCURRENCY,
 	DEFAULT_WORKBENCH_SETTINGS,
 	DEFAULT_WORKER_DELEGATION_ACCOUNT,
@@ -133,6 +134,7 @@ import {
 	MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
 	MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
 	MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
+	MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
 	MAX_TOOL_EXECUTION_CONCURRENCY,
 	MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
 	MAX_WORKER_DELEGATION_MAX_CONCURRENT,
@@ -3592,9 +3594,17 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake">> {
+	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake" | "maxResultWakesPerDay">> {
 		const configured = this.settings.routines ?? {};
-		return { automaticIntake: typeof configured.automaticIntake === "boolean" ? configured.automaticIntake : true };
+		return {
+			automaticIntake: typeof configured.automaticIntake === "boolean" ? configured.automaticIntake : true,
+			maxResultWakesPerDay: sanitizeIntegerSetting(
+				configured.maxResultWakesPerDay,
+				DEFAULT_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
+				0,
+				MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
+			),
+		};
 	}
 
 	/** Bounds of routines run away; the daemon reads them for the whole agent dir. */

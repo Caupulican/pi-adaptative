@@ -64,6 +64,7 @@ function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 		...(routine.lastRunAt === undefined ? {} : { lastRunAt: routine.lastRunAt }),
 		...(routine.lastStatus === undefined ? {} : { lastStatus: routine.lastStatus }),
 		...(unschedulable === undefined ? {} : { unschedulable }),
+		...(routine.failurePause === undefined ? {} : { pausedAfterFailures: routine.failurePause.after }),
 	};
 }
 

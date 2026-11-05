@@ -283,6 +283,14 @@ export const DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY = 1;
 /** Each hosted session holds its parent context and worker runtime in the daemon's memory. */
 export const DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS = 4;
 
+/**
+ * Routine results that start a parent turn in any rolling 24 h across the agent dir's sessions: one a day for each of
+ * the ten automatic routines a session may hold. Past it a result rides with the owner's next turn.
+ */
+export const DEFAULT_ROUTINE_MAX_RESULT_WAKES_PER_DAY = 10;
+
+export const MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY = 1_000;
+
 /** A run away always has a bound: a worker reads a zero budget as unbounded, and the day bound charges this per run. */
 export const MIN_ROUTINE_AWAY_MAX_USD_PER_RUN = 0.01;
 

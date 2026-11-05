@@ -160,7 +160,11 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { RoutineIntake, type RoutineIntakeStatus } from "./routines/routine-intake.ts";
-import { isQuietRoutineCompletion, routineParentInput } from "./routines/routine-parent-input.ts";
+import {
+	isCarriedRoutineCompletion,
+	ROUTINE_RESULT_WAKES_HOLD,
+	routineParentInput,
+} from "./routines/routine-parent-input.ts";
 import {
 	RoutineSchedulerController,
 	routineEventAnchor,
@@ -1405,6 +1409,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._botTeamStore;
 	}
 
+	/** The parent input still carrying an earlier result of this routine, quiet or held, to the owner's next turn. */
+	private findCarriedRoutineResult(routineId: string, cause: "quiet" | "held"): { entryId: string } | undefined {
+		const manager = this.deps.getSessionManager();
+		const carried = manager
+			.getPendingParentInputs("next-owner-turn")
+			.find((input) => isCarriedRoutineCompletion(manager.getEntry(input.entryId), routineId, cause));
+		return carried ? { entryId: carried.entryId } : undefined;
+	}
+
 	private _ensureRoutineScheduler(): void {
 		if (this._routines || !this._botTeamStore || this.deps.isDisposed() || this.deps.canRunRoutines?.() === false)
 			return;
@@ -1462,7 +1475,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			delivery: {
-				deliver: (delivery) => {
+				deliver: async (delivery) => {
 					const { occurrence } = delivery;
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
 					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
@@ -1478,15 +1491,30 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 							if (this._parentWriteHolds.has(attemptId))
 								throw new Error("Routine result is waiting for the claims its run recorded away to land.");
 					}
-					return this.deps.deliverParentInput(routineParentInput(delivery));
-				},
-				findCarriedQuietResult: (routineId) => {
+					const input = routineParentInput(delivery);
+					// Quiet results and expiry notices already ride with the owner's next turn and never count as wakes.
+					if (input.mode === "next-owner-turn") return this.deps.deliverParentInput(input);
 					const manager = this.deps.getSessionManager();
-					const carried = manager
-						.getPendingParentInputs("next-owner-turn")
-						.find((input) => isQuietRoutineCompletion(manager.getEntry(input.entryId), routineId));
-					return carried ? { entryId: carried.entryId } : undefined;
+					// A replay repeats the saved mode, so a saved delivery is never measured again.
+					const saved = manager.getParentInput(input.deliveryId);
+					let held = saved !== undefined && saved.metadata.mode === "next-owner-turn";
+					if (!saved) {
+						const day = await this.deps.aggregateUsageWindow(rollingDayWindow(Date.now()));
+						const bound = this.deps.getSettingsManager().getRoutinesSettings().maxResultWakesPerDay;
+						held = day.routineResultTurnWakes >= bound;
+						if (held) {
+							this.deps.observeHarnessNotice?.("routine-result-wakes", () => ({
+								reason: ROUTINE_RESULT_WAKES_HOLD,
+								text: `Routine results started ${bound} parent turns in the last 24 hours, the routines.maxResultWakesPerDay bound; later results wait for the owner's next turn until the day has room. Raising the setting lets more start turns.`,
+							}));
+							// One held result of a routine is carried at a time; later ones are recorded against it.
+							const carried = this.findCarriedRoutineResult(delivery.occurrence.routineId, "held");
+							if (carried) return carried;
+						} else this.deps.observeHarnessNotice?.("routine-result-wakes", () => "clear");
+					}
+					return this.deps.deliverParentInput(held ? routineParentInput(delivery, true) : input);
 				},
+				findCarriedQuietResult: (routineId) => this.findCarriedRoutineResult(routineId, "quiet"),
 				acknowledgeWorkerNotification: (occurrence) => {
 					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
@@ -1505,6 +1533,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					}
 					lifecycle.markNotificationsDelivered(ids);
 				},
+				noticeRoutineState: (kind, routineId, notice) =>
+					this.deps.observeHarnessNotice?.(kind, () => ({ scope: routineId, state: notice ?? "clear" })),
 			},
 			dispatchMessage: async (occurrence) => {
 				if (occurrence.target.kind === "bot") {

@@ -29,6 +29,18 @@ export const MAX_ROUTINE_ID_CHARS = 128;
 export const MAX_ROUTINE_COMMAND_ID_CHARS = 64;
 export const MAX_ROUTINE_PROMPT_CHARS = 8_000;
 export const MAX_ROUTINE_OCCURRENCES = 256;
+/**
+ * Journal entries one routine may hold that cannot be pruned (active runs, undelivered results, uncertain runs still
+ * reconciled). A routine at its share starts no further run until one settles, so no routine can fill the journal.
+ */
+export const ROUTINE_JOURNAL_SHARE = 32;
+/**
+ * How long an uncertain run whose uncertainty was delivered stays reconciled against its worker. Past it, the journal
+ * prunes it under pressure like a delivered result: a run still unknown after a week will not be found any more.
+ */
+export const ROUTINE_UNCERTAIN_RETENTION_MS = 7 * 86_400_000;
+/** Failed results in a row after which the store pauses the routine in the same write as the last of them. */
+export const ROUTINE_FAILURE_PAUSE_THRESHOLD = 3;
 /** Consumed manual and event occurrence ids kept after their journal entry is pruned, so neither replays. */
 export const MAX_ROUTINE_REPLAY_TOMBSTONES = 2_048;
 /** Bound on superseded or coalesced CI attempts one event run reports as missed. */
@@ -500,6 +512,23 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	 * session's next open; the session reports this once, and the daemon status lists it.
 	 */
 	readonly awayRefusal?: { readonly reason: string; readonly at: number };
+	/** Failed results in a row, below {@link ROUTINE_FAILURE_PAUSE_THRESHOLD}; a succeeded result clears it. */
+	readonly failureStreak?: number;
+	/**
+	 * Why the host paused the routine: written with the failed result that reached the threshold, kept while the routine
+	 * stays paused, dropped by the owner's write that enables it again. It never moves the revision.
+	 */
+	readonly failurePause?: RoutineFailurePause;
+}
+
+export interface RoutineFailurePause {
+	/** Failed results in a row that paused it. */
+	readonly after: number;
+	readonly at: number;
+	/** The occurrence whose failed result reached the threshold. */
+	readonly occurrenceId: string;
+	/** That result's first line, redacted and bounded. */
+	readonly lastError: string;
 }
 
 export const ROUTINE_LAST_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled", "uncertain"] as const;
@@ -589,6 +618,11 @@ export interface RoutineClaimResult {
 	 * entry is still active, uncertain or awaiting delivery. Nothing was consumed; delivered results make room.
 	 */
 	readonly journalFull: boolean;
+	/**
+	 * Due routines left due because each already holds {@link ROUTINE_JOURNAL_SHARE} unsettled journal entries; nothing
+	 * was consumed, and the next admitted run's missed count covers the slots that passed meanwhile.
+	 */
+	readonly journalShareFull: readonly string[];
 	/** Clock routines whose slots this runtime could not compute; each was skipped and the others still claimed. */
 	readonly unschedulable: readonly { readonly routineId: string; readonly reason: string }[];
 	/** Due routines an away claim left due because the away spend bound has no room for another run. */
@@ -986,6 +1020,8 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 		lastStatus,
 		lastSummary,
 		awayRefusal: rawAwayRefusal,
+		failureStreak,
+		failurePause: rawFailurePause,
 		...rawDefinition
 	} = value;
 	const definition = parseRoutineDefinition(rawDefinition);
@@ -1035,6 +1071,33 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 				at: rawAwayRefusal.at,
 			};
 		}
+		if (
+			failureStreak !== undefined &&
+			(typeof failureStreak !== "number" ||
+				!Number.isSafeInteger(failureStreak) ||
+				failureStreak < 1 ||
+				failureStreak >= ROUTINE_FAILURE_PAUSE_THRESHOLD)
+		)
+			return undefined;
+		let failurePause: RoutineFailurePause | undefined;
+		if (rawFailurePause !== undefined) {
+			if (
+				!isPlainRecord(rawFailurePause) ||
+				!hasOnlyKeys(rawFailurePause, ["after", "at", "occurrenceId", "lastError"]) ||
+				typeof rawFailurePause.after !== "number" ||
+				!Number.isSafeInteger(rawFailurePause.after) ||
+				rawFailurePause.after < 1 ||
+				!validInstant(rawFailurePause.at) ||
+				definition.enabled
+			)
+				return undefined;
+			failurePause = {
+				after: rawFailurePause.after,
+				at: rawFailurePause.at,
+				occurrenceId: boundedString(rawFailurePause.occurrenceId, MAX_ROUTINE_SUMMARY_CHARS, "paused occurrence"),
+				lastError: boundedString(rawFailurePause.lastError, MAX_ROUTINE_SUMMARY_CHARS, "pause error"),
+			};
+		}
 		return {
 			...definition,
 			cursor,
@@ -1043,6 +1106,8 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			...(lastStatus === undefined ? {} : { lastStatus: lastStatus as RoutineDefinitionView["lastStatus"] }),
 			...(lastSummary === undefined ? {} : { lastSummary }),
 			...(awayRefusal ? { awayRefusal } : {}),
+			...(failureStreak === undefined ? {} : { failureStreak }),
+			...(failurePause ? { failurePause } : {}),
 		};
 	} catch {
 		return undefined;

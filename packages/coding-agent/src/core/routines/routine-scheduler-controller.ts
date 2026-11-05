@@ -3,6 +3,7 @@ import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notificat
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { ciEventSubject, ciSubjectKey, hostEventHash } from "../events/host-event-contract.ts";
 import { hostEventIsCurrent } from "../events/host-event-reducer.ts";
+import type { HarnessNotice } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -15,6 +16,7 @@ import {
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
+	ROUTINE_JOURNAL_SHARE,
 	type RoutineAwayClaimGate,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
@@ -132,6 +134,15 @@ export interface RoutineResultDelivery {
 	findCarriedQuietResult(routineId: string): { entryId: string } | undefined;
 	/** Consume the native notification only after its parent input is physically durable. */
 	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
+	/**
+	 * Tells the owner once, with their next turn, that one of this session's routines is paused after failed runs or
+	 * cannot be scheduled here; `undefined` observes that the state ended.
+	 */
+	noticeRoutineState(
+		kind: "routine-paused" | "routine-unschedulable",
+		routineId: string,
+		notice: HarnessNotice | undefined,
+	): void;
 }
 
 interface RoutineSchedulerDeps {
@@ -195,6 +206,8 @@ export class RoutineSchedulerController {
 	private stepFailed = false;
 	/** The last claim left a due routine unconsumed for lack of journal room; only a store change can admit it. */
 	private journalFull = false;
+	/** Routines the last claim left due because each holds its whole journal share; only a store change can admit them. */
+	private shareWait: ReadonlySet<string> = new Set();
 	/**
 	 * Away only: the routines the last claim left due because the away spend bound had no room, and when the oldest
 	 * charged run leaves the window. Room otherwise returns only with a store change, which wakes the scheduler.
@@ -356,7 +369,7 @@ export class RoutineSchedulerController {
 			const separator = unit.indexOf("|");
 			if (separator < 0) continue;
 			const subject = unit.slice(separator + 1);
-			const aboutRoutine = unit.startsWith("routine|") || unit.startsWith("away|");
+			const aboutRoutine = unit.startsWith("routine|") || unit.startsWith("away|") || unit.startsWith("share|");
 			if (!(aboutRoutine ? routines : present).has(subject)) this.faults.delete(unit);
 		}
 		const pendingIds = new Set(
@@ -395,7 +408,40 @@ export class RoutineSchedulerController {
 			}
 		}
 		this.attempt("delivery", () => this.deliverPending());
+		const parent = this.deps.delivery;
+		if (parent) this.attempt("notices", () => this.observeRoutineStates(parent));
 		return result;
+	}
+
+	/**
+	 * Observes, for each routine of this session, the two kept states the owner acts on: a pause after failed runs (from
+	 * its durable record, so a restart finds the notice already saved) and a time zone this runtime cannot place.
+	 */
+	private observeRoutineStates(parent: RoutineResultDelivery): void {
+		for (const routine of this.deps.store.listRoutines()) {
+			if (routine.target.kind !== "session" || routine.target.parentSessionId !== this.deps.parentSessionId)
+				continue;
+			const pause = routine.failurePause;
+			parent.noticeRoutineState(
+				"routine-paused",
+				routine.routineId,
+				pause && {
+					reason: `${routine.routineId}:${pause.occurrenceId}`,
+					text: `Routine ${routine.routineId} was paused after ${pause.after} failed runs in a row and stays paused until the owner resumes it. The last run reported: ${JSON.stringify(pause.lastError)}`,
+				},
+			);
+			const schedule = routine.schedule;
+			parent.noticeRoutineState(
+				"routine-unschedulable",
+				routine.routineId,
+				schedule.kind === "calendar" && routineZoneUnsupported(schedule) !== undefined
+					? {
+							reason: `${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`,
+							text: `Routine ${routine.routineId} cannot be scheduled: time zone ${JSON.stringify(schedule.timeZone)} is not supported by this runtime, so it does not run until the owner changes the zone or a runtime that supports it opens the session.`,
+						}
+					: undefined,
+			);
+		}
 	}
 
 	private eligibleRoutines(): RoutineDefinitionView[] {
@@ -500,6 +546,7 @@ export class RoutineSchedulerController {
 			(hostEvents === undefined || !this.hasEventWork(eventRoutines, hostEvents))
 		) {
 			this.journalFull = false;
+			this.shareWait = new Set();
 			this.awayWait = undefined;
 			this.faults.delete("journal");
 			return;
@@ -518,6 +565,14 @@ export class RoutineSchedulerController {
 		});
 		for (const { routineId, reason } of claim.unschedulable)
 			this.report(`routine|${routineId}`, `Routine ${routineId} cannot be scheduled: ${reason}`);
+		this.shareWait = new Set(claim.journalShareFull);
+		for (const routineId of claim.journalShareFull)
+			this.report(
+				`share|${routineId}`,
+				`Routine ${routineId} is waiting: it already holds ${ROUTINE_JOURNAL_SHARE} unfinished, uncertain or undelivered runs, its share of the routine journal; its due run starts once one of them settles.`,
+			);
+		for (const unit of this.faults.keys())
+			if (unit.startsWith("share|") && !this.shareWait.has(unit.slice("share|".length))) this.faults.delete(unit);
 		this.awayWait =
 			claim.awayRefused.length > 0
 				? {
@@ -631,7 +686,7 @@ export class RoutineSchedulerController {
 			recipient: this.deps.parentSessionId,
 			nowMs: this.deps.timers.now(),
 		};
-		// A resolved uncertainty always wakes: the parent was already told this run's outcome was unknown.
+		// A resolved uncertainty is never quiet: the parent was already told this run's outcome was unknown.
 		if (occurrence.phase === "uncertain")
 			this.deps.store.resolveUncertainRoutineOccurrence({
 				...outcome,
@@ -792,7 +847,8 @@ export class RoutineSchedulerController {
 		}
 		try {
 			const nowMs = this.deps.timers.now();
-			let next = this.nextScheduledAt(nowMs, this.journalFull, this.awayWait?.routines);
+			const waiting = new Set([...this.shareWait, ...(this.awayWait?.routines ?? [])]);
+			let next = this.nextScheduledAt(nowMs, this.journalFull, waiting);
 			if (this.awayWait?.retryAt !== undefined) next = Math.min(next, this.awayWait.retryAt);
 			for (const occurrence of this.occurrences())
 				if (
@@ -815,9 +871,10 @@ export class RoutineSchedulerController {
 	 * contributes only an edit still ahead of the clock. Every routine, paused ones included, contributes its end time
 	 * while that is ahead (not away, where nothing is retired). With `waitingForRoom`, a routine already due is left
 	 * out: the last claim found no journal room for it, and only a store change (which wakes the scheduler) can make
-	 * room; the same holds for a due routine in `awayRefused`, whose room also returns as the away spend window passes.
+	 * room; the same holds for a due routine in `waiting`: one holding its whole journal share, or one the away spend
+	 * bound refused, whose room also returns as the away spend window passes.
 	 */
-	private nextScheduledAt(nowMs: number, waitingForRoom = false, awayRefused?: ReadonlySet<string>): number {
+	private nextScheduledAt(nowMs: number, waitingForRoom = false, waiting?: ReadonlySet<string>): number {
 		let next = Number.POSITIVE_INFINITY;
 		const previousSlots = new Map<string, number | undefined>();
 		for (const routine of this.deps.store.listRoutines()) {
@@ -846,7 +903,7 @@ export class RoutineSchedulerController {
 				due = undefined;
 			}
 			if (end !== undefined) due = due === undefined ? end : Math.min(due, end);
-			if (due === undefined || (due <= nowMs && (waitingForRoom || awayRefused?.has(routine.routineId)))) continue;
+			if (due === undefined || (due <= nowMs && (waitingForRoom || waiting?.has(routine.routineId)))) continue;
 			next = Math.min(next, due);
 		}
 		this.previousSlots = previousSlots;

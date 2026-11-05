@@ -13,7 +13,13 @@ const MAX_NOTICE_GENERATIONS = 32;
  * The automatic capabilities whose owner-actionable inactive states the harness reports by itself. A kind is part of
  * the delivery id, so a name never changes once shipped; its reasons are free stable strings chosen by the capability.
  */
-export type HarnessNoticeKind = "knowledge-collection" | "proactive-review" | "routine-intake";
+export type HarnessNoticeKind =
+	| "knowledge-collection"
+	| "proactive-review"
+	| "routine-intake"
+	| "routine-result-wakes"
+	| "routine-paused"
+	| "routine-unschedulable";
 
 /** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */
 export interface HarnessNotice {
@@ -23,9 +29,14 @@ export interface HarnessNotice {
 
 /**
  * What a capability's owner observed at one of its own detection points: a kept state, or proof that the capability
- * works again. A state that is normal flow, transient or the owner's own switch is not observed at all.
+ * works again. A state that is normal flow, transient or the owner's own switch is not observed at all. A kind whose
+ * subjects hold their states independently (one per routine) names the subject as `scope`; each scope has its own
+ * episodes, so observing one subject never ends or repeats another's.
  */
-export type HarnessNoticeObservation = HarnessNotice | "clear";
+export type HarnessNoticeObservation =
+	| HarnessNotice
+	| "clear"
+	| { readonly scope: string; readonly state: HarnessNotice | "clear" };
 
 export interface HarnessNoticeDeps {
 	getSessionManager(): SessionManager;
@@ -64,7 +75,8 @@ export function harnessNoticeDeliveryId(
  */
 export class HarnessNoticeController {
 	private readonly deps: HarnessNoticeDeps;
-	private readonly kinds = new Map<HarnessNoticeKind, KindState>();
+	/** State per kind, or per kind and scope. */
+	private readonly kinds = new Map<string, KindState>();
 	private readonly inFlight = new Set<string>();
 	private sessionId: string | undefined;
 	private closed = false;
@@ -92,17 +104,20 @@ export class HarnessNoticeController {
 		this.closed = true;
 	}
 
-	private record(kind: HarnessNoticeKind, observation: HarnessNoticeObservation): void {
+	private record(kind: HarnessNoticeKind, observed: HarnessNoticeObservation): void {
 		const manager = this.deps.getSessionManager();
 		const sessionId = manager.getSessionId();
 		if (sessionId !== this.sessionId) {
 			this.sessionId = sessionId;
 			this.kinds.clear();
 		}
-		let state = this.kinds.get(kind);
+		const scope = typeof observed === "object" && "scope" in observed ? observed.scope : undefined;
+		const observation = typeof observed === "object" && "scope" in observed ? observed.state : observed;
+		const key = scope === undefined ? kind : JSON.stringify([kind, scope]);
+		let state = this.kinds.get(key);
 		if (!state) {
 			state = {};
-			this.kinds.set(kind, state);
+			this.kinds.set(key, state);
 		}
 		const firstObservation = state.observed === undefined;
 		if (observation === "clear") {

@@ -9,6 +9,7 @@ import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/sess
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "../events/host-event-delivery.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "../proactivity/proactivity-review.ts";
+import { ROUTINE_COMPLETION_TYPE } from "../routines/routine-parent-input.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { accountingProjectionPath } from "./accounting-evidence.ts";
 import { accountingFragmentPath } from "./accounting-fragments.ts";
@@ -51,6 +52,8 @@ export type DailyUsageTotals = {
 	proactiveTurnWakes: number;
 	/** Host events (CI results) delivered to the main session as a parent turn without an owner message. */
 	hostEventTurnWakes: number;
+	/** Routine results delivered to the parent as a turn without an owner message. */
+	routineResultTurnWakes: number;
 	totalCost: number;
 	reportedTotalCost?: number;
 	input: number;
@@ -72,6 +75,7 @@ function createZeroTotals(): DailyUsageTotals {
 		proactivityCost: 0,
 		proactiveTurnWakes: 0,
 		hostEventTurnWakes: 0,
+		routineResultTurnWakes: 0,
 		totalCost: 0,
 		input: 0,
 		output: 0,
@@ -126,6 +130,7 @@ function addDailyUsageRecord(
 	// A wake is an event, not spend: it does not make its session one that spent in the window.
 	if (record.kind === "wake") {
 		if (record.wake === "proactive_note") totals.proactiveTurnWakes++;
+		else if (record.wake === "routine_result") totals.routineResultTurnWakes++;
 		else totals.hostEventTurnWakes++;
 		return false;
 	}
@@ -228,10 +233,10 @@ interface DailyUsageSpendRecord {
 	proactivity: boolean;
 }
 
-/** An accepted proactive note or host event whose delivery starts a parent turn, at its acceptance time. */
+/** An accepted proactive note, host event or routine result that starts a parent turn, at its acceptance time. */
 interface ParentWakeRecord {
 	kind: "wake";
-	wake: "proactive_note" | "host_event";
+	wake: "proactive_note" | "host_event" | "routine_result";
 	timestamp: string;
 }
 
@@ -241,6 +246,7 @@ type DailyUsageRecord = DailyUsageSpendRecord | ParentWakeRecord;
 const PARENT_WAKE_KINDS: ReadonlyMap<string, ParentWakeRecord["wake"]> = new Map([
 	[PROACTIVE_NOTE_CUSTOM_TYPE, "proactive_note"],
 	[HOST_EVENT_CUSTOM_TYPE, "host_event"],
+	[ROUTINE_COMPLETION_TYPE, "routine_result"],
 ]);
 
 /** Persisted and held semantic receipts map to one record shape, so the report-id dedupe sees them as the same charge. */
