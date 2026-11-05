@@ -117,6 +117,7 @@ import type { ToolDefinition } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
 	type ContinuousChatWorkReportEntry,
@@ -208,6 +209,8 @@ export interface BackgroundLaneControllerDeps
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
+	/** The session's genuine owner input; routines read only its newest source instant. */
+	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "listOwnerEvidence">;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -1457,6 +1460,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
 				invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 				eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
+				latestOwnerSourceAt: () => {
+					const latest = this.deps.getOwnerEvidence().listOwnerEvidence().at(-1);
+					return latest ? Date.parse(latest.createdAt) : undefined;
+				},
 				now: () => this.deps.getTimers().port("routines").now(),
 				isDisposed: () => this.deps.isDisposed(),
 			}),

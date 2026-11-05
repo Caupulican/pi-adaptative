@@ -8,6 +8,10 @@ import {
 	nextRoutineAt,
 	type RoutineDefinitionView,
 	type RoutineEventAnchor,
+	type RoutineIntakeOrigin,
+	RoutineIntakeRefusal,
+	type RoutineIntakeRefusalReason,
+	type RoutineScheduleInput,
 	routineScheduleInputOf,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
@@ -29,8 +33,20 @@ interface RoutineSessionDeps {
 	invocationKey(callId: string): string;
 	/** The session ledger's current position; read only when an event routine is saved. */
 	eventAnchor(): RoutineEventAnchor;
+	/** Owner-evidence instant (ms) of the session's newest owner source, if any; stamped on every non-intake save. */
+	latestOwnerSourceAt(): number | undefined;
 	now(): number;
 	isDisposed(): boolean;
+}
+
+/** A host intake creation: the routine, or why the routine owner refused it. Other failures are thrown. */
+export type RoutineIntakeCreation =
+	| { readonly created: RoutineToolView }
+	| { readonly refused: RoutineIntakeRefusalReason | "admission"; readonly reason: string };
+
+/** The deterministic routine id of one intake origin, so a replay meets its own routine. */
+export function routineIntakeRoutineId(origin: RoutineIntakeOrigin): string {
+	return `owner-${origin.key.slice(0, 16)}`;
 }
 
 function summary(routine: RoutineDefinitionView): RoutineToolSummary {
@@ -131,6 +147,42 @@ export class RoutineSessionController implements RoutineToolPort {
 		return { occurrenceId: this.deps.scheduler.run(routineId, expectedRevision, commandId) };
 	}
 
+	/**
+	 * Creates a routine the host derived from the owner's own words: the same parent check, zone default, event
+	 * anchor and store write as a tool save, with read-only worker authority and the origin consumed in that write.
+	 * Widening its authority is a later routine tool update, never intake.
+	 */
+	async createFromIntake(
+		spec: { readonly prompt: string; readonly schedule: RoutineScheduleInput },
+		origin: RoutineIntakeOrigin,
+		signal?: AbortSignal,
+	): Promise<RoutineIntakeCreation> {
+		this.check(signal);
+		let savedIntent: WorkerSavedIntent;
+		try {
+			savedIntent = await this.deps.capture(
+				{ instructions: spec.prompt, knowledge: [], objectiveId: null, authority: { readOnly: true } },
+				signal,
+			);
+		} catch (error) {
+			// An abort or a disposed session is not the admission's answer; the caller retries or stops.
+			this.check(signal);
+			return { refused: "admission", reason: error instanceof Error ? error.message : String(error) };
+		}
+		this.check(signal);
+		try {
+			const created = this.persist(
+				{ routineId: routineIntakeRoutineId(origin), prompt: spec.prompt, schedule: spec.schedule, knowledge: [] },
+				savedIntent,
+				{ enabled: true, intakeOrigin: origin },
+			);
+			return { created };
+		} catch (error) {
+			if (error instanceof RoutineIntakeRefusal) return { refused: error.reason, reason: error.message };
+			throw error;
+		}
+	}
+
 	private async save(
 		input: RoutineToolInput,
 		expectedRevision: number | undefined,
@@ -155,22 +207,31 @@ export class RoutineSessionController implements RoutineToolPort {
 					signal,
 				);
 		this.check(signal);
+		const toolAuthoredThrough = this.deps.latestOwnerSourceAt();
 		return this.persist(input, savedIntent, {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
 			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
+			...(toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough }),
 		});
 	}
 
 	/**
 	 * The one write of a saved routine for every creation path: the parent check, the calendar zone default, the
 	 * event anchor and the store upsert. A create is `createOnly`; an update names the revision it replaces. A calendar
-	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's.
+	 * rule without a zone takes `extras.timeZone` (an update's saved zone), else this host's. A tool save stamps the
+	 * owner source it answered; an intake creation carries the origin it consumes.
 	 */
 	private persist(
 		input: RoutineToolInput,
 		savedIntent: WorkerSavedIntent,
-		extras: { readonly enabled: boolean; readonly expectedRevision?: number; readonly timeZone?: string },
+		extras: {
+			readonly enabled: boolean;
+			readonly expectedRevision?: number;
+			readonly timeZone?: string;
+			readonly toolAuthoredThrough?: number;
+			readonly intakeOrigin?: RoutineIntakeOrigin;
+		},
 	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
 			throw new Error("Routine parent changed during admission.");
@@ -196,6 +257,8 @@ export class RoutineSessionController implements RoutineToolPort {
 				...(extras.expectedRevision === undefined
 					? { createOnly: true }
 					: { expectedRevision: extras.expectedRevision }),
+				...(extras.toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough: extras.toolAuthoredThrough }),
+				...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 			}),
 		);
 	}

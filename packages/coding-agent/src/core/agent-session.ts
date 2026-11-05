@@ -1143,6 +1143,7 @@ export class AgentSession {
 			canRunRoutines: () => !this._isChildSession,
 			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
+			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),

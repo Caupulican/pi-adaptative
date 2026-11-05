@@ -47,6 +47,8 @@ export const ROUTINE_INTAKE_WINDOW_CAP = 3;
 export const ROUTINE_INTAKE_CAP_WINDOW_MS = 86_400_000;
 /** Live harness-created routines one session may hold at once. */
 export const ROUTINE_INTAKE_LIVE_CAP = 10;
+/** Sessions whose intake state is kept; the least recently written leaves first and restarts from the newest source. */
+export const MAX_ROUTINE_INTAKE_SESSIONS = 256;
 const MAX_ROUTINE_SOURCE_ID_CHARS = 512;
 
 const intervalSchema = Type.Object(
@@ -244,6 +246,17 @@ export interface RoutineIntakeConsumption {
 	readonly at: number;
 }
 
+/** One session's routine-intake state in the routine store. */
+export interface RoutineIntakeSession {
+	readonly parentSessionId: string;
+	/**
+	 * Instant (ms, owner-evidence clock) of the newest owner source a routine tool create or update answered. The
+	 * model already handled every source at or before it, so intake never reads them.
+	 */
+	readonly toolAuthoredThrough?: number;
+	readonly updatedAt: number;
+}
+
 /** Why the store refused a host intake creation; anything else thrown is not a refusal and may be retried. */
 export type RoutineIntakeRefusalReason = "consumed" | "window_cap" | "live_cap";
 
@@ -289,6 +302,11 @@ export interface UpsertPersistentRoutineInput {
 	 * origin is already consumed or the session's caps are reached, and consumed in the same write as the routine.
 	 */
 	readonly intakeOrigin?: RoutineIntakeOrigin;
+	/**
+	 * A routine tool save: the owner-evidence instant of the newest owner source when it ran, recorded on the
+	 * session's intake state in the same write. Session targets only.
+	 */
+	readonly toolAuthoredThrough?: number;
 }
 
 export type RoutineOccurrencePhase = "pending" | "claimed" | "dispatching" | "running" | "uncertain" | "terminal";
@@ -1253,6 +1271,30 @@ export function parseRoutineIntakeConsumptions(value: unknown): RoutineIntakeCon
 			key: entry.key,
 			parentSessionId: boundedString(entry.parentSessionId, 200, "parent session id"),
 			at: entry.at,
+		};
+	});
+}
+
+/** The persisted per-session intake states, least recently written first; one invalid entry rejects them all. */
+export function parseRoutineIntakeSessions(value: unknown): RoutineIntakeSession[] {
+	if (!Array.isArray(value) || value.length > MAX_ROUTINE_INTAKE_SESSIONS)
+		throw new TypeError("Routine intake sessions have an invalid size.");
+	const sessions = new Set<string>();
+	return value.map((entry: unknown) => {
+		if (!isPlainRecord(entry) || !hasOnlyKeys(entry, ["parentSessionId", "toolAuthoredThrough", "updatedAt"]))
+			throw new TypeError("Routine intake session state is invalid.");
+		const parentSessionId = boundedString(entry.parentSessionId, 200, "parent session id");
+		if (
+			sessions.has(parentSessionId) ||
+			!validInstant(entry.updatedAt) ||
+			(entry.toolAuthoredThrough !== undefined && !validInstant(entry.toolAuthoredThrough))
+		)
+			throw new TypeError("Routine intake session state is invalid or repeated.");
+		sessions.add(parentSessionId);
+		return {
+			parentSessionId,
+			...(entry.toolAuthoredThrough === undefined ? {} : { toolAuthoredThrough: entry.toolAuthoredThrough }),
+			updatedAt: entry.updatedAt,
 		};
 	});
 }
