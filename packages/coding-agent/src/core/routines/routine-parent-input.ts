@@ -13,6 +13,11 @@ const ROUTINE_COMPLETION_TYPE = "routine-completion";
  */
 export function routineParentInput({ occurrence, result }: RoutineDelivery): ParentInputDelivery {
 	const quiet = result.ownerUpdate === "none";
+	const missedCount = occurrence.trigger.kind === "schedule" ? occurrence.trigger.missedCount : 0;
+	const missed =
+		missedCount > 0
+			? ` It also covers ${missedCount} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`
+			: "";
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
 		nonce: result.digest,
 	});
@@ -20,14 +25,15 @@ export function routineParentInput({ occurrence, result }: RoutineDelivery): Par
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
 		content: quiet
-			? `Routine ${occurrence.routineId} ended: succeeded with nothing for the owner.\n${evidence}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`
-			: `Routine ${occurrence.routineId} ended: ${result.outcome}.\n${evidence}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`,
+			? `Routine ${occurrence.routineId} ended: succeeded with nothing for the owner.${missed}\n${evidence}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`
+			: `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`,
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
 			routineRevision: occurrence.routineRevision,
 			outcome: result.outcome,
 			resultDigest: result.digest,
+			...(missedCount > 0 ? { missedCount } : {}),
 			...(quiet ? { ownerUpdate: "none" as const } : {}),
 		},
 	};
