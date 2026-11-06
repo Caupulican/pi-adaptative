@@ -41,6 +41,8 @@ export interface ChannelPendingMessage {
 	readonly text: string;
 	readonly receivedAt: number;
 	readonly admittedAt: number;
+	/** The session a turn holding this message is being offered to: no other session delivers it meanwhile. */
+	offeredTo?: string;
 }
 
 export interface ChannelBatchRecord {
@@ -54,6 +56,8 @@ export interface ChannelBatchRecord {
 	readonly acceptedAt: number;
 	state: "accepted" | "replied" | "drafted" | "unanswered";
 	usd?: number;
+	/** Delivered by the daemon while no session was open: it charges the away spend bound (`away-channels.ts`). */
+	readonly away?: true;
 }
 
 export interface ChannelDraftRecord {
@@ -66,6 +70,8 @@ export interface ChannelDraftRecord {
 	readonly createdAt: number;
 	state: "pending" | "sent" | "dismissed";
 	settledAt?: number;
+	/** Written by the daemon while no session was open; the next session that serves the channel is told. */
+	readonly away?: true;
 }
 
 export interface ChannelGapRecord {
@@ -77,7 +83,8 @@ export interface ChannelGapRecord {
 
 export interface ChannelJournalState {
 	version: number;
-	holder?: { sessionId: string; pid: number };
+	/** The session serving the channel; `away` marks the daemon's host, which any open session takes over. */
+	holder?: { sessionId: string; pid: number; away?: true };
 	pending: ChannelPendingMessage[];
 	seen: { d: string; at: number; outcome: ChannelSeenOutcome }[];
 	held: { sender: string; kind: string; reason: ChannelHeldReason; at: number }[];
@@ -126,7 +133,8 @@ function isPending(value: unknown): value is ChannelPendingMessage {
 		(value.kind === "message" || value.kind === "reaction") &&
 		isString(value.text) &&
 		isTime(value.receivedAt) &&
-		isTime(value.admittedAt)
+		isTime(value.admittedAt) &&
+		(value.offeredTo === undefined || isString(value.offeredTo))
 	);
 }
 
@@ -145,7 +153,8 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 			value.state === "replied" ||
 			value.state === "drafted" ||
 			value.state === "unanswered") &&
-		(value.usd === undefined || isTime(value.usd))
+		(value.usd === undefined || isTime(value.usd)) &&
+		(value.away === undefined || value.away === true)
 	);
 }
 
@@ -160,7 +169,8 @@ function isDraft(value: unknown): value is ChannelDraftRecord {
 		isString(value.reason) &&
 		isTime(value.createdAt) &&
 		(value.state === "pending" || value.state === "sent" || value.state === "dismissed") &&
-		(value.settledAt === undefined || isTime(value.settledAt))
+		(value.settledAt === undefined || isTime(value.settledAt)) &&
+		(value.away === undefined || value.away === true)
 	);
 }
 
@@ -182,7 +192,15 @@ function parseState(text: string): ChannelJournalState {
 	const value: unknown = JSON.parse(text);
 	if (!isPlainRecord(value) || value.version !== JOURNAL_VERSION) throw new Error("unknown journal version");
 	const holder = value.holder;
-	if (holder !== undefined && !(isPlainRecord(holder) && isString(holder.sessionId) && isCount(holder.pid)))
+	if (
+		holder !== undefined &&
+		!(
+			isPlainRecord(holder) &&
+			isString(holder.sessionId) &&
+			isCount(holder.pid) &&
+			(holder.away === undefined || holder.away === true)
+		)
+	)
 		throw new Error("malformed holder");
 	const list = <T>(field: unknown, check: (item: unknown) => item is T): T[] => {
 		if (!Array.isArray(field) || !field.every(check)) throw new Error("malformed journal list");
@@ -190,7 +208,15 @@ function parseState(text: string): ChannelJournalState {
 	};
 	return {
 		version: JOURNAL_VERSION,
-		...(holder ? { holder: { sessionId: holder.sessionId as string, pid: holder.pid as number } } : {}),
+		...(holder
+			? {
+					holder: {
+						sessionId: holder.sessionId as string,
+						pid: holder.pid as number,
+						...(holder.away === true ? { away: true as const } : {}),
+					},
+				}
+			: {}),
 		pending: list(value.pending, isPending),
 		seen: list(
 			value.seen,

@@ -10,6 +10,8 @@
  * the owner releases with the `channel_reply` tool.
  */
 
+import { type FSWatcher, watch } from "node:fs";
+import { dirname } from "node:path";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SendUserMessageOptions } from "../extensions/types.ts";
@@ -25,6 +27,7 @@ import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-not
 import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
+import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel } from "./built-in-providers.ts";
 import {
 	type ChannelBatchRecord,
@@ -60,6 +63,11 @@ const liveHolders = new Map<string, string>();
 /** Sessions of this process serving channels: a channel one of them gives up is offered to the others at once. */
 const startedSessions = new Set<SessionChannels>();
 
+/** Whether the journal's holder still serves: one of this process's is live only while listed in `liveHolders`. */
+function holderLive(journalPath: string, holder: NonNullable<ChannelJournalState["holder"]>): boolean {
+	return holder.pid === process.pid ? liveHolders.get(journalPath) === holder.sessionId : isProcessAlive(holder.pid);
+}
+
 export type ChannelRuntimeState =
 	| "not_configured"
 	| "invalid"
@@ -90,6 +98,10 @@ export interface ChannelJournalSummary {
 	/** Messages held back (unverified, not allowlisted, or a burst) since the journal began. */
 	readonly heldTotal: number;
 	readonly gaps: number;
+	/** Who serves the channel now, by its journal: this session, the daemon (no session open), another session, nobody. */
+	readonly servedBy: ChannelServedBy;
+	/** Reply drafts the daemon wrote while no session was open that still wait for the owner. */
+	readonly awayDrafts: number;
 }
 
 /** One reply draft as the owner's release tool lists it. */
@@ -118,6 +130,12 @@ export interface SessionChannelsDeps {
 	/** Rebuild the session's tools: the release tool is offered only while a channel has an explicit policy. */
 	refreshTools?(): void;
 	now?(): number;
+	/**
+	 * Set for the daemon's host while no session is open (`away-channel-host.ts`): it serves a channel only while no open
+	 * session does and yields to one at once, marks its batches and drafts `away`, and delivers a turn only while
+	 * `capReason` (the away spend bound) gives no reason to wait.
+	 */
+	away?: { capReason(now: number): string | undefined };
 }
 
 interface ChannelRuntime {
@@ -129,6 +147,8 @@ interface ChannelRuntime {
 	offering: boolean;
 	/** Why the started provider reported it receives nothing, until it reports it is connected again. */
 	connection?: string;
+	/** The daemon's host yielded the channel to an open session and still routes the batches it accepted. */
+	draining?: boolean;
 }
 
 function messageText(message: AgentMessage): string | undefined {
@@ -164,6 +184,8 @@ export class SessionChannels {
 	private readonly builtIns = new Map<string, ChannelProvider>();
 	/** Names a deployment wrapper registered: its provider wins over a shipped one. */
 	private readonly wrapperNames = new Set<string>();
+	/** Per channel taken over from the daemon's host: the watch that tells the drafts its last turns still write. */
+	private readonly preemptedWatches = new Map<string, FSWatcher>();
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
@@ -294,6 +316,7 @@ export class SessionChannels {
 		this.started = false;
 		startedSessions.delete(this);
 		for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
+		for (const name of [...this.preemptedWatches.keys()]) this.unfollowPreempted(name);
 		await this.registry.stop();
 		if (!wasStarted) return;
 		for (const [name, runtime] of this.runtimes) {
@@ -369,6 +392,18 @@ export class SessionChannels {
 			if (runtime.state !== "ignored") this.setState(name, "ignored");
 			return this.dropHold(name);
 		}
+		if (this.deps.away && this.servedElsewhere(name)) {
+			// The daemon's host never writes the journal while an open session serves the channel: that session's own
+			// writes wake it, and a write of its own would wake it again.
+			if (runtime.holding) {
+				runtime.holding = false;
+				runtime.draining = true;
+				this.scheduleWork();
+			}
+			if (runtime.state !== "served_elsewhere")
+				this.setState(name, "served_elsewhere", "an open session took it over");
+			return false;
+		}
 		if (!runtime.holding) {
 			try {
 				if (!this.takeHold(name)) {
@@ -391,6 +426,17 @@ export class SessionChannels {
 		return true;
 	}
 
+	/** Whether another live session holds the channel, read without writing the journal. */
+	private servedElsewhere(name: string): boolean {
+		const journal = this.journal(name);
+		const holder = journal.read().result.holder;
+		return (
+			holder !== undefined &&
+			holder.sessionId !== this.deps.getSessionManager().getSessionId() &&
+			holderLive(journal.path, holder)
+		);
+	}
+
 	private dropHold(name: string): false {
 		const runtime = this.runtime(name);
 		runtime.connection = undefined;
@@ -400,24 +446,28 @@ export class SessionChannels {
 
 	/**
 	 * Record this session as the channel's serving session unless another live one holds it. A holder whose process is
-	 * gone is replaced; batches it accepted and never answered become one gap (their turns are in its transcript).
+	 * gone is replaced; batches it accepted and never answered become one gap (their turns are in its transcript). An open
+	 * session takes a channel the daemon's host serves at once: that host keeps routing the batches it accepted.
 	 */
 	private takeHold(name: string): boolean {
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const journalPath = this.journal(name).path;
+		const away = this.deps.away !== undefined;
 		const update = this.journal(name).update(this.now(), (state) => {
 			const holder = state.holder;
-			if (holder && holder.sessionId !== sessionId) {
-				const live =
-					holder.pid === process.pid
-						? liveHolders.get(journalPath) === holder.sessionId
-						: isProcessAlive(holder.pid);
-				if (live) return false;
+			let preempted: string | undefined;
+			if (holder && holder.sessionId !== sessionId && holderLive(journalPath, holder)) {
+				if (away || !holder.away) return undefined;
+				preempted = holder.sessionId;
 			}
-			state.holder = { sessionId, pid: process.pid };
+			state.holder = { sessionId, pid: process.pid, ...(away ? { away: true as const } : {}) };
+			// A message being offered to a session that is gone is free again; one the preempted host offers stays its own.
+			for (const entry of state.pending)
+				if (entry.offeredTo !== undefined && entry.offeredTo !== sessionId && entry.offeredTo !== preempted)
+					entry.offeredTo = undefined;
 			let orphaned = 0;
 			for (const batch of state.batches) {
-				if (batch.state === "accepted" && batch.sessionId !== sessionId) {
+				if (batch.state === "accepted" && batch.sessionId !== sessionId && batch.sessionId !== preempted) {
 					batch.state = "unanswered";
 					orphaned++;
 				}
@@ -429,16 +479,88 @@ export class SessionChannels {
 					count: orphaned,
 					at: this.now(),
 				});
-			return true;
+			return { preempted, state: structuredClone(state) };
 		});
 		this.afterJournal(name, update.reset);
 		if (!update.result) return false;
 		liveHolders.set(journalPath, sessionId);
-		this.runtime(name).holding = true;
+		const runtime = this.runtime(name);
+		runtime.holding = true;
+		runtime.draining = false;
+		const { preempted, state } = update.result;
+		if (!away) this.noticeAwayDrafts(name, state);
+		if (preempted !== undefined) {
+			// The preempted host of this process yields now; one in the daemon's process wakes on the journal's change.
+			this.offerToOthers();
+			this.followPreempted(name, preempted);
+		}
 		return true;
 	}
 
+	/** Tell the owner of the reply drafts the daemon's host wrote for the channel and that still wait; once per set. */
+	private noticeAwayDrafts(name: string, state: ChannelJournalState): void {
+		const ids = state.drafts
+			.filter((draft) => draft.away === true && draft.state === "pending")
+			.map((draft) => draft.id);
+		if (ids.length === 0) return;
+		this.deps.observeNotice("channel-reply", () => ({
+			scope: `${name}:away-drafts`,
+			state: {
+				reason: `away-drafts:${name}:${ids.join(",")}`,
+				text: `Channel ${name}: ${ids.length} reply draft(s) the daemon wrote while no session was open wait for you (${ids.join(", ")}). The channel_reply tool sends or dismisses them.`,
+			},
+		}));
+	}
+
+	/**
+	 * The host this session took the channel from still routes the turns it had accepted, and their answers become
+	 * drafts: watch the journal (reading only) until none of its turns is left, so each such draft is told when written.
+	 */
+	private followPreempted(name: string, preempted: string): void {
+		this.unfollowPreempted(name);
+		const journal = this.journal(name);
+		const follow = (): boolean => {
+			const state = journal.read().result;
+			this.noticeAwayDrafts(name, state);
+			return state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === preempted);
+		};
+		if (!follow()) return;
+		try {
+			const watcher = watch(dirname(journal.path), { persistent: false }, () => {
+				if (this.preemptedWatches.get(name) === watcher && !follow()) this.unfollowPreempted(name);
+			});
+			watcher.on("error", () => this.unfollowPreempted(name));
+			this.preemptedWatches.set(name, watcher);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: a reply draft the daemon still writes is told at the next session (${error instanceof Error ? error.message : String(error)}).`,
+			);
+		}
+	}
+
+	private unfollowPreempted(name: string): void {
+		const watcher = this.preemptedWatches.get(name);
+		if (!watcher) return;
+		this.preemptedWatches.delete(name);
+		watcher.close();
+	}
+
+	/** Another session of this process waiting on a channel, or yielding one, re-reads it past the caller's stack. */
+	private offerToOthers(): void {
+		for (const other of startedSessions)
+			if (other !== this) queueMicrotask(() => void other.registry.refreshChannels());
+	}
+
+	/**
+	 * Re-read who serves each channel: the daemon's host calls it when a channel journal changed or a holder's process
+	 * may have ended. Starts what this session may now serve and stops what an open session took over.
+	 */
+	refresh(): void {
+		if (this.started) void this.registry.refreshChannels();
+	}
+
 	private releaseHold(name: string): void {
+		this.unfollowPreempted(name);
 		const runtime = this.runtime(name);
 		runtime.holding = false;
 		const journal = this.journal(name);
@@ -456,8 +578,7 @@ export class SessionChannels {
 		}
 		// Another session of this process waiting on the channel takes it now, not at its next settings change. Past
 		// this stack, so its journal update never runs inside this one's start gate or stop.
-		for (const other of startedSessions)
-			if (other !== this) queueMicrotask(() => void other.registry.refreshChannels());
+		this.offerToOthers();
 	}
 
 	private onChannelStart(name: string, outcome: LifecycleOutcome, reason: string | undefined): void {
@@ -539,10 +660,14 @@ export class SessionChannels {
 		this.rerun = false;
 		try {
 			for (const [name, runtime] of this.runtimes) {
-				if (!runtime.holding) continue;
+				if (!runtime.holding && !runtime.draining) continue;
 				const policy = this.policy(name);
 				if (!policy) continue;
-				await this.routeReplies(name, policy);
+				const waiting = await this.routeReplies(name, policy);
+				if (!runtime.holding) {
+					if (!waiting && !runtime.offering) runtime.draining = false;
+					continue;
+				}
 				if (runtime.state === "armed" || runtime.state === "capped") this.deliverNext(name, policy);
 			}
 		} catch (error) {
@@ -706,10 +831,16 @@ export class SessionChannels {
 			// One turn per channel at a time: its reply is routed before the next batch is offered.
 			if (state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === sessionId))
 				return { kind: "busy" as const, state: structuredClone(state) };
+			// A conversation another session is being offered (the daemon's host this session took over) stays its own.
+			const elsewhere = new Set(
+				state.pending
+					.filter((entry) => entry.offeredTo !== undefined && entry.offeredTo !== sessionId)
+					.map((entry) => entry.conversationKey),
+			);
 			// A bound holds messages; with none waiting there is nothing to hold and nothing to tell.
-			const first = state.pending.find((entry) => entry.kind === "message");
+			const first = state.pending.find((entry) => entry.kind === "message" && !elsewhere.has(entry.conversationKey));
 			if (!first) return { kind: "idle" as const, state: structuredClone(state) };
-			const cap = this.capReason(name, policy, state, now);
+			const cap = this.capReason(name, policy, state, now) ?? this.deps.away?.capReason(now);
 			if (cap) return { kind: "capped" as const, cap, state: structuredClone(state) };
 			const batch = state.pending
 				.filter((entry) => entry.conversationKey === first.conversationKey)
@@ -738,6 +869,21 @@ export class SessionChannels {
 		const delivered = new Set(messages.map((message) => message.eventDigest));
 		// The batch's id rides on the turn's origin record, so routing finds the turn whatever became of its text.
 		const batchId = digest(`${name}:${[...delivered].join(",")}`).slice(0, 24);
+		// Marked before the turn is offered: a session taking the channel over meanwhile does not deliver it again.
+		const markOffered = (offered: boolean) =>
+			this.journal(name).update(this.now(), (state) => {
+				for (const entry of state.pending)
+					if (delivered.has(entry.eventDigest) && (offered || entry.offeredTo === sessionId))
+						entry.offeredTo = offered ? sessionId : undefined;
+			});
+		try {
+			markOffered(true);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: a delivery could not be recorded (${error instanceof Error ? error.message : String(error)}); it is offered again later.`,
+			);
+			return;
+		}
 		runtime.offering = true;
 		let answered = false;
 		const onAccepted = (accepted: boolean) => {
@@ -745,6 +891,11 @@ export class SessionChannels {
 			answered = true;
 			runtime.offering = false;
 			if (!accepted) {
+				try {
+					markOffered(false);
+				} catch {
+					// Left marked: the next session to take the channel frees it.
+				}
 				this.deps.warn(`Channel ${name}: the session did not accept a delivery; it is offered again later.`);
 				return;
 			}
@@ -758,6 +909,7 @@ export class SessionChannels {
 				allowlisted: composed.verified,
 				acceptedAt: now,
 				state: "accepted",
+				...(this.deps.away ? { away: true as const } : {}),
 			};
 			try {
 				this.journal(name).update(now, (state) => {
@@ -821,6 +973,8 @@ export class SessionChannels {
 			const message = entry.message;
 			if (message.role !== "assistant") continue;
 			usd += message.usage?.cost?.total ?? 0;
+			// An aborted turn answers nothing; left waiting it would hold the channel's next turn for a day.
+			if (message.stopReason === "aborted") return { kind: "unanswered", reason: "aborted" };
 			if (message.stopReason === "stop" || message.stopReason === "length") {
 				const text = messageText(message)?.trim() ?? "";
 				return text ? { kind: "answered", text, usd } : { kind: "unanswered", reason: "empty_answer" };
@@ -829,7 +983,8 @@ export class SessionChannels {
 		return now - batch.acceptedAt >= DAY_MS ? { kind: "unanswered", reason: "no_answer" } : { kind: "waiting" };
 	}
 
-	private async routeReplies(name: string, policy: ResolvedChannelPolicy): Promise<void> {
+	/** Settle this session's delivered batches whose turn ended; resolves whether any still waits for its turn. */
+	private async routeReplies(name: string, policy: ResolvedChannelPolicy): Promise<boolean> {
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const now = this.now();
 		const { result: batches } = this.journal(name).update(now, (state) =>
@@ -837,9 +992,13 @@ export class SessionChannels {
 				.filter((batch) => batch.state === "accepted" && batch.sessionId === sessionId)
 				.map((batch) => ({ ...batch })),
 		);
+		let waiting = false;
 		for (const batch of batches) {
 			const outcome = this.batchOutcome(name, batch, now);
-			if (outcome.kind === "waiting") continue;
+			if (outcome.kind === "waiting") {
+				waiting = true;
+				continue;
+			}
 			if (outcome.kind === "unanswered") {
 				this.settleBatch(name, batch.id, "unanswered", 0, undefined);
 				this.deps.observeNotice("channel-reply", () => ({
@@ -883,6 +1042,7 @@ export class SessionChannels {
 				);
 			}
 		}
+		return waiting;
 	}
 
 	private async sendParts(
@@ -928,6 +1088,7 @@ export class SessionChannels {
 			reason,
 			createdAt: this.now(),
 			state: "pending",
+			...(this.deps.away ? { away: true as const } : {}),
 		};
 		this.settleBatch(name, batch.id, "drafted", usd, draft);
 		this.deps.observeNotice("channel-reply", () => ({
@@ -971,6 +1132,7 @@ export class SessionChannels {
 	 */
 	readJournalSummaries(): ChannelJournalSummary[] {
 		const now = this.now();
+		const sessionId = this.deps.getSessionManager().getSessionId();
 		return this.explicitChannels().map(([name, policy]) => {
 			const state = this.journal(name).read().result;
 			const usage = channelDayUsage(state, now);
@@ -982,6 +1144,8 @@ export class SessionChannels {
 				pendingDrafts: state.drafts.filter((draft) => draft.state === "pending").length,
 				heldTotal: state.heldTotal,
 				gaps: state.gaps.length,
+				servedBy: channelServedBy(state.holder, sessionId),
+				awayDrafts: state.drafts.filter((draft) => draft.away === true && draft.state === "pending").length,
 			};
 		});
 	}

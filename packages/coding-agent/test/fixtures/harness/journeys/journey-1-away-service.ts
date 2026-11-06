@@ -109,7 +109,7 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 			stopObserving();
 		}
 		const noticeText =
-			'Routines keep running after reboot if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.';
+			'Routines and channels served while no session is open keep running after reboot only if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.';
 		expect(JSON.stringify(notices()[0]), "the notice says how to enable always-on").toContain(
 			JSON.stringify(noticeText).slice(1, -1),
 		);

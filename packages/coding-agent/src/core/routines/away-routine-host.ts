@@ -42,6 +42,7 @@ import {
 	ROUTINE_AWAY_HELD_REASON,
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	RoutineAdmissionRefused,
+	type RoutineAwayCharge,
 	type RoutineAwayClaimGate,
 	type RoutineOccurrence,
 	routineAwayHeld,
@@ -75,6 +76,8 @@ export interface AwayRoutineSupervisorDeps {
 	readonly eventSources?: AwayEventSourceFactory;
 	/** The owner's global `proactivity.ciEvents`; off, no CI source is followed away. */
 	ciEvents?(): boolean;
+	/** The daemon's other charges on the same away spend bound: its channel turns while no session was open. */
+	otherAwayCharges?(): readonly RoutineAwayCharge[];
 }
 
 /** One closed parent held open away: its context and the routine scheduler that runs its routines on it. */
@@ -731,7 +734,12 @@ export class AwayRoutineSupervisor {
 	/** The away spend bound every host's claim is admitted under; finished runs carry their own settled spend. */
 	private gate(): RoutineAwayClaimGate {
 		const settings = this.deps.settings();
-		return { maxUsdPerRun: settings.maxUsdPerRun, maxUsdPerDay: settings.maxUsdPerDay };
+		const otherCharges = this.deps.otherAwayCharges?.();
+		return {
+			maxUsdPerRun: settings.maxUsdPerRun,
+			maxUsdPerDay: settings.maxUsdPerDay,
+			...(otherCharges ? { otherCharges } : {}),
+		};
 	}
 
 	private async closeHosts(parentSessionIds: readonly string[]): Promise<void> {

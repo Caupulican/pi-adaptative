@@ -1,4 +1,5 @@
 import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
 import {
 	type ActiveChatTarget,
 	type BotOperatorMessageDispatchResult,
@@ -53,8 +54,11 @@ export interface BotTeamChatSessionPort {
 	getPersistentBotDaemonStatus?(): PersistentBotDaemonStatus;
 	startPersistentBotDaemon?(): { started: boolean; pid?: number; detail: string };
 	stopPersistentBotDaemon?(): { stopped: boolean; detail: string };
-	/** The session's background lanes: the always-on service of its agent directory. */
-	readonly backgroundLanes?: { getAwayService(): AwayService };
+	/** The session's background lanes: the always-on service of its agent directory and its channels served away. */
+	readonly backgroundLanes?: {
+		getAwayService(): AwayService;
+		readAwayChannelStatus(): readonly AwayChannelStatus[];
+	};
 }
 
 export interface BotTeamChatHost {
@@ -1089,6 +1093,10 @@ export class BotTeamChatController {
 				];
 				const awayService = port.backgroundLanes?.getAwayService();
 				if (awayService) lines.push(describeAwayServiceInspection(awayService.inspect()));
+				for (const channel of port.backgroundLanes?.readAwayChannelStatus() ?? [])
+					lines.push(
+						`Channel ${channel.name} is served by the daemon in ${channel.cwd} while no session is open (now: ${channel.servedBy}); ${channel.awayDrafts} reply draft(s) it wrote wait for the next session (channel_reply).`,
+					);
 				this.host.showStatus(lines.join("\n"));
 				return;
 			}

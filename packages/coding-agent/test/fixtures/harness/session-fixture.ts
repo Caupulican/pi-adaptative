@@ -14,6 +14,7 @@ import {
 	prepareAgentSessionRuntime,
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import type { AwayChannelProviderFactory } from "../../../src/core/channels/away-channel-host.ts";
 import {
 	collectToolCallResultPairs,
 	resolvePreserveRecentPairs,
@@ -2542,6 +2543,7 @@ export class HarnessProcesses {
 			owner: ownProcessOwner(),
 			...this.credentials(),
 			...(waiter.options.eventSources ? { eventSources: waiter.options.eventSources } : {}),
+			...(waiter.options.channelProviders ? { channelProviders: waiter.options.channelProviders } : {}),
 		});
 		let closed = false;
 		const daemon: HarnessBotDaemon = {
@@ -2587,6 +2589,8 @@ export interface HarnessBotDaemonLaunch {
 /** How the next in-process daemon is composed: the process entry's injected parts. */
 export interface HarnessBotDaemonOptions {
 	readonly eventSources?: AwayEventSourceFactory;
+	/** The transports of the channels the daemon serves while no session is open (the entry's built-in ones). */
+	readonly channelProviders?: AwayChannelProviderFactory;
 }
 
 /** A launched daemon running its production body in process: `stop` sends its process SIGTERM and joins the stop. */

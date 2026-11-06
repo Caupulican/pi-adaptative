@@ -4,11 +4,13 @@
  * may start a turn in the owner's session. A channel with no policy, or with one that does not parse, is not started.
  */
 
+import { isAbsolute } from "node:path";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const MAX_ALLOWED_SENDERS = 50;
 export const MAX_CHANNEL_BATCH = 25;
 const MAX_SENDER_ID_CHARS = 256;
+const MAX_AWAY_CWD_CHARS = 4096;
 
 /** A channel name the harness admits: it becomes the turn origin's channel, so it is short, plain and never `pi-chat`. */
 const CHANNEL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -28,6 +30,11 @@ export interface ResolvedChannelPolicy {
 	readonly maxBatch: number;
 	readonly maxPendingPerConversation: number;
 	readonly replyMode: ChannelReplyMode;
+	/**
+	 * The working directory the daemon serves the channel in while no session is open (`away-channels.ts`). The daemon
+	 * honors it only from the global layer; an open session ignores it.
+	 */
+	readonly awayCwd?: string;
 }
 
 /** A channel's policy as read: usable, or present but unreadable (which starts nothing). */
@@ -65,6 +72,12 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 	const maxUsdPerDay = value.maxUsdPerDay ?? 0.5;
 	if (typeof maxUsdPerDay !== "number" || !Number.isFinite(maxUsdPerDay) || maxUsdPerDay < 0 || maxUsdPerDay > 100)
 		throw new Error(`${key}.maxUsdPerDay must be a number from 0 to 100`);
+	const awayCwd = value.awayCwd;
+	if (
+		awayCwd !== undefined &&
+		(typeof awayCwd !== "string" || !isAbsolute(awayCwd) || awayCwd.length > MAX_AWAY_CWD_CHARS)
+	)
+		throw new Error(`${key}.awayCwd must be an absolute path`);
 	return {
 		mode,
 		allowedSenders: [...new Set(senders as string[])],
@@ -79,6 +92,7 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 			`${key}.maxPendingPerConversation`,
 		),
 		replyMode,
+		...(awayCwd === undefined ? {} : { awayCwd }),
 	};
 }
 

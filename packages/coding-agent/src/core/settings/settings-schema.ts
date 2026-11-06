@@ -339,6 +339,7 @@ export interface ChannelPolicySettings {
 	maxBatch?: number; // default: 10 (1..25) — messages of one conversation delivered in one turn
 	maxPendingPerConversation?: number; // default: 25 (1..100) — waiting messages per conversation; more are held
 	replyMode?: "draft" | "auto"; // default: "draft" — the answer waits for the owner; "auto" sends it to the same address
+	awayCwd?: string; // absolute path; global layer only — the daemon serves the channel there while no session is open
 }
 
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead" | "feedback">> &

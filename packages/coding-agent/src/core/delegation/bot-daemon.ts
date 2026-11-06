@@ -1,6 +1,7 @@
 /**
- * The detached bot daemon: queues due persistent bot and team routines across TUI restarts, and runs the routines of
- * closed sessions away (`AwayRoutineSupervisor`).
+ * The detached bot daemon: queues due persistent bot and team routines across TUI restarts, runs the routines of
+ * closed sessions away (`AwayRoutineSupervisor`), and serves the channels the owner named an `awayCwd` for while no
+ * session is open (`AwayChannelHosts`), on the same away spend bound.
  *
  * A session claims the daemon lease with a fresh token, then launches `pi --bot-daemon <agentDir> <token>` through
  * the stable self-launch target. Sessions do this by themselves: on start while an enabled routine exists, and when a
@@ -12,7 +13,7 @@
  * Each renewal records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn
  * may be a launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it
  * in the shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`), reloads the owner's settings and
- * wakes the away supervisor, which is when a parent session's holder can have died.
+ * wakes the away supervisor and the channel hosts, which is when a parent session's or a channel's holder can have died.
  *
  * The daemon process owns ONE credential store and ONE model registry, shared by every parent it hosts away. Each tick
  * reloads them when the owner's `auth.json` or `models.json` changed on disk; an OAuth refresh always reads the stored
@@ -31,6 +32,8 @@ import { basename, dirname, isAbsolute } from "node:path";
 import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
+import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
+import { readAwayChannelCharges } from "../channels/away-channels.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
@@ -88,6 +91,8 @@ export interface BotDaemonInput {
 	readonly modelRegistry?: ModelRegistry;
 	/** The event sources a closed parent's checkout has away (the CI source); without them event routines wait. */
 	readonly eventSources?: AwayEventSourceFactory;
+	/** The transports of the channels served while no session is open; without them no channel is served away. */
+	readonly channelProviders?: AwayChannelProviderFactory;
 	/** How the daemon this one replaces ended, when its own start claimed the lease: a failure is its first report. */
 	readonly previousEnd?: BotDaemonEnd;
 }
@@ -144,7 +149,22 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
 		...(input.eventSources ? { eventSources: input.eventSources } : {}),
 		ciEvents: () => settings.getProactivitySettings().ciEvents,
+		otherAwayCharges: () =>
+			readAwayChannelCharges(agentDir, settings.getRoutineAwaySettings().maxUsdPerRun, clock.now()),
 	});
+	const channelProviders = input.channelProviders;
+	const channelHosts = channelProviders
+		? new AwayChannelHosts({
+				agentDir,
+				settings,
+				timers,
+				providers: channelProviders,
+				routineOccurrences: () => routineStore.listRoutineOccurrences(),
+				report,
+				...(input.authStorage ? { authStorage: input.authStorage } : {}),
+				...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
+			})
+		: undefined;
 	const leaseFile = daemonLeasePath(routineStore.getStoreFilePath());
 	let watcher: FSWatcher | undefined;
 	// The settings reload a tick started; it never rejects (a failure stops the daemon) and a stop joins it.
@@ -164,6 +184,12 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			} catch (error) {
 				code = 1;
 				ended = { reason: "failed", detail: `the away supervisor did not close: ${errorText(error)}` };
+			}
+			try {
+				await channelHosts?.close();
+			} catch (error) {
+				code = 1;
+				ended = { reason: "failed", detail: `the channel hosts did not close: ${errorText(error)}` };
 			}
 			flushReports();
 			// Without an end the lease is no longer this daemon's: whoever holds or released it owns the record.
@@ -210,7 +236,9 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		reloading = settings
 			.reload()
 			.then(() => {
-				if (!stopping) supervisor.wake();
+				if (stopping) return;
+				supervisor.wake();
+				channelHosts?.sync();
 			}, fail)
 			.finally(() => {
 				reloading = undefined;
@@ -238,7 +266,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 
 /**
  * Runs the daemon for `pi --bot-daemon <agentDir> <token>`; resolves with the process exit code once it stops. The
- * process entry supplies the event sources (core builds no host source).
+ * process entry supplies the event sources and the channel transports.
  *
  * `pi --bot-daemon <agentDir>` is the user service's form (see `away-service.ts`): no session started it, so it claims
  * the lease itself through the claim a session's start uses, and exits 0 at once while a live daemon holds it. On
@@ -246,10 +274,13 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
  * daemon detached and hidden exactly as a session does and exits: the scheduled task's console process would
  * otherwise keep a console window open for the daemon's whole life.
  */
-export function runBotDaemonCommand(
-	args: readonly string[],
-	options: { readonly eventSources?: AwayEventSourceFactory } = {},
-): Promise<number> {
+/** What the process entry composes into the daemon: core builds no host source and no channel transport. */
+export interface BotDaemonCommandOptions {
+	readonly eventSources?: AwayEventSourceFactory;
+	readonly channelProviders?: AwayChannelProviderFactory;
+}
+
+export function runBotDaemonCommand(args: readonly string[], options: BotDaemonCommandOptions = {}): Promise<number> {
 	const [agentDir, token] = args;
 	if (args.length === 1 && agentDir && isAbsolute(agentDir)) return runServiceBotDaemon(agentDir, options);
 	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
@@ -261,10 +292,7 @@ function writeDiagnostic(message: string): void {
 	process.stderr.write(`${message}\n`);
 }
 
-async function runServiceBotDaemon(
-	agentDir: string,
-	options: { readonly eventSources?: AwayEventSourceFactory },
-): Promise<number> {
+async function runServiceBotDaemon(agentDir: string, options: BotDaemonCommandOptions): Promise<number> {
 	const clock = SYSTEM_TIMER_SOURCE.port("routines");
 	const store = new PersistentBotTeamStore(agentDir, writeDiagnostic);
 	if (process.platform === "win32") {
@@ -311,7 +339,7 @@ async function runServiceBotDaemon(
 function runClaimedBotDaemon(
 	agentDir: string,
 	token: string,
-	options: { readonly eventSources?: AwayEventSourceFactory; readonly previousEnd?: BotDaemonEnd },
+	options: BotDaemonCommandOptions & { readonly previousEnd?: BotDaemonEnd },
 ): Promise<number> {
 	// One credential owner for the whole process: every parent hosted away shares this store and registry.
 	const authStorage = AuthStorage.create(configFile(agentDir, "auth.json"));
@@ -324,6 +352,7 @@ function runClaimedBotDaemon(
 		authStorage,
 		modelRegistry,
 		...(options.eventSources ? { eventSources: options.eventSources } : {}),
+		...(options.channelProviders ? { channelProviders: options.channelProviders } : {}),
 		...(options.previousEnd ? { previousEnd: options.previousEnd } : {}),
 	});
 	process.once("SIGTERM", () => void run.stop());

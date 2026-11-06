@@ -51,6 +51,11 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				? [`last end: ${value.lastEnd.reason}${value.lastEnd.detail ? `: ${value.lastEnd.detail}` : ""}`]
 				: []),
 			...list(value.awayRefusals, (refusal) => `${refusal.routineId} refused away: ${refusal.reason}`),
+			...list(
+				value.channels,
+				(channel) =>
+					`channel ${channel.name} away in ${channel.cwd}: served by ${channel.servedBy}, ${channel.awayDrafts} draft(s) written while no session was open wait for the next session (channel_reply)`,
+			),
 		]),
 		...block("Host events", status.hostEvents, (value) => [
 			...list(
@@ -86,7 +91,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				: list(
 						value.journal.value,
 						(channel) =>
-							`${channel.name}: wakes ${count(channel.wakes)}, spend ${count(channel.spendUsd, true)} (24 h), ${channel.pendingMessages} waiting, ${channel.pendingDrafts} draft(s), ${channel.heldTotal} held, ${channel.gaps} gap(s)`,
+							`${channel.name}: served by ${channel.servedBy}, wakes ${count(channel.wakes)}, spend ${count(channel.spendUsd, true)} (24 h), ${channel.pendingMessages} waiting, ${channel.pendingDrafts} draft(s) (${channel.awayDrafts} written while no session was open), ${channel.heldTotal} held, ${channel.gaps} gap(s)`,
 					)),
 		]),
 		...block("Outward drafts", status.outwardDrafts, (value) => [

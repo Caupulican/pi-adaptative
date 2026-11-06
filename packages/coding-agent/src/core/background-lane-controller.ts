@@ -35,6 +35,12 @@ import {
 	readSessionAutonomyStatus,
 	type SessionAutonomyStatus,
 } from "./autonomy-status/autonomy-status.ts";
+import {
+	type AwayChannelStatus,
+	awayChannels,
+	readAwayChannelCharges,
+	readAwayChannelStatus,
+} from "./channels/away-channels.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
@@ -1759,20 +1765,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Brings the detached daemon up by itself, with no command: at session start and on every routine save, while an
-	 * enabled routine exists and no daemon holds the lease. The claim is idempotent across sessions and processes, so
-	 * only one start launches. A worker process never starts one. A reason the daemon cannot start is reported once.
-	 * The same points apply `routines.away.autostart` (see `away-service.ts`).
+	 * enabled routine or a channel served away (`channels.<name>.awayCwd`) exists and no daemon holds the lease. The
+	 * claim is idempotent across sessions and processes, so only one start launches. A worker process never starts one.
+	 * A reason the daemon cannot start is reported once. The same points apply `routines.away.autostart` (see
+	 * `away-service.ts`), for the same work.
 	 */
 	private _ensureBotDaemon(): void {
 		const store = this._botTeamStore;
 		if (!store || this.deps.isDisposed() || getSessionRole() === "worker") return;
 		this._daemonRevision = store.getRoutineRevision();
 		let failure: string | undefined;
-		let activeRoutines = 0;
+		// Enabled routines and channels served away: either keeps the daemon, and the always-on service, wanted.
+		let awayWork = 0;
 		try {
 			const status = store.getDaemonStatus(this.deps.getTimers().port("routines").now());
-			activeRoutines = status.activeRoutines;
-			if (!status.running && status.activeRoutines > 0) {
+			awayWork = status.activeRoutines + awayChannels(this.deps.getSettingsManager()).length;
+			if (!status.running && awayWork > 0) {
 				const started = this.startPersistentBotDaemon();
 				if (!started.started && !started.held) failure = started.detail;
 			}
@@ -1782,12 +1790,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (failure !== undefined && failure !== this._daemonStartFailure) this._safeWarn(failure);
 		this._daemonStartFailure = failure;
 		try {
-			if (!this.deps.isChildSession()) this.getAwayService().reconcile(activeRoutines);
+			if (!this.deps.isChildSession()) this.getAwayService().reconcile(awayWork);
 		} catch (error) {
 			this._safeWarn(
 				`Always-on routines could not be checked: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	/** The channels the daemon serves while no session is open: who serves each now and its drafts (filesystem reads). */
+	readAwayChannelStatus(): AwayChannelStatus[] {
+		return readAwayChannelStatus(this.deps.getAgentDir(), this.deps.getSettingsManager(), this.deps.getSessionId());
 	}
 
 	/** The always-on service of this agent directory: its hands-off reconcile, explicit commands and inspection. */
@@ -1869,6 +1882,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			channelStates: () => this.channels.getStates(),
 			channelJournals: () => this.channels.readJournalSummaries(),
+			awayChannelCharges: (maxUsdPerRun, nowMs) =>
+				readAwayChannelCharges(this.deps.getAgentDir(), maxUsdPerRun, nowMs),
+			awayChannels: () => this.readAwayChannelStatus(),
 			awayService: this._botTeamStore ? () => this.getAwayService().inspect() : undefined,
 			harnessNotices,
 			memory,

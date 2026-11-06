@@ -713,14 +713,25 @@ export const ROUTINE_AWAY_SPEND_REFUSAL =
 export const ROUTINE_AWAY_HELD_REASON =
 	"an earlier run away of it has not been delivered to its session yet, so later slots wait for the session to open and its next run's missed count covers them.";
 
+/** One charge on the away spend bound, in micro-dollars, until when (undefined: until the store that made it changes). */
+export interface RoutineAwayCharge {
+	readonly micros: number;
+	readonly until?: number;
+}
+
 /** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
 export interface RoutineAwayClaimGate {
 	readonly maxUsdPerRun: number;
 	readonly maxUsdPerDay: number;
+	/**
+	 * What else the daemon spent away on the same bound: its channel turns while no session was open
+	 * (`away-channels.ts`). Read by the daemon just before the claim, in the one process that makes every away charge.
+	 */
+	readonly otherCharges?: readonly RoutineAwayCharge[];
 }
 
 /** Whole micro-dollars: the bound's sums and comparisons are exact. */
-function micros(usd: number): number {
+export function awaySpendMicros(usd: number): number {
 	return Math.round(usd * 1_000_000);
 }
 
@@ -738,17 +749,17 @@ function routineAwayCharge(
 	item: RoutineOccurrence,
 	maxUsdPerRun: number,
 	nowMs: number,
-): { readonly micros: number; readonly until?: number } | undefined {
+): RoutineAwayCharge | undefined {
 	if (item.executor !== "away") return undefined;
 	if (item.phase === "uncertain") {
 		const until = item.updatedAt + ROUTINE_UNCERTAIN_RETENTION_MS + ROUTINE_AWAY_SPEND_WINDOW_MS;
-		return until > nowMs ? { micros: micros(maxUsdPerRun), until } : undefined;
+		return until > nowMs ? { micros: awaySpendMicros(maxUsdPerRun), until } : undefined;
 	}
-	if (item.phase !== "terminal") return { micros: micros(maxUsdPerRun) };
+	if (item.phase !== "terminal") return { micros: awaySpendMicros(maxUsdPerRun) };
 	if (!item.dispatchKey) return undefined;
 	const until = (item.awaySettlement?.at ?? item.updatedAt) + ROUTINE_AWAY_SPEND_WINDOW_MS;
 	if (until <= nowMs) return undefined;
-	return { micros: micros(item.awaySettlement?.costUsd ?? maxUsdPerRun), until };
+	return { micros: awaySpendMicros(item.awaySettlement?.costUsd ?? maxUsdPerRun), until };
 }
 
 /** Whether the run away is still charged the away spend bound, so the journal keeps it. */
@@ -759,7 +770,8 @@ export function routineAwayCharged(item: RoutineOccurrence, nowMs: number): bool
 /**
  * The away spend bound's state: whether one more run fits (`charged + maxUsdPerRun <= maxUsdPerDay`, exact in
  * micro-dollars) and, when it does not, the earliest instant a charge ends by time (undefined when every charge ends
- * only by a store change: a run finishing or returning to pending).
+ * only by a store change: a run finishing or returning to pending, or a channel turn away settling). The gate's
+ * `otherCharges` count like runs.
  */
 export function routineAwaySpendRoom(
 	occurrences: Iterable<RoutineOccurrence>,
@@ -768,14 +780,14 @@ export function routineAwaySpendRoom(
 ): { readonly chargedMicros: number; readonly fits: (extraRuns: number) => boolean; readonly exit?: number } {
 	let chargedMicros = 0;
 	let exit: number | undefined;
-	for (const item of occurrences) {
-		const charge = routineAwayCharge(item, gate.maxUsdPerRun, nowMs);
+	const routineCharges = [...occurrences].map((item) => routineAwayCharge(item, gate.maxUsdPerRun, nowMs));
+	for (const charge of [...routineCharges, ...(gate.otherCharges ?? [])]) {
 		if (!charge) continue;
 		chargedMicros += charge.micros;
 		if (charge.until !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, charge.until);
 	}
-	const perRun = micros(gate.maxUsdPerRun);
-	const perDay = micros(gate.maxUsdPerDay);
+	const perRun = awaySpendMicros(gate.maxUsdPerRun);
+	const perDay = awaySpendMicros(gate.maxUsdPerDay);
 	return {
 		chargedMicros,
 		fits: (extraRuns) => chargedMicros + (extraRuns + 1) * perRun <= perDay,

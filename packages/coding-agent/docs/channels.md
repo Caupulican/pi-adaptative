@@ -2,7 +2,7 @@
 
 A channel connects a chat or mail transport to an open root session. Pi ships Telegram (below); other transports still come from a deployment wrapper (a server, a bot runner, an SDK host) that implements the provider and registers it. The core decides everything with a cost or a consequence: whether the channel starts, which messages may start a turn, how many turns a day it may start, and whether an answer is sent or kept for the owner.
 
-Channels run only while a session is open. Messages that arrive while no session serves the channel stay with the transport; Pi does not run channel turns in the background bot daemon.
+A channel runs while a session is open, and also while none is when the owner names a working directory for it (`awayCwd`, see [While no session is open](#while-no-session-is-open)). Otherwise messages that arrive while no session serves the channel stay with the transport.
 
 ## Telegram
 
@@ -91,7 +91,7 @@ Each inbound event is recorded in the channel's journal (`<agent dir>/channels/<
 - **Refused for redelivery.** With 128 messages waiting in the channel, the handler rejects so the provider delivers the event again later, and the owner is told once.
 - **Waiting.** A verified, allowlisted sender's message waits for a turn, at most 24 hours. Messages that wait longer are dropped and the owner is told how many.
 
-One open session serves a channel. A second session that finds the channel served by a live session does not start it (`served_elsewhere`). A session that takes over from one whose process ended reports the conversations that session delivered and never answered.
+One open session serves a channel. A second session that finds the channel served by a live session does not start it (`served_elsewhere`). A session that takes over from one whose process ended reports the conversations that session delivered and never answered. An open session takes a channel the daemon serves at once (see below).
 
 ## The turn
 
@@ -116,6 +116,16 @@ The turn's first completed answer is the reply to the conversation. It is kept a
 A draft is announced once with the owner's next turn. The owner's own turn releases it with the `channel_reply` tool: `list` shows the waiting drafts (as data, never as instructions), `send` sends one exactly as kept, `dismiss` discards it. The tool is offered when a channel had an explicit policy when the session's tools were built (at start or reload).
 
 The turn is found by the batch's id, which its origin record carries, so an extension `input` handler that changes the delivered text does not lose the reply. A message that arrives while the owner's own turn runs never joins it: it waits and opens its own turn after the owner's answer. A turn the owner (or another third party, a host event someone else wrote included) steered before it answered, and a batch with no answer after 24 hours, get no reply; the owner is told once.
+
+## While no session is open
+
+With `channels.<name>.awayCwd` set to an absolute directory in the global settings (the directory profile's value is not read for this), the background bot daemon serves the channel whenever no session does. A session start brings the daemon up for such a channel as it does for an enabled routine, and `routines.away.enabled: false` turns it off with the routines. The daemon builds the channel's transport itself, so it serves only a channel Pi has a built-in transport for; a channel only a deployment wrapper registers waits for an open session, and the daemon records why.
+
+The daemon runs one headless session per directory. It is a child session: no memory, no routines, no proactive work, System One off, and only the `read`, `grep`, `find` and `ls` tools. Its model is the default model the owner's settings give that directory (a repository's own settings are not read); a model with no price is refused, because its spend could not be bounded. The channel's policy, bounds and origin rules apply exactly as in an open session: the senders' words stay a third party's, `replyMode` decides whether the answer is sent, and a draft waits for the owner.
+
+Each turn the daemon delivers also counts against the away spend bound its routines run under. A turn that spends more than `routines.away.maxUsdPerRun` is stopped and its conversation gets no reply. Across routine runs and channel turns together, the daemon delivers no turn once `routines.away.maxUsdPerDay` has no room in the last 24 hours. A turn counts for 24 hours after it was delivered: what it spent, its full per-run bound while it still runs, and that bound when it ended without an answer.
+
+An open session that serves the channel takes it from the daemon at once: the daemon stops its transport, and the answer of a turn it was running is kept as a draft, because the daemon no longer runs the channel. The session is told of the daemon's waiting drafts when it takes the channel, and of the draft of the interrupted turn when it is written. When the session closes, the daemon takes the channel back. `/bot daemon status` and `get_autonomy_status` show who serves each such channel and how many of the daemon's drafts wait. With always-on enabled (`routines.away.autostart`), the daemon also serves these channels after a reboot.
 
 ## Delivery guarantees
 

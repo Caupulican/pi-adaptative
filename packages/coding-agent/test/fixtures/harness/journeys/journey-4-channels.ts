@@ -12,8 +12,8 @@ import { THIRD_PARTY_MEMORY_WITHHELD } from "../../../../src/core/system-prompt-
 import { entryTurnOrigin } from "../../../../src/core/turn-origin.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { type Barrier, calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmLatestResult } from "./shared.ts";
 
 /**
@@ -28,6 +28,8 @@ class ScriptedChannel implements ChannelProvider {
 	stops = 0;
 	private inbound: ChannelInboundHandler | undefined;
 	private sendWaiter: Barrier | undefined;
+	private startWaiter: Barrier | undefined;
+	private stopWaiter: Barrier | undefined;
 
 	constructor(name: string) {
 		this.name = name;
@@ -36,6 +38,7 @@ class ScriptedChannel implements ChannelProvider {
 	start(onInbound: ChannelInboundHandler): void {
 		this.starts++;
 		this.inbound = onInbound;
+		this.startWaiter?.release();
 	}
 
 	send(message: ChannelMessage): void {
@@ -46,6 +49,19 @@ class ScriptedChannel implements ChannelProvider {
 	stop(): void {
 		this.stops++;
 		this.inbound = undefined;
+		this.stopWaiter?.release();
+	}
+
+	/** Resolves on the next start of this transport. */
+	nextStart(): Promise<void> {
+		this.startWaiter = createBarrier();
+		return this.startWaiter.promise;
+	}
+
+	/** Resolves on the next stop of this transport. */
+	nextStop(): Promise<void> {
+		this.stopWaiter = createBarrier();
+		return this.stopWaiter.promise;
 	}
 
 	async deliver(...events: ChannelMessage[]): Promise<void> {
@@ -78,13 +94,20 @@ function event(
 }
 
 interface JournalView {
-	readonly holder?: unknown;
+	readonly holder?: { readonly sessionId: string; readonly away?: true };
 	readonly pending: readonly { readonly eventDigest: string }[];
 	readonly seen: readonly unknown[];
 	readonly held: readonly { readonly reason: string }[];
 	readonly heldTotal: number;
-	readonly batches: readonly { readonly id: string; readonly state: string }[];
-	readonly drafts: readonly { readonly id: string; readonly state: string; readonly address: string }[];
+	readonly batches: readonly { readonly id: string; readonly state: string; readonly away?: true }[];
+	readonly drafts: readonly {
+		readonly id: string;
+		readonly state: string;
+		readonly address: string;
+		readonly reason: string;
+		readonly text: string;
+		readonly away?: true;
+	}[];
 }
 
 /** The harness notices of `kind` the session saved for its owner: one per delivery (reason and generation). */
@@ -442,4 +465,162 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 	expect(feed.starts, "the unconfigured channel never started").toBe(0);
 	expect(journal("mail").holder, "the closed session no longer serves mail").toBeUndefined();
 	trace.mark("root", "channels.closed");
+}
+
+/**
+ * Channels while no session is open: the owner's global `channels.phone.awayCwd` makes a session start bring the daemon
+ * up by itself, and with every session closed the daemon serves the channel in a headless read-only session. A stranger
+ * starts nothing. Alice's question gets its turn there and its answer goes back to her (`replyMode: "auto"`). A
+ * session that opens while the daemon's next turn runs takes the channel over at once: the daemon's transport stops,
+ * that turn's answer waits as one draft marked as written away, the session delivers nothing again and its status
+ * counts the draft. Closing the session gives the channel back to the daemon, and stopping the daemon gives it up.
+ */
+export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-away-channels`;
+	const policy = {
+		mode: "explicit" as const,
+		allowedSenders: ["alice"],
+		replyMode: "auto" as const,
+		awayCwd: HARNESS_PROJECT_CWD,
+	};
+	// The daemon reads the owner's global settings file; the sessions read the same values from their own store.
+	world.io.seed(
+		configFile(agentDir, "settings.json"),
+		JSON.stringify({ defaultProvider: HARNESS_PROVIDER, defaultModel: "root", channels: { phone: policy } }),
+	);
+	const settings = {
+		autoLearn: { enabled: false },
+		proactivity: { enabled: false },
+		orchestrator: { delegationGate: false },
+		routines: { away: { autostart: "off" as const } },
+		channels: { phone: policy },
+	};
+	const journal = (): JournalView =>
+		JSON.parse(String(world.io.readFileSync(join(agentDir, "channels", "phone.json")))) as JournalView;
+	const journalHolds = (holds: (state: JournalView) => boolean) =>
+		world.io.waitForMutation(() => world.io.existsSync(join(agentDir, "channels", "phone.json")) && holds(journal()));
+	const daemonPhone = new ScriptedChannel("phone");
+	const built: string[] = [];
+	const daemonServes = daemonPhone.nextStart();
+	const launched = world.processes.runNextBotDaemon({
+		channelProviders: (channel) => {
+			built.push(channel);
+			return channel === "phone" ? daemonPhone : undefined;
+		},
+	});
+	const opener = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings,
+	});
+	const daemon = await withDeadline(trace, "a session start launches the daemon for an away channel", launched);
+	expect(await world.disposeSessionInBody(opener.session), "the opening session closes").toBeUndefined();
+	await withDeadline(trace, "the daemon serves the channel", daemonServes);
+	expect(built, "the daemon builds the configured channel's transport once").toEqual(["phone"]);
+	expect(journal().holder?.away, "the daemon's host holds the channel").toBe(true);
+	trace.mark("root", "away-channels.served");
+
+	// A verified stranger is held: no turn, no request.
+	const alice = { id: "alice", label: "Alice", verified: true };
+	const requestsBefore = world.provider.requests.length;
+	await daemonPhone.deliver(event("p-held", "chat-9", { id: "mallory", label: "Mallory", verified: true }, "hello"));
+	expect(
+		journal().held.map((entry) => entry.reason),
+		"a stranger is held",
+	).toEqual(["not_allowed"]);
+	expect(world.provider.requests.length, "a stranger starts no turn").toBe(requestsBefore);
+
+	// Alice's question gets its turn in the headless session, and its answer goes back to her address.
+	const awayTools = ["read", "grep", "find", "ls"];
+	world.provider.enqueue("root", {
+		name: "away-phone-answer",
+		check: (request) => {
+			const delivered = JSON.stringify(request.context.messages);
+			expect(delivered.split('source=\\"channel:phone\\"').length - 1, "Alice's message arrives fenced").toBe(1);
+			expect(delivered).toContain("where are the release notes");
+			const tools = (request.context.tools ?? []).map((tool) => tool.name);
+			expect(tools, "the headless session reads").toContain("read");
+			expect(
+				tools.filter((name) => !awayTools.includes(name)),
+				"the headless session has only read-only tools",
+			).toEqual([]);
+		},
+		reply: { content: [{ type: "text", text: "Hi Alice, the notes are in the docs folder." }] },
+	});
+	const answered = daemonPhone.nextSend();
+	await daemonPhone.deliver(event("p-1", "chat-9", alice, "where are the release notes"));
+	await withDeadline(trace, "the away answer goes back to Alice", answered);
+	expect(daemonPhone.sent, "one answer, to the address the question came from").toMatchObject([
+		{ conversationKey: "chat-9", address: "chat-9-address", text: "Hi Alice, the notes are in the docs folder." },
+	]);
+	await withDeadline(
+		trace,
+		"the away turn is settled",
+		journalHolds((state) => state.batches.length === 1 && state.batches[0]?.state === "replied"),
+	);
+	expect(journal().batches[0]?.away, "the turn is charged to the away bound").toBe(true);
+	trace.mark("root", "away-channels.answered");
+
+	// A session opens while the daemon's next turn runs: it takes the channel at once, the daemon's transport stops, and
+	// that turn's answer waits as one draft (the daemon no longer runs the channel); the session delivers it to no turn.
+	const heldTurn = createBarrier();
+	const turnReached = createBarrier();
+	world.provider.enqueue("root", {
+		name: "away-phone-preempted",
+		gate: heldTurn.promise,
+		check: () => turnReached.release(),
+		reply: { content: [{ type: "text", text: "Hi Alice, the wiki has the schedule." }] },
+	});
+	await daemonPhone.deliver(event("p-2", "chat-9", alice, "and the schedule"));
+	await withDeadline(trace, "the daemon's second turn starts", turnReached.promise);
+	const daemonYields = daemonPhone.nextStop();
+	const manager = world.createSessionManager(agentDir);
+	const reopened = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: manager,
+		systemOneEnabled: false,
+		settings,
+	});
+	const sessionPhone = new ScriptedChannel("phone");
+	reopened.session.registerChannelProvider(sessionPhone);
+	expect(sessionPhone.starts, "the open session takes the channel over").toBe(1);
+	await withDeadline(trace, "the daemon yields the channel", daemonYields);
+	expect(journal().holder?.sessionId, "the open session holds the channel").toBe(manager.getSessionId());
+	heldTurn.release();
+	await withDeadline(
+		trace,
+		"the preempted turn's answer waits as a draft",
+		journalHolds((state) => state.drafts.length === 1),
+	);
+	const preempted = journal();
+	expect(preempted.drafts[0], "the preempted answer is kept once").toMatchObject({
+		state: "pending",
+		away: true,
+		reason: "the channel is not running",
+		text: "Hi Alice, the wiki has the schedule.",
+	});
+	expect(
+		preempted.batches.map((batch) => batch.state),
+		"each batch is settled once",
+	).toEqual(["replied", "drafted"]);
+	expect(preempted.pending, "nothing waits to be delivered again").toEqual([]);
+	await reopened.session.agent.waitForIdle();
+	expect(world.provider.requests.length - requestsBefore, "one turn per batch, none in the open session").toBe(2);
+	expect([daemonPhone.sent.length, sessionPhone.sent], "the draft is not sent").toEqual([1, []]);
+	expect(reopened.session.backgroundLanes.readAwayChannelStatus(), "the session counts the away draft").toEqual([
+		{ name: "phone", cwd: HARNESS_PROJECT_CWD, servedBy: "this session", awayDrafts: 1 },
+	]);
+	trace.mark("root", "away-channels.taken-over");
+
+	// The session closes: the daemon takes the channel back; stopping the daemon gives it up.
+	const daemonReturns = daemonPhone.nextStart();
+	expect(await world.disposeSessionInBody(reopened.session), "the open session closes").toBeUndefined();
+	await withDeadline(trace, "the daemon takes the channel back", daemonReturns);
+	expect(journal().holder?.away, "the daemon serves the channel again").toBe(true);
+	expect(await withDeadline(trace, "the daemon stops", daemon.stop()), "the daemon exits cleanly").toBe(0);
+	expect(journal().holder, "a stopped daemon serves nothing").toBeUndefined();
+	expect([daemonPhone.starts, daemonPhone.stops, sessionPhone.stops], "every start is stopped").toEqual([2, 2, 1]);
+	trace.mark("root", "away-channels.closed");
 }

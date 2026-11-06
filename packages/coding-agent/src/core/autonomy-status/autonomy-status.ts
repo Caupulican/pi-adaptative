@@ -11,6 +11,7 @@ import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import { outwardDraftStates } from "../agent-session-edge.ts";
 import type { EdgeClass, EdgeGrantSource, EdgeGrantView } from "../autonomy/edge-policy.ts";
+import type { AwayChannelStatus } from "../channels/away-channels.ts";
 import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -28,6 +29,7 @@ import {
 import type { AwayServiceInspection } from "../routines/away-service.ts";
 import {
 	ROUTINE_NO_NEXT_RUN_AT,
+	type RoutineAwayCharge,
 	type RoutineDefinitionView,
 	type RoutineOccurrence,
 	routineAwaySpendRoom,
@@ -105,8 +107,11 @@ export interface AwayDaemonStatusView {
 		readonly maxUsdPerDay: number;
 		readonly maxParentHosts: number;
 	};
+	/** Routine runs away and channel turns the daemon delivered while no session was open, on the same bound. */
 	readonly spentUsd: number;
 	readonly hostedParents: StatusSection<number>;
+	/** The channels the global settings name an `awayCwd` for: who serves each now, and the drafts written away. */
+	readonly channels: BoundedList<AwayChannelStatus>;
 	/** The opt-in always-on service that starts the daemon at login, read from the filesystem. */
 	readonly service: StatusSection<AwayServiceInspection>;
 }
@@ -272,6 +277,10 @@ export interface AutonomyStatusSources {
 	};
 	channelStates(): readonly ChannelStateView[];
 	channelJournals(): readonly ChannelJournalSummary[];
+	/** The channel turns the daemon delivered away, as charges on the away spend bound (journal reads). */
+	awayChannelCharges(maxUsdPerRun: number, nowMs: number): readonly RoutineAwayCharge[];
+	/** The channels served while no session is open, from the global settings and the journals. */
+	awayChannels(): readonly AwayChannelStatus[];
 	/** The always-on service's filesystem read; undefined while the routine store it reads is not loaded. */
 	readonly awayService: (() => AwayServiceInspection) | undefined;
 	readonly harnessNotices: Pick<HarnessNoticeController, "observedStates">;
@@ -397,7 +406,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				: unavailable("the routine store is not loaded, so the service is not read");
 			const daemon = store.getDaemonStatus(nowMs);
 			const away = settings.getRoutineAwaySettings();
-			const spend = routineAwaySpendRoom(store.listRoutineOccurrences(), away, nowMs);
+			const spend = routineAwaySpendRoom(
+				store.listRoutineOccurrences(),
+				{ ...away, otherCharges: sources.awayChannelCharges(away.maxUsdPerRun, nowMs) },
+				nowMs,
+			);
 			return available({
 				running: daemon.running,
 				...(daemon.pid !== undefined ? { pid: daemon.pid } : {}),
@@ -425,6 +438,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				},
 				spentUsd: spend.chargedMicros / 1_000_000,
 				hostedParents: unavailable("the away daemon does not record the parents it hosts"),
+				channels: bounded(sources.awayChannels()),
 				service,
 			});
 		}),

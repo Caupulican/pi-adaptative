@@ -3957,6 +3957,15 @@ export class SettingsManager {
 		return resolveChannelPolicies([this.directoryProfileSettings.channels, this.globalSettings.channels]);
 	}
 
+	/**
+	 * The policies the daemon serves channels under while no session is open: the global layer alone (the daemon has no
+	 * directory), so only `channels.<name>.awayCwd` written there names where. A global load error withholds them all.
+	 */
+	getAwayChannelPolicies(): ReadonlyMap<string, ChannelPolicyResolution> {
+		if (this.globalSettingsLoadError) return new Map();
+		return resolveChannelPolicies([this.globalSettings.channels]);
+	}
+
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {
 		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
 

@@ -514,6 +514,7 @@ Admission policy for each chat or mail channel: the shipped `telegram` transport
 | `channels.<name>.maxUsdPerDay` | `0.5` | Spend of those turns over the last 24 hours (0 to 100). |
 | `channels.<name>.maxBatch` | `10` | Messages of one conversation delivered as one turn (1 to 25). |
 | `channels.<name>.maxPendingPerConversation` | `25` | Messages one conversation may have waiting (1 to 100); further ones are held. |
+| `channels.<name>.awayCwd` | unset | Absolute directory where the background bot daemon serves the channel while no session is open (see [Channels](channels.md#while-no-session-is-open)). Read from the global settings only; a relative path rejects the policy. |
 
 Unlike other settings, a value outside its range is not replaced: the whole policy of that channel is rejected, the channel is not started, and the owner is told why.
 

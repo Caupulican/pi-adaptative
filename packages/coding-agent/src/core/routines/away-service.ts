@@ -820,7 +820,7 @@ export async function awayServiceStatus(
 }
 
 const NOTICE_AVAILABLE =
-	'Routines keep running after reboot if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.';
+	'Routines and channels served while no session is open keep running after reboot only if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.';
 
 export interface AwayServiceDeps {
 	readonly store: () => PersistentBotTeamStore;
@@ -859,12 +859,12 @@ export class AwayService {
 	}
 
 	/**
-	 * Applies `routines.away.autostart` while an enabled routine exists: `notify` gives its notice once per agent
-	 * directory, `on` installs a service that is missing or not current, `off` does nothing. Filesystem reads only,
-	 * unless an install is due.
+	 * Applies `routines.away.autostart` while the daemon has work (`awayWork`: enabled routines plus channels served
+	 * while no session is open): `notify` gives its notice once per agent directory, `on` installs a service that is
+	 * missing or not current, `off` does nothing. Filesystem reads only, unless an install is due.
 	 */
-	reconcile(activeRoutines: number): void {
-		if (this.closed || activeRoutines === 0) return;
+	reconcile(awayWork: number): void {
+		if (this.closed || awayWork === 0) return;
 		const mode = this.deps.autostart();
 		if (mode === "off") return;
 		const host = this.host();
@@ -880,7 +880,7 @@ export class AwayService {
 					? { reason: "always-on-available", text: NOTICE_AVAILABLE }
 					: {
 							reason: "always-on-unavailable",
-							text: `Routines of closed sessions stop at reboot, and always-on cannot be enabled here: ${unavailable}`,
+							text: `Routines of closed sessions and channels served while no session is open stop at reboot, and always-on cannot be enabled here: ${unavailable}`,
 						},
 			);
 			if (told) writeAwayServiceRecord(agentDir, { ...record, version: 1, noticeToldAt: this.deps.clock.now() });
