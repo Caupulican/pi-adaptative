@@ -194,6 +194,8 @@ export interface OutwardDraftsStatus {
 		readonly origin: TurnOriginKind;
 		readonly preparedAt: string;
 	}>;
+	/** Approved from an owner channel; the run that approval opened admits that exact call once. */
+	readonly approved: number;
 	readonly released: number;
 	readonly dismissed: number;
 }
@@ -552,7 +554,9 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			}),
 		),
 		section<OutwardDraftsStatus>(() => {
-			const states = outwardDraftStates(branch, run.turnOrigin.origin()?.k === "owner-typed");
+			const liveRun = run.turnOrigin.origin();
+			// A queued approval delivery is not visible here: only an approval whose run is in progress reads approved.
+			const states = outwardDraftStates(branch, liveRun?.k === "owner-typed", liveRun ? { liveRun } : {});
 			const pending = states.filter((draft) => draft.state === "pending");
 			return available({
 				pending: bounded(
@@ -564,6 +568,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 						preparedAt: record.preparedAt,
 					})),
 				),
+				approved: states.filter((draft) => draft.state === "approved").length,
 				released: states.filter((draft) => draft.state === "released").length,
 				dismissed: states.filter((draft) => draft.state === "dismissed").length,
 			});

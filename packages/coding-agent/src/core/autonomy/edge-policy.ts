@@ -702,6 +702,109 @@ export function ownerOnlyToolCallReason(toolName: string, args: unknown): string
 	return `${toolName} ${action ?? "without an action"} changes state beyond reading`;
 }
 
+/**
+ * The closed table of what only the owner's own terminal turn does, which a run opened from an owner channel (the
+ * owner's listed identity on a chat platform) never does: each entry names whether an action of that tool is typed-only.
+ * Standing grants, routines that would later run with the owner's authority, replies to third parties, secrets, the
+ * harness itself, System One dispositions that unblock later autonomy, and the owner's proactivity settings.
+ */
+type TypedOnlyRule = (action: string | undefined) => string | undefined;
+const REMOTE_OWNER_TYPED_ONLY: ReadonlyMap<string, TypedOnlyRule> = new Map<string, TypedOnlyRule>([
+	["goal", (action) => (action === "grant_edge" ? "goal grant_edge records a standing edge grant" : undefined)],
+	[
+		"routine",
+		(action) =>
+			action === "create" || action === "update" || action === "resume" || action === "run"
+				? `routine ${action} sets standing work that later runs with the owner's own authority`
+				: undefined,
+	],
+	["channel_reply", () => "channel_reply releases or discards replies to third parties"],
+	[
+		"secret_store",
+		(action) =>
+			action === "status" || action === "list"
+				? undefined
+				: `secret_store ${action ?? "without an action"} changes the credentials of external accounts`,
+	],
+	[
+		"runtime_update",
+		(action) =>
+			action === "status" ? undefined : `runtime_update ${action ?? "without an action"} changes the harness itself`,
+	],
+	[
+		"systemone",
+		(action) =>
+			action === "resolve_uncertainty"
+				? "systemone resolve_uncertainty records a disposition that unblocks later autonomy"
+				: undefined,
+	],
+	[
+		"proactivity",
+		(action) =>
+			action === "set_preferences" || action === "clear_preferences" || action === "turn_off" || action === "turn_on"
+				? `proactivity ${action} writes the owner's proactivity settings`
+				: undefined,
+	],
+]);
+
+/** The owner's private records, which a run opened from an owner channel reads and writes (owner decision). */
+const REMOTE_OWNER_RECORD_TOOLS: ReadonlySet<string> = new Set(["memory", "knowledge"]);
+/** Harness action tools that the read-only and delegation tables do not list. */
+const REMOTE_OWNER_OTHER_ACTION_TOOLS: ReadonlySet<string> = new Set(["peer", "tool_task"]);
+
+function isKnownActionTool(toolName: string): boolean {
+	return (
+		THIRD_PARTY_READ_ONLY_ACTIONS.has(toolName) ||
+		DELEGATION_ACTIONS[toolName] !== undefined ||
+		REMOTE_OWNER_TYPED_ONLY.has(toolName) ||
+		REMOTE_OWNER_RECORD_TOOLS.has(toolName) ||
+		REMOTE_OWNER_OTHER_ACTION_TOOLS.has(toolName)
+	);
+}
+
+function toolAction(args: unknown): string | undefined {
+	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+	return typeof record.action === "string" ? record.action : undefined;
+}
+
+/**
+ * Why a tool call on a run opened from an owner channel is refused outright, never held: the typed-only table, and an
+ * action of a tool the gate does not know (an extension tool, a tool added later), which is no more than a run carrying a
+ * third party's words may do (`ownerOnlyToolCallReason` refuses every action of a tool it does not list).
+ */
+export function remoteOwnerTypedOnlyReason(toolName: string, args: unknown): string | undefined {
+	const action = toolAction(args);
+	const typedOnly = REMOTE_OWNER_TYPED_ONLY.get(toolName);
+	if (typedOnly) return typedOnly(action);
+	if (action !== undefined && !isKnownActionTool(toolName))
+		return `${toolName} ${action} is an action of a tool the owner-channel gate does not know`;
+	return undefined;
+}
+
+/** The first classified operation a run opened from an owner channel may never be approved for: settings authority. */
+export function remoteOwnerTypedOnlyOperation(operations: readonly EdgeOperation[]): EdgeOperation | undefined {
+	return operations.find((operation) => operation.class === "settings.authority" || operation.ungrantable === true);
+}
+
+/**
+ * An action of a harness action tool that a run opened from an owner channel holds for the owner's approval: every
+ * action outside the read-only table, the owner's private records and the delegation launches (which the outward
+ * classifier holds as `agent.delegate`). Such an action changes state the edge does not classify (a measured command,
+ * a step or event write), so the phone owner approves the exact call.
+ */
+export function remoteOwnerUnclassifiedAction(toolName: string, args: unknown): EdgeOperation | undefined {
+	const action = toolAction(args);
+	if (action === undefined || REMOTE_OWNER_RECORD_TOOLS.has(toolName)) return undefined;
+	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
+	if (THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName)?.has(action)) return undefined;
+	if (!isKnownActionTool(toolName)) return undefined;
+	return {
+		class: "operation.irreversible",
+		operation: `${toolName} ${action}`,
+		reason: "changes state the edge does not classify",
+	};
+}
+
 const POSIX_SYSTEM_DIRECTORIES: ReadonlySet<string> = new Set([
 	"/",
 	"/home",

@@ -28,12 +28,22 @@ import {
 	ownerOnlyToolCallReason,
 	type ProtectedWritePaths,
 	parseEdgeScope,
+	remoteOwnerTypedOnlyOperation,
+	remoteOwnerTypedOnlyReason,
+	remoteOwnerUnclassifiedAction,
 	thirdPartyReleaseLine,
 } from "./autonomy/edge-policy.ts";
+import { ownerCallDigest, renderOwnerDraftCall } from "./autonomy/owner-draft-rendering.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
-import { entryTurnOrigin, isThirdPartyOrigin, latestDecisiveEntry, type TurnOriginRecord } from "./turn-origin.ts";
+import {
+	entryTurnOrigin,
+	isRemoteOwnerOrigin,
+	isThirdPartyOrigin,
+	latestDecisiveEntry,
+	type TurnOriginRecord,
+} from "./turn-origin.ts";
 
 export interface SessionEdgeDeps {
 	getMode?(): "guarded" | "yolo";
@@ -70,7 +80,7 @@ export interface SessionEdgeDeps {
 	releaseOutward?(toolName: string, operations: () => readonly EdgeOperation[]): void;
 	/** Harness files and the session store, which a run carrying a third party's words does not write on its own. */
 	getProtectedWritePaths?(): ProtectedWritePaths;
-	/** Reports a call the third-party gate refused or prepared, for the run's tool manifest (`autonomy-status`). */
+	/** Reports a call the third-party or remote-owner gate refused or held, for the run's tool manifest (`autonomy-status`). */
 	noteToolRefusal?(decision: ToolDecision): void;
 	/**
 	 * Whether the owner channel that opened a remote-owner run still holds the owner's authority (the sender is still
@@ -80,6 +90,22 @@ export interface SessionEdgeDeps {
 	isOwnerChannelLive?(origin: TurnOriginRecord): boolean;
 	/** Shows a draft held on a remote-owner run to the owner's phone; the notice in the session is written either way. */
 	presentOwnerDraft?(view: OwnerDraftView): void;
+	/**
+	 * The sender digest of the owner identity whose message opened the remote-owner run `origin` names: only that
+	 * identity approves the draft from a channel. Absent or `undefined` leaves the draft to the owner's terminal.
+	 */
+	ownerChannelSender?(origin: TurnOriginRecord): string | undefined;
+	/**
+	 * The arguments of a call the remote-owner edge admitted by consuming the owner's approval, so the operation gate
+	 * admits that same call (the same arguments object) instead of holding it again.
+	 */
+	noteApprovedCall?(args: unknown): void;
+}
+
+/** A tool call as the edge received it: its complete arguments, before any redaction or shortening. */
+export interface EdgeCall {
+	readonly toolName: string;
+	readonly args: unknown;
 }
 
 /** An outward action held for the owner, as the gate saw it. */
@@ -87,6 +113,10 @@ export interface OutwardDraftInput {
 	readonly toolName: string;
 	readonly operations: readonly EdgeOperation[];
 	readonly origin: TurnOriginRecord;
+	/** The complete call, on a remote-owner run that held one: the draft is then bound to it and rendered. */
+	readonly call?: EdgeCall;
+	/** The sender digest of the owner identity that opened the remote-owner run (`ownerChannelSender`). */
+	readonly ownerSender?: string;
 }
 
 export interface EdgeGrantDetails {
@@ -159,11 +189,35 @@ function thirdPartyRunOrigin(deps: Pick<SessionEdgeDeps, "getRunOrigin">): TurnO
 	return isThirdPartyOrigin(origin) ? origin : undefined;
 }
 
-/** The grants the run in progress may use: on a run carrying a third party's words, only the owner's standing ones. */
+/** The run's origin when the run in progress was opened from an owner channel (the owner's phone). */
+function remoteOwnerRunOrigin(deps: Pick<SessionEdgeDeps, "getRunOrigin">): TurnOriginRecord | undefined {
+	const origin = deps.getRunOrigin?.();
+	return isRemoteOwnerOrigin(origin) ? origin : undefined;
+}
+
+/**
+ * The grants a run opened from an owner channel uses: the owner's standing grants (typed `/edge allow` and
+ * `edge.thirdPartyAllow`) and this session's operator grants. Never a grant recorded from instructions, and never the
+ * defaulted `edge.allow` classes, which stand for the owner at the terminal.
+ */
+export function remoteOwnerEdgeGrants(
+	deps: Pick<SessionEdgeDeps, "getEdgeRecords" | "getThirdPartySettingsAllow">,
+): EdgeGrantView[] {
+	const written = deps.getThirdPartySettingsAllow?.() ?? [];
+	return collectEdgeGrants(deps.getEdgeRecords(), written, written).filter(
+		(grant) => grant.standing === true || grant.source === "operator",
+	);
+}
+
+/**
+ * The grants the run in progress may use: on a run carrying a third party's words, only the owner's standing ones; on
+ * a run opened from an owner channel, `remoteOwnerEdgeGrants`.
+ */
 export function effectiveEdgeGrants(
 	deps: Pick<SessionEdgeDeps, "getEdgeRecords" | "getSettingsAllow" | "getThirdPartySettingsAllow" | "getRunOrigin">,
 ): EdgeGrantView[] {
-	return thirdPartyRunOrigin(deps) ? standingEdgeGrants(deps) : sessionEdgeGrants(deps);
+	if (thirdPartyRunOrigin(deps)) return standingEdgeGrants(deps);
+	return remoteOwnerRunOrigin(deps) ? remoteOwnerEdgeGrants(deps) : sessionEdgeGrants(deps);
 }
 
 export function originLabel(origin: TurnOriginRecord): string {
@@ -178,32 +232,101 @@ export const OUTWARD_DRAFT_STATE_CUSTOM_TYPE = "pi_outward_draft_state";
 /** Pending drafts one branch keeps; past it the gate still prepares (refuses to run) but keeps no further draft. */
 export const MAX_OUTWARD_DRAFTS = 64;
 
-/** A draft is pending, released (the owner's own run performed it) or dismissed (the owner's own run ended without it). */
-export type OutwardDraftState = "pending" | "released" | "dismissed";
+/**
+ * A draft is pending; approved from an owner channel (bound to its complete call, admitted once); released (performed:
+ * by the owner's own run, or by the approved call); denied from an owner channel; dismissed (the owner's own run ended
+ * without it); or expired (a draft held on a remote-owner run, unanswered for `OWNER_DRAFT_EXPIRY_MS`).
+ */
+export type OutwardDraftState = "pending" | "approved" | "released" | "denied" | "dismissed" | "expired";
+
+/** How long a draft held on a remote-owner run waits for an answer, from `preparedAt`; derived, nothing is written. */
+export const OWNER_DRAFT_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 export interface OutwardDraftRecord {
 	readonly version: 1;
-	/** The requesting message's entry and the operations: the same request asked again finds its draft, another adds one. */
+	/**
+	 * The requesting message's entry and the operations (a remote-owner draft: the complete call): the same request
+	 * asked again finds its draft, another adds one.
+	 */
 	readonly id: string;
 	/** The digest of the tool and its operations alone, which the owner's own run is matched against (`releaseOutwardDrafts`). */
 	readonly operationsDigest: string;
-	/** The entry of the third party's message that opened or steered the run, when the branch names one. */
+	/** The entry of the third party's or the owner channel's message that opened or steered the run, when the branch names one. */
 	readonly requestEntryId?: string;
 	readonly toolName: string;
 	readonly operations: readonly { class: EdgeClass; operation: string; reason: string }[];
 	readonly origin: TurnOriginRecord;
 	readonly preparedAt: string;
+	/** The versioned digest of the complete held call (`ownerCallDigest`): an approval admits only this call. */
+	readonly callDigest?: string;
+	/** What the owner reads before approving (`renderOwnerDraftCall`); absent leaves the draft to the terminal. */
+	readonly rendering?: string;
+	/** The sender digest of the owner identity that opened the run: only it approves the draft from a channel. */
+	readonly ownerSender?: string;
+}
+
+/** Who decided on a draft from an owner channel: the channel, the sender's digest, the delivery ref, the event's digest. */
+export interface OwnerDecisionByRecord {
+	readonly channel: string;
+	readonly senderDigest: string;
+	readonly ref: string;
+	readonly eventDigest: string;
 }
 
 /**
- * The recorded release of a kept draft, written when the owner's own run performs it. Dismissal is not written: it
- * follows from the branch (the owner's words after the draft, and the end of the run answering them).
+ * A kept draft's recorded state. `released` is written when the owner's own run performs it or the approved call is
+ * admitted; `approved` and `denied` are the owner's answers from an owner channel. Dismissal and expiry are not
+ * written: they follow from the branch and the clock.
  */
-export interface OutwardDraftStateRecord {
-	readonly version: 1;
-	readonly id: string;
-	readonly state: "released";
-	readonly at: string;
+export type OutwardDraftStateRecord =
+	| { readonly version: 1; readonly id: string; readonly state: "released"; readonly at: string }
+	| {
+			readonly version: 1;
+			readonly id: string;
+			readonly state: "approved";
+			readonly at: string;
+			readonly callDigest: string;
+			readonly by: OwnerDecisionByRecord;
+	  }
+	| {
+			readonly version: 1;
+			readonly id: string;
+			readonly state: "denied";
+			readonly at: string;
+			readonly by: OwnerDecisionByRecord;
+	  };
+
+/** Reads to derive a draft's approval and expiry: the live run's decisive origin and the delivery queue. */
+export interface OutwardDraftStateContext {
+	/** The decisive origin of the run in progress: an approval delivered to the branch is active only during its run. */
+	readonly liveRun?: TurnOriginRecord;
+	/** Whether the approval delivery with `ref` is still queued (delivered, not yet accepted or dropped). */
+	isApprovalDeliveryPending?(ref: string): boolean;
+	readonly nowMs?: number;
+}
+
+export interface OutwardDraftStateView {
+	readonly record: OutwardDraftRecord;
+	readonly state: OutwardDraftState;
+	/** The state before expiry applies (an approval decision reads it to name the state it refuses). */
+	readonly unexpiredState: Exclude<OutwardDraftState, "expired">;
+	/** The active approval, while `state` is `approved`. */
+	readonly approval?: { readonly callDigest: string; readonly by: OwnerDecisionByRecord };
+}
+
+function stringField(data: object, key: string): string | undefined {
+	const value = Reflect.get(data, key);
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function decisionBy(data: object): OwnerDecisionByRecord | undefined {
+	const by: unknown = Reflect.get(data, "by");
+	if (typeof by !== "object" || by === null) return undefined;
+	const channel = stringField(by, "channel");
+	const senderDigest = stringField(by, "senderDigest");
+	const ref = stringField(by, "ref");
+	const eventDigest = stringField(by, "eventDigest");
+	return channel && senderDigest && ref && eventDigest ? { channel, senderDigest, ref, eventDigest } : undefined;
 }
 
 function outwardOperationsDigest(toolName: string, operations: readonly EdgeOperation[]): string {
@@ -228,13 +351,23 @@ function isOutwardDraftRecord(data: unknown): data is OutwardDraftRecord {
  * run that answers them releases it by performing its operations (a recorded state), and once that run has ended a
  * draft it did not perform is dismissed. `ownerRunLive` names whether the run in progress is the owner's (its latest
  * owner words are still being answered).
+ *
+ * Owner-channel answers (`context`): a denial is final; a draft held on a remote-owner run expires
+ * `OWNER_DRAFT_EXPIRY_MS` after it was prepared; the latest approval is active while its delivery is still queued (no
+ * owner-channel entry with its `ref` on the branch and `isApprovalDeliveryPending(ref)`) or while the run that delivery
+ * opened is the run in progress, and has lapsed otherwise, so the draft reads as it would without it. A state record
+ * of a state this build does not know is skipped, never thrown on.
  */
 export function outwardDraftStates(
 	branch: readonly SessionEntry[],
 	ownerRunLive: boolean,
-): { readonly record: OutwardDraftRecord; readonly state: OutwardDraftState }[] {
+	context: OutwardDraftStateContext = {},
+): OutwardDraftStateView[] {
 	const released = new Set<string>();
+	const denied = new Set<string>();
+	const approvals = new Map<string, { callDigest: string; by: OwnerDecisionByRecord; index: number }>();
 	const drafts: { record: OutwardDraftRecord; index: number }[] = [];
+	const channelRefs: { ref: string; index: number }[] = [];
 	let latestOwnerWords = -1;
 	const ownerWordsAfter: number[] = [];
 	for (let index = 0; index < branch.length; index++) {
@@ -247,22 +380,68 @@ export function outwardDraftStates(
 		}
 		if (entry.type === "custom" && entry.customType === OUTWARD_DRAFT_STATE_CUSTOM_TYPE) {
 			const data: unknown = entry.data;
-			const id = typeof data === "object" && data !== null ? Reflect.get(data, "id") : undefined;
-			if (typeof id === "string" && Reflect.get(data as object, "state") === "released") released.add(id);
+			if (typeof data !== "object" || data === null) continue;
+			const id: unknown = Reflect.get(data, "id");
+			const state = Reflect.get(data, "state");
+			if (typeof id !== "string") continue;
+			if (state === "released") released.add(id);
+			else if (state === "denied") denied.add(id);
+			else if (state === "approved") {
+				const callDigest = stringField(data, "callDigest");
+				const by = decisionBy(data);
+				if (callDigest && by) approvals.set(id, { callDigest, by, index });
+			}
 			continue;
 		}
-		if (entryTurnOrigin(entry)?.k === "owner-typed") {
+		const origin = entryTurnOrigin(entry);
+		if (origin?.k === "owner-typed") {
 			latestOwnerWords = index;
 			ownerWordsAfter.push(index);
-		}
+		} else if (origin?.k === "owner-channel" && origin.ref !== undefined)
+			channelRefs.push({ ref: origin.ref, index });
 	}
-	return drafts.map(({ record, index }) => {
-		if (released.has(record.id)) return { record, state: "released" as const };
-		const answeredBy = ownerWordsAfter.find((ownerIndex) => ownerIndex > index);
-		if (answeredBy === undefined || (answeredBy === latestOwnerWords && ownerRunLive))
-			return { record, state: "pending" as const };
-		return { record, state: "dismissed" as const };
+	const now = context.nowMs ?? Date.now();
+	const liveRun = context.liveRun;
+	return drafts.map(({ record, index }): OutwardDraftStateView => {
+		if (released.has(record.id)) return { record, state: "released", unexpiredState: "released" };
+		if (denied.has(record.id)) return { record, state: "denied", unexpiredState: "denied" };
+		// An unreadable preparation time counts as expired: an unanswered draft never waits forever.
+		const expired =
+			record.origin.k === "owner-channel" && !(now - Date.parse(record.preparedAt) < OWNER_DRAFT_EXPIRY_MS);
+		const approval = approvals.get(record.id);
+		const delivered =
+			approval && channelRefs.some(({ ref, index: at }) => ref === approval.by.ref && at > approval.index);
+		const approvalActive =
+			approval !== undefined &&
+			(delivered
+				? liveRun?.k === "owner-channel" && liveRun.ref === approval.by.ref
+				: context.isApprovalDeliveryPending?.(approval.by.ref) === true);
+		let unexpiredState: "approved" | "pending" | "dismissed";
+		if (approvalActive) unexpiredState = "approved";
+		else {
+			const answeredBy = ownerWordsAfter.find((ownerIndex) => ownerIndex > index);
+			unexpiredState =
+				answeredBy === undefined || (answeredBy === latestOwnerWords && ownerRunLive) ? "pending" : "dismissed";
+		}
+		if (expired) return { record, state: "expired", unexpiredState };
+		return approvalActive && approval
+			? { record, state: "approved", unexpiredState, approval: { callDigest: approval.callDigest, by: approval.by } }
+			: { record, state: unexpiredState, unexpiredState };
 	});
+}
+
+/** A draft as an owner channel shows it (`OwnerDraftView`). */
+export function ownerDraftView(view: Pick<OutwardDraftStateView, "record" | "state">): OwnerDraftView {
+	const { record } = view;
+	return {
+		id: record.id,
+		classes: [...new Set(record.operations.map((operation) => operation.class))],
+		toolName: record.toolName,
+		rendering: record.callDigest !== undefined ? record.rendering : undefined,
+		origin: record.origin,
+		state: view.state,
+		preparedAt: record.preparedAt,
+	};
 }
 
 /**
@@ -273,7 +452,7 @@ export function outwardDraftStates(
 export function keepOutwardDraft(
 	manager: Pick<SessionManager, "getBranch" | "appendCustomEntry">,
 	draft: OutwardDraftInput,
-): { id: string; notice: string; kept: boolean } {
+): { id: string; notice: string; kept: boolean; added?: OutwardDraftRecord } {
 	const operations = draft.operations.map((operation) => ({
 		class: operation.class,
 		operation: boundedRedactedDiagnosticText(operation.operation) ?? draft.toolName,
@@ -281,18 +460,27 @@ export function keepOutwardDraft(
 	}));
 	const branch = manager.getBranch();
 	const request = latestDecisiveEntry(branch);
-	const requestEntryId = request && isThirdPartyOrigin(request.origin) ? request.entry.id : undefined;
+	const requestEntryId =
+		request && (isThirdPartyOrigin(request.origin) || isRemoteOwnerOrigin(request.origin))
+			? request.entry.id
+			: undefined;
 	// The whole operation names the draft (a digest reveals none of it); only its redacted first line is stored.
 	const operationsDigest = outwardOperationsDigest(draft.toolName, draft.operations);
+	// A draft held on a remote-owner run is bound to its complete call; a third party's draft keeps its operations' name.
+	const remoteOwner = isRemoteOwnerOrigin(draft.origin);
+	const callDigest = remoteOwner && draft.call ? ownerCallDigest(draft.call.toolName, draft.call.args) : undefined;
+	const rendering =
+		callDigest !== undefined && draft.call ? renderOwnerDraftCall(draft.call.toolName, draft.call.args) : undefined;
 	const id = `draft-${createHash("sha256")
-		.update(JSON.stringify([requestEntryId ?? null, operationsDigest]))
+		.update(JSON.stringify([requestEntryId ?? null, callDigest ?? operationsDigest]))
 		.digest("hex")
 		.slice(0, 16)}`;
 	const states = outwardDraftStates(branch, false);
 	let kept = states.some(({ record }) => record.id === id);
-	if (!kept && states.filter(({ state }) => state === "pending").length < MAX_OUTWARD_DRAFTS) {
+	let added: OutwardDraftRecord | undefined;
+	if (!kept && states.filter(({ state }) => state === "pending" || state === "approved").length < MAX_OUTWARD_DRAFTS) {
 		kept = true;
-		const record: OutwardDraftRecord = {
+		added = {
 			version: 1,
 			id,
 			operationsDigest,
@@ -301,8 +489,11 @@ export function keepOutwardDraft(
 			operations,
 			origin: draft.origin,
 			preparedAt: new Date().toISOString(),
+			...(callDigest !== undefined ? { callDigest } : {}),
+			...(rendering !== undefined ? { rendering } : {}),
+			...(remoteOwner && draft.ownerSender ? { ownerSender: draft.ownerSender } : {}),
 		};
-		manager.appendCustomEntry(OUTWARD_DRAFT_CUSTOM_TYPE, record);
+		manager.appendCustomEntry(OUTWARD_DRAFT_CUSTOM_TYPE, added);
 	}
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	const grantable = grantableEdgeClasses(operations);
@@ -311,6 +502,7 @@ export function keepOutwardDraft(
 	return {
 		id,
 		kept,
+		...(added ? { added } : {}),
 		notice: boundedActionLine(
 			"Held, not run: ",
 			action,
@@ -320,14 +512,16 @@ export function keepOutwardDraft(
 	};
 }
 
-/** Records every pending draft whose operations the owner's own run is about to perform as released. */
+/** Records every pending (or approved) draft whose operations the owner's own run is about to perform as released. */
 export function releaseOutwardDrafts(
 	manager: Pick<SessionManager, "getBranch" | "getCustomEntriesOnBranch" | "appendCustomEntry">,
 	toolName: string,
 	readOperations: () => readonly EdgeOperation[],
 ): void {
 	if (manager.getCustomEntriesOnBranch([OUTWARD_DRAFT_CUSTOM_TYPE]).length === 0) return;
-	const pending = outwardDraftStates(manager.getBranch(), true).filter(({ state }) => state === "pending");
+	const pending = outwardDraftStates(manager.getBranch(), true).filter(
+		({ state }) => state === "pending" || state === "approved",
+	);
 	if (pending.length === 0) return;
 	const operations = readOperations();
 	if (operations.length === 0) return;
@@ -436,6 +630,153 @@ async function enforceThirdPartyEdge(
 	return { block: true, ...prepareOutward(deps, origin, toolName, ungranted) };
 }
 
+const REMOTE_OWNER_GATE = "remote-owner gate";
+const REMOTE_OWNER_ENDED = "the phone owner's authority ended";
+
+/** The live check of a remote-owner run: the owner channel that opened it must still hold the owner's authority. */
+function remoteOwnerEnded(
+	deps: SessionEdgeDeps,
+	origin: TurnOriginRecord,
+	toolName: string,
+): ThirdPartyRefusal | undefined {
+	if (deps.isOwnerChannelLive?.(origin) === true) return undefined;
+	deps.noteToolRefusal?.({ tool: toolName, code: "remote-owner-ended", owner: REMOTE_OWNER_GATE });
+	return {
+		reason: `Refused: ${REMOTE_OWNER_ENDED}; this run no longer acts for the owner.`,
+		correction: "Stop and report what is left; the owner continues from the terminal or a new message.",
+	};
+}
+
+function remoteOwnerTypedOnly(deps: SessionEdgeDeps, toolName: string, why: string): ThirdPartyRefusal {
+	deps.noteToolRefusal?.({ tool: toolName, code: "remote-owner-typed-only", owner: REMOTE_OWNER_GATE, detail: why });
+	return {
+		reason: `Refused: ${why}, which only the owner's own turn at the terminal decides. This run was opened from an owner channel.`,
+		correction: "Tell the owner what is needed; they do it at the terminal.",
+	};
+}
+
+/**
+ * Admits the call once when the owner approved exactly it from the owner channel for this run: the digest of the
+ * complete call equals an active approval's `callDigest`, the approval's delivery opened the run in progress, and the
+ * draft has not expired. Writes `released` for that draft id alone and returns it. The branch read and the append are
+ * one synchronous step, so a second call (a repeat, or a parallel call with the same arguments) finds it released.
+ */
+function consumeOwnerApproval(
+	deps: Pick<SessionEdgeDeps, "getBranch" | "appendCustomEntry">,
+	origin: TurnOriginRecord,
+	call: EdgeCall,
+): string | undefined {
+	const digest = ownerCallDigest(call.toolName, call.args);
+	const approved = outwardDraftStates(deps.getBranch(), false, { liveRun: origin }).find(
+		({ record, state, approval }) =>
+			state === "approved" &&
+			record.callDigest === digest &&
+			approval?.callDigest === digest &&
+			approval.by.ref === origin.ref,
+	);
+	if (!approved) return undefined;
+	const released: OutwardDraftStateRecord = {
+		version: 1,
+		id: approved.record.id,
+		state: "released",
+		at: new Date().toISOString(),
+	};
+	deps.appendCustomEntry(OUTWARD_DRAFT_STATE_CUSTOM_TYPE, released);
+	return approved.record.id;
+}
+
+/**
+ * The hold of a remote-owner run: one durable draft bound to the complete call (when there is one), the session notice
+ * and the presentation on the owner's phone (`prepareOutward`), and a tool result that says what waits for approval.
+ */
+function holdForOwner(
+	deps: SessionEdgeDeps,
+	origin: TurnOriginRecord,
+	toolName: string,
+	operations: readonly EdgeOperation[],
+	call: EdgeCall | undefined,
+): ThirdPartyRefusal {
+	const ownerSender = deps.ownerChannelSender?.(origin);
+	const prepared = deps.prepareOutward?.({
+		toolName,
+		operations,
+		origin,
+		...(call ? { call } : {}),
+		...(ownerSender ? { ownerSender } : {}),
+	});
+	const classes = [...new Set(operations.map((operation) => operation.class))];
+	deps.noteToolRefusal?.({
+		tool: toolName,
+		code: "remote-owner-held",
+		owner: REMOTE_OWNER_GATE,
+		detail: `no grant covers ${classes.join(", ")}`,
+	});
+	return {
+		reason: boundedActionLine(
+			"Held for your approval: ",
+			operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`).join("; "),
+			`, asked from ${originLabel(origin)}; no grant of the owner covers ${classes.join(", ")}.`,
+			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
+		),
+		correction: [
+			prepared?.id
+				? `It is kept as draft ${prepared.id}: the owner approves it from the owner channel or performs it at the terminal.`
+				: prepared
+					? "No draft was kept: the session's pending drafts are full."
+					: "This session keeps no drafts.",
+			"Report the held action in your answer and continue with the rest; issue the same call again only once the owner approves it.",
+		].join(" "),
+	};
+}
+
+/**
+ * The gate of a run opened from an owner channel (the owner's listed identity on a chat platform), in front of every
+ * other edge rule (YOLO included: it stands for the owner at the terminal). In order: the live check; the typed-only
+ * table and settings authority, refused; the operations the outward classifier names (destructive and conditional
+ * ones included) and the harness actions it does not classify, each against `remoteOwnerEdgeGrants`; the owner's
+ * approval of exactly this call, consumed once; otherwise a held draft. No confirmation handler and no owner follow-up
+ * take part, and no model decides.
+ */
+async function enforceRemoteOwnerEdge(
+	deps: SessionEdgeDeps,
+	origin: TurnOriginRecord,
+	toolName: string,
+	args: unknown,
+	executionCwd: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<BeforeToolCallResult | undefined> {
+	const ended = remoteOwnerEnded(deps, origin, toolName);
+	if (ended) return { block: true, ...ended };
+	const typedOnly = remoteOwnerTypedOnlyReason(toolName, args);
+	if (typedOnly) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, typedOnly) };
+	const scopeCwd = deps.getCwd();
+	const classified = classifyOutwardEdgeOperations({
+		toolName,
+		args,
+		cwd: executionCwd ?? scopeCwd,
+		scopeCwd,
+		protectedWrites: deps.getProtectedWritePaths?.(),
+	});
+	const settings = remoteOwnerTypedOnlyOperation(classified);
+	if (settings) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, settings.reason) };
+	const unclassified = remoteOwnerUnclassifiedAction(toolName, args);
+	if (unclassified) classified.push(unclassified);
+	if (classified.length === 0) return undefined;
+	const operations = await resolveEdgeConditions(deps, classified, signal);
+	// The condition read may have waited: the owner channel's authority is read again before anything is admitted.
+	const endedMeanwhile = remoteOwnerEnded(deps, origin, toolName);
+	if (endedMeanwhile) return { block: true, ...endedMeanwhile };
+	const grants = remoteOwnerEdgeGrants(deps);
+	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
+	if (ungranted.length === 0) return undefined;
+	const call: EdgeCall = { toolName, args };
+	if (consumeOwnerApproval(deps, origin, call) !== undefined) {
+		deps.noteApprovedCall?.(args);
+		return undefined;
+	}
+	return { block: true, ...holdForOwner(deps, origin, toolName, ungranted, call) };
+}
+
 /** Revoke a session or instruction grant; a settings grant is the machine's. Returns whether one was removed. */
 export function recordEdgeRevoke(deps: SessionEdgeDeps, edgeClass: EdgeClass, scopeKey?: string): boolean {
 	const validatedScope = requireValidEdgeScope(scopeKey, "revoke");
@@ -453,19 +794,36 @@ export function recordEdgeRevoke(deps: SessionEdgeDeps, edgeClass: EdgeClass, sc
 
 /**
  * Enforce the edge for a specific typed EdgeOperation.
- * Used by run_toolkit_script authorizer and composite child execution.
+ * Used by run_toolkit_script authorizer, composite child execution and the operation gate's operator question. On a
+ * remote-owner run it never asks a handler or writes an owner follow-up: the operation runs under a remote-owner grant
+ * or the owner's approval of exactly `call`, and is held as a draft otherwise (with no `call`, a draft only the
+ * terminal performs).
  */
 export async function enforceSessionEdgeOperation(
 	deps: SessionEdgeDeps,
 	operation: EdgeOperation,
 	toolName = "operation",
 	signal?: AbortSignal,
+	call?: EdgeCall,
 ): Promise<{ authorized: boolean; decision?: EdgeDecision; reason?: string; correction?: string }> {
 	const origin = thirdPartyRunOrigin(deps);
 	if (origin) {
 		return isEdgeOperationGranted(operation, effectiveEdgeGrants(deps))
 			? { authorized: true }
 			: { authorized: false, ...prepareOutward(deps, origin, toolName, [operation]) };
+	}
+	const remote = remoteOwnerRunOrigin(deps);
+	if (remote) {
+		const ended = remoteOwnerEnded(deps, remote, call?.toolName ?? toolName);
+		if (ended) return { authorized: false, ...ended };
+		if (remoteOwnerTypedOnlyOperation([operation]))
+			return { authorized: false, ...remoteOwnerTypedOnly(deps, call?.toolName ?? toolName, operation.reason) };
+		if (isEdgeOperationGranted(operation, remoteOwnerEdgeGrants(deps))) return { authorized: true };
+		if (call && consumeOwnerApproval(deps, remote, call) !== undefined) {
+			deps.noteApprovedCall?.(call.args);
+			return { authorized: true };
+		}
+		return { authorized: false, ...holdForOwner(deps, remote, call?.toolName ?? toolName, [operation], call) };
 	}
 	if (deps.getMode?.() === "yolo") return { authorized: true };
 	const grants = sessionEdgeGrants(deps);
@@ -542,6 +900,10 @@ export async function enforceSessionEdge(
 		const prepared = await enforceThirdPartyEdge(deps, origin, toolName, args, executionCwd, signal);
 		return prepared ?? enforceEdgeRules(deps, toolName, args, executionCwd, signal);
 	}
+	// A run opened from an owner channel is decided by its own gate alone: YOLO, the confirmation handler and the
+	// owner's terminal release stand for the owner at the terminal.
+	const remote = remoteOwnerRunOrigin(deps);
+	if (remote) return enforceRemoteOwnerEdge(deps, remote, toolName, args, executionCwd, signal);
 	const decided = await enforceEdgeRules(deps, toolName, args, executionCwd, signal);
 	if (!decided?.block && deps.releaseOutward) {
 		const scopeCwd = deps.getCwd();

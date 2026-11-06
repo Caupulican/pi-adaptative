@@ -97,7 +97,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 					)),
 		]),
 		...block("Outward drafts", status.outwardDrafts, (value) => [
-			`${value.pending.items.length + (value.pending.omitted ?? 0)} pending, ${value.released} released, ${value.dismissed} dismissed`,
+			`${value.pending.items.length + (value.pending.omitted ?? 0)} pending, ${value.approved > 0 ? `${value.approved} approved, ` : ""}${value.released} released, ${value.dismissed} dismissed`,
 			...list(
 				value.pending,
 				(draft) =>

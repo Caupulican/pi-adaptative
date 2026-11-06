@@ -3,6 +3,7 @@
  * local-commit delivery bindings, model-pool policy updates, and session edge grants.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { CONFIG_DIR_NAME } from "../config.ts";
@@ -10,15 +11,18 @@ import type { ToolCallStartContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
+	type EdgeCall,
 	type EdgeGrantDetails,
 	edgeRecordsOnBranch,
 	enforceSessionEdgeOperation,
 	keepOutwardDraft,
 	MAX_OUTWARD_DRAFTS,
 	originLabel,
+	ownerDraftView,
 	recordEdgeGrant,
 	recordEdgeRevoke,
 	releaseOutwardDrafts,
+	remoteOwnerEdgeGrants,
 	type SessionEdgeDeps,
 	sessionEdgeGrants,
 	standingEdgeGrants,
@@ -88,7 +92,7 @@ import {
 	optionalToolRequestAliases,
 	readOptionalToolIntent,
 } from "./tool-applicability-gate.ts";
-import { isThirdPartyOrigin } from "./turn-origin.ts";
+import { isRemoteOwnerOrigin, isThirdPartyOrigin } from "./turn-origin.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 
 /**
@@ -224,6 +228,11 @@ export interface SessionEdgeIntentControllerDeps {
 	getForegroundRun(): Pick<ForegroundRecoveryController, "turnOrigin" | "toolManifests">;
 	/** Tells the owner once, with their next turn; returns whether they are told (`HarnessNoticeController.observe`). */
 	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	/**
+	 * The owner-channel plane's answers for a run opened from an owner channel: whether the channel still holds the
+	 * owner's authority, the presentation of a held draft, the opener's sender digest. Absent: such a run holds none.
+	 */
+	readonly ownerChannel?: Pick<SessionEdgeDeps, "isOwnerChannelLive" | "presentOwnerDraft" | "ownerChannelSender">;
 }
 
 export class SessionEdgeIntentController {
@@ -231,6 +240,12 @@ export class SessionEdgeIntentController {
 	readonly ownerPolicy: OwnerPolicyQueue<OwnerRequestClassificationOutcome>;
 	readonly modelPolicy: OwnerModelPolicy;
 	private operationGateInstance?: OperationGate;
+	/** The operation gate of a run opened from an owner channel: its grants are `remoteOwnerEdgeGrants`. */
+	private remoteOwnerOperationGateInstance?: OperationGate;
+	/** The call the remote-owner operation gate is checking, for its operator question (one scope per call). */
+	private readonly remoteOwnerCall = new AsyncLocalStorage<EdgeCall>();
+	/** Arguments of calls the remote-owner edge admitted on the owner's approval: the operation gate admits them too. */
+	private readonly ownerApprovedCalls = new WeakSet<object>();
 	private delegationGateInstance?: DelegationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
 	/** The committed optional-tool judgment in flight (one at a time: the owner-policy queue runs them); its paused entry heads the chain. */
@@ -332,21 +347,39 @@ export class SessionEdgeIntentController {
 
 	/**
 	 * The root's own tool calls are checked here: the delegation gate (steers, so YOLO does not skip it) and the operation
-	 * gate, which YOLO skips only on the owner's own runs (`runsThirdParty`).
+	 * gate, which YOLO skips only on the owner's own terminal runs (`runsOutsideOwnerTerminal`). A run opened from an owner
+	 * channel is checked by its own operation gate; a call its edge admitted on the owner's approval is admitted here too.
 	 */
 	rootCallChecks() {
 		return {
 			checkDelegation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
 				this.delegationGate.check(tool, args, cwd ?? this.deps.getCwd(), signal),
-			checkOperation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
-				this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
-			runsThirdParty: () => this.runsThirdParty(),
+			checkOperation: async (
+				tool: string,
+				args: unknown,
+				cwd: string | undefined,
+				signal: AbortSignal | undefined,
+			) => {
+				if (!this.runsRemoteOwner())
+					return this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal);
+				if (typeof args === "object" && args !== null && this.ownerApprovedCalls.has(args)) return undefined;
+				return this.remoteOwnerCall.run({ toolName: tool, args }, () =>
+					this.remoteOwnerOperationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
+				);
+			},
+			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
 		};
 	}
 
 	/** Judges the root's calls of one assistant message ahead of their gate checks, under the run's authority. */
 	prewarmOperations(calls: readonly ToolCallStartContext[], signal: AbortSignal | undefined): void {
-		prewarmOperationGate(this.operationGate, calls, this.deps.getCwd(), this.rootCaller(), signal);
+		prewarmOperationGate(
+			this.runsRemoteOwner() ? this.remoteOwnerOperationGate : this.operationGate,
+			calls,
+			this.deps.getCwd(),
+			this.rootCaller(),
+			signal,
+		);
 	}
 
 	/**
@@ -372,9 +405,14 @@ export class SessionEdgeIntentController {
 		return isThirdPartyOrigin(this.deps.getForegroundRun().turnOrigin.origin());
 	}
 
+	/** Whether the run in progress was opened from an owner channel (`RunTurnOrigin`): the owner, not at the terminal. */
+	private runsRemoteOwner(): boolean {
+		return isRemoteOwnerOrigin(this.deps.getForegroundRun().turnOrigin.origin());
+	}
+
 	/** The verdict caches' turn: the submission, the run's authority and the owner's request it reads. */
 	private systemOneTurnKey(): string {
-		return `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.runsThirdParty() ? "third-party" : "owner"}\u0000${this.deps.getLastUserRequest()}`;
+		return `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.deps.getForegroundRun().turnOrigin.authority()}\u0000${this.deps.getLastUserRequest()}`;
 	}
 
 	/**
@@ -417,15 +455,43 @@ export class SessionEdgeIntentController {
 	}
 
 	get operationGate(): OperationGate {
-		this.operationGateInstance ??= createSessionOperationGate({
+		this.operationGateInstance ??= this.rootOperationGate({
+			getEdgeGrants: (standingOnly) => this.getEdgeGrants(standingOnly),
+			askOperator: async (operation, signal) =>
+				enforceSessionEdgeOperation(this.edgeDeps(), operation, "operation", signal),
+		});
+		return this.operationGateInstance;
+	}
+
+	/**
+	 * The operation gate of a run opened from an owner channel. The session gate's grants include the defaulted
+	 * `edge.allow`, which stands for the owner at the terminal and would admit every call; this one reads
+	 * `remoteOwnerEdgeGrants`, and its operator question carries the complete call, so a held operation is bound to it.
+	 */
+	private get remoteOwnerOperationGate(): OperationGate {
+		this.remoteOwnerOperationGateInstance ??= this.rootOperationGate({
+			getEdgeGrants: (standingOnly) =>
+				standingOnly ? standingEdgeGrants(this.edgeDeps()) : remoteOwnerEdgeGrants(this.edgeDeps()),
+			askOperator: async (operation, signal) => {
+				const call = this.remoteOwnerCall.getStore();
+				return enforceSessionEdgeOperation(this.edgeDeps(), operation, call?.toolName ?? "operation", signal, call);
+			},
+		});
+		return this.remoteOwnerOperationGateInstance;
+	}
+
+	/** An operation gate of this session's root, with its grants and its operator question. */
+	private rootOperationGate(
+		input: Pick<Parameters<typeof createSessionOperationGate>[0], "getEdgeGrants" | "askOperator">,
+	): OperationGate {
+		return createSessionOperationGate({
 			settleOwnerPolicy: (signal) => this.ownerPolicy.settle("latest", signal),
 			getEngine: () => this.gateEngine(),
 			// Read only for a call that carries no third party's words: the owner's words never approve a third party's call.
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),
-			getEdgeGrants: (standingOnly) => this.getEdgeGrants(standingOnly),
-			askOperator: async (operation, signal) =>
-				enforceSessionEdgeOperation(this.edgeDeps(), operation, "operation", signal),
+			getEdgeGrants: input.getEdgeGrants,
+			...(input.askOperator ? { askOperator: input.askOperator } : {}),
 			notify: (message) => {
 				if (!this.handoffValue) this.deps.emitWarning(message);
 			},
@@ -433,7 +499,6 @@ export class SessionEdgeIntentController {
 			getSessionId: () => this.deps.getSessionManager().getSessionId(),
 			getCwd: () => this.deps.getCwd(),
 		});
-		return this.operationGateInstance;
 	}
 
 	edgeDeps(): SessionEdgeDeps {
@@ -481,10 +546,18 @@ export class SessionEdgeIntentController {
 								},
 							},
 				);
+				// A draft held on a remote-owner run is also shown on the owner's phone, once, when it is first kept.
+				if (held.added && isRemoteOwnerOrigin(draft.origin))
+					this.deps.ownerChannel?.presentOwnerDraft?.(ownerDraftView({ record: held.added, state: "pending" }));
 				return { ...(held.kept ? { id: held.id } : {}), told };
 			},
 			releaseOutward: (toolName, operations) =>
 				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),
+			isOwnerChannelLive: (origin) => this.deps.ownerChannel?.isOwnerChannelLive?.(origin) === true,
+			ownerChannelSender: (origin) => this.deps.ownerChannel?.ownerChannelSender?.(origin),
+			noteApprovedCall: (args) => {
+				if (typeof args === "object" && args !== null) this.ownerApprovedCalls.add(args);
+			},
 		};
 	}
 

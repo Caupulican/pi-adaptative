@@ -32,7 +32,13 @@ export type ToolDecisionCode =
 	/** The third-party gate kept the outward operation as a draft for the owner. */
 	| "third-party-prepared"
 	/** A worker carrying a third party's words: an outward operation no standing grant covers is not run. */
-	| "third-party-not-run";
+	| "third-party-not-run"
+	/** A run opened from an owner channel whose channel no longer holds the owner's authority: every guarded call is refused. */
+	| "remote-owner-ended"
+	/** The remote-owner gate's typed-only table and settings authority (`remoteOwnerTypedOnlyReason`): refused, never held. */
+	| "remote-owner-typed-only"
+	/** The remote-owner gate kept the call as a draft for the owner's approval of exactly that call. */
+	| "remote-owner-held";
 
 export interface ToolDecision {
 	readonly tool: string;
