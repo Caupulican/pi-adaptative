@@ -7,16 +7,15 @@
  * holds no authority.
  */
 
-import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import type { AgentEvent } from "../kernel/types.ts";
 import type { PromptOptions } from "./agent-session-contracts.ts";
+import { createOwnerDraftDecisions } from "./autonomy/owner-draft-decisions.ts";
 import type {
 	OwnerChannelControl,
 	OwnerChannelDelivery,
 	OwnerChannelOrigin,
-	OwnerDraftDecisions,
 	OwnerDraftView,
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
@@ -42,14 +41,6 @@ export interface OwnerChannelSessionHost {
 /** The foreground run's authority. */
 export type OwnerChannelForeground = Pick<ForegroundRecoveryController, "turnOrigin">;
 
-/** What the owner's draft decisions read and write of the session. */
-export interface OwnerDraftDecisionsSessionDeps {
-	getBranch(): readonly SessionEntry[];
-	appendCustomEntry(customType: string, data?: unknown): string;
-	getRunOrigin(): TurnOriginRecord | undefined;
-	isApprovalDeliveryPending(ref: string): boolean;
-}
-
 /** One batch the channels core handed in, by its `ref`. */
 interface OwnerChannelRun {
 	readonly live: () => boolean;
@@ -66,7 +57,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	/** Insertion order is age: the first entry is the oldest. */
 	private readonly runs = new Map<string, OwnerChannelRun>();
 	private readonly draftListeners = new IndependentObserverSet<(view: OwnerDraftView) => void>();
-	private controlValue: OwnerChannelControl | undefined;
+	private readonly controlValue: OwnerChannelControl;
 
 	constructor(
 		host: OwnerChannelSessionHost,
@@ -78,6 +69,24 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		this.getForeground = getForeground;
 		this.getSessionManager = getSessionManager;
 		this.isClosed = isClosed;
+		const decisions = createOwnerDraftDecisions({
+			getBranch: () => this.getSessionManager().getBranch(),
+			appendCustomEntry: (customType, data) => {
+				this.getSessionManager().appendCustomEntry(customType, data);
+			},
+			getRunOrigin: () => this.getForeground().turnOrigin.origin(),
+			isApprovalDeliveryPending: (ref) => this.isApprovalDeliveryPending(ref),
+		});
+		this.controlValue = {
+			drafts: () => decisions.drafts(),
+			approve: (draftId, by, policy) => decisions.approve(draftId, by, policy),
+			deny: (draftId, by) => decisions.deny(draftId, by),
+			onDraftHeld: (listener) => {
+				if (this.draftListeners.size >= MAX_DRAFT_LISTENERS)
+					throw new Error(`At most ${MAX_DRAFT_LISTENERS} owner-channel draft listeners are kept.`);
+				return this.draftListeners.subscribe(listener);
+			},
+		};
 	}
 
 	deliver(
@@ -141,29 +150,9 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		);
 	}
 
-	/** The owner's decisions over this session's drafts and the stream of newly held ones; undefined until decisions exist. */
-	control(): OwnerChannelControl | undefined {
+	/** The owner's decisions over this session's drafts and the stream of newly held ones. */
+	control(): OwnerChannelControl {
 		return this.controlValue;
-	}
-
-	/** Bind the owner's draft decisions (built over this session) into the control the channels core holds. */
-	bindDecisions(create: (deps: OwnerDraftDecisionsSessionDeps) => OwnerDraftDecisions): void {
-		const decisions = create({
-			getBranch: () => this.getSessionManager().getBranch(),
-			appendCustomEntry: (customType, data) => this.getSessionManager().appendCustomEntry(customType, data),
-			getRunOrigin: () => this.getForeground().turnOrigin.origin(),
-			isApprovalDeliveryPending: (ref) => this.isApprovalDeliveryPending(ref),
-		});
-		this.controlValue = {
-			drafts: () => decisions.drafts(),
-			approve: (draftId, by, policy) => decisions.approve(draftId, by, policy),
-			deny: (draftId, by) => decisions.deny(draftId, by),
-			onDraftHeld: (listener) => {
-				if (this.draftListeners.size >= MAX_DRAFT_LISTENERS)
-					throw new Error(`At most ${MAX_DRAFT_LISTENERS} owner-channel draft listeners are kept.`);
-				return this.draftListeners.subscribe(listener);
-			},
-		};
 	}
 
 	/**
