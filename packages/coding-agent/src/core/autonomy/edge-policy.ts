@@ -562,13 +562,18 @@ function argvWriteTargets(argv: readonly string[]): string[] {
 	const tool = commandTool(argv[0]);
 	const rest = argv.slice(1);
 	if (tool === "tee") return positional(rest);
+	// A removed path is written to as much as an overwritten one: it is gone, and so is what read it.
+	if (tool === "rm" || tool === "unlink" || tool === "rmdir" || tool === "shred" || tool === "truncate")
+		return positional(rest);
 	if (tool === "cp" || tool === "mv" || tool === "install" || tool === "ln") {
+		// `mv` also takes every source away from where it was.
+		const moved = tool === "mv" ? positional(rest) : [];
 		const target = rest.findIndex((word) => word === "-t" || word === "--target-directory");
-		if (target >= 0) return rest[target + 1] === undefined ? [] : [rest[target + 1]!];
+		if (target >= 0) return rest[target + 1] === undefined ? moved : [rest[target + 1]!, ...moved];
 		const attached = rest.find((word) => word.startsWith("--target-directory="));
-		if (attached) return [attached.slice("--target-directory=".length)];
+		if (attached) return [attached.slice("--target-directory=".length), ...moved];
 		const targets = positional(rest);
-		return targets.length >= 2 ? [targets.at(-1)!] : [];
+		return targets.length >= 2 ? (tool === "mv" ? targets : [targets.at(-1)!]) : [];
 	}
 	if (tool === "sed" && rest.some((word) => /^(?:-[a-zA-Z]*i|--in-place)/u.test(word))) {
 		const files: string[] = [];
