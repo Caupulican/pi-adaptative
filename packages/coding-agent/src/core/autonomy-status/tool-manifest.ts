@@ -40,7 +40,9 @@ export type ToolDecisionCode =
 	/** The hardline or an `edge.deny` pattern refused a call of a run opened from an owner channel, in every mode. */
 	| "remote-owner-hardline"
 	/** The remote-owner gate kept the call as a draft for the owner's approval of exactly that call. */
-	| "remote-owner-held";
+	| "remote-owner-held"
+	/** The owner's approval of this exact call is held by an identical call admitted earlier whose outcome is not known yet. */
+	| "remote-owner-approval-in-use";
 
 export interface ToolDecision {
 	readonly tool: string;

@@ -126,12 +126,12 @@ export interface ToolGateControllerDeps {
 	 */
 	runsRemoteOwner?(): boolean;
 	/**
-	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate, once per call that
-	 * reached the gates: `admitted` when the call passed every gate and may start (its draft is released), false when a
-	 * later gate refused it or a check threw (the approval stays for a call that passes). A call that claimed none is a
-	 * no-op.
+	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate: `executed` when the
+	 * call ran (its draft is released), false when a later gate refused it, a check threw or the loop dropped the admitted
+	 * call before it started (the approval stays for a call that runs). A call that claimed none, or one already settled,
+	 * is a no-op. Without a preparation cleanup hook the call is settled as executed at admission.
 	 */
-	settleApprovedCall?(args: unknown, admitted: boolean): void;
+	settleApprovedCall?(args: unknown, executed: boolean): void;
 	/**
 	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
 	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
@@ -381,7 +381,7 @@ export class ToolGateController {
 		let terminalOutcome = await evaluateEnvelope(args);
 		let observation: AdmittedRepositoryObservation | undefined;
 		let observationHandedOff = false;
-		// Set only where the call is admitted: an owner approval it claimed is released then, and freed on any other exit.
+		// Set only where the call is admitted: an owner approval it claimed is kept then, and freed on any other exit.
 		let admitted = false;
 		try {
 			const denied = blockedBy(terminalOutcome);
@@ -553,15 +553,21 @@ export class ToolGateController {
 			admitted = true;
 			return yolo ? undefined : extensionResult;
 		} finally {
-			this.deps.settleApprovedCall?.(args, admitted);
-			if (observation && !observationHandedOff) {
-				for (const token of observation.tokens) {
-					await this.deps.repositoryObserver?.finish({ token, operationSucceeded: false });
+			try {
+				// An admitted call keeps the owner approval it claimed until it executed (`afterToolCall` releases the
+				// draft) or the loop drops it unstarted (its preparation cleanup frees the approval).
+				if (admitted && registerCleanup) registerCleanup(() => this.deps.settleApprovedCall?.(args, false));
+				else this.deps.settleApprovedCall?.(args, admitted);
+			} finally {
+				if (observation && !observationHandedOff) {
+					for (const token of observation.tokens) {
+						await this.deps.repositoryObserver?.finish({ token, operationSucceeded: false });
+					}
 				}
+				// A later abort does not invalidate a decision the envelope already made; the pre-hook
+				// evaluation above either completed (and is published) or threw before this block exists.
+				if (envelope) this.deps.recordGateOutcome(terminalOutcome);
 			}
-			// A later abort does not invalidate a decision the envelope already made; the pre-hook
-			// evaluation above either completed (and is published) or threw before this block exists.
-			if (envelope) this.deps.recordGateOutcome(terminalOutcome);
 		}
 	};
 
@@ -730,8 +736,13 @@ export class ToolGateController {
 		} finally {
 			// Result hooks can fail before complete(). A terminal call must retain no pending
 			// observation; a projection failure is not evidence that the tool itself failed.
-			if (invocation) selection?.discard(invocation.id);
-			await this.finishObservation(invocation?.repositoryObservation, finishSucceeded);
+			try {
+				if (invocation) selection?.discard(invocation.id);
+				await this.finishObservation(invocation?.repositoryObservation, finishSucceeded);
+			} finally {
+				// The call executed (a call refused before execution has no after-hook): the approval it claimed is spent.
+				this.deps.settleApprovedCall?.(args, true);
+			}
 		}
 	};
 }

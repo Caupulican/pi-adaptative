@@ -697,6 +697,7 @@ export class AgentSession {
 			getForegroundRun: () => this._foregroundRecovery,
 			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
 			ownerChannel: this.ownerChannel,
+			holdsAgainAtExecution: (call) => this._runtimeBuilder.holdsAgainAtExecution(call),
 		});
 		this._unsettledLadder = new SessionUnsettledLadderController({
 			getSessionManager: () => this.sessionManager,

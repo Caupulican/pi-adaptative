@@ -235,6 +235,8 @@ export interface SessionEdgeIntentControllerDeps {
 	 * owner's authority, the presentation of a held draft, the opener's sender digest. Absent: such a run holds none.
 	 */
 	readonly ownerChannel?: Pick<SessionEdgeDeps, "isOwnerChannelLive" | "presentOwnerDraft" | "ownerChannelSender">;
+	/** `SessionEdgeDeps.holdsAgainAtExecution`: whether executing the call reaches the edge again with no call. */
+	holdsAgainAtExecution?(call: EdgeCall): boolean;
 }
 
 export class SessionEdgeIntentController {
@@ -377,18 +379,21 @@ export class SessionEdgeIntentController {
 			},
 			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
 			runsRemoteOwner: () => this.runsRemoteOwner(),
-			settleApprovedCall: (args: unknown, admitted: boolean) => this.settleApprovedCall(args, admitted),
+			settleApprovedCall: (args: unknown, executed: boolean) => this.settleApprovedCall(args, executed),
 		};
 	}
 
-	/** Ends the claim a call holds on an owner approval: admitted, its draft is released; refused, the approval is free. */
-	private settleApprovedCall(args: unknown, admitted: boolean): void {
+	/**
+	 * Ends the claim a call holds on an owner approval: executed, its draft is released; not run, the approval is free. An
+	 * executed call whose release cannot be written keeps the approval claimed, so it admits no second call.
+	 */
+	private settleApprovedCall(args: unknown, executed: boolean): void {
 		if (typeof args !== "object" || args === null) return;
 		const draftId = this.approvedCalls.get(args);
 		if (draftId === undefined) return;
 		this.approvedCalls.delete(args);
+		if (executed) appendOutwardDraftReleased(this.deps.getSessionManager(), draftId);
 		this.claimedApprovals.delete(draftId);
-		if (admitted) appendOutwardDraftReleased(this.deps.getSessionManager(), draftId);
 	}
 
 	/** The grants the run in progress may use (`effectiveEdgeGrants`), which its authority context names to the model. */
@@ -581,17 +586,14 @@ export class SessionEdgeIntentController {
 				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),
 			isOwnerChannelLive: (origin) => this.deps.ownerChannel?.isOwnerChannelLive?.(origin) === true,
 			ownerChannelSender: (origin) => this.deps.ownerChannel?.ownerChannelSender?.(origin),
+			holdsAgainAtExecution: (call) => this.deps.holdsAgainAtExecution?.(call) === true,
 			claimApprovedCall: (draftId, args) => {
-				if (
-					typeof args !== "object" ||
-					args === null ||
-					this.claimedApprovals.has(draftId) ||
-					this.approvedCalls.has(args)
-				)
-					return false;
+				if (typeof args !== "object" || args === null) return "untracked";
+				if (this.approvedCalls.has(args)) return "claimed";
+				if (this.claimedApprovals.has(draftId)) return "in-use";
 				this.claimedApprovals.add(draftId);
 				this.approvedCalls.set(args, draftId);
-				return true;
+				return "claimed";
 			},
 		};
 	}

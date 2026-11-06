@@ -2937,6 +2937,17 @@ export class RuntimeBuilder {
 	previewTaskAutomationContext(): TaskAutomationContextPlan {
 		return this._taskAutomationAdapter.previewContext();
 	}
+
+	/**
+	 * Whether executing the call reaches the edge again with no call: a `task_automation` run of a dangerous automation
+	 * passes its toolkit authorizer (`enforceEdgeOperation`), which holds it once more on a remote-owner run.
+	 */
+	holdsAgainAtExecution(call: { readonly toolName: string; readonly args: unknown }): boolean {
+		if (call.toolName !== "task_automation" || typeof call.args !== "object" || call.args === null) return false;
+		const { action, name } = call.args as { action?: unknown; name?: unknown };
+		if (action !== "run" || typeof name !== "string") return false;
+		return this._taskAutomationAdapter.getController().getAutomation(name)?.danger === true;
+	}
 }
 
 export async function resolveScoutModel(

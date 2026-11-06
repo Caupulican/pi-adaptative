@@ -106,10 +106,16 @@ export interface SessionEdgeDeps {
 	/**
 	 * Claims the owner's approval of draft `draftId` for the call with these arguments (the same arguments object), which
 	 * the remote-owner edge admits on it: a claimed approval admits no other call, the operation gate admits this call
-	 * instead of holding it again, and `released` is written only once the call passed every later gate (the tool gate
-	 * settles the claim). False, and nothing is admitted, when the draft is already claimed or the call cannot be tracked.
+	 * instead of holding it again, and `released` is written only once the call executed (the tool gate settles the
+	 * claim). `claimed` when this call now holds it (or these arguments already hold a claim); `in-use` when another call
+	 * holds it; `untracked` when the arguments are not an object, so nothing is admitted and the call is held.
 	 */
-	claimApprovedCall?(draftId: string, args: unknown): boolean;
+	claimApprovedCall?(draftId: string, args: unknown): "claimed" | "in-use" | "untracked";
+	/**
+	 * Whether executing the call reaches the edge again with no call (a dangerous automation's toolkit authorizer), which
+	 * would hold it once more after an approval: on a remote-owner run its draft is then left to the terminal.
+	 */
+	holdsAgainAtExecution?(call: EdgeCall): boolean;
 }
 
 /** A tool call as the edge received it: its complete arguments, before any redaction or shortening. */
@@ -127,6 +133,8 @@ export interface OutwardDraftInput {
 	readonly call?: EdgeCall;
 	/** The sender digest of the owner identity that opened the remote-owner run (`ownerChannelSender`). */
 	readonly ownerSender?: string;
+	/** The call cannot be released by an approval from a channel: it is kept bound to its call but not rendered. */
+	readonly terminalOnly?: boolean;
 }
 
 export interface EdgeGrantDetails {
@@ -508,7 +516,9 @@ export function keepOutwardDraft(
 	const remoteOwner = isRemoteOwnerOrigin(draft.origin);
 	const callDigest = remoteOwner && draft.call ? ownerCallDigest(draft.call.toolName, draft.call.args) : undefined;
 	const rendering =
-		callDigest !== undefined && draft.call ? renderOwnerDraftCall(draft.call.toolName, draft.call.args) : undefined;
+		callDigest !== undefined && draft.call && draft.terminalOnly !== true
+			? renderOwnerDraftCall(draft.call.toolName, draft.call.args)
+			: undefined;
 	const id = `draft-${createHash("sha256")
 		.update(JSON.stringify([requestEntryId ?? null, callDigest ?? operationsDigest]))
 		.digest("hex")
@@ -699,14 +709,16 @@ function remoteOwnerTypedOnly(deps: SessionEdgeDeps, toolName: string, why: stri
  * complete call equals an active approval's `callDigest`, the approval's delivery opened and decided the run in
  * progress, and the draft has not expired. The approval is claimed for this call (`claimApprovedCall`) in the same
  * synchronous step as the branch read, so a parallel call with the same arguments finds it claimed (`in-use`) and a
- * repeat after the call ran finds it released; `released` itself is written when the tool gate admits the call past
- * every later gate, and a refusal there frees the approval again.
+ * repeat after the call ran finds it released; `released` itself is written once the call executed, and a refusal by a
+ * later gate or a call the loop never starts frees the approval again. Arguments that cannot be tracked (not an object)
+ * admit nothing: the call is held.
  */
 function consumeOwnerApproval(
 	deps: Pick<SessionEdgeDeps, "getBranch" | "getLiveRun" | "claimApprovedCall">,
 	origin: TurnOriginRecord,
 	call: EdgeCall,
 ): "admitted" | "in-use" | undefined {
+	if (typeof call.args !== "object" || call.args === null || !deps.claimApprovedCall) return undefined;
 	const digest = ownerCallDigest(call.toolName, call.args);
 	const liveRun = deps.getLiveRun?.();
 	const approved = outwardDraftStates(deps.getBranch(), false, liveRun ? { liveRun } : {}).filter(
@@ -716,22 +728,23 @@ function consumeOwnerApproval(
 			approval?.callDigest === digest &&
 			approval.by.ref === origin.ref,
 	);
-	if (approved.some(({ record }) => deps.claimApprovedCall?.(record.id, call.args) === true)) return "admitted";
-	return approved.length > 0 && deps.claimApprovedCall ? "in-use" : undefined;
+	let inUse = false;
+	for (const { record } of approved) {
+		const claim = deps.claimApprovedCall(record.id, call.args);
+		if (claim === "claimed") return "admitted";
+		inUse ||= claim === "in-use";
+	}
+	return inUse ? "in-use" : undefined;
 }
 
-/** The refusal of a call whose matching approval an identical call in progress already claimed. */
+/** The refusal of a call whose matching approval an identical call admitted earlier still holds. */
 function approvalInUse(deps: SessionEdgeDeps, toolName: string): ThirdPartyRefusal {
-	deps.noteToolRefusal?.({
-		tool: toolName,
-		code: "remote-owner-held",
-		owner: REMOTE_OWNER_GATE,
-		detail: "approval in use",
-	});
+	deps.noteToolRefusal?.({ tool: toolName, code: "remote-owner-approval-in-use", owner: REMOTE_OWNER_GATE });
 	return {
 		reason:
-			"Not run: an identical call in progress already uses the owner's approval of this call; one approval admits one call.",
-		correction: "Do not repeat the call; report the outcome of the call already admitted.",
+			"Not run: an identical call admitted earlier holds the owner's approval of this call, and its outcome is not known yet; one approval admits one call.",
+		correction:
+			"Wait for that call's result. If it ran, the approval is spent; if it did not run, the approval admits this call when it is issued again.",
 	};
 }
 
@@ -747,12 +760,18 @@ function holdForOwner(
 	call: EdgeCall | undefined,
 ): ThirdPartyRefusal {
 	const ownerSender = deps.ownerChannelSender?.(origin);
+	// A toolkit script, or a call whose execution reaches the edge again with no call, would be held a second time after
+	// an approval: only the terminal releases it.
+	const terminalOnly =
+		operations.some((operation) => operation.class === "toolkit.script") ||
+		(call !== undefined && deps.holdsAgainAtExecution?.(call) === true);
 	const prepared = deps.prepareOutward?.({
 		toolName,
 		operations,
 		origin,
 		...(call ? { call } : {}),
 		...(ownerSender ? { ownerSender } : {}),
+		...(terminalOnly ? { terminalOnly } : {}),
 	});
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	const final =
@@ -774,11 +793,15 @@ function holdForOwner(
 			? `Draft ${prepared?.id} is already ${prepared?.state} and cannot be approved. Report it in your answer and continue with the rest; the owner asks for it again in a new message or performs it at the terminal.`
 			: [
 					prepared?.id
-						? `It is kept as draft ${prepared.id}: the owner approves it from the owner channel or performs it at the terminal.`
+						? terminalOnly
+							? `It is kept as draft ${prepared.id}: only the owner at the terminal can perform it.`
+							: `It is kept as draft ${prepared.id}: the owner approves it from the owner channel or performs it at the terminal.`
 						: prepared
 							? "No draft was kept: the session's pending drafts are full."
 							: "This session keeps no drafts.",
-					"Report the held action in your answer and continue with the rest; issue the same call again only once the owner approves it.",
+					terminalOnly
+						? "Report the held action in your answer and continue with the rest; do not issue it again from this run."
+						: "Report the held action in your answer and continue with the rest; issue the same call again only once the owner approves it.",
 				].join(" "),
 	};
 }
