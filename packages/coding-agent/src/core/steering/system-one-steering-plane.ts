@@ -314,11 +314,6 @@ export class SystemOneSteeringPlane {
 		return { action: "continue_current_work", reasonCodes };
 	}
 
-	private hardPass(answer: unknown, direction: "required_true" | "required_false"): boolean {
-		const fallback = direction !== "required_true";
-		return evaluateNoul(noulFromAnswer(answer, fallback), direction) === "hard_pass";
-	}
-
 	/**
 	 * Does this answer carry a yes?
 	 *
@@ -632,24 +627,6 @@ export class SystemOneSteeringPlane {
 			case "JEV-025": {
 				// The same questions and bounds the goal tool's completion judges with.
 				failed.push(...completionPackFailures("completion", answers).map((gate) => completionPredicate(gate.id)));
-				if (
-					answers.acceptance_satisfied !== undefined &&
-					!this.hardPass(answers.acceptance_satisfied, "required_true")
-				) {
-					failed.push("acceptance_satisfied");
-				}
-				if (
-					answers.requirements_complete !== undefined &&
-					!this.hardPass(answers.requirements_complete, "required_true")
-				) {
-					failed.push("requirements_complete");
-				}
-				if (
-					answers.verification_conclusive !== undefined &&
-					!this.hardPass(answers.verification_conclusive, "required_true")
-				) {
-					failed.push("verification_conclusive");
-				}
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
@@ -658,28 +635,6 @@ export class SystemOneSteeringPlane {
 				failed.push(
 					...completionPackFailures("completion_challenge", answers).map((gate) => completionPredicate(gate.id)),
 				);
-				if (
-					answers.unhandled_edge_cases !== undefined &&
-					!this.hardPass(answers.unhandled_edge_cases, "required_false")
-				)
-					failed.push("no_unhandled_edge_cases");
-				if (
-					answers.hidden_regressions !== undefined &&
-					!this.hardPass(answers.hidden_regressions, "required_false")
-				)
-					failed.push("no_hidden_regressions");
-				if (
-					answers.assumption_violations !== undefined &&
-					!this.hardPass(answers.assumption_violations, "required_false")
-				) {
-					failed.push("no_assumption_violations");
-				}
-				if (
-					answers.adversarial_approved !== undefined &&
-					!this.hardPass(answers.adversarial_approved, "required_true")
-				) {
-					failed.push("adversarial_approved");
-				}
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}

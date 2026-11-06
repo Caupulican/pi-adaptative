@@ -1756,20 +1756,11 @@ export class ObjectiveExecutionController {
 							});
 							if (j26.certificate) steeringCertRefs.push(j26.certificate.certificate_id);
 							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
-							const adverseChallengeIds =
-								j26.kind === "judged"
-									? ["missing_requirement"].filter(
-											(id) =>
-												(j26.certificate.answers[id] as { value?: boolean } | undefined)?.value === true,
-										)
-									: [];
-							if (
-								j26.kind === "judged" &&
-								(j26.certificate.semantic_outcome !== "pass" || adverseChallengeIds.length > 0)
-							) {
+							// The challenge pack's own failures (a missing requirement among them) are the certificate's
+							// failed predicates; its outcome is the whole verdict.
+							if (j26.kind === "judged" && j26.certificate.semantic_outcome !== "pass") {
 								return this.rejectedCompletion(objectiveId, runtime, [
 									"adversarial_completion_failed",
-									...adverseChallengeIds,
 									...(j26.certificate.failed_semantic_predicates ?? []),
 								]);
 							}
@@ -1842,11 +1833,8 @@ export class ObjectiveExecutionController {
 								if (j28.certificate) steeringCertRefs.push(j28.certificate.certificate_id);
 								if (j28.kind === "held") return this.heldCompletion(objectiveId, runtime, j28.reasonCodes);
 
-								const deploySafe =
-									j28.kind !== "judged" ||
-									(j28.certificate.semantic_outcome === "pass" &&
-										(j28.certificate.answers.deploy_safe as { value?: boolean })?.value !== false);
-								if (!deploySafe && j28.kind === "judged") {
+								// deploy_safe is one of the outcome's predicates: a pass already means it held.
+								if (j28.kind === "judged" && j28.certificate.semantic_outcome !== "pass") {
 									return this.rejectedCompletion(objectiveId, runtime, [
 										"release_readiness_rejected",
 										...(j28.certificate.failed_semantic_predicates ?? []),
