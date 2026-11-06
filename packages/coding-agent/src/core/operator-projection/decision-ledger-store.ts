@@ -1,6 +1,6 @@
 /**
  * The decision ledger: one SQLite database per agent directory that retains, for every session,
- * the Decision graph's stage transitions and the semantic (Jev) evaluations the session ran.
+ * the Decision graph's stage transitions and the semantic (System One) evaluations the session ran.
  *
  * Owner decision (2026-09-20): this data is an analysis asset — accuracy, model usage, model fitness —
  * so it is never erased and lives in one database file rather than many scattered files. Rows are

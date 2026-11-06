@@ -1,5 +1,5 @@
 /**
- * The Jev evaluation ledger's vocabulary: what one semantic evaluation is (kind, label, timing,
+ * The System One evaluation ledger's vocabulary: what one semantic evaluation is (kind, label, timing,
  * outcome, verdict, bounded reasons), the one observer every evaluation path reports to, and the
  * pure functions that turn a raw evaluation or a steering certificate into a verdict the operator
  * can read. No path may record an evaluation any other way; that is how `S1 eval` under-reported.

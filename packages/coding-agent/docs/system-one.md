@@ -273,6 +273,43 @@ first (precision on a labelled set, requests, latency, tokens against the baseli
 5. Memory recall ranks by token overlap; "does this memory bear on the task" per page.
 6. Test failure triage ("flake or real regression") over the failure text and the recent diff.
 
+## Thresholds and readings
+
+System One makes the judgment; code makes the decision. Every cut lives in
+`core/decision/thresholds.ts`, next to the readers that apply it. A measured value carries its measurement
+there; the rest are starting points kept until an evaluation on this harness's own answers says otherwise.
+
+| Answer | Family or risk | Cut | Notes |
+|---|---|---|---|
+| yes/no | `gating` | hard pass 0.93, soft pass 0.85, hard fail 0.2 (mirror 0.07 / 0.15 / 0.8) | measured on the owner-words screen; a soft pass may continue a step, never authorize |
+| yes/no | `advisory` | pass 0.7, fail 0.3 | no soft band; between is undecided and gets its own outcome |
+| yes/no | `operation_effect` | effect absent at or below 0.5, established at 0.8 | probed live on common commands |
+| yes/no | `operation_request` | asks at 0.8, clearly does not at 0.2 | |
+| yes/no | `plan_review` | defect steers at 0.8, sound at or below 0.5 | probed live on planted plan defects |
+| yes/no | `completion` | outcome holds at 0.7, defect absent at or below 0.5, claim supported at 0.5 | measured on the completion eval set, 2026-09-25 |
+| yes/no | knowledge | 0.9 | admission and grounding |
+| Choice | `reversible` | P(option) 0.7 | |
+| Choice | `route` | P(option) 0.88, lead 0.15 | preflight and postflight route |
+| Choice | `consequential` | P(option) 0.9 | |
+| Choice | `authority` | P(option) 0.93, lead 0.2 | owner intent, optional-tool standing |
+| Choice | `destructive` | P(option) 0.9, then a confirmation step | identifying the intent never performs it |
+| Choice | follow-up | decide at 0.9, ask a narrower question from 0.8 | the authority line |
+| Score | any | confidence at least 0.5, then 0.7 of the mass on one side of the boundary | below the floor a Score decides nothing |
+
+How an answer is read:
+
+- **yes/no** is P(true). `noulBand(p, direction, family)` places it in `hard_pass`, `soft_pass`, `ambiguous` or
+  `hard_fail` for the question's required end. `readNoul` adds `unasked` for a missing or non-probability answer,
+  so a question that was not answered is never read as a default probability.
+- **Choice** is read on the probability of the option code acts on (`choiceProbability`, `choiceAct`,
+  `choiceGate`), never on `confidence`, which for a Choice is only a transform of the top probability. The
+  runner-up margin applies only where a close second changes what code does.
+- **Score** is read confidence first, then on boundary mass (`scoreSettled`).
+- The decision action policy reads a yes/no by its band (`ambiguous` is uncertain, and so is `soft_pass` at
+  critical consequence) and a Choice through `choiceAct` (`reversible` at low and medium consequence,
+  `consequential` with the 0.15 lead at high and critical). Only a missing result or a disallowed provenance
+  sends the router to another engine; an answer below a cut returns as `gather_more`.
+
 ## File location
 
 `systemone locate` answers "which file holds X" for the session owner (workers do not have it). The caller
@@ -564,10 +601,19 @@ receipts cannot establish resolution; gather fresh proof within that evidence wi
 ## The decision ledger
 
 `state/decision-ledger.sqlite` (one per agent directory, keyed by session id and working directory,
-append-only) holds every stage transition, every Jev evaluation and every route with its executor. The
+append-only) holds every stage transition, every System One evaluation and every route with its executor. The
 objective's recent routes are a history block in the state the judge reads; "repeated without new
 evidence" is one route on one evidence marker, twice. The root reads the ledger with
 `decision_ledger_read` (`sessions`, `stages`, `evaluations`, `replay`); workers never do.
+
+An evaluation may carry its decision trace: the decision code took, the gates it checked, the judgments
+behind it (P(true) and band for a yes/no, P(chosen option) and the runner-up for a Choice, and whether each
+drove the decision), short facts, and whether the answer came from the certificate cache. The recorder bounds
+it (8 gates, 16 judgments, 8 facts, 120 characters per string) and redacts secrets before it is kept. A caller
+attaches it with `noteTrace(evaluationId, trace)`, taking the id from `audit.evaluationId` of the recorded
+evaluation; it works on an open evaluation, a settled one, and one no longer held in memory. The trace is
+stored in the nullable `trace` column of `semantic_evaluations`, added to existing databases in place; a row
+whose trace does not parse is read without one.
 
 The TUI counts unresolved questions in live System One status instead of appending a line for each
 uncertain evaluation. Repeated judgments update the same question; decisive matching evidence
@@ -606,8 +652,8 @@ verifier or opening an owner-question latch. A bound completion transaction hold
 the account evaluator is unavailable, in either steering mode. The diagnostic remains an evaluator problem; it neither
 clears existing completion findings nor queues production repair tasks.
 An irreversible or outward operation goes to the
-operator, or is refused for a worker; an established outward effect the request does not ask for is refused. Only Choice and Score answers are gated on confidence; a
-Noul's probability is its certainty.
+operator, or is refused for a worker; an established outward effect the request does not ask for is refused. A Choice is gated on P(chosen option) and a
+Score on its confidence; a Noul's probability is its certainty (see Thresholds and readings).
 
 Project-rule candidates across mutation, postflight and completion require the receiving agent to
 verify them. Current verification receipts reach the recheck. An evaluator outage reports its

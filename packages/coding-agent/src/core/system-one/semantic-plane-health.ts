@@ -175,7 +175,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	 * The evaluation was cancelled — the operator aborted the turn, or its caller went away. The
 	 * plane did not fail: nothing was observed, so the last real outcome stands and the state
 	 * returns to whatever it was before the evaluation started. The record is still kept, so the
-	 * pane can show that Jev was interrupted.
+	 * pane can show that System One was interrupted.
 	 */
 	settleCancelled(evaluationId: string): void {
 		const start = this.take(evaluationId);
@@ -253,7 +253,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		return this.recent.at(-1);
 	}
 
-	/** Fires on every settlement and verdict note; the Execution pane's Jev previews hang off it. */
+	/** Fires on every settlement and verdict note; the Execution pane's System One previews hang off it. */
 	subscribe(listener: (record: SemanticEvaluationRecord) => void): () => void {
 		return this.listeners.subscribe(listener);
 	}
@@ -335,7 +335,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			return { resolved: false, reason: "storage_unavailable" };
 		}
 		if (!this.doubts.resolveCurrent(input)) return { resolved: false, reason: "stale_question" };
-		// Refresh the existing evaluation view without manufacturing another Jev evaluation/verdict.
+		// Refresh the existing evaluation view without manufacturing another System One evaluation/verdict.
 		if (record) this.notify(record);
 		return { resolved: true };
 	}

@@ -359,7 +359,7 @@ function isPostflightStatus(choice: string): choice is PostflightStatus {
 /**
  * Deterministic completion gates evaluation.
  * R-020: Deterministic checks MUST run before semantic checks whenever code can answer the question exactly.
- * R-035: A deterministic failure (compile/test/path/auth) MUST NOT be overridden by a favorable Jev answer.
+ * R-035: A deterministic failure (compile/test/path/auth) MUST NOT be overridden by a favorable System One answer.
  * R-050: Every required acceptance criterion MUST be satisfied or explicitly waived.
  * R-051: Every hard constraint MUST be verified or explicitly waived.
  * R-052: Compile/build status MUST be recorded when the project offers a build path.

@@ -99,7 +99,7 @@ export class SessionSemanticPlaneController {
 	/**
 	 * The one way this session hands its semantic decision engine to anything: the plane's engine
 	 * wrapped so every evaluation it runs is recorded. Every in-session consumer goes through here,
-	 * so the POV bar's Jev indicator reports the whole plane's work and not one subsystem's.
+	 * so the POV bar's System One indicator reports the whole plane's work and not one subsystem's.
 	 * Memoized per underlying engine so collaborators wired once keep a stable engine identity.
 	 */
 	recordingSemanticEngine(): SemanticDecisionEngine | undefined {
@@ -114,7 +114,7 @@ export class SessionSemanticPlaneController {
 			capabilities: () => engine.capabilities(),
 			evaluate: async (program, state, options) => {
 				// The in-flight record is what lets the POV bar show `S1 eval` only while a real
-				// evaluation runs and the Decision graph say what Jev is judging; settlement below
+				// evaluation runs and the Decision graph say what System One is judging; settlement below
 				// always closes it and keeps the verdict for the ledger.
 				const evaluationId = this.health.start({
 					programId: program.id,
@@ -212,7 +212,7 @@ export class SessionSemanticPlaneController {
 		plane?.setEvaluationObserver(this.health);
 	}
 
-	/** The durable side of the Jev ledger, bound to the current session id and cwd. */
+	/** The durable side of the System One ledger, bound to the current session id and cwd. */
 	semanticLedgerSink(): SemanticEvaluationDurableSink | undefined {
 		const ledger = this.getDecisionLedger();
 		if (!ledger) return undefined;
@@ -271,12 +271,12 @@ export class SessionSemanticPlaneController {
 		};
 	}
 
-	/** Recent Jev evaluations: what was judged, when, and what it decided. */
+	/** Recent System One evaluations: what was judged, when, and what it decided. */
 	getSemanticEvaluations(): readonly SemanticEvaluationRecord[] {
 		return this.health.getRecentEvaluations();
 	}
 
-	/** Subscribes to settled Jev evaluations (the Execution pane's Jev previews). */
+	/** Subscribes to settled System One evaluations (the Execution pane's System One previews). */
 	onSemanticEvaluation(listener: (record: SemanticEvaluationRecord) => void): () => void {
 		return this.health.subscribe(listener);
 	}
