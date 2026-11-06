@@ -19,13 +19,13 @@ import type {
 	OwnerDraftDecisions,
 	OwnerDraftView,
 } from "../channels/owner-channel-types.ts";
-import type { TurnOriginRecord } from "../turn-origin.ts";
+import type { LiveRunOrigin } from "../turn-origin.ts";
 
 export interface OwnerDraftDecisionDeps {
 	getBranch(): readonly SessionEntry[];
 	appendCustomEntry(customType: string, data: unknown): void;
-	/** The decisive origin of the run in progress (`RunTurnOrigin.origin()`). */
-	getRunOrigin?(): TurnOriginRecord | undefined;
+	/** The run in progress (`RunTurnOrigin.live()`): its decisive origin and whether the run's own messages decided it. */
+	getLiveRun?(): LiveRunOrigin | undefined;
 	/** Whether the approval delivery with `ref` is still queued (delivered, not yet accepted or dropped). */
 	isApprovalDeliveryPending?(ref: string): boolean;
 	now?(): number;
@@ -37,8 +37,8 @@ function byRecord(by: OwnerDecisionBy): { channel: string; senderDigest: string;
 
 export function createOwnerDraftDecisions(deps: OwnerDraftDecisionDeps): OwnerDraftDecisions {
 	const states = (): OutwardDraftStateView[] => {
-		const liveRun = deps.getRunOrigin?.();
-		return outwardDraftStates(deps.getBranch(), liveRun?.k === "owner-typed", {
+		const liveRun = deps.getLiveRun?.();
+		return outwardDraftStates(deps.getBranch(), liveRun?.origin.k === "owner-typed", {
 			...(liveRun ? { liveRun } : {}),
 			...(deps.isApprovalDeliveryPending
 				? { isApprovalDeliveryPending: (ref: string) => deps.isApprovalDeliveryPending?.(ref) === true }

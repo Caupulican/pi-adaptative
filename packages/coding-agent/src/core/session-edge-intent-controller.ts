@@ -11,9 +11,11 @@ import type { ToolCallStartContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
+	appendOutwardDraftReleased,
 	type EdgeCall,
 	type EdgeGrantDetails,
 	edgeRecordsOnBranch,
+	effectiveEdgeGrants,
 	enforceSessionEdgeOperation,
 	keepOutwardDraft,
 	MAX_OUTWARD_DRAFTS,
@@ -244,8 +246,13 @@ export class SessionEdgeIntentController {
 	private remoteOwnerOperationGateInstance?: OperationGate;
 	/** The call the remote-owner operation gate is checking, for its operator question (one scope per call). */
 	private readonly remoteOwnerCall = new AsyncLocalStorage<EdgeCall>();
-	/** Arguments of calls the remote-owner edge admitted on the owner's approval: the operation gate admits them too. */
-	private readonly ownerApprovedCalls = new WeakSet<object>();
+	/**
+	 * Arguments of calls the remote-owner edge admitted on the owner's approval, with the draft each claimed, until the tool
+	 * gate settles the call's admission (`settleApprovedCall`): the operation gate admits them too.
+	 */
+	private readonly approvedCalls = new WeakMap<object, string>();
+	/** The drafts whose approval such a call claimed: a claimed approval admits no other call. */
+	private readonly claimedApprovals = new Set<string>();
 	private delegationGateInstance?: DelegationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
 	/** The committed optional-tool judgment in flight (one at a time: the owner-policy queue runs them); its paused entry heads the chain. */
@@ -363,14 +370,30 @@ export class SessionEdgeIntentController {
 			) => {
 				if (!this.runsRemoteOwner())
 					return this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal);
-				if (typeof args === "object" && args !== null && this.ownerApprovedCalls.has(args)) return undefined;
+				if (typeof args === "object" && args !== null && this.approvedCalls.has(args)) return undefined;
 				return this.remoteOwnerCall.run({ toolName: tool, args }, () =>
 					this.remoteOwnerOperationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
 				);
 			},
 			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
 			runsRemoteOwner: () => this.runsRemoteOwner(),
+			settleApprovedCall: (args: unknown, admitted: boolean) => this.settleApprovedCall(args, admitted),
 		};
+	}
+
+	/** Ends the claim a call holds on an owner approval: admitted, its draft is released; refused, the approval is free. */
+	private settleApprovedCall(args: unknown, admitted: boolean): void {
+		if (typeof args !== "object" || args === null) return;
+		const draftId = this.approvedCalls.get(args);
+		if (draftId === undefined) return;
+		this.approvedCalls.delete(args);
+		this.claimedApprovals.delete(draftId);
+		if (admitted) appendOutwardDraftReleased(this.deps.getSessionManager(), draftId);
+	}
+
+	/** The grants the run in progress may use (`effectiveEdgeGrants`), which its authority context names to the model. */
+	getRunEdgeGrants(): EdgeGrantView[] {
+		return effectiveEdgeGrants(this.edgeDeps());
 	}
 
 	/** Judges the root's calls of one assistant message ahead of their gate checks, under the run's authority. */
@@ -532,6 +555,7 @@ export class SessionEdgeIntentController {
 			mayHoldUnownedWorktreeChanges: (signal) =>
 				mayHoldUnownedWorktreeChanges(this.deps.getCwd(), [...this.deps.getWrittenMutationPaths()], signal),
 			getRunOrigin: () => this.deps.getForegroundRun().turnOrigin.origin(),
+			getLiveRun: () => this.deps.getForegroundRun().turnOrigin.live(),
 			noteToolRefusal: (decision) => this.deps.getForegroundRun().toolManifests.refuseRoot(decision),
 			prepareOutward: (draft) => {
 				const held = keepOutwardDraft(this.deps.getSessionManager(), draft);
@@ -557,8 +581,17 @@ export class SessionEdgeIntentController {
 				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),
 			isOwnerChannelLive: (origin) => this.deps.ownerChannel?.isOwnerChannelLive?.(origin) === true,
 			ownerChannelSender: (origin) => this.deps.ownerChannel?.ownerChannelSender?.(origin),
-			noteApprovedCall: (args) => {
-				if (typeof args === "object" && args !== null) this.ownerApprovedCalls.add(args);
+			claimApprovedCall: (draftId, args) => {
+				if (
+					typeof args !== "object" ||
+					args === null ||
+					this.claimedApprovals.has(draftId) ||
+					this.approvedCalls.has(args)
+				)
+					return false;
+				this.claimedApprovals.add(draftId);
+				this.approvedCalls.set(args, draftId);
+				return true;
 			},
 		};
 	}

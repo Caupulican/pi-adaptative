@@ -126,6 +126,13 @@ export interface ToolGateControllerDeps {
 	 */
 	runsRemoteOwner?(): boolean;
 	/**
+	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate, once per call that
+	 * reached the gates: `admitted` when the call passed every gate and may start (its draft is released), false when a
+	 * later gate refused it or a check threw (the approval stays for a call that passes). A call that claimed none is a
+	 * no-op.
+	 */
+	settleApprovedCall?(args: unknown, admitted: boolean): void;
+	/**
 	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
 	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
 	 */
@@ -374,6 +381,8 @@ export class ToolGateController {
 		let terminalOutcome = await evaluateEnvelope(args);
 		let observation: AdmittedRepositoryObservation | undefined;
 		let observationHandedOff = false;
+		// Set only where the call is admitted: an owner approval it claimed is released then, and freed on any other exit.
+		let admitted = false;
 		try {
 			const denied = blockedBy(terminalOutcome);
 			if (denied) return denied;
@@ -541,8 +550,10 @@ export class ToolGateController {
 				observationHandedOff = true;
 				invocation.repositoryObservation = observation;
 			}
+			admitted = true;
 			return yolo ? undefined : extensionResult;
 		} finally {
+			this.deps.settleApprovedCall?.(args, admitted);
 			if (observation && !observationHandedOff) {
 				for (const token of observation.tokens) {
 					await this.deps.repositoryObserver?.finish({ token, operationSucceeded: false });

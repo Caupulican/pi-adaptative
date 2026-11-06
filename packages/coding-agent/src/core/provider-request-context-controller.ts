@@ -93,7 +93,10 @@ export interface ProviderRequestContextControllerDeps {
 		SkillVaultController,
 		"previewSystemPromptSection" | "getContextRevision" | "previewExclusionReminder" | "commitSystemPromptSection"
 	>;
-	/** Edge authority grants active on the session; projected after compaction or whenever active. */
+	/**
+	 * Edge authority grants the run in progress may use (`effectiveEdgeGrants`: the session's on the owner's own runs and
+	 * outside a run, fewer on a fenced or phone run); projected after compaction or whenever active.
+	 */
 	getEdgeGrants?(): readonly EdgeGrantView[];
 	applyPathAliases(messages: AgentMessage[]): {
 		messages: AgentMessage[];

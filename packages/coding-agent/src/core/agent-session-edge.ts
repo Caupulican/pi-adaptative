@@ -41,6 +41,7 @@ import {
 	entryTurnOrigin,
 	isRemoteOwnerOrigin,
 	isThirdPartyOrigin,
+	type LiveRunOrigin,
 	latestDecisiveEntry,
 	type TurnOriginRecord,
 } from "./turn-origin.ts";
@@ -67,6 +68,8 @@ export interface SessionEdgeDeps {
 	mayHoldUnownedWorktreeChanges?(signal?: AbortSignal): Promise<boolean>;
 	/** The decisive origin of the run in progress (`RunTurnOrigin`); absent or owner-controlled outside such a run. */
 	getRunOrigin?(): TurnOriginRecord | undefined;
+	/** The run in progress with whether its own messages decided its origin (`RunTurnOrigin.live`): an approval reads it. */
+	getLiveRun?(): LiveRunOrigin | undefined;
 	/**
 	 * Keeps operations a run carrying a third party's words may not run as one durable draft for the owner and tells
 	 * the owner once (`keepOutwardDraft`); returns the draft's id (absent when the session's pending drafts are full) and
@@ -101,10 +104,12 @@ export interface SessionEdgeDeps {
 	 */
 	ownerChannelSender?(origin: TurnOriginRecord): string | undefined;
 	/**
-	 * The arguments of a call the remote-owner edge admitted by consuming the owner's approval, so the operation gate
-	 * admits that same call (the same arguments object) instead of holding it again.
+	 * Claims the owner's approval of draft `draftId` for the call with these arguments (the same arguments object), which
+	 * the remote-owner edge admits on it: a claimed approval admits no other call, the operation gate admits this call
+	 * instead of holding it again, and `released` is written only once the call passed every later gate (the tool gate
+	 * settles the claim). False, and nothing is admitted, when the draft is already claimed or the call cannot be tracked.
 	 */
-	noteApprovedCall?(args: unknown): void;
+	claimApprovedCall?(draftId: string, args: unknown): boolean;
 }
 
 /** A tool call as the edge received it: its complete arguments, before any redaction or shortening. */
@@ -315,8 +320,11 @@ export type OutwardDraftStateRecord =
 
 /** Reads to derive a draft's approval and expiry: the live run's decisive origin and the delivery queue. */
 export interface OutwardDraftStateContext {
-	/** The decisive origin of the run in progress: an approval delivered to the branch is active only during its run. */
-	readonly liveRun?: TurnOriginRecord;
+	/**
+	 * The run in progress (`RunTurnOrigin.live`): an approval delivered to the branch is active only in the run whose own
+	 * delivery of it decided the run (`decidedInRun`), never in a later run that inherits that origin.
+	 */
+	readonly liveRun?: LiveRunOrigin;
 	/** Whether the approval delivery with `ref` is still queued (delivered, not yet accepted or dropped). */
 	isApprovalDeliveryPending?(ref: string): boolean;
 	readonly nowMs?: number;
@@ -382,7 +390,8 @@ function isOutwardDraftRecord(data: unknown): data is OutwardDraftRecord {
  * Owner-channel answers (`context`): a denial is final; a draft held on a remote-owner run expires
  * `OWNER_DRAFT_EXPIRY_MS` after it was prepared; the latest approval is active while its delivery is still queued (no
  * owner-channel entry with its `ref` on the branch and `isApprovalDeliveryPending(ref)`) or while the run that delivery
- * opened is the run in progress, and has lapsed otherwise, so the draft reads as it would without it. A state record
+ * opened and decided is the run in progress (a later run inheriting its origin does not count), and has lapsed
+ * otherwise, so the draft reads as it would without it. A state record
  * of a state this build does not know is skipped, never thrown on.
  */
 export function outwardDraftStates(
@@ -441,7 +450,9 @@ export function outwardDraftStates(
 		const approvalActive =
 			approval !== undefined &&
 			(delivered
-				? liveRun?.k === "owner-channel" && liveRun.ref === approval.by.ref
+				? liveRun?.decidedInRun === true &&
+					liveRun.origin.k === "owner-channel" &&
+					liveRun.origin.ref === approval.by.ref
 				: context.isApprovalDeliveryPending?.(approval.by.ref) === true);
 		let unexpiredState: "approved" | "pending" | "dismissed";
 		if (approvalActive) unexpiredState = "approved";
@@ -556,15 +567,14 @@ export function releaseOutwardDrafts(
 	if (operations.length === 0) return;
 	const digest = outwardOperationsDigest(toolName, operations);
 	for (const { record } of pending) {
-		if (record.operationsDigest !== digest) continue;
-		const released: OutwardDraftStateRecord = {
-			version: 1,
-			id: record.id,
-			state: "released",
-			at: new Date().toISOString(),
-		};
-		manager.appendCustomEntry(OUTWARD_DRAFT_STATE_CUSTOM_TYPE, released);
+		if (record.operationsDigest === digest) appendOutwardDraftReleased(manager, record.id);
 	}
+}
+
+/** Records draft `id` as released (performed). */
+export function appendOutwardDraftReleased(manager: Pick<SessionManager, "appendCustomEntry">, id: string): void {
+	const released: OutwardDraftStateRecord = { version: 1, id, state: "released", at: new Date().toISOString() };
+	manager.appendCustomEntry(OUTWARD_DRAFT_STATE_CUSTOM_TYPE, released);
 }
 
 /** A refusal of a run carrying a third party's words: what was held and why, and the model's next action. */
@@ -686,32 +696,43 @@ function remoteOwnerTypedOnly(deps: SessionEdgeDeps, toolName: string, why: stri
 
 /**
  * Admits the call once when the owner approved exactly it from the owner channel for this run: the digest of the
- * complete call equals an active approval's `callDigest`, the approval's delivery opened the run in progress, and the
- * draft has not expired. Writes `released` for that draft id alone and returns it. The branch read and the append are
- * one synchronous step, so a second call (a repeat, or a parallel call with the same arguments) finds it released.
+ * complete call equals an active approval's `callDigest`, the approval's delivery opened and decided the run in
+ * progress, and the draft has not expired. The approval is claimed for this call (`claimApprovedCall`) in the same
+ * synchronous step as the branch read, so a parallel call with the same arguments finds it claimed (`in-use`) and a
+ * repeat after the call ran finds it released; `released` itself is written when the tool gate admits the call past
+ * every later gate, and a refusal there frees the approval again.
  */
 function consumeOwnerApproval(
-	deps: Pick<SessionEdgeDeps, "getBranch" | "appendCustomEntry">,
+	deps: Pick<SessionEdgeDeps, "getBranch" | "getLiveRun" | "claimApprovedCall">,
 	origin: TurnOriginRecord,
 	call: EdgeCall,
-): string | undefined {
+): "admitted" | "in-use" | undefined {
 	const digest = ownerCallDigest(call.toolName, call.args);
-	const approved = outwardDraftStates(deps.getBranch(), false, { liveRun: origin }).find(
+	const liveRun = deps.getLiveRun?.();
+	const approved = outwardDraftStates(deps.getBranch(), false, liveRun ? { liveRun } : {}).filter(
 		({ record, state, approval }) =>
 			state === "approved" &&
 			record.callDigest === digest &&
 			approval?.callDigest === digest &&
 			approval.by.ref === origin.ref,
 	);
-	if (!approved) return undefined;
-	const released: OutwardDraftStateRecord = {
-		version: 1,
-		id: approved.record.id,
-		state: "released",
-		at: new Date().toISOString(),
+	if (approved.some(({ record }) => deps.claimApprovedCall?.(record.id, call.args) === true)) return "admitted";
+	return approved.length > 0 && deps.claimApprovedCall ? "in-use" : undefined;
+}
+
+/** The refusal of a call whose matching approval an identical call in progress already claimed. */
+function approvalInUse(deps: SessionEdgeDeps, toolName: string): ThirdPartyRefusal {
+	deps.noteToolRefusal?.({
+		tool: toolName,
+		code: "remote-owner-held",
+		owner: REMOTE_OWNER_GATE,
+		detail: "approval in use",
+	});
+	return {
+		reason:
+			"Not run: an identical call in progress already uses the owner's approval of this call; one approval admits one call.",
+		correction: "Do not repeat the call; report the outcome of the call already admitted.",
 	};
-	deps.appendCustomEntry(OUTWARD_DRAFT_STATE_CUSTOM_TYPE, released);
-	return approved.record.id;
 }
 
 /**
@@ -829,10 +850,9 @@ async function enforceRemoteOwnerEdge(
 	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
 	if (ungranted.length === 0) return undefined;
 	const call: EdgeCall = { toolName, args };
-	if (consumeOwnerApproval(deps, origin, call) !== undefined) {
-		deps.noteApprovedCall?.(args);
-		return undefined;
-	}
+	const approval = consumeOwnerApproval(deps, origin, call);
+	if (approval === "admitted") return undefined;
+	if (approval === "in-use") return { block: true, ...approvalInUse(deps, toolName) };
 	return { block: true, ...holdForOwner(deps, origin, toolName, ungranted, call) };
 }
 
@@ -878,10 +898,9 @@ export async function enforceSessionEdgeOperation(
 		if (remoteOwnerTypedOnlyOperation([operation]))
 			return { authorized: false, ...remoteOwnerTypedOnly(deps, call?.toolName ?? toolName, operation.reason) };
 		if (isEdgeOperationGranted(operation, remoteOwnerEdgeGrants(deps))) return { authorized: true };
-		if (call && consumeOwnerApproval(deps, remote, call) !== undefined) {
-			deps.noteApprovedCall?.(call.args);
-			return { authorized: true };
-		}
+		const approval = call ? consumeOwnerApproval(deps, remote, call) : undefined;
+		if (approval === "admitted") return { authorized: true };
+		if (approval === "in-use") return { authorized: false, ...approvalInUse(deps, call?.toolName ?? toolName) };
 		return { authorized: false, ...holdForOwner(deps, remote, call?.toolName ?? toolName, [operation], call) };
 	}
 	if (deps.getMode?.() === "yolo") return { authorized: true };

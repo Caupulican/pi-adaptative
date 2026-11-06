@@ -30,16 +30,18 @@ const MAX_OWNER_CHANNEL_RUNS = 64;
 /** The channels cores that can hear the drafts held at once (one per channel hosted by this session). */
 const MAX_DRAFT_LISTENERS = 8;
 
-/** What the owner channel uses of the session: its submission path, its interrupt, its agent's events and its warnings. */
+/** What the owner channel uses of the session: its submission path, its agent's events and abort, and its warnings. */
 export interface OwnerChannelSessionHost {
 	prompt(text: string, options?: PromptOptions): Promise<void>;
-	abort(reason: string): Promise<void>;
-	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void };
+	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void; abort(reason: string): void };
 	emitHostWarning(message: string): void;
 }
 
-/** The foreground run's authority. */
-export type OwnerChannelForeground = Pick<ForegroundRecoveryController, "turnOrigin">;
+/** The foreground run's authority, and the aborts of the submission that owns it and of its retry. */
+export type OwnerChannelForeground = Pick<
+	ForegroundRecoveryController,
+	"turnOrigin" | "abortSubmission" | "abortRetry"
+>;
 
 /** One batch the channels core handed in, by its `ref`. */
 interface OwnerChannelRun {
@@ -52,6 +54,8 @@ interface OwnerChannelRun {
 export class OwnerChannelSession implements OwnerChannelDelivery {
 	private readonly host: OwnerChannelSessionHost;
 	private readonly getForeground: () => OwnerChannelForeground;
+	/** Aborts the prompt submission that owns the foreground, if one does (`PromptSubmissionController.abortSubmission`). */
+	private readonly abortPromptSubmission: (reason: string) => void;
 	private readonly getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">;
 	private readonly isClosed: () => boolean;
 	/** Insertion order is age: the first entry is the oldest. */
@@ -62,11 +66,13 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	constructor(
 		host: OwnerChannelSessionHost,
 		getForeground: () => OwnerChannelForeground,
+		abortPromptSubmission: (reason: string) => void,
 		getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">,
 		isClosed: () => boolean,
 	) {
 		this.host = host;
 		this.getForeground = getForeground;
+		this.abortPromptSubmission = abortPromptSubmission;
 		this.getSessionManager = getSessionManager;
 		this.isClosed = isClosed;
 		const decisions = createOwnerDraftDecisions({
@@ -74,7 +80,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			appendCustomEntry: (customType, data) => {
 				this.getSessionManager().appendCustomEntry(customType, data);
 			},
-			getRunOrigin: () => this.getForeground().turnOrigin.origin(),
+			getLiveRun: () => this.getForeground().turnOrigin.live(),
 			isApprovalDeliveryPending: (ref) => this.isApprovalDeliveryPending(ref),
 		});
 		this.controlValue = {
@@ -122,8 +128,19 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		});
 	}
 
+	/**
+	 * Ends only the run `ref` decided and the submission that owns it (its preparation and tail, its foreground lease, its
+	 * retry, the agent run), as the session's interrupt does for those; queued input awaiting admission, the owner's
+	 * typed-word judgments, a pending human-input resume and runtime updates are left as they are.
+	 */
 	abortRun(ref: string): void {
-		if (this.runOpenedBy(ref)) void this.host.abort("owner channel stop");
+		if (!this.runOpenedBy(ref)) return;
+		const reason = "owner channel stop";
+		this.abortPromptSubmission(reason);
+		const foreground = this.getForeground();
+		foreground.abortSubmission(reason);
+		foreground.abortRetry();
+		this.host.agent.abort(reason);
 	}
 
 	/** Whether the run `origin` decided still holds the owner's authority: the channels core's kept answer, false without one. */

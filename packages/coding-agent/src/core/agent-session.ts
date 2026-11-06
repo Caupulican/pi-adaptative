@@ -415,6 +415,7 @@ export class AgentSession {
 	readonly ownerChannel = new OwnerChannelSession(
 		this,
 		() => this._foregroundRecovery,
+		(reason) => this._promptSubmission.abortSubmission(reason),
 		() => this.sessionManager,
 		() => this._disposed,
 	);
@@ -1556,7 +1557,7 @@ export class AgentSession {
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 			getRoutedGoalContext: () => this._goals.getRoutedGoalContext(),
-			getEdgeGrants: () => this.getEdgeGrants(),
+			getEdgeGrants: () => this._edgeIntent.getRunEdgeGrants(),
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
 		});
 		this._providerRequestRuntime = new ProviderRequestRuntimeController({

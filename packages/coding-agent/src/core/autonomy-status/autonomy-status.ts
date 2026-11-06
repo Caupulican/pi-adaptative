@@ -554,9 +554,9 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			}),
 		),
 		section<OutwardDraftsStatus>(() => {
-			const liveRun = run.turnOrigin.origin();
-			// A queued approval delivery is not visible here: only an approval whose run is in progress reads approved.
-			const states = outwardDraftStates(branch, liveRun?.k === "owner-typed", liveRun ? { liveRun } : {});
+			const liveRun = run.turnOrigin.live();
+			// A queued approval delivery is not visible here: only an approval whose own run is in progress reads approved.
+			const states = outwardDraftStates(branch, liveRun?.origin.k === "owner-typed", liveRun ? { liveRun } : {});
 			const pending = states.filter((draft) => draft.state === "pending");
 			return available({
 				pending: bounded(

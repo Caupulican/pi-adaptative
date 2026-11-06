@@ -210,6 +210,15 @@ export function latestDecisiveEntry(
 }
 
 /**
+ * The run in progress as an owner's approval reads it: its decisive origin, and whether a message the run itself took in
+ * set it (`decidedInRun`), rather than the branch it extends (a continuation, a wake, a routine delivery inherits it).
+ */
+export interface LiveRunOrigin {
+	readonly origin: TurnOriginRecord;
+	readonly decidedInRun: boolean;
+}
+
+/**
  * The authority of the foreground run in progress. The owner's typed words, the owner's words from a verified owner
  * channel and a third party's words decide it, the latest of them on the session branch wins: a peer's message makes the
  * run third-party, the owner's words after it give it back (typed words as the owner, a phone message as the remote
@@ -221,6 +230,8 @@ export function latestDecisiveEntry(
 export class RunTurnOrigin {
 	private active = false;
 	private latest: TurnOriginRecord | undefined;
+	/** Whether `latest` was set by a message this run took in, not read from the branch at `begin`. */
+	private decidedInRun = false;
 
 	/**
 	 * A run starts from the session branch it extends (every entry mode alike: a prompt, a committed turn, a
@@ -230,6 +241,7 @@ export class RunTurnOrigin {
 	begin(opening: readonly AgentMessage[], branch: readonly SessionEntry[]): void {
 		this.active = true;
 		this.latest = latestDecisiveEntry(branch)?.origin;
+		this.decidedInRun = false;
 		for (const message of opening) this.note(message);
 	}
 
@@ -237,12 +249,21 @@ export class RunTurnOrigin {
 	note(message: AgentMessage): void {
 		if (!this.active) return;
 		const origin = turnOriginOf(message);
-		if (origin && isDecisiveOrigin(origin)) this.latest = origin;
+		if (origin && isDecisiveOrigin(origin)) {
+			this.latest = origin;
+			this.decidedInRun = true;
+		}
 	}
 
 	end(): void {
 		this.active = false;
 		this.latest = undefined;
+		this.decidedInRun = false;
+	}
+
+	/** The run in progress with its decisive origin and whether the run decided it; undefined when there is none. */
+	live(): LiveRunOrigin | undefined {
+		return this.latest === undefined ? undefined : { origin: this.latest, decidedInRun: this.decidedInRun };
 	}
 
 	/** True while a run is in progress (between `begin` and `end`). */
