@@ -82,6 +82,8 @@ interface PendingNotice {
 	readonly payloadDigest: string;
 	readonly message: ParentInputDelivery["message"];
 	failures: number;
+	/** The observers told when this notice is dropped unsaved; emptied once told. */
+	readonly lost: (() => void)[];
 }
 
 /** The id of one episode's notice: replaying a detection, in this process or after restart, finds the saved input. */
@@ -116,7 +118,8 @@ export function transcriptKeepsNotices(
  * An observed notice is kept in memory until it is saved: a later clear does not drop it, and a session whose first
  * entry is not saved yet saves it with that entry. It is lost when this runtime ends or changes session before that
  * entry, when a newer reason of the same state supersedes it, and, with a warning, when it is the oldest one not being
- * saved past 32 waiting notices or its third save fails.
+ * saved past 32 waiting notices or its third save fails. An observer that passed `onLost` hears each such loss once,
+ * past the caller's stack; a notice whose save is in flight is lost only if that save fails or never runs.
  */
 export class HarnessNoticeController {
 	private readonly deps: HarnessNoticeDeps;
@@ -144,13 +147,14 @@ export class HarnessNoticeController {
 	 * or saved is reported, never thrown into the capability that observed it. Returns whether the owner is told of the
 	 * observed state: its notice is being saved or waits for the session's next saved entry, or one already saved tells
 	 * it. False where no notice can be kept (a child session, a session that is not persisted, a closed runtime), and
-	 * for a clear.
+	 * for a clear. `onLost` is called once if a notice this call reports kept is dropped before it is saved; never
+	 * when this returns false.
 	 */
-	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean {
+	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined, onLost?: () => void): boolean {
 		if (this.closed || this.deps.isChildSession()) return false;
 		try {
 			const observation = read();
-			return observation === undefined ? false : this.record(kind, observation);
+			return observation === undefined ? false : this.record(kind, observation, onLost);
 		} catch (error) {
 			this.report(kind, error);
 			return false;
@@ -190,16 +194,22 @@ export class HarnessNoticeController {
 		this.offObserverFailures();
 		this.offPersisted?.();
 		this.offPersisted = undefined;
+		// A notice whose save is in flight is decided by that save.
+		for (const notice of this.pending.values()) if (!this.inFlight.has(notice.deliveryId)) this.lose(notice);
 		this.pending.clear();
 	}
 
-	private record(kind: HarnessNoticeKind, observed: HarnessNoticeObservation): boolean {
+	private record(
+		kind: HarnessNoticeKind,
+		observed: HarnessNoticeObservation,
+		onLost: (() => void) | undefined,
+	): boolean {
 		const manager = this.deps.getSessionManager();
 		const sessionId = manager.getSessionId();
 		if (sessionId !== this.sessionId) {
 			this.sessionId = sessionId;
 			this.kinds.clear();
-			for (const notice of [...this.pending.values()]) this.drop(notice);
+			for (const notice of [...this.pending.values()]) this.dropUnsaved(notice);
 		}
 		const scope = typeof observed === "object" && "scope" in observed ? observed.scope : undefined;
 		const observation = typeof observed === "object" && "scope" in observed ? observed.state : observed;
@@ -223,8 +233,13 @@ export class HarnessNoticeController {
 		state.unsaved = false;
 		// A newer state of the same subject supersedes the older one's unsaved notice.
 		const superseded = this.pending.get(key);
-		if (superseded && superseded.reason !== reason) this.drop(superseded);
-		if (state.covered === reason && !recurred) return true;
+		if (superseded && superseded.reason !== reason) this.dropUnsaved(superseded);
+		if (state.covered === reason && !recurred) {
+			// A notice of this episode that still waits tells this observation too, and shares its fate.
+			const waiting = this.pending.get(key);
+			if (onLost && waiting?.reason === reason) waiting.lost.push(onLost);
+			return true;
+		}
 		state.covered = undefined;
 		let latest = -1;
 		while (latest + 1 < MAX_NOTICE_GENERATIONS) {
@@ -264,9 +279,10 @@ export class HarnessNoticeController {
 				details: { kind, reason, generation },
 			};
 			const payloadDigest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
-			notice = { sessionId, kind, key, reason, deliveryId, payloadDigest, message, failures: 0 };
+			notice = { sessionId, kind, key, reason, deliveryId, payloadDigest, message, failures: 0, lost: [] };
 			this.keep(notice);
 		}
+		if (onLost) notice.lost.push(onLost);
 		this.save(notice);
 		return true;
 	}
@@ -281,6 +297,7 @@ export class HarnessNoticeController {
 		if (oldest) {
 			this.pending.delete(oldest.key);
 			this.reopen(oldest);
+			this.lose(oldest);
 			this.report(oldest.kind, `${MAX_PENDING_NOTICES} newer notices wait to be saved`, "it is dropped");
 		}
 		this.pending.set(notice.key, notice);
@@ -311,6 +328,24 @@ export class HarnessNoticeController {
 		}
 	}
 
+	/** Drop a notice that is not saved: lost now, unless its save is in flight, which decides. */
+	private dropUnsaved(notice: PendingNotice): void {
+		this.drop(notice);
+		if (!this.inFlight.has(notice.deliveryId)) this.lose(notice);
+	}
+
+	/** Tell the notice's observers, once and past the caller's stack, that the owner does not get it. */
+	private lose(notice: PendingNotice): void {
+		for (const onLost of notice.lost.splice(0))
+			queueMicrotask(() => {
+				try {
+					onLost();
+				} catch (error) {
+					this.report(notice.kind, error, "its observer could not take the loss back");
+				}
+			});
+	}
+
 	/** A dropped notice whose state is still observed leaves its episode open: the capability's next signal retries it. */
 	private reopen(notice: PendingNotice): void {
 		const state = this.kinds.get(notice.key);
@@ -323,8 +358,13 @@ export class HarnessNoticeController {
 	private save(notice: PendingNotice): void {
 		if (this.closed || this.inFlight.has(notice.deliveryId)) return;
 		const manager = this.deps.getSessionManager();
-		// Saved already (a replay, or another runtime of this session), or left behind by a session switch.
-		if (manager.getSessionId() !== notice.sessionId || manager.getParentInput(notice.deliveryId)) {
+		// Left behind by a session switch.
+		if (manager.getSessionId() !== notice.sessionId) {
+			this.dropUnsaved(notice);
+			return;
+		}
+		// Saved already (a replay, or another runtime of this session).
+		if (manager.getParentInput(notice.deliveryId)) {
 			this.drop(notice);
 			return;
 		}
@@ -332,25 +372,32 @@ export class HarnessNoticeController {
 		if (!transcriptKeepsNotices(manager)) return;
 		this.inFlight.add(notice.deliveryId);
 		void Promise.resolve()
-			.then(() => {
+			.then(async () => {
 				// A closed runtime or a switched session has no owner left for this episode.
-				if (this.closed || this.deps.getSessionManager() !== manager) return undefined;
-				return this.deps.deliver({
+				if (this.closed || this.deps.getSessionManager() !== manager) return false;
+				await this.deps.deliver({
 					deliveryId: notice.deliveryId,
 					payloadDigest: notice.payloadDigest,
 					message: notice.message,
 					origin: captureWorkerReceiptOrigin(manager),
 					mode: "next-owner-turn",
 				});
+				return true;
 			})
 			.then(
-				() => {
+				(saved) => {
 					this.inFlight.delete(notice.deliveryId);
 					this.drop(notice);
+					if (saved) return;
+					this.reopen(notice);
+					this.lose(notice);
 				},
 				(error: unknown) => {
 					this.inFlight.delete(notice.deliveryId);
-					if (this.closed) return;
+					if (this.closed) {
+						this.lose(notice);
+						return;
+					}
 					// The attempt's own foreground release notifies synchronously while the reason is still covered, so that
 					// echo starts nothing; a branch navigation during a busy turn is the usual cause of a failed save.
 					notice.failures++;
@@ -359,6 +406,7 @@ export class HarnessNoticeController {
 					if (!retried) {
 						this.drop(notice);
 						this.reopen(notice);
+						this.lose(notice);
 					}
 					this.report(
 						notice.kind,

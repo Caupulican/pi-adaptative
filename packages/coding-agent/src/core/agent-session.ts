@@ -1095,7 +1095,7 @@ export class AgentSession {
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
-			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
+			observeHarnessNotice: (kind, read, onLost) => this._harnessNotices.observe(kind, read, onLost),
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,

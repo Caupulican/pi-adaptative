@@ -110,6 +110,7 @@ interface JournalView {
 		readonly told?: true;
 	}[];
 	readonly gaps: readonly { readonly reason: string; readonly away?: true; readonly told?: true }[];
+	readonly toldFlags?: true;
 	readonly awayHeld?: Readonly<Record<string, number>>;
 	readonly onboarding: readonly unknown[];
 }
@@ -479,8 +480,9 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
  * that turn's answer waits as one draft marked as written away, the session delivers nothing again and its status
  * counts the draft. Once that turn is settled the session tells its owner, in one notice, what the daemon left: the
  * draft by id and reason, a message it found past its day and the stranger it held, counted, with none of their words.
- * Closing the session gives the channel back to the daemon; a second session taking it again tells nothing, and stopping
- * the daemon gives it up.
+ * A gap of the build before told flags (the seeded journal has no marker) counts as told and gets no notice. Closing the
+ * session gives the channel back to the daemon, which holds one more stranger; a second session taking it again tells
+ * only that stranger, counted, and nothing told before. Stopping the daemon gives it up.
  */
 export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -508,6 +510,7 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	const journalHolds = (holds: (state: JournalView) => boolean) =>
 		world.io.waitForMutation(() => world.io.existsSync(journalPath) && holds(journal()));
 	// A message that has waited past its day when the daemon first serves the channel: the daemon drops it undelivered.
+	// The journal is one of the build before told flags: its gap was told by that build's rule and is never told again.
 	const expiredWords = "the lilac harbor ledger";
 	const waitedSince = Date.now() - 25 * 60 * 60 * 1000;
 	const expiredDigest = "seeded-expired-event";
@@ -535,7 +538,7 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 			ignoredTotal: 0,
 			batches: [],
 			drafts: [],
-			gaps: [],
+			gaps: [{ id: "seeded-legacy-gap", reason: "unanswered", count: 1, at: waitedSince }],
 			onboarding: [],
 		}),
 	);
@@ -562,10 +565,16 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	await withDeadline(
 		trace,
 		"the daemon drops the message past its day",
-		journalHolds((state) => state.gaps.length === 1),
+		journalHolds((state) => state.gaps.some((gap) => gap.reason === "expired")),
 	);
-	expect(journal().gaps, "the drop is the daemon's, not told yet").toMatchObject([{ reason: "expired", away: true }]);
-	expect(journal().gaps[0]?.told).toBeUndefined();
+	expect(
+		journal().gaps.map((gap) => [gap.reason, gap.away, gap.told]),
+		"the drop is the daemon's, not told yet; the older build's gap reads as told",
+	).toEqual([
+		["unanswered", undefined, true],
+		["expired", true, undefined],
+	]);
+	expect(journal().toldFlags, "the first write records that the journal keeps told flags").toBe(true);
 	expect(journal().pending, "the dropped message's words are gone").toEqual([]);
 	trace.mark("root", "away-channels.served");
 
@@ -760,8 +769,11 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	const told = journal();
 	expect(
 		told.gaps.map((gap) => [gap.reason, gap.away, gap.told]),
-		"the dropped message is told",
-	).toEqual([["expired", true, true]]);
+		"the dropped message is told; the older build's gap had no notice",
+	).toEqual([
+		["unanswered", undefined, true],
+		["expired", true, true],
+	]);
 	expect(
 		told.drafts.map((draft) => [draft.state, draft.told]),
 		"the draft is told and still waits",
@@ -774,8 +786,13 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	expect(await world.disposeSessionInBody(reopened.session), "the open session closes").toBeUndefined();
 	await withDeadline(trace, "the daemon takes the channel back", daemonReturns);
 	expect(journal().holder?.away, "the daemon serves the channel again").toBe(true);
+	await daemonPhone.deliver(
+		event("p-held-again", "chat-11", { id: "mallory", label: "Mallory", verified: true }, "hello again"),
+	);
+	expect(journal().awayHeld, "the daemon counts one more held stranger").toEqual({ not_allowed: 1 });
 
-	// A second session takes the channel from the daemon again: everything is told already, so it tells nothing.
+	// A second session takes the channel from the daemon again: it tells the one stranger held since, and nothing that
+	// was told already.
 	const daemonYieldsAgain = daemonPhone.nextStop();
 	const againManager = flushedSessionManager(world, agentDir);
 	const again = await world.createRootSession("root", {
@@ -788,13 +805,26 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	again.session.registerChannelProvider(againPhone);
 	await withDeadline(trace, "the daemon yields the channel again", daemonYieldsAgain);
 	expect(journal().holder?.sessionId, "the second session holds the channel").toBe(againManager.getSessionId());
+	await withDeadline(
+		trace,
+		"the second session tells what the daemon held since",
+		noticeSaved(againManager, "channel-gap", "away:phone:"),
+	);
 	const againNotices = (await again.session.autonomyStatus()).harnessNotices;
 	if (againNotices.status !== "available") throw new Error(`Harness notices unavailable: ${againNotices.reason}`);
 	expect(
-		againNotices.value.observed.items.filter((item) => item.kind === "channel-gap"),
-		"the second takeover observes nothing to tell",
-	).toEqual([]);
-	expect(notices(againManager, "channel-gap"), "nothing is told twice").toEqual([]);
+		againNotices.value.observed.items.filter((item) => item.kind === "channel-gap").length,
+		"the second takeover observes one summary",
+	).toBe(1);
+	const againSummaries = notices(againManager, "channel-gap");
+	expect(againSummaries.length, "one summary, and no notice per record").toBe(1);
+	const againSummary = againSummaries[0]?.text ?? "";
+	expect(againSummary, "the new stranger is counted").toContain(
+		"While the daemon served channel phone: 1 message(s) held (1 not in channels.phone.allowedSenders).",
+	);
+	for (const told of ["reply draft", `${preempted.drafts[0]?.id}`, "expired", "no reply", "mallory", "hello"])
+		expect(againSummary.toLowerCase(), "nothing told before is told twice, and no sender's text").not.toContain(told);
+	expect(journal().awayHeld, "the new stranger is told").toBeUndefined();
 	expect(notices(againManager, "channel-reply"), "the told draft is not announced again").toEqual([]);
 	expect(
 		journal().drafts.map((draft) => [draft.state, draft.told]),

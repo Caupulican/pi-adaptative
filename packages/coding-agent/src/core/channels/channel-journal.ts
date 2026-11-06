@@ -106,6 +106,11 @@ export interface ChannelJournalState {
 	pending: ChannelPendingMessage[];
 	seen: { d: string; at: number; outcome: ChannelSeenOutcome }[];
 	held: { sender: string; kind: string; reason: ChannelHeldReason; at: number }[];
+	/**
+	 * The journal records a told flag on each record, so a record without one is untold. Absent in a journal written
+	 * before: its gaps and the daemon's drafts were told by that build's rule and are read as told.
+	 */
+	toldFlags?: true;
 	heldTotal: number;
 	/** Held while the daemon's host served the channel and not told yet; absent when there is none. */
 	awayHeld?: ChannelHeldCounts;
@@ -121,13 +126,20 @@ export function digest(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * A fresh journal. `holder` and `awayHeld` keep their key positions while unset (`JSON.stringify` omits them), so a
+ * first value is written where `parseState` puts it and the next update that changes nothing writes nothing.
+ */
 function emptyState(): ChannelJournalState {
 	return {
 		version: JOURNAL_VERSION,
+		holder: undefined,
 		pending: [],
 		seen: [],
 		held: [],
+		toldFlags: true,
 		heldTotal: 0,
+		awayHeld: undefined,
 		ignoredTotal: 0,
 		batches: [],
 		drafts: [],
@@ -237,21 +249,25 @@ function parseState(text: string): ChannelJournalState {
 	)
 		throw new Error("malformed holder");
 	if (value.awayHeld !== undefined && !isHeldCounts(value.awayHeld)) throw new Error("malformed held counts");
+	if (value.toldFlags !== undefined && value.toldFlags !== true) throw new Error("malformed told marker");
 	const list = <T>(field: unknown, check: (item: unknown) => item is T): T[] => {
 		if (!Array.isArray(field) || !field.every(check)) throw new Error("malformed journal list");
 		return field;
 	};
+	// Written before told flags: that build told its gaps and the daemon's drafts by its own rule, so none is told again
+	// (a draft's reason from then may also hold a wrapper's raw error text).
+	const legacy = value.toldFlags === undefined;
+	const told = <T extends { told?: true }>(record: T, untold: boolean): T =>
+		legacy && untold && record.told !== true ? { ...record, told: true } : record;
 	return {
 		version: JOURNAL_VERSION,
-		...(holder
+		holder: holder
 			? {
-					holder: {
-						sessionId: holder.sessionId as string,
-						pid: holder.pid as number,
-						...(holder.away === true ? { away: true as const } : {}),
-					},
+					sessionId: holder.sessionId as string,
+					pid: holder.pid as number,
+					...(holder.away === true ? { away: true as const } : {}),
 				}
-			: {}),
+			: undefined,
 		pending: list(value.pending, isPending),
 		seen: list(
 			value.seen,
@@ -267,13 +283,14 @@ function parseState(text: string): ChannelJournalState {
 				HELD_REASONS.has(item.reason) &&
 				isTime(item.at),
 		),
+		toldFlags: true,
 		heldTotal: isCount(value.heldTotal) ? value.heldTotal : 0,
-		// Absent in a journal written before the daemon's held messages were told.
-		...(value.awayHeld === undefined ? {} : { awayHeld: { ...(value.awayHeld as ChannelHeldCounts) } }),
+		// Absent in a journal written before the daemon's held messages were told; the key keeps its place (`emptyState`).
+		awayHeld: value.awayHeld === undefined ? undefined : { ...(value.awayHeld as ChannelHeldCounts) },
 		ignoredTotal: isCount(value.ignoredTotal) ? value.ignoredTotal : 0,
 		batches: list(value.batches, isBatch),
-		drafts: list(value.drafts, isDraft),
-		gaps: list(value.gaps, isGap),
+		drafts: list(value.drafts, isDraft).map((draft) => told(draft, draft.away === true && draft.state === "pending")),
+		gaps: list(value.gaps, isGap).map((gap) => told(gap, true)),
 		// Absent in a journal written before onboarding notices existed.
 		onboarding:
 			value.onboarding === undefined

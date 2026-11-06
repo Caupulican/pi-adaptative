@@ -212,8 +212,15 @@ export interface BackgroundLaneControllerDeps
 			ProactivityControllerDeps,
 			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
 		> {
-	/** Observe a capability's kept state; true when the owner is told of it (the session can keep the notice). */
-	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	/**
+	 * Observe a capability's kept state; true when the owner is told of it (the session can keep the notice). `onLost`
+	 * hears once that a notice reported kept was dropped unsaved.
+	 */
+	observeHarnessNotice?(
+		kind: HarnessNoticeKind,
+		read: () => HarnessNoticeObservation | undefined,
+		onLost?: () => void,
+	): boolean;
 	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
 	getSessionManager(): SessionManager;
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
@@ -359,7 +366,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
 			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
-			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read) ?? false,
+			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
 			isChildSession: () => deps.isChildSession(),

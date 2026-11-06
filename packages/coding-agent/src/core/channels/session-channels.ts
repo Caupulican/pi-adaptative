@@ -33,7 +33,7 @@ import {
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
-import { createBuiltInChannelProvider, isBuiltInChannel } from "./built-in-providers.ts";
+import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelAwayUntold,
 	type ChannelBatchRecord,
@@ -106,6 +106,20 @@ function sessionLive(sessionId: string, pid: number | undefined): boolean {
 	return false;
 }
 
+/** Whether an accepted batch's turn may still answer: its session runs by `pid`; with no known process, for its day. */
+function batchMayAnswer(batch: ChannelBatchRecord, pid: number | undefined, now: number): boolean {
+	return pid === undefined ? now - batch.acceptedAt < DAY_MS : sessionLive(batch.sessionId, pid);
+}
+
+/** Whether a message's offer still holds: the session it is offered to runs and the offer is not stale. */
+function offerHolds(entry: ChannelPendingMessage, now: number): boolean {
+	return (
+		entry.offeredTo !== undefined &&
+		sessionLive(entry.offeredTo, entry.offeredPid) &&
+		now - (entry.offeredAt ?? 0) < OFFER_STALE_MS
+	);
+}
+
 function clearOffer(entry: ChannelPendingMessage): void {
 	entry.offeredTo = undefined;
 	entry.offeredPid = undefined;
@@ -175,8 +189,15 @@ export interface SessionChannelsDeps {
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
-	/** Whether the owner is told: the notice is kept for their next turn (`HarnessNoticeController.observe`). */
-	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	/**
+	 * Whether the owner is told: the notice is kept for their next turn (`HarnessNoticeController.observe`). `onLost`
+	 * hears, once, that a notice reported kept was dropped unsaved after all.
+	 */
+	observeNotice(
+		kind: HarnessNoticeKind,
+		read: () => HarnessNoticeObservation | undefined,
+		onLost?: () => void,
+	): boolean;
 	warn(message: string): void;
 	isDisposed(): boolean;
 	isChildSession(): boolean;
@@ -568,7 +589,7 @@ export class SessionChannels {
 		for (const batch of state.batches) {
 			if (batch.state !== "accepted" || batch.sessionId === sessionId) continue;
 			const pid = batch.pid ?? (batch.sessionId === previousHolder?.sessionId ? previousHolder.pid : undefined);
-			if (pid === undefined ? now - batch.acceptedAt < DAY_MS : sessionLive(batch.sessionId, pid)) continue;
+			if (batchMayAnswer(batch, pid, now)) continue;
 			batch.state = "unanswered";
 			if (batch.away) orphanedAway++;
 			else orphaned++;
@@ -631,6 +652,7 @@ export class SessionChannels {
 	 * The host this session took the channel from still routes the turns it had accepted or was offering, and their
 	 * answers become drafts: follow the journal (reading only) until none of its turns is left, then tell what the
 	 * daemon left, so that summary holds those drafts too. A turn that host accepts after the preemption is followed too.
+	 * Each journal change the directory watch sees and each work pass take a step, so the follow ends without the watch.
 	 */
 	private followPreempted(name: string, preempted: string): void {
 		this.followed.set(name, preempted);
@@ -638,17 +660,23 @@ export class SessionChannels {
 		this.syncDirWatch();
 	}
 
-	/** Whether the preempted host still has a turn accepted or offered; once it has none, what it left is told. */
-	private followStep(name: string, preempted: string): boolean {
+	/**
+	 * Reads only. The follow ends once the preempted host has no turn that may still answer (an accepted batch of a
+	 * live session, a live offer that is not stale: what `settleDeadBatches` and `pickDelivery` keep); what it left is
+	 * then told. A host that died leaves nothing to wait for.
+	 */
+	private followStep(name: string, preempted: string): void {
 		const state = this.journal(name).read().result;
+		const now = this.now();
 		const busy =
-			state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === preempted) ||
-			state.pending.some((entry) => entry.offeredTo === preempted);
-		if (!busy) {
-			this.followed.delete(name);
-			this.tellUntold(name);
-		}
-		return busy;
+			state.batches.some(
+				(batch) =>
+					batch.state === "accepted" && batch.sessionId === preempted && batchMayAnswer(batch, batch.pid, now),
+			) || state.pending.some((entry) => entry.offeredTo === preempted && offerHolds(entry, now));
+		if (busy) return;
+		this.followed.delete(name);
+		this.syncDirWatch();
+		this.tellUntold(name);
 	}
 
 	/**
@@ -657,7 +685,8 @@ export class SessionChannels {
 	 * unless this session still follows that host's interrupted turn. Only the session the journal names the holder
 	 * tells, and only while its transcript can keep a notice; until then it waits for the session's next saved entry.
 	 * The same locked journal update that decides to tell the records marks them told, so no session tells one twice,
-	 * and a notice the session did not keep takes its marks back, so the next pass or session tells it.
+	 * and a notice the session did not keep, or kept and then lost unsaved, takes its marks back, so the next pass or
+	 * session tells it.
 	 */
 	private tellUntold(name: string): void {
 		if (!this.started || this.deps.away || this.deps.isDisposed()) return;
@@ -682,14 +711,30 @@ export class SessionChannels {
 			this.afterJournal(name, update.reset);
 			const untold = update.result;
 			if (!untold) return;
-			const lostGaps = untold.gaps.filter((gap) => !this.noticeGap(name, gap));
-			const lostAway = untold.away && !this.noticeAway(name, untold.away, sessionId, now) ? untold.away : undefined;
-			if (lostGaps.length === 0 && !lostAway) return;
-			const back: ChannelUntold = { gaps: lostGaps, ...(lostAway ? { away: lostAway } : {}) };
-			journal.update(this.now(), (state) => markTold(state, back, false));
+			const lostGaps = untold.gaps.filter(
+				(gap) => !this.noticeGap(name, gap, () => this.unmarkTold(name, { gaps: [gap] })),
+			);
+			const away = untold.away;
+			const lostAway =
+				away && !this.noticeAway(name, away, sessionId, now, () => this.unmarkTold(name, { gaps: [], away }))
+					? away
+					: undefined;
+			if (lostGaps.length > 0 || lostAway)
+				this.unmarkTold(name, { gaps: lostGaps, ...(lostAway ? { away: lostAway } : {}) });
 		} catch (error) {
 			this.deps.warn(
 				`Channel ${name}: what its journal recorded could not be told yet (${error instanceof Error ? error.message : String(error)}); a later pass tells it.`,
+			);
+		}
+	}
+
+	/** Take back the told marks of records whose notice the owner does not get: the next pass or session tells them. */
+	private unmarkTold(name: string, back: ChannelUntold): void {
+		try {
+			this.afterJournal(name, this.journal(name).update(this.now(), (state) => markTold(state, back, false)).reset);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: records whose notice was not kept stay marked told (${error instanceof Error ? error.message : String(error)}); no session tells them again.`,
 			);
 		}
 	}
@@ -704,17 +749,18 @@ export class SessionChannels {
 		});
 	}
 
-	private noticeGap(name: string, gap: ChannelGapRecord): boolean {
+	private noticeGap(name: string, gap: ChannelGapRecord, onLost?: () => void): boolean {
 		const text =
 			gap.reason === "expired"
 				? `Channel ${name}: ${gap.count} message(s) waited more than 24 hours and were dropped undelivered.`
 				: gap.reason === "unanswered"
 					? `Channel ${name}: ${gap.count} delivered conversation(s) got no reply (the turn ended without an answer for them, or the session that served them closed).`
 					: `Channel ${name}: its journal could not be read and was replaced; messages and drafts it held are not delivered.`;
-		return this.deps.observeNotice("channel-gap", () => ({
-			scope: `${name}:${gap.id}`,
-			state: { reason: `gap:${name}:${gap.id}`, text },
-		}));
+		return this.deps.observeNotice(
+			"channel-gap",
+			() => ({ scope: `${name}:${gap.id}`, state: { reason: `gap:${name}:${gap.id}`, text } }),
+			onLost,
+		);
 	}
 
 	/**
@@ -722,7 +768,13 @@ export class SessionChannels {
 	 * conversations it left unanswered, and the messages it held, counted by reason; never a sender's id, label or words.
 	 * As many drafts are named as fit the notice's one bounded line, the rest are counted.
 	 */
-	private noticeAway(name: string, away: ChannelAwayUntold, sessionId: string, now: number): boolean {
+	private noticeAway(
+		name: string,
+		away: ChannelAwayUntold,
+		sessionId: string,
+		now: number,
+		onLost: () => void,
+	): boolean {
 		const summed = (reason: ChannelGapRecord["reason"]) =>
 			away.gaps.filter((gap) => gap.reason === reason).reduce((sum, gap) => sum + gap.count, 0);
 		const expired = summed("expired");
@@ -763,10 +815,11 @@ export class SessionChannels {
 		const text = fitting();
 		const told = [...away.gaps.map((gap) => gap.id), ...away.drafts.map((draft) => draft.id)].join(",");
 		const id = digest(`${name}:away:${sessionId}:${now}:${told}:${JSON.stringify(away.held)}`).slice(0, 16);
-		return this.deps.observeNotice("channel-gap", () => ({
-			scope: `${name}:away:${id}`,
-			state: { reason: `away:${name}:${id}`, text },
-		}));
+		return this.deps.observeNotice(
+			"channel-gap",
+			() => ({ scope: `${name}:away:${id}`, state: { reason: `away:${name}:${id}`, text } }),
+			onLost,
+		);
 	}
 
 	/** Open the journal directory's watch while this open session follows a host or waits for a channel; else close it. */
@@ -800,7 +853,7 @@ export class SessionChannels {
 			if (this.dirWatchFailure === reason) return;
 			this.dirWatchFailure = reason;
 			this.deps.warn(
-				`Channels: the journal directory cannot be watched (${reason}); a channel another session gives up is taken at the next settings change, and a reply draft the daemon still writes is told at the next session.`,
+				`Channels: the journal directory cannot be watched (${reason}); a channel another session gives up is taken at the next settings change, and what the daemon left is told at this session's next channel pass (its next turn, message or settings change).`,
 			);
 		}
 	}
@@ -875,7 +928,10 @@ export class SessionChannels {
 		runtime.connection = undefined;
 		// Only a shipped transport's rejection is shown: its text is Pi's own words. A wrapper's may carry remote text, and
 		// a notice enters the owner's turn unfenced.
-		const shown = reason !== undefined && this.builtIns.has(name) ? boundedRedactedDiagnosticText(reason) : undefined;
+		const shown =
+			reason !== undefined && isShippedChannelProvider(this.registry.getChannel(name))
+				? boundedRedactedDiagnosticText(reason)
+				: undefined;
 		this.setState(name, "suspended", outcome === "timed_out" ? "its start timed out" : (shown ?? "its start failed"));
 	}
 
@@ -940,6 +996,8 @@ export class SessionChannels {
 		this.routing = true;
 		this.rerun = false;
 		try {
+			// A follow ends here too, so a directory watch that failed or saw nothing withholds no summary.
+			for (const [name, preempted] of this.followed) this.followStep(name, preempted);
 			for (const [name, runtime] of this.runtimes) {
 				if (!runtime.holding && !runtime.draining) continue;
 				// A channel whose policy went mid-turn still routes that turn: its answer becomes a draft.
@@ -1110,15 +1168,9 @@ export class SessionChannels {
 					...(this.deps.away ? { away: true as const } : {}),
 				});
 		}
-		for (const entry of state.pending) {
-			if (entry.offeredTo === undefined) continue;
-			if (
-				entry.offeredTo === sessionId ||
-				!sessionLive(entry.offeredTo, entry.offeredPid) ||
-				now - (entry.offeredAt ?? 0) >= OFFER_STALE_MS
-			)
+		for (const entry of state.pending)
+			if (entry.offeredTo !== undefined && (entry.offeredTo === sessionId || !offerHolds(entry, now)))
 				clearOffer(entry);
-		}
 		this.settleDeadBatches(name, state, sessionId, now);
 		// One turn per channel at a time: its reply is routed before the next batch is offered.
 		if (state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === sessionId))
@@ -1359,7 +1411,7 @@ export class SessionChannels {
 			} catch (error) {
 				// Only a shipped transport's error is kept: its text is Pi's own words. A wrapper's may carry remote text,
 				// and the reason reaches the owner's notices unfenced.
-				const said = this.builtIns.has(name)
+				const said = isShippedChannelProvider(provider)
 					? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
 					: undefined;
 				this.keepDraft(

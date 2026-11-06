@@ -26,12 +26,19 @@ export function isBuiltInChannel(name: string): boolean {
 	return name === TELEGRAM_CHANNEL || name === SLACK_CHANNEL || name === GMAIL_CHANNEL;
 }
 
-/** The shipped transport for `channel`, or undefined for a name that is not built in. Starts nothing by itself. */
-export function createBuiltInChannelProvider(
-	channel: string,
-	_policy: ResolvedChannelPolicy,
-	deps: BuiltInChannelProviderDeps,
-): ChannelProvider | undefined {
+/** The providers this module built: only these are Pi's own transports, however they were registered. */
+const shippedProviders = new WeakSet<ChannelProvider>();
+
+/**
+ * Whether `provider` is a transport Pi ships, built by {@link createBuiltInChannelProvider}: its errors and start
+ * rejections are Pi's own words. A wrapper's provider is not, whatever it declares, and neither is one that wraps a
+ * shipped provider.
+ */
+export function isShippedChannelProvider(provider: ChannelProvider | undefined): boolean {
+	return provider !== undefined && shippedProviders.has(provider);
+}
+
+function buildShipped(channel: string, deps: BuiltInChannelProviderDeps): ChannelProvider | undefined {
 	const fetch = deps.fetch ? { fetch: deps.fetch } : {};
 	if (channel === TELEGRAM_CHANNEL)
 		return new TelegramChannelProvider({ agentDir: deps.agentDir, warn: deps.warn, ...fetch });
@@ -49,4 +56,15 @@ export function createBuiltInChannelProvider(
 			...(deps.timers ? { timers: deps.timers } : {}),
 		});
 	return undefined;
+}
+
+/** The shipped transport for `channel`, or undefined for a name that is not built in. Starts nothing by itself. */
+export function createBuiltInChannelProvider(
+	channel: string,
+	_policy: ResolvedChannelPolicy,
+	deps: BuiltInChannelProviderDeps,
+): ChannelProvider | undefined {
+	const provider = buildShipped(channel, deps);
+	if (provider) shippedProviders.add(provider);
+	return provider;
 }
