@@ -356,6 +356,8 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		const claimed = this.claimed;
 		this.sourceId = undefined;
 		this.activationId = undefined;
+		// After the join, so no report of this start reaches the sink once its connection is ended.
+		sink?.endConnection(HOST_EVENT_KINDS["ci-attempt-terminal"].source);
 		try {
 			if (sink && sourceId) await sink.deactivate(sourceId);
 		} catch (error) {
@@ -474,7 +476,13 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		const sink = this.sink;
 		this.draining = this.drain(sink, signal).finally(() => {
 			this.draining = undefined;
-			if (signal.aborted || this.dormant) return;
+			if (signal.aborted) return;
+			if (this.dormant) {
+				// A dormant source follows nothing until its next start, which reports its state from scratch.
+				this.connectionKey = undefined;
+				sink.endConnection(HOST_EVENT_KINDS["ci-attempt-terminal"].source);
+				return;
+			}
 			if (this.dirty || this.forced) this.request(this.forced);
 			else {
 				this.discoveryTimer = setTimeout(

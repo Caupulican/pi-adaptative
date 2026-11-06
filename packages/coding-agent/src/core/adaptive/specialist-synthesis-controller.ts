@@ -12,12 +12,7 @@ import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import type { SpecialistCatalog, SpecialistCatalogEntry } from "./specialist-catalog.ts";
-import type {
-	MaterializedSpecialist,
-	SpecialistCognitiveRequirements,
-	SpecialistRecord,
-	SpecialistSpec,
-} from "./types.ts";
+import type { MaterializedSpecialist, SpecialistCognitiveRequirements, SpecialistSpec } from "./types.ts";
 
 export class SpecialistMaterializationError extends Error {
 	constructor(message: string) {
@@ -81,7 +76,6 @@ export class SpecialistSynthesisController {
 	private readonly taskProfiles?: TaskProfileWriterPort;
 	private readonly contractFactory?: WorkerExecutionContractFactory;
 	private readonly getOwnerRules?: () => string;
-	private readonly records = new Map<string, SpecialistRecord>();
 
 	constructor(deps: SpecialistSynthesisControllerDeps) {
 		this.steering = deps.steering;
@@ -124,7 +118,7 @@ export class SpecialistSynthesisController {
 		const evidenceRevision = input.evidenceRevision ?? 1;
 
 		// 1. JEV-031: Specialist need certificate
-		const needCert = await this.steering.requireCertificate(
+		await this.steering.requireCertificate(
 			"JEV-031",
 			{
 				need: input.need,
@@ -187,7 +181,7 @@ export class SpecialistSynthesisController {
 
 		if (existingEntry) {
 			isExisting = true;
-			spec = existingEntry.spec ?? {
+			spec = {
 				schema_version: "1.0",
 				specialist_id: existingEntry.specialistId,
 				version: "1.0",
@@ -399,18 +393,6 @@ export class SpecialistSynthesisController {
 				signal: input.signal,
 			},
 		);
-
-		const record: SpecialistRecord = {
-			schema_version: "1.0",
-			specialist_id: spec.specialist_id,
-			spec_version: spec.version,
-			state: isExisting ? "retained_project" : "materialized_task",
-			profile_ids: [profileId],
-			certificate_refs: [needCert.certificate_id],
-			created_at: new Date().toISOString(),
-		};
-
-		this.records.set(spec.specialist_id, record);
 
 		return {
 			specialistId: spec.specialist_id,

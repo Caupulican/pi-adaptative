@@ -4,7 +4,7 @@
  * Implements S1A-180, S1A-181, S1A-196.
  */
 
-import type { SpecialistCognitiveRequirements, SpecialistLifetime, SpecialistRecord, SpecialistSpec } from "./types.ts";
+import type { SpecialistCognitiveRequirements, SpecialistLifetime } from "./types.ts";
 
 export interface SpecialistCatalogEntry {
 	readonly specialistId: string;
@@ -14,8 +14,6 @@ export interface SpecialistCatalogEntry {
 	readonly cognitiveRequirements: SpecialistCognitiveRequirements;
 	readonly lifetime: SpecialistLifetime;
 	readonly verifiedOutcomeCount: number;
-	readonly spec?: SpecialistSpec;
-	readonly record?: SpecialistRecord;
 }
 
 export class SpecialistCatalog {

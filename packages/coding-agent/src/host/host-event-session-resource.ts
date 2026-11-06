@@ -94,6 +94,7 @@ export class HostEventSessionResource implements AgentSessionRuntimeResource {
 			reportConnection: (source, connection) => {
 				if (!signal.aborted) sink.reportConnection(source, connection);
 			},
+			endConnection: (source) => sink.endConnection(source),
 			subscribeWritable: (listener) =>
 				sink.subscribeWritable(() => {
 					if (!signal.aborted) listener();

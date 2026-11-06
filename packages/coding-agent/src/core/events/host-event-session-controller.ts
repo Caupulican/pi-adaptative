@@ -6,6 +6,7 @@ import type { ParentWakeDelivery } from "../proactivity/proactivity-controller.t
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import {
+	type HostEventConnectionView,
 	HostEventError,
 	type HostEventReplayGap,
 	type HostEventSink,
@@ -50,6 +51,8 @@ export interface HostEventSessionControllerDeps {
 	/** The session's owner notices: history this session never observed is told once, with the owner's next turn. */
 	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	warn(message: string): void;
+	/** Called once when the binding is fenced (its signal aborts) or closed. */
+	retired?(): void;
 }
 
 const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
@@ -137,6 +140,8 @@ export class HostEventSessionController {
 	);
 	private closed = false;
 	private readonly sourceLifetime: HostEventSourceLifetime;
+	/** The connection each running source last reported, by source name; a stopped source's entry is gone. */
+	private readonly connectionStates = new Map<string, HostEventConnectionView>();
 
 	constructor(deps: HostEventSessionControllerDeps) {
 		this.deps = deps;
@@ -145,7 +150,15 @@ export class HostEventSessionController {
 		const events = deps.runtime.hostEvents;
 		this.sourceLifetime = events.openSourceLifetime();
 		const lifetime = this.sourceLifetime;
-		this.signal.addEventListener("abort", () => events.closeSourceLifetime(lifetime), { once: true });
+		// `close()` aborts this signal too, so this runs once for a fence or a close.
+		this.signal.addEventListener(
+			"abort",
+			() => {
+				events.closeSourceLifetime(lifetime);
+				deps.retired?.();
+			},
+			{ once: true },
+		);
 		const consumerId = `session-${hostEventHash("pi-host-event-consumer-v1", [deps.agentDir, deps.sessionId])}`;
 		this.sink = {
 			consumerId,
@@ -185,12 +198,20 @@ export class HostEventSessionController {
 			deactivate: async (sourceId) => events.deactivateSource(sourceId, lifetime),
 			reportConnection: (source, connection) => {
 				if (!this.active()) return;
+				this.connectionStates.set(
+					source,
+					connection ? { source, state: connection.state, reason: connection.reason } : { source, state: "armed" },
+				);
 				deps.observeNotice("host-event-source", () => ({
 					scope: source,
 					state: connection
 						? { reason: `${connection.state}:${connection.reason}`, text: connection.text }
 						: "clear",
 				}));
+			},
+			// The notice keeps its episode: a restart that reports the same state again tells the owner nothing new.
+			endConnection: (source) => {
+				this.connectionStates.delete(source);
 			},
 			subscribeWritable: (listener) => {
 				const notify = () => {
@@ -228,6 +249,11 @@ export class HostEventSessionController {
 					endedSourceNotice(source.registration.sourceId, ended.reason),
 				);
 		}
+	}
+
+	/** Read-only: the running sources' connections while this binding is open; nothing once it is closed or fenced. */
+	connections(): readonly HostEventConnectionView[] {
+		return this.active() ? [...this.connectionStates.values()] : [];
 	}
 
 	private active(): boolean {
@@ -398,6 +424,7 @@ export class HostEventSessionController {
 
 	async close(): Promise<void> {
 		this.closed = true;
+		this.connectionStates.clear();
 		this.abort.abort(new Error("Host event session closed."));
 		this.deps.runtime.hostEvents.closeSourceLifetime(this.sourceLifetime);
 		for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();

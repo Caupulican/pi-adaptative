@@ -113,8 +113,6 @@ export {
 	type SpecialistCognitiveRequirements,
 	type SpecialistContextPolicy,
 	type SpecialistLifetime,
-	type SpecialistRecord,
-	type SpecialistRecordState,
 	type SpecialistSpec,
 	type WorkerAdaptationNeedKind,
 } from "./types.ts";

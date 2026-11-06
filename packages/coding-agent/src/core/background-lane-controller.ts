@@ -119,6 +119,7 @@ import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { SUBMIT_REPORT_TOOL_NAME, workerReportClaimText } from "./delegation/worker-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
+import type { HostEventConnectionView } from "./events/host-event-contract.ts";
 import type {
 	HostEventControlPort,
 	HostEventControlScope,
@@ -293,6 +294,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _ciFailureEvidence: CiFailureEvidenceReader | undefined;
 	/** How the last CI event for this session reached the parent: a wake or carried past the wake bound. */
 	private _lastEventDelivery: ParentWakeDelivery | undefined;
+	/** Host event bindings of this session not yet fenced or closed; each keeps its running sources' connections. */
+	private readonly _hostEventSessions = new Set<HostEventSessionController>();
 	private readonly _fitness: ModelFitnessController;
 	/** Lazily materialized only when managed-lane state is queried or reported. */
 	private _managedLanes: ManagedLaneController | undefined;
@@ -799,7 +802,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				throw new Error("Host events belong to a retired session.");
 		};
 		assertCurrent();
-		return new HostEventSessionController({
+		const controller: HostEventSessionController = new HostEventSessionController({
 			runtime: this._getWorkerLifecycle().ledger.runtime,
 			agentDir: this.deps.getAgentDir(),
 			sessionId,
@@ -836,7 +839,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 			warn: (message) => this._safeWarn(message),
+			retired: () => this._hostEventSessions.delete(controller),
 		});
+		this._hostEventSessions.add(controller);
+		return controller;
+	}
+
+	/** Read-only: the connections the running host event sources of this session's open bindings last reported. */
+	readHostEventConnections(): readonly HostEventConnectionView[] {
+		return [...this._hostEventSessions].flatMap((session) => session.connections());
 	}
 
 	getWorkerResult(laneId: string): WorkerResultContract | undefined {
@@ -1892,6 +1903,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			routineStore: this._botTeamStore,
 			routineIntake: this._routines?.intake.status(),
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
+			hostEventConnections: () => this.readHostEventConnections(),
 			proactivity: {
 				daily: this.getProactivityDailyState(),
 				lastSkipReason: this.getLastProactivitySkipReason(),

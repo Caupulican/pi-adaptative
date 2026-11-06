@@ -62,32 +62,6 @@ export interface SpecialistSpec {
 	readonly retention_criteria?: readonly string[];
 }
 
-export type SpecialistRecordState =
-	| "candidate"
-	| "materialized_task"
-	| "active_task"
-	| "retained_session"
-	| "retained_project"
-	| "retained_global"
-	| "repair_required"
-	| "demoted"
-	| "retired"
-	| "discarded";
-
-export interface SpecialistRecord {
-	readonly schema_version: "1.0";
-	readonly specialist_id: string;
-	readonly spec_version: string;
-	readonly state: SpecialistRecordState;
-	readonly profile_ids: readonly string[];
-	readonly certificate_refs: readonly string[];
-	readonly attempt_ids?: readonly string[];
-	readonly success_count?: number;
-	readonly failure_count?: number;
-	readonly created_at: string;
-	readonly updated_at?: string | null;
-}
-
 export type WorkerAdaptationNeedKind =
 	| "specialist"
 	| "capability"

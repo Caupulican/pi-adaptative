@@ -15,6 +15,7 @@ import type { AwayChannelStatus } from "../channels/away-channels.ts";
 import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import type { HostEventConnectionView } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessNoticeKind } from "../harness-notice.ts";
@@ -116,12 +117,11 @@ export interface AwayDaemonStatusView {
 	readonly service: StatusSection<AwayServiceInspection>;
 }
 
-export interface HostEventConnectionStatus {
-	readonly source: string;
-	/** `armed`: the source's last report cleared its wait. A source that never reported is not listed. */
-	readonly state: "armed" | "waiting" | "suspended";
-	readonly reason?: string;
-}
+/**
+ * A source is listed only while its runtime runs on one of this session's open bindings and after its first report;
+ * `armed`: its last report cleared its wait.
+ */
+export type HostEventConnectionStatus = HostEventConnectionView;
 
 export interface HostEventLedgerStatus {
 	readonly sources: BoundedList<{
@@ -270,6 +270,8 @@ export interface AutonomyStatusSources {
 	readonly routineIntake: RoutineIntakeStatus | undefined;
 	/** The worker ledger's projection; undefined while the ledger is not loaded. */
 	readonly hostEventLedger: HostEventProjection | undefined;
+	/** The running host event sources' connections (`HostEventSessionController.connections`). */
+	hostEventConnections(): readonly HostEventConnectionView[];
 	readonly proactivity: {
 		readonly daily: ProactivityDailyState;
 		readonly lastSkipReason?: string;
@@ -350,14 +352,6 @@ function routineItem(
 				}
 			: {}),
 	};
-}
-
-function connectionOf(observed: string): Pick<HostEventConnectionStatus, "state" | "reason"> {
-	if (observed === "clear") return { state: "armed" };
-	const split = observed.indexOf(":");
-	const state = split === -1 ? observed : observed.slice(0, split);
-	const reason = split === -1 ? undefined : observed.slice(split + 1);
-	return { state: state === "suspended" ? "suspended" : "waiting", ...(reason ? { reason } : {}) };
 }
 
 function harnessNoticeDetails(entry: SessionEntry | undefined): { kind: string; reason: string } | undefined {
@@ -443,10 +437,10 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			});
 		}),
 		section<HostEventsStatus>(() => {
-			const connections = sources.harnessNotices
-				.observedStates()
-				.states.filter((state) => state.kind === "host-event-source" && state.scope !== undefined)
-				.map((state) => ({ source: state.scope ?? "", ...connectionOf(state.observed) }));
+			const connections = sources.hostEventConnections().map((connection) => {
+				const reason = text(connection.reason);
+				return { source: connection.source, state: connection.state, ...(reason ? { reason } : {}) };
+			});
 			const ledger = sources.hostEventLedger;
 			const sourceStates = ledger ? Object.values(ledger.eventSources) : [];
 			const deliveries = ledger ? Object.values(ledger.eventDeliveries) : [];

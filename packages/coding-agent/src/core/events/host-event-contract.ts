@@ -380,6 +380,13 @@ export interface HostEventSourceConnection {
 	readonly text: string;
 }
 
+/** The connection a running source last reported: `armed` when its last report cleared its wait. */
+export interface HostEventConnectionView {
+	readonly source: string;
+	readonly state: "armed" | HostEventSourceConnection["state"];
+	readonly reason?: string;
+}
+
 export interface HostEventSink {
 	readonly consumerId: string;
 	checkpoint(sourceId: string, signal: AbortSignal): Promise<HostEventConsumerCheckpoint | undefined>;
@@ -397,6 +404,11 @@ export interface HostEventSink {
 	subscribeWritable(listener: () => void): () => void;
 	/** Each change of the named source's connection state; never throws into the source. */
 	reportConnection(source: string, connection: HostEventSourceConnection | undefined): void;
+	/**
+	 * The named source's runtime stopped: its connection is no longer followed or shown. Not a recovery, so no owner
+	 * notice ends or repeats. Like revocation, it remains available after source cancellation; never throws.
+	 */
+	endConnection(source: string): void;
 }
 
 export interface HostEventSource {

@@ -534,6 +534,11 @@ export async function runJourney1GithubRoutinesPhase(
 			status: "available",
 			value: { connections: { items: [{ source: "ci", state: "waiting", reason: "repository-unavailable" }] } },
 		});
+		const stoppedStatus = await owner.session.autonomyStatus();
+		expect(stoppedStatus.hostEvents, "a stopped source's connection is no longer listed").toMatchObject({
+			status: "available",
+			value: { connections: { items: [] } },
+		});
 		expect(status.outwardDrafts).toMatchObject({
 			status: "available",
 			value: {
