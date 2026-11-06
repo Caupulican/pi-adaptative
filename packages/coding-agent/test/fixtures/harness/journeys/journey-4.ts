@@ -1,4 +1,5 @@
 import "../builtin-install.ts";
+import { runJourney4ChannelsPhase } from "./journey-4-channels.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -23,6 +24,7 @@ export async function runJourney4(): Promise<void> {
 		},
 		async (world) => {
 			await runJourney4OrchestrationGatePhase(world);
+			await runJourney4ChannelsPhase(world);
 		},
 	);
 }
