@@ -6,6 +6,7 @@ import { stateFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import { choiceAct, choiceProbability } from "../decision/thresholds.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "../memory/continuous-chat-settings.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "../model-resolver.ts";
@@ -148,30 +149,9 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 	try {
 		checkAbort();
 		manager.flushBufferedEntries();
-		const readiness = await adapter.evaluate(
-			{
-				state: { value: "ready" },
-				questions: {
-					ready: {
-						type: "choice",
-						instructions: "What is the value in state.value?",
-						criteria: { ready: "The value is ready.", other: "The value is not ready." },
-					},
-				},
-			},
-			{ signal: options.signal },
-		);
-		const ready = readiness.answers.ready;
-		if (
-			!ready ||
-			typeof ready !== "object" ||
-			!("choice" in ready) ||
-			ready.choice !== "ready" ||
-			!("confidence" in ready) ||
-			typeof ready.confidence !== "number" ||
-			ready.confidence < 0.9
-		)
-			throw new Error("System One readiness evaluation did not pass");
+		// Readiness is a fact the models endpoint states for free (the key authenticates); no judgment is paid for it.
+		const readiness = await reviewer.status(options.signal);
+		if (!readiness.authenticationVerified) throw new Error(`System One is not ready: ${readiness.message}`);
 		evidence.stages.push({ stage: "system-one", model: readiness.model, ready: true });
 		persist();
 		let status = await runtime.detect();
@@ -327,18 +307,16 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 						{ signal },
 					);
 					const answer = result.answers.matches;
-					if (
-						!answer ||
-						typeof answer !== "object" ||
-						!("choice" in answer) ||
-						!("confidence" in answer) ||
-						typeof answer.confidence !== "number"
-					)
-						throw new Error("System One did not return the requested judgment");
+					// Read on P(yes), the option a pass acts on; a Choice's `confidence` is only a transform of its top probability.
+					const yes = choiceProbability(answer, "yes");
+					if (yes === undefined) throw new Error("System One did not return the requested judgment");
+					// An activation gate: the raised floor for consequential work. A pass is P(yes) at that floor; a fail is
+					// asserted with the same certainty only when P(no) reaches it.
+					const reading = choiceAct(answer, "yes", "consequential");
 					return {
-						pass: answer.choice === "yes",
-						confidence: answer.confidence,
-						explanation: `System One selected ${String(answer.choice)} with confidence ${answer.confidence}`,
+						pass: reading === "act",
+						confidence: reading === "act" ? yes : 1 - yes,
+						explanation: `System One gave the criterion P(yes) ${yes}`,
 					};
 				},
 			});
