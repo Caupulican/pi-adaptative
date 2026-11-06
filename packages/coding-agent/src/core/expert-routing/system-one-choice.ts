@@ -5,7 +5,7 @@
  * supports). A Choice over every (model, thinking level) pair was measured live and failed: with a
  * pool of 36 models the probability spread over ~150 options and no pick cleared 0.3.
  *
- * Confidence rule: 0.90 or above decides. Otherwise the question is asked again between the two
+ * Probability rule, on P(the option acted on): 0.90 or above decides. Otherwise the question is asked again between the two
  * leading options only, and decides there at 0.90 (options that split one answer, such as three
  * effort variants of one model, leave no single option high until narrowed). A leader between 0.80
  * and 0.90 that the narrower question did not settle may stand for reversible routing, with its
@@ -14,7 +14,8 @@
 
 import type { ModelThinkingLevel } from "@caupulican/pi-ai";
 import { settledAnswer } from "../decision/noul.ts";
-import { confidenceGate } from "../system-one/authority-line.ts";
+import { choiceProbability, choiceRunnerUp } from "../decision/thresholds.ts";
+import { choiceGate } from "../system-one/authority-line.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
 import type { ModelCapabilityCard } from "./capability-card.ts";
 
@@ -144,28 +145,25 @@ async function decideChoice<T extends string>(
 		const first = await ask(options);
 		if (!first || !isOption(first.choice)) return { fallback: "System One returned no option" };
 		const leader = first.choice;
-		const confidence = typeof first.confidence === "number" ? first.confidence : Number.NaN;
-		if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
-			return { fallback: "System One returned an invalid confidence" };
-		const gate = confidenceGate(confidence);
+		// Read on P(leader), the option code acts on; a Choice's `confidence` is only a transform of it.
+		const confidence = choiceProbability(first, leader);
+		if (confidence === undefined) return { fallback: "System One returned no probability for its option" };
+		const gate = choiceGate(first, leader);
 		if (gate === "decide")
-			return { choice: leader, confidence, stage: "decided", reasons: [`confidence ${confidence}`] };
+			return { choice: leader, confidence, stage: "decided", reasons: [`P(${leader}) ${confidence}`] };
 		if (singleAttempt) return { fallback: `System One leaned ${leader} at only ${confidence}` };
-		const runnerUp =
-			first.probabilities && typeof first.probabilities === "object"
-				? Object.entries(first.probabilities as Record<string, unknown>)
-						.filter((entry): entry is [T, number] => isOption(entry[0]) && typeof entry[1] === "number")
-						.filter(([option]) => option !== leader)
-						.sort((a, b) => b[1] - a[1])[0]?.[0]
-				: undefined;
+		const second = choiceRunnerUp(first, leader);
+		const runnerUp = second && isOption(second.option) ? second.option : undefined;
 		if (runnerUp) {
 			const narrowed = await ask([leader, runnerUp]);
-			const narrowedConfidence = typeof narrowed?.confidence === "number" ? narrowed.confidence : Number.NaN;
+			const narrowedConfidence = isOption(narrowed?.choice)
+				? choiceProbability(narrowed, narrowed.choice)
+				: undefined;
 			if (
+				narrowedConfidence !== undefined &&
 				isOption(narrowed?.choice) &&
 				(narrowed?.choice === leader || narrowed?.choice === runnerUp) &&
-				narrowedConfidence <= 1 &&
-				confidenceGate(narrowedConfidence) === "decide"
+				choiceGate(narrowed, narrowed.choice) === "decide"
 			)
 				return {
 					choice: narrowed.choice,

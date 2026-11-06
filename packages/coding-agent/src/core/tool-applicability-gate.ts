@@ -1,4 +1,5 @@
 import type { BeforeToolCallResult } from "../kernel/index.ts";
+import { choiceProbability } from "./decision/thresholds.ts";
 import type { SourceInfo } from "./source-info.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG } from "./system-one/config.ts";
 
@@ -139,17 +140,16 @@ export function optionalToolRelationAsked(context: Pick<OptionalToolRequestConte
 	);
 }
 
-/** Confidence is checked once at this intent owner; malformed choices are not semantic approval. */
+/**
+ * The floor is checked once at this intent owner, on P(the chosen option): a Choice's `confidence` is only a
+ * transform of its top probability. Malformed choices are not semantic approval.
+ */
 function intentChoice(answer: unknown, allowed: readonly string[], floor: number): string | undefined {
 	if (!answer || typeof answer !== "object" || Array.isArray(answer)) return undefined;
-	const value = answer as { choice?: unknown; confidence?: unknown };
-	return typeof value.choice === "string" &&
-		allowed.includes(value.choice) &&
-		typeof value.confidence === "number" &&
-		Number.isFinite(value.confidence) &&
-		value.confidence >= floor &&
-		value.confidence <= 1
-		? value.choice
+	const choice = (answer as { choice?: unknown }).choice;
+	const probability = choiceProbability(answer);
+	return typeof choice === "string" && allowed.includes(choice) && probability !== undefined && probability >= floor
+		? choice
 		: undefined;
 }
 
@@ -167,7 +167,8 @@ function describeJudgment(
 	const value =
 		answer && typeof answer === "object" && !Array.isArray(answer) ? (answer as Record<string, unknown>) : {};
 	const accepted = intentChoice(answer, allowed, floor);
-	const confidence = typeof value.confidence === "number" ? value.confidence.toFixed(3) : "missing";
+	const probability = choiceProbability(answer);
+	const confidence = probability === undefined ? "missing" : probability.toFixed(3);
 	const choice = typeof value.choice === "string" ? value.choice : "missing";
 	const verdict = accepted === undefined ? `rejected (floor ${floor})` : "accepted";
 	return {

@@ -23,7 +23,7 @@ import {
 import { isSystemOneEnabled } from "./access.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
-import { confidenceGate } from "./authority-line.ts";
+import { choiceGate } from "./authority-line.ts";
 import {
 	hashQuestions,
 	modelPoolFollowUp,
@@ -732,7 +732,7 @@ export class SystemOneController {
 				continue;
 			}
 			if (answer.choice === "unchanged") {
-				if (confidenceGate(answer.confidence) === "decide") {
+				if (choiceGate(answer) === "decide") {
 					reasons.push(`${questionId}: unchanged (${String(answer.confidence)})`);
 					questionStates.push({ question: questionId, uncertain: false });
 				} else {
@@ -743,7 +743,7 @@ export class SystemOneController {
 				continue;
 			}
 			const enable = answer.choice === "enable";
-			const gate = confidenceGate(answer.confidence);
+			const gate = choiceGate(answer);
 			if (gate === "decide") {
 				change[pool] = enable;
 				reasons.push(`${questionId}: ${answer.choice} (${String(answer.confidence)})`);

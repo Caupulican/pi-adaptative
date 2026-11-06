@@ -4,6 +4,7 @@ import { estimateTokensFromChars } from "../context/context-item.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionResult } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import { KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import type { OwnerEvidenceLedger, OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import { nextOwnerEvidenceWindow, type OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
@@ -56,12 +57,16 @@ function verdict(value: unknown): Verdict {
 	return { relation: value.relation as Relation, confidence: value.confidence, requested: value.requested };
 }
 
+/**
+ * The relation Choice is read on its confidence, not on P(selected): this engine may be the structured model
+ * engine, whose Choice distribution puts all mass on the selected option whatever its self-reported confidence.
+ */
 function judgedVerdict(relation: DecisionResult | undefined, requested: DecisionResult | undefined): Verdict {
 	if (
 		relation?.kind !== "choice" ||
 		!RELATIONS.some((value) => value === relation.selected) ||
 		!Number.isFinite(relation.confidence.value) ||
-		relation.confidence.value < 0.9 ||
+		relation.confidence.value < KNOWLEDGE_FLOOR ||
 		relation.confidence.value > 1
 	)
 		return { relation: "unresolved", confidence: 0, requested: false };
@@ -70,9 +75,9 @@ function judgedVerdict(relation: DecisionResult | undefined, requested: Decision
 		confidence: relation.confidence.value,
 		requested:
 			requested?.kind === "boolean" &&
-			requested.probabilityTrue >= 0.9 &&
+			requested.probabilityTrue >= KNOWLEDGE_FLOOR &&
 			requested.probabilityTrue <= 1 &&
-			requested.confidence.value >= 0.9 &&
+			requested.confidence.value >= KNOWLEDGE_FLOOR &&
 			requested.confidence.value <= 1,
 	};
 }

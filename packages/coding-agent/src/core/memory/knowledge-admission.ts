@@ -7,6 +7,7 @@ import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
+import { KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
@@ -265,10 +266,10 @@ function decisivelyTrue(answer: JudgedAnswer | undefined): boolean {
 	return (
 		answer?.probabilityTrue !== undefined &&
 		Number.isFinite(answer.probabilityTrue) &&
-		answer.probabilityTrue >= 0.9 &&
+		answer.probabilityTrue >= KNOWLEDGE_FLOOR &&
 		answer.probabilityTrue <= 1 &&
 		Number.isFinite(answer.confidence) &&
-		answer.confidence >= 0.9 &&
+		answer.confidence >= KNOWLEDGE_FLOOR &&
 		answer.confidence <= 1
 	);
 }
@@ -545,6 +546,8 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		assertCurrent();
 		if (judged && !judged.calibrated) selfReported = true;
 		const grounded = judged?.answers.grounded;
+		// The basis Choice stays on its confidence: under the structured model engine its distribution puts all mass on
+		// the selected option, so P(selected) would read a self-reported guess as certain.
 		const basisAnswer: JudgedAnswer | undefined = longGrounding
 			? { selected: longGrounding.basis, confidence: longGrounding.confidence }
 			: judged?.answers.basis;
@@ -555,13 +558,13 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		const basisSelected = basisAnswer?.selected;
 		if (
 			!Number.isFinite(groundedProbability) ||
-			groundedProbability < 0.9 ||
+			groundedProbability < KNOWLEDGE_FLOOR ||
 			groundedProbability > 1 ||
 			!Number.isFinite(groundedConfidence) ||
-			groundedConfidence < 0.9 ||
+			groundedConfidence < KNOWLEDGE_FLOOR ||
 			groundedConfidence > 1 ||
 			!Number.isFinite(basisConfidence) ||
-			basisConfidence < 0.9 ||
+			basisConfidence < KNOWLEDGE_FLOOR ||
 			basisConfidence > 1 ||
 			(basisSelected !== "explicit" && basisSelected !== "inferred")
 		)

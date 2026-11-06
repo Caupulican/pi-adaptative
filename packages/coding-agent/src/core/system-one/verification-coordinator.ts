@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isNoulProbability } from "../decision/noul.ts";
+import { choiceProbability } from "../decision/thresholds.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "../goals/goal-tool-names.ts";
 import { isProvablyObservationalToolCall } from "../model-router/tool-escalation.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
@@ -19,6 +20,12 @@ import {
 /** The source of findings a completion evaluation opens: a later completion evaluation of the same questions replaces them. */
 export const COMPLETION_FINDING_SOURCE = "completion";
 export const PEER_REVIEW_EVIDENCE_SOURCE = "peer_review_evidence";
+/**
+ * A rejected peer-review evidence gap counts as closed at P(closes_gap) 0.65 with the resolution's own P(valid) at
+ * 0.6, which lifts the resolution to the resolution floor. Unmeasured; kept as live.
+ */
+const EVIDENCE_GAP_CLOSES_MIN_PROBABILITY = 0.65;
+const EVIDENCE_GAP_RESOLUTION_MIN_NOUL = 0.6;
 
 type StoragePort = ConstructorParameters<typeof SemanticVerificationObligationTracker>[0];
 export type VerificationResolutionRequest = Parameters<SemanticVerificationObligationTracker["prepareResolution"]>[0];
@@ -235,17 +242,13 @@ function missingResolutionProof(
 	};
 	return conditions.flatMap((condition) => {
 		const receiptMatches = receipts.filter((receipt) => receipt.role === expectedRoles[condition]);
-		const answer = answers[condition] as { choice?: unknown; confidence?: unknown } | undefined;
-		const validConfidence =
-			typeof answer?.confidence === "number" &&
-			Number.isFinite(answer.confidence) &&
-			answer.confidence >= 0 &&
-			answer.confidence <= 1;
-		const confidence = validConfidence ? (answer.confidence as number) : undefined;
+		const answer = answers[condition] as { choice?: unknown } | undefined;
+		// Read on P(the chosen option); a Choice's `confidence` is only a transform of its top probability.
+		const confidence = choiceProbability(answer);
+		const validConfidence = confidence !== undefined;
 		const satisfied =
 			typeof answer?.choice === "string" &&
 			expectedChoices[condition]?.includes(answer.choice) === true &&
-			validConfidence &&
 			confidence !== undefined &&
 			confidence >= MIN_RESOLUTION_CONFIDENCE;
 		if (satisfied) return [];
@@ -609,16 +612,14 @@ export class VerificationCoordinator {
 					nextAction:
 						"System One returned no valid probability for this proof. Keep the finding pending and retry resolution when a valid judgment is available; do not treat this as a low-confidence rejection.",
 				};
-			const gapAnswer = verdict.answers.evidence_closes_gap as
-				| { choice?: unknown; confidence?: unknown }
-				| undefined;
+			const gapAnswer = verdict.answers.evidence_closes_gap as { choice?: unknown } | undefined;
+			const gapProbability = choiceProbability(gapAnswer, "closes_gap");
 			const gapCloses =
 				evidenceGap &&
 				gapAnswer?.choice === "closes_gap" &&
-				typeof gapAnswer.confidence === "number" &&
-				Number.isFinite(gapAnswer.confidence) &&
-				gapAnswer.confidence >= 0.65 &&
-				answer.noul >= 0.6;
+				gapProbability !== undefined &&
+				gapProbability >= EVIDENCE_GAP_CLOSES_MIN_PROBABILITY &&
+				answer.noul >= EVIDENCE_GAP_RESOLUTION_MIN_NOUL;
 			const effectiveConfidence = gapCloses ? Math.max(answer.noul, MIN_RESOLUTION_CONFIDENCE) : answer.noul;
 			const result = this.tracker.resolve({
 				...input,

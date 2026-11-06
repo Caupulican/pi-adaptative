@@ -15,7 +15,8 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
-import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
+import { settledAnswer } from "../decision/noul.ts";
+import { choiceAct } from "../decision/thresholds.ts";
 import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
@@ -295,16 +296,16 @@ export const CLAIM_QUESTION_IDS: Readonly<Record<ClaimKind, string>> = {
 
 type VerificationClaimProvenance = "current_success" | "historical_only" | "no_current_success";
 
+/**
+ * The provenance System One settled on, read on P(the chosen option) at the consequential Choice floor: the
+ * chosen provenance decides whether the model is told it misreported, so a false reading misleads it.
+ */
 function settledVerificationClaimProvenance(answer: unknown): VerificationClaimProvenance | undefined {
 	if (!answer || typeof answer !== "object") return undefined;
-	const record = answer as { choice?: unknown; confidence?: unknown };
-	if (!isNoulProbability(record.confidence) || record.confidence < DEFAULT_NOUL_BAND_THRESHOLDS.requiredTrue.softPass)
+	const choice = (answer as { choice?: unknown }).choice;
+	if (choice !== "current_success" && choice !== "historical_only" && choice !== "no_current_success")
 		return undefined;
-	return record.choice === "current_success" ||
-		record.choice === "historical_only" ||
-		record.choice === "no_current_success"
-		? record.choice
-		: undefined;
+	return choiceAct(answer, choice, "consequential") === "act" ? choice : undefined;
 }
 
 function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string): ClaimFinding | undefined {
