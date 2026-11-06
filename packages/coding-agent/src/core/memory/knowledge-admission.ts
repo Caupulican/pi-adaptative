@@ -7,7 +7,7 @@ import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
-import { KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
+import { choiceProbability, KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
@@ -220,6 +220,8 @@ function calibrated(provenance: ConfidenceProvenance): boolean {
 interface JudgedAnswer {
 	readonly probabilityTrue?: number;
 	readonly selected?: string;
+	/** A Choice's P(selected); absent when the answer carried no probability for its option. */
+	readonly probability?: number;
 	readonly confidence: number;
 }
 
@@ -234,8 +236,14 @@ function judgmentOf(evaluation: DecisionEvaluation): KnowledgeJudgment {
 	for (const [id, result] of Object.entries(evaluation.results)) {
 		if (result.kind === "boolean")
 			answers[id] = { probabilityTrue: result.probabilityTrue, confidence: result.confidence.value };
-		else if (result.kind === "choice")
-			answers[id] = { selected: result.selected, confidence: result.confidence.value };
+		else if (result.kind === "choice") {
+			const probability = choiceProbability(result);
+			answers[id] = {
+				selected: result.selected,
+				...(probability !== undefined ? { probability } : {}),
+				confidence: result.confidence.value,
+			};
+		}
 	}
 	return { calibrated: calibrated(evaluation.engine.confidence_provenance), answers };
 }
@@ -249,13 +257,15 @@ function retainedJudgment(value: unknown): KnowledgeJudgment {
 			!isPlainRecord(answer) ||
 			typeof answer.confidence !== "number" ||
 			(answer.probabilityTrue !== undefined && typeof answer.probabilityTrue !== "number") ||
-			(answer.selected !== undefined && typeof answer.selected !== "string")
+			(answer.selected !== undefined && typeof answer.selected !== "string") ||
+			(answer.probability !== undefined && typeof answer.probability !== "number")
 		)
 			throw new Error("Invalid retained knowledge judgment");
 		answers[id] = {
 			confidence: answer.confidence,
 			...(typeof answer.probabilityTrue === "number" ? { probabilityTrue: answer.probabilityTrue } : {}),
 			...(typeof answer.selected === "string" ? { selected: answer.selected } : {}),
+			...(typeof answer.probability === "number" ? { probability: answer.probability } : {}),
 		};
 	}
 	return { calibrated: value.calibrated, answers };
@@ -546,15 +556,18 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		assertCurrent();
 		if (judged && !judged.calibrated) selfReported = true;
 		const grounded = judged?.answers.grounded;
-		// The basis Choice stays on its confidence: under the structured model engine its distribution puts all mass on
-		// the selected option, so P(selected) would read a self-reported guess as certain.
+		// The basis Choice is read on P(selected); whole-original grounding already read each window's relation that way.
 		const basisAnswer: JudgedAnswer | undefined = longGrounding
-			? { selected: longGrounding.basis, confidence: longGrounding.confidence }
+			? {
+					selected: longGrounding.basis,
+					probability: longGrounding.confidence,
+					confidence: longGrounding.confidence,
+				}
 			: judged?.answers.basis;
 		const groundedProbability = longGrounding ? (longGrounding.grounded ? 1 : 0) : (grounded?.probabilityTrue ?? 0);
 		const groundedConfidence =
 			longGrounding?.confidence ?? (grounded?.probabilityTrue === undefined ? 0 : grounded.confidence);
-		const basisConfidence = basisAnswer?.confidence ?? 0;
+		const basisProbability = basisAnswer?.probability ?? 0;
 		const basisSelected = basisAnswer?.selected;
 		if (
 			!Number.isFinite(groundedProbability) ||
@@ -563,13 +576,13 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			!Number.isFinite(groundedConfidence) ||
 			groundedConfidence < KNOWLEDGE_FLOOR ||
 			groundedConfidence > 1 ||
-			!Number.isFinite(basisConfidence) ||
-			basisConfidence < KNOWLEDGE_FLOOR ||
-			basisConfidence > 1 ||
+			!Number.isFinite(basisProbability) ||
+			basisProbability < KNOWLEDGE_FLOOR ||
+			basisProbability > 1 ||
 			(basisSelected !== "explicit" && basisSelected !== "inferred")
 		)
 			return held("ungrounded", "evidence", "The proposed knowledge is not sufficiently grounded");
-		const basis = { selected: basisSelected, confidence: basisConfidence };
+		const basis = { selected: basisSelected, confidence: basisProbability };
 		const explicitlyRequested = longGrounding?.requested ?? decisivelyTrue(judged?.answers.requested);
 		if (!this.deps.automaticEnabled && !explicitlyRequested)
 			return held("automatic_disabled", "configuration", "Automatic knowledge collection is disabled");

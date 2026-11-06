@@ -1,5 +1,6 @@
 import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
+import { choiceProbability } from "../decision/thresholds.ts";
 import {
 	lightweightQuestionId,
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
@@ -733,10 +734,10 @@ export class SystemOneController {
 			}
 			if (answer.choice === "unchanged") {
 				if (choiceGate(answer) === "decide") {
-					reasons.push(`${questionId}: unchanged (${String(answer.confidence)})`);
+					reasons.push(`${questionId}: unchanged (P=${String(choiceProbability(answer))})`);
 					questionStates.push({ question: questionId, uncertain: false });
 				} else {
-					doubts.push(`${pool} models: unchanged at confidence ${String(answer.confidence)}, not applied`);
+					doubts.push(`${pool} models: unchanged at P=${String(choiceProbability(answer))}, not applied`);
 					reasons.push(doubtReason(`${questionId}: unchanged answer is inconclusive`));
 					questionStates.push({ question: questionId, uncertain: true });
 				}
@@ -746,7 +747,7 @@ export class SystemOneController {
 			const gate = choiceGate(answer);
 			if (gate === "decide") {
 				change[pool] = enable;
-				reasons.push(`${questionId}: ${answer.choice} (${String(answer.confidence)})`);
+				reasons.push(`${questionId}: ${answer.choice} (P=${String(choiceProbability(answer))})`);
 				questionStates.push({ question: questionId, uncertain: false });
 			} else if (gate === "ask_more") {
 				followUps[questionId] = modelPoolFollowUp(pool, enable, pasted);
@@ -754,7 +755,7 @@ export class SystemOneController {
 				reasons.push(doubtReason(`${questionId}: ${answer.choice} awaits a follow-up`));
 				questionStates.push({ question: questionId, uncertain: true });
 			} else {
-				doubts.push(`${pool} models: "${answer.choice}" at confidence ${String(answer.confidence)}, not applied`);
+				doubts.push(`${pool} models: "${answer.choice}" at P=${String(choiceProbability(answer))}, not applied`);
 				reasons.push(doubtReason(`${questionId}: ${answer.choice} is below the decision threshold`));
 				questionStates.push({ question: questionId, uncertain: true });
 			}
@@ -1195,10 +1196,10 @@ export class SystemOneController {
 			batches[0]!.questions,
 			signal,
 		);
-		const answer = answers.worker_task_fit as { choice?: unknown; confidence?: unknown } | undefined;
+		const answer = answers.worker_task_fit as { choice?: unknown } | undefined;
 		const uncertain = workerTaskFitStatus(answer) === "uncertain";
 		const question = `worker_task_fit:${workerTaskFitKey(input)}`;
-		const text = `${question}: ${String(answer?.choice)} at confidence ${String(answer?.confidence)}`;
+		const text = `${question}: ${String(answer?.choice)} at P=${String(choiceProbability(answer))}`;
 		this.sealDecision(
 			decision,
 			"evaluated",
@@ -1249,10 +1250,10 @@ export class SystemOneController {
 			questions,
 			signal,
 		);
-		const first = answers[ROUTE_CHOICE_QUESTION_ID] as { choice?: unknown; confidence?: unknown } | undefined;
+		const first = answers[ROUTE_CHOICE_QUESTION_ID] as { choice?: unknown } | undefined;
 		const chosen = firstOptions.find((option) => option.id === first?.choice);
 		this.sealDecision(decision, "evaluated", evaluationId, [
-			`chose ${chosen?.description.split(";")[0] ?? String(first?.choice)} at confidence ${String(first?.confidence)} of ${firstOptions.length} options`,
+			`chose ${chosen?.description.split(";")[0] ?? String(first?.choice)} at P=${String(choiceProbability(first))} of ${firstOptions.length} options`,
 		]);
 		return answers;
 	}

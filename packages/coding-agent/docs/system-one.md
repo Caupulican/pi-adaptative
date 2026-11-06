@@ -302,9 +302,14 @@ How an answer is read:
   `hard_fail` for the question's required end. `readNoul` adds `unasked` for a missing or non-probability answer,
   so a question that was not answered is never read as a default probability.
 - **Choice** readers (`choiceProbability`, `choiceAct`, `choiceGate`) read the probability of the option code
-  acts on, never `confidence`, which for a Choice is only a transform of the top probability; the step route
-  and the action policy use them, and the authority-line sites still on `confidenceGate` move to `choiceGate`
-  separately. The runner-up margin applies only where a close second changes what code does.
+  acts on, never `confidence`, which for a Choice is only a transform of the top probability. These Choice
+  reads use them: the step route, the action policy, model pools, route choice and its narrowed pass, worker
+  task fitness, peer strength (0.95), tool intent, claim provenance (`consequential`, 0.9), verification resolution proof and
+  evidence-gap closure, the LFM3 media judgment, and knowledge admission and grounding (at the knowledge floor,
+  0.9). The structured model engine, used when System One is not bound, reports one verbal confidence per
+  answer instead of a distribution; it reads as P(selected), with the rest of the mass spread evenly over the
+  other options, so a Choice decides on the same value it did on confidence. The runner-up margin applies only
+  where a close second changes what code does.
 - **Score** is read confidence first, then on boundary mass (`scoreSettled`).
 - The decision action policy reads a yes/no by its band (`ambiguous` is uncertain, and so is `soft_pass` at
   critical consequence) and a Choice through `choiceAct` (`reversible` at low and medium consequence,
@@ -653,8 +658,8 @@ verifier or opening an owner-question latch. A bound completion transaction hold
 the account evaluator is unavailable, in either steering mode. The diagnostic remains an evaluator problem; it neither
 clears existing completion findings nor queues production repair tasks.
 An irreversible or outward operation goes to the
-operator, or is refused for a worker; an established outward effect the request does not ask for is refused. Only Choice and Score answers are gated on
-confidence here (`confidenceGate`; `choiceGate` reads a Choice on P(chosen option) instead); a Noul's
+operator, or is refused for a worker; an established outward effect the request does not ask for is refused. A Choice
+is gated on P(chosen option) (`choiceGate`) and a Score on its confidence (`confidenceGate`); a Noul's
 probability is its certainty (see Thresholds and readings).
 
 Semantic project-rule judgment is opt-in per rule. System One judges an instruction-file bullet only when

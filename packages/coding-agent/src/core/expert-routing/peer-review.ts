@@ -5,6 +5,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ThinkingLevel } from "../../kernel/index.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
+import { choiceProbability } from "../decision/thresholds.ts";
 import { ORCHESTRATION_THINKING_LEVELS } from "../orchestration/contracts.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { buildCapabilityCard, describeModelCard } from "./capability-card.ts";
@@ -1027,19 +1028,11 @@ export class PeerReviewController {
 					)
 				)[ROUTE_CHOICE_QUESTION_ID];
 				const result =
-					answer && typeof answer === "object"
-						? (answer as { type?: unknown; choice?: unknown; confidence?: unknown })
-						: undefined;
-				if (
-					result?.type !== "choice" ||
-					result.choice !== "stronger" ||
-					typeof result.confidence !== "number" ||
-					!Number.isFinite(result.confidence) ||
-					result.confidence < 0.95 ||
-					result.confidence > 1
-				)
-					throw new Error("System One did not establish a stronger task-specific peer at confidence >= 0.95");
-				strength = { source: "system_one_task_judgment", confidence: result.confidence };
+					answer && typeof answer === "object" ? (answer as { type?: unknown; choice?: unknown }) : undefined;
+				const stronger = result?.choice === "stronger" ? choiceProbability(result, "stronger") : undefined;
+				if (result?.type !== "choice" || stronger === undefined || stronger < 0.95)
+					throw new Error("System One did not establish a stronger task-specific peer at P(stronger) >= 0.95");
+				strength = { source: "system_one_task_judgment", confidence: stronger };
 			}
 			const recheck = async (): Promise<void> => {
 				await verificationFence();

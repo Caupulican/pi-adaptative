@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { confidenceGate } from "../system-one/authority-line.ts";
+import { choiceGate } from "../system-one/authority-line.ts";
 import type { RouteChoiceJudge, WorkerTaskFitInput } from "./system-one-choice.ts";
 
 /** Separate the durable machine reason from the actionable, bounded diagnostic. */
@@ -16,13 +16,11 @@ export function workerTaskFitKey(input: WorkerTaskFitInput): string {
 	return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
+/** Read on P(chosen option): a fit is decided at the authority line's Choice floor. */
 export function workerTaskFitStatus(answer: unknown): "adequate" | "inadequate" | "uncertain" {
 	if (!answer || typeof answer !== "object") return "uncertain";
-	const { choice, confidence } = answer as { choice?: unknown; confidence?: unknown };
-	return (choice === "adequate" || choice === "inadequate") &&
-		confidenceGate(confidence) === "decide" &&
-		typeof confidence === "number" &&
-		confidence <= 1
+	const { choice } = answer as { choice?: unknown };
+	return (choice === "adequate" || choice === "inadequate") && choiceGate(answer, choice) === "decide"
 		? choice
 		: "uncertain";
 }

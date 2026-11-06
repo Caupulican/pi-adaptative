@@ -195,11 +195,19 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 				);
 			} else if (decision.kind === "choice") {
 				const selected = answer.selected as string;
+				// The model reports one confidence, not a distribution: P(selected) is that verbal confidence and the
+				// rest of the mass is spread evenly over the other listed options, so a P(option) reader sees the
+				// same value a confidence reader does.
+				const others = Object.keys(decision.options).filter((option) => option !== selected);
+				const rest = others.length > 0 ? (1 - answer.confidence) / others.length : 0;
 				results[decision.id] = {
 					kind: "choice",
 					selected,
-					distribution: { [selected]: 1 },
-					margin: 1,
+					distribution: {
+						...Object.fromEntries(others.map((option) => [option, rest])),
+						[selected]: answer.confidence,
+					},
+					margin: answer.confidence - rest,
 					confidence,
 				};
 			} else if (decision.kind === "score") {

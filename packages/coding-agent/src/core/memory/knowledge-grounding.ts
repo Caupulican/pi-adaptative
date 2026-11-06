@@ -4,7 +4,7 @@ import { estimateTokensFromChars } from "../context/context-item.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionResult } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import { KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
+import { choiceProbability, KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import type { OwnerEvidenceLedger, OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import { nextOwnerEvidenceWindow, type OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
@@ -58,21 +58,21 @@ function verdict(value: unknown): Verdict {
 }
 
 /**
- * The relation Choice is read on its confidence, not on P(selected): this engine may be the structured model
- * engine, whose Choice distribution puts all mass on the selected option whatever its self-reported confidence.
+ * The relation Choice is read on P(selected) at the knowledge floor; the verdict's confidence is that
+ * probability. A missing probability leaves the relation unresolved.
  */
 function judgedVerdict(relation: DecisionResult | undefined, requested: DecisionResult | undefined): Verdict {
+	const p = relation?.kind === "choice" ? choiceProbability(relation) : undefined;
 	if (
 		relation?.kind !== "choice" ||
 		!RELATIONS.some((value) => value === relation.selected) ||
-		!Number.isFinite(relation.confidence.value) ||
-		relation.confidence.value < KNOWLEDGE_FLOOR ||
-		relation.confidence.value > 1
+		p === undefined ||
+		p < KNOWLEDGE_FLOOR
 	)
 		return { relation: "unresolved", confidence: 0, requested: false };
 	return {
 		relation: relation.selected as Relation,
-		confidence: relation.confidence.value,
+		confidence: p,
 		requested:
 			requested?.kind === "boolean" &&
 			requested.probabilityTrue >= KNOWLEDGE_FLOOR &&
