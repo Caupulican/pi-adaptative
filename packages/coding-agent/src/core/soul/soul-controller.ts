@@ -365,7 +365,7 @@ export class SoulController {
 	 * owner once per episode: the harness reviews it again when System One answers and writes it itself if the review
 	 * allows it. A review the call's own abort cancelled blocks and holds nothing. An engine that can never run the review,
 	 * or System One configured with no engine bound, refuses the write and tells the owner it is a configuration fault.
-	 * Only while System One is not configured (turned off, or never set up) is the write taken unreviewed. After close no
+	 * Only while System One is not configured (turned off, or never set up) is a non-empty write taken unreviewed. After close no
 	 * soul.md write is taken.
 	 *
 	 * `registerCleanup` is the invocation's end: it runs when the call is refused (by this gate or a later one), abandoned
