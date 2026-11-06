@@ -17,7 +17,14 @@ import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.
 import type { TimerPort } from "../util/timer-port.ts";
 import { botDaemonCommandArgs } from "./bot-daemon-command.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./bot-daemon-legacy.ts";
-import type { BotDaemonEnd, PersistentBotDaemonStatus } from "./bot-team-routine-helpers.ts";
+import {
+	type BotDaemonEnd,
+	describeDaemonBuild,
+	describeDaemonReplacement,
+	OWN_DAEMON_BUILD,
+	type PersistentBotDaemonStatus,
+	type ReplacedBotDaemon,
+} from "./bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
 /** A fresh lease claimed for a daemon about to start, or the status of the daemon already holding it. */
@@ -27,19 +34,30 @@ export type BotDaemonLeaseClaim =
 			readonly token: string;
 			/** How the previous daemon ended, read before this claim replaced the record. */
 			readonly previousEnd?: BotDaemonEnd;
+			/** The live daemon of an older build this claim took the lease from; it exits on observing the new lease. */
+			readonly replaced?: ReplacedBotDaemon;
 			/** What retiring earlier-generation daemons did, for the starter's report; empty when nothing. */
 			readonly legacy: string;
 	  }
 	| { readonly claimed: false; readonly current: PersistentBotDaemonStatus; readonly legacy: string };
 
-/** Retires earlier-generation daemons, then claims the lease with a fresh token unless a live daemon holds it. */
+/**
+ * Retires earlier-generation daemons, then claims the lease with a fresh token for this process's build unless a live
+ * daemon of the same or a newer build holds it; one of an older build is replaced.
+ */
 export function claimBotDaemonLease(store: PersistentBotTeamStore, clock: TimerPort): BotDaemonLeaseClaim {
 	const legacy = describeLegacyDaemonRetirement(retireLegacyBotDaemons(store));
 	const token = randomUUID();
 	const previousEnd = store.getDaemonEnd();
-	if (!store.claimDaemonLease(token, clock.now()))
-		return { claimed: false, current: store.getDaemonStatus(clock.now()), legacy };
-	return { claimed: true, token, ...(previousEnd ? { previousEnd } : {}), legacy };
+	const claim = store.claimDaemonLease(token, OWN_DAEMON_BUILD, clock.now());
+	if (!claim.claimed) return { claimed: false, current: store.getDaemonStatus(clock.now()), legacy };
+	return {
+		claimed: true,
+		token,
+		...(previousEnd ? { previousEnd } : {}),
+		...(claim.replaced ? { replaced: claim.replaced } : {}),
+		legacy,
+	};
 }
 
 /** The first report of a daemon whose predecessor ended on an error. */
@@ -58,7 +76,7 @@ export interface BotDaemonLaunch {
 
 export interface BotDaemonLaunchResult {
 	readonly started: boolean;
-	/** Another daemon already holds the lease. */
+	/** Another daemon of the same or a newer build already holds the lease. */
 	readonly held?: boolean;
 	readonly pid?: number;
 	readonly detail: string;
@@ -91,18 +109,19 @@ export function launchDetachedBotDaemon(input: BotDaemonLaunch): BotDaemonLaunch
 	if (!claim.claimed) {
 		const { current } = claim;
 		const starting = current.lastHeartbeatAt === undefined;
+		const build = describeDaemonBuild(current.build, OWN_DAEMON_BUILD);
 		return {
 			started: false,
 			held: true,
 			...(current.pid !== undefined ? { pid: current.pid } : {}),
 			detail: withLegacy(
 				starting
-					? `Detached bot daemon is already starting${current.pid !== undefined ? ` (launched as pid ${current.pid})` : ""}.`
-					: `Detached bot daemon is already running (pid ${current.pid ?? "unknown"}, ${current.activeRoutines} active routines).`,
+					? `Detached bot daemon is already starting (${current.pid !== undefined ? `launched as pid ${current.pid}, ` : ""}${build}).`
+					: `Detached bot daemon is already running (pid ${current.pid ?? "unknown"}, ${build}, ${current.activeRoutines} active routines).`,
 			),
 		};
 	}
-	const { token, previousEnd } = claim;
+	const { token, previousEnd, replaced } = claim;
 	if (previousEnd?.reason === "failed")
 		warn(
 			`The detached bot daemon stopped on an error${previousEnd.detail ? `: ${previousEnd.detail}` : ""}. It is started again.`,
@@ -163,7 +182,7 @@ export function launchDetachedBotDaemon(input: BotDaemonLaunch): BotDaemonLaunch
 		handedOver: Promise.all([spawned, flushed]).then(([ok]) => ok),
 		pid,
 		detail: withLegacy(
-			`Started detached bot daemon (pid ${pid}) watching ${store.getStoreFilePath()} across TUI restarts.`,
+			`${replaced ? `${describeDaemonReplacement(replaced, OWN_DAEMON_BUILD)} ` : ""}Started detached bot daemon (pid ${pid}) watching ${store.getStoreFilePath()} across TUI restarts.`,
 		),
 	};
 }

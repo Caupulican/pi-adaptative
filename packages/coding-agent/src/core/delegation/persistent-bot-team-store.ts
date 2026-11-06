@@ -101,6 +101,7 @@ import {
 	claimDaemonLeaseFile,
 	collectBotInboxEntries,
 	collectTeamInboxEntries,
+	type DaemonLeaseClaim,
 	type DaemonLeaseRelease,
 	daemonLeaseBelongsTo,
 	formatDurationIntervalMs,
@@ -3041,9 +3042,12 @@ export class PersistentBotTeamStore {
 		return readDaemonLeaseStatus(this.filePath, this.routines.values(), [...this.routineOccurrences.values()], nowMs);
 	}
 
-	/** Takes the detached daemon's lease for a daemon about to start with `token`; false while another holds it. */
-	claimDaemonLease(token: string, nowMs = Date.now()): boolean {
-		return claimDaemonLeaseFile(this.filePath, token, nowMs);
+	/**
+	 * Takes the detached daemon's lease for a daemon of `build` about to start with `token`: not claimed while another
+	 * of the same or a newer build holds it; one of an older build is replaced (see `claimDaemonLeaseFile`).
+	 */
+	claimDaemonLease(token: string, build: string | undefined, nowMs = Date.now()): DaemonLeaseClaim {
+		return claimDaemonLeaseFile(this.filePath, token, build, nowMs);
 	}
 
 	/** Records the pid of the process spawned for `token`; display only (it may be a launcher wrapper, never probed). */
@@ -3051,9 +3055,9 @@ export class PersistentBotTeamStore {
 		recordDaemonLaunchPidFile(this.filePath, token, launcherPid);
 	}
 
-	/** The daemon's renewal with its own process identity; false once its lease was released or taken. */
-	renewDaemonLease(token: string, owner: ProcessOwner, nowMs = Date.now()): boolean {
-		return renewDaemonLeaseFile(this.filePath, token, owner, nowMs);
+	/** The daemon's renewal with its own process identity and build; false once its lease was released or taken. */
+	renewDaemonLease(token: string, owner: ProcessOwner, build: string | undefined, nowMs = Date.now()): boolean {
+		return renewDaemonLeaseFile(this.filePath, token, owner, build, nowMs);
 	}
 
 	daemonLeaseBelongsTo(token: string): boolean {

@@ -3,8 +3,10 @@
  * and the timed routines of closed sessions keep running after a reboot or logout with no session opened.
  *
  * The service runs `pi --bot-daemon <agentDir>` (see `bot-daemon.ts`): that form claims the daemon lease itself, and
- * exits at once while another daemon holds it. Each manager restarts it only after a failure, so an owner's
- * `/bot daemon stop` is respected until the next login.
+ * exits at once while another daemon of the same or a newer build holds it. Each manager restarts it only after a
+ * failure, so an owner's `/bot daemon stop` is respected until the next login. A session that finds a daemon of an
+ * older build running restarts a current install through its manager ({@link AwayService.replaceDaemon}), so the
+ * replacing daemon stays supervised; without one it launches the daemon detached.
  * - Linux: a `systemd --user` unit. Lingering is reported, never enabled: without it the service starts at login and
  *   stops at logout.
  * - macOS: a launchd user agent.
@@ -30,7 +32,12 @@ import { APP_NAME } from "../../config.ts";
 import { configFile, stateFile } from "../agent-paths.ts";
 import { daemonServiceEnvironment, environmentOnlyCredentialNames } from "../daemon-environment.ts";
 import { BOT_DAEMON_COMMAND } from "../delegation/bot-daemon-command.ts";
-import { daemonLeasePath, type PersistentBotDaemonStatus } from "../delegation/bot-team-routine-helpers.ts";
+import {
+	daemonLeasePath,
+	isOlderDaemonBuild,
+	OWN_DAEMON_BUILD,
+	type PersistentBotDaemonStatus,
+} from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { type ExecResult, execCommand } from "../exec.ts";
 import type { HarnessNoticeObservation } from "../harness-notice.ts";
@@ -539,12 +546,15 @@ export interface AwayServiceManagerDeps {
 
 const REFUSAL = "Routines away cannot start at login:";
 
-/** Waits for a daemon to hold the lease: a watch on the lease directory, ended by the deadline. */
-function awaitDaemonLease(deps: AwayServiceManagerDeps): Promise<PersistentBotDaemonStatus> {
+/** Waits for a daemon `accepts` to hold the lease: a watch on the lease directory, ended by the deadline. */
+function awaitDaemonLease(
+	deps: AwayServiceManagerDeps,
+	accepts: (status: PersistentBotDaemonStatus) => boolean = (status) => status.running,
+): Promise<PersistentBotDaemonStatus> {
 	const { store, clock, signal } = deps;
 	const read = () => store.getDaemonStatus(clock.now());
 	const first = read();
-	if (first.running) return Promise.resolve(first);
+	if (accepts(first)) return Promise.resolve(first);
 	return new Promise((resolve) => {
 		let watcher: FSWatcher | undefined;
 		let settled = false;
@@ -562,7 +572,7 @@ function awaitDaemonLease(deps: AwayServiceManagerDeps): Promise<PersistentBotDa
 		try {
 			watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
 				if (filename !== null && filename.toString() !== basename(leaseFile)) return;
-				if (read().running) finish();
+				if (accepts(read())) finish();
 			});
 			watcher.on("error", () => {
 				watcher?.close();
@@ -586,6 +596,54 @@ function writeDefinition(spec: AwayServiceSpec): void {
 	writeFileAtomicSync(spec.definitionPath, text);
 }
 
+/** Runs the manager's install commands in order: what failed, or undefined once every required one succeeded. */
+async function runInstallCommands(
+	spec: AwayServiceSpec,
+	deps: AwayServiceManagerDeps,
+	existed: boolean,
+): Promise<string | undefined> {
+	for (const command of installCommands(spec, deps.host, existed)) {
+		if (deps.signal?.aborted) return "the install was stopped.";
+		const result = await runManagerCommand(command, spec.workingDirectory, deps.signal);
+		if (result.code !== 0 && !command.tolerated) return `\`${commandText(command)}\` failed: ${resultText(result)}`;
+	}
+	return undefined;
+}
+
+/**
+ * Restarts a current install through its manager with the install's own commands (the definition is not rewritten),
+ * so the service's daemon runs this machine's installed build under the manager: it claims the lease, replacing a
+ * daemon of an older build. Succeeds once a daemon of `build` or a newer one holds the lease. Never rejects.
+ */
+async function restartAwayService(
+	spec: AwayServiceSpec,
+	deps: AwayServiceManagerDeps,
+	build: string | undefined,
+): Promise<AwayServiceOutcome> {
+	try {
+		const failed = await runInstallCommands(spec, deps, true);
+		if (failed) return { ok: false, detail: `The always-on service was not restarted: ${failed}` };
+		const lease = await awaitDaemonLease(
+			deps,
+			(status) => status.running && !isOlderDaemonBuild(status.build, build),
+		);
+		if (!lease.running || isOlderDaemonBuild(lease.build, build))
+			return {
+				ok: false,
+				detail: `The always-on service restarted, but no daemon of build ${build ?? "unknown"} or newer held the routine lease within ${LEASE_WAIT_MS / 1000} s.`,
+			};
+		return {
+			ok: true,
+			detail: `The always-on service restarted; its daemon holds the routine lease (build ${lease.build ?? "unstamped"}).`,
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			detail: `The always-on service was not restarted: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
 /**
  * Writes the definition, enables and starts it, records the install and waits for a daemon to hold the lease.
  * Idempotent: an install over a current one rewrites the same definition and restarts it. Never rejects.
@@ -599,12 +657,8 @@ export async function installAwayService(
 	try {
 		const existed = existsSync(spec.definitionPath);
 		writeDefinition(spec);
-		for (const command of installCommands(spec, deps.host, existed)) {
-			if (deps.signal?.aborted) return { ok: false, detail: `${REFUSAL} the install was stopped.` };
-			const result = await runManagerCommand(command, spec.workingDirectory, deps.signal);
-			if (result.code !== 0 && !command.tolerated)
-				return { ok: false, detail: `${REFUSAL} \`${commandText(command)}\` failed: ${resultText(result)}` };
-		}
+		const failed = await runInstallCommands(spec, deps, existed);
+		if (failed) return { ok: false, detail: `${REFUSAL} ${failed}` };
 		const record = readAwayServiceRecord(spec.agentDir);
 		writeAwayServiceRecord(spec.agentDir, {
 			...record,
@@ -781,7 +835,7 @@ export async function awayServiceStatus(
 					why = `the service failed (${values.get("Result") ?? "unknown"}, exit status ${values.get("ExecMainStatus") ?? "unknown"}); \`journalctl --user -u ${unitName(spec)}\` shows its output.`;
 				else if (values.get("ActiveState") === "inactive")
 					why =
-						"the service's daemon exited normally: another daemon held the lease, or `/bot daemon stop` released it. It starts again at the next login or service start.";
+						"the service's daemon exited normally: another daemon held the lease, a session of a newer build replaced it, or `/bot daemon stop` released it. It starts again at the next login or service start.";
 			} else managerState = `systemd did not answer: ${resultText(result)}`;
 		} else if (spec.platform === "darwin") {
 			const command = { file: LAUNCHCTL, args: ["print", `${launchdDomain(spec)}/${spec.name}`] };
@@ -792,7 +846,7 @@ export async function awayServiceStatus(
 				managerState = `launchd: loaded, ${state}${lastExit ? `, last exit ${lastExit}` : ""}`;
 				if (state !== "running")
 					why =
-						"the agent's daemon is not running: another daemon held the lease, `/bot daemon stop` released it, or it failed (its last exit says which).";
+						"the agent's daemon is not running: another daemon held the lease, a session of a newer build replaced it, `/bot daemon stop` released it, or it failed (its last exit says which).";
 			} else managerState = "launchd: the agent is not loaded; it loads at the next login";
 		} else {
 			const command = { file: schtasksPath(deps.host), args: ["/Query", "/TN", spec.name] };
@@ -837,14 +891,17 @@ export interface AwayServiceDeps {
 
 /**
  * The session runtime's owner of the always-on service: the hands-off reconcile at session start and routine save,
- * and the explicit install, uninstall, status and inspection. One install runs at a time; `close` stops and joins it.
+ * the restart that replaces a daemon of an older build under the manager, and the explicit install, uninstall, status
+ * and inspection. One manager operation runs at a time; `close` stops and joins it.
  */
 export class AwayService {
 	private readonly deps: AwayServiceDeps;
 	private readonly abort = new AbortController();
-	private installing: Promise<AwayServiceOutcome> | undefined;
+	private managing: Promise<AwayServiceOutcome> | undefined;
 	/** The identity whose hands-off install was refused or failed in this runtime: reported once, never retried. */
 	private refused: string | undefined;
+	/** The install whose restart for a replacement failed in this runtime: later replacements launch detached. */
+	private restartFailed: string | undefined;
 	private closed = false;
 
 	constructor(deps: AwayServiceDeps) {
@@ -887,7 +944,7 @@ export class AwayService {
 			if (told) writeAwayServiceRecord(agentDir, { ...record, version: 1, noticeToldAt: this.deps.clock.now() });
 			return;
 		}
-		if (this.installing) return;
+		if (this.managing) return;
 		const key = resolution.ok ? awayServiceDigest(resolution.spec) : `unresolved:${resolution.reason}`;
 		if (this.refused === key) return;
 		if (!resolution.ok || unavailable !== undefined) {
@@ -902,12 +959,45 @@ export class AwayService {
 		});
 	}
 
-	private runInstall(spec: AwayServiceSpec): Promise<AwayServiceOutcome> {
-		const running = installAwayService(spec, this.managerDeps()).finally(() => {
-			if (this.installing === running) this.installing = undefined;
+	/** One manager operation (an install or a restart) at a time; `close` joins it. */
+	private track(operation: Promise<AwayServiceOutcome>): Promise<AwayServiceOutcome> {
+		const running = operation.finally(() => {
+			if (this.managing === running) this.managing = undefined;
 		});
-		this.installing = running;
+		this.managing = running;
 		return running;
+	}
+
+	private runInstall(spec: AwayServiceSpec): Promise<AwayServiceOutcome> {
+		return this.track(installAwayService(spec, this.managerDeps()));
+	}
+
+	/**
+	 * Replaces a running daemon of an older build through the installed service, so this machine's installed build runs
+	 * under the manager: only while the install is current and its manager is present, and not again in this runtime
+	 * after a restart for the same install failed. False when the service cannot take it (the caller launches the
+	 * daemon detached); `fallback` runs, once, with why a restart did not bring a daemon of this build up. An install or
+	 * restart in flight already restarts the service, so it is joined (true).
+	 */
+	replaceDaemon(fallback: (reason: string) => void): boolean {
+		if (this.closed) return false;
+		if (this.managing) return true;
+		const host = this.host();
+		const resolution = this.resolve();
+		if (
+			!resolution.ok ||
+			!isAwayServiceCurrent(readAwayServiceRecord(resolution.spec.agentDir), resolution.spec) ||
+			awayServiceManagerAbsence(resolution.spec, host) !== undefined
+		)
+			return false;
+		const key = awayServiceDigest(resolution.spec);
+		if (this.restartFailed === key) return false;
+		void this.track(restartAwayService(resolution.spec, this.managerDeps(), OWN_DAEMON_BUILD)).then((outcome) => {
+			if (outcome.ok || this.closed) return;
+			this.restartFailed = key;
+			fallback(outcome.detail);
+		});
+		return true;
 	}
 
 	private resolve(): AwayServiceResolution {
@@ -919,7 +1009,7 @@ export class AwayService {
 		if (this.closed) return { ok: false, detail: `${REFUSAL} this session is closing.` };
 		const resolution = this.resolve();
 		if (!resolution.ok) return { ok: false, detail: `${REFUSAL} ${resolution.reason}` };
-		await this.installing;
+		await this.managing;
 		const outcome = await this.runInstall(resolution.spec);
 		if (outcome.ok) this.refused = undefined;
 		return outcome;
@@ -928,7 +1018,7 @@ export class AwayService {
 	async uninstall(): Promise<AwayServiceOutcome> {
 		const resolution = this.resolve();
 		if (!resolution.ok) return { ok: false, detail: `No always-on service applies here: ${resolution.reason}` };
-		await this.installing;
+		await this.managing;
 		return uninstallAwayService(resolution.spec, this.managerDeps());
 	}
 
@@ -947,10 +1037,10 @@ export class AwayService {
 		return awayServiceStatus(this.inspect(), resolution.ok ? resolution.spec : undefined, this.managerDeps());
 	}
 
-	/** Stops an install in flight (its manager command is aborted) and joins it. */
+	/** Stops an install or restart in flight (its manager command is aborted) and joins it. */
 	async close(): Promise<void> {
 		this.closed = true;
 		this.abort.abort();
-		await this.installing;
+		await this.managing;
 	}
 }

@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { VERSION, VERSION_SOURCE_AVAILABLE } from "../../config.ts";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { comparePackageVersions } from "../../utils/version-check.ts";
 import {
 	MIN_ROUTINE_INTERVAL_MS,
 	nextRoutineAt,
@@ -50,6 +52,11 @@ export interface PersistentBotDaemonStatus {
 	/** The daemon's own pid once it renewed; before that, the advisory pid of the process the starter spawned. */
 	readonly pid?: number;
 	readonly startedAt?: string;
+	/**
+	 * The build the daemon renewed its lease with (its package version); before its first renewal, its starter's.
+	 * Absent for a lease an earlier build wrote, which stamps none.
+	 */
+	readonly build?: string;
 	/** Absent while the daemon has not renewed its lease yet (starting). */
 	readonly lastHeartbeatAt?: number;
 	readonly lastTickAt?: number;
@@ -177,10 +184,15 @@ export function collectBotInboxEntries(
  * Earlier builds used `bot-daemon-lease.json` (see `bot-daemon-legacy.ts`). The current lease never lives there, so a
  * legacy daemon's unlocked rewrites of that file cannot displace it: the old file is read to report a legacy claim and
  * written only to release a first-generation token lease.
+ *
+ * `build` is the package version: the claim writes its starter's, and every renewal the daemon process's own, since the
+ * launch target can run newer code than the session that started it. A claim by a newer build takes over a held lease
+ * of an older one ({@link isOlderDaemonBuild}); that daemon exits as any daemon whose lease another start took.
  */
 interface DaemonLeaseRecord {
 	readonly token: string;
 	readonly startedAt: string;
+	readonly build?: string;
 	readonly launcherPid?: number;
 	readonly owner?: ProcessOwner;
 	readonly lastHeartbeatAt?: number;
@@ -189,6 +201,43 @@ interface DaemonLeaseRecord {
 }
 
 const DAEMON_LEASE_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A build stamp is a package version: short and printable; anything else in a lease reads as no stamp. */
+const DAEMON_BUILD_REGEX = /^[0-9A-Za-z.+-]{1,64}$/;
+
+function parseDaemonBuild(value: unknown): string | undefined {
+	return typeof value === "string" && DAEMON_BUILD_REGEX.test(value) ? value : undefined;
+}
+
+/** This process's build, stamped into each lease it claims or renews; undefined when no package metadata named it. */
+export const OWN_DAEMON_BUILD: string | undefined = VERSION_SOURCE_AVAILABLE ? parseDaemonBuild(VERSION) : undefined;
+
+/**
+ * Whether a lease stamped `leaseBuild` is of an older build than `own`, so a start of `own` replaces its daemon. No
+ * stamp is older (an earlier build stamps none); an equal, newer or incomparable one is not, so only a strictly newer
+ * build replaces and builds never alternate. An unknown own build replaces nothing.
+ */
+export function isOlderDaemonBuild(leaseBuild: string | undefined, own: string | undefined): boolean {
+	if (own === undefined) return false;
+	if (leaseBuild === undefined) return true;
+	const order = comparePackageVersions(leaseBuild, own);
+	return order !== undefined && order < 0;
+}
+
+/** The daemon's build for status lines, and the session's when they differ. */
+export function describeDaemonBuild(build: string | undefined, sessionBuild: string | undefined): string {
+	const running = build === undefined ? "build unstamped (an earlier build)" : `build ${build}`;
+	return build === sessionBuild ? running : `${running}; this session runs ${sessionBuild ?? "an unknown build"}`;
+}
+
+/** The daemon a newer build's claim took the lease from: it exits on observing the new lease. */
+export interface ReplacedBotDaemon {
+	readonly build?: string;
+	readonly pid?: number;
+}
+
+export function describeDaemonReplacement(replaced: ReplacedBotDaemon, own: string | undefined): string {
+	return `Replaced the daemon of ${replaced.build === undefined ? "an earlier build" : `build ${replaced.build}`}${replaced.pid !== undefined ? ` (pid ${replaced.pid})` : ""} with build ${own ?? "unknown"}; it exits on observing the new lease.`;
+}
 
 /** Whether `value` is a daemon lease token (`crypto.randomUUID()` spelling). */
 export function isDaemonLeaseToken(value: string): boolean {
@@ -273,6 +322,7 @@ function daemonLeaseOf(parsed: Record<string, unknown> | undefined): DaemonLease
 		typeof parsed.startedAt !== "string"
 	)
 		return undefined;
+	const build = parseDaemonBuild(parsed.build);
 	const launcherPid = isPositiveSafePid(parsed.launcherPid) ? parsed.launcherPid : undefined;
 	const owner = parseProcessOwner(parsed.owner);
 	const lastHeartbeatAt = finiteNumber(parsed.lastHeartbeatAt);
@@ -281,6 +331,7 @@ function daemonLeaseOf(parsed: Record<string, unknown> | undefined): DaemonLease
 	return {
 		token: parsed.token,
 		startedAt: parsed.startedAt,
+		...(build !== undefined ? { build } : {}),
 		...(launcherPid !== undefined ? { launcherPid } : {}),
 		...(owner !== undefined ? { owner } : {}),
 		...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
@@ -387,6 +438,7 @@ export function readDaemonLeaseStatus(
 		running,
 		...(pid !== undefined ? { pid } : {}),
 		startedAt: lease.startedAt,
+		...(lease.build !== undefined ? { build: lease.build } : {}),
 		...(lease.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: lease.lastHeartbeatAt } : {}),
 		...(lease.lastTickAt !== undefined ? { lastTickAt: lease.lastTickAt } : {}),
 		activeRoutines,
@@ -403,14 +455,43 @@ export function readDaemonEnd(storeFilePath: string): BotDaemonEnd | undefined {
 	return daemonLeaseOf(parsed) ? undefined : parseDaemonEnd(parsed?.end);
 }
 
-/** Takes the lease for a daemon about to be started with `token`; false while another holder keeps it. */
-export function claimDaemonLeaseFile(storeFilePath: string, token: string, nowMs = Date.now()): boolean {
+export type DaemonLeaseClaim =
+	| { readonly claimed: false }
+	| { readonly claimed: true; readonly replaced?: ReplacedBotDaemon };
+
+/**
+ * Takes the lease for a daemon of `build` about to be started with `token`; not claimed while another holder of the
+ * same or a newer build keeps it. A held lease of an older build is taken over under the same lock (`replaced`), so no
+ * other start can claim between; its daemon exits on observing the new token, and its reports are kept, after one
+ * naming the replacement.
+ */
+export function claimDaemonLeaseFile(
+	storeFilePath: string,
+	token: string,
+	build: string | undefined,
+	nowMs = Date.now(),
+): DaemonLeaseClaim {
 	const leasePath = daemonLeasePath(storeFilePath);
 	return withLeaseLock(leasePath, () => {
 		const current = readDaemonLease(leasePath);
-		if (current && isDaemonLeaseHeld(current, nowMs)) return false;
-		writeDaemonLease(leasePath, { token, startedAt: new Date(nowMs).toISOString() });
-		return true;
+		const held = current !== undefined && isDaemonLeaseHeld(current, nowMs);
+		if (held && !isOlderDaemonBuild(current.build, build)) return { claimed: false };
+		const pid = held ? (current.owner?.pid ?? current.launcherPid) : undefined;
+		const replaced: ReplacedBotDaemon | undefined = held
+			? { ...(current.build !== undefined ? { build: current.build } : {}), ...(pid !== undefined ? { pid } : {}) }
+			: undefined;
+		const reports = replaced
+			? [...(current?.reports ?? []), { at: nowMs, message: describeDaemonReplacement(replaced, build) }].slice(
+					-MAX_DAEMON_REPORTS,
+				)
+			: [];
+		writeDaemonLease(leasePath, {
+			token,
+			startedAt: new Date(nowMs).toISOString(),
+			...(build !== undefined ? { build } : {}),
+			...(reports.length > 0 ? { reports } : {}),
+		});
+		return { claimed: true, ...(replaced ? { replaced } : {}) };
 	});
 }
 
@@ -423,18 +504,29 @@ export function recordDaemonLaunchPidFile(storeFilePath: string, token: string, 
 	});
 }
 
-/** The daemon's renewal: true while the lease is still `token`'s, false once released or claimed by another start. */
+/**
+ * The daemon's renewal, stamping its own process identity and `build`: true while the lease is still `token`'s, false
+ * once released or claimed by another start.
+ */
 export function renewDaemonLeaseFile(
 	storeFilePath: string,
 	token: string,
 	owner: ProcessOwner,
+	build: string | undefined,
 	nowMs = Date.now(),
 ): boolean {
 	const leasePath = daemonLeasePath(storeFilePath);
 	return withLeaseLock(leasePath, () => {
 		const current = readDaemonLease(leasePath);
 		if (current?.token !== token) return false;
-		writeDaemonLease(leasePath, { ...current, owner, lastHeartbeatAt: nowMs, lastTickAt: nowMs });
+		const { build: _starterBuild, ...rest } = current;
+		writeDaemonLease(leasePath, {
+			...rest,
+			...(build !== undefined ? { build } : {}),
+			owner,
+			lastHeartbeatAt: nowMs,
+			lastTickAt: nowMs,
+		});
 		return true;
 	});
 }

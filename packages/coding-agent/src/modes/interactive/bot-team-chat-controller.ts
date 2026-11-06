@@ -1,5 +1,6 @@
 import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
+import { describeDaemonBuild, OWN_DAEMON_BUILD } from "../../core/delegation/bot-team-routine-helpers.ts";
 import {
 	type ActiveChatTarget,
 	type BotOperatorMessageDispatchResult,
@@ -1084,7 +1085,7 @@ export class BotTeamChatController {
 						: "";
 				const lines = [
 					status.running
-						? `Detached bot daemon running (${status.pid === undefined ? "" : `pid ${status.pid}, `}${counts}).${legacyNote}`
+						? `Detached bot daemon running (${status.pid === undefined ? "" : `pid ${status.pid}, `}${describeDaemonBuild(status.build, OWN_DAEMON_BUILD)}, ${counts}).${legacyNote}`
 						: `Detached bot daemon stopped (${counts}).${endNote}${legacyNote}`,
 					...status.awayRefusals.map(
 						(refusal) => `Routine ${refusal.routineId} was not run away: ${refusal.reason}`,

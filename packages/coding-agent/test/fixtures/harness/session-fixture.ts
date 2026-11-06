@@ -32,6 +32,7 @@ import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usa
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../../../src/core/cost/usage-records.ts";
 import { type BotDaemonRun, startBotDaemon } from "../../../src/core/delegation/bot-daemon.ts";
 import { BOT_DAEMON_COMMAND } from "../../../src/core/delegation/bot-daemon-command.ts";
+import { OWN_DAEMON_BUILD } from "../../../src/core/delegation/bot-team-routine-helpers.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
@@ -2541,6 +2542,7 @@ export class HarnessProcesses {
 			token,
 			timers: this.timers,
 			owner: ownProcessOwner(),
+			build: waiter.options.build ?? OWN_DAEMON_BUILD,
 			...this.credentials(),
 			...(waiter.options.eventSources ? { eventSources: waiter.options.eventSources } : {}),
 			...(waiter.options.channelProviders ? { channelProviders: waiter.options.channelProviders } : {}),
@@ -2591,6 +2593,8 @@ export interface HarnessBotDaemonOptions {
 	readonly eventSources?: AwayEventSourceFactory;
 	/** The transports of the channels the daemon serves while no session is open (the entry's built-in ones). */
 	readonly channelProviders?: AwayChannelProviderFactory;
+	/** The build the daemon's renewals stamp, as a process of another pi version would; this build's by default. */
+	readonly build?: string;
 }
 
 /** A launched daemon running its production body in process: `stop` sends its process SIGTERM and joins the stop. */

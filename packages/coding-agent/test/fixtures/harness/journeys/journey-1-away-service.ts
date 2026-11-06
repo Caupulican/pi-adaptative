@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { expect } from "vitest";
 import { APP_NAME } from "../../../../src/config.ts";
+import { isOlderDaemonBuild, OWN_DAEMON_BUILD } from "../../../../src/core/delegation/bot-team-routine-helpers.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import type { OrchestrationProfile } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
@@ -29,13 +30,15 @@ const REFUSAL = /^Routines away cannot start at login: /;
  * Always-on routines away (`routines.away.autostart`): the user service definitions render exactly for each platform;
  * `on` with no service manager is refused once and not retried; `notify` tells the owner once per agent directory and
  * runs nothing; `on` with the manager present installs at session start with exactly the manager's commands in order,
- * and a later save finds it current and runs none.
+ * and a later save finds it current and runs none. A session of a newer build replaces a live daemon of an older build
+ * and leaves one of its own or a newer build alone.
  */
 export async function runJourney1AwayService(world: HarnessWorld, profile: OrchestrationProfile): Promise<void> {
 	renderWitness();
 	const onDir = `${world.agentDir}-away-service-on`;
 	const notifyDir = `${world.agentDir}-away-service-notify`;
-	for (const agentDir of [onDir, notifyDir])
+	const buildDir = `${world.agentDir}-daemon-build`;
+	for (const agentDir of [onDir, notifyDir, buildDir])
 		new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
 			profile,
 			"global",
@@ -165,6 +168,55 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 	} finally {
 		world.io.rmSync(managerMarker, { recursive: true, force: true });
 	}
+
+	// An upgrade: a session start finding a live daemon of an older build replaces it with one launch, and the older
+	// daemon exits on observing the new lease; one of this build is not restarted, and one of a newer build (this
+	// session is the older one) is left alone. No install is current here, so the replacement launches detached.
+	const own = OWN_DAEMON_BUILD;
+	if (own === undefined) throw new Error("The harness runs a build with no package version");
+	const older = "0.0.0-older";
+	const newer = `${Number.parseInt(own, 10) + 1}.0.0`;
+	expect([isOlderDaemonBuild(older, own), isOlderDaemonBuild(own, newer), isOlderDaemonBuild(own, own)]).toEqual([
+		true,
+		true,
+		false,
+	]);
+	const launchesBefore = world.processes.botDaemonLaunches.length;
+	const launches = () => world.processes.botDaemonLaunches.length - launchesBefore;
+	const leaseOf = (session: Awaited<ReturnType<typeof open>>["session"]) =>
+		session.backgroundLanes.getBotTeamStore().getDaemonStatus(world.timers.port("routines").now());
+	const olderLaunch = world.processes.runNextBotDaemon({ build: older });
+	const first = await open(buildDir, "off");
+	await save(first.session, "daemon-build-older");
+	expect(launches(), "the save launched the older build's daemon").toBe(1);
+	const olderDaemon = await olderLaunch;
+	expect(leaseOf(first.session).build, "its renewal stamps its own build").toBe(older);
+	expect(await world.disposeSessionInBody(first.session)).toBeUndefined();
+	const currentDaemon = world.processes.runNextBotDaemon();
+	const upgraded = await open(buildDir, "off");
+	expect(launches(), "the upgraded session start launched exactly one daemon").toBe(2);
+	expect(await withDeadline(world.trace, "the older daemon exits", olderDaemon.exited)).toBe(0);
+	const current = await currentDaemon;
+	const replacedLease = leaseOf(upgraded.session);
+	expect(upgraded.session.backgroundLanes.getBotTeamStore().daemonLeaseBelongsTo(current.launch.token)).toBe(true);
+	expect(replacedLease.build).toBe(own);
+	expect(
+		replacedLease.reports.filter((report) => report.message.startsWith(`Replaced the daemon of build ${older} `)),
+		"the replacement is reported once",
+	).toHaveLength(1);
+	const same = await open(buildDir, "off");
+	expect(launches(), "a daemon of this build is not restarted").toBe(2);
+	expect(await current.stop()).toBe(0);
+	const newerDaemon = world.processes.runNextBotDaemon({ build: newer });
+	expect(same.session.backgroundLanes.startPersistentBotDaemon().started).toBe(true);
+	const newest = await newerDaemon;
+	await save(upgraded.session, "daemon-build-newer");
+	expect(launches(), "a daemon of a newer build is left alone").toBe(3);
+	expect(same.session.backgroundLanes.getBotTeamStore().daemonLeaseBelongsTo(newest.launch.token)).toBe(true);
+	expect(leaseOf(same.session).build).toBe(newer);
+	expect(await newest.stop()).toBe(0);
+	for (const session of [upgraded.session, same.session])
+		expect(await world.disposeSessionInBody(session)).toBeUndefined();
 }
 
 /** Each platform's definition from explicit inputs: absolute paths with a space, `%` and `$`, quoted for its manager. */

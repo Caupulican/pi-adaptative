@@ -8,9 +8,10 @@
  * routine is saved (see `BackgroundLaneController`). The owner's user service runs `pi --bot-daemon <agentDir>` at
  * login (see `away-service.ts`): that form claims the lease itself, and exits at once while another daemon holds it.
  * The daemon renews that lease while it is still its own and stops
- * as soon as it is not: released by `/bot daemon stop`, or claimed by a later start after this daemon's lease went
- * stale. Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
- * Each renewal records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn
+ * as soon as it is not: released by `/bot daemon stop`, claimed by a later start after this daemon's lease went
+ * stale, or taken over by the start of a newer build (an upgrade replaces the daemon of the build it upgraded from).
+ * Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
+ * Each renewal records the daemon's own process identity (pid, start time, host) and build; the pid the starter recorded at spawn
  * may be a launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it
  * in the shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`), reloads the owner's settings and
  * wakes the away supervisor and the channel hosts, which is when a parent session's or a channel's holder can have died.
@@ -50,6 +51,7 @@ import {
 	type BotDaemonReport,
 	daemonLeasePath,
 	isDaemonLeaseToken,
+	OWN_DAEMON_BUILD,
 } from "./bot-team-routine-helpers.ts";
 import { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
@@ -83,6 +85,8 @@ export interface BotDaemonInput {
 	readonly timers: TimerSource;
 	/** The identity each renewal records. */
 	readonly owner: ProcessOwner;
+	/** The build each renewal records (this process's package version); a newer build's start replaces the daemon. */
+	readonly build: string | undefined;
 	/**
 	 * Shared credential owners, when the host has them (the daemon process always does); otherwise each parent run away
 	 * builds them as the SDK does. Shared ones are reloaded when the owner's files change.
@@ -109,7 +113,7 @@ export interface BotDaemonRun {
 
 /** Starts the daemon for `token`; it runs until its lease is no longer its own or it is stopped. */
 export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
-	const { agentDir, token, timers, owner } = input;
+	const { agentDir, token, timers, owner, build } = input;
 	const clock = timers.port("routines");
 	const pending: BotDaemonReport[] = [];
 	let store: PersistentBotTeamStore | undefined;
@@ -212,7 +216,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		if (stopping) return;
 		const now = clock.now();
 		try {
-			if (!routineStore.renewDaemonLease(token, owner, now)) {
+			if (!routineStore.renewDaemonLease(token, owner, build, now)) {
 				void stop();
 				return;
 			}
@@ -269,7 +273,8 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
  * process entry supplies the event sources and the channel transports.
  *
  * `pi --bot-daemon <agentDir>` is the user service's form (see `away-service.ts`): no session started it, so it claims
- * the lease itself through the claim a session's start uses, and exits 0 at once while a live daemon holds it. On
+ * the lease itself through the claim a session's start uses (replacing a live daemon of an older build), and exits 0 at
+ * once while a live daemon of the same or a newer build holds it. On
  * POSIX it then runs the daemon in this process, which the service manager supervises. On Windows it launches the
  * daemon detached and hidden exactly as a session does and exits: the scheduled task's console process would
  * otherwise keep a console window open for the daemon's whole life.
@@ -349,6 +354,7 @@ function runClaimedBotDaemon(
 		token,
 		timers: SYSTEM_TIMER_SOURCE,
 		owner: ownProcessOwner(),
+		build: OWN_DAEMON_BUILD,
 		authStorage,
 		modelRegistry,
 		...(options.eventSources ? { eventSources: options.eventSources } : {}),

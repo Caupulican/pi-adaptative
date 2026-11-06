@@ -49,6 +49,7 @@ import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegatio
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
+import { isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
 	createForegroundTranscriptWrites,
 	type ForegroundTranscriptWriteDeps,
@@ -320,6 +321,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _daemonRevision: number | undefined;
 	/** The last reason the daemon could not be started by itself, reported once until it changes. */
 	private _daemonStartFailure: string | undefined;
+	/** The lease token of the daemon this runtime last launched: one it never replaces for its build. */
+	private _launchedDaemonToken: string | undefined;
 	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
 	private _awayChannelsKey: string | undefined;
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
@@ -1807,7 +1810,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Brings the detached daemon up by itself, with no command: at session start and on every routine save, while an
-	 * enabled routine or a channel served away (`channels.<name>.awayCwd`) exists and no daemon holds the lease. The
+	 * enabled routine or a channel served away (`channels.<name>.awayCwd`) exists and no daemon holds the lease, or the
+	 * one holding it is of an older build (an upgrade replaces it; one of the same or a newer build is left alone). The
 	 * claim is idempotent across sessions and processes, so only one start launches. A worker process never starts one.
 	 * A reason the daemon cannot start is reported once. The same points apply `routines.away.autostart` (see
 	 * `away-service.ts`), for the same work.
@@ -1823,7 +1827,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			const status = store.getDaemonStatus(this.deps.getTimers().port("routines").now());
 			this._awayChannelsKey = awayChannelsKey(this.deps.getSettingsManager());
 			awayWork = status.activeRoutines + awayChannels(this.deps.getSettingsManager()).length;
-			if (!status.running && awayWork > 0) {
+			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
+			// older than this session, and a relaunch would run the same build again.
+			const ownLaunch =
+				this._launchedDaemonToken !== undefined && store.daemonLeaseBelongsTo(this._launchedDaemonToken);
+			const replace = status.running && !ownLaunch && isOlderDaemonBuild(status.build, OWN_DAEMON_BUILD);
+			// A current always-on install is restarted through its manager, so the new build runs supervised; when that
+			// fails (reported once), or without one, the daemon is launched detached.
+			const fallback = (reason: string) => {
+				this._safeWarn(`${reason} The daemon is started detached instead.`);
+				const started = this.startPersistentBotDaemon();
+				if (!started.started && !started.held) this._safeWarn(started.detail);
+			};
+			if (awayWork > 0 && (!status.running || (replace && !this.getAwayService().replaceDaemon(fallback)))) {
 				const started = this.startPersistentBotDaemon();
 				if (!started.started && !started.held) failure = started.detail;
 			}
@@ -1943,12 +1959,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * previous daemon that ended on an error is reported once, by the start that replaces it.
 	 */
 	startPersistentBotDaemon(): BotDaemonLaunchResult {
-		return launchDetachedBotDaemon({
+		const launch = launchDetachedBotDaemon({
 			store: this.getBotTeamStore(),
 			clock: this.deps.getTimers().port("routines"),
 			cwd: this.deps.getCwd(),
 			warn: (message) => this._safeWarn(message),
 		});
+		if (launch.token !== undefined) this._launchedDaemonToken = launch.token;
+		return launch;
 	}
 
 	/**

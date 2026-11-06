@@ -15,6 +15,7 @@ import type { EdgeClass, EdgeGrantSource, EdgeGrantView } from "../autonomy/edge
 import type { AwayChannelStatus } from "../channels/away-channels.ts";
 import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
+import { OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { HostEventConnectionView } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
@@ -90,6 +91,10 @@ export interface RoutinesStatus {
 export interface AwayDaemonStatusView {
 	readonly running: boolean;
 	readonly pid?: number;
+	/** The build the running daemon renewed its lease with; absent when not running or for an earlier build. */
+	readonly build?: string;
+	/** This session's build: a running daemon of an older one is replaced at the next session start or routine save. */
+	readonly sessionBuild?: string;
 	readonly lastHeartbeatAt?: number;
 	readonly lastTickAt?: number;
 	readonly activeRoutines: number;
@@ -421,6 +426,8 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			return available({
 				running: daemon.running,
 				...(daemon.pid !== undefined ? { pid: daemon.pid } : {}),
+				...(daemon.running && daemon.build !== undefined ? { build: daemon.build } : {}),
+				...(OWN_DAEMON_BUILD !== undefined ? { sessionBuild: OWN_DAEMON_BUILD } : {}),
 				...(daemon.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: daemon.lastHeartbeatAt } : {}),
 				...(daemon.lastTickAt !== undefined ? { lastTickAt: daemon.lastTickAt } : {}),
 				activeRoutines: daemon.activeRoutines,

@@ -1,5 +1,6 @@
 /** The `/status` text of a {@link SessionAutonomyStatus}: one block per section, an unavailable one with its reason. */
 
+import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
@@ -42,7 +43,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			),
 		]),
 		...block("Away daemon", status.awayDaemon, (value) => [
-			`${value.running ? "running" : "not running"}${value.pid !== undefined ? ` (pid ${value.pid})` : ""}, heartbeat ${at(value.lastHeartbeatAt)}, ${value.activeRoutines} active, ${value.dueRoutines} due`,
+			`${value.running ? "running" : "not running"}${value.pid !== undefined ? ` (pid ${value.pid})` : ""}${value.running ? `, ${describeDaemonBuild(value.build, value.sessionBuild)}` : ""}, heartbeat ${at(value.lastHeartbeatAt)}, ${value.activeRoutines} active, ${value.dueRoutines} due`,
 			`away ${value.settings.enabled ? "on" : "off"}: spent $${value.spentUsd.toFixed(2)} of $${value.settings.maxUsdPerDay.toFixed(2)} (24 h), $${value.settings.maxUsdPerRun.toFixed(2)} per run, ${value.settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
 			`parents hosted: ${value.hostedParents.status === "available" ? value.hostedParents.value : `unavailable: ${value.hostedParents.reason}`}`,
 			value.service.status === "available"
