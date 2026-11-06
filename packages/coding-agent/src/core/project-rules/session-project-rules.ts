@@ -36,6 +36,8 @@ export interface SessionProjectRulesDeps {
 	getOwnerRulePolicies(): readonly OwnerRulePolicy[];
 	/** The session's semantic engine in its batched shape (traces included); absent means only deterministic rules run. */
 	getDecisionEngine(): DecisionEngine | undefined;
+	/** System One is configured for the session: without an engine, its rules name the configuration fault. */
+	isSystemOneConfigured(): boolean;
 	/** Durable sink for queued RepairWork. */
 	recordRepairWork(repair: RuleRepairWork): void;
 	/** Bounded operator-visible notice for a violation or semantic advice. */
@@ -101,6 +103,7 @@ export class SessionProjectRules {
 			initialRules: rules,
 			// The session's engine at the moment a rule is judged, not the one bound when the rules compiled.
 			getDecisionEngine: () => this.deps.getDecisionEngine(),
+			isSystemOneConfigured: () => this.deps.isSystemOneConfigured(),
 		});
 		this.compiledSignature = signature;
 		return this.controller;

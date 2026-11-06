@@ -14,7 +14,7 @@ import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/f
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import { formatRouteValue, shortModelName } from "../../../core/route-text.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
-import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
+import { type SemanticPlaneHealth, semanticPlaneHealthValue } from "../../../core/system-one/semantic-plane-health.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 
 export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
@@ -336,8 +336,8 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		evaluations: evaluations.length,
 		doing: inFlight
 			? `judging ${inFlight.label}`
-			: health.state === "unbound"
-				? "off"
+			: health.state === "unbound" || health.state === "no-engine"
+				? semanticPlaneHealthValue({ state: health.state })
 				: projection.phase === "done"
 					? "delivered"
 					: projection.control.owner === "system_one"

@@ -45,7 +45,6 @@ import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
-import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
@@ -190,6 +189,7 @@ import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { getSessionRole } from "./session-role.ts";
+import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
@@ -242,8 +242,11 @@ export interface BackgroundLaneControllerDeps
 	waitForForegroundIdle(): Promise<void>;
 	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
 	markGoalToolUnavailable(): void;
-	/** The session's bound System One engine, if any: routine intake judges with it before the session model. */
-	getSystemOneEngine(): SemanticDecisionEngine | undefined;
+	/**
+	 * The session's semantic plane: its bound engine, if any (routine intake judges with it before the session model),
+	 * and whether System One is configured without one (`/status`).
+	 */
+	readonly systemOne: Pick<SessionSemanticPlaneController, "recordingSemanticEngine" | "configured">;
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
@@ -381,7 +384,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._laneModels,
 		);
 		this._proactivity = new ProactivityController(
-			{ ...deps, timers: deps.getTimers().port("proactivity") },
+			{
+				...deps,
+				timers: deps.getTimers().port("proactivity"),
+				getSystemOneEngine: () => deps.systemOne.recordingSemanticEngine(),
+			},
 			this._laneModels,
 		);
 		this._fitness = new ModelFitnessController(deps, this._laneModels);
@@ -1680,7 +1687,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				return this.deps.getSettingsManager().getRoutinesSettings().automaticIntake ? undefined : "disabled";
 			},
 			model: () => this._laneModels.resolveModel(undefined),
-			systemOne: () => this.deps.getSystemOneEngine(),
+			systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
 			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
 			maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
@@ -1927,6 +1934,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			memory,
 			standingGrants: getEdgeGrants ? () => getEdgeGrants(true) : undefined,
 			foregroundRun,
+			systemOne: this.deps.systemOne,
 		});
 	}
 

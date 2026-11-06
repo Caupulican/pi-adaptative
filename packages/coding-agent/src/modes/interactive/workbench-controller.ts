@@ -18,7 +18,7 @@ import {
 	evaluationResultText,
 	type SemanticEvaluationRecord,
 } from "../../core/system-one/semantic-evaluation-ledger.ts";
-import type { SemanticPlaneHealth } from "../../core/system-one/semantic-plane-health.ts";
+import { type SemanticPlaneHealth, semanticPlaneHealthValue } from "../../core/system-one/semantic-plane-health.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
 import { formatCompactDuration } from "../../core/util/format-duration.ts";
 import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "../../kernel/index.ts";
@@ -751,7 +751,12 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 						? `last: ${facts.last.label}${lastResult ? ` · ${lastResult}` : ""}`
 						: `${facts.last.outcome}: ${facts.last.label}`,
 				)
-			: theme.fg("dim", facts.health.state === "unbound" ? "off" : "ready");
+			: facts.health.state === "unbound" || facts.health.state === "no-engine"
+				? theme.fg(
+						facts.health.state === "no-engine" ? "warning" : "dim",
+						semanticPlaneHealthValue({ state: facts.health.state }),
+					)
+				: theme.fg("dim", "ready");
 	const glyph = evaluating ? theme.fg(SYSTEM_ONE_TONE, "◆") : theme.fg("muted", "◇");
 	// The session executing is the default and needs no word; only a handover is worth one.
 	const control =

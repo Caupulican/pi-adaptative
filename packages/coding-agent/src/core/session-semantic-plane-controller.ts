@@ -292,7 +292,7 @@ export class SessionSemanticPlaneController {
 
 	/** Observed health of this session's semantic plane. */
 	getSemanticPlaneHealth(): SemanticPlaneHealth {
-		return this.health.getHealth(Boolean(this.steeringPlane?.decisionEngine));
+		return this.health.getHealth(Boolean(this.steeringPlane?.decisionEngine), this.configured);
 	}
 
 	/** Live semantic uncertainty decisions, scoped to this root session by the health recorder. */

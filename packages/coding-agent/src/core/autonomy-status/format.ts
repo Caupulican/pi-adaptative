@@ -1,6 +1,7 @@
 /** The `/status` text of a {@link SessionAutonomyStatus}: one block per section, an unavailable one with its reason. */
 
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
+import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
 import type { ToolDecision } from "./tool-manifest.ts";
 
@@ -112,6 +113,9 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 		...block("Authority", status.authority, (value) => [
 			`run: ${value.run.state === "idle" ? "idle" : `${value.run.authority}${value.run.origin ? ` (${value.run.origin})` : ""}`}, edge ${value.edgeMode}, third-party classes: ${value.thirdPartyAllow.join(", ") || "none"}`,
 			...list(value.standingGrants, (grant) => `standing grant ${grant.class} (${grant.source})`),
+		]),
+		...block("System One", status.systemOne, (value) => [
+			value.state === "no-engine" ? `no engine: ${SYSTEM_ONE_NO_ENGINE_CAUSE}` : value.state,
 		]),
 		...block("Recent runs", status.runs, (runs) =>
 			runs.flatMap((run) => [

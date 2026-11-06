@@ -5,6 +5,7 @@ import {
 	type SemanticDecisionTrace,
 	type SemanticTraceJudgment,
 } from "../system-one/semantic-evaluation-ledger.ts";
+import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
@@ -254,15 +255,19 @@ export class SemanticProjectRuleController {
 	readonly registry: SemanticRuleRegistry;
 	/** Resolved at every evaluation: an engine bound after the rules compiled is the one that judges them. */
 	private readonly getDecisionEngine: () => DecisionEngine | undefined;
+	/** Whether System One is configured for the session, so a missing engine is named as its configuration fault. */
+	private readonly isSystemOneConfigured: () => boolean;
 	private readonly repairLog: Array<{ ruleId: string; summary: string; timestamp: string }> = [];
 
 	constructor(deps: {
 		registry?: SemanticRuleRegistry;
 		getDecisionEngine?: () => DecisionEngine | undefined;
+		isSystemOneConfigured?: () => boolean;
 		initialRules?: readonly SemanticRule[];
 	}) {
 		this.registry = deps.registry ?? new SemanticRuleRegistry();
 		this.getDecisionEngine = deps.getDecisionEngine ?? (() => undefined);
+		this.isSystemOneConfigured = deps.isSystemOneConfigured ?? (() => false);
 
 		if (deps.initialRules) {
 			this.registry.registerAll(deps.initialRules);
@@ -442,7 +447,12 @@ export class SemanticProjectRuleController {
 			unavailable: reason.slice(0, 500),
 		});
 		const engine = this.getDecisionEngine();
-		if (!engine) return unjudged("no System One engine is configured for this session");
+		if (!engine)
+			return unjudged(
+				this.isSystemOneConfigured()
+					? SYSTEM_ONE_NO_ENGINE_CAUSE
+					: "no System One engine is configured for this session",
+			);
 		let evaluation: Awaited<ReturnType<DecisionEngine["evaluate"]>>;
 		try {
 			evaluation = await engine.evaluate(

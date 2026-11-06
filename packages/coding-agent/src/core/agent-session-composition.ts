@@ -74,6 +74,7 @@ import {
 } from "./project-rules/session-project-rules.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
+import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import type { SessionWorkState } from "./session-work-state.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
@@ -252,7 +253,8 @@ export interface SessionProjectRulesWiringDeps {
 		getAdmittedAgentsRuleSources?(): readonly TrustedRuleSource[] | undefined;
 	};
 	readonly ownerRules: Pick<DurableOwnerRuleStore, "list">;
-	getDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined;
+	/** The session's semantic plane: its batched engine, and whether System One is configured without one. */
+	readonly systemOne: Pick<SessionSemanticPlaneController, "semanticDecisionEngine" | "configured">;
 	readonly sessionManager: Pick<SessionManager, "appendCustomEntry">;
 	emit(event: AgentSessionEvent): void;
 	getSystemOneController(): Pick<SystemOneController, "noteControlDirective"> | undefined;
@@ -272,7 +274,8 @@ export function createSessionProjectRules(deps: SessionProjectRulesWiringDeps): 
 				.agentsFiles.flatMap((file) => (file.content ? [{ path: file.path, content: file.content }] : []));
 		},
 		getOwnerRulePolicies: () => deps.ownerRules.list(),
-		getDecisionEngine: () => deps.getDecisionEngine(),
+		getDecisionEngine: () => deps.systemOne.semanticDecisionEngine(),
+		isSystemOneConfigured: () => deps.systemOne.configured,
 		recordRepairWork: (repair) => {
 			deps.sessionManager.appendCustomEntry(PROJECT_RULE_REPAIR_CUSTOM_TYPE, repair);
 		},

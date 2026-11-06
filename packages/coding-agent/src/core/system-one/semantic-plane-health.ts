@@ -2,7 +2,8 @@
  * Observed health of the session's semantic plane, and the ledger of what it evaluated.
  *
  * Health is what actually happened to the last evaluation, not a constant. A session with no plane
- * reports `unbound`; a bound plane that has never been asked reports `unknown`; a plane with an
+ * reports `unbound`, or `no-engine` when System One is configured for it but no decision engine was
+ * supplied (a configuration fault, not off); a bound plane that has never been asked reports `unknown`; a plane with an
  * evaluation in flight reports `evaluating`; a plane whose last evaluation threw reports `degraded`.
  * Nothing here renders a state the runtime did not earn.
  *
@@ -37,7 +38,15 @@ import {
 	semanticQuestionNamespace,
 } from "./semantic-evaluation-ledger.ts";
 
-export type SemanticPlaneHealthState = "unbound" | "unknown" | "evaluating" | "ok" | "degraded";
+/**
+ * The `no-engine` configuration fault in words: System One is on and the session was given a controller or a
+ * steering plane, but no decision engine is bound (`SessionSemanticPlaneController.configured` without
+ * `recordingSemanticEngine`).
+ */
+export const SYSTEM_ONE_NO_ENGINE_CAUSE =
+	"System One is configured for this session but no decision engine was supplied";
+
+export type SemanticPlaneHealthState = "unbound" | "no-engine" | "unknown" | "evaluating" | "ok" | "degraded";
 
 export interface SemanticPlaneHealth {
 	readonly state: SemanticPlaneHealthState;
@@ -258,10 +267,13 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		return this.listeners.subscribe(listener);
 	}
 
-	/** `bound` is whether a semantic plane exists at all for this session. */
-	getHealth(bound: boolean): SemanticPlaneHealth {
+	/**
+	 * `bound` is whether a semantic plane exists at all for this session; `configured`, whether System One is configured
+	 * for it, so an unbound plane of a configured session is the `no-engine` fault rather than `unbound`.
+	 */
+	getHealth(bound: boolean, configured = false): SemanticPlaneHealth {
 		this.refreshSession();
-		return { ...this.healthSnapshot(bound), unresolvedDoubts: this.doubts.snapshot() };
+		return { ...this.healthSnapshot(bound, configured), unresolvedDoubts: this.doubts.snapshot() };
 	}
 
 	/** Advisory work remains visible in whole-plane health without taking root submission authority. */
@@ -397,8 +409,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		}
 	}
 
-	private healthSnapshot(bound: boolean): SemanticPlaneHealth {
-		if (!bound) return { state: "unbound" };
+	private healthSnapshot(bound: boolean, configured: boolean): SemanticPlaneHealth {
+		if (!bound) return { state: configured ? "no-engine" : "unbound" };
 		const open = [...this.open.values()].filter(
 			(record) => this.evaluationSessions.get(record.evaluationId) === this.sessionId,
 		);
@@ -486,14 +498,13 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	}
 }
 
-/**
- * The operator label for a health state, as the normal-mode POV bar shows it. Every state has a
- * word an operator can act on; there is deliberately no "?" state.
- */
 /** The short name the operator bar shows System One under. */
 export const SYSTEM_ONE_BAR_LABEL = "S1";
 
-/** The state word for a health state, without the System One label. */
+/**
+ * The state word for a health state, without the System One label. Every state has a word an operator can act on;
+ * there is deliberately no "?" state.
+ */
 export function semanticPlaneHealthValue(health: SemanticPlaneHealth): string {
 	let value: string;
 	switch (health.state) {
@@ -511,6 +522,9 @@ export function semanticPlaneHealthValue(health: SemanticPlaneHealth): string {
 			break;
 		case "unknown":
 			value = "ready";
+			break;
+		case "no-engine":
+			value = "no engine";
 			break;
 		default:
 			value = "off";

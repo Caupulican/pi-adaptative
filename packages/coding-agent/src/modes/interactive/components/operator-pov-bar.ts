@@ -104,15 +104,16 @@ function paintGauge(bar: string): string {
 }
 
 /**
- * System One in words, only when it is doing or needing something: judging (accent), degraded with the reason, or
- * holding uncertain judgments. A healthy or idle System One says nothing; an abbreviation and a dot at rest told
- * the operator nothing they could act on.
+ * System One in words, only when it is doing or needing something: judging (accent), degraded with the reason,
+ * configured with no decision engine, or holding uncertain judgments. A healthy, idle or off System One says nothing;
+ * an abbreviation and a dot at rest told the operator nothing they could act on.
  */
 function systemOneStyled(health: SemanticPlaneHealth): string | undefined {
 	const doubts = health.unresolvedDoubts?.length ?? 0;
 	if (health.state === "evaluating")
 		return theme.fg("accent", `◆ System One judging${doubts ? ` · ${doubts} uncertain` : ""}`);
-	if (health.state === "degraded") return theme.fg("warning", `System One ${semanticPlaneHealthValue(health)}`);
+	if (health.state === "degraded" || health.state === "no-engine")
+		return theme.fg("warning", `System One ${semanticPlaneHealthValue(health)}`);
 	if (doubts) return theme.fg("warning", `System One · ${doubts} uncertain`);
 	return undefined;
 }

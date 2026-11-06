@@ -1,9 +1,10 @@
 /**
  * The session's automatic work at one instant, read from each owner's own accessors: routines, the away daemon,
  * host-event sources, acting ahead, proactive review, channels, outward drafts, harness notices, knowledge collection,
- * standing grants with the run's authority, and the recent runs' tool manifests. It is a projection, never a source of
- * truth: it builds no owner, writes nothing, takes nothing a model reported, and decides nothing. A section whose owner
- * is not loaded, or whose read fails, is `unavailable` with the reason; every list is bounded with an omitted count.
+ * standing grants with the run's authority, System One's configuration, and the recent runs' tool manifests. It is a
+ * projection, never a source of truth: it builds no owner, writes nothing, takes nothing a model reported, and decides
+ * nothing. A section whose owner is not loaded, or whose read fails, is `unavailable` with the reason; every list is
+ * bounded with an omitted count.
  */
 
 import { existsSync } from "node:fs";
@@ -40,6 +41,7 @@ import {
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import type { SessionSemanticPlaneController } from "../session-semantic-plane-controller.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { TurnAuthority, TurnOriginKind } from "../turn-origin.ts";
 import type { RunToolManifest } from "./tool-manifest.ts";
@@ -219,6 +221,14 @@ export interface AuthorityStatus {
 	readonly thirdPartyAllow: readonly EdgeClass[];
 }
 
+/**
+ * Whether System One can judge in this session: `on` with a decision engine bound, `no-engine` when it is configured
+ * with none (the configuration fault the POV bar shows as "no engine"), `off` when it is not configured.
+ */
+export interface SystemOneStatus {
+	readonly state: "on" | "no-engine" | "off";
+}
+
 export interface SessionAutonomyStatus {
 	readonly v: 1;
 	readonly at: string;
@@ -233,6 +243,7 @@ export interface SessionAutonomyStatus {
 	readonly harnessNotices: StatusSection<HarnessNoticesStatus>;
 	readonly knowledgeCollection: StatusSection<KnowledgeCollectionStatus>;
 	readonly authority: StatusSection<AuthorityStatus>;
+	readonly systemOne: StatusSection<SystemOneStatus>;
 	/** The recent runs' tool manifests, newest first (`tool-manifest.ts`). */
 	readonly runs: StatusSection<readonly RunToolManifest[]>;
 }
@@ -290,6 +301,8 @@ export interface AutonomyStatusSources {
 	/** The standing grants (`/edge allow` and `edge.thirdPartyAllow`); undefined where the session supplies none. */
 	readonly standingGrants: (() => readonly EdgeGrantView[]) | undefined;
 	readonly foregroundRun: Pick<ForegroundRecoveryController, "turnOrigin" | "toolManifests">;
+	/** Read from its live getters only: the decision ledger is never opened for it. */
+	readonly systemOne: Pick<SessionSemanticPlaneController, "recordingSemanticEngine" | "configured">;
 }
 
 function bounded<T>(items: readonly T[], limit = AUTONOMY_STATUS_LIST_LIMIT): BoundedList<T> {
@@ -596,6 +609,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		}),
 		section<readonly RunToolManifest[]>(() => available(run.toolManifests.list())),
 	]);
+	const systemOne = await section<SystemOneStatus>(() =>
+		available({
+			state: sources.systemOne.recordingSemanticEngine() ? "on" : sources.systemOne.configured ? "no-engine" : "off",
+		}),
+	);
 
 	return {
 		v: 1,
@@ -611,6 +629,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		harnessNotices,
 		knowledgeCollection,
 		authority,
+		systemOne,
 		runs,
 	};
 }

@@ -30,7 +30,6 @@ import {
 	type EdgeGrantView,
 } from "./autonomy/edge-policy.ts";
 import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts";
-import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
@@ -66,6 +65,7 @@ import {
 import type { SessionProjectRules } from "./project-rules/session-project-rules.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
 import { ownerRequestForJudge } from "./security/owner-paste-boundary.ts";
+import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import {
 	normalizeUserRequest,
@@ -78,6 +78,7 @@ import type { OperationCaller, OperationGate } from "./system-one/operation-gate
 import { createSessionOperationGate, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type PendingOwnerRequest } from "./system-one/owner-policy-queue.ts";
 import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
+import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "./system-one/semantic-plane-health.ts";
 import {
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
@@ -199,7 +200,8 @@ export interface SessionEdgeIntentControllerDeps {
 	isDisposed(): boolean;
 	getReflectionAbortSignal(): AbortSignal;
 	getSystemOneController(): SystemOneController | undefined;
-	getSemanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined;
+	/** The session's semantic plane: the gates' batched engine, and whether System One is configured without one. */
+	readonly systemOne: Pick<SessionSemanticPlaneController, "semanticDecisionEngine" | "configured">;
 	getDecisionLedger(): DecisionLedgerStore | undefined;
 	getCurrentSubmissionEpoch(): number | undefined;
 	getLastUserRequest(): string;
@@ -257,6 +259,8 @@ export class SessionEdgeIntentController {
 	/** The last owner-policy settle failure reported, so a failure that persists is reported once until a settle succeeds. */
 	private lastOwnerPolicyFailure?: string;
 	private handoffValue = false;
+	/** The session whose owner was told the gates run without an engine (`gateEngine`). */
+	private gateEngineFaultToldIn?: string;
 
 	constructor(deps: SessionEdgeIntentControllerDeps) {
 		this.deps = deps;
@@ -373,13 +377,30 @@ export class SessionEdgeIntentController {
 		return `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.runsThirdParty() ? "third-party" : "owner"}\u0000${this.deps.getLastUserRequest()}`;
 	}
 
+	/**
+	 * The engine both gates judge with, read where a gate meets a call. System One configured with none bound leaves the
+	 * call to the deterministic gates, as when it is off (System One is a quality plane, never an execution dependency),
+	 * and the owner is told once per session: a `system-one-engine` notice, or a warning where no notice can be kept.
+	 */
+	private gateEngine(): ReturnType<SessionEdgeIntentControllerDeps["systemOne"]["semanticDecisionEngine"]> {
+		const engine = this.deps.systemOne.semanticDecisionEngine();
+		if (engine || !this.deps.systemOne.configured) return engine;
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		if (this.gateEngineFaultToldIn === sessionId) return engine;
+		this.gateEngineFaultToldIn = sessionId;
+		const text = `${SYSTEM_ONE_NO_ENGINE_CAUSE}, so tool calls run under the deterministic gates only, without System One's review of their effects.`;
+		if (!this.deps.observeHarnessNotice("system-one-engine", () => ({ reason: "no-engine", text })))
+			this.deps.emitWarning(text);
+		return engine;
+	}
+
 	get delegationGate(): DelegationGate {
 		this.delegationGateInstance ??= new DelegationGate({
 			isActive: () =>
 				!this.deps.isChildSession() &&
 				this.deps.getSettingsManager().getOrchestratorSettings().delegationGate &&
 				this.deps.isDelegateToolActive(),
-			getEngine: () => this.deps.getSemanticDecisionEngine(),
+			getEngine: () => this.gateEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),
 			getOrchestrationDirectories: () => [this.deps.getAgentDir(), join(this.deps.getCwd(), CONFIG_DIR_NAME)],
@@ -391,7 +412,7 @@ export class SessionEdgeIntentController {
 	get operationGate(): OperationGate {
 		this.operationGateInstance ??= createSessionOperationGate({
 			settleOwnerPolicy: (signal) => this.ownerPolicy.settle("latest", signal),
-			getEngine: () => this.deps.getSemanticDecisionEngine(),
+			getEngine: () => this.gateEngine(),
 			// Read only for a call that carries no third party's words: the owner's words never approve a third party's call.
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),

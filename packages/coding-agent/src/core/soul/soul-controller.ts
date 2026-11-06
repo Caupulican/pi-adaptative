@@ -7,6 +7,7 @@ import { canonicalPathScopeIdentity, safeRealpathSync } from "../autonomy/path-s
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { SemanticEvaluationRecord } from "../system-one/semantic-evaluation-ledger.ts";
+import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import {
 	applyEditMatchPlanToSource,
 	type Edit,
@@ -118,8 +119,6 @@ const HELD_RETRY_SPACING_MS = 2 * 60 * 1000;
  * review keeps failing (its 20 s budget at high consequence), and those answers must not spend the failures in seconds.
  */
 const HELD_RETRY_MIN_SPACING_MS = 30 * 1000;
-/** Why no agent soul review can run while System One is configured but no engine is bound: a fault, never "off". */
-const NO_ENGINE_BOUND = "System One is configured for this session but no decision engine was supplied";
 const CLOSE_LOCK_WARNING =
 	"The soul.md change no review settled could not be reverted at close because the soul lock is held elsewhere; it stays on disk unreviewed.";
 
@@ -317,7 +316,7 @@ export class SoulController {
 		if (current === undefined) return { kind: "missing", path: this.path };
 		const engine = this.deps.systemOne.recordingSemanticEngine();
 		if (!engine && this.deps.systemOne.configured)
-			return { kind: "reviewed", outcome: { kind: "unsupported", error: NO_ENGINE_BOUND } };
+			return { kind: "reviewed", outcome: { kind: "unsupported", error: SYSTEM_ONE_NO_ENGINE_CAUSE } };
 		if (!engine) return { kind: "unavailable" };
 		return {
 			kind: "reviewed",
@@ -408,7 +407,7 @@ export class SoulController {
 		const engine = this.deps.systemOne.recordingSemanticEngine();
 		if (screened.soul === undefined || (!engine && !this.deps.systemOne.configured))
 			return this.hold(call, candidate.text, current, "unreviewed", false);
-		if (!engine) return this.refuseUnsupported(candidate.text, NO_ENGINE_BOUND);
+		if (!engine) return this.refuseUnsupported(candidate.text, SYSTEM_ONE_NO_ENGINE_CAUSE);
 
 		const identity = soulSha256(candidate.text);
 		if ((this.evaluations.get(identity) ?? 0) >= UNSETTLED_EVALUATIONS_PER_CANDIDATE) {
@@ -777,7 +776,7 @@ export class SoulController {
 					this.closing.signal,
 				)
 			: this.deps.systemOne.configured
-				? ({ kind: "unsupported", error: NO_ENGINE_BOUND } as const)
+				? ({ kind: "unsupported", error: SYSTEM_ONE_NO_ENGINE_CAUSE } as const)
 				: "unbound";
 		await this.serialized(() => this.finishHeld(held, outcome));
 	}
@@ -1185,7 +1184,7 @@ export class SoulController {
 		if (screened.soul === undefined || (!engine && !this.deps.systemOne.configured))
 			return { kind: "accept", reviewer: "unreviewed" };
 		if (this.closed) return { kind: "unavailable", error: "the session closed" };
-		if (!engine) return { kind: "reject", reason: NO_ENGINE_BOUND };
+		if (!engine) return { kind: "reject", reason: SYSTEM_ONE_NO_ENGINE_CAUSE };
 		const outcome = await reviewSoulText(
 			engine,
 			{ proposedText: text, currentSoul: current ?? "" },
