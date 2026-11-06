@@ -3,7 +3,8 @@
  * the global settings, serving those channels through the same `SessionChannels` an open session runs.
  *
  * The session reads and reports, as every run away does: it is a child session (no memory, no routines, no proactive
- * work, no owner decisions), System One is off, and its tools are read-only. A channel's message is a third party's
+ * work, no owner decisions), System One is off, and its tools are read-only and reach only its working directory, never
+ * the agent directory or the private paths every lane is denied (`privatePathScope`). A channel's message is a third party's
  * words there exactly as in an open session: the origin gate applies, and the reply waits as a draft unless the owner
  * set `replyMode: "auto"`. Drafts wait for the owner's next session, which is told of them.
  *
@@ -17,7 +18,7 @@
  */
 
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
@@ -36,6 +37,12 @@ import { SessionChannels } from "./session-channels.ts";
 
 /** The tools a channel turn away may call: it reads the working directory and answers. */
 const AWAY_CHANNEL_TOOLS = ["read", "grep", "find", "ls"];
+
+/** Whether `child` is `parent` or inside it. */
+function isWithin(parent: string, child: string): boolean {
+	const rel = relative(resolve(parent), resolve(child));
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
 
 /** The transport of a channel the daemon serves; undefined when it has none for that name. */
 export type AwayChannelProviderFactory = (
@@ -246,6 +253,12 @@ export class AwayChannelHosts {
 					isChildSession: true,
 					disableSystemOne: true,
 					tools: AWAY_CHANNEL_TOOLS,
+					// A third party's turn reads the working directory only, never the harness's own storage (credentials,
+					// settings, memory, sessions, channel tokens and journals), wherever the directory is.
+					privatePathScope: {
+						allowedPaths: [cwd],
+						deniedPaths: isWithin(agentDir, cwd) ? [] : [agentDir],
+					},
 					timers,
 					onClosingWarnings: (warnings) => {
 						for (const warning of warnings) this.input.report(`Channels away: ${warning}`);

@@ -71,6 +71,7 @@ import {
 	buildWorkerSessionDefaultWriteScopeEnvelope,
 	buildWorkerSessionHarnessWriteEnvelope,
 	buildWorkerSessionPrivatePathEnvelope,
+	type SessionPrivatePathScope,
 } from "./autonomy/worker-session-private-scope.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
@@ -407,6 +408,8 @@ export interface RuntimeBuilderDeps {
 	getCapabilityEnvelope?(): CapabilityEnvelope | undefined;
 	/** Immutable active orchestration profile; absent sessions never construct run_process. */
 	getOrchestrationProfile?(): OrchestrationProfile | undefined;
+	/** Private path scope a session that is not a worker process asked for (a worker process always has one). */
+	getPrivatePathScope?(): SessionPrivatePathScope | undefined;
 	getExcludedToolNames(): Set<string> | undefined;
 	/** Re-derive the profile tool filter from freshly reloaded settings (reload only). */
 	deriveToolProfileFilter(): Required<ResourceProfileFilterSettings>;
@@ -715,9 +718,24 @@ export class RuntimeBuilder {
 		// path arguments exactly as they govern the builtin file tools.
 		registerWorkerExtensionToolPolicies(workerExtensionGrants);
 		this._workerExtensionToolNames = new Set(workerExtensionGrants.map((grant) => grant.tool));
+		const privatePathScope = deps.getPrivatePathScope?.();
 		this._workerSessionPrivatePathEnvelope = isWorkerSession()
-			? buildWorkerSessionPrivatePathEnvelope(deps.getCwd(), deps.getAgentDir())
-			: undefined;
+			? buildWorkerSessionPrivatePathEnvelope(
+					deps.getCwd(),
+					deps.getAgentDir(),
+					undefined,
+					undefined,
+					privatePathScope?.deniedPaths,
+				)
+			: privatePathScope
+				? buildWorkerSessionPrivatePathEnvelope(
+						deps.getCwd(),
+						deps.getAgentDir(),
+						privatePathScope.allowedPaths ?? [],
+						[],
+						privatePathScope.deniedPaths,
+					)
+				: undefined;
 		this._workerSessionHarnessWriteEnvelope = isWorkerSession()
 			? buildWorkerSessionHarnessWriteEnvelope(deps.getCwd(), deps.getAgentDir())
 			: undefined;

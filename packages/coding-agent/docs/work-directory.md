@@ -72,6 +72,7 @@ straggler:
   work/      transient/scratch (this document)                                         -- re-exported from agent-paths.ts
     work/extensions/<namespace>/<run-id>/                                              extension leased work
   runtimes/<kind>  models/<kind>  sessions/  npm/  git/  worktrees/                    -- runtimesDir/modelsDir/sessionsDir/npmDir/gitDir/worktreesDir
+  channels/  channel tokens and per-channel journals (private to every lane)          -- channelsDir
 ```
 
 ### Session bundle retention

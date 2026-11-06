@@ -15,6 +15,7 @@ import type {
 import type { CompactionResult, SessionManager } from "../kernel/node.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
+import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
@@ -188,6 +189,8 @@ export interface AgentSessionConfig {
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
 	/** Immutable owner-authored orchestration policy. */
 	orchestrationProfile?: OrchestrationProfile;
+	/** Private path scope of a session that is not a worker process; see `SessionPrivatePathScope`. */
+	privatePathScope?: SessionPrivatePathScope;
 	/** Injectable local-runtime I/O dependencies. */
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */

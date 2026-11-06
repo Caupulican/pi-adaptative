@@ -46,22 +46,38 @@ export function encodeWorkerSessionAllowedPaths(paths: readonly string[]): strin
 }
 
 /**
+ * A session that is not a worker process but whose file tools are scoped like one (for example the session the bot
+ * daemon answers a channel with while no session is open): the private harness roots are denied to it exactly as to a
+ * worker, plus `deniedPaths`; `allowedPaths` confines it further (empty keeps host-wide project access).
+ */
+export interface SessionPrivatePathScope {
+	readonly allowedPaths?: readonly string[];
+	readonly deniedPaths?: readonly string[];
+}
+
+/**
  * Structural filesystem envelope for a standalone worker process (for example a Pi child launched
- * in herdr). An empty allow list deliberately preserves the worker's host-wide project access while
- * the private harness roots remain denied. Process tools are not path-confined by this envelope:
- * bash/python are explicit host-trust boundaries and retain their OS-visible filesystem surface.
+ * in herdr), or for a session given a {@link SessionPrivatePathScope}. An empty allow list deliberately
+ * preserves the session's host-wide project access while the private harness roots remain denied.
+ * Process tools are not path-confined by this envelope: bash/python are explicit host-trust boundaries
+ * and retain their OS-visible filesystem surface.
  */
 export function buildWorkerSessionPrivatePathEnvelope(
 	cwd: string,
 	agentDir: string,
 	allowedPaths: readonly string[] = parseWorkerSessionAllowedPaths(process.env[PI_WORKER_ALLOWED_PATHS_ENV]),
 	readableFiles: readonly string[] = parseWorkerSessionReadableFiles(process.env[PI_WORKER_READABLE_FILES_ENV]),
+	extraDeniedPaths: readonly string[] = [],
 ): CapabilityEnvelope {
 	const capabilities = Object.freeze(["filesystem.read", "filesystem.write"] as const);
 	const immutableAllowedPaths = Object.freeze([...allowedPaths]);
 	// The machine-wide emergency stop is the operator's: a worker must not lift it, and process tools
 	// reach it through the same lexical guard as the other private roots.
-	const deniedPaths = Object.freeze([...getPrivateLaneDeniedPaths(cwd, agentDir), emergencyStopPath(agentDir)]);
+	const deniedPaths = Object.freeze([
+		...getPrivateLaneDeniedPaths(cwd, agentDir),
+		emergencyStopPath(agentDir),
+		...extraDeniedPaths,
+	]);
 	return Object.freeze({
 		id: "worker-session-private-paths",
 		capabilities,

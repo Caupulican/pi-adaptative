@@ -20,6 +20,7 @@ import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
 import {
 	botTeamStoreFile,
+	channelsDir,
 	configBackupsDir,
 	directoryProfilesDir,
 	extensionStateDir,
@@ -521,6 +522,32 @@ function restoreMisplacedCanonicalRoot(agentDir: string, name: string): void {
 	renameSync(stolenDir, liveDir);
 }
 
+/**
+ * Builds that did not declare `channels` a root entry archived it (channel tokens and journals) under
+ * `state/legacy-layout/channels` on every start, while the running channels wrote a new one. Move each archived
+ * top-level file back unless the live directory already has a file of that name; a live file is never replaced.
+ */
+function restoreArchivedChannelFiles(agentDir: string): void {
+	const archived = stateFile(agentDir, "legacy-layout", "channels");
+	if (!existsSync(archived)) return;
+	const archivedStats = lstatSync(archived);
+	if (!archivedStats.isDirectory() || archivedStats.isSymbolicLink()) return;
+	const live = channelsDir(agentDir);
+	mkdirSync(live, { recursive: true });
+	for (const entry of readdirSync(archived).slice(0, MAX_LEGACY_DIRECTORY_ENTRIES_TO_MIGRATE)) {
+		const source = join(archived, entry);
+		const target = join(live, entry);
+		try {
+			const stats = lstatSync(source);
+			if (!stats.isFile() || stats.isSymbolicLink() || existsSync(target)) continue;
+			renameSync(source, target);
+		} catch {}
+	}
+	try {
+		rmdirSync(archived);
+	} catch {}
+}
+
 /** Remove only empty real per-project session directories; transcript files are never retention-pruned. */
 export function pruneEmptySessionNamespaces(agentDir: string): string[] {
 	const root = sessionsDir(agentDir);
@@ -630,6 +657,9 @@ export function migrateAgentDirLayout(agentDir: string): void {
 	} catch {}
 	try {
 		restoreMisplacedCanonicalRoot(agentDir, "memory");
+	} catch {}
+	try {
+		restoreArchivedChannelFiles(agentDir);
 	} catch {}
 	pruneEmptySessionNamespaces(agentDir);
 }

@@ -40,6 +40,7 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 	"npm",
 	"git",
 	"worktrees",
+	"channels",
 	"auth.json",
 	"MEMORY.md",
 	"USER.md",

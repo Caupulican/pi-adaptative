@@ -13,7 +13,7 @@ import { entryTurnOrigin } from "../../../../src/core/turn-origin.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { icmLatestResult } from "./shared.ts";
 
 /**
@@ -532,23 +532,70 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	).toEqual(["not_allowed"]);
 	expect(world.provider.requests.length, "a stranger starts no turn").toBe(requestsBefore);
 
-	// Alice's question gets its turn in the headless session, and its answer goes back to her address.
+	// Alice's question gets its turn in the headless session, and its answer goes back to her address. Its file tools
+	// read the working directory and nothing of the harness: the auth file, the channel token, the channel journals
+	// and the project's own settings file are refused before the tool runs.
 	const awayTools = ["read", "grep", "find", "ls"];
-	world.provider.enqueue("root", {
-		name: "away-phone-answer",
-		check: (request) => {
-			const delivered = JSON.stringify(request.context.messages);
-			expect(delivered.split('source=\\"channel:phone\\"').length - 1, "Alice's message arrives fenced").toBe(1);
-			expect(delivered).toContain("where are the release notes");
-			const tools = (request.context.tools ?? []).map((tool) => tool.name);
-			expect(tools, "the headless session reads").toContain("read");
-			expect(
-				tools.filter((name) => !awayTools.includes(name)),
-				"the headless session has only read-only tools",
-			).toEqual([]);
+	const tokenMarker = "away-token-7f3c91";
+	const tokenPath = join(agentDir, "channels", "telegram.token");
+	world.io.seed(tokenPath, tokenMarker);
+	const notesPath = projectPath("docs", "release-notes.md");
+	world.io.seed(notesPath, "Release notes live in docs/release-notes.md.\n");
+	const refusedReads = {
+		"away-read-auth": configFile(agentDir, "auth.json"),
+		"away-read-token": tokenPath,
+		"away-read-project-settings": projectPath(".pi", "settings.json"),
+	};
+	world.provider.enqueue(
+		"root",
+		{
+			...calls("away-phone-reads", [
+				...Object.entries(refusedReads).map(([id, path]) => ({ id, name: "read", arguments: { path } })),
+				{ id: "away-ls-channels", name: "ls", arguments: { path: join(agentDir, "channels") } },
+				{ id: "away-read-notes", name: "read", arguments: { path: notesPath } },
+			]),
+			check: (request) => {
+				const delivered = JSON.stringify(request.context.messages);
+				expect(delivered.split('source=\\"channel:phone\\"').length - 1, "Alice's message arrives fenced").toBe(1);
+				expect(delivered).toContain("where are the release notes");
+				const tools = (request.context.tools ?? []).map((tool) => tool.name);
+				expect(tools, "the headless session reads").toContain("read");
+				expect(
+					tools.filter((name) => !awayTools.includes(name)),
+					"the headless session has only read-only tools",
+				).toEqual([]);
+			},
 		},
-		reply: { content: [{ type: "text", text: "Hi Alice, the notes are in the docs folder." }] },
-	});
+		{
+			name: "away-phone-answer",
+			check: (request) => {
+				const result = (id: string) => {
+					const found = request.context.messages.find(
+						(message) => message.role === "toolResult" && message.toolCallId === id,
+					);
+					if (found?.role !== "toolResult") throw new Error(`Missing tool result ${id}`);
+					return {
+						isError: found.isError,
+						text: found.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"),
+					};
+				};
+				for (const [id, path] of [
+					...Object.entries(refusedReads),
+					["away-ls-channels", join(agentDir, "channels")],
+				]) {
+					const refused = result(id);
+					expect(refused.isError, `${id} is refused`).toBe(true);
+					expect(refused.text, `${id} is refused by the private path scope before it runs`).toContain(
+						`envelope_path_denied: "${path}" is outside envelope worker-session-private-paths's path scope. The tool was NOT run.`,
+					);
+				}
+				const notes = result("away-read-notes");
+				expect(notes.isError, "a file of the working directory is read").toBeFalsy();
+				expect(notes.text).toContain("Release notes live in docs/release-notes.md.");
+			},
+			reply: { content: [{ type: "text", text: "Hi Alice, the notes are in the docs folder." }] },
+		},
+	);
 	const answered = daemonPhone.nextSend();
 	await daemonPhone.deliver(event("p-1", "chat-9", alice, "where are the release notes"));
 	await withDeadline(trace, "the away answer goes back to Alice", answered);
@@ -561,6 +608,10 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 		journalHolds((state) => state.batches.length === 1 && state.batches[0]?.state === "replied"),
 	);
 	expect(journal().batches[0]?.away, "the turn is charged to the away bound").toBe(true);
+	expect(
+		world.provider.requests.filter((request) => JSON.stringify(request.context).includes(tokenMarker)).length,
+		"the channel token reaches no model request",
+	).toBe(0);
 	trace.mark("root", "away-channels.answered");
 
 	// A session opens while the daemon's next turn runs: it takes the channel at once, the daemon's transport stops, and
@@ -607,7 +658,10 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	).toEqual(["replied", "drafted"]);
 	expect(preempted.pending, "nothing waits to be delivered again").toEqual([]);
 	await reopened.session.agent.waitForIdle();
-	expect(world.provider.requests.length - requestsBefore, "one turn per batch, none in the open session").toBe(2);
+	expect(
+		world.provider.requests.length - requestsBefore,
+		"three requests: the first batch's tool round and answer, the second batch's answer; none in the open session",
+	).toBe(3);
 	expect([daemonPhone.sent.length, sessionPhone.sent], "the draft is not sent").toEqual([1, []]);
 	expect(reopened.session.backgroundLanes.readAwayChannelStatus(), "the session counts the away draft").toEqual([
 		{ name: "phone", cwd: HARNESS_PROJECT_CWD, servedBy: "this session", awayDrafts: 1 },

@@ -118,6 +118,8 @@ export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"npm",
 	"git",
 	"worktrees",
+	// Channel tokens and per-channel journals (`channels/<name>.json`).
+	"channels",
 ] as const;
 
 const AGENT_ROOT_ENTRY_NAMES = new Set<string>([...AGENT_ROOT_FILE_NAMES, ...AGENT_ROOT_DIRECTORY_NAMES]);
@@ -161,6 +163,11 @@ export function managedProjectMemoryStateFile(agentDir: string, projectKey: stri
 		"projects",
 		`${projectKey.toLowerCase()}.MEMORY.md.pi-managed.json`,
 	);
+}
+
+/** `<agentDir>/channels` -- channel tokens and each channel's journal of inbound messages, turns and drafts. */
+export function channelsDir(agentDir: string): string {
+	return join(agentDir, "channels");
 }
 
 /** `<agentDir>/okf-memory` -- user-authored durable OKF memory documents. */

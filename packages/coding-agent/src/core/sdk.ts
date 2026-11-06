@@ -31,6 +31,7 @@ import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { compileExecutionCharter, type ExecutionCharter } from "./autonomy/execution-charter.ts";
+import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import {
 	BEDROCK_PROVIDER_ID,
 	bindSavedBedrockScope,
@@ -181,6 +182,11 @@ export interface CreateAgentSessionOptions {
 	resourceProfiles?: string[];
 	/** Immutable owner-authored orchestration policy for this session. */
 	orchestrationProfile?: OrchestrationProfile;
+	/**
+	 * Scopes the file tools of a session that is not a worker process like a worker's: the private harness roots
+	 * (credentials, auth, settings, memory, sessions, state, channels) are denied, plus `deniedPaths`. YOLO keeps it.
+	 */
+	privatePathScope?: SessionPrivatePathScope;
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 	/** Shell backend for bash, shared by root and every worker lane; the native host shell is used when unset. */
@@ -926,6 +932,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
 				isChildSession,
 				orchestrationProfile,
+				privatePathScope: options.privatePathScope,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
 				systemOneEnabled,

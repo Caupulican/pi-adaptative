@@ -4,6 +4,7 @@ import path from "node:path";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
+	channelsDir,
 	configFile,
 	getWorkRoot,
 	okfMemoryDir,
@@ -63,6 +64,8 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		okfMemoryDir(agentDir),
 		configFile(agentDir, "settings.json"),
 		configFile(agentDir, "models.json"),
+		// Channel tokens and journals (the senders' words and the drafts answered to them).
+		channelsDir(agentDir),
 		sessionsDir(agentDir),
 		stateDir(agentDir),
 		getWorkRoot(agentDir),

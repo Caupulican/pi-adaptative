@@ -1912,9 +1912,7 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			setExtensionRunner: (runner) => {
 				this._extensionRunner = runner;
-				if (this._extensionRunnerRef) {
-					this._extensionRunnerRef.current = runner;
-				}
+				if (this._extensionRunnerRef) this._extensionRunnerRef.current = runner;
 			},
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
 			setBaseSystemPrompt: (prompt) => {
@@ -1941,6 +1939,7 @@ export class AgentSession {
 			},
 			getAllowedToolNames: () => this._allowedToolNames,
 			getOrchestrationProfile: () => config.orchestrationProfile,
+			getPrivatePathScope: () => config.privatePathScope,
 			getExcludedToolNames: () => this._excludedToolNames,
 			deriveToolProfileFilter: () => this._profileFilter.deriveToolProfileFilter(),
 			isToolOrCommandAllowedByProfile: (name) => this._profileFilter.isToolOrCommandAllowedByProfile(name),
