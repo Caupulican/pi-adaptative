@@ -4,6 +4,7 @@ import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
 import {
+	runJourney4TelegramBoundsPhase,
 	runJourney4TelegramDaemonPhase,
 	runJourney4TelegramOwnerPhase,
 	runJourney4TelegramPhase,
@@ -34,6 +35,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4ChannelsPhase(world);
 			await runJourney4TelegramPhase(world);
 			await runJourney4TelegramOwnerPhase(world);
+			await runJourney4TelegramBoundsPhase(world);
 			await runJourney4TelegramDaemonPhase(world);
 			await runJourney4AwayChannelsPhase(world);
 			await runJourney4SlackPhase(world);

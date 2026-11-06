@@ -1,10 +1,11 @@
 import { join } from "node:path";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { outwardDraftStates } from "../../../../src/core/agent-session-edge.ts";
 import { createBuiltInChannelProvider } from "../../../../src/core/channels/built-in-providers.ts";
-import { digest } from "../../../../src/core/channels/channel-journal.ts";
+import { DAY_MS, digest } from "../../../../src/core/channels/channel-journal.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import {
@@ -889,6 +890,344 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 	}
 }
 
+interface BoundsLegJournal {
+	readonly holder?: unknown;
+	readonly seen: readonly { readonly d: string }[];
+	readonly batches: readonly {
+		readonly id: string;
+		readonly state: string;
+		readonly acceptedAt: number;
+		readonly usd?: number;
+		readonly owner?: true;
+	}[];
+	readonly ownerPushes?: readonly { readonly k: string; readonly c?: string }[];
+}
+
+/**
+ * The bounds on the owner's turns from the phone. `stop` aborts the running owner turn at its provider request and the
+ * turn ends unanswered; with no turn left, `stop` says so. The emergency stop engaged in the serving process aborts the
+ * running owner turn at once and tells the chat; a message sent while it holds waits and starts no turn, `status` names
+ * the refusal and the waiting message, and lifting the stop runs that message by itself. A turn whose spend reaches
+ * `ownerMaxUsdPerTurn` is stopped before its tool call runs and tells the chat. Once the owner pool holds too much for
+ * another turn under `ownerMaxUsdPerDay`, new messages wait, the chat is told once when room returns, `status` shows the
+ * spend and what waits, `approve` is refused with the same reason and starts no turn, and `deny` still decides.
+ */
+export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-telegram-bounds`;
+	const channelsDir = join(agentDir, "channels");
+	const tokenPath = join(channelsDir, "telegram.token");
+	const journalPath = join(channelsDir, "telegram.json");
+	world.io.mkdirSync(channelsDir, { recursive: true });
+	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	const journal = (): BoundsLegJournal =>
+		world.io.existsSync(journalPath)
+			? (JSON.parse(String(world.io.readFileSync(journalPath))) as BoundsLegJournal)
+			: { seen: [], batches: [] };
+	const journalHolds = (holds: (state: BoundsLegJournal) => boolean) =>
+		world.io.waitForMutation(() => holds(journal()));
+	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
+	world.fetchResponder = (input, init) => api.respond(input, init);
+	const warningsBefore = world.warnings.length;
+	const ownerChat = String(OWNER_ID);
+	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
+	const terminalOf = (sequence: number) => world.provider.terminals.find((terminal) => terminal.sequence === sequence);
+	try {
+		const firstPoll = api.nextPoll(undefined);
+		const manager = world.createSessionManager(agentDir);
+		const created = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: manager,
+			systemOneEnabled: false,
+			settings: {
+				memorySystem: "okf",
+				autoLearn: { enabled: false },
+				proactivity: { enabled: false },
+				orchestrator: { delegationGate: false },
+				edge: {},
+				channels: {
+					telegram: {
+						mode: "explicit",
+						ownerSenders: [OWNER_ID],
+						ownerMaxUsdPerTurn: 0.05,
+						ownerMaxUsdPerDay: 0.1,
+					},
+				},
+			},
+		});
+		const session: AgentSession = created.session;
+		await withDeadline(trace, "the bounds leg's first poll", firstPoll);
+		trace.mark("root", "telegram-bounds.polling");
+
+		// `stop` from the phone aborts the running owner turn at its provider request; the turn ends unanswered.
+		const stopWords = "summarize the open review threads";
+		const stopReached = createBarrier();
+		let stopSequence = 0;
+		world.provider.enqueue("root", {
+			name: "tg-bounds-stop-held",
+			gate: createBarrier().promise,
+			check: (request) => {
+				expect(deliveryWith(request, stopWords), "the owner's words open the turn").toContain(ownerHeader);
+				stopSequence = request.sequence;
+				stopReached.release();
+			},
+			reply: { content: [{ type: "text", text: "This answer is never produced." }] },
+		});
+		api.deliver(ownerLegUpdate(1, OWNER_ID, stopWords));
+		await withDeadline(trace, "the owner's turn reaches its provider request", stopReached.promise);
+		api.deliver(ownerLegUpdate(2, OWNER_ID, "stop"));
+		await withDeadline(trace, "the stop's reply reaches the chat", api.untilSent(1));
+		expect(api.texts()[0], "stop names the turn it ended").toBe("Stopped the running turn.");
+		await withDeadline(
+			trace,
+			"the stopped turn settles",
+			journalHolds((state) => state.batches[0]?.state === "unanswered"),
+		);
+		await session.agent.waitForIdle();
+		expect(terminalOf(stopSequence), "the turn's provider request is aborted").toMatchObject({
+			stopReason: "aborted",
+			requestAborted: true,
+		});
+		api.deliver(ownerLegUpdate(3, OWNER_ID, "stop"));
+		await withDeadline(trace, "the second stop's reply reaches the chat", api.untilSent(2));
+		expect(api.texts()[1], "with no turn left, stop says so").toBe("No turn is running.");
+		trace.mark("root", "telegram-bounds.stopped");
+
+		// The emergency stop engaged in this process aborts the running owner turn at once and tells the chat.
+		const estopWords = "draft the release notes for the next tag";
+		const estopReached = createBarrier();
+		let estopSequence = 0;
+		world.provider.enqueue("root", {
+			name: "tg-bounds-estop-held",
+			gate: createBarrier().promise,
+			check: (request) => {
+				expect(deliveryWith(request, estopWords), "the owner's words open the turn").toContain(ownerHeader);
+				estopSequence = request.sequence;
+				estopReached.release();
+			},
+			reply: { content: [{ type: "text", text: "This answer is never produced either." }] },
+		});
+		api.deliver(ownerLegUpdate(4, OWNER_ID, estopWords));
+		await withDeadline(trace, "the owner's turn reaches its provider request", estopReached.promise);
+		expect(session.setEmergencyStop(true, "the owner holds every turn"), "the stop is engaged").toBe(true);
+		await withDeadline(trace, "the emergency stop's push reaches the chat", api.untilSent(3));
+		expect(api.texts()[2], "the chat learns why its turn ended").toBe("Stopped: the emergency stop is engaged.");
+		await withDeadline(
+			trace,
+			"the turn the stop ended settles",
+			journalHolds((state) => state.batches[1]?.state === "unanswered"),
+		);
+		await session.agent.waitForIdle();
+		expect(terminalOf(estopSequence), "the turn's provider request is aborted").toMatchObject({
+			stopReason: "aborted",
+			requestAborted: true,
+		});
+		const requestsWhileStopped = world.provider.requests.length;
+		const liftWords = "push the release branch";
+		api.deliver(ownerLegUpdate(5, OWNER_ID, liftWords));
+		await withDeadline(
+			trace,
+			"the message sent under the stop waits",
+			noticeSaved(manager, "channel-state", "telegram:capped:the emergency stop is engaged"),
+		);
+		expect(
+			session.channels.getStates().find((state) => state.name === "telegram"),
+			"the channel holds owner messages while the stop is engaged",
+		).toMatchObject({ state: "capped", detail: "the emergency stop is engaged" });
+		api.deliver(ownerLegUpdate(6, OWNER_ID, "status"));
+		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(4));
+		expect(api.texts()[3], "status names the refusal and the waiting message").toBe(
+			[
+				"Owner spend: $0.00 of $0.10 in 24 hours, $0.05 per turn; no new turn: the emergency stop is engaged.",
+				"No turn is running. 1 message(s) wait.",
+				"No held action from this chat.",
+			].join("\n"),
+		);
+		expect(world.provider.requests.length, "no turn starts while the stop is engaged").toBe(requestsWhileStopped);
+
+		// Lifting the stop runs the waiting message by itself; its push is held and presented.
+		const liftAnswer = "The release branch push waits for your approval.";
+		const liftHeld = createBarrier();
+		world.provider.enqueue(
+			"root",
+			{
+				...calls("tg-bounds-lift-push", [
+					{ id: "tg-bounds-push", name: "bash", arguments: { command: "git push origin release" } },
+				]),
+				check: (request) => {
+					expect(deliveryWith(request, liftWords), "the waiting message is the owner's own batch").toContain(
+						ownerHeader,
+					);
+				},
+			},
+			{
+				name: "tg-bounds-lift-answer",
+				check: (request) => {
+					expect(icmLatestResult(request, "bash").text, "the phone's push is held for approval").toContain(
+						"Held for your approval: git push origin release (git.publish",
+					);
+					liftHeld.release();
+				},
+				reply: { content: [{ type: "text", text: liftAnswer }] },
+			},
+		);
+		expect(session.setEmergencyStop(false), "the stop is lifted").toBe(true);
+		await withDeadline(trace, "the waiting message's turn", liftHeld.promise);
+		await session.agent.waitForIdle();
+		await withDeadline(trace, "the presentation and the answer reach the chat", api.untilSent(6));
+		await withDeadline(
+			trace,
+			"the presentation is recorded as shown",
+			journalHolds((state) => (state.ownerPushes ?? []).some((push) => push.c === `telegram:${ownerChat}`)),
+		);
+		await withDeadline(
+			trace,
+			"the lifted turn settles",
+			journalHolds((state) => state.batches[2]?.state === "replied"),
+		);
+		const held = outwardDraftStates(manager.getBranch(), false).find(
+			(view) => view.record.rendering === "bash\ncommand: git push origin release",
+		);
+		expect(held?.state, "the push waits for the owner").toBe("pending");
+		const heldId = held?.record.id ?? "";
+		const lifted = api.texts().slice(4);
+		expect(lifted, "the lifted turn answers the chat").toContain(liftAnswer);
+		expect(
+			lifted.find((text) => text !== liftAnswer),
+			"and its held push is presented",
+		).toContain(`Held for your decision: bash (git.publish), draft ${heldId}.`);
+		trace.mark("root", "telegram-bounds.emergency-stop");
+
+		// A turn whose spend reaches the per-turn bound is stopped before its tool call runs, and the chat is told.
+		const boundWords = "list what my notes hold";
+		const boundReached = createBarrier();
+		world.provider.enqueue("root", {
+			name: "tg-bounds-turn-bound",
+			check: (request) => {
+				expect(deliveryWith(request, boundWords), "the owner's words open the turn").toContain(ownerHeader);
+				boundReached.release();
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "tg-bounds-memory",
+						name: "memory",
+						arguments: { action: "list", target: "user" },
+					},
+				],
+				stopReason: "toolUse",
+				usage: {
+					...createEmptyUsage(),
+					output: 100,
+					totalTokens: 100,
+					cost: { ...createEmptyUsage().cost, output: 0.06, total: 0.06 },
+				},
+			},
+		});
+		api.deliver(ownerLegUpdate(7, OWNER_ID, boundWords));
+		await withDeadline(trace, "the costly turn's provider request", boundReached.promise);
+		await withDeadline(trace, "the per-turn bound's push reaches the chat", api.untilSent(7));
+		expect(api.texts()[6], "the chat learns which bound ended the turn").toBe(
+			"Stopped: this turn reached its bound (channels.telegram.ownerMaxUsdPerTurn, $0.05).",
+		);
+		await withDeadline(
+			trace,
+			"the bounded turn settles",
+			journalHolds((state) => state.batches[3]?.state === "unanswered"),
+		);
+		await session.agent.waitForIdle();
+		// A tool call that ran would have sent another, unscripted request.
+		const requestsAtBound = world.provider.requests.length;
+		trace.mark("root", "telegram-bounds.turn-bound");
+
+		// The owner pool now holds $0.06 of $0.10: another $0.05 turn does not fit, so new messages wait.
+		api.deliver(ownerLegUpdate(8, OWNER_ID, "what changed in the build today"));
+		await withDeadline(
+			trace,
+			"the message past the daily bound waits",
+			noticeSaved(manager, "channel-state", "telegram:capped:$0.06 of channels.telegram.ownerMaxUsdPerDay"),
+		);
+		const dayRefusal = "$0.06 of channels.telegram.ownerMaxUsdPerDay ($0.10) is held in the last 24 hours";
+		await withDeadline(trace, "the daily bound's push reaches the chat", api.untilSent(8));
+		const ownerBatches = journal().batches.filter((batch) => batch.owner === true);
+		const oldestUntil = Math.min(...ownerBatches.map((batch) => batch.acceptedAt)) + DAY_MS;
+		expect(api.texts()[7], "the chat learns when room returns").toBe(
+			`Owner turns paused: ${dayRefusal}; the oldest charge leaves the window at ${new Date(oldestUntil).toISOString()}. Your messages wait up to 24 hours; deny, status and stop still answer.`,
+		);
+		api.deliver(ownerLegUpdate(9, OWNER_ID, "and what failed"));
+		await withDeadline(trace, "the poll acknowledging the second waiting message", api.nextPoll(10));
+		api.deliver(ownerLegUpdate(10, OWNER_ID, "status"));
+		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(9));
+		expect(api.texts()[8], "status shows the spend, what waits and what is held").toBe(
+			[
+				`Owner spend: $0.06 of $0.10 in 24 hours, $0.05 per turn; no new turn: ${dayRefusal}.`,
+				"No turn is running. 2 message(s) wait.",
+				`Held: ${heldId} (git.publish).`,
+			].join("\n"),
+		);
+		api.deliver(ownerLegUpdate(11, OWNER_ID, `approve ${heldId}`));
+		await withDeadline(trace, "the refused approval's reply reaches the chat", api.untilSent(10));
+		expect(api.texts()[9], "approve needs a turn the bound refuses").toBe(
+			`Approve refused: ${dayRefusal}. deny, status and stop still work.`,
+		);
+		api.deliver(ownerLegUpdate(12, OWNER_ID, `deny ${heldId}`));
+		await withDeadline(trace, "the denial's reply reaches the chat", api.untilSent(11));
+		expect(api.texts()[10], "deny still decides").toBe(`Denied draft ${heldId}; it will not run.`);
+		expect(
+			outwardDraftStates(manager.getBranch(), false).find((view) => view.record.id === heldId)?.state,
+			"the denied push is ended",
+		).toBe("denied");
+		expect(world.provider.requests.length, "no turn starts past the bounds").toBe(requestsAtBound);
+		const settled = journal();
+		expect(
+			settled.batches.map((batch) => [batch.state, batch.usd]),
+			"each stopped turn ends unanswered, charged what it spent",
+		).toEqual([
+			["unanswered", undefined],
+			["unanswered", undefined],
+			["replied", undefined],
+			["unanswered", 0.06],
+		]);
+		expect(
+			(settled.ownerPushes ?? []).map((push) => push.k).filter((k) => !k.startsWith("push:draft:")),
+			"one push per kill switch and bound, none for stop, the daily bound once",
+		).toEqual([
+			`push:stopped:${settled.batches[1]?.id}`,
+			`push:stopped:${settled.batches[3]?.id}`,
+			`push:bound:${oldestUntil}`,
+		]);
+		expect(
+			notices(manager, "channel-reply").filter((notice) => notice.reason.startsWith("unanswered:telegram:")).length,
+			"each stopped turn is noted unanswered",
+		).toBe(3);
+		trace.mark("root", "telegram-bounds.day-bound");
+
+		expect(await world.disposeSessionInBody(session), "the bounds leg's session closes").toBeUndefined();
+		expect(api.openPolls, "closing aborts the held poll").toBe(0);
+		expect(journal().holder, "the closed session no longer serves telegram").toBeUndefined();
+		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
+		expect(world.io.existsSync(join(agentDir, "ESTOP")), "the lifted stop leaves no sentinel").toBe(false);
+		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
+		// The Telegram legs before this one keep their own token files in their own agent directories.
+		const tokenFiles = new Set([
+			tokenPath,
+			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
+			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
+		]);
+		for (const [path, text] of world.io.fileEntries())
+			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expect(JSON.stringify(manager.getEntries()), "no entry carries the bot token").not.toContain(secret);
+		expect(
+			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
+			"the bounds leg ran without a Telegram warning",
+		).toEqual([]);
+		trace.mark("root", "telegram-bounds.closed");
+	} finally {
+		world.fetchResponder = undefined;
+	}
+}
+
 interface DaemonLegJournal {
 	readonly holder?: { readonly sessionId: string; readonly away?: true };
 	readonly seen: readonly { readonly d: string }[];
@@ -1133,6 +1472,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			tokenPath,
 			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
 			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
+			join(`${world.agentDir}-telegram-bounds`, "channels", "telegram.token"),
 		]);
 		for (const [path, text] of world.io.fileEntries())
 			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
