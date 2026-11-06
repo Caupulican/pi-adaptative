@@ -831,6 +831,18 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 		const workerRequestsBeforeAway = workerRequests();
 		const storeDiagnostics: string[] = [];
+		const harnessNotices = (kind: HarnessNoticeKind) =>
+			root.sessionManager.getEntries().filter((entry) => {
+				const details = parentInputOriginalDetails(entry);
+				return (
+					entry.type === "custom_message" &&
+					entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+					typeof details === "object" &&
+					details !== null &&
+					"kind" in details &&
+					details.kind === kind
+				);
+			});
 		const awayStore = new PersistentBotTeamStore(agentDir, (message) => storeDiagnostics.push(message));
 		try {
 			const daemonStatus = () => {
@@ -1344,6 +1356,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					await sessionCiBinding.close();
 				}
 				expect(sessionCiDiagnostics, "the session takes the consumer back from the daemon cleanly").toEqual([]);
+				expect(
+					harnessNotices("host-event-source"),
+					"the daemon followed the CI up to the handback, so the session is told no away connection state",
+				).toEqual([]);
 				expect(ciMismatches, "the reopened session asked nothing unscripted").toEqual([]);
 				expect(ciReports(handedBack), "the daemon says once that the session follows its events").toHaveLength(1);
 				expect(
@@ -1375,18 +1391,6 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 
 		// A routine whose runs keep failing pauses itself in the write of its third failed result in a row, keeps the
 		// revision the owner resumes against, tells the owner once and takes no further slot; a success restarts the count.
-		const harnessNotices = (kind: HarnessNoticeKind) =>
-			root.sessionManager.getEntries().filter((entry) => {
-				const details = parentInputOriginalDetails(entry);
-				return (
-					entry.type === "custom_message" &&
-					entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
-					typeof details === "object" &&
-					details !== null &&
-					"kind" in details &&
-					details.kind === kind
-				);
-			});
 		const wakesSettled = (count: number): Promise<void> =>
 			new Promise((resolve) => {
 				const check = () => {

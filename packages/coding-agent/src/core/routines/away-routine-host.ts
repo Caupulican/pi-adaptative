@@ -612,10 +612,12 @@ export class AwayRoutineSupervisor {
 			const current = this.feeds.get(parentSessionId);
 			if (current && !current.isHandedBack()) continue;
 			if (current) {
-				// A session took the consumer back and has let go again: a new feed takes it up once the hold ends.
+				// Another holder took the consumer (a session that has let go again, or another host): a new feed takes it up
+				// once the hold ends. A hold that outlasts the retries is reported once.
 				await this.closeFeeds(
 					[parentSessionId],
 					"another holder took its events; the away host follows them again later",
+					"once",
 				);
 				this.feedRetryAt.set(parentSessionId, nowMs + OPEN_RETRY_MS);
 				next = Math.min(next, nowMs + OPEN_RETRY_MS);
@@ -663,7 +665,11 @@ export class AwayRoutineSupervisor {
 	}
 
 	/** The feed's terminal signal: one report of why its events are no longer followed away, after its sources parked. */
-	private async closeFeeds(parentSessionIds: readonly string[], reason: string): Promise<void> {
+	private async closeFeeds(
+		parentSessionIds: readonly string[],
+		reason: string,
+		repeat: "always" | "once" = "always",
+	): Promise<void> {
 		for (const parentSessionId of parentSessionIds) {
 			const feed = this.feeds.get(parentSessionId);
 			if (!feed) continue;
@@ -671,7 +677,13 @@ export class AwayRoutineSupervisor {
 			try {
 				await feed.close();
 				this.reported.delete(`feed-close|${parentSessionId}`);
-				this.deps.report(`Events of session ${parentSessionId} are no longer followed away: ${reason}`);
+				const message = `Events of session ${parentSessionId} are no longer followed away: ${reason}`;
+				if (repeat === "once") this.reportOnce(`feed-held|${parentSessionId}`, message);
+				else {
+					// Any other end closes the episode of a hold reported once.
+					this.reported.delete(`feed-held|${parentSessionId}`);
+					this.deps.report(message);
+				}
 			} catch (error) {
 				this.reportOnce(
 					`feed-close|${parentSessionId}`,

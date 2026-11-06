@@ -119,8 +119,8 @@ interface Consumer {
 	parkedAt?: number;
 	pendingGap?: { afterSequence: number; throughSequence: number; cause: HostEventReplayGapReason };
 	/**
-	 * The active host's last connection transition; absent while armed. Cleared by the next claim; one an away activation
-	 * recorded is handed to the session that claims the consumer next.
+	 * The active host's last connection transition; absent while armed. Cleared by the next claim, except one an away
+	 * activation recorded: a session's claim is handed it and keeps it until the session's own first transition.
 	 */
 	connection?: { state: "waiting" | "suspended"; reason: string; since: number; text?: string; role?: CiConsumerRole };
 	/** The consumer's GitHub listeners, kept while it is parked: collection serves the union of every consumer's. */
@@ -661,6 +661,9 @@ export class CiSourceStore {
 					...(role === undefined ? {} : { role }),
 				},
 				interests: existing?.interests ?? [],
+				// The away state stays recorded until the session's own first transition replaces it, so a claim again
+				// before then (a restart that did not save the notice) is told it again.
+				...(awayConnection && left ? { connection: left } : {}),
 			};
 			state.consumers = [...state.consumers.filter((entry) => entry !== existing), consumer];
 			return awayConnection ? { awayConnection } : {};
