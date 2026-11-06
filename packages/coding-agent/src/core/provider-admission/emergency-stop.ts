@@ -6,7 +6,9 @@ import { KeyedSignal } from "../util/keyed-signal.ts";
 /**
  * Machine-wide emergency stop: a sentinel file at `<agentDir>/ESTOP` pauses NEW worker and
  * background provider work in every pi process on this agent directory. In-flight foreground turns
- * continue and nothing is killed; workers waiting to start stay queued, and a running worker's next
+ * continue and nothing is killed, except a turn the owner's phone started in the process that serves
+ * its channel: that process stops it at once (the channels core subscribes to this signal). Workers
+ * waiting to start stay queued, and a running worker's next
  * provider request waits (bounded) instead of being sent. The check is one `existsSync`, so every
  * scheduler may run it on each tick. A corrupt or empty file still counts as engaged (fail safe):
  * the pause must hold even if the file was created with `touch`.
