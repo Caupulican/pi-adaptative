@@ -356,9 +356,16 @@ function ownerLegUpdate(
 	};
 }
 
-/** The text of the latest user message a request carries: the words this turn was opened with. */
-function latestUserText(request: ScriptedRequest): string {
-	const message = request.context.messages.findLast((entry) => entry.role === "user");
+/**
+ * The latest user message of a request that carries `words`: the delivery this turn was opened with. Not simply the
+ * last user message: host context the request projects after it (the authority record of the session's grants) also
+ * reaches the model in the user role.
+ */
+function deliveryWith(request: ScriptedRequest, words: string): string {
+	const message = request.context.messages.findLast(
+		(entry) => entry.role === "user" && JSON.stringify(entry.content).includes(words),
+	);
+	expect(message, `a user message of the request carries "${words}"`).toBeDefined();
 	return JSON.stringify(message?.content ?? "");
 }
 
@@ -469,9 +476,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			{
 				...calls("tg-owner-memory-call", [memoryCall("tg-owner-memory")]),
 				check: (request) => {
-					const words = latestUserText(request);
+					const words = deliveryWith(request, question);
 					expect(words, "the owner's words arrive under the owner header").toContain(ownerHeader);
-					expect(words).toContain(question);
 					expect(words, "the owner's words are not fenced as a third party's").not.toContain(fence);
 					expectOwnerMemory(request, true);
 				},
@@ -493,9 +499,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			{
 				...calls("tg-friend-memory-call", [memoryCall("tg-friend-memory")]),
 				check: (request) => {
-					const words = latestUserText(request);
+					const words = deliveryWith(request, question);
 					expect(words.split(fence).length - 1, "the friend's words arrive fenced").toBe(1);
-					expect(words).toContain(question);
 					expect(words, "the frame says who wrote them").toContain("not by the owner");
 					expectOwnerMemory(request, false);
 				},
@@ -547,9 +552,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			{
 				...calls("tg-forward-memory-call", [memoryCall("tg-forward-memory")]),
 				check: (request) => {
-					const words = latestUserText(request);
+					const words = deliveryWith(request, forwardedWords);
 					expect(words.split(fence).length - 1, "a forward from the owner's id arrives fenced").toBe(1);
-					expect(words).toContain(forwardedWords);
 					expect(words, "it is its own batch, apart from the owner's words").not.toContain(pushWords);
 					expect(words).not.toContain("words in the team group");
 					expectOwnerMemory(request, false);
@@ -580,9 +584,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 					})),
 				),
 				check: (request) => {
-					const words = latestUserText(request);
+					const words = deliveryWith(request, pushWords);
 					expect(words, "the owner's next plain message is the owner's again").toContain(ownerHeader);
-					expect(words).toContain(pushWords);
 					expect(words, "the forward never joins the owner's batch").not.toContain(forwardedWords);
 					expect(words).not.toContain(fence);
 				},
@@ -677,9 +680,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 					{ id: "tg-approved-push", name: "bash", arguments: { command: pushCommands[0] } },
 				]),
 				check: (request) => {
-					expect(latestUserText(request), "the approval turn names the approved draft").toContain(
-						`Owner approval on channel telegram: the owner approved held draft ${mainId}`,
-					);
+					// The approval turn names the approved draft.
+					deliveryWith(request, `Owner approval on channel telegram: the owner approved held draft ${mainId}`);
 				},
 			},
 			{
@@ -761,7 +763,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 					{ id: "tg-typed-only-routine", name: "routine", arguments: routineInput },
 				]),
 				check: (request) => {
-					expect(latestUserText(request)).toContain(typedOnlyWords);
+					expect(deliveryWith(request, typedOnlyWords), "the owner's words from the phone").toContain(ownerHeader);
 				},
 			},
 			{
@@ -772,8 +774,12 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 					expect(text("goal"), "a standing grant is the terminal's").toContain(
 						`Refused: goal grant_edge records a standing edge grant, ${refusedTail}`,
 					);
-					expect(text("write"), "a harness settings write is the terminal's").toContain(
-						`Refused: writes ${settingsPath}, a harness file or one that runs or configures the harness or git, ${refusedTail}`,
+					// The model's context may shorten the path to its `p/<name>` alias: the file name identifies it, the reason
+					// and the refusal are exact.
+					expect(text("write"), "a harness settings write is the terminal's").toMatch(
+						new RegExp(
+							`Refused: writes \\S*settings\\.json, a harness file or one that runs or configures the harness or git, ${refusedTail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+						),
 					);
 					expect(text("routine"), "a routine is the terminal's").toContain(
 						`Refused: routine create sets standing work that later runs with the owner's own authority, ${refusedTail}`,
