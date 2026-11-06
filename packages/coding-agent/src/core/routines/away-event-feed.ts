@@ -3,8 +3,10 @@
  * the parent's event routines are decided while it is closed.
  *
  * - The parent's own event consumer is used: the same consumer id its session uses, over the parent's own task ledger.
- *   The CI journal admits one live activation per consumer; the away host's activation is marked as such, a reopening
- *   session takes custody back from it, and the away activation then stops following (see the CI source store).
+ *   The CI journal admits one live activation per consumer; the away host's activation is marked as such, and a
+ *   reopening session's claim takes custody back from it. The feed then hands back: its sources stop (a session holds
+ *   the consumer, or its ledger refuses them once the session opened) and the supervisor closes it with one report.
+ *   The connection state the away host recorded is told once by the reopening session.
  * - Readiness is process-local: the feed's own source lifetime registers, catches up and SEALS before anything is
  *   decided, exactly as a session does. Accepting an event is idempotent per event and consumer, and the ledger
  *   checkpoint is read on every claim, so a handover loses or repeats nothing.
@@ -18,7 +20,7 @@
  */
 
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
-import type { CiSubject, HostEventSource } from "../events/host-event-contract.ts";
+import { type CiSubject, HostEventError, type HostEventSource } from "../events/host-event-contract.ts";
 import { DeliveryLane, HostEventSessionController } from "../events/host-event-session-controller.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
@@ -36,6 +38,8 @@ export interface AwayEventSourceRequest {
 	onDiagnostic(message: string): void;
 	getSubscribedSubjects(): readonly CiSubject[];
 	subscribeSubjects(listener: () => void): () => void;
+	/** A source found the parent's consumer held by its session and stopped following. */
+	onHeld(): void;
 }
 
 /**
@@ -51,11 +55,13 @@ export interface AwayEventFeedInput {
 	readonly timers: TimerSource;
 	readonly store: RoutineStorePort;
 	readonly sources: AwayEventSourceFactory;
-	/** Whether anything other than the away host holds the parent: a session open anywhere owns its events. */
+	/** Whether a session holds the parent (the away host's own holds never count): a session open anywhere owns its events. */
 	isParentOpen(): boolean;
 	/** The parent's event routines the away host may decide now. */
 	eventRoutineIds(): readonly string[];
 	report(message: string): void;
+	/** The parent's session took its events back, so this feed follows nothing more: its owner closes it. */
+	handedBack(): void;
 }
 
 /** Why a feed did not open: the parent's checkout has no event source the away host can follow. */
@@ -67,7 +73,7 @@ export class AwayEventFeedUnavailable extends Error {
 }
 
 /** How every away refusal of a source not followed begins; a source followed again clears each one. */
-const AWAY_CI_UNFOLLOWED = "its CI results are not followed while its session is closed:";
+const AWAY_CI_UNFOLLOWED = "the away host reported:";
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -85,6 +91,7 @@ export class AwayEventFeed {
 	/** A source reported a connection change the store does not hold yet. */
 	private refusalUnsynced = false;
 	private closing: Promise<void> | undefined;
+	private handBackSignalled = false;
 	/** Decisions run one at a time; a change during one runs exactly one more. */
 	private readonly lane = new DeliveryLane(
 		async () => this.decideOnce(),
@@ -97,9 +104,13 @@ export class AwayEventFeed {
 		this.runtime = runtime;
 		const { agentDir, parentSessionId } = input;
 		const abort = this.abort;
+		// Once the session opened, the ledger is its own: the feed's sink is closed to its sources, which stop.
 		const assertCurrent = (): void => {
-			if (this.closing) throw new Error("The away event feed closed.");
-			if (input.isParentOpen()) throw new Error("The session opened: its own sources follow its events.");
+			if (this.closing) throw new HostEventError("closed", "The away event feed closed.");
+			if (input.isParentOpen()) {
+				this.handBack();
+				throw new HostEventError("closed", "The session opened: its own sources follow its events.");
+			}
 		};
 		this.controller = new HostEventSessionController({
 			runtime,
@@ -129,8 +140,8 @@ export class AwayEventFeed {
 				if (observed === undefined || observed === "clear" || !("scope" in observed)) return;
 				if (kind === "host-event-source") this.observeConnection(observed.scope, observed.state);
 				else if (observed.state !== "clear")
-					// A replay gap is committed in the ledger and the session tells it when it opens; a journal replaced while
-					// the session is closed is told only here.
+					// A replay gap and a replaced journal's end are committed in the ledger, and the session tells them when it
+					// opens; the daemon's report is the operator's.
 					input.report(`Host events of session ${parentSessionId} away: ${observed.state.text}`);
 			},
 			warn: (message) => input.report(`Host events of session ${parentSessionId} away: ${message}`),
@@ -173,6 +184,7 @@ export class AwayEventFeed {
 				onDiagnostic: (message) => input.report(`Host events of session ${parentSessionId} away: ${message}`),
 				getSubscribedSubjects: () => runtime.hostEvents.subscribedSubjects(),
 				subscribeSubjects: (listener) => runtime.hostEvents.subscribe(listener),
+				onHeld: () => feed.handBack(),
 			});
 			if (feed.sources.length === 0)
 				throw new AwayEventFeedUnavailable("its project has no CI workflow the away host can follow.");
@@ -196,6 +208,18 @@ export class AwayEventFeed {
 		return this.closing !== undefined;
 	}
 
+	/** Whether the parent's session took its events back from this feed (it follows nothing more). */
+	isHandedBack(): boolean {
+		return this.handBackSignalled;
+	}
+
+	/** Signalled once, past the caller's stack: a source or a ledger call is never re-entered by the owner's close. */
+	private handBack(): void {
+		if (this.handBackSignalled || this.closing) return;
+		this.handBackSignalled = true;
+		queueMicrotask(() => this.input.handedBack());
+	}
+
 	/** Stops the sources (parking the consumer for the session), fences the consumer and joins the last decision. */
 	close(): Promise<void> {
 		this.closing ??= (async () => {
@@ -214,7 +238,11 @@ export class AwayEventFeed {
 	private decideOnce(): void {
 		const { input } = this;
 		const routineIds = input.eventRoutineIds();
-		if (routineIds.length === 0 || input.isParentOpen()) return;
+		if (routineIds.length === 0) return;
+		if (input.isParentOpen()) {
+			this.handBack();
+			return;
+		}
 		const nowMs = input.timers.port("routines").now();
 		try {
 			if (this.refusalUnsynced) {

@@ -38,9 +38,9 @@ import {
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
 import { ROUTINE_RESULT_WAKES_HOLD } from "../../../../src/core/routines/routine-parent-input.ts";
+import { type AwayCiCredentials, createCiAwayEventSources } from "../../../../src/host/ci/ci-away-event-sources.ts";
 import { createCiHostRuntime } from "../../../../src/host/ci/ci-host-event-source.ts";
 import type { CiProvider, CiRepository } from "../../../../src/host/ci/ci-provider.ts";
-import { CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
 import type { CiGitPaths } from "../../../../src/host/ci/ci-status-record.ts";
 import type { SessionManager } from "../../../../src/kernel/node.ts";
 import {
@@ -1094,11 +1094,16 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			expect(parentInputs(), "the import delivers no result again").toHaveLength(41);
 			world.faultMatrix.witness("R54", { control: false });
 
-			// An event routine of this parent follows its CI while the parent is closed: the daemon builds the same CI source a
-			// session follows, for the parent's checkout (only the provider's upstream answers are scripted). A source it
-			// cannot ready is told once, as the routine's away refusal; once followed, a sealed failure runs the routine once
-			// away, and the reopened parent receives one result and re-seals the attempt without a second run.
+			// An event routine of this parent follows its CI while the parent is closed: the daemon builds the production away
+			// CI source for the parent's checkout (only the checkout's paths and the provider's upstream answers are scripted).
+			// A source it cannot ready is told once, as the routine's away refusal. Once it is followed, the refusal clears
+			// before anything is decided, and a sealed failure runs the routine once away. The reopened session's own CI source
+			// then takes the consumer back from the running daemon, which stops following and says so; the parent receives
+			// one result, and the re-sealed attempt runs nothing again. The accepted failure's root delivery stays pending in
+			// the parent's ledger: proactivity is off in this leg's settings, so no lane delivers it, and a later leg that
+			// enables proactivity on this parent must settle it first.
 			const ciRoutineId = "away-ci-watch";
+			const ciParentSessionId = root.sessionManager.getSessionId();
 			const ciPrompt = "Check the failing CI attempt of the closed session and report its status.";
 			const ciRepository: CiRepository = {
 				host: "github.com",
@@ -1134,7 +1139,12 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				observedAt: "2026-11-05T00:01:00.000Z",
 				runUrl: "https://github.com/harness/routines/actions/runs/702",
 			});
+			// What the scripted upstream was asked that it does not answer; checked after every wait, since a throw inside a
+			// production callback would surface only as that wait's timeout.
+			const ciMismatches: string[] = [];
 			let ghInstalled = false;
+			let ciCompleted = false;
+			const ciRunCompleted = createBarrier();
 			const ciProvider: CiProvider = {
 				repository: async (signal) => {
 					signal.throwIfAborted();
@@ -1143,7 +1153,13 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				},
 				collect: async (requestedSha, signal) => {
 					signal.throwIfAborted();
-					expect(requestedSha).toBe(ciSha);
+					if (requestedSha !== ciSha) ciMismatches.push(`collected ${requestedSha}`);
+					if (!ciCompleted)
+						return {
+							subject: ciSubject,
+							events: [],
+							current: { subject: ciSubject, runId: 702, runNumber: 1, runAttempt: 1, status: "in_progress" },
+						};
 					return {
 						subject: ciSubject,
 						events: [ciFailure],
@@ -1159,24 +1175,32 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					};
 				},
 				failedJobs: async () => ["harness job"],
-				waitForRun: async () => {
-					throw new Error("A completed CI attempt is never watched.");
-				},
+				// The in-progress attempt's watch ends when the scripted run completes.
+				waitForRun: (runId, signal) =>
+					new Promise<void>((resolve, reject) => {
+						if (runId !== 702) ciMismatches.push(`watched run ${runId}`);
+						const onAbort = () => reject(signal.reason);
+						if (signal.aborted) {
+							onAbort();
+							return;
+						}
+						signal.addEventListener("abort", onAbort, { once: true });
+						void ciRunCompleted.promise.then(() => {
+							signal.removeEventListener("abort", onAbort);
+							resolve();
+						});
+					}),
 			};
-			const awayCiSources: AwayEventSourceFactory = async (request) => {
-				expect(request.cwd, "the away host follows the parent's own checkout").toBe(HARNESS_PROJECT_CWD);
-				const runtime = await createCiHostRuntime({
-					cwd: request.cwd,
-					paths: ciPaths,
-					provider: ciProvider,
-					store: new CiSourceStore(ciPaths.statusDir),
-					signal: request.signal,
-					onDiagnostic: (message) => request.onDiagnostic(message),
-					getSubscribedSubjects: () => request.getSubscribedSubjects(),
-					subscribeSubjects: (listener) => request.subscribeSubjects(listener),
-				});
-				if (!runtime) throw new Error("The scripted CI source did not open.");
-				return [runtime.source];
+			let handOverGhCredentials: (credentials: AwayCiCredentials) => void = () => {};
+			const awayCiFactory = createCiAwayEventSources(
+				new Promise<AwayCiCredentials>((resolve) => {
+					handOverGhCredentials = resolve;
+				}),
+				{ paths: ciPaths, provider: ciProvider },
+			);
+			const awayCiSources: AwayEventSourceFactory = (request) => {
+				if (request.cwd !== HARNESS_PROJECT_CWD) ciMismatches.push(`followed away in ${request.cwd}`);
+				return awayCiFactory(request);
 			};
 			root.session.backgroundLanes.stopPersistentBotDaemon();
 			const ciDaemonStarted = world.processes.runNextBotDaemon({ eventSources: awayCiSources });
@@ -1198,15 +1222,28 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			const ciDaemon = await ciDaemonStarted;
 			for (const name of GH_CREDENTIAL_NAMES)
 				expect(ciDaemon.launch.env[name], `no gh token reaches the daemon's environment (${name})`).toBeUndefined();
+			const handedGhCredentials = parseDaemonGhCredentials(ciDaemon.launch.stdin());
+			expect(
+				handedGhCredentials.GH_TOKEN,
+				"the starting session handed its gh token over on the daemon's input",
+			).toBe(ghTokenSentinel);
+			handOverGhCredentials({ credentials: handedGhCredentials });
 			const ciRuns = () => awayStore.listRoutineOccurrences({ routineId: ciRoutineId });
 			const ghMissing = "the gh command is not installed";
-			const ghMissingReports = () => daemonStatus().reports.filter((report) => report.message.includes(ghMissing));
+			const ciReports = (fragment: string) =>
+				daemonStatus().reports.filter((report) => report.message.includes(fragment));
+			const followedAgain = "are followed away again.";
+			const handedBack = `Events of session ${ciParentSessionId} are no longer followed away: its session opened, so the session follows its events`;
 			const ciRefused = createBarrier();
+			const ciFollowed = createBarrier();
 			const ciRan = createBarrier();
+			const ciHandedBack = createBarrier();
 			const stopObservingCi = awayStore.subscribe(() => {
-				if (awayStore.getRoutine(ciRoutineId)?.awayRefusal?.reason.includes(ghMissing) === true)
-					ciRefused.release();
+				const refusal = awayStore.getRoutine(ciRoutineId)?.awayRefusal?.reason;
+				if (refusal?.includes(ghMissing) === true) ciRefused.release();
+				if (ghInstalled && refusal === undefined && ciReports(followedAgain).length > 0) ciFollowed.release();
 				if (ciRuns().some((run) => run.phase === "terminal")) ciRan.release();
+				if (ciReports(handedBack).length > 0) ciHandedBack.release();
 			});
 			world.provider.enqueue("worker-a", workerReply("away-ci-routine", ciPrompt));
 			let ciRunId: string;
@@ -1217,90 +1254,106 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				// The daemon's next renewal finds the parent closed and opens its one event feed.
 				world.timers.advance("routines", 10_000);
 				await withDeadline(world.trace, "the away host reports the source it cannot ready", ciRefused.promise);
-				expect(
-					parseDaemonGhCredentials(ciDaemon.launch.stdin()).GH_TOKEN,
-					"the starting session handed its gh token over on the daemon's input",
-				).toBe(ghTokenSentinel);
+				expect(ciMismatches, "the away host asked the scripted upstream only for its checkout").toEqual([]);
 				expect(
 					awayStore.getRoutine(ciRoutineId)?.awayRefusal?.reason,
 					"the routine waits for its session, with the exact reason",
 				).toContain("waits for the session to open");
-				expect(ciRuns(), "a source that is not followed decides nothing").toEqual([]);
-				expect(ghMissingReports(), "the unready source is reported once").toHaveLength(1);
-				// gh is installed: the source's next check (a HEAD write is its local trigger) follows the checkout.
+				expect(ciRuns(), "a source that cannot be followed is refused and runs nothing").toEqual([]);
+				expect(ciReports(ghMissing), "the unready source is reported once").toHaveLength(1);
+				// gh is installed: the source's next check (a HEAD write is its local trigger) follows the checkout, whose
+				// attempt is still in progress. Its seal clears the refusal and decides nothing.
 				ghInstalled = true;
 				world.io.writeFileSync(ciHead, `${ciSha}\n`);
+				await withDeadline(world.trace, "following again clears the away refusal", ciFollowed.promise);
+				expect(ciMismatches, "the followed checkout asked nothing unscripted").toEqual([]);
+				expect(ciRuns(), "an attempt still in progress runs nothing").toEqual([]);
+				// The attempt completes: its watch ends, and the sealed failure runs the routine away.
+				ciCompleted = true;
+				ciRunCompleted.release();
 				await withDeadline(world.trace, "the sealed CI failure runs the routine away", ciRan.promise);
+				expect(ciMismatches, "the completed attempt asked nothing unscripted").toEqual([]);
 				const runs = ciRuns();
 				expect(
 					runs.map((run) => [run.executor, run.result?.outcome, run.result?.delivery]),
 					"the closed session's event routine ran once away, its result left for its parent",
 				).toEqual([["away", "succeeded", "pending"]]);
 				expect(runs[0]?.trigger).toMatchObject({ kind: "event", event: ciFailure });
+				expect(ciReports(ghMissing), "and repeated no report").toHaveLength(1);
+				expect(ciReports(followedAgain), "following again is reported once").toHaveLength(1);
 				expect(
-					awayStore.getRoutine(ciRoutineId)?.awayRefusal,
-					"following again cleared the refusal",
-				).toBeUndefined();
-				expect(ghMissingReports(), "and repeated no report").toHaveLength(1);
+					[
+						...ciReports("CI events remain pending"),
+						...ciReports("Host event remains pending"),
+						...ciReports("are no longer followed away"),
+					],
+					"the away host opening for the run is no open session: the feed keeps following",
+				).toEqual([]);
 				expect(world.io.peekFile(file), "nothing wrote the parent transcript while it was closed").toBe(
 					fileWhileCiAway,
 				);
 				ciRunId = runs[0]!.occurrenceId;
+
+				// The session reopens while the daemon still follows its events. Its own CI source starts with it, before
+				// its first routine tick, and takes the consumer back from the daemon's live activation.
+				world.systemOne.enterPhase("routine-away-ci-parent", {});
+				world.provider.enqueue("root", {
+					...text("routine-away-ci-parent", "The away CI check completed."),
+					check: (request) =>
+						expect(JSON.stringify(request.context.messages)).toContain("away-ci-routine completed."),
+				});
+				root = await world.createRootSession("root", {
+					agentDir,
+					sessionManager: world.openSessionManager(file, agentDir),
+					settings,
+				});
+				open = true;
+				const sessionCiDiagnostics: string[] = [];
+				const sessionCiSealed = createBarrier();
+				const sessionCiAbort = new AbortController();
+				const sessionCiBinding = root.session.backgroundLanes.openHostEventSession(sessionCiAbort.signal);
+				const sessionCi = await createCiHostRuntime({
+					cwd: HARNESS_PROJECT_CWD,
+					paths: ciPaths,
+					provider: ciProvider,
+					onDiagnostic: (message) => sessionCiDiagnostics.push(message),
+					getSubscribedSubjects: () => root.session.backgroundLanes.getHostEventSubjects(),
+					subscribeSubjects: (listener) => root.session.backgroundLanes.subscribeOrchestrationStore(listener),
+				});
+				if (!sessionCi) throw new Error("The scripted CI source did not open.");
+				try {
+					await sessionCi.source.start({
+						...sessionCiBinding.sink,
+						seal: async (seal, signal) => {
+							await sessionCiBinding.sink.seal(seal, signal);
+							sessionCiSealed.release();
+						},
+					});
+					await withDeadline(
+						world.trace,
+						"the reopened session takes its CI back from the running daemon and re-seals",
+						sessionCiSealed.promise,
+					);
+					const ciSettled = parentSettled(42);
+					await root.session.backgroundLanes.tickPersistentRoutines();
+					await withDeadline(world.trace, "the event run away is delivered on reopen", ciSettled);
+					await withDeadline(world.trace, "the daemon stops following the reopened session", ciHandedBack.promise);
+					await root.session.backgroundLanes.tickPersistentRoutines();
+				} finally {
+					await sessionCi.source.stop();
+					await sessionCiBinding.close();
+				}
+				expect(sessionCiDiagnostics, "the session takes the consumer back from the daemon cleanly").toEqual([]);
+				expect(ciMismatches, "the reopened session asked nothing unscripted").toEqual([]);
+				expect(ciReports(handedBack), "the daemon says once that the session follows its events").toHaveLength(1);
+				expect(
+					[...ciReports("CI events remain pending"), ...ciReports("Host event remains pending")],
+					"the handback leaves no pending source behind in the daemon",
+				).toEqual([]);
 				expect(await ciDaemon.stop()).toBe(0);
 			} finally {
 				stopObservingCi();
 			}
-
-			// Reopening delivers the event run's result once; the session's own CI source then takes the parked custody back
-			// and re-seals the same attempt, which runs nothing again.
-			world.systemOne.enterPhase("routine-away-ci-parent", {});
-			world.provider.enqueue("root", {
-				...text("routine-away-ci-parent", "The away CI check completed."),
-				check: (request) =>
-					expect(JSON.stringify(request.context.messages)).toContain("away-ci-routine completed."),
-			});
-			root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager: world.openSessionManager(file, agentDir),
-				settings,
-			});
-			open = true;
-			const ciSettled = parentSettled(42);
-			await root.session.backgroundLanes.tickPersistentRoutines();
-			await withDeadline(world.trace, "the event run away is delivered on reopen", ciSettled);
-			const sessionCiDiagnostics: string[] = [];
-			const sessionCiSealed = createBarrier();
-			const sessionCiAbort = new AbortController();
-			const sessionCiBinding = root.session.backgroundLanes.openHostEventSession(sessionCiAbort.signal);
-			const sessionCi = await createCiHostRuntime({
-				cwd: HARNESS_PROJECT_CWD,
-				paths: ciPaths,
-				provider: ciProvider,
-				store: new CiSourceStore(ciPaths.statusDir),
-				onDiagnostic: (message) => sessionCiDiagnostics.push(message),
-				getSubscribedSubjects: () => root.session.backgroundLanes.getHostEventSubjects(),
-				subscribeSubjects: (listener) => root.session.backgroundLanes.subscribeOrchestrationStore(listener),
-			});
-			if (!sessionCi) throw new Error("The scripted CI source did not open.");
-			try {
-				await sessionCi.source.start({
-					...sessionCiBinding.sink,
-					seal: async (seal, signal) => {
-						await sessionCiBinding.sink.seal(seal, signal);
-						sessionCiSealed.release();
-					},
-				});
-				await withDeadline(
-					world.trace,
-					"the reopened session re-seals the attempt run away",
-					sessionCiSealed.promise,
-				);
-				await root.session.backgroundLanes.tickPersistentRoutines();
-			} finally {
-				await sessionCi.source.stop();
-				await sessionCiBinding.close();
-			}
-			expect(sessionCiDiagnostics, "the session takes the parked custody back cleanly").toEqual([]);
 			expect(
 				store()
 					.listRoutineOccurrences({ routineId: ciRoutineId })

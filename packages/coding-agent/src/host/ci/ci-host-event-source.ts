@@ -27,6 +27,8 @@ import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "..
 import type { CiProvider, CiRepository } from "./ci-provider.ts";
 import { CiRunMonitor } from "./ci-run-monitor.ts";
 import {
+	CiConsumerHeldError,
+	type CiConsumerRole,
 	type CiSourceSnapshot,
 	CiSourceStore,
 	CiSourceVersionError,
@@ -79,6 +81,13 @@ export interface CiHostRuntimeOptions {
 	readonly subscribeGithubInterests?: (listener: () => void) => () => void;
 	/** Variables only the default provider's gh commands carry (the away host's gh tokens). */
 	readonly commandCredentials?: Readonly<Record<string, string>>;
+	/**
+	 * `away-host`: this source follows a closed session's events with that session's consumer. Its activation yields to
+	 * the session's claim, and it keeps the session's recorded GitHub listeners instead of recording its own.
+	 */
+	readonly role?: CiConsumerRole;
+	/** Called once when an away activation finds the consumer held by a session: the source has stopped following. */
+	readonly onHeld?: () => void;
 }
 
 interface CiLocalInputs {
@@ -169,6 +178,8 @@ class CiRepositoryUnavailableError extends Error {}
 class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	readonly source: HostEventSource = this;
 	private readonly paths: CiGitPaths;
+	private readonly role: CiConsumerRole | undefined;
+	private readonly onHeld: (() => void) | undefined;
 	private readonly provider: CiProvider;
 	private readonly store: CiSourceStore;
 	private readonly diagnostic: (message: string) => void;
@@ -228,8 +239,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			| "threads"
 			| "getGithubInterests"
 			| "subscribeGithubInterests"
+			| "role"
+			| "onHeld"
 		> = {},
 	) {
+		this.role = options.role;
+		this.onHeld = options.onHeld;
 		this.paths = paths;
 		this.provider = provider;
 		this.store = store;
@@ -469,6 +484,17 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 					this.report("source", `CI event source inactive: ${errorText(error)}`);
 					return;
 				}
+				// A session holds the consumer an away activation followed: it stops, and its owner reports the handback.
+				if (error instanceof CiConsumerHeldError && this.role === "away-host") {
+					this.dormant = true;
+					this.onHeld?.();
+					return;
+				}
+				// A closed sink admits nothing more from this start; its owner reports why it closed.
+				if (error instanceof HostEventError && error.code === "closed") {
+					this.dormant = true;
+					return;
+				}
 				if (error instanceof HostEventError && error.code === "runtime_replacing") {
 					// Runtime replacement re-requests through the sink's admission signal; it is no upstream failure.
 					this.sinkBlocked = true;
@@ -571,7 +597,8 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		let snapshot = this.store.snapshot();
 		let consumer = this.consumer(snapshot, sink.consumerId, activationId);
 		if (!consumer) return;
-		this.store.recordInterests(sink.consumerId, activationId, inputs.interests);
+		// The away host serves no GitHub listener of its own: the session's recorded ones stay its collection's interests.
+		if (this.role !== "away-host") this.store.recordInterests(sink.consumerId, activationId, inputs.interests);
 		const { subjects: scope, required } = this.scope(repository, inputs, snapshot, consumer.acknowledged);
 		if (!scope.length) {
 			// No revision to observe (unborn HEAD, nothing subscribed or unsettled) and nothing retained.
@@ -966,13 +993,21 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		const checkpoint = await sink.checkpoint(identity.sourceId, signal);
 		signal.throwIfAborted();
 		const activationId = randomUUID();
-		this.store.claim(sink.consumerId, activationId, checkpoint);
+		const { awayConnection } = this.store.claim(sink.consumerId, activationId, checkpoint, this.role);
 		this.activationId = activationId;
 		this.sourceId = identity.sourceId;
 		this.claimed = { consumerId: sink.consumerId, activationId };
 		this.opened = false;
 		this.sealed = undefined;
 		this.retiredSent = undefined;
+		// What the away host could not follow while the session was closed is told once with the session's next turn. It
+		// shares the scope and reason of this source's own state, so a state that still holds here is not told twice.
+		if (awayConnection)
+			sink.reportConnection(HOST_EVENT_KINDS["ci-attempt-terminal"].source, {
+				state: awayConnection.state,
+				reason: awayConnection.reason,
+				text: `Since ${new Date(awayConnection.since).toISOString()}, while this session was closed: ${awayConnection.text}`,
+			});
 		return activationId;
 	}
 
@@ -983,8 +1018,10 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	): CiSourceSnapshot["consumers"][number] | undefined {
 		const consumer = snapshot.consumers.find((entry) => entry.id === consumerId);
 		if (consumer?.activation?.id === activationId && snapshot.sourceId === this.sourceId) return consumer;
-		// A quarantined journal or an expired claim: activate again against the current source.
-		this.report("custody", "CI source custody was replaced; this session registers the current source.");
+		// A quarantined journal or an expired claim: activate again against the current source. An away activation reports
+		// nothing here: its next claim either continues or meets a session's hold, whose handback its owner reports.
+		if (this.role !== "away-host")
+			this.report("custody", "CI source custody was replaced; this session registers the current source.");
 		const previous = this.sourceId;
 		this.activationId = undefined;
 		this.claimed = undefined;

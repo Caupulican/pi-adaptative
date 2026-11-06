@@ -37,6 +37,7 @@ import {
 	HOST_EVENT_LISTENER_LIMITS,
 	parseGithubThreadInterest,
 } from "../../core/events/host-event-kinds.ts";
+import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "../../core/security/secret-text.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../../core/util/atomic-file.ts";
 import {
 	isProcessOwnerRecord,
@@ -55,7 +56,7 @@ export const CI_PARKED_CONSUMER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Each version has its own journal file, so a build that reads an older shape never quarantines a newer journal it
  * shares the repository's status directory with. Version 3 records departures, gap causes and connection state;
- * version 4 adds GitHub thread cursors and every consumer's GitHub interests.
+ * version 4 adds GitHub thread cursors, every consumer's GitHub interests and the away host's activation role.
  */
 const CI_SOURCE_VERSION = 4;
 const MAX_CONSUMERS = 64;
@@ -71,6 +72,29 @@ const MAX_REVIEW_CURSORS = 64;
 
 /** A journal written by a newer release is never rewritten or quarantined by an older reader. */
 export class CiSourceVersionError extends Error {}
+
+/**
+ * Who a consumer's activation serves: a session (no role), or the away host following a closed session's events with
+ * that session's own consumer. A session's claim takes custody back from a live away activation; nothing else
+ * displaces a live activation.
+ */
+export type CiConsumerRole = "away-host";
+
+/** The consumer is held by another live activation this claim or call may not displace. */
+export class CiConsumerHeldError extends Error {
+	constructor(message = "CI source consumer is already active in another host resource.") {
+		super(message);
+		this.name = "CiConsumerHeldError";
+	}
+}
+
+/** A connection state the away host recorded, which the session that takes its consumer back is told once. */
+export interface CiAwayConnection {
+	readonly state: "waiting" | "suspended";
+	readonly reason: string;
+	readonly text: string;
+	readonly since: number;
+}
 
 interface ConsumerStart {
 	registration: HostEventSourceRegistration;
@@ -90,12 +114,15 @@ interface Consumer {
 	/** Persisted before the sink call; exact replay bridges either side of a crash. */
 	pendingStart?: ConsumerStart;
 	replayFloor: number;
-	activation?: { id: string; owner: ProcessOwner };
+	activation?: { id: string; owner: ProcessOwner; role?: CiConsumerRole };
 	/** Set exactly when no live host owns the consumer. Custody stays retained until expiry. */
 	parkedAt?: number;
 	pendingGap?: { afterSequence: number; throughSequence: number; cause: HostEventReplayGapReason };
-	/** The active host's last connection transition; absent while armed. Cleared by the next claim. */
-	connection?: { state: "waiting" | "suspended"; reason: string; since: number };
+	/**
+	 * The active host's last connection transition; absent while armed. Cleared by the next claim; one an away activation
+	 * recorded is handed to the session that claims the consumer next.
+	 */
+	connection?: { state: "waiting" | "suspended"; reason: string; since: number; text?: string; role?: CiConsumerRole };
 	/** The consumer's GitHub listeners, kept while it is parked: collection serves the union of every consumer's. */
 	interests: GithubThreadInterest[];
 }
@@ -210,10 +237,19 @@ function parseConsumer(value: unknown): Consumer {
 }
 
 function parseConsumerActivation(value: unknown): NonNullable<Consumer["activation"]> {
-	const entry = hostEventRecord(value, ["id", "owner"], "CI consumer activation");
+	const entry = hostEventRecord(value, ["id", "owner", "role"], "CI consumer activation");
 	const owner = hostEventRecord(entry.owner, ["pid", "startTime", "hostname", "machineId"], "CI consumer owner");
 	if (!isProcessOwnerRecord(owner)) throw new Error("CI consumer owner is invalid.");
-	return { id: hostEventString(entry.id, "activation id"), owner };
+	return {
+		id: hostEventString(entry.id, "activation id"),
+		owner,
+		...(entry.role === undefined ? {} : { role: parseConsumerRole(entry.role) }),
+	};
+}
+
+function parseConsumerRole(value: unknown): CiConsumerRole {
+	if (value !== "away-host") throw new Error("CI consumer role is unknown.");
+	return value;
 }
 
 function parseConsumerGap(value: unknown): NonNullable<Consumer["pendingGap"]> {
@@ -226,13 +262,17 @@ function parseConsumerGap(value: unknown): NonNullable<Consumer["pendingGap"]> {
 }
 
 function parseConsumerConnection(value: unknown): NonNullable<Consumer["connection"]> {
-	const entry = hostEventRecord(value, ["state", "reason", "since"], "CI consumer connection");
+	const entry = hostEventRecord(value, ["state", "reason", "since", "text", "role"], "CI consumer connection");
 	if (entry.state !== "waiting" && entry.state !== "suspended")
 		throw new Error("CI consumer connection state is unknown.");
 	return {
 		state: entry.state,
 		reason: hostEventString(entry.reason, "connection reason", 64),
 		since: hostEventInteger(entry.since, "since", 0),
+		...(entry.text === undefined
+			? {}
+			: { text: hostEventString(entry.text, "connection text", MAX_RETAINED_DIAGNOSTIC_CHARS) }),
+		...(entry.role === undefined ? {} : { role: parseConsumerRole(entry.role) }),
 	};
 }
 
@@ -414,6 +454,8 @@ function sameSubjects(left: readonly CiSubject[], right: readonly CiSubject[]): 
 
 function activeConsumer(state: SourceState, consumerId: string, activationId: string): Consumer {
 	const consumer = state.consumers.find((entry) => entry.id === consumerId);
+	if (consumer?.activation && consumer.activation.id !== activationId)
+		throw new CiConsumerHeldError("CI source consumer activation was replaced by another host resource.");
 	if (!consumer || consumer.activation?.id !== activationId)
 		throw new Error("CI source consumer activation is absent or was replaced.");
 	return consumer;
@@ -547,17 +589,31 @@ export class CiSourceStore {
 		return this.change((state) => ({ sourceId: state.sourceId, sourceEpoch: state.sourceEpoch }));
 	}
 
-	claim(consumerId: string, activationId: string, checkpoint: HostEventConsumerCheckpoint | undefined): void {
-		this.change((state) => {
+	/**
+	 * Claims the consumer for one activation. A session's claim (no `role`) takes custody back from a live away
+	 * activation; any other live activation holds it ({@link CiConsumerHeldError}). When a session claims, it receives the
+	 * connection state an away activation left on the consumer, to tell it once.
+	 */
+	claim(
+		consumerId: string,
+		activationId: string,
+		checkpoint: HostEventConsumerCheckpoint | undefined,
+		role?: CiConsumerRole,
+	): { awayConnection?: CiAwayConnection } {
+		return this.change((state) => {
 			const now = this.now();
 			reclaimDeadConsumers(state, now);
 			this.expire(state, now);
 			const existing = state.consumers.find((entry) => entry.id === consumerId);
 			if (existing?.activation) {
-				if (existing.activation.id !== activationId)
-					throw new Error("CI source consumer is already active in another host resource.");
-				return;
+				if (existing.activation.id === activationId) return {};
+				if (role !== undefined || existing.activation.role !== "away-host") throw new CiConsumerHeldError();
 			}
+			const left = existing?.connection;
+			const awayConnection: CiAwayConnection | undefined =
+				role === undefined && left?.role === "away-host" && left.text !== undefined
+					? { state: left.state, reason: left.reason, text: left.text, since: left.since }
+					: undefined;
 			if (!existing) {
 				while (state.consumers.length >= MAX_CONSUMERS) {
 					const evicted = oldestParkedConsumer(state);
@@ -599,10 +655,15 @@ export class CiSourceStore {
 							},
 						}
 					: {}),
-				activation: { id: hostEventString(activationId, "activationId"), owner: ownProcessOwner() },
+				activation: {
+					id: hostEventString(activationId, "activationId"),
+					owner: ownProcessOwner(),
+					...(role === undefined ? {} : { role }),
+				},
 				interests: existing?.interests ?? [],
 			};
 			state.consumers = [...state.consumers.filter((entry) => entry !== existing), consumer];
+			return awayConnection ? { awayConnection } : {};
 		});
 	}
 
@@ -670,14 +731,26 @@ export class CiSourceStore {
 	recordConnection(
 		consumerId: string,
 		activationId: string,
-		connection: Pick<NonNullable<Consumer["connection"]>, "state" | "reason"> | undefined,
+		connection:
+			| { readonly state: "waiting" | "suspended"; readonly reason: string; readonly text: string }
+			| undefined,
 	): void {
 		this.change((state) => {
 			const consumer = state.consumers.find((entry) => entry.id === consumerId);
-			if (consumer?.activation?.id !== activationId) return;
-			if (connection)
-				consumer.connection = { state: connection.state, reason: connection.reason, since: this.now() };
-			else delete consumer.connection;
+			const activation = consumer?.activation;
+			if (!consumer || activation?.id !== activationId) return;
+			if (!connection) {
+				delete consumer.connection;
+				return;
+			}
+			const text = boundedRedactedDiagnosticText(connection.text);
+			consumer.connection = {
+				state: connection.state,
+				reason: connection.reason,
+				since: this.now(),
+				...(text === undefined ? {} : { text }),
+				...(activation.role === undefined ? {} : { role: activation.role }),
+			};
 		});
 	}
 

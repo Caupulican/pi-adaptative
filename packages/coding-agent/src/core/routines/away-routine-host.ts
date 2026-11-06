@@ -609,7 +609,18 @@ export class AwayRoutineSupervisor {
 				continue;
 			}
 			this.feedRoutines.set(parentSessionId, routineIds);
-			if (this.feeds.has(parentSessionId)) continue;
+			const current = this.feeds.get(parentSessionId);
+			if (current && !current.isHandedBack()) continue;
+			if (current) {
+				// A session took the consumer back and has let go again: a new feed takes it up once the hold ends.
+				await this.closeFeeds(
+					[parentSessionId],
+					"another holder took its events; the away host follows them again later",
+				);
+				this.feedRetryAt.set(parentSessionId, nowMs + OPEN_RETRY_MS);
+				next = Math.min(next, nowMs + OPEN_RETRY_MS);
+				continue;
+			}
 			const retryAt = this.feedRetryAt.get(parentSessionId);
 			if (retryAt !== undefined && retryAt > nowMs) {
 				next = Math.min(next, retryAt);
@@ -626,6 +637,7 @@ export class AwayRoutineSupervisor {
 					isParentOpen: () => this.parentOpen(parentSessionId) !== false,
 					eventRoutineIds: () => this.feedRoutines.get(parentSessionId) ?? [],
 					report: (message) => this.deps.report(message),
+					handedBack: () => this.wake(),
 				});
 				if (this.disposed) {
 					await feed.close();
@@ -684,15 +696,15 @@ export class AwayRoutineSupervisor {
 	}
 
 	/**
-	 * Whether any hold other than this supervisor's own host's holds the parent's session: only a holder proven dead
+	 * Whether any hold other than this supervisor's own away holds holds the parent's session: only a holder proven dead
 	 * does not count. `unknown` when the lease registry cannot be read; nothing then proves the session closed.
 	 */
 	private parentOpen(parentSessionId: string): boolean | "unknown" {
-		// Only this supervisor's own hold is discounted: a session open in this same process holds the parent too.
-		const ownHold = this.hosts.get(parentSessionId)?.context.holdToken;
+		// Every away-host hold of this process is this supervisor's, including one whose host is still opening (its lease
+		// is taken before the open yields). A session open in this same process holds the parent in the session role.
 		try {
 			return readSessionLeaseHolders(this.deps.agentDir, parentSessionId).some(
-				(holder) => holder.token !== ownHold && holder.standing !== "dead",
+				(holder) => !(holder.self && holder.role === "away-host") && holder.standing !== "dead",
 			);
 		} catch {
 			return "unknown";
