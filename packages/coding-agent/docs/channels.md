@@ -88,7 +88,7 @@ The run carries a third party's words, so it runs under their authority:
 
 - An outward action the words ask for (a push, a publish) is prepared, not run, unless a standing grant of the owner covers its class. The owner is told with their next turn and approves it in their own words (see [Settings](settings.md#autonomy)).
 - The owner's own decisions are refused: goal and routine changes, handing knowledge to another agent, and every action of the `knowledge`, `memory` and `channel_reply` tools, reads included (the knowledge base, memory history and the waiting drafts).
-- The owner's records are withheld from the request: the knowledge projection, retrieved memory evidence and the user persona are replaced by a cleared record. The memory block of the session's fixed system prompt (the file-store memory system's `MEMORY.md`, project `MEMORY.md` and `USER.md` snapshot) is not withheld.
+- The owner's records are withheld from the request: the knowledge projection, retrieved memory evidence and the user persona are replaced by a cleared record. The request's system prompt leaves out the owner's memory block (the file-store memory system's `MEMORY.md`, project `MEMORY.md`, `USER.md` preferences and memory extensions' blocks) and says in one line that the memory is withheld. A message that arrives while the owner's run is live waits and opens its own run after it, without that block; the owner's next run sends it again.
 
 The same rules apply to every run that carries a third party's words: a pi-chat peer's message, and a host event someone else wrote.
 

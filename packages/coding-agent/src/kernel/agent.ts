@@ -142,8 +142,8 @@ export interface AgentOptions {
 	 * unwired from the constructor.
 	 */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
-	/** The host's projection of the held system prompt into the one a request sends (see `Agent.requestSystemPrompt`). */
-	projectSystemPrompt?: (systemPrompt: string) => string;
+	/** The host's projection of the held system prompt into the one a request sends (`AgentLoopConfig.projectSystemPrompt`). */
+	projectSystemPrompt?: AgentLoopConfig["projectSystemPrompt"];
 	streamFn?: StreamFn;
 	getApiKey?: AgentLoopConfig["getApiKey"];
 	resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
@@ -296,7 +296,7 @@ export class Agent {
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	public onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
 	public requestPreflight?: AgentLoopConfig["requestPreflight"];
-	public projectSystemPrompt?: (systemPrompt: string) => string;
+	public projectSystemPrompt?: AgentLoopConfig["projectSystemPrompt"];
 	public streamFn: StreamFn;
 	public getApiKey?: AgentLoopConfig["getApiKey"];
 	public resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
@@ -730,8 +730,9 @@ export class Agent {
 	}
 
 	/**
-	 * The system prompt the next request sends: the held prompt (`state.systemPrompt`) through the host's
-	 * `projectSystemPrompt`, read at the moment the request's context is taken. The held prompt is never changed by it.
+	 * The system prompt a request made now, outside the loop (a compaction's summarizer), sends: the held prompt
+	 * (`state.systemPrompt`) through the host's `projectSystemPrompt`. The loop's own contexts hold the held prompt and the
+	 * loop projects it per request at the provider boundary. The held prompt is never changed by it.
 	 */
 	requestSystemPrompt(): string {
 		return this.projectSystemPrompt?.(this._state.systemPrompt) ?? this._state.systemPrompt;
@@ -739,7 +740,7 @@ export class Agent {
 
 	private createContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this.requestSystemPrompt(),
+			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),
 			tools: this._state.tools.slice(),
 		};
@@ -802,6 +803,7 @@ export class Agent {
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			projectSystemPrompt: this.projectSystemPrompt,
 		};
 	}
 

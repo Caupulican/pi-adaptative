@@ -3011,7 +3011,7 @@ export class AgentSession {
 
 	private _createAgentContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this.agent.requestSystemPrompt(),
+			systemPrompt: this.agent.state.systemPrompt,
 			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};

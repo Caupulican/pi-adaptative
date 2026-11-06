@@ -513,7 +513,12 @@ export async function startPlannedAgentProviderRequestWithId(
 	signal: AbortSignal | undefined,
 	streamFn?: StreamFn,
 ): Promise<StartedAgentProviderRequest> {
-	let sourceContext = initialContext;
+	// The prompt this request sends, projected now: the loop has taken in every message the request carries. The copy shares
+	// the caller's messages array, so `adoptReplannedMessages` below still sees whether the accepted history moved.
+	const projectSystemPrompt = baseConfig.projectSystemPrompt;
+	let sourceContext = projectSystemPrompt
+		? { ...initialContext, systemPrompt: projectSystemPrompt(initialContext.systemPrompt) }
+		: initialContext;
 	let admissionAttempt = 0;
 	let stalePlanCount = 0;
 	const prefixState: ProviderRequestPrefixState =

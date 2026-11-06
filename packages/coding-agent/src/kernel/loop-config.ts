@@ -809,6 +809,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getFollowUpMessages?: (state: FollowUpState) => Promise<AgentMessage[]>;
 
 	/**
+	 * The host's projection of the context's held system prompt into the one a request sends. Applied once per request
+	 * at the provider boundary (`startPlannedAgentProviderRequestWithId`), after the loop took in every message that
+	 * request carries (a run's opening messages, steering and follow-up messages), so a message the host reads to choose
+	 * the variant is always counted by the request that carries it. Unset: the held prompt is sent as is.
+	 */
+	projectSystemPrompt?: (systemPrompt: string) => string;
+
+	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
 	 * - "parallel": partition an assistant message's tool calls into an order-preserving sequence
@@ -936,7 +944,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 /** Context snapshot passed into the low-level agent loop. */
 export interface AgentContext {
-	/** System prompt included with the request. */
+	/** The held system prompt; a request sends it through `AgentLoopConfig.projectSystemPrompt` when one is set. */
 	systemPrompt: string;
 	/** Transcript visible to the model. */
 	messages: AgentMessage[];

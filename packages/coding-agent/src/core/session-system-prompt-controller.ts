@@ -78,8 +78,9 @@ export class SessionSystemPromptController {
 	 * The system prompt a request sends for the held prompt `prompt` (installed as the agent's `projectSystemPrompt`):
 	 * a request on a third party's words gets it with the owner's memory withheld, any other request the prompt itself.
 	 * The words are the run's decisive origin, or, for a request outside a run (an idle compaction's summarizer), the
-	 * branch's latest decisive entry, the origin the next run would begin with. They are read when the request's context
-	 * is taken, so a run whose authority changes mid-run sends the other variant from its next turn on.
+	 * branch's latest decisive entry, the origin the next run would begin with. They are read when the request is made,
+	 * after the loop took in every message it carries, so a message that changes the run's authority (a queued third
+	 * party's message a delivery run opens with, a steer, a follow-up) decides the variant of the request that carries it.
 	 */
 	forRequest(prompt: string): string {
 		const origin = this.deps.getRunOrigin() ?? latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin;
