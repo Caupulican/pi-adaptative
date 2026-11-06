@@ -122,6 +122,7 @@ import type { SendUserMessageOptions, ToolDefinition } from "./extensions/types.
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
 import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
@@ -195,12 +196,10 @@ export interface BackgroundLaneControllerDeps
 		LaneModelResolverDeps,
 		Pick<
 			ProactivityControllerDeps,
-			| "deliverNotes"
-			| "captureReviewContext"
-			| "subscribeForegroundActivity"
-			| "aggregateUsageWindow"
-			| "observeHarnessNotice"
+			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
 		> {
+	/** Observe a capability's kept state; true when the owner is told of it (the session can keep the notice). */
+	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
 	getSessionManager(): SessionManager;
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
@@ -327,7 +326,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
 			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
-			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read),
+			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
 			isChildSession: () => deps.isChildSession(),

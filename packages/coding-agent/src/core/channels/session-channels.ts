@@ -10,7 +10,6 @@
  * the owner releases with the `channel_reply` tool.
  */
 
-import { createCustomMessage } from "../../kernel/messages.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SendUserMessageOptions } from "../extensions/types.ts";
@@ -24,7 +23,7 @@ import {
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
-import { isDecisiveOrigin, turnOriginOf } from "../turn-origin.ts";
+import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
 import {
 	type ChannelBatchRecord,
 	type ChannelDraftRecord,
@@ -89,7 +88,8 @@ export interface SessionChannelsDeps {
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
-	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
+	/** Whether the owner is told of the observed state (false until the session can keep a notice). */
+	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 	warn(message: string): void;
 	isDisposed(): boolean;
 	isChildSession(): boolean;
@@ -103,6 +103,11 @@ interface ChannelRuntime {
 	holding: boolean;
 	/** A batch handed to `sendUserMessage` whose acceptance is not known yet. */
 	offering: boolean;
+	/**
+	 * The owner is told of the current state, or it needs no notice. False while the session cannot keep one yet (a
+	 * provider registered before the first persisted entry): every work pass observes it again.
+	 */
+	told: boolean;
 }
 
 function messageText(message: AgentMessage): string | undefined {
@@ -158,7 +163,7 @@ export class SessionChannels {
 	private runtime(name: string): ChannelRuntime {
 		let runtime = this.runtimes.get(name);
 		if (!runtime) {
-			runtime = { state: "stopped", holding: false, offering: false };
+			runtime = { state: "stopped", holding: false, offering: false, told: true };
 			this.runtimes.set(name, runtime);
 		}
 		return runtime;
@@ -226,8 +231,13 @@ export class SessionChannels {
 		const runtime = this.runtime(name);
 		runtime.state = state;
 		runtime.detail = detail;
-		const notice = this.stateNotice(name, state, detail);
-		this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
+		this.tellState(name, runtime);
+	}
+
+	private tellState(name: string, runtime: ChannelRuntime): void {
+		const notice = this.stateNotice(name, runtime.state, runtime.detail);
+		const told = this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
+		runtime.told = notice === undefined || told;
 	}
 
 	private stateNotice(name: string, state: ChannelRuntimeState, detail: string | undefined) {
@@ -406,6 +416,7 @@ export class SessionChannels {
 		this.rerun = false;
 		try {
 			for (const [name, runtime] of this.runtimes) {
+				if (!runtime.told) this.tellState(name, runtime);
 				if (!runtime.holding) continue;
 				const policy = this.policy(name);
 				if (!policy) continue;
@@ -579,6 +590,9 @@ export class SessionChannels {
 		if (!latest || !isValidChannelName(name)) return;
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const sender = plainLabel(composed.senderLabel) || "unknown sender";
+		const delivered = new Set(messages.map((message) => message.eventDigest));
+		// The batch's id rides on the turn's origin record, so routing finds the turn whatever became of its text.
+		const batchId = digest(`${name}:${[...delivered].join(",")}`).slice(0, 24);
 		runtime.offering = true;
 		let answered = false;
 		const onAccepted = (accepted: boolean) => {
@@ -590,14 +604,11 @@ export class SessionChannels {
 				return;
 			}
 			const now = this.now();
-			const delivered = new Set(messages.map((message) => message.eventDigest));
 			const batch: ChannelBatchRecord = {
-				id: digest(`${name}:${[...delivered].join(",")}`).slice(0, 24),
+				id: batchId,
 				sessionId,
 				conversationKey: latest.conversationKey,
 				address: latest.address,
-				bodyDigest: composed.bodyDigest,
-				ownerDigest: digest(composed.ownerText),
 				eventDigests: [...delivered],
 				allowlisted: composed.verified,
 				acceptedAt: now,
@@ -619,7 +630,7 @@ export class SessionChannels {
 			.sendUserMessage(composed.text, {
 				deliverAs: "followUp",
 				processSlashCommands: false,
-				origin: { channel: name, sender, verified: composed.verified, text: composed.ownerText },
+				origin: { channel: name, sender, verified: composed.verified, text: composed.ownerText, ref: batchId },
 				onAccepted,
 			})
 			.then(
@@ -635,22 +646,17 @@ export class SessionChannels {
 	}
 
 	/**
-	 * How a batch's turn ended. Its user entry is found by the digest of what was delivered (or of the owner-visible
-	 * form a restored queue holds) under this channel's origin. The answer is the first completed assistant answer after
-	 * it; a decisive message before that (the owner's words, or another third party's) means this batch got none.
+	 * How a batch's turn ended. Its user entry is the one whose origin record names this channel and the batch's id
+	 * (`ref`). The answer is the first completed assistant answer after it; a decisive entry before that (the owner's
+	 * words, or another third party's, a host event someone else wrote included) means this batch got none.
 	 */
 	private batchOutcome(name: string, batch: ChannelBatchRecord, now: number): BatchOutcome {
 		const branch = this.deps.getSessionManager().getBranch();
 		let index = -1;
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
-			if (entry?.type !== "message" || entry.message.role !== "user") continue;
-			const origin = turnOriginOf(entry.message);
-			if (origin?.k !== "inbound-channel" || origin.channel !== name) continue;
-			const text = messageText(entry.message);
-			if (text === undefined) continue;
-			const textDigest = digest(text);
-			if (textDigest === batch.bodyDigest || textDigest === batch.ownerDigest) {
+			const origin = entry === undefined ? undefined : entryTurnOrigin(entry);
+			if (origin?.k === "inbound-channel" && origin.channel === name && origin.ref === batch.id) {
 				index = i;
 				break;
 			}
@@ -662,22 +668,12 @@ export class SessionChannels {
 		let usd = 0;
 		for (let i = index + 1; i < branch.length; i++) {
 			const entry = branch[i];
-			if (entry?.type === "custom_message") {
-				// A host event someone else wrote steers the run as decisively as a user message does.
-				const origin = turnOriginOf(
-					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-				);
-				if (origin && isDecisiveOrigin(origin)) return { kind: "unanswered", reason: "mixed" };
-				continue;
-			}
-			if (entry?.type !== "message") continue;
+			if (entry === undefined) continue;
+			const origin = entryTurnOrigin(entry);
+			if (origin && isDecisiveOrigin(origin))
+				return { kind: "unanswered", reason: origin.k === "owner-typed" ? "owner_steered" : "mixed" };
+			if (entry.type !== "message") continue;
 			const message = entry.message;
-			if (message.role === "user") {
-				const origin = turnOriginOf(message);
-				if (origin && isDecisiveOrigin(origin))
-					return { kind: "unanswered", reason: origin.k === "owner-typed" ? "owner_steered" : "mixed" };
-				continue;
-			}
 			if (message.role !== "assistant") continue;
 			usd += message.usage?.cost?.total ?? 0;
 			if (message.stopReason === "stop" || message.stopReason === "length") {

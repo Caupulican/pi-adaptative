@@ -11,7 +11,12 @@
 import { ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
-import { parseTurnOriginRecord, turnOriginStampOf, UNREADABLE_TURN_ORIGIN } from "../kernel/turn-origin-stamp.ts";
+import {
+	MAX_TURN_ORIGIN_REF_CHARS,
+	parseTurnOriginRecord,
+	turnOriginStampOf,
+	UNREADABLE_TURN_ORIGIN,
+} from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { parseWorkerControlRecord, type WorkerControlRecord, workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { CHAT_EXTENSION_NAME } from "./chat/constants.ts";
@@ -36,7 +41,9 @@ export type TurnAuthority = "owner" | "third-party";
  * channel that cannot name a record (one restored from a record written before the boundary checked it) is unreadable,
  * and an unreadable origin is third-party like any other.
  */
-export function channelTurnOrigin(origin: Pick<SendUserMessageOrigin, "channel" | "verified">): TurnOriginRecord {
+export function channelTurnOrigin(
+	origin: Pick<SendUserMessageOrigin, "channel" | "verified" | "ref">,
+): TurnOriginRecord {
 	return (
 		parseTurnOriginRecord({
 			v: 1,
@@ -44,6 +51,7 @@ export function channelTurnOrigin(origin: Pick<SendUserMessageOrigin, "channel" 
 			channel: origin.channel,
 			...(origin.verified === true ? { verified: true as const } : {}),
 			thirdParty: true,
+			...(origin.ref !== undefined ? { ref: origin.ref } : {}),
 		}) ?? UNREADABLE_TURN_ORIGIN
 	);
 }
@@ -63,6 +71,8 @@ export function sendUserMessageOriginError(origin: unknown): string | undefined 
 	if (typeof record.sender !== "string") return "origin.sender must be a string";
 	if (typeof record.verified !== "boolean") return "origin.verified must be a boolean";
 	if (typeof record.text !== "string") return "origin.text must be a string";
+	if (record.ref !== undefined && parseTurnOriginRecord({ v: 1, k: "inbound-channel", ref: record.ref }) === undefined)
+		return `origin.ref must be a non-empty string of at most ${MAX_TURN_ORIGIN_REF_CHARS} characters`;
 	return undefined;
 }
 

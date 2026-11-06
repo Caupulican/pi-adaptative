@@ -100,8 +100,6 @@ export interface ComposedChannelBatch {
 	readonly text: string;
 	/** The fenced body alone: the queue and the owner see this instead of the frame. */
 	readonly ownerText: string;
-	/** Digest of `text`; reply routing finds the batch's entry by it. */
-	readonly bodyDigest: string;
 	/** The batch's senders as one bounded label. */
 	readonly senderLabel: string;
 	/** Every sender was verified and allowlisted. */
@@ -129,7 +127,6 @@ export function composeChannelBatch(channel: string, messages: readonly ChannelP
 	return {
 		text,
 		ownerText: body,
-		bodyDigest: digest(text),
 		senderLabel: senderLabel || "unknown sender",
 		verified: messages.every((message) => message.verified),
 	};

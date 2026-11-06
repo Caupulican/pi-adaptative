@@ -1700,6 +1700,11 @@ export interface SendUserMessageOrigin {
 	verified: boolean;
 	/** The third party's message exactly as received, without the extension's framing. */
 	text: string;
+	/**
+	 * The extension's own id for this delivery, at most 128 characters. It is recorded on the turn's origin, so the
+	 * extension finds the turn that carried it whatever an `input` handler made of the text.
+	 */
+	ref?: string;
 }
 
 /** How an extension sends a user message, and how it learns the message was accepted. */

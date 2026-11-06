@@ -47,9 +47,6 @@ export interface ChannelBatchRecord {
 	readonly sessionId: string;
 	readonly conversationKey: string;
 	readonly address: string;
-	/** Digest of the delivered text, and of its owner-visible form (what a restored queued input carries). */
-	readonly bodyDigest: string;
-	readonly ownerDigest: string;
 	readonly eventDigests: readonly string[];
 	/** Every sender of the batch was verified and allowlisted when it was admitted. */
 	readonly allowlisted: boolean;
@@ -136,8 +133,6 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 		isString(value.sessionId) &&
 		isString(value.conversationKey) &&
 		isString(value.address) &&
-		isString(value.bodyDigest) &&
-		isString(value.ownerDigest) &&
 		Array.isArray(value.eventDigests) &&
 		value.eventDigests.every(isString) &&
 		typeof value.allowlisted === "boolean" &&
