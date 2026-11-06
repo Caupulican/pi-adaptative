@@ -6,6 +6,7 @@ import { canonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
+	ROUTINE_UNFINISHED_PHASES,
 	type RoutineDefinitionView,
 	type RoutineEventAnchor,
 	type RoutineIntakeOrigin,
@@ -54,14 +55,21 @@ export function routineIntakeRoutineId(origin: RoutineIntakeOrigin): string {
 	return `owner-${origin.key.slice(0, 16)}`;
 }
 
-function summary(routine: RoutineDefinitionView): RoutineToolSummary {
+function summary(routine: RoutineDefinitionView, store: RoutineStorePort): RoutineToolSummary {
 	const unschedulable = routineZoneUnsupported(routine.schedule);
 	const nextRunAt =
 		unschedulable === undefined && !routine.conditionMet
 			? nextRoutineAt(routine.schedule, routine.cursor)
 			: undefined;
-	// The window as no unfinished run holds it shut; the summary does not read the run journal.
-	const opensAt = nextRunAt === undefined ? undefined : routineStartWindow(routine, routine.cursor, [])?.opensAt;
+	// The window as the claim reads it: an unfinished run of the routine holds it shut.
+	const opensAt =
+		nextRunAt === undefined
+			? undefined
+			: routineStartWindow(
+					routine,
+					routine.cursor,
+					store.listRoutineOccurrences({ routineId: routine.routineId, phases: ROUTINE_UNFINISHED_PHASES }),
+				)?.opensAt;
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
@@ -77,9 +85,9 @@ function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 	};
 }
 
-function view(routine: RoutineDefinitionView): RoutineToolView {
+function view(routine: RoutineDefinitionView, store: RoutineStorePort): RoutineToolView {
 	return {
-		...summary(routine),
+		...summary(routine, store),
 		prompt: routine.prompt,
 		...(routine.lastSummary === undefined
 			? {}
@@ -105,13 +113,16 @@ export class RoutineSessionController implements RoutineToolPort {
 			.filter((routine) => this.owns(routine) && (after === undefined || routine.routineId > after))
 			.sort((left, right) => (left.routineId < right.routineId ? -1 : left.routineId === right.routineId ? 0 : 1));
 		const page = entries.slice(0, Math.max(1, Math.min(20, limit)));
-		return { routines: page.map(summary), ...(entries.length > page.length ? { next: page.at(-1)!.routineId } : {}) };
+		return {
+			routines: page.map((routine) => summary(routine, this.deps.store)),
+			...(entries.length > page.length ? { next: page.at(-1)!.routineId } : {}),
+		};
 	}
 
 	async get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | undefined> {
 		this.check(signal);
 		const routine = this.deps.store.getRoutine(routineId);
-		return routine && this.owns(routine) ? view(routine) : undefined;
+		return routine && this.owns(routine) ? view(routine, this.deps.store) : undefined;
 	}
 
 	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
@@ -146,6 +157,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				executionSnapshot: routine.executionSnapshot,
 				nowMs: this.deps.now(),
 			}),
+			this.deps.store,
 		);
 	}
 
@@ -290,6 +302,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 				...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 			}),
+			this.deps.store,
 		);
 	}
 
