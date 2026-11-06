@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { hostname } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { configFile } from "../../../src/core/agent-paths.ts";
@@ -2329,10 +2329,15 @@ export class HarnessProcesses {
 			detached: spawnOptions.detached === true,
 			deliver: () => void run?.stop(),
 		});
-		// What the starting session writes to the daemon's stdin (its gh credential handover).
-		const stdin = new PassThrough();
+		// What the starting session writes to the daemon's stdin (its gh credential handover), kept as it is written:
+		// a readable side would hand it over only on a later tick.
 		const stdinChunks: Buffer[] = [];
-		stdin.on("data", (chunk: Buffer) => stdinChunks.push(chunk));
+		const stdin = new Writable({
+			write(chunk: Buffer | string, _encoding, callback) {
+				stdinChunks.push(Buffer.from(chunk));
+				callback();
+			},
+		});
 		const launch: HarnessBotDaemonLaunch = Object.freeze({
 			file,
 			args: Object.freeze([...args]),

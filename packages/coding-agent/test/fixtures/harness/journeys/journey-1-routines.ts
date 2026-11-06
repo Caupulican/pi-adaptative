@@ -1215,6 +1215,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				return awayCiFactory(request);
 			};
 			root.session.backgroundLanes.stopPersistentBotDaemon();
+			const launchesBeforeCiSave = daemonLaunches();
 			const ciDaemonStarted = world.processes.runNextBotDaemon({ eventSources: awayCiSources });
 			// The starting session holds a gh token while its save launches the daemon: it travels only on the daemon's input.
 			const ghTokenSentinel = "harness-gh-token-sentinel";
@@ -1231,7 +1232,9 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				if (ghTokenBefore === undefined) delete process.env.GH_TOKEN;
 				else process.env.GH_TOKEN = ghTokenBefore;
 			}
-			const ciDaemon = await ciDaemonStarted;
+			// An event routine is active until it ends: its save alone brings the daemon up.
+			expect(daemonLaunches() - launchesBeforeCiSave, "the event routine's save launched one daemon").toBe(1);
+			const ciDaemon = await withDeadline(world.trace, "the event routine's daemon starts", ciDaemonStarted);
 			for (const name of GH_CREDENTIAL_NAMES)
 				expect(ciDaemon.launch.env[name], `no gh token reaches the daemon's environment (${name})`).toBeUndefined();
 			const handedGhCredentials = parseDaemonGhCredentials(ciDaemon.launch.stdin());
@@ -1249,13 +1252,11 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			const ciRefused = createBarrier();
 			const ciFollowed = createBarrier();
 			const ciRan = createBarrier();
-			const ciHandedBack = createBarrier();
 			const stopObservingCi = awayStore.subscribe(() => {
 				const refusal = awayStore.getRoutine(ciRoutineId)?.awayRefusal?.reason;
 				if (refusal?.includes(ghMissing) === true) ciRefused.release();
 				if (ghInstalled && refusal === undefined && ciReports(followedAgain).length > 0) ciFollowed.release();
 				if (ciRuns().some((run) => run.phase === "terminal")) ciRan.release();
-				if (ciReports(handedBack).length > 0) ciHandedBack.release();
 			});
 			world.provider.enqueue("worker-a", workerReply("away-ci-routine", ciPrompt));
 			let ciRunId: string;
@@ -1349,11 +1350,16 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					const ciSettled = parentSettled(42);
 					await root.session.backgroundLanes.tickPersistentRoutines();
 					await withDeadline(world.trace, "the event run away is delivered on reopen", ciSettled);
-					await withDeadline(world.trace, "the daemon stops following the reopened session", ciHandedBack.promise);
+					// The handback report lands in the daemon's lease record after its last routine write: wait on any write.
+					await withDeadline(
+						world.trace,
+						"the daemon stops following the reopened session",
+						world.io.waitForMutation(() => ciReports(handedBack).length > 0),
+					);
 					await root.session.backgroundLanes.tickPersistentRoutines();
 				} finally {
-					await sessionCi.source.stop();
-					await sessionCiBinding.close();
+					await withDeadline(world.trace, "the session's CI source stops", sessionCi.source.stop());
+					await withDeadline(world.trace, "the session's host event binding closes", sessionCiBinding.close());
 				}
 				expect(sessionCiDiagnostics, "the session takes the consumer back from the daemon cleanly").toEqual([]);
 				expect(
@@ -1366,7 +1372,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 					[...ciReports("CI events remain pending"), ...ciReports("Host event remains pending")],
 					"the handback leaves no pending source behind in the daemon",
 				).toEqual([]);
-				expect(await ciDaemon.stop()).toBe(0);
+				expect(await withDeadline(world.trace, "the CI daemon stops", ciDaemon.stop())).toBe(0);
 			} finally {
 				stopObservingCi();
 			}

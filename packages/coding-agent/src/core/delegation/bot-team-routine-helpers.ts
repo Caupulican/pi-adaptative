@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
-import { MIN_ROUTINE_INTERVAL_MS, nextRoutineAt, type RoutineDefinitionView } from "../routines/routine-contract.ts";
+import {
+	MIN_ROUTINE_INTERVAL_MS,
+	nextRoutineAt,
+	type RoutineDefinitionView,
+	routineEnded,
+} from "../routines/routine-contract.ts";
 import {
 	isMissingFileError,
 	LOW_LATENCY_FILE_LOCK_OPTIONS,
@@ -345,10 +350,12 @@ export function readDaemonLeaseStatus(
 	let dueRoutines = 0;
 	const awayRefusals: { routineId: string; reason: string; at: number }[] = [];
 	for (const r of routines) {
+		if (!r.enabled) continue;
+		// An event routine has no slot: it stays active until it ends, and the daemon follows it for its closed session.
 		const next = nextRoutineAt(r.schedule, r.cursor);
-		if (!r.enabled || next === undefined) continue;
+		if (r.schedule.kind === "event" ? routineEnded(r, nowMs) !== undefined : next === undefined) continue;
 		activeRoutines++;
-		if (next <= nowMs) dueRoutines++;
+		if (next !== undefined && next <= nowMs) dueRoutines++;
 		if (r.awayRefusal) awayRefusals.push({ routineId: r.routineId, ...r.awayRefusal });
 	}
 	const legacy = legacyDaemonClaimOf(readLeaseJson(legacyDaemonLeasePath(storeFilePath)), nowMs);
