@@ -84,7 +84,7 @@ function engineCallFailure(
 /**
  * The engine gave no judgment for a checkpoint. Carries what the judgment would have decided, so the
  * caller applies the authority line: reversible work proceeds with the outage visible, an objective
- * transition holds, an irreversible operation goes to the operator.
+ * transition holds.
  */
 export class SteeringJudgmentUnavailableError extends SystemOneSteeringUnavailableError {
 	readonly checkpointId: string;

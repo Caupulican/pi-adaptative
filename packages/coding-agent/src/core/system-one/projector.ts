@@ -58,26 +58,6 @@ export function containsCredential(text: string, userKeys: readonly string[] = [
 }
 
 /**
- * Wrap untrusted text from repository or external docs.
- * R-031: Repository and external text MUST be labeled untrusted in state projections.
- * R-065: Prompt-injection-like content must be quarantined.
- */
-export function wrapUntrustedText(
-	text: string,
-	sourceKind = "repository",
-	userKeys: readonly string[] = [],
-): {
-	trust: "repository_untrusted_text" | "external_untrusted_text";
-	content: string;
-} {
-	const trust = sourceKind === "external_doc" ? "external_untrusted_text" : "repository_untrusted_text";
-	return {
-		trust,
-		content: redactSecrets(text, userKeys),
-	};
-}
-
-/**
  * StateProjector: builds stage-specific, bounded projections from the authoritative ExecutionState.
  * R-030: State projections MUST contain only information relevant to the current question pack.
  * R-048: Final completion validation MUST use a fresh cold projection built from source evidence, diff, acceptance matrix, and verification results.

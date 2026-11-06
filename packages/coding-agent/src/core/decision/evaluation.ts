@@ -76,14 +76,6 @@ export interface SetDecisionResult {
 	readonly confidence: DecisionConfidence;
 }
 
-export interface FunctionCallDecisionResult {
-	readonly kind: "function_call";
-	readonly name: string;
-	readonly arguments: Record<string, unknown>;
-	readonly confidence: DecisionConfidence;
-	readonly argumentConfidences: Record<string, DecisionConfidence>;
-}
-
 export interface UnsupportedDecisionResult {
 	readonly kind: "unsupported";
 	readonly reason: string;
@@ -94,7 +86,6 @@ export type DecisionResult =
 	| ChoiceDecisionResult
 	| ScoreDecisionResult
 	| SetDecisionResult
-	| FunctionCallDecisionResult
 	| UnsupportedDecisionResult;
 
 export interface DecisionEvaluationAudit {
@@ -130,7 +121,6 @@ export interface DecisionEvaluation {
 	};
 	readonly results: Record<string, DecisionResult>;
 	readonly timestamp: string;
-	readonly proposedFunctionCall?: FunctionCallDecisionResult;
 	readonly audit?: DecisionEvaluationAudit;
 	/** The engine's answers as returned, for readers that need fields the typed results do not carry. */
 	readonly rawAnswers?: Readonly<Record<string, unknown>>;
@@ -143,7 +133,6 @@ export function createDecisionEvaluation(input: {
 	readonly model: string;
 	readonly confidenceProvenance: ConfidenceProvenance;
 	readonly results: Record<string, DecisionResult>;
-	readonly proposedFunctionCall?: FunctionCallDecisionResult;
 	readonly timestamp?: string;
 	readonly audit?: DecisionEvaluationAudit;
 	readonly rawAnswers?: Readonly<Record<string, unknown>>;
@@ -161,7 +150,6 @@ export function createDecisionEvaluation(input: {
 		},
 		results: input.results,
 		timestamp: input.timestamp ?? new Date().toISOString(),
-		proposedFunctionCall: input.proposedFunctionCall,
 		audit: input.audit,
 		...(input.rawAnswers ? { rawAnswers: input.rawAnswers } : {}),
 	};

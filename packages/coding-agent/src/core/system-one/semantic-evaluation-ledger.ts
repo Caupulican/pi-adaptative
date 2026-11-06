@@ -367,7 +367,7 @@ export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 } {
 	const reasons: string[] = [];
 	const questionStates: SemanticQuestionState[] = [];
-	let verdict: string | undefined = evaluation.proposedFunctionCall?.name;
+	let verdict: string | undefined;
 	for (const [id, result] of Object.entries(evaluation.results)) {
 		const includeInPreview = reasons.length < MAX_EVALUATION_REASONS;
 		let line: string;
@@ -397,9 +397,6 @@ export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 				break;
 			case "set":
 				line = `${id}: ${result.selected.join(", ")}`;
-				break;
-			case "function_call":
-				line = `${id}: ${result.name}`;
 				break;
 			default:
 				line = `${id}: unsupported (${result.reason})`;

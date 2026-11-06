@@ -389,11 +389,12 @@ it touch files outside the task, does it acquire external code, does the owner's
 The reading scales with what an interruption costs: an effect is established at 0.8, unsettled above
 an even chance, absent below (live: `npm test`, `git status`, a build script and a `sed` edit stay at
 or below 0.22 on every effect; `pip install` reads 0.99 acquires external code; a Python POST 0.93
-leaves the machine). The irreversible row of the authority line then decides: no likely effect runs
+leaves the machine). The operation row of the authority line then decides: no likely effect runs
 silently; an established effect runs when the request asks for it (0.8), is refused when it clearly
 does not (0.2), and otherwise goes to the operator as `operation.irreversible` at the edge, as does
-an unsettled effect or a System One that cannot answer within 8 s; a worker is refused instead of
-asking. A broad standing `operation.irreversible` grant authorizes both root and worker before
+an unsettled effect; a worker is refused instead of asking. A System One that cannot answer within
+2 s (`OPERATION_JUDGMENT_TIMEOUT_MS`) lets the operation run with the outage shown to the operator, since code already decided every
+edge class. A broad standing `operation.irreversible` grant authorizes both root and worker before
 semantic classification; an existing owner decision cannot be vetoed or delayed by another evaluator
 call. Scoped grants retain their exact operation identity and never become blanket authority.
 Cancellation, capability envelopes, path boundaries and mandatory verification remain authoritative.

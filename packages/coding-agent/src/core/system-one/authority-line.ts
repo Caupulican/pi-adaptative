@@ -4,17 +4,17 @@
  * Every consumer of a semantic judgment declares what the judgment decides. Reversible work never
  * waits on, or is refused by, a doubt or an outage: it proceeds and the doubt stays visible. An
  * objective transition (complete, deliver) never closes on a doubt and holds on an outage. An
- * irreversible or outward operation asks the operator (root) or is refused (worker). An operation
- * the deterministic gates could not classify (a shell or code call, a write outside the task) is the
- * same, except an outage: code already decided every edge class, so an outage proceeds with the doubt
- * visible instead of parking each command on the operator.
+ * operation the deterministic gates could not classify (a shell or code call, a write outside the
+ * task) asks the operator (root) or is refused (worker) on an unsettled judgment, and is refused on a
+ * failed one. An outage proceeds with the doubt visible: code already decided every edge class, so
+ * the outage does not park each command on the operator.
  *
  * This is the one table; the steering plane and the decision graph read it, nothing re-derives it.
  */
 
 import { CHOICE_FOLLOW_UP, choiceProbability } from "../decision/thresholds.ts";
 
-export type AuthorityKind = "reversible_work" | "objective_transition" | "irreversible" | "operation";
+export type AuthorityKind = "reversible_work" | "objective_transition" | "operation";
 
 /** What the judgment settled, already reduced from its band or confidence. */
 export type JudgmentReading = "pass" | "doubt" | "ambiguous" | "fail" | "unavailable";
@@ -77,13 +77,6 @@ export function decideByAuthority(
 					: { action: "gather_more" };
 			if (reading === "fail") return { action: "replan" };
 			return { action: "hold", doubt: "System One unavailable: the objective stays open until it is judged" };
-		case "irreversible":
-			if (reading === "fail") return { action: "refuse" };
-			if (actor === "worker") return { action: "refuse", doubt: "a worker cannot ask the operator" };
-			return {
-				action: "ask_operator",
-				doubt: reading === "unavailable" ? "System One unavailable: the operator decides" : "unsettled judgment",
-			};
 		case "operation":
 			if (reading === "unavailable")
 				return { action: "proceed_with_doubt", doubt: "System One unavailable: this operation was not judged" };

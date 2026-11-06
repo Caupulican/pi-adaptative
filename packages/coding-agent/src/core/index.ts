@@ -140,6 +140,5 @@ export {
 	SystemOneController,
 	SystemOneJevAdapter,
 	SystemOneReplayRunner,
-	wrapUntrustedText,
 } from "./system-one/index.ts";
 export type { BashResult } from "./tools/schemas/bash.ts";

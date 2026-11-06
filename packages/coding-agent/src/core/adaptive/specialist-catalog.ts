@@ -20,7 +20,7 @@ export interface SpecialistCatalogEntry {
 
 export class SpecialistCatalog {
 	private readonly entries = new Map<string, SpecialistCatalogEntry>();
-	private catalogRevision = 1;
+	private readonly catalogRevision = 1;
 
 	constructor() {
 		this.seedStandardRoles();
@@ -92,22 +92,6 @@ export class SpecialistCatalog {
 	searchBySpecialties(specialties: readonly string[]): readonly SpecialistCatalogEntry[] {
 		const targetSet = new Set(specialties.map((s) => s.toLowerCase()));
 		return this.listAll().filter((entry) => entry.specialties.some((s) => targetSet.has(s.toLowerCase())));
-	}
-
-	registerSpecialist(spec: SpecialistSpec, record?: SpecialistRecord): void {
-		const entry: SpecialistCatalogEntry = {
-			specialistId: spec.specialist_id,
-			specialties: [...spec.specialties],
-			authorityRole: spec.authority_role,
-			purpose: spec.purpose,
-			cognitiveRequirements: spec.cognitive_requirements,
-			lifetime: spec.lifetime,
-			verifiedOutcomeCount: record?.success_count ?? 1,
-			spec,
-			record,
-		};
-		this.entries.set(spec.specialist_id, entry);
-		this.catalogRevision += 1;
 	}
 
 	compactSummary(): readonly Record<string, unknown>[] {
