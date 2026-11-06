@@ -493,11 +493,12 @@ export class PromptSubmissionController {
 				(input && queuedBehavior
 					? this.deps.pendingQueue.register(
 							queuedBehavior,
-							text,
+							recordedText,
 							options.images,
 							options.origin,
 							inputId,
 							options.pasted,
+							ownerChannel?.origin,
 						)
 					: undefined);
 			if (lateQueuedInput !== queuedOwnerInput) this.deps.emitQueueUpdate();
@@ -825,11 +826,12 @@ export class PromptSubmissionController {
 					queuedOwnerInput ??
 					this.deps.pendingQueue.register(
 						options.streamingBehavior,
-						text,
+						channelWords ? ownerChannel.ownerText : text,
 						options.images,
 						options.origin,
 						lifecycle.input?.inputId,
 						options.pasted,
+						ownerChannel?.origin,
 					);
 				lifecycle.queued = pending;
 				let admitted = false;

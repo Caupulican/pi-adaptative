@@ -9,6 +9,7 @@ import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import {
+	isOwnerChannelInputId,
 	isOwnerSpokenInputId,
 	type OwnerInputEnd,
 	type OwnerInputId,
@@ -125,10 +126,12 @@ const AUTHORITY_RANK: Readonly<Record<TurnAuthority, number>> = { "third-party":
 /**
  * The authority an entry decides for the run that takes it (`RunTurnOrigin`): a third party's words, the owner's words from
  * an owner channel, or the owner's typed words. An extension's own message (no origin) decides nothing: `undefined`.
+ * Owner-channel words registered without their verified origin are unreadable, so they decide a third party's.
  */
 function entryAuthority(entry: PendingEntry): TurnAuthority | undefined {
 	if (entry.origin) return "third-party";
 	if (entry.ownerChannel) return "remote-owner";
+	if (isOwnerChannelInputId(entry.inputId)) return "third-party";
 	return isOwnerSpokenInputId(entry.inputId) ? "owner" : undefined;
 }
 
@@ -1189,7 +1192,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words are not held behind them. Once the
 	 * owner's words from an owner channel are involved (one waits, or the live run is the remote owner's), words wait by
 	 * rank (`AUTHORITY_RANK`): behind a live run whose authority reaches further than theirs, and, with no live run, behind
-	 * the furthest-reaching words waiting, so the delivery run about to start takes those words only.
+	 * the furthest-reaching words waiting, so the delivery run about to start takes those words only. An owner-channel
+	 * approval entry (none of the owner's words) joins only a live run of its own authority, the remote owner's, and
+	 * otherwise waits for the delivery run.
 	 */
 	handOff(): void {
 		if (this._closed) return;
@@ -1205,6 +1210,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				if (decides !== undefined) runRank = Math.max(runRank, AUTHORITY_RANK[decides]);
 			}
 		const waits = (entry: PendingEntry): boolean => {
+			const approval = entry.ownerChannel !== undefined && !isOwnerSpokenInputId(entry.inputId);
+			if (approval && live && authority !== "remote-owner") return true;
 			if (!ranked) return entry.origin !== undefined && live && authority !== "third-party";
 			const decides = entryAuthority(entry);
 			return decides !== undefined && AUTHORITY_RANK[decides] < runRank;

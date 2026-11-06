@@ -2,7 +2,9 @@
  * The session side of the owner channel: the owner's words from a verified owner channel (a phone) enter the session here,
  * and the channels core reads back here whether the run they opened still holds the owner's authority. The channels core
  * decides liveness (`live`, asked at every guarded call); the session only keeps each answer by the batch that opened the
- * run and drops it when that run ends, so a remote-owner run whose answer is gone holds no authority.
+ * run. A later run that answers the same batch (a continuation, a wake, a routine) reads the same answer, so it is kept
+ * until the delivery is refused, ends undelivered or is evicted at capacity; a remote-owner run whose answer is gone
+ * holds no authority.
  */
 
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
@@ -19,9 +21,12 @@ import type {
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import { isRemoteOwnerOrigin, turnOriginOf } from "./turn-origin.ts";
+import { isRemoteOwnerOrigin } from "./turn-origin.ts";
 
-/** The batches whose answers are kept at once; past it the oldest is dropped, and its run holds no authority. */
+/**
+ * The batches whose answers are kept at once; past it the oldest one that neither awaits its approval entry nor decides
+ * the run in progress is dropped (its runs hold no authority), and with none such the new delivery is refused.
+ */
 const MAX_OWNER_CHANNEL_RUNS = 64;
 /** The channels cores that can hear the drafts held at once (one per channel hosted by this session). */
 const MAX_DRAFT_LISTENERS = 8;
@@ -34,11 +39,8 @@ export interface OwnerChannelSessionHost {
 	emitHostWarning(message: string): void;
 }
 
-/** The foreground run's authority and lifetime. */
-export type OwnerChannelForeground = Pick<
-	ForegroundRecoveryController,
-	"turnOrigin" | "subscribeActivity" | "isRunActive" | "getCurrentSubmissionEpoch"
->;
+/** The foreground run's authority. */
+export type OwnerChannelForeground = Pick<ForegroundRecoveryController, "turnOrigin">;
 
 /** What the owner's draft decisions read and write of the session. */
 export interface OwnerDraftDecisionsSessionDeps {
@@ -52,8 +54,6 @@ export interface OwnerDraftDecisionsSessionDeps {
 interface OwnerChannelRun {
 	readonly live: () => boolean;
 	readonly senderDigest: string;
-	/** A run read its message: the batch's answer is dropped when the foreground next goes idle. */
-	ran: boolean;
 	/** An accepted approval delivery whose entry has not landed on the branch yet. */
 	approvalPending: boolean;
 }
@@ -67,7 +67,6 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	private readonly runs = new Map<string, OwnerChannelRun>();
 	private readonly draftListeners = new IndependentObserverSet<(view: OwnerDraftView) => void>();
 	private controlValue: OwnerChannelControl | undefined;
-	private observing = false;
 
 	constructor(
 		host: OwnerChannelSessionHost,
@@ -120,7 +119,8 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 
 	/** Whether the run `origin` decided still holds the owner's authority: the channels core's kept answer, false without one. */
 	isOwnerChannelLive(origin: TurnOriginRecord): boolean {
-		return this.runOf(origin)?.live() === true;
+		const run = this.runOf(origin);
+		return run !== undefined && answersLive(run.live);
 	}
 
 	/** The digest of the verified sender whose batch opened the run `origin` decided; none once that batch is dropped. */
@@ -168,7 +168,8 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 
 	/**
 	 * Submit one owner-channel delivery as a follow-up: never a command, a skill or a template (`PromptOptions.ownerChannel`).
-	 * Its answer is kept from now; a delivery not accepted, or one that ends undelivered, drops it.
+	 * Its answer is kept from now; a delivery not accepted, or one that ends undelivered, drops it. A late callback drops
+	 * only the answer it kept, never a later delivery's under the same `ref`.
 	 */
 	private submit(
 		text: string,
@@ -178,12 +179,15 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
 	): void {
-		if (this.isClosed() || !live() || this.runs.has(origin.ref)) {
+		const run =
+			this.isClosed() || this.runs.has(origin.ref) || !answersLive(live) ? undefined : this.keep(origin, live);
+		if (run === undefined) {
 			onAccepted(false);
 			return;
 		}
-		this.observe();
-		this.keep(origin, live);
+		const drop = (): void => {
+			if (this.runs.get(origin.ref) === run) this.runs.delete(origin.ref);
+		};
 		// The channels core hears exactly one verdict: the submission's own acceptance, or a refusal when it ended (returned
 		// or threw) without reaching one.
 		let answered = false;
@@ -191,26 +195,18 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		const answer = (accepted: boolean): void => {
 			if (answered) return;
 			answered = true;
-			const run = this.runs.get(origin.ref);
-			if (!accepted) this.runs.delete(origin.ref);
-			else if (approval && run && !delivered) run.approvalPending = true;
+			if (!accepted) drop();
+			else if (approval && !delivered) run.approvalPending = true;
 			onAccepted(accepted);
 		};
 		const settleDelivered = (): void => {
 			delivered = true;
-			const run = this.runs.get(origin.ref);
-			if (run) run.approvalPending = false;
+			run.approvalPending = false;
 		};
 		void this.host
 			.prompt(text, {
 				streamingBehavior: "followUp",
-				ownerChannel: {
-					origin,
-					ownerText,
-					approval,
-					onDelivered: settleDelivered,
-					onUndelivered: () => this.runs.delete(origin.ref),
-				},
+				ownerChannel: { origin, ownerText, approval, onDelivered: settleDelivered, onUndelivered: drop },
 				preflightResult: (success) => answer(success),
 			})
 			.then(
@@ -224,13 +220,23 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			);
 	}
 
-	private keep(origin: OwnerChannelOrigin, live: () => boolean): void {
-		while (this.runs.size >= MAX_OWNER_CHANNEL_RUNS) {
-			const oldest = this.runs.keys().next().value;
-			if (oldest === undefined) break;
-			this.runs.delete(oldest);
+	/** Keep the batch's answer, evicting at capacity (`MAX_OWNER_CHANNEL_RUNS`); undefined when nothing may be evicted. */
+	private keep(origin: OwnerChannelOrigin, live: () => boolean): OwnerChannelRun | undefined {
+		if (this.runs.size >= MAX_OWNER_CHANNEL_RUNS) {
+			const deciding = this.getForeground().turnOrigin.origin();
+			const decidingRef = isRemoteOwnerOrigin(deciding) ? deciding?.ref : undefined;
+			let evicted = false;
+			for (const [ref, kept] of this.runs) {
+				if (kept.approvalPending || ref === decidingRef) continue;
+				this.runs.delete(ref);
+				evicted = true;
+				break;
+			}
+			if (!evicted) return undefined;
 		}
-		this.runs.set(origin.ref, { live, senderDigest: origin.senderDigest, ran: false, approvalPending: false });
+		const run: OwnerChannelRun = { live, senderDigest: origin.senderDigest, approvalPending: false };
+		this.runs.set(origin.ref, run);
+		return run;
 	}
 
 	/** The kept batch the remote-owner `origin` names. */
@@ -244,28 +250,13 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		const origin = turnOrigin.origin();
 		return turnOrigin.isActive() && isRemoteOwnerOrigin(origin) && origin?.ref === ref;
 	}
+}
 
-	/**
-	 * From the first delivery on: a run that reads an owner-channel message marks its batch, and the batches whose runs
-	 * ended are dropped once the foreground is idle (no run and no submission: a retry or a claim correction of the same
-	 * submission still runs on them). A closed session keeps none.
-	 */
-	private observe(): void {
-		if (this.observing) return;
-		this.observing = true;
-		this.host.agent.subscribe((event) => {
-			if (event.type !== "message_end" || event.message.role !== "user") return;
-			const run = this.runOf(turnOriginOf(event.message));
-			if (run) run.ran = true;
-		});
-		const foreground = this.getForeground();
-		foreground.subscribeActivity(() => {
-			if (this.isClosed()) {
-				this.runs.clear();
-				return;
-			}
-			if (foreground.isRunActive || foreground.getCurrentSubmissionEpoch() !== undefined) return;
-			for (const [ref, run] of this.runs) if (run.ran && !run.approvalPending) this.runs.delete(ref);
-		});
+/** The channels core's liveness answer; a check that throws is not live. */
+function answersLive(live: () => boolean): boolean {
+	try {
+		return live();
+	} catch {
+		return false;
 	}
 }

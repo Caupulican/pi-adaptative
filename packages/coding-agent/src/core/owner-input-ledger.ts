@@ -105,6 +105,14 @@ export function isOwnerSpokenInputId(id: string): boolean {
 	return !id.startsWith("extension:");
 }
 
+/**
+ * Whether the input an id names is the owner's words from an owner channel. Its authority is read only from the stamp
+ * the channel's verified origin minted, so a reader that finds the id without that stamp treats it as unreadable.
+ */
+export function isOwnerChannelInputId(id: string): boolean {
+	return id.startsWith("channel:");
+}
+
 export class OwnerInputLedger {
 	/** Every input that has not reached a terminal; a held input stays until the owner takes it back. */
 	private readonly records = new Map<OwnerInputId, InputRecord>();

@@ -27,7 +27,7 @@ import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goals/goal-continuation
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "./harness-notice.ts";
 import { HOST_TURN_CUSTOM_TYPES } from "./host-turn-reasoning.ts";
 import { HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE } from "./human-input.ts";
-import { isOwnerSpokenInputId } from "./owner-input-ledger.ts";
+import { isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "./proactivity/proactivity-review.ts";
 import { ROUTINE_COMPLETION_TYPE, ROUTINE_INTAKE_NOTICE_TYPE } from "./routines/routine-parent-input.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
@@ -151,6 +151,8 @@ function userTurnOrigin(
 	if (stamped) return stamped;
 	if (control) return { v: 1, k: control.k === "host_event" ? "host-event" : "harness" };
 	if (inputId === undefined) return undefined;
+	// Owner-channel words carry their verified origin's stamp; without it their authority is unreadable, never the owner's.
+	if (isOwnerChannelInputId(inputId)) return UNREADABLE_TURN_ORIGIN;
 	return { v: 1, k: isOwnerSpokenInputId(inputId) ? "owner-typed" : "extension-message" };
 }
 
