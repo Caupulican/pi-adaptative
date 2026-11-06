@@ -137,7 +137,7 @@ export function thirdPartyProtectedWritePaths(
 ): ProtectedWritePaths {
 	const sessionFile = session.getSessionFile();
 	return {
-		harness: [...getHarnessWriteProtectedPaths(cwd, agentDir), path.join(cwd, ".pi", "settings.json")],
+		harness: [...getHarnessWriteProtectedPaths(cwd, agentDir), projectLaneSettingsPath(cwd)],
 		sessions: [sessionsDir(agentDir), session.getSessionDir(), ...(sessionFile ? [path.dirname(sessionFile)] : [])],
 	};
 }
