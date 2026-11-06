@@ -111,7 +111,7 @@ export class JevAdapterFailure extends Error {
 		cause?: unknown,
 		receipts?: readonly SystemOneReceipt[],
 	) {
-		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
+		super(`System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
 		this.name = "JevAdapterFailure";
 		this.kind = kind;
 		this.originalMessage = originalMessage;

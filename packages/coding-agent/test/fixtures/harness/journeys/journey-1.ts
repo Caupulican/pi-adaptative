@@ -41,7 +41,7 @@ export async function runJourney1(): Promise<void> {
 			warningAllowances: [
 				// The immediate proactivity cancellation asserts exactly one unresolved physical response before releasing it.
 				/^Provider request [0-9a-f-]{36} ended locally with usage still unknown; its original accounting identity is retained in the session journal\.$/,
-				/^Optional integrations stay available; owner intent for them was not classified: Jev System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
+				/^Optional integrations stay available; owner intent for them was not classified: System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: the judgment was uncertain\.$/,
 				// The E13R and E13Q live owners' refused releases: the settled lane hands the record to its retry, and the backoff alarm reports
 				// each retry it makes before the refusal is cleared. Each refusal is named exactly (E13R, and the three E13Q entrances). Each message exactly: the lane, the reservation uuid, the refused unlink of the

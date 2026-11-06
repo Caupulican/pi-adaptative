@@ -2792,7 +2792,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	).toBe(world.systemOne.enabled ? 1 : 0);
 	// The intentional evaluator outage (the long-path turn) emits exactly one warning on; off runs no System One and emits none.
 	expect(
-		world.warnings.filter((message) => message.includes("Jev System One unavailable")).length,
+		world.warnings.filter((message) => message.includes("System One unavailable")).length,
 		"the intentional evaluator outage warns exactly as its scripted turn requires",
 	).toBe(world.systemOne.enabled ? 1 : 0);
 	// Production default window, asserted on its own: the short window below replaces it only for this session's ask tool.
