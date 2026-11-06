@@ -6,7 +6,7 @@
  */
 
 import type { TurnAuthority, TurnOriginKind, TurnOriginRecord } from "../turn-origin.ts";
-import { isThirdPartyOrigin } from "../turn-origin.ts";
+import { isRemoteOwnerOrigin, isThirdPartyOrigin } from "../turn-origin.ts";
 
 export const MAX_TOOL_MANIFEST_RUNS = 16;
 const MAX_OFFERED_NAMES = 64;
@@ -105,7 +105,8 @@ function boundedDecisions(decisions: readonly ToolDecision[]): ToolDecision[] {
 }
 
 function authorityOf(origin: TurnOriginRecord | undefined): TurnAuthority {
-	return isThirdPartyOrigin(origin) ? "third-party" : "owner";
+	if (isThirdPartyOrigin(origin)) return "third-party";
+	return isRemoteOwnerOrigin(origin) ? "remote-owner" : "owner";
 }
 
 export class RunToolManifests {

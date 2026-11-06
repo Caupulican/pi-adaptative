@@ -1138,14 +1138,14 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/**
 	 * Enqueue each kind's decided inputs up to the first one still awaiting its decision: a run consumes the agent's queue.
-	 * A third party's words never join a live run the owner decided: they wait, admitted, and the delivery run that starts
-	 * once that run ends opens with them (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words
-	 * are not held behind them.
+	 * A third party's words never join a live run the owner decided, typed at the terminal or sent from a verified owner
+	 * channel: they wait, admitted, and the delivery run that starts once that run ends opens with them
+	 * (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words are not held behind them.
 	 */
 	handOff(): void {
 		if (this._closed) return;
 		const ownerRunLive =
-			this._foreground?.hasLiveConsumer === true && this._foreground.turnOrigin.authority() === "owner";
+			this._foreground?.hasLiveConsumer === true && this._foreground.turnOrigin.authority() !== "third-party";
 		for (const [entries, enqueue] of [
 			[
 				this._steering,

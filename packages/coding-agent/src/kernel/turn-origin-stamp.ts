@@ -2,7 +2,9 @@
  * Where a message that can open or steer a turn came from, recorded where it enters the session and never classified
  * afterwards. The set is closed: every wake path maps to one kind (see `core/turn-origin.ts`, which derives the kind of
  * an unstamped message from the identity it already carries). A stamp is written only where no such identity exists: a
- * user message an extension delivers on behalf of a third party.
+ * user message an extension delivers on behalf of a third party, or one the channels core delivers for an owner channel
+ * (the owner's own listed identity on a platform chat). An `owner-channel` record that is missing its verification, its
+ * channel or its reference does not parse, so it reads as unreadable, which is third-party.
  *
  * It follows the worker-control design: a non-enumerable stamp on the message object that never reaches a serialized
  * message or a provider request; the session manager writes it on the message's entry (`SessionMessageEntry.turnOrigin`)
@@ -18,6 +20,7 @@ export type TurnOriginKind =
 	| "host-event"
 	| "peer-agent"
 	| "inbound-channel"
+	| "owner-channel"
 	| "worker-result"
 	| "goal-continuation"
 	| "proactive-review"
@@ -26,9 +29,12 @@ export type TurnOriginKind =
 export interface TurnOriginRecord {
 	readonly v: 1;
 	readonly k: TurnOriginKind;
-	/** The extension channel that delivered the words (`pi-chat`). */
+	/** The extension channel that delivered the words (`pi-chat`), or the channel an `owner-channel` message arrived on. */
 	readonly channel?: string;
-	/** The channel's broker verified which session sent them; it does not make the words the owner's. */
+	/**
+	 * The channel's broker verified which session sent them; it does not make the words the owner's. On an `owner-channel`
+	 * record it states that the channels core verified the sender against the owner's own list, and it is required.
+	 */
 	readonly verified?: true;
 	/** The words were authored by someone other than the owner or the owner's own code. */
 	readonly thirdParty?: true;
@@ -45,11 +51,14 @@ const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"host-event",
 	"peer-agent",
 	"inbound-channel",
+	"owner-channel",
 	"worker-result",
 	"goal-continuation",
 	"proactive-review",
 	"harness",
 ]);
+/** The extension chat mesh is a third party's channel and can never be an owner channel. */
+const PEER_CHAT_CHANNEL = "pi-chat";
 const TURN_ORIGIN = Symbol("pi.turnOrigin");
 
 /** The record an entry names when it cannot be read: third-party, so an unreadable origin never gains authority. */
@@ -72,6 +81,15 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 	if (
 		record.ref !== undefined &&
 		(typeof record.ref !== "string" || record.ref.length === 0 || record.ref.length > MAX_TURN_ORIGIN_REF_CHARS)
+	)
+		return undefined;
+	if (
+		record.k === "owner-channel" &&
+		(record.verified !== true ||
+			record.thirdParty !== undefined ||
+			record.ref === undefined ||
+			typeof record.channel !== "string" ||
+			record.channel === PEER_CHAT_CHANNEL)
 	)
 		return undefined;
 	return {

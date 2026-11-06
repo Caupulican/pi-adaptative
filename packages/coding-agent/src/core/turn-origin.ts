@@ -19,6 +19,7 @@ import {
 } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { parseWorkerControlRecord, type WorkerControlRecord, workerControlOf } from "../kernel/worker-control-stamp.ts";
+import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import { CHAT_EXTENSION_NAME } from "./chat/constants.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "./events/host-event-delivery.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
@@ -33,8 +34,13 @@ import { isPlainRecord } from "./util/value-guards.ts";
 
 export type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 
-/** Who the run answers: the owner (their words or their own automation), or a third party whose words it carries. */
-export type TurnAuthority = "owner" | "third-party";
+/**
+ * Who the run answers: the owner at their own terminal (their words or their own automation), the owner on a phone
+ * (`remote-owner`: a verified message from an identity the owner lists for a channel), or a third party whose words it
+ * carries. A remote owner holds the owner's tools and memory but not the owner's standing authority: what only the
+ * terminal may do stays refused and outward actions wait for the owner's approval.
+ */
+export type TurnAuthority = "owner" | "remote-owner" | "third-party";
 
 /**
  * The origin of a third party's words an extension delivers: a peer agent on the chat mesh, or another channel. A
@@ -53,6 +59,18 @@ export function channelTurnOrigin(
 			thirdParty: true,
 			...(origin.ref !== undefined ? { ref: origin.ref } : {}),
 		}) ?? UNREADABLE_TURN_ORIGIN
+	);
+}
+
+/**
+ * The origin of the owner's words delivered from a verified owner channel. Only the channels core mints it (through
+ * `OwnerChannelDelivery`); an extension's message shape cannot express it. A record that does not parse is unreadable,
+ * and an unreadable origin is third-party, so a mistake here never gains authority.
+ */
+export function ownerChannelTurnOrigin(origin: Pick<OwnerChannelOrigin, "channel" | "ref">): TurnOriginRecord {
+	return (
+		parseTurnOriginRecord({ v: 1, k: "owner-channel", channel: origin.channel, verified: true, ref: origin.ref }) ??
+		UNREADABLE_TURN_ORIGIN
 	);
 }
 
@@ -163,9 +181,17 @@ export function isThirdPartyOrigin(origin: TurnOriginRecord | undefined): boolea
 	return origin?.thirdParty === true;
 }
 
-/** The owner's typed words and a third party's words decide a run's authority; the owner's automation does not. */
+/** The owner's words from a verified owner channel (a phone), which are not a third party's and not typed at the terminal. */
+export function isRemoteOwnerOrigin(origin: TurnOriginRecord | undefined): boolean {
+	return origin?.k === "owner-channel";
+}
+
+/**
+ * The owner's typed words, the owner's words from a verified owner channel, and a third party's words decide a run's
+ * authority; the owner's automation does not.
+ */
 export function isDecisiveOrigin(origin: TurnOriginRecord): boolean {
-	return origin.thirdParty === true || origin.k === "owner-typed";
+	return origin.thirdParty === true || origin.k === "owner-typed" || origin.k === "owner-channel";
 }
 
 /** The latest entry of `branch` (root to leaf) whose origin decides a run's authority, with that origin. */
@@ -182,12 +208,13 @@ export function latestDecisiveEntry(
 }
 
 /**
- * The authority of the foreground run in progress. The owner's typed words and a third party's words decide it, the
- * latest of them on the session branch wins: a peer's message makes the run third-party, the owner's words after it
- * give it back. The owner's own automation (routines, CI, workers, goal continuations, notices, extensions) never
- * decides: a run it opens or continues answers whoever the branch last answered, so a goal continuation or a wake after
- * a peer's run stays third-party until the owner types. Outside a run, and on a branch nobody decisive wrote, the
- * authority is the owner's.
+ * The authority of the foreground run in progress. The owner's typed words, the owner's words from a verified owner
+ * channel and a third party's words decide it, the latest of them on the session branch wins: a peer's message makes the
+ * run third-party, the owner's words after it give it back (typed words as the owner, a phone message as the remote
+ * owner). The owner's own automation (routines, CI, workers, goal continuations, notices, extensions) never decides: a
+ * run it opens or continues answers whoever the branch last answered, so a goal continuation or a wake after a peer's
+ * run stays third-party until the owner types. Outside a run, and on a branch nobody decisive wrote, the authority is
+ * the owner's.
  */
 export class RunTurnOrigin {
 	private active = false;
@@ -227,6 +254,7 @@ export class RunTurnOrigin {
 	}
 
 	authority(): TurnAuthority {
-		return isThirdPartyOrigin(this.latest) ? "third-party" : "owner";
+		if (isThirdPartyOrigin(this.latest)) return "third-party";
+		return isRemoteOwnerOrigin(this.latest) ? "remote-owner" : "owner";
 	}
 }

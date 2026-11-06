@@ -31,6 +31,7 @@ import {
 	thirdPartyReleaseLine,
 } from "./autonomy/edge-policy.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
+import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
 import { entryTurnOrigin, isThirdPartyOrigin, latestDecisiveEntry, type TurnOriginRecord } from "./turn-origin.ts";
 
@@ -71,6 +72,14 @@ export interface SessionEdgeDeps {
 	getProtectedWritePaths?(): ProtectedWritePaths;
 	/** Reports a call the third-party gate refused or prepared, for the run's tool manifest (`autonomy-status`). */
 	noteToolRefusal?(decision: ToolDecision): void;
+	/**
+	 * Whether the owner channel that opened a remote-owner run still holds the owner's authority (the sender is still
+	 * listed, the provider is the shipped one, the emergency stop is not engaged). Asked again at every guarded call of
+	 * such a run; absent means it does not, so a remote-owner run with no answer holds no authority.
+	 */
+	isOwnerChannelLive?(origin: TurnOriginRecord): boolean;
+	/** Shows a draft held on a remote-owner run to the owner's phone; the notice in the session is written either way. */
+	presentOwnerDraft?(view: OwnerDraftView): void;
 }
 
 /** An outward action held for the owner, as the gate saw it. */

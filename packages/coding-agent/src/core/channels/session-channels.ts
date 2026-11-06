@@ -64,6 +64,7 @@ import {
 	plainLabel,
 } from "./channel-message.ts";
 import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
+import type { SessionChannelsOwnerDeps } from "./owner-channel-types.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
 const MAX_NAMED_AWAY_DRAFTS = 3;
@@ -202,7 +203,7 @@ export interface ChannelHeldSenderView {
 /** What a session exposes: a deployment wrapper registers providers and reads their states; it never starts them. */
 export type SessionChannelsView = Pick<SessionChannels, "registerChannel" | "registerScheduler" | "getStates">;
 
-export interface SessionChannelsDeps {
+export interface SessionChannelsDeps extends SessionChannelsOwnerDeps {
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
 	getChannelPolicies(): ReadonlyMap<string, ChannelPolicyResolution>;

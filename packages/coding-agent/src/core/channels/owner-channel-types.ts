@@ -24,10 +24,25 @@ export interface OwnerChannelOrigin {
  * conversation. Only the channels core holds one; an extension cannot mint an owner-channel turn.
  */
 export interface OwnerChannelDelivery {
-	/** Follow-up delivery: no slash processing, stamped as an owner-channel turn, recorded under the `channel` input source. */
-	deliver(text: string, origin: OwnerChannelOrigin, onAccepted: (accepted: boolean) => void): void;
+	/**
+	 * Follow-up delivery: no slash processing, stamped as an owner-channel turn, recorded under the `channel` input
+	 * source. `live` is the channels core's answer, asked at every guarded call of the run this message opens, to whether
+	 * the channel still holds the owner's authority (sender still listed, shipped provider, emergency stop not engaged);
+	 * a run whose `live` is gone or answers false has no authority, so the session never decides that from its own state.
+	 */
+	deliver(
+		text: string,
+		origin: OwnerChannelOrigin,
+		live: () => boolean,
+		onAccepted: (accepted: boolean) => void,
+	): void;
 	/** The turn that carries a recorded approval: the same owner-channel stamp, a non-owner input source. */
-	deliverApproval(text: string, origin: OwnerChannelOrigin, onAccepted: (accepted: boolean) => void): void;
+	deliverApproval(
+		text: string,
+		origin: OwnerChannelOrigin,
+		live: () => boolean,
+		onAccepted: (accepted: boolean) => void,
+	): void;
 	/** Reports the cost of the run that `ref` opened as it grows; returns the unsubscribe. */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
 	/** Aborts the run that `ref` opened. */
@@ -65,7 +80,7 @@ export interface OwnerApprovalPolicy {
 }
 
 /** The owner's decisions over the drafts of the hosting session. Each decision names exactly one draft. */
-export interface OwnerChannelControl {
+export interface OwnerDraftDecisions {
 	drafts(): readonly OwnerDraftView[];
 	/** Records the approval of one draft; the held call is admitted once, when it is re-issued with an identical digest. */
 	approve(
@@ -76,9 +91,20 @@ export interface OwnerChannelControl {
 	deny(draftId: string, by: OwnerDecisionBy): OwnerDraftView["state"] | "absent";
 }
 
-/** The part of the channels core's dependencies the session wiring fills; declared here so both sides build against it. */
+/** The decisions plus the stream of newly held drafts: what the channels core holds of the session that hosts the phone. */
+export interface OwnerChannelControl extends OwnerDraftDecisions {
+	/** Hears each draft the hosting session holds on a remote-owner run (to show it to the phone); returns the unsubscribe. */
+	onDraftHeld(listener: (view: OwnerDraftView) => void): () => void;
+}
+
+/**
+ * The part of the channels core's dependencies the session wiring fills; declared here so both sides build against it.
+ * Every member is optional and an absent one fails closed: with no delivery handle, no control handle or no emergency
+ * stop probe, the channels core never admits an owner message and every identity follows the third-party path.
+ */
 export interface SessionChannelsOwnerDeps {
 	readonly ownerDelivery?: OwnerChannelDelivery;
 	ownerControl?(): OwnerChannelControl | undefined;
-	isEmergencyStopEngaged(): boolean;
+	/** Whether the emergency stop file is engaged; no owner offer is made while it is, and without this probe none is made. */
+	isEmergencyStopEngaged?(): boolean;
 }
