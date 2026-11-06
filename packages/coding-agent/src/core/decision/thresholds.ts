@@ -166,7 +166,20 @@ export const STEERING_CUTS = Object.freeze({
 	transitionDirective: 0.75,
 	/** JEV-004 and JEV-024 semantic outcome: `completion_plausible`. */
 	outcomeCompletionPlausible: 0.65,
+	/**
+	 * JEV-001 `ambiguity_severity` at level 2 or more, JEV-005 `semantic_progress` at level 0 or less: this much Score
+	 * mass on the adverse side flags it. A flag only sends the pass to `gather_more` or `replan`, the safe side, so the
+	 * pass needs more than half its mass clear of it. It is not {@link SCORE_BOUNDARY_MASS} (0.7, with a confidence
+	 * floor), which settles a side to act on; reading these flags at 0.7 would let a pass through on a 0.6 adverse mass.
+	 */
+	scoreAdverseMass: 0.5,
 });
+
+/**
+ * JEV-043 `duplicate_introduced`: at or above it the route stops and a repair task is added; below it the change
+ * passes. There is no middle band. Unmeasured.
+ */
+export const DUPLICATE_INTRODUCED_CUT = 0.6;
 
 // ---------------------------------------------------------------------------------------------------
 // Choice readers. They take a raw System One answer (`{ choice, confidence, probabilities }`), a

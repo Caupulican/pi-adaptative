@@ -5,18 +5,20 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import type { SemanticDecisionEngine, SemanticEvaluationOccupancy } from "../decision/engine.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
-import { noulProbability, readNoul } from "../decision/noul.ts";
+import { type NoulBandThresholds, noulProbability, readNoul } from "../decision/noul.ts";
 import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
 import { CONSEQUENCE_MIN_CONFIDENCE, choiceProbability, STEERING_CUTS } from "../decision/thresholds.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
-import { completionPackFailures, isAdverseAnswer } from "../system-one/policy.ts";
+import type { SystemOneThresholds } from "../system-one/config.ts";
+import { completionPackFailures, isAdverseAnswer, noulBandThresholds } from "../system-one/policy.ts";
 import {
 	type SemanticDecisionTrace,
 	type SemanticEvaluationObserver,
@@ -103,6 +105,10 @@ export interface SystemOneSteeringPlaneDeps {
 	readonly certificates?: SteeringCertificateStore;
 	readonly policy?: SteeringPolicyConfig;
 	readonly persistentPath?: string;
+	/** The System One config's yes/no bands: the plane's own band reads and the engine it builds use them. */
+	readonly thresholds?: SystemOneThresholds;
+	/** The session's accounting origin, taken when a checkpoint asks, so its spend is the turn that asked. */
+	readonly captureOrigin?: () => AccountingOrigin;
 }
 
 /** Recent certificates whose trace a consumer may still extend; older ones keep the plane's trace only. */
@@ -120,6 +126,8 @@ export class SystemOneSteeringPlane {
 	readonly decisionEngine?: SemanticDecisionEngine;
 	readonly router?: DecisionEngineRouter;
 	private readonly adapter?: JevAdapter;
+	private readonly bands: NoulBandThresholds;
+	private readonly captureOrigin?: () => AccountingOrigin;
 	/**
 	 * Predicates whose band came back ambiguous during the current `evaluateSemanticOutcome` call.
 	 * Scoped to that one synchronous call, which resets it on entry and drains it before returning;
@@ -136,12 +144,14 @@ export class SystemOneSteeringPlane {
 		this.policy = deps.policy ?? DEFAULT_STEERING_POLICY;
 		this.adapter = deps.adapter;
 		this.router = deps.router;
+		this.bands = noulBandThresholds(deps.thresholds);
+		this.captureOrigin = deps.captureOrigin;
 
 		if (deps.decisionEngine) {
 			this.decisionEngine = deps.decisionEngine;
 		} else if (deps.adapter) {
 			const model = this.policy.model.id || PINNED_JEV_MODEL;
-			this.decisionEngine = new TypeSafeSystemOneDecisionEngine(deps.adapter, model);
+			this.decisionEngine = new TypeSafeSystemOneDecisionEngine(deps.adapter, model, this.bands);
 		}
 	}
 
@@ -351,7 +361,7 @@ export class SystemOneSteeringPlane {
 			return probability !== undefined && probability >= threshold;
 		}
 		if (typeof ans === "object") {
-			const band = readNoul(ans, "required_true");
+			const band = readNoul(ans, "required_true", this.bands);
 			if (band === "unasked") return false;
 			if (band === "ambiguous") {
 				if (predicate) this.openDoubts.push(predicate);
@@ -419,7 +429,10 @@ export class SystemOneSteeringPlane {
 					failed.push("objective_coherent");
 				}
 				// Most of the belief on "different readings lead to different work" or worse.
-				if ((this.scoreMass(answers.ambiguity_severity, (level) => level >= 2) ?? 0) >= 0.5) {
+				if (
+					(this.scoreMass(answers.ambiguity_severity, (level) => level >= 2) ?? 0) >=
+					STEERING_CUTS.scoreAdverseMass
+				) {
 					failed.push("ambiguity_severity_acceptable");
 				}
 				if (this.isTruthy(answers.missing_information, undefined, "missing_information")) {
@@ -427,7 +440,7 @@ export class SystemOneSteeringPlane {
 				}
 				// Only a decisively incoherent objective ends admission. Ambiguity and missing information
 				// are answered by gathering evidence or asking the owner, never by refusing the objective.
-				const incoherent = readNoul(answers.objective_coherent, "required_true") === "hard_fail";
+				const incoherent = readNoul(answers.objective_coherent, "required_true", this.bands) === "hard_fail";
 				if (failed.length > 0) outcome = incoherent ? "fail" : "gather_more";
 				break;
 			}
@@ -468,7 +481,9 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-005": {
-				if ((this.scoreMass(answers.semantic_progress, (level) => level <= 0) ?? 0) >= 0.5) {
+				if (
+					(this.scoreMass(answers.semantic_progress, (level) => level <= 0) ?? 0) >= STEERING_CUTS.scoreAdverseMass
+				) {
 					failed.push("semantic_progress_positive");
 					outcome = "replan";
 				}
@@ -1011,12 +1026,15 @@ export class SystemOneSteeringPlane {
 	): Promise<DecisionEvaluation> {
 		const required = this.policy.mode === "system_one_required";
 		let evaluation: DecisionEvaluation;
+		// Taken as the checkpoint asks: the adapter resolves its access, and may retry, before its reviewer would take it.
+		const origin = this.captureOrigin?.();
 
 		if (this.router) {
 			try {
 				evaluation = await this.router.evaluateOrFallback(program, request.state, {
 					consequence,
 					occupancy: request.occupancy,
+					...(origin ? { origin } : {}),
 				});
 			} catch (err) {
 				throw engineCallFailure(err, request.signal, label, "Decision router", required);
@@ -1030,6 +1048,7 @@ export class SystemOneSteeringPlane {
 						? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
 						: {}),
 					...(request.signal ? { signal: request.signal } : {}),
+					...(origin ? { origin } : {}),
 				});
 			} catch (err) {
 				throw engineCallFailure(err, request.signal, label, "System One steering engine", required);

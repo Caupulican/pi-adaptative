@@ -39,6 +39,7 @@ import {
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { PromptPrefixMonitor } from "./cache-trace.ts";
+import { captureSessionAccountingOrigin } from "./cost/accounting-origin.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
@@ -959,6 +960,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						adapter: systemOneController.adapter,
 						certificates,
 						policy: DEFAULT_STEERING_POLICY,
+						thresholds: systemOneController.config.thresholds,
+						captureOrigin: () => captureSessionAccountingOrigin(sessionManager),
 					});
 				}
 

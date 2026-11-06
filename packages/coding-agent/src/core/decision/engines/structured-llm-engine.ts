@@ -4,12 +4,8 @@ import { RequestSpendRefusal } from "../../cost/request-spend-budget.ts";
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
 import type { DecisionConfidence } from "../confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../engine.ts";
-import {
-	certainBooleanResult,
-	createDecisionEvaluation,
-	type DecisionEvaluation,
-	type DecisionResult,
-} from "../evaluation.ts";
+import { createDecisionEvaluation, type DecisionEvaluation, type DecisionResult } from "../evaluation.ts";
+import { noulBand } from "../noul.ts";
 import type { DecisionDefinition } from "../primitives.ts";
 import type { DecisionProgram } from "../program.ts";
 import { DecisionEngineProtocolError } from "../protocol-error.ts";
@@ -188,11 +184,17 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 				isCalibrated: false,
 			};
 			if (decision.kind === "boolean") {
-				results[decision.id] = certainBooleanResult(
-					answer.value as boolean,
-					decision.direction ?? "required_true",
+				// The model reports one confidence that its true/false is correct: P(true) is that confidence for a true
+				// answer and its complement for a false one, so the band says how sure the model said it was.
+				const probabilityTrue = answer.value === true ? answer.confidence : 1 - answer.confidence;
+				const direction = decision.direction ?? "required_true";
+				results[decision.id] = {
+					kind: "boolean",
+					probabilityTrue,
+					direction,
+					band: noulBand(probabilityTrue, direction),
 					confidence,
-				);
+				};
 			} else if (decision.kind === "choice") {
 				const selected = answer.selected as string;
 				// The model reports one confidence, not a distribution: P(selected) is that verbal confidence and the
@@ -212,7 +214,18 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 				};
 			} else if (decision.kind === "score") {
 				const value = answer.value as number;
-				results[decision.id] = { kind: "score", value, distribution: { [value]: 1 }, confidence };
+				// As for a Choice: P(value) is the verbal confidence and the rest is spread evenly over the other levels.
+				const others = decision.levels.map((level) => level.value).filter((level) => level !== value);
+				const rest = others.length > 0 ? (1 - answer.confidence) / others.length : 0;
+				results[decision.id] = {
+					kind: "score",
+					value,
+					distribution: {
+						...Object.fromEntries(others.map((level) => [level, rest])),
+						[value]: answer.confidence,
+					},
+					confidence,
+				};
 			} else {
 				const selected = answer.selected as string[];
 				results[decision.id] = {

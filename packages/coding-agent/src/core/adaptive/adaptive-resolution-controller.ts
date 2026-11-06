@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { choiceAct } from "../decision/thresholds.ts";
 import { type AdaptationTier, readAdaptationTier } from "../steering/programs.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { AdaptationGraph } from "./adaptation-graph.ts";
@@ -19,8 +20,6 @@ export interface AdaptiveResolutionInput {
 	readonly objectiveId: string;
 	readonly taskId?: string;
 	readonly request?: string;
-	readonly prompt?: string;
-	readonly objectiveDescription?: string;
 	readonly recentEvidence?: unknown;
 	readonly recentFailures?: readonly string[];
 	readonly currentExpert?: string;
@@ -89,16 +88,21 @@ export class AdaptiveResolutionController {
 			},
 		);
 
-		// Interpret lowest adequate adaptation dimension from typed Jev (ERC-050)
 		const answers = cert.answers;
-		const specialistDomainChoice = (answers.specialist_domain as { choice?: string } | undefined)?.choice;
-		const reqText =
-			`${input.request ?? ""} ${(input as any).prompt ?? ""} ${input.objectiveDescription ?? ""} ${JSON.stringify(input.recentEvidence ?? "")}`.toLowerCase();
-		const isUiRegex = /\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText);
-
 		// System One owns the dimension (ERC-050, ERC-051): the tier its Choice lets code act on. An unsure
 		// choice adapts the strategy, the lowest tier; words in the request never pick a costlier one.
-		const dimension: AdaptiveDimension = readAdaptationTier(answers.lowest_adequate_adaptation)?.tier ?? "strategy";
+		const tier: AdaptiveDimension = readAdaptationTier(answers.lowest_adequate_adaptation)?.tier ?? "strategy";
+		// A specialist is synthesized only for a domain its Choice lets code act on. An unsure domain adapts the
+		// strategy instead, which synthesizes nothing; no default domain stands in for it.
+		const domainAnswer = answers.specialist_domain as { choice?: unknown } | undefined;
+		const domain =
+			tier === "specialist" &&
+			typeof domainAnswer?.choice === "string" &&
+			choiceAct(domainAnswer, undefined, "reversible") === "act"
+				? domainAnswer.choice
+				: undefined;
+		const domainUnsure = tier === "specialist" && domain === undefined;
+		const dimension: AdaptiveDimension = domainUnsure ? "strategy" : tier;
 
 		const kindMap: Record<AdaptiveDimension, AdaptationNodeKind> = {
 			strategy: "strategy_change",
@@ -124,63 +128,27 @@ export class AdaptiveResolutionController {
 		let capabilityNeed: CapabilityNeed | undefined;
 		let runtimeNeed: Record<string, unknown> | undefined;
 
-		if (dimension === "specialist") {
-			const domain = specialistDomainChoice || (isUiRegex ? "ui_ux" : "architecture");
-			// JEV-040 asks no vision question: the chosen domain is what says the specialist is visual.
+		if (dimension === "specialist" && domain !== undefined) {
+			// JEV-040 asks only the domain: the chosen domain is what says the specialist is visual, and the rest of
+			// its profile follows from that.
 			const isVisual =
 				domain === "ui_ux" || domain.toLowerCase().includes("ui") || domain.toLowerCase().includes("visual");
-
-			const specialties = Array.isArray((answers.specialties as any)?.list)
-				? (answers.specialties as any).list
-				: Array.isArray(answers.specialties)
-					? (answers.specialties as string[])
-					: isVisual
-						? ["ui_ux", "visual_design"]
-						: [domain, `${domain}_specialist`];
-
-			const obligations = Array.isArray(answers.obligations)
-				? (answers.obligations as string[])
-				: isVisual
-					? ["vision_inspection", "ui_ux_fidelity"]
-					: [`${domain}_verification`];
-
-			const requiredTools = Array.isArray(answers.required_tools)
-				? (answers.required_tools as string[])
-				: isVisual
-					? ["view_image", "capture_screenshot", "read_file", "write_file", "edit_file"]
-					: ["read_file", "write_file", "edit_file"];
-
-			const requiredCapabilities = Array.isArray(answers.required_capabilities)
-				? (answers.required_capabilities as string[])
-				: isVisual
-					? ["ui_inspection"]
-					: [];
-
 			specialistNeed = {
 				specialty: domain,
-				specialties,
-				purpose:
-					(answers.purpose as string) ??
-					(isVisual
-						? `Deliver UI/UX design and visual implementation for ${input.objectiveId}`
-						: `Deliver specialized ${domain} implementation for ${input.objectiveId}`),
-				mission:
-					(answers.mission as string) ??
-					(isVisual
-						? "Analyze UI requirements, create visual design and component hierarchy, and verify user experience"
-						: `Execute specialized ${domain} task for ${input.objectiveId}`),
-				obligations,
-				cognitiveRequirements: {
-					vision: isVisual,
-					reasoning: ((answers.reasoning as string) ||
-						(answers.cognitiveRequirements as any)?.reasoning ||
-						"high") as any,
-					tool_calling: true,
-					long_context: true,
-				},
-				requiredTools,
-				requiredCapabilities,
-				authorityRole: (answers.authority_role as string) ?? "implementer",
+				specialties: isVisual ? ["ui_ux", "visual_design"] : [domain, `${domain}_specialist`],
+				purpose: isVisual
+					? `Deliver UI/UX design and visual implementation for ${input.objectiveId}`
+					: `Deliver specialized ${domain} implementation for ${input.objectiveId}`,
+				mission: isVisual
+					? "Analyze UI requirements, create visual design and component hierarchy, and verify user experience"
+					: `Execute specialized ${domain} task for ${input.objectiveId}`,
+				obligations: isVisual ? ["vision_inspection", "ui_ux_fidelity"] : [`${domain}_verification`],
+				cognitiveRequirements: { vision: isVisual, reasoning: "high", tool_calling: true, long_context: true },
+				requiredTools: isVisual
+					? ["view_image", "capture_screenshot", "read_file", "write_file", "edit_file"]
+					: ["read_file", "write_file", "edit_file"],
+				requiredCapabilities: isVisual ? ["ui_inspection"] : [],
+				authorityRole: "implementer",
 			};
 		} else if (dimension === "capability") {
 			capabilityNeed = {
@@ -201,7 +169,7 @@ export class AdaptiveResolutionController {
 			...(specialistNeed?.specialty !== undefined ? { specialty: specialistNeed.specialty } : {}),
 			action: cert.directive,
 			certificateId: cert.certificate_id,
-			reasonCodes: [cert.directive, `dimension_${dimension}`],
+			reasonCodes: [cert.directive, `dimension_${dimension}`, ...(domainUnsure ? ["specialist_domain_unsure"] : [])],
 			node,
 			...(specialistNeed !== undefined ? { specialistNeed } : {}),
 			...(capabilityNeed !== undefined ? { capabilityNeed } : {}),

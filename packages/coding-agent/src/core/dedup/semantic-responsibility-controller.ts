@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { noulProbability, readNoul } from "../decision/noul.ts";
+import { DUPLICATE_INTRODUCED_CUT } from "../decision/thresholds.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
 import { noulHolds } from "../system-one/policy.ts";
@@ -284,7 +285,7 @@ export class SemanticResponsibilityController {
 		// The waiver has to earn its exemption: it applies when the answer settles on a yes, and an
 		// undecided or unasked answer leaves the duplicate unwaived rather than excusing it at a coin flip.
 		const waiverApplies = waiver !== undefined && noulHolds(cert.answers.intentional_waiver_applies, "required_true");
-		const isUnintentionalDuplicate = duplicateIntroduced >= 0.6 && !waiverApplies;
+		const isUnintentionalDuplicate = duplicateIntroduced >= DUPLICATE_INTRODUCED_CUT && !waiverApplies;
 
 		const verdict: PostMutationDedupVerdict = {
 			unintentionalDuplicate: isUnintentionalDuplicate,

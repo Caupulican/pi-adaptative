@@ -26,9 +26,9 @@ export function settledBoolean(result: BooleanDecisionResult): boolean | undefin
 }
 
 /**
- * A boolean an engine computed rather than estimated: a mechanical read of state, or a model that
- * returned a literal true/false. It lands at P=1 or P=0, so its band is decisive either way, and
- * the direction still decides which of those is a pass.
+ * A boolean an engine computed rather than estimated: a mechanical read of state. It lands at P=1
+ * or P=0, so its band is decisive either way, and the direction still decides which of those is a
+ * pass. A model's literal true/false is not certain: its P(true) is the confidence it reported.
  */
 export function certainBooleanResult(
 	value: boolean,
