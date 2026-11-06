@@ -1308,10 +1308,11 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				ciRunId = runs[0]!.occurrenceId;
 
 				// The session reopens while the daemon still follows its events. Its own CI source starts with it, before
-				// its first routine tick, and takes the consumer back from the daemon's live activation.
+				// its first routine tick, and takes the consumer back from the daemon's live activation. The wake turn calls no
+				// tool and its answer names no claim kind, so System One is asked nothing for it.
 				world.systemOne.enterPhase("routine-away-ci-parent", {});
 				world.provider.enqueue("root", {
-					...text("routine-away-ci-parent", "The away CI check completed."),
+					...text("routine-away-ci-parent", "The away CI run is reported."),
 					check: (request) =>
 						expect(JSON.stringify(request.context.messages)).toContain("away-ci-routine completed."),
 				});
