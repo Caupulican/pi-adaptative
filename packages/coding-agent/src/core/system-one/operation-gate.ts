@@ -44,7 +44,10 @@ export const OPERATION_JUDGMENT_TIMEOUT_MS = 2_000;
 
 type JudgedTriage = Extract<ReturnType<typeof triageOperation>, { kind: "judged" }>;
 
-/** Where a gate decision's answer came from. */
+/**
+ * Where a gate decision's answer came from. `"jev"` is the legacy stored id for a System One judgment: decision-ledger
+ * rows already carry it, so it stays as the persisted value.
+ */
 export type OperationDecisionSource = "jev" | "cache" | "outage";
 
 export interface OperationGateDecisionRecord {

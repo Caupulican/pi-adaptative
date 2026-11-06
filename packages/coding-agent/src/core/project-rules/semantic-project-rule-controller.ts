@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isNoulProbability, noulBand } from "../decision/noul.ts";
+import { readNoul } from "../decision/noul.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
@@ -191,14 +191,6 @@ function semanticRuleProgram(rules: readonly SemanticRule[], phase: RulePhase): 
 	};
 }
 
-/** P(the change violates the rule), or undefined when the answer carries no probability (never read as a verdict). */
-function violationProbability(answer: unknown): number | undefined {
-	if (!answer || typeof answer !== "object") return undefined;
-	const fields = answer as { noul?: unknown; probabilityTrue?: unknown };
-	const probability = fields.probabilityTrue ?? fields.noul;
-	return isNoulProbability(probability) ? probability : undefined;
-}
-
 /**
  * A settled "violates" is a finding the receiving agent verifies; a settled "does not" passes; anything else (an
  * undecided band or no answer) is a doubt, the same outcome an evaluator outage has.
@@ -211,10 +203,10 @@ function readSemanticRules(
 	const findings: RuleViolation[] = [];
 	const doubts: RuleDoubt[] = [];
 	for (const rule of rules) {
-		const probability = violationProbability(answers?.[`violate::${rule.rule_id}`]);
-		const band = probability === undefined ? "ambiguous" : noulBand(probability, "required_false");
-		if (band === "hard_pass" || band === "soft_pass") continue;
-		if (band === "ambiguous") {
+		// A finding stops affected work for verification, so it is read on the gating family.
+		const reading = readNoul(answers?.[`violate::${rule.rule_id}`], "required_false", "gating");
+		if (reading === "hard_pass" || reading === "soft_pass") continue;
+		if (reading === "ambiguous" || reading === "unasked") {
 			doubts.push({ ruleId: rule.rule_id, text: rule.text, cause: "undecided" });
 			continue;
 		}

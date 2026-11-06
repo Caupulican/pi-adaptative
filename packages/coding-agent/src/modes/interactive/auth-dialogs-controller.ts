@@ -199,7 +199,7 @@ export class AuthDialogsController {
 			});
 		}
 		if (!options.some((option) => option.id === TYPESAFE_PROVIDER)) {
-			options.push({ id: TYPESAFE_PROVIDER, name: "TypeSafe (Jev reviewer)", authType: "api_key" });
+			options.push({ id: TYPESAFE_PROVIDER, name: "TypeSafe (System One)", authType: "api_key" });
 		}
 
 		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;

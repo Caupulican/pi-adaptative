@@ -11,7 +11,7 @@ Date: 2026-09-19
 | **Integrity & Epistemic Truth** | GoalState + DurableTaskRuntime + verification obligations, projected into `ExecutionStore` by `projectCanonicalTruth` before every System One stage | Canonical observations, claims, criteria, verification and completion facts. `ExecutionStore` is a hydrated projection, not a second mutable authority. `SystemOneController` owns stage-pack evaluation (preflight, tool gate, postflight, completion transaction) on that projection. |
 | **Loop Execution (Target)** | `packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts` (`ObjectiveExecutionController`) | Deterministic loop owner. Owns reconciliation, route composition, dispatch/wait/replan/repair, completion transaction invocation, and explicit terminal reasons. |
 | **Semantic Referee** | `packages/coding-agent/src/core/system-one/` (`TypeSafeSystemOneDriver`, `jev-1.13.0`) | Semantic referee for decomposed questions (`work_remaining`, `missing_work_class`, `independent_worker_required`, `capability_escalation_required`, `external_blocker_present`, `semantic_progress`, `context_stale`, `strategy_repetition`). Does NOT own loop scheduling, terminal authority, or provider/model selection. |
-| **Model Selection** | `packages/coding-agent/src/core/autonomy/model-router.ts`, `capability-gateway.ts` | Selects exact provider and model within configured policy. Jev selects work class, Pi selects who executes. |
+| **Model Selection** | `packages/coding-agent/src/core/autonomy/model-router.ts`, `capability-gateway.ts` | Selects exact provider and model within configured policy. System One selects work class, Pi selects who executes. |
 | **Worker Cognition** | `packages/coding-agent/src/core/orchestration/worker-execution-contract.ts`, `worker-delegation-controller.ts` | Bounded worker execution, leases, and contracts. Worker can only propose `completion_candidate` and never terminalize. |
 | **Legacy Continuation (Phased Out)** | `packages/coding-agent/src/core/goal-loop-controller.ts`, `goals/goal-session-controller.ts` (`GoalLoopController`, `GoalState`) | Legacy prompt-continuation loop. Non-authoritative in `objective_shadow` and `objective_primary` modes; bridged by `GoalCompatibilityAdapter`. |
 
@@ -20,7 +20,7 @@ Date: 2026-09-19
 1. **No Fourth State Machine**: The `ObjectiveExecutionController` persists only minimal loop metadata (cycle id, last route, stall fingerprint, active repair batch, terminal reason). It does NOT create a parallel objective/task/evidence database.
 2. **Authority Hierarchy**:
    `deterministic code / policy > mechanical evidence > semantic validation > worker assertion`
-3. **Model Selection Independence**: Jev evaluates semantic work class; the existing model router and capability gateway select the concrete worker model.
+3. **Model Selection Independence**: System One evaluates semantic work class; the existing model router and capability gateway select the concrete worker model.
 4. **Terminal Gating**: `complete` is not a standard route; it is only committed via the completion coordinator, which may call `SystemOneController.executeCompletionTransaction` on the hydrated projection. Empty or disconnected objective state cannot complete.
 5. **Worker Boundary**: Workers propose `completion_candidate`; only the harness commits completion.
 6. **Rollout Modes**:

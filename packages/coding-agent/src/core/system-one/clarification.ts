@@ -12,10 +12,10 @@
  * charter stays `interaction_mode: "start_only"` and an owner answer is evidence, never permission.
  */
 
+import { readNoul, settledFromBand } from "../decision/noul.ts";
 import type { GoalClarification, GoalClarificationCategory } from "../goals/goal-state.ts";
 import type { HumanInputQuestion } from "../human-input-request.ts";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
-import { settledNoul } from "./policy.ts";
 
 /**
  * The batched decision-program shape the session's recorded semantic engine consumes. Declared here
@@ -110,13 +110,14 @@ export function clarificationQuestionIdentity(text: string): string {
  * to every caller here, which is the honest reading of an ambiguous probability -- a cutoff would
  * turn it into a confident yes or no that the model never gave.
  */
-function readBoolean(results: Record<string, any> | undefined, id: string): boolean | undefined {
+function readBoolean(results: Record<string, unknown> | undefined, id: string): boolean | undefined {
 	const res = results?.[id];
 	if (!res || typeof res !== "object") return undefined;
-	if (typeof res.value === "boolean") return res.value;
-	const probability = typeof res.probabilityTrue === "number" ? res.probabilityTrue : res.noul;
-	if (typeof probability !== "number") return undefined;
-	return settledNoul(probability, res.direction === "required_false" ? "required_false" : "required_true", false);
+	const direction =
+		(res as { direction?: unknown }).direction === "required_false" ? "required_false" : "required_true";
+	// Whether the owner must be asked is a gating judgment: it stops autonomous work either way.
+	const reading = readNoul(res, direction, "gating");
+	return reading === "unasked" ? undefined : settledFromBand(reading, direction);
 }
 
 /**
@@ -218,32 +219,37 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 		};
 	}
 
+	// Both answers must settle for the objective to go on without the owner; an undecided one asks.
 	const missingInformation = readBoolean(answers, "missing_information");
 	const objectiveCoherent = readBoolean(answers, "objective_coherent");
-	if (missingInformation === undefined) {
-		return {
-			decision: "ask",
-			reasonCode: "no_prior",
-			detail: "Sufficiency evaluation returned no answer for missing_information.",
-		};
-	}
-	if (missingInformation) {
+	const unsettled = [
+		...(missingInformation === undefined ? ["missing_information"] : []),
+		...(objectiveCoherent === undefined ? ["objective_coherent"] : []),
+	];
+	if (missingInformation === true) {
 		return {
 			decision: "ask",
 			reasonCode: "semantic_missing_information",
-			detail: "JEV-001 reports critical information missing for this objective.",
+			detail: "System One's admission check finds information only the owner can supply missing from the request.",
 		};
 	}
 	if (objectiveCoherent === false) {
 		return {
 			decision: "ask",
 			reasonCode: "semantic_missing_information",
-			detail: "JEV-001 reports the objective is not coherent (objective_coherent=false).",
+			detail: "System One's admission check finds the request does not state one coherent objective.",
+		};
+	}
+	if (unsettled.length > 0) {
+		return {
+			decision: "ask",
+			reasonCode: "no_prior",
+			detail: `System One's admission check did not settle ${unsettled.join(" or ")}.`,
 		};
 	}
 	return {
 		decision: "resolve_autonomously",
 		reasonCode: "semantic_sufficient",
-		detail: "JEV-001 reports no missing information for this objective.",
+		detail: "System One's admission check finds the request coherent and missing nothing only the owner can supply.",
 	};
 }

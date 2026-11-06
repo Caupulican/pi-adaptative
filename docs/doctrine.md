@@ -256,7 +256,7 @@ it does not permit unrelated description growth. Explicit `peer` review has a se
 schema allowance, measured at 344 tokens, for independent or stronger review, durable obligation inspection and proof resolution.
 Canonical System One input validation shares one schema with provider projection, replacing the permissive compact rubric. Under identical live runtime framing, the prior schema costs 358 tokens and the canonical schema costs 828; its explicit 470-token delta receives a separate allowance. The root may also list and disposition current advisory uncertainties in its own journal through `systemone`; these owner-model judgments do not prove verification, satisfy mandatory obligations, or authorize actions. The canonical schema now costs 932 tokens, adding a measured 104-token allowance for those uncertainty actions and their validated disposition object. The live default surface measures 6,991 schema tokens
 against a 7,039-token aggregate ceiling (4,500 base + 350 task_directory + 720 task_automation +
-100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 350 peer + 574 canonical Jev schema, comprising the original 470-token delta and 104-token advisory-uncertainty addition).
+100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 350 peer + 574 canonical System One tool schema, comprising the original 470-token delta and 104-token advisory-uncertainty addition).
 The unchanged 4,500-token base subtotal excludes the actual costs of those separately budgeted
 tools, including `peer`, and the measured growth of `goal` and `create_goal` over their respective
 330-token and 84-token baselines. Every pre-existing aggregate component and individual schema
@@ -757,7 +757,7 @@ Worker supervision checks the original objective, task and live attempt before d
 so late judgments cannot affect a persistent worker's next assignment.
 Whenever System One is bound the
 goal loop runs in `objective_primary` mode: each continuation pass evaluates one objective route from
-deterministic facts (cancellation, budget, running attempts, the ledger's stall reading) and Jev's
+deterministic facts (cancellation, budget, running attempts, the ledger's stall reading) and System One's
 judgments, then executes it. A route names its executor: the root (one foreground turn carrying the
 route brief) for implement, investigate, replan, retrieval and non-independent verification; a worker
 for review, independent verification and escalation; a wait on the running workers; the completion
@@ -892,7 +892,7 @@ exactly as an unmet check does, and it blocks the `DELIVER` node. Doubts travel 
 lines on the evaluation record, so they reach the pane and the durable ledger by the route every
 other reason already takes. The running clock is the current visit only and restarts on resume.
 
-**The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
+**The decision ledger is an input, never erased.** Every stage transition, System One evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
 The objective's recent routes are a history block in the state the judge reads, and "repeated without
 new evidence" is a fact from those rows: one executable route on one evidence marker, twice. A
@@ -901,7 +901,7 @@ strategy, so it is never a stall; an executable route repeated after such waits 
 the ledger through `decision_ledger_read`, a bounded query tool never exposed to workers; its
 projected schema costs at most 100 tokens, budgeted separately from the 4,500-token base ceiling
 and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_directory +
-720 task_automation + 100 decision_ledger_read + 143 repo_read; the Jev tool's 512 stays inside the base subtotal
+720 task_automation + 100 decision_ledger_read + 143 repo_read; the System One tool's 512 stays inside the base subtotal
 accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is a bounded git read, measured at 143 tokens, and is budgeted the same way.
 Root bash also runs git. The operator is asked only before deleting the repository, a directory
 that contains it, the home directory, a filesystem root, or a disk.
@@ -1025,7 +1025,7 @@ measurement gains no new surface.
 | 2026-09-30 | Provider-neutral `systemone` replaces the native tool and skill names; root assignment/integration and worker local autonomy remain explicit. Ordinary peer review admits supported effort without strength judgment; explicit stronger review retains its checks. Standing operation authority avoids redundant evaluator calls, scoped grants remain exact, advisory management remains available during outages, and supervision rejects obsolete or aborted attempt judgments. Existing prompt and schema ceilings remain unchanged. |
 | 2026-09-30 | The root may list and disposition advisory uncertainties in its own journal through `typesafe_review`; this does not prove verification, settle mandatory obligations, or grant permission. The measured canonical schema addition is 104 tokens, raising only the canonical allowance to 574 and the aggregate ceiling to 7,039; the 4,500-token base remains unchanged. |
 | 2026-09-29 | Durable peer obligation inspection and proof resolution increase the peer allowance from 210 to 350 tokens (333 measured), making the aggregate ceiling 6,935. Actual peer cost remains excluded from the unchanged 4,500-token base, so verification actions cannot hide unrelated schema growth. |
-| 2026-09-29 | Canonical Jev tool schema replaces the permissive projection: live prior 358 tokens, canonical 828, separate delta 470; aggregate 6,795, measured 6,742. The old 4,500 base and all prior individual ceilings remain unchanged. Completion refusal status preserves bounded judgment identities and next checks; oversized originals use the existing evidence archive, with explicit truncation and retention-failure disclosure. |
+| 2026-09-29 | Canonical System One tool schema replaces the permissive projection: live prior 358 tokens, canonical 828, separate delta 470; aggregate 6,795, measured 6,742. The old 4,500 base and all prior individual ceilings remain unchanged. Completion refusal status preserves bounded judgment identities and next checks; oversized originals use the existing evidence archive, with explicit truncation and retention-failure disclosure. |
 | 2026-09-29 | Explicit `peer` review adds a separate 210-token schema allowance, measured at 197 tokens, bringing the default aggregate ceiling to 6,325 (4,500 + 350 + 720 + 100 + 143 + 140 + 162 + 210). The unchanged 4,500 base excludes actual peer cost alongside existing feature costs and measured goal growth; all pre-existing ceilings remain unchanged. |
 | 2026-09-28 | Background task lists expose task identity and status only; summaries are output-derived and remain owned by the completion wake-up or an explicit wait. |
 | 2026-09-28 | Foreground admission races during objective-primary continuation remain transient coordination: the auto-continuation owner waits and retries while the goal stays active and its failure streak stays unchanged. |

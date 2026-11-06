@@ -291,7 +291,7 @@ export class SoulController {
 				this.record(candidate.text, "block");
 				return block("System One could not settle this soul.md text. Simplify the text and write it again.");
 			case "failed":
-				this.deps.emitWarning(`soul written without Jev review: ${outcome.error}`);
+				this.deps.emitWarning(`soul written without System One review: ${outcome.error}`);
 				return this.hold(call, candidate.text, current, "unreviewed");
 		}
 	}
@@ -567,7 +567,7 @@ export class SoulController {
 				return {
 					accept: true,
 					reviewer: "unreviewed",
-					warning: `soul written without Jev review: ${outcome.error}`,
+					warning: `soul written without System One review: ${outcome.error}`,
 				};
 		}
 	}

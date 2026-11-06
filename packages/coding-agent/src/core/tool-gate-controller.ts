@@ -141,7 +141,7 @@ export interface ToolGateControllerDeps {
 	noteMutatingCall?(toolName: string, assistantMessage: AssistantMessage): void;
 	/** The tool's own `readOnly` declaration, when it made one. */
 	isToolReadOnly?(toolName: string): boolean | undefined;
-	/** Branch this task must commit onto. Set only after Jev classifies the request as local commits. */
+	/** Branch this task must commit onto. Set only after System One classifies the request as local commits. */
 	localCommitBranch?(): string | undefined;
 	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
 	noteEdgeOperations?(toolCallId: string, classes: readonly EdgeClass[]): void;

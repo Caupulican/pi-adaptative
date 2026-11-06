@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isNoulProbability } from "../decision/noul.ts";
+import { noulProbability, readNoul } from "../decision/noul.ts";
 
 export type RetentionDisposition = "keep_exact" | "keep_call_truncate_result" | "drop_pair";
 
@@ -101,12 +101,6 @@ const RETENTION_PAIRS_PER_REQUEST = 12;
 const RETENTION_REQUEST_STATE_BYTES = 24 * 1024;
 
 /**
- * The advisory yes/no band (0.7 / 0.3) with its middle read as keep: a call or an exact result is let go only on a
- * settled "no longer useful" (P(keep) <= 0.3). An unanswered question keeps it too.
- */
-const RETENTION_LET_GO_AT_MOST = 0.3;
-
-/**
  * Builds batched System One program with keep_call and keep_result questions, one pair of questions per entry of
  * `pairs` in state; the ids carry the call id, the questions carry nothing but the index. FR-024, FR-025.
  */
@@ -193,10 +187,12 @@ export function planRetentionRequests(
 	return requests;
 }
 
-/** P(keep), or undefined when the question was not answered with a probability. */
-function keepProbability(answer: RetentionAnswer | undefined): number | undefined {
-	const probability = answer?.probabilityTrue ?? answer?.noul;
-	return isNoulProbability(probability) ? probability : undefined;
+/**
+ * A call or an exact result is let go only on a settled "no longer useful": the advisory family's fail band
+ * (P(keep) <= 0.3). Its middle, and an unanswered question, keep it.
+ */
+function lettingGo(answer: RetentionAnswer | undefined): boolean {
+	return readNoul(answer, "required_true", "advisory") === "hard_fail";
 }
 
 /**
@@ -215,17 +211,17 @@ export async function applyConservativeRetentionPolicy(
 	let artifactRefsCreated = 0;
 
 	for (const pair of pairs) {
-		const callProb = keepProbability(evaluation?.answers?.[`keep_call::${pair.callId}`]);
-		const resultProb = keepProbability(evaluation?.answers?.[`keep_result::${pair.callId}`]);
-		const letGo = (probability: number | undefined) =>
-			probability !== undefined && probability <= RETENTION_LET_GO_AT_MOST;
+		const callAnswer = evaluation?.answers?.[`keep_call::${pair.callId}`];
+		const resultAnswer = evaluation?.answers?.[`keep_result::${pair.callId}`];
+		const callProb = noulProbability(callAnswer);
+		const resultProb = noulProbability(resultAnswer);
 
 		let disposition: RetentionDisposition;
 		let artifactRef: string | undefined;
 
-		if (!letGo(resultProb)) {
+		if (!lettingGo(resultAnswer)) {
 			disposition = "keep_exact";
-		} else if (!letGo(callProb)) {
+		} else if (!lettingGo(callAnswer)) {
 			disposition = "keep_call_truncate_result";
 			// If result is large, store as artifact (FR-027)
 			const resultStr =

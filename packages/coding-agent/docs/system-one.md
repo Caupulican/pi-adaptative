@@ -18,7 +18,7 @@ Mandatory findings require receiving-lane reproduction, repair when confirmed, a
 
 - `objective_primary` (default whenever System One is bound): each continuation pass evaluates one
   objective route and executes it. The route comes from deterministic facts (cancellation, budget,
-  running attempts, the ledger's stall reading) and Jev's judgments (`objective-route-v2`: task
+  running attempts, the ledger's stall reading) and System One's judgments (`objective-route-v2`: task
   kind, work remaining, missing work class, worker can continue, independent worker required,
   capability escalation, external blocker, progress, context stale, strategy repetition).
 - `objective_shadow`: the legacy continuation drives; the route is evaluated for disagreement
@@ -82,7 +82,7 @@ they are not discarded.
 
 `objective_primary` without a live `ObjectiveExecutionController` fails closed and names that
 binding; it never continues on the legacy loop. Under `system_one_required`, a required steering
-checkpoint must come from calibrated Jev or mechanical `none` — `synthetic_self_report` cannot
+checkpoint must come from calibrated System One or mechanical `none` — `synthetic_self_report` cannot
 satisfy it.
 
 Every System One stage hydrates `ExecutionStore` from the live goal, durable task evidence and open
@@ -426,7 +426,7 @@ set at a time.
 
 ## Native worker model and effort
 
-Before a fresh unbound native worker starts, the host asks Jev once to select a profile from the
+Before a fresh unbound native worker starts, the host asks System One once to select a profile from the
 existing account routing candidates and their supported effort settings. The host compiles every
 offered profile through worker admission with the same tools, paths, permissions and budget.
 The request favors medium effort for clear coding tasks and higher supported effort for complex
@@ -632,10 +632,10 @@ the responsible worker and may steer it to recheck; after reviewing that evidenc
 may record an advisory disposition for any current question in its own journal. Use
 `action: "resolve_uncertainty"` with `uncertainty` containing its exact `evaluationId`, `question`,
 `disposition` (`conservative_path` or `evidence_based_decision`), `reason` and `evidence`.
-The host records this owner-model decision separately from the Jev evaluation. A newer judgment
+The host records this owner-model decision separately from the System One evaluation. A newer judgment
 reopens its question; stale identities, questions explicitly scoped to a foreign root session and
 failed journal writes cannot acknowledge it. Missing scope on a legacy evaluation remains unknown
-and does not acquire root provenance during hydration. This advisory disposition does not alter Jev
+and does not acquire root provenance during hydration. This advisory disposition does not alter System One
 evidence or discharge mandatory same-lane verification, and grants no permission, certificate proof
 or finding resolution. Independent authorized work continues while evidence is gathered.
 

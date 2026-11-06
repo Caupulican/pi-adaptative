@@ -109,7 +109,7 @@ decisions with their selection provenance (`selected by manual`, `auto` or `H-Mo
 While a routed turn runs, the POV bar shows `ROOT` (the session model the turn returns to),
 `ACTIVE` (the model executing now) and `ROUTE` with the authority that chose it — `direct`,
 `manual:<model>`, `<tier> via model-router`, `<tier> via model-router/H-MoE` or
-`escalated→<model> via model-router`. Jev is never named as the selector; its own slot reports only
+`escalated→<model> via model-router`. System One is never named as the selector; its own slot reports only
 its observed state (`S1 off | ready | eval | ok | degraded`). See `workbench.md`.
 
 A routed turn's model is the turn's, never the session's. The session model is the one last selected
