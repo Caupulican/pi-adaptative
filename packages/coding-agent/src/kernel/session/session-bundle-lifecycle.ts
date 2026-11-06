@@ -56,9 +56,41 @@ export function hasCurrentSessionBundleAdmission(agentDir: string, parentSession
 /**
  * What a hold serves: `session`, an open session of the parent (the foreground, or an SDK session); `away-host`, the
  * bot daemon running the parent's routine runs while it is closed. An away host keeps the bundle alive but is no session:
- * it never takes back a collaboration job, so it never blocks another session's adoption of one.
+ * it never takes back a collaboration job, so it never blocks another session's adoption of one. `channel-host`, the bot
+ * daemon hosting the owner's phone session: it is the session's only open holder, so it is admitted only while no
+ * session or other channel host holds the session, and an AgentSession open is refused while it holds it.
  */
-export type SessionLeaseRole = "session" | "away-host";
+export type SessionLeaseRole = "session" | "away-host" | "channel-host";
+
+/** A holder named in a refusal: its process id and what it serves. */
+export interface SessionLeaseHolderRef {
+	readonly pid: number;
+	readonly role: SessionLeaseRole;
+}
+
+/** A channel host was refused: the session is open (or held by a process that cannot be judged dead). */
+export class SessionHeldError extends Error {
+	readonly holders: readonly SessionLeaseHolderRef[];
+	constructor(parentSessionId: string, holders: readonly SessionLeaseHolderRef[]) {
+		super(
+			`Session ${parentSessionId} is open (pid ${holders.map((holder) => holder.pid).join(", ")}); the daemon hosts it once it is closed.`,
+		);
+		this.name = "SessionHeldError";
+		this.holders = holders;
+	}
+}
+
+/** An AgentSession open was refused: the bot daemon hosts the session as the owner's phone session. */
+export class SessionHostedError extends Error {
+	readonly holder: SessionLeaseHolderRef;
+	constructor(holder: SessionLeaseHolderRef) {
+		super(
+			`This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
+		);
+		this.name = "SessionHostedError";
+		this.holder = holder;
+	}
+}
 
 interface BundleHolder {
 	token: string;
@@ -70,8 +102,9 @@ interface BundleHolder {
 
 /**
  * Schema 2 records each holder as a {@link ProcessOwner}; schema 1 (`host` + `pid`) is still read. Schema 3 adds a
- * `role` key to an away-host holder; the registry is written as schema 3 only while it holds one, so a build that
- * predates roles refuses (as needing inspection) only a parent an away host holds right now.
+ * `role` key to an away-host or channel-host holder; the registry is written as schema 3 only while it holds one, so a
+ * build that predates roles refuses (as needing inspection) only a parent such a host holds right now, and a build that
+ * knows only `away-host` refuses a channel-host holder (its key count is that of no holder it reads).
  */
 const HOLDERS_SCHEMA_VERSION = 2;
 const ROLE_HOLDERS_SCHEMA_VERSION = 3;
@@ -141,12 +174,15 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const holders: BundleHolder[] = [];
 	for (const holder of value.holders) {
 		const owner = isPlainRecord(holder) ? parseRecordedOwner(holder, legacy) : undefined;
-		// Only an away host records its role; a holder without one is a session.
-		const awayHost = roles && isPlainRecord(holder) && holder.role === "away-host";
+		// Only an away or channel host records its role; a holder without one is a session.
+		const role =
+			roles && isPlainRecord(holder) && (holder.role === "away-host" || holder.role === "channel-host")
+				? holder.role
+				: undefined;
 		if (
 			!isPlainRecord(holder) ||
 			!owner ||
-			Object.keys(holder).length !== (legacy || awayHost ? 4 : 3) ||
+			Object.keys(holder).length !== (legacy || role ? 4 : 3) ||
 			typeof holder.token !== "string" ||
 			!UUID_PATTERN.test(holder.token) ||
 			tokens.has(holder.token) ||
@@ -159,7 +195,7 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 			token: holder.token,
 			owner,
 			processInstanceId: holder.processInstanceId,
-			role: awayHost ? "away-host" : "session",
+			role: role ?? "session",
 		});
 	}
 	return holders;
@@ -170,11 +206,11 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 		unlinkSync(file);
 		return;
 	}
-	const roles = holders.some((holder) => holder.role === "away-host");
+	const roles = holders.some((holder) => holder.role !== "session");
 	const text = `${JSON.stringify({
 		schemaVersion: roles ? ROLE_HOLDERS_SCHEMA_VERSION : HOLDERS_SCHEMA_VERSION,
 		parentSessionId,
-		holders: holders.map(({ role, ...holder }) => (role === "away-host" ? { ...holder, role } : holder)),
+		holders: holders.map(({ role, ...holder }) => (role !== "session" ? { ...holder, role } : holder)),
 	})}\n`;
 	if (Buffer.byteLength(text) > MAX_HOLDER_BYTES) throw new Error("Session bundle lifetime leases are too large.");
 	writeFileAtomicSync(file, text);
@@ -186,6 +222,35 @@ function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
 	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
 	return live;
+}
+
+const holderRef = (holder: {
+	readonly owner: ProcessOwner;
+	readonly role: SessionLeaseRole;
+}): SessionLeaseHolderRef => ({
+	pid: holder.owner.pid,
+	role: holder.role,
+});
+
+/**
+ * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel host is
+ * refused while a session or another channel host holds the session, a session asking `refuseHosted` while a channel
+ * host does; every other admission is bounded by capacity alone.
+ */
+function admitHolder(
+	parentSessionId: string,
+	holders: readonly BundleHolder[],
+	holder: BundleHolder,
+	refuseHosted: boolean,
+): BundleHolder[] {
+	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
+	if (holder.role === "channel-host") {
+		const open = holders.filter((entry) => entry.role === "session" || entry.role === "channel-host");
+		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef));
+	}
+	const host = refuseHosted && holder.role === "session" && holders.find((entry) => entry.role === "channel-host");
+	if (host) throw new SessionHostedError(holderRef(host));
+	return [...holders, holder];
 }
 
 /** One process currently holding a lifetime lease on a persisted session, as {@link readSessionLeaseHolders} sees it. */
@@ -220,6 +285,22 @@ export function readSessionLeaseHolders(agentDir: string, parentSessionId: strin
 	}));
 }
 
+/** The channel host holding the session that is not proven dead, if any; read-only like {@link readSessionLeaseHolders}. */
+export function sessionChannelHost(agentDir: string, parentSessionId: string): SessionLeaseHolder | undefined {
+	return readSessionLeaseHolders(agentDir, parentSessionId).find(
+		(holder) => holder.role === "channel-host" && holder.standing !== "dead",
+	);
+}
+
+/**
+ * Refuse, before anything is opened or written, to open a session the bot daemon hosts: the check the AgentSession
+ * acquire makes ({@link acquireSessionBundleLease} with `refuseHosted`), read-only. An unreadable registry throws.
+ */
+export function refuseHostedSession(agentDir: string, parentSessionId: string): void {
+	const host = sessionChannelHost(agentDir, parentSessionId);
+	if (host) throw new SessionHostedError(holderRef(host));
+}
+
 function releaseBundleLease(state: BundleLeaseState): void {
 	if (state.status === "released") return;
 	const tombstone = orchestrationSessionDeletionFile(state.agentDir, state.parentSessionId);
@@ -242,7 +323,8 @@ function releaseBundleLease(state: BundleLeaseState): void {
 export function acquireSessionBundleLease(
 	agentDir: string,
 	parentSessionId: string,
-	options: { role?: SessionLeaseRole } = {},
+	/** `refuseHosted`: a `session` hold is refused while a channel host holds the session (the AgentSession open path). */
+	options: { role?: SessionLeaseRole; refuseHosted?: boolean } = {},
 ): SessionBundleLease {
 	const directory = resolve(agentDir);
 	const tombstone = orchestrationSessionDeletionFile(directory, parentSessionId);
@@ -255,8 +337,7 @@ export function acquireSessionBundleLease(
 	};
 	withSessionBundleAdmission(directory, parentSessionId, () => {
 		const holders = liveHolders(file, parentSessionId);
-		if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
-		writeHolders(file, parentSessionId, [...holders, holder]);
+		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
 	});
 	const state: BundleLeaseState = { agentDir: directory, parentSessionId, holder, claimed: false, status: "held" };
 	const lease: SessionBundleLease = Object.freeze({

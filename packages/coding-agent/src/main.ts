@@ -63,6 +63,7 @@ import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-
 import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
+import { refuseHostedSession, SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
@@ -802,6 +803,13 @@ export async function main(args: string[], options?: MainOptions) {
 		} else {
 			refuseInvocation(new MissingSessionCwdError(missingSessionCwdIssue).message);
 		}
+	}
+	// A session the bot daemon hosts is refused with its one message before `--name` or the session writes to it.
+	try {
+		if (sessionManager.isPersisted()) refuseHostedSession(agentDir, sessionManager.getSessionId());
+	} catch (error) {
+		if (error instanceof SessionHostedError) refuseInvocation(error.message);
+		throw error;
 	}
 	if (parsed.name !== undefined) {
 		const name = parsed.name.trim();

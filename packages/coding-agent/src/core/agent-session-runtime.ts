@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
@@ -21,7 +22,12 @@ import type {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
-import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
+import {
+	refuseHostedSession,
+	SessionBundleLeaseReleaseError,
+	SessionHostedError,
+	withSessionBundleLeases,
+} from "./orchestration/session-bundle-lifecycle.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { writeTerminalWarnings } from "./terminal-warnings.ts";
@@ -336,11 +342,14 @@ export class SessionReplacementRuntimeError extends Error {
 		const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
 		const warnings = undeliveredWarnings.length > 0 ? `. ${undeliveredWarnings.join(" ")}` : "";
 		super(
-			phase === "admission"
-				? `Session replacement admission failed; the previous session remains active: ${transitionMessage}`
-				: recovered
-					? `Session replacement ${phase} failed; the previous session was restored: ${transitionMessage}`
-					: `Session replacement ${phase} failed and the previous session could not be restored safely: ${transitionMessage}${warnings}`,
+			// A session the bot daemon hosts is refused with its own one message; nothing was opened.
+			phase === "admission" && transitionError instanceof SessionHostedError
+				? transitionMessage
+				: phase === "admission"
+					? `Session replacement admission failed; the previous session remains active: ${transitionMessage}`
+					: recovered
+						? `Session replacement ${phase} failed; the previous session was restored: ${transitionMessage}`
+						: `Session replacement ${phase} failed and the previous session could not be restored safely: ${transitionMessage}${warnings}`,
 		);
 		this.name = "SessionReplacementRuntimeError";
 		this.phase = phase;
@@ -348,6 +357,20 @@ export class SessionReplacementRuntimeError extends Error {
 		this.transitionError = transitionError;
 		this.recoveryError = recoveryError;
 		this.undeliveredWarnings = undeliveredWarnings;
+	}
+}
+
+/**
+ * Refuse a session file the bot daemon hosts before it is opened or copied: a recovered admission failure (the previous
+ * session stays active) whose message is the hosted one; nothing is written.
+ */
+function refuseHostedSessionFile(agentDir: string, path: string): void {
+	const header = readSessionHeaderResult(resolvePath(path));
+	if (!header.ok) return;
+	try {
+		refuseHostedSession(agentDir, header.header.id);
+	} catch (error) {
+		throw new SessionReplacementRuntimeError("admission", error, true);
 	}
 }
 
@@ -1031,6 +1054,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		sessionPath: string,
 		options?: AgentSessionSwitchOptions,
 	): Promise<{ cancelled: boolean }> {
+		refuseHostedSessionFile(this.services.agentDir, sessionPath);
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
@@ -1206,6 +1230,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		if (!existsSync(resolvedPath)) {
 			throw new SessionImportFileNotFoundError(resolvedPath);
 		}
+		refuseHostedSessionFile(this.services.agentDir, resolvedPath);
 
 		const sessionDir = this.sessionManager.getSessionDir();
 		const destinationPath = join(sessionDir, basename(resolvedPath));

@@ -24,6 +24,7 @@ import {
 	parentWakeContent,
 	parentWakeMarker,
 } from "./parent-input-ledger.ts";
+import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
 import { SessionEntryEvidenceIndex } from "./session-entry-evidence-index.ts";
 import { MAX_SESSION_ENTRY_VISIT_COUNT, MAX_SESSION_LINE_CHARS } from "./session-entry-limits.ts";
 import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
@@ -1443,7 +1444,11 @@ function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string): boolea
 }
 
 /** Exported for testing */
-export function findMostRecentSession(sessionDir: string, cwd?: string): string | null {
+export function findMostRecentSession(
+	sessionDir: string,
+	cwd?: string,
+	skip?: (sessionId: string) => boolean,
+): string | null {
 	const resolvedSessionDir = normalizePath(sessionDir);
 	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
 	try {
@@ -1455,7 +1460,8 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 				(file): file is { path: string; header: SessionHeader } =>
 					file.header !== null &&
 					!isAutoLearnSessionId(file.header.id) &&
-					(!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(file.header), resolvedCwd)),
+					(!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(file.header), resolvedCwd)) &&
+					!skip?.(file.header.id),
 			)
 			.flatMap(({ path }) => {
 				try {
@@ -1472,10 +1478,14 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	}
 }
 
-function findMostRecentSessionInDirs(sessionDirs: string[], cwd?: string): string | null {
+function findMostRecentSessionInDirs(
+	sessionDirs: string[],
+	cwd?: string,
+	skip?: (sessionId: string) => boolean,
+): string | null {
 	let mostRecent: { path: string; mtime: number } | null = null;
 	for (const dir of sessionDirs) {
-		const sessionPath = findMostRecentSession(dir, cwd);
+		const sessionPath = findMostRecentSession(dir, cwd, skip);
 		if (!sessionPath) continue;
 		try {
 			const mtime = statSync(sessionPath).mtime.getTime();
@@ -4673,7 +4683,15 @@ export class SessionManager {
 		const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
 		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
 		const searchDirs = sessionDir ? [dir] : defaultDirs;
-		const mostRecent = findMostRecentSessionInDirs(searchDirs, filterCwd ? cwd : undefined);
+		// The phone session the bot daemon hosts is skipped: opening it here is refused while the daemon holds it.
+		const hosted = (id: string): boolean => {
+			try {
+				return sessionChannelHost(agentDir, id) !== undefined;
+			} catch {
+				return false; // An unreadable registry is reported by the open's own lease acquisition.
+			}
+		};
+		const mostRecent = findMostRecentSessionInDirs(searchDirs, filterCwd ? cwd : undefined, hosted);
 		if (mostRecent) {
 			return new SessionManager(cwd, resolve(mostRecent, ".."), mostRecent, true, agentDir);
 		}

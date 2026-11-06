@@ -62,7 +62,7 @@ import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import { acquireSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
+import { acquireSessionBundleLease, type SessionLeaseRole } from "./orchestration/session-bundle-lifecycle.ts";
 import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
 	SessionTaskProfileStore,
@@ -142,6 +142,13 @@ export interface CreateAgentSessionOptions {
 	isExplicitThinking?: boolean;
 	/** True when this session is a spawned subagent/child — gates durable memory writes. */
 	isChildSession?: boolean;
+	/** The role of the session's lifetime lease; default `session`. The bot daemon's phone session holds `channel-host`. */
+	bundleLeaseRole?: SessionLeaseRole;
+	/**
+	 * `daemon`: the bot daemon's channel host serves this session's channels, so the session starts none, takes no channel
+	 * hold and never launches or reconciles the daemon.
+	 */
+	hostedChannels?: "daemon";
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 	/**
@@ -429,8 +436,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager =
 		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
 
+	// An AgentSession never opens a session the bot daemon hosts (`SessionHostedError`); the daemon's own hold is `channel-host`.
 	const bundleLease = sessionManager.isPersisted()
-		? acquireSessionBundleLease(agentDir, sessionManager.getSessionId())
+		? acquireSessionBundleLease(agentDir, sessionManager.getSessionId(), {
+				role: options.bundleLeaseRole ?? "session",
+				refuseHosted: true,
+			})
 		: undefined;
 	let bundleTransferred = false;
 	try {
@@ -1326,6 +1337,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
 			await session.initializeMemory();
 			const extensionsResult = resourceLoader.getExtensions();
+			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			session.startBackgroundInputs();
 
 			return {

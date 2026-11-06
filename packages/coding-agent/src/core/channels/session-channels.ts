@@ -266,6 +266,8 @@ export type SessionChannelsView = Pick<SessionChannels, "registerChannel" | "reg
 export interface SessionChannelsDeps extends SessionChannelsOwnerDeps {
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
+	/** Where owner turns run when not in this session (the daemon's phone session); this session's own when omitted. */
+	getOwnerSessionManager?(): Pick<SessionManager, "getBranch">;
 	getChannelPolicies(): ReadonlyMap<string, ChannelPolicyResolution>;
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
@@ -1737,7 +1739,8 @@ export class SessionChannels {
 	 * included) means this batch got none.
 	 */
 	private batchOutcome(name: string, batch: ChannelBatchRecord, now: number): BatchOutcome {
-		const branch = this.deps.getSessionManager().getBranch();
+		const owner = batch.owner === true ? this.deps.getOwnerSessionManager?.() : undefined;
+		const branch = (owner ?? this.deps.getSessionManager()).getBranch();
 		let index = -1;
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];

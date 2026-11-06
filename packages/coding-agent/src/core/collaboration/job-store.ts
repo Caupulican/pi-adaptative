@@ -140,8 +140,9 @@ function judgeBinding(
 			reason: `Controller pid ${owner.pid} is alive; the lease registry of session ${serving} is unreadable (${String(error).slice(0, 160)}).`,
 		};
 	}
-	// An away host holds a closed parent for its routine runs; it serves no collaboration job.
-	return holders.some((holder) => holder.role === "session" && isSameProcess(holder.owner, owner))
+	// An away host holds a closed parent for its routine runs; it serves no collaboration job. A channel host is the
+	// session's open holder (the daemon's phone session) and serves its jobs like a session.
+	return holders.some((holder) => holder.role !== "away-host" && isSameProcess(holder.owner, owner))
 		? { state: "live", reason: `Live pid ${owner.pid} serves the job for session ${serving}.` }
 		: { state: "gone", reason: `Controller pid ${owner.pid} is alive but no longer holds session ${serving}.` };
 }

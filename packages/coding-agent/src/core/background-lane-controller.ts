@@ -321,6 +321,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		| { scheduler: RoutineSchedulerController; session: RoutineSessionController; intake: RoutineIntake }
 		| undefined;
 	private routinesStarted = false;
+	private _channelsHostedByDaemon = false;
 	/** The routine revision the daemon was last ensured for: a save moves it, the store's other writes do not. */
 	private _daemonRevision: number | undefined;
 	/** The last reason the daemon could not be started by itself, reported once until it changes. */
@@ -1726,12 +1727,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
+	 * The bot daemon's channel host serves this session's channels (`hostedChannels: "daemon"`, set before the inputs
+	 * start): the session starts no channel, takes no hold, and never launches or reconciles the daemon.
+	 */
+	hostChannelsInDaemon(): void {
+		this._channelsHostedByDaemon = true;
+	}
+
+	/**
 	 * The hands-off inputs a root session starts once it binds: persistent routines, the registered channels and acting
 	 * ahead on the checkout's failing CI.
 	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
-		this.channels.start();
+		if (!this._channelsHostedByDaemon) this.channels.start();
 		if (!this.deps.isDisposed() && !this.deps.isChildSession()) this._getActAhead().start();
 	}
 
@@ -1825,7 +1834,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	private _ensureBotDaemon(): void {
 		const store = this._botTeamStore;
-		if (!store || this.deps.isDisposed() || getSessionRole() === "worker") return;
+		if (!store || this.deps.isDisposed() || getSessionRole() === "worker" || this._channelsHostedByDaemon) return;
 		this._daemonRevision = store.getRoutineRevision();
 		let failure: string | undefined;
 		// Enabled routines and channels served away: either keeps the daemon, and the always-on service, wanted.

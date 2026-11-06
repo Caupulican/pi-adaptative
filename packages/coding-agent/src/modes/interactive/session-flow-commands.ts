@@ -46,6 +46,7 @@ import {
 	resolveModelScopeWithDiagnostics,
 } from "../../core/model-resolver.ts";
 import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
+import { refuseHostedSession, SessionHostedError } from "../../core/orchestration/session-bundle-lifecycle.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type { ModelFavorite } from "../../core/settings/settings-schema.ts";
 import { parseTaskCommand } from "../../core/tasks/task-command.ts";
@@ -61,6 +62,7 @@ import {
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
 import { SessionManager } from "../../kernel/node.ts";
+import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
@@ -511,6 +513,15 @@ export function showSessionSelector(host: SessionFlowHost): void {
 				renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
 					const next = (nextName ?? "").trim();
 					if (!next) return;
+					// A session the bot daemon hosts is never written from here (`SessionHostedError`).
+					const header = readSessionHeaderResult(sessionFilePath);
+					try {
+						if (header.ok) refuseHostedSession(agentDir, header.header.id);
+					} catch (error) {
+						if (!(error instanceof SessionHostedError)) throw error;
+						host.showError(error.message);
+						return;
+					}
 					const mgr = SessionManager.open(sessionFilePath, agentDir);
 					mgr.appendSessionInfo(next);
 				},

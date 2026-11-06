@@ -166,6 +166,8 @@ export interface ChannelJournalState {
 	ownerPushes?: ChannelOwnerPushRecord[];
 	/** Updates the push rate bound kept from the owner's chat since `status` last reported them; absent at zero. */
 	ownerPushSuppressed?: number;
+	/** The persistent session the daemon's host runs the owner's turns in (the phone session); absent until it wrote. */
+	ownerSession?: { sessionId: string; file: string };
 }
 
 export function digest(value: string): string {
@@ -194,6 +196,7 @@ function emptyState(): ChannelJournalState {
 		ownerConversations: undefined,
 		ownerPushes: undefined,
 		ownerPushSuppressed: undefined,
+		ownerSession: undefined,
 	};
 }
 
@@ -319,6 +322,12 @@ function parseState(text: string): ChannelJournalState {
 	if (value.toldFlags !== undefined && value.toldFlags !== true) throw new Error("malformed told marker");
 	if (value.ownerPushSuppressed !== undefined && !isCount(value.ownerPushSuppressed))
 		throw new Error("malformed push count");
+	const ownerSession = value.ownerSession;
+	if (
+		ownerSession !== undefined &&
+		!(isPlainRecord(ownerSession) && isString(ownerSession.sessionId) && isString(ownerSession.file))
+	)
+		throw new Error("malformed owner session");
 	const list = <T>(field: unknown, check: (item: unknown) => item is T): T[] => {
 		if (!Array.isArray(field) || !field.every(check)) throw new Error("malformed journal list");
 		return field;
@@ -377,6 +386,10 @@ function parseState(text: string): ChannelJournalState {
 			value.ownerConversations === undefined ? undefined : list(value.ownerConversations, isOwnerConversation),
 		ownerPushes: value.ownerPushes === undefined ? undefined : list(value.ownerPushes, isOwnerPush),
 		ownerPushSuppressed: value.ownerPushSuppressed as number | undefined,
+		// Absent in a journal written before the daemon hosted the owner's session, and until that session wrote.
+		ownerSession: ownerSession
+			? { sessionId: ownerSession.sessionId as string, file: ownerSession.file as string }
+			: undefined,
 	};
 }
 
