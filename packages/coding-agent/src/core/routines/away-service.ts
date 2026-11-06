@@ -22,7 +22,8 @@
  * Installing changes the machine, so it happens only under `routines.away.autostart: "on"` or the explicit command.
  * The hands-off check reads the filesystem only: the install record (`state/away-service/record.json` in the agent directory) holds
  * the digest of the definition's identity (its command, path and principal), and a current record with its definition
- * file present means nothing is run. Only an install, an uninstall and the explicit `status` run the service manager.
+ * file present means nothing is run. Only an install, an uninstall, the explicit `status` and the restart that replaces
+ * a daemon of an older build run the service manager.
  */
 import { createHash } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";

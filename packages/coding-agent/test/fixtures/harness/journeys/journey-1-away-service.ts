@@ -204,19 +204,21 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 		replacedLease.reports.filter((report) => report.message.startsWith(`Replaced the daemon of build ${older} `)),
 		"the replacement is reported once",
 	).toHaveLength(1);
+	expect(await world.disposeSessionInBody(upgraded.session)).toBeUndefined();
 	const same = await open(buildDir, "off");
 	expect(launches(), "a daemon of this build is not restarted").toBe(2);
 	expect(await current.stop()).toBe(0);
 	const newerDaemon = world.processes.runNextBotDaemon({ build: newer });
 	expect(same.session.backgroundLanes.startPersistentBotDaemon().started).toBe(true);
 	const newest = await newerDaemon;
-	await save(upgraded.session, "daemon-build-newer");
+	expect(await world.disposeSessionInBody(same.session)).toBeUndefined();
+	const behind = await open(buildDir, "off");
+	await save(behind.session, "daemon-build-newer");
 	expect(launches(), "a daemon of a newer build is left alone").toBe(3);
-	expect(same.session.backgroundLanes.getBotTeamStore().daemonLeaseBelongsTo(newest.launch.token)).toBe(true);
-	expect(leaseOf(same.session).build).toBe(newer);
+	expect(behind.session.backgroundLanes.getBotTeamStore().daemonLeaseBelongsTo(newest.launch.token)).toBe(true);
+	expect(leaseOf(behind.session).build).toBe(newer);
 	expect(await newest.stop()).toBe(0);
-	for (const session of [upgraded.session, same.session])
-		expect(await world.disposeSessionInBody(session)).toBeUndefined();
+	expect(await world.disposeSessionInBody(behind.session)).toBeUndefined();
 }
 
 /** Each platform's definition from explicit inputs: absolute paths with a space, `%` and `$`, quoted for its manager. */
