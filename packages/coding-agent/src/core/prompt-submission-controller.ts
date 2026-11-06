@@ -82,6 +82,8 @@ interface AcceptedInput {
 	readonly acceptedOrder?: number;
 	/** Set by the ledger when the input ends without being delivered. */
 	ended?: OwnerInputEnd;
+	/** Set at delivery when the owner-channel authority its words were accepted under had ended: they decide nothing. */
+	lapsed?: true;
 }
 
 /** One submission's input and the points of its preparation the caller acts on. */
@@ -270,15 +272,29 @@ export class PromptSubmissionController {
 	 * registered, for a judgment to carry them, and become owner policy and the answer to an operator blocker when the input
 	 * is delivered, never before: an input taken back, held or cancelled first decides nothing. However the input ends
 	 * undelivered, its words are released. `words.pasted` marks what the owner pasted: only typed words decide anything.
+	 * `stillOwner` (an owner channel's `full`) is asked again at delivery: words delivered once it answers false are
+	 * released and marked `lapsed`, so they become no owner policy and no owner rule.
 	 */
-	private acceptInput(source: OwnerInputSource, words: OwnerWords, acceptedOrder: number | undefined): AcceptedInput {
+	private acceptInput(
+		source: OwnerInputSource,
+		words: OwnerWords,
+		acceptedOrder: number | undefined,
+		stillOwner?: () => boolean,
+	): AcceptedInput {
 		const input: AcceptedInput = {
 			inputId: this.deps.ownerInputs.accept(source),
 			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
 		};
 		if (acceptedOrder !== undefined) {
 			this.deps.registerOwnerWords(acceptedOrder, words);
-			this.deps.ownerInputs.whenDelivered(input.inputId, ({ entryId }) => this.noteOwnerSpoke(words, entryId));
+			this.deps.ownerInputs.whenDelivered(input.inputId, ({ entryId }) => {
+				if (stillOwner === undefined || stillOwner()) {
+					this.noteOwnerSpoke(words, entryId);
+					return;
+				}
+				input.lapsed = true;
+				this.deps.releaseOwnerWords(acceptedOrder);
+			});
 		}
 		this.deps.ownerInputs.whenUndelivered(input.inputId, (end) => {
 			input.ended = end;
@@ -378,20 +394,32 @@ export class PromptSubmissionController {
 		)
 			throw new TypeError("An owner-channel submission names no other origin, source, kept input or pasted range.");
 		// The owner's words from an owner channel are the owner's, though not typed at the terminal: never owner policy or an
-		// owner rule (typed only), so they take no submission order. An approval turn is accepted on the untrusted path.
+		// owner rule (typed only), so they take no submission order, unless the channel holds the owner's full authority
+		// (`OwnerChannelSubmission.full`). An approval turn is accepted on the untrusted path.
 		const channelWords = ownerChannel !== undefined && !ownerChannel.approval;
+		const fullChannelWords = channelWords && ownerChannel.full?.() === true;
 		const untrusted = options?.source === "extension" || ownerChannel?.approval === true;
 		// The owner's submission order, fixed now: every judgment of this submission carries it.
 		const acceptedOrder =
-			options?.internalContextType || untrusted || channelWords ? undefined : ++this.ownerSubmissionOrder;
+			options?.internalContextType || untrusted || (channelWords && !fullChannelWords)
+				? undefined
+				: ++this.ownerSubmissionOrder;
 		// Its identity, minted at acceptance for every source (an extension's message on its untrusted path): the message it
 		// becomes carries it, and its persistence delivers it. A hidden internal turn is no one's input and has none. Its
 		// words are judged only where their outcome is read (a fresh turn's at its first tool call), so a queued input judged
-		// before then carries them; until something judges, carries or releases them, they wait registered.
-		const ownerWords: OwnerWords = { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
+		// before then carries them; until something judges, carries or releases them, they wait registered. Owner-channel
+		// words are the owner's text only, after the channel's header line.
+		const ownerWords: OwnerWords = channelWords
+			? { text: ownerChannel.ownerText }
+			: { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
 		const input = options?.internalContextType
 			? undefined
-			: this.acceptInput(untrusted ? "extension" : channelWords ? "channel" : "prompt", ownerWords, acceptedOrder);
+			: this.acceptInput(
+					untrusted ? "extension" : channelWords ? "channel" : "prompt",
+					ownerWords,
+					acceptedOrder,
+					fullChannelWords ? ownerChannel.full : undefined,
+				);
 		const inputId = input?.inputId;
 		if (input && ownerChannel?.onDelivered)
 			this.deps.ownerInputs.whenDelivered(input.inputId, ownerChannel.onDelivered);
@@ -839,7 +867,8 @@ export class PromptSubmissionController {
 				// free: the input then runs as its own turn below instead of entering a queue that no run drains.
 				let ownTurn = false;
 				try {
-					// Only words with a submission order are judged as owner intent: owner-channel words are not owner policy.
+					// Only words with a submission order are judged as owner intent: owner-channel words are owner policy only
+					// under the channel's full authority.
 					if (ownerOriginalText !== undefined && lifecycle.input?.acceptedOrder !== undefined) {
 						const classified = await (queuedOwnerClassification ??
 							this.deps.judgeQueuedOwnerRequest(
@@ -879,9 +908,10 @@ export class PromptSubmissionController {
 						// The owner's admitted words become policy when the run delivers them, never when they are taken back,
 						// cleared or held first: their judgment is applied where it is read.
 						if (ownerOriginalText !== undefined && judged !== undefined)
-							this.deps.ownerInputs.whenDelivered(pending.inputId, () =>
-								this.deps.enqueueOwnerWords(submittedWords, judgedOrder, judged),
-							);
+							this.deps.ownerInputs.whenDelivered(pending.inputId, () => {
+								if (lifecycle.input?.lapsed !== true)
+									this.deps.enqueueOwnerWords(submittedWords, judgedOrder, judged);
+							});
 						admitted = this.deps.pendingQueue.admit(pending, {
 							text: expandedText,
 							...(currentImages ? { images: currentImages } : {}),
@@ -1274,8 +1304,8 @@ export class PromptSubmissionController {
 				// Only the owner's words are the turn's request and owner policy. An extension's message (a peer agent's, say) is
 				// never classified and decides nothing: no grant, handoff, model pool, delivery binding or rule authority, and it
 				// replaces no request the operation, acquisition and plan-review gates judge a tool call against.
-				// The owner's words from an owner channel are the turn's request, never owner policy (they have no submission order);
-				// an approval turn is neither.
+				// The owner's words from an owner channel are the turn's request, and owner policy only under the channel's full
+				// authority (otherwise they have no submission order); an approval turn is neither.
 				if (ownerSpoke) {
 					this.lastUserRequestValue = fenceOwnerPaste(userRequest);
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
@@ -1288,9 +1318,15 @@ export class PromptSubmissionController {
 					// reads them into its staged judgment.
 					const input = lifecycle.input;
 					if (input?.acceptedOrder !== undefined)
-						this.deps.ownerInputs.whenDelivered(input.inputId, () =>
-							this.deps.enqueueOwnerWords(submittedWords, input.acceptedOrder, ownerJudgment, submissionSignal),
-						);
+						this.deps.ownerInputs.whenDelivered(input.inputId, () => {
+							if (input.lapsed !== true)
+								this.deps.enqueueOwnerWords(
+									submittedWords,
+									input.acceptedOrder,
+									ownerJudgment,
+									submissionSignal,
+								);
+						});
 				}
 				this.deps.announceOwnerFollowUpsWhenPresent();
 			}
@@ -1319,7 +1355,8 @@ export class PromptSubmissionController {
 					)
 				: await executeSystemOnePreflight(undefined, this.deps.agent.state.messages.length);
 			if (preflight.proceed) {
-				if (lifecycle.input?.acceptedOrder !== undefined && submission.lease)
+				// Parent notes ride the owner's typed words only (`isParentNoteOwnerId`), never an owner channel's.
+				if (lifecycle.input?.acceptedOrder !== undefined && !channelWords && submission.lease)
 					this.deps.sessionManager.authorizeParentNoteOwner(lifecycle.input.inputId, submission.lease.epoch);
 				// The run sends `messages[0]` first (it holds at least the prompt message); the claim check finds the turn
 				// by it, since a compaction inside the turn can rebuild the history so no length read here marks its start.

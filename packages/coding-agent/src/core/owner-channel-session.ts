@@ -47,6 +47,8 @@ export type OwnerChannelForeground = Pick<
 interface OwnerChannelRun {
 	readonly live: () => boolean;
 	readonly senderDigest: string;
+	/** The batch was offered under `ownerAuthority: "full"` (`OwnerChannelOrigin.full`). */
+	readonly full: boolean;
 	/** An accepted approval delivery whose entry has not landed on the branch yet. */
 	approvalPending: boolean;
 }
@@ -149,6 +151,12 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		return run !== undefined && answersLive(run.live);
 	}
 
+	/** Whether the run `origin` decided holds the owner's own authority: offered under "full" and still live. */
+	isOwnerChannelFull(origin: TurnOriginRecord): boolean {
+		const run = this.runOf(origin);
+		return run?.full === true && answersLive(run.live);
+	}
+
 	/** The digest of the verified sender whose batch opened the run `origin` decided; none once that batch is dropped. */
 	ownerChannelSender(origin: TurnOriginRecord): string | undefined {
 		return this.runOf(origin)?.senderDigest;
@@ -212,7 +220,14 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		void this.host
 			.prompt(text, {
 				streamingBehavior: "followUp",
-				ownerChannel: { origin, ownerText, approval, onDelivered: settleDelivered, onUndelivered: drop },
+				ownerChannel: {
+					origin,
+					ownerText,
+					approval,
+					onDelivered: settleDelivered,
+					onUndelivered: drop,
+					...(run.full ? { full: () => answersLive(live) } : {}),
+				},
 				preflightResult: (success) => answer(success),
 			})
 			.then(
@@ -240,7 +255,12 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			}
 			if (!evicted) return undefined;
 		}
-		const run: OwnerChannelRun = { live, senderDigest: origin.senderDigest, approvalPending: false };
+		const run: OwnerChannelRun = {
+			live,
+			senderDigest: origin.senderDigest,
+			full: origin.full === true,
+			approvalPending: false,
+		};
 		this.runs.set(origin.ref, run);
 		return run;
 	}

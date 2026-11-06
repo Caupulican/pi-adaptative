@@ -62,6 +62,11 @@ export interface ResolvedChannelPolicy {
 	readonly ownerPushPerHour: number;
 	/** Classes of held action the owner releases only at the terminal, never by `approve` from the phone. */
 	readonly ownerTerminalOnlyClasses: readonly EdgeClass[];
+	/**
+	 * `ownerAuthority: "full"`: a verified owner turn runs with the owner's own authority (the session's grants, the
+	 * terminal's classification and mode) instead of the guarded remote-owner gate. Present only when set to "full".
+	 */
+	readonly ownerFullAuthority?: true;
 }
 
 /** A channel's policy as read: usable, or present but unreadable (which starts nothing). */
@@ -116,6 +121,15 @@ function parseTerminalOnlyClasses(value: unknown, key: string): EdgeClass[] {
 	return [...new Set(value)];
 }
 
+/** `ownerAuthority`: "guarded" (the default) or "full"; "full" only on the channels that can carry owner authority. */
+function parseOwnerFullAuthority(name: string, value: unknown, key: string): boolean {
+	if (value === undefined || value === "guarded") return false;
+	if (value !== "full") throw new Error(`${key}.ownerAuthority must be "guarded" or "full"`);
+	if (!isOwnerChannelName(name))
+		throw new Error(`${key}.ownerAuthority "full" is only read on the telegram and slack channels`);
+	return true;
+}
+
 function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 	const key = `channels.${name}`;
 	if (!isPlainRecord(value)) throw new Error(`${key} must be an object`);
@@ -145,6 +159,7 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 		(typeof awayCwd !== "string" || !isAbsolute(awayCwd) || awayCwd.length > MAX_AWAY_CWD_CHARS)
 	)
 		throw new Error(`${key}.awayCwd must be an absolute path`);
+	const ownerFullAuthority = parseOwnerFullAuthority(name, value.ownerAuthority, key);
 	return {
 		mode,
 		allowedSenders: [...new Set(senders as string[])],
@@ -165,6 +180,7 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 		ownerMaxUsdPerTurn: numberIn(value.ownerMaxUsdPerTurn, 1, 0.05, 20, `${key}.ownerMaxUsdPerTurn`),
 		ownerPushPerHour: integerIn(value.ownerPushPerHour, 12, 0, 60, `${key}.ownerPushPerHour`),
 		ownerTerminalOnlyClasses: parseTerminalOnlyClasses(value.ownerTerminalOnlyClasses, key),
+		...(ownerFullAuthority ? { ownerFullAuthority: true as const } : {}),
 	};
 }
 
