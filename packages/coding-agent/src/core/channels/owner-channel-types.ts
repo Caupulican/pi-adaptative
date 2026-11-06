@@ -107,4 +107,9 @@ export interface SessionChannelsOwnerDeps {
 	ownerControl?(): OwnerChannelControl | undefined;
 	/** Whether the emergency stop file is engaged; no owner offer is made while it is, and without this probe none is made. */
 	isEmergencyStopEngaged?(): boolean;
+	/**
+	 * Hears each change of that stop made in this process (`subscribeEmergencyStop`); returns the unsubscribe. Without it a
+	 * change is seen at the channels core's next pass.
+	 */
+	subscribeEmergencyStop?(listener: () => void): () => void;
 }

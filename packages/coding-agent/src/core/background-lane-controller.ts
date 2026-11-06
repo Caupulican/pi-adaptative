@@ -167,7 +167,7 @@ import {
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
-import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -380,6 +380,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			...(deps.ownerChannel ? { ownerDelivery: deps.ownerChannel } : {}),
 			ownerControl: () => deps.ownerChannel?.control(),
 			isEmergencyStopEngaged: () => isEmergencyStopEngaged(deps.getAgentDir()),
+			subscribeEmergencyStop: (listener) => subscribeEmergencyStop(deps.getAgentDir(), listener),
 			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),

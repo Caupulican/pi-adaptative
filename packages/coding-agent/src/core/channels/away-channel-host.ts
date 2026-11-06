@@ -39,7 +39,7 @@ import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { readSessionLeaseHolders, SessionHeldError } from "../orchestration/session-bundle-lifecycle.ts";
 import { isProcessAlive } from "../process-liveness.ts";
-import { isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { type RoutineOccurrence, routineAwaySpendRoom } from "../routines/routine-contract.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
@@ -543,6 +543,7 @@ export class AwayChannelHosts {
 						ownerDelivery: owner.session.ownerChannel,
 						ownerControl: () => owner.session.ownerChannel.control(),
 						isEmergencyStopEngaged: () => isEmergencyStopEngaged(agentDir),
+						subscribeEmergencyStop: (listener: () => void) => subscribeEmergencyStop(agentDir, listener),
 						getOwnerSessionManager: () => owner.sessionManager,
 					}
 				: {}),

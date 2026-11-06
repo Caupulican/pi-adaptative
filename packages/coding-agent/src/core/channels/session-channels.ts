@@ -547,6 +547,9 @@ export class SessionChannels {
 			this.deps.subscribeSettings(() => this.onSettingsChanged()),
 			this.deps.subscribeForegroundActivity(() => this.onActivity()),
 		);
+		// Engaged, the pass stops the owner runs (the kill switches); lifted, it offers the owner messages that waited.
+		if (this.deps.subscribeEmergencyStop)
+			this.unsubscribes.push(this.deps.subscribeEmergencyStop(() => this.onActivity()));
 		this.syncOwnerSubscription();
 		this.syncBuiltIns();
 		void this.registry.start((name, message) => this.receive(name, message));
