@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import { readNoul, settledFromBand } from "../decision/noul.ts";
+import { choiceAct } from "../decision/thresholds.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
@@ -163,13 +164,21 @@ export class SpecialistSynthesisController {
 				},
 			);
 
-			const fitChoice = (fitCert.answers.best_candidate as { choice?: string })?.choice;
+			// The pick is acted on at the reversible floor on P(chosen option), and the picked candidate's own
+			// absolute fit must settle a yes (advisory pass, 0.7), as the capability rerank requires.
+			const fitChoice =
+				choiceAct(fitCert.answers.best_candidate, undefined, "reversible") === "act"
+					? (fitCert.answers.best_candidate as { choice?: string })?.choice
+					: undefined;
+			const fits =
+				fitChoice !== undefined &&
+				readNoul(fitCert.answers[`fits::${fitChoice}`], "required_true", "advisory") === "hard_pass";
 			// Reusing the existing specialist needs a settled "no new one is required". Undecided or unasked
 			// keeps the synthesis path rather than reusing a candidate the judgment did not endorse.
 			const newSpecialist = readNoul(fitCert.answers.new_specialist_required, "required_false");
 			const noNewSpecialist =
 				newSpecialist !== "unasked" && settledFromBand(newSpecialist, "required_false") === false;
-			if (fitChoice && fitChoice !== "none" && noNewSpecialist) {
+			if (fitChoice && fitChoice !== "none" && fits && noNewSpecialist) {
 				existingEntry = this.catalog.get(fitChoice);
 			}
 		}
