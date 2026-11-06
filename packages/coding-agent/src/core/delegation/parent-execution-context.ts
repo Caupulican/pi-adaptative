@@ -320,7 +320,15 @@ export interface ForegroundStateReaders {
 /** What worker execution reads from the parent transcript; every write goes through {@link ParentWritePort}. */
 export type ParentSessionReader = Pick<
 	SessionManager,
-	"getBranch" | "getEntries" | "getEntry" | "getLeafId" | "buildSessionContext" | "getSessionLineageIds"
+	| "getBranch"
+	| "getEntries"
+	| "getEntry"
+	| "getLeafId"
+	| "buildSessionContext"
+	| "getSessionLineageIds"
+	// The session store a worker carrying a third party's words never writes (`thirdPartyProtectedWritePaths`).
+	| "getSessionDir"
+	| "getSessionFile"
 >;
 
 /**

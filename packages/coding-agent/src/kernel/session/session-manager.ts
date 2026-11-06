@@ -76,7 +76,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import { ownerInputIdOf } from "../owner-input-stamp.ts";
+import { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../owner-input-stamp.ts";
 import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
 import { FileSnapshotChangedError, sameFileVersion } from "../storage/bounded-file.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
@@ -988,6 +988,15 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 			turnOriginStampOf(entry.message) === undefined
 		)
 			stampTurnOrigin(entry.message, parseTurnOriginRecord(entry.turnOrigin) ?? UNREADABLE_TURN_ORIGIN);
+		// The owner input the entry delivered, so a rebuilt context (resume, fork, tree, a parent's wake) names whose words
+		// it holds as the live message did.
+		if (
+			typeof entry.ownerInputId === "string" &&
+			entry.message.role === "user" &&
+			Object.isExtensible(entry.message) &&
+			ownerInputIdOf(entry.message) === undefined
+		)
+			stampOwnerInput(entry.message, entry.ownerInputId as OwnerInputId);
 		return entry.message;
 	}
 	if (entry.type === "custom_message") {

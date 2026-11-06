@@ -57,10 +57,13 @@ export interface OperationGateDecisionRecord {
 
 export interface OperationGateDeps {
 	getEngine(): OperationEffectEngine | undefined;
-	/** The owner's request this turn serves. */
-	getRequest(): string;
+	/**
+	 * The owner's request this turn serves; undefined on a run that carries a third party's words, where no owner request
+	 * is read, so a request can never make an operation proceed.
+	 */
+	getRequest(): string | undefined;
 	getScopeCwd(): string;
-	/** Identity of the current user turn; a new one forgets cached verdicts. */
+	/** Identity of the current user turn and its authority; a new one forgets cached verdicts. */
 	getTurnKey(): string;
 	/** The owner's words are classified lazily; they are settled before the standing authority is read. */
 	settleOwnerPolicy?(signal?: AbortSignal): Promise<void>;
@@ -202,15 +205,17 @@ export class OperationGate {
 		}
 		if (todo.length === 0) return;
 		const never = () => undefined;
-		if (todo.length === 1) {
-			const [only] = todo;
-			this.pending.set(only!.key, this.decide(engine, only!.toolName, only!.triage, "root", signal).catch(never));
+		const request = this.deps.getRequest();
+		// The batch asks every call against the owner's request; with none to read, each call is judged on its effects.
+		if (todo.length === 1 || request === undefined) {
+			for (const entry of todo)
+				this.pending.set(entry.key, this.decide(engine, entry.toolName, entry.triage, "root", signal).catch(never));
 			return;
 		}
 		const started = this.now();
 		const batch = askOperationBatch(engine, {
 			entries: todo.map((entry) => ({ triage: entry.triage, toolName: entry.toolName })),
-			request: this.deps.getRequest(),
+			request,
 			signal,
 			onModel: (model) => {
 				this.answeringModel = model;
@@ -320,7 +325,7 @@ export class OperationGate {
 			askOperation(engine, {
 				triage,
 				toolName,
-				request,
+				request: request ?? "",
 				questions,
 				signal,
 				timeoutMs: OPERATION_JUDGMENT_TIMEOUT_MS,
@@ -338,19 +343,27 @@ export class OperationGate {
 				// The effects are known; only the owner's request is missing. Without an answer it is
 				// unsettled, so an operation that has an effect goes to the operator, never past them.
 				let asked: number | undefined;
-				try {
-					asked = readOperationRequest(await ask([OPERATION_REQUEST_ID]));
-				} catch {
-					signal?.throwIfAborted();
+				if (request !== undefined) {
+					try {
+						asked = readOperationRequest(await ask([OPERATION_REQUEST_ID]));
+					} catch {
+						signal?.throwIfAborted();
+					}
 				}
 				const verdict = verdictFromReadings(remembered, asked, actor);
 				this.record(toolName, triage, "cache", verdict, started);
 				return { verdict };
 			}
-			const answers = await ask([...OPERATION_EFFECT_IDS, OPERATION_REQUEST_ID]);
+			const answers = await ask(
+				request === undefined ? OPERATION_EFFECT_IDS : [...OPERATION_EFFECT_IDS, OPERATION_REQUEST_ID],
+			);
 			const effects = readOperationEffects(answers);
 			this.remember(engine, toolName, triage, effects);
-			const verdict = verdictFromReadings(effects, readOperationRequest(answers), actor);
+			const verdict = verdictFromReadings(
+				effects,
+				request === undefined ? undefined : readOperationRequest(answers),
+				actor,
+			);
 			this.record(toolName, triage, "jev", verdict, started);
 			return { verdict };
 		} catch (error) {

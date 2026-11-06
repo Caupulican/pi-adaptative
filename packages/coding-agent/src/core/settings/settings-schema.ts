@@ -470,14 +470,19 @@ export type FileEncodingsSettings = Record<string, string>;
 export interface EdgeSettings {
 	mode?: "guarded" | "yolo"; // default: guarded; yolo bypasses harness execution permission gates
 	allow?: string[]; // default: all EDGE_CLASSES; an explicit list, including [], replaces the default; unknown names are ignored
+	/**
+	 * Classes a run carrying a third party's words may perform without the owner (default: none). Read only from the
+	 * global and directory-profile settings: a repository's own settings file never grants it.
+	 */
+	thirdPartyAllow?: string[];
 	deny?: string[]; // shell-command globs that remain blocked in yolo; empty by default
 }
 
 export interface ResolvedEdgeSettings {
 	mode: "guarded" | "yolo";
 	allow: EdgeClass[];
-	/** The classes of `allow` the owner wrote in settings, empty when `allow` is the default: only these are standing. */
-	standingAllow: EdgeClass[];
+	/** `edge.thirdPartyAllow` from the global and directory-profile settings: the settings grants that stand for a third party's run. */
+	thirdPartyAllow: EdgeClass[];
 	deny: string[];
 }
 

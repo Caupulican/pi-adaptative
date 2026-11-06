@@ -253,14 +253,14 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const exhausted = new ExhaustedProviderRegistry(join(providerAdmissionDir(agentDir), "exhausted"), () =>
 			admissionClock.now(),
 		);
-		// Away reads no standing settings grant, so a standing-only read is the owner's typed standing grants.
+		// The same grants the session reads: a standing-only read is the owner's typed grants and `edge.thirdPartyAllow`.
+		const edgeGrantDeps = {
+			getEdgeRecords: () => edgeRecordsOnBranch(readerNow()),
+			getSettingsAllow: () => settings.getEdgeSettings().allow,
+			getThirdPartySettingsAllow: () => settings.getEdgeSettings().thirdPartyAllow,
+		};
 		const getEdgeGrants = (standingOnly?: boolean) =>
-			standingOnly
-				? standingEdgeGrants({ getEdgeRecords: () => edgeRecordsOnBranch(readerNow()) })
-				: sessionEdgeGrants({
-						getEdgeRecords: () => edgeRecordsOnBranch(readerNow()),
-						getSettingsAllow: () => settings.getEdgeSettings().allow,
-					});
+			standingOnly ? standingEdgeGrants(edgeGrantDeps) : sessionEdgeGrants(edgeGrantDeps);
 		const operationGate = createSessionOperationGate({
 			getEngine: () => undefined,
 			// Never read without an engine; a run away carries no owner request.

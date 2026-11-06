@@ -293,7 +293,8 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const heldPush = pushTurn("pi-chat-peer-push", 2, (results) => {
 		expect(results, "the push is prepared, not run").toContain(`Prepared, not run: ${pushCommand} (git.publish`);
 		expect(results, "the result names the peer").toContain("a peer agent on pi-chat");
-		expect(results, "the result says how the owner releases it").toContain("approves it in their own words");
+		expect(results, "the result says how the owner releases it").toContain("asks for it in their own turn");
+		expect(results, "the result says the owner is told").toContain("The owner is told with their next turn");
 	});
 	expectStatus(
 		await callTool(sessionA, "agent_send", {
@@ -337,7 +338,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const noticesHeld = heldNotices();
 	expect(noticesHeld.length, "the owner is told once").toBe(1);
 	expect(JSON.stringify(noticesHeld[0]), "the notice names the action, the peer and the release").toContain(
-		`Held, not run: ${pushCommand} (git.publish), asked by a peer agent on pi-chat. Approve it in your next message, or grant git.publish in your own words.`,
+		`Held, not run: ${pushCommand} (git.publish), asked by a peer agent on pi-chat. It runs if you ask for it yourself; /edge allow git.publish lets such runs do it.`,
 	);
 	expect(
 		managerC.getPendingParentInputs("next-owner-turn").some((input) => input.entryId === noticesHeld[0]?.id),
@@ -345,13 +346,77 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	).toBe(true);
 	trace.mark("root", "pi-chat.push-prepared");
 
-	// Control: the owner's own turn pushes under the default grant.
+	// A later run no one typed (a wake delivered as a custom message, as routine and collaboration wakes are) acts for the
+	// peer whose words are the branch's latest decisive message: the push stays held, under the same draft and notice.
+	const wakePush = pushTurn("pi-chat-wake-push", 1, (results) => {
+		expect(results, "a wake after the peer's run is held too").toContain(`Prepared, not run: ${pushCommand}`);
+	});
+	await sessionC.sendCustomMessage(
+		{ customType: "pi-chat-journey-wake", content: "Continue the work.", display: false },
+		{ triggerTurn: true },
+	);
+	await withDeadline(trace, "C's wake run asks for the push", wakePush.promise);
+	await sessionC.agent.waitForIdle();
+	expect(
+		world.shell.requests.slice(shellBefore).map((request) => request.command),
+		"the wake run never reaches the shell with the push",
+	).not.toContain(pushCommand);
+	expect(drafts().length, "the wake's attempt is the same held request").toBe(1);
+	expect(heldNotices().length, "the owner is still told once").toBe(1);
+
+	// Control: the owner's own turn pushes under the default grant. A peer message arriving during that run is queued as a
+	// follow-up: it never joins the owner's run, which keeps its authority, and opens its own run once the owner's ends.
 	world.shell.enqueue({ name: "pi-chat-owner-push", command: pushCommand, output: "", exitCode: 0 });
-	const ownerPush = pushTurn("pi-chat-owner-push", 1, (results) => {
-		expect(results, "the owner's run is not held").not.toContain("Prepared, not run");
+	const peerQueued = createBarrier();
+	const peerAside = "a peer aside during the owner's run";
+	const ownerAnswered = createBarrier();
+	world.provider.enqueue(
+		"root",
+		{
+			...calls("pi-chat-owner-push-call", [
+				{ id: "pi-chat-owner-push-0", name: "bash", arguments: { command: pushCommand } },
+			]),
+			gate: peerQueued.promise,
+		},
+		{
+			name: "pi-chat-owner-push-answer",
+			check: (request) => {
+				const seen = JSON.stringify(request.context.messages);
+				expect(JSON.stringify(request.context.messages.slice(-1)), "the owner's run is not held").not.toContain(
+					"Prepared, not run",
+				);
+				expect(seen, "the peer's message never joins the owner's run").not.toContain(peerAside);
+				ownerAnswered.release();
+			},
+			reply: { content: [{ type: "text", text: "Pushed." }] },
+		},
+	);
+	const asideRun = createBarrier();
+	world.provider.enqueue("root", {
+		name: "pi-chat-peer-aside-answer",
+		check: (request) => {
+			expect(JSON.stringify(request.context.messages.slice(-1)), "the queued message opens its own run").toContain(
+				peerAside,
+			);
+			expect(world.shell.reached, "after the owner's run has pushed").toContain("pi-chat-owner-push");
+			asideRun.release();
+		},
+		reply: { content: [{ type: "text", text: "Noted." }] },
 	});
 	await withDeadline(trace, "C's owner turn", sessionC.prompt("Push main."));
-	await withDeadline(trace, "C's owner run pushes", ownerPush.promise);
+	expectStatus(
+		await callTool(sessionA, "agent_send", {
+			to: meshIdC,
+			message: peerAside,
+			messageId: "leg-aside-1",
+			timeoutMs: TOOL_TIMEOUT_MS,
+		}),
+		"received",
+		"a peer message during the owner's run is queued",
+	);
+	peerQueued.release();
+	await withDeadline(trace, "C's owner run pushes", ownerAnswered.promise);
+	await withDeadline(trace, "the queued peer message opens its own run", asideRun.promise);
 	await sessionC.agent.waitForIdle();
 	expect(world.shell.reached, "the owner's run reaches the shell").toContain("pi-chat-owner-push");
 

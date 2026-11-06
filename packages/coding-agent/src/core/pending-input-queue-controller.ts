@@ -316,7 +316,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * The foreground owner (`bindForeground`): decided input is handed to the agent's queue only while it reports a run that
 	 * consumes that queue, and is otherwise left admitted for it to hand to the next run, or to deliver itself.
 	 */
-	private _foreground?: Pick<ForegroundRecoveryController, "hasLiveConsumer" | "noteInputWaiting">;
+	private _foreground?: Pick<ForegroundRecoveryController, "hasLiveConsumer" | "noteInputWaiting" | "turnOrigin">;
 	private readonly _steerListeners = new Set<() => void>();
 	private readonly _steerDecisionListeners = new Set<() => void>();
 	private readonly deps: PendingInputQueueDeps;
@@ -329,7 +329,10 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** The foreground owner hands this queue's admitted input to runs from here on (`ForegroundRecoveryController.bindInput`). */
 	bindForeground(
-		foreground: Pick<ForegroundRecoveryController, "hasLiveConsumer" | "noteInputWaiting" | "bindInput">,
+		foreground: Pick<
+			ForegroundRecoveryController,
+			"hasLiveConsumer" | "noteInputWaiting" | "bindInput" | "turnOrigin"
+		>,
 	): void {
 		this._foreground = foreground;
 		foreground.bindInput(this);
@@ -1133,9 +1136,16 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		return false;
 	}
 
-	/** Enqueue each kind's decided inputs up to the first one still awaiting its decision: a run consumes the agent's queue. */
+	/**
+	 * Enqueue each kind's decided inputs up to the first one still awaiting its decision: a run consumes the agent's queue.
+	 * A third party's words never join a live run the owner decided: they wait, admitted, and the delivery run that starts
+	 * once that run ends opens with them (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words
+	 * are not held behind them.
+	 */
 	handOff(): void {
 		if (this._closed) return;
+		const ownerRunLive =
+			this._foreground?.hasLiveConsumer === true && this._foreground.turnOrigin.authority() === "owner";
 		for (const [entries, enqueue] of [
 			[
 				this._steering,
@@ -1150,6 +1160,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				if (entry.message || entry.held || this._isUncertain(entry)) continue;
 				const admission = entry.admission;
 				if (!admission) break;
+				if (entry.origin && ownerRunLive) continue;
 				// The handoff to the agent is the delivery point: the input's context is checked here.
 				if (!this._contextCurrent(entry)) {
 					this._hold(entry, "context_changed");

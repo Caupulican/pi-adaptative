@@ -91,15 +91,18 @@ export class HarnessNoticeController {
 	/**
 	 * Called only from a capability's existing detection points with a reader of its current state (undefined: nothing
 	 * the owner is told about). Delivery is deferred past the caller's stack, and a state or notice that cannot be read
-	 * or saved is reported, never thrown into the capability that observed it.
+	 * or saved is reported, never thrown into the capability that observed it. Returns whether the owner is told of the
+	 * observed state: its notice is being saved, or one already saved tells it. False where no notice can be kept (a child
+	 * session, a session that is not persisted, a closed runtime), and for a clear.
 	 */
-	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void {
-		if (this.closed || this.deps.isChildSession()) return;
+	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean {
+		if (this.closed || this.deps.isChildSession()) return false;
 		try {
 			const observation = read();
-			if (observation !== undefined) this.record(kind, observation);
+			return observation === undefined ? false : this.record(kind, observation);
 		} catch (error) {
 			this.report(kind, error);
+			return false;
 		}
 	}
 
@@ -107,7 +110,7 @@ export class HarnessNoticeController {
 		this.closed = true;
 	}
 
-	private record(kind: HarnessNoticeKind, observed: HarnessNoticeObservation): void {
+	private record(kind: HarnessNoticeKind, observed: HarnessNoticeObservation): boolean {
 		const manager = this.deps.getSessionManager();
 		const sessionId = manager.getSessionId();
 		if (sessionId !== this.sessionId) {
@@ -127,13 +130,13 @@ export class HarnessNoticeController {
 			state.observed = "clear";
 			state.covered = undefined;
 			state.unsaved = false;
-			return;
+			return false;
 		}
 		const { reason } = observation;
 		const recurred = state.unsaved === true || (!firstObservation && state.observed !== reason);
 		state.observed = reason;
 		state.unsaved = false;
-		if (state.covered === reason && !recurred) return;
+		if (state.covered === reason && !recurred) return true;
 		state.covered = undefined;
 		let latest = -1;
 		while (latest + 1 < MAX_NOTICE_GENERATIONS) {
@@ -149,12 +152,12 @@ export class HarnessNoticeController {
 				manager.getPendingParentInputs("next-owner-turn").some((input) => input.metadata.deliveryId === latestId))
 		) {
 			state.covered = reason;
-			return;
+			return true;
 		}
 		const generation = latest + 1;
 		if (generation >= MAX_NOTICE_GENERATIONS) {
 			state.covered = reason;
-			return;
+			return true;
 		}
 		const text = boundedRedactedDiagnosticText(observation.text);
 		const leafId = manager.getLeafId();
@@ -167,11 +170,11 @@ export class HarnessNoticeController {
 			!manager.isEntryPersisted(leafId)
 		) {
 			state.unsaved = recurred;
-			return;
+			return false;
 		}
 		const deliveryId = harnessNoticeDeliveryId(sessionId, kind, reason, generation);
 		state.covered = reason;
-		if (this.inFlight.has(deliveryId)) return;
+		if (this.inFlight.has(deliveryId)) return true;
 		this.inFlight.add(deliveryId);
 		void Promise.resolve()
 			.then(() => {
@@ -205,6 +208,7 @@ export class HarnessNoticeController {
 					if (!this.closed) this.report(kind, error);
 				},
 			);
+		return true;
 	}
 
 	private report(kind: HarnessNoticeKind, error: unknown): void {

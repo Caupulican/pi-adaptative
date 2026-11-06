@@ -12,12 +12,17 @@ import type { WorkerClaim, WorkerHostFinding, WorkerRequest } from "../autonomy/
 import {
 	buildToolkitScriptOperation,
 	classifyAllEdgeOperations,
+	classifyOutwardEdgeOperations,
 	edgeBlockReason,
 	isEdgeOperationGranted,
 	thirdPartyEdgeRefusal,
 } from "../autonomy/edge-policy.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
-import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
+import {
+	getHarnessWriteProtectedPaths,
+	getPrivateLaneDeniedPaths,
+	thirdPartyProtectedWritePaths,
+} from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
@@ -5355,10 +5360,9 @@ export class WorkerDelegationController {
 					if (isEdgeOperationGranted(operation, parentGrants)) {
 						return { authorized: true };
 					}
-					return {
-						authorized: false,
-						reason: thirdParty ? thirdPartyEdgeRefusal(operation) : edgeBlockReason(operation, false),
-					};
+					return thirdParty
+						? { authorized: false, ...thirdPartyEdgeRefusal([operation]) }
+						: { authorized: false, reason: edgeBlockReason(operation, false) };
 				},
 			};
 		}
@@ -5455,24 +5459,34 @@ export class WorkerDelegationController {
 					args,
 				);
 				if (refusedPush) return refusedPush;
-				// YOLO is no grant: a run carrying a third party's words acts only under the owner's standing grants.
-				const thirdParty = this.carriesThirdPartyWords(durableHandle.attemptId);
-				if (!thirdParty && this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
-				const parentGrants = this.deps.getEdgeGrants?.(thirdParty) ?? [];
-				const operations = classifyAllEdgeOperations({
+				// YOLO is no grant: a run carrying a third party's words acts only under the owner's standing grants, on
+				// the session gate's outward classification (`enforceThirdPartyEdge`), refused instead of prepared. The
+				// session's closed table of reading actions is not applied: it names the parent's tools, not a worker's.
+				if (this.carriesThirdPartyWords(durableHandle.attemptId)) {
+					const standing = this.deps.getEdgeGrants?.(true) ?? [];
+					const ungranted = classifyOutwardEdgeOperations({
+						toolName,
+						args,
+						cwd: executionCwd,
+						scopeCwd: this.deps.getCwd(),
+						protectedWrites: thirdPartyProtectedWritePaths(
+							executionCwd,
+							this.deps.getAgentDir(),
+							this.deps.getSessionManager(),
+						),
+					}).filter((operation) => !isEdgeOperationGranted(operation, standing));
+					if (ungranted.length > 0) return { block: true, ...thirdPartyEdgeRefusal(ungranted) };
+					return this.deps.checkOperation?.(toolName, args, executionCwd);
+				}
+				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
+				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
+				const operation = classifyAllEdgeOperations({
 					toolName,
 					args,
 					cwd: executionCwd,
 					scopeCwd: this.deps.getCwd(),
-				});
-				for (const operation of operations) {
-					if (!isEdgeOperationGranted(operation, parentGrants)) {
-						return {
-							block: true,
-							reason: thirdParty ? thirdPartyEdgeRefusal(operation) : edgeBlockReason(operation, false),
-						};
-					}
-				}
+				}).find((candidate) => !isEdgeOperationGranted(candidate, parentGrants));
+				if (operation) return { block: true, reason: edgeBlockReason(operation, false) };
 				return this.deps.checkOperation?.(toolName, args, executionCwd);
 			},
 			initialUsage,

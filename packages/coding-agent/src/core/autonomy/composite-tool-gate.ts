@@ -1,5 +1,5 @@
 import type { TSchema } from "typebox";
-import type { AgentTool, BeforeToolCallResult } from "../../kernel/index.ts";
+import { type AgentTool, AgentToolPolicyDeniedError, type BeforeToolCallResult } from "../../kernel/index.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGateAsync } from "./gates.ts";
@@ -78,7 +78,13 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 				const edge = await checkEdge(tool.name, params, executionContext?.cwd ?? cwd, signal);
 				signal?.throwIfAborted();
 				if (edge?.block) {
-					throw new Error(`Tool '${tool.name}' execution blocked by edge: ${edge.reason ?? "denied"}`);
+					// The edge's reason is already bounded for the failure record and names the operation: no prefix pushes its
+					// tail (origin, classes) past that bound.
+					throw new AgentToolPolicyDeniedError(
+						edge.reason ?? `Tool '${tool.name}' execution blocked by edge.`,
+						edge.terminate,
+						edge.correction,
+					);
 				}
 			}
 			return executor.execute(toolCallId, params, signal, onUpdate);

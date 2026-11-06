@@ -169,7 +169,7 @@ function operationIdentity(toolName: string, args: unknown, operation: string, c
 		const argv = processArgv(args);
 		if (argv) invocations = [argv];
 	} else if (toolName === "bash" || toolName === "powershell") {
-		invocations = shellInvocations(operation);
+		invocations = shellInvocations(operation, toolName === "powershell" ? "powershell" : "posix");
 	} else if (toolName === "python") {
 		const record = args as { scriptPath?: unknown } | undefined;
 		const argv = ["python", ...(typeof record?.scriptPath === "string" ? [record.scriptPath] : [])];

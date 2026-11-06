@@ -10,6 +10,7 @@ import {
 	RetryController,
 	RetryDelayExceededError,
 } from "../kernel/reliability/index.ts";
+import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -124,6 +125,8 @@ export interface ForegroundRecoveryControllerDeps {
 	/** Directory the exhausted-provider registry shares with sibling processes; omitted keeps it process-local. */
 	exhaustedStoreDir?: string;
 	emit(event: ForegroundRecoveryEvent): void;
+	/** The session branch a run extends, root to leaf (`SessionManager.getBranch`): where the run's authority is read from. */
+	getBranchEntries(): readonly SessionEntry[];
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	/** The provider refused the model for this account: move the turn to a replacement, returning its ref. */
 	replaceUnsupportedModel?(message: AssistantMessage): Promise<string | undefined>;
@@ -1046,9 +1049,8 @@ export class ForegroundRecoveryController {
 			// From here the run delivers what the agent's queue holds, until its last round.
 			this.setConsumingRun(true);
 			this.recoveryRoundAvailable = !atRoundCap();
-			// The run answers who opened it (a continuation: who its history last answered), until a steer decides again.
-			if (mode === "continue") this.turnOrigin.begin([], this.deps.agent.state.messages);
-			else this.turnOrigin.begin([messages ?? []].flat());
+			// The run answers whoever the branch last answered, then its opening messages, until a later message decides again.
+			this.turnOrigin.begin(mode === "continue" ? [] : [messages ?? []].flat(), this.deps.getBranchEntries());
 			if (mode !== "continue") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
 				// prompt([]) creates fresh loop limits and recovery state over the committed transcript.

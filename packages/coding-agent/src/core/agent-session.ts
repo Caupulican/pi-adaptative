@@ -691,7 +691,6 @@ export class AgentSession {
 			emitWarning: (msg) => this._emit({ type: "warning", message: msg }),
 			getRunTurnOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
 			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
-			findOwnerEvidence: (sourceId) => this._reflection.ownerEvidence.findSource(sourceId),
 		});
 		this._unsettledLadder = new SessionUnsettledLadderController({
 			getSessionManager: () => this.sessionManager,
@@ -1616,6 +1615,7 @@ export class AgentSession {
 			failureCorpus: this._failureCorpus,
 			getContextWindow: () => this.model?.contextWindow ?? 0,
 			exhaustedStoreDir: join(providerAdmissionDir(this._agentDir), "exhausted"),
+			getBranchEntries: () => this.sessionManager.getBranch(),
 			emit: (event) => {
 				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
 				// recovered provider failure leaves a session record a census can count.

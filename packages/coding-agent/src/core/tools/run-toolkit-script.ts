@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import { MAX_TOOL_FAILURE_EVIDENCE_CHARS } from "../../kernel/tool-failure-memory.ts";
-import { AgentToolExecutionError } from "../../kernel/types.ts";
+import { AgentToolExecutionError, AgentToolPolicyDeniedError } from "../../kernel/types.ts";
 import { truncateMiddle, truncateTail } from "../../kernel/utils/truncate.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
@@ -46,6 +46,8 @@ export interface ToolkitScriptAuthorizationDecision {
 	authorized: boolean;
 	/** Actionable explanation if denied or requiring confirmation. */
 	reason?: string;
+	/** The policy's own next action for the model (`BeforeToolCallResult.correction`). */
+	correction?: string;
 }
 
 export type ToolkitScriptAuthorizer = (
@@ -168,18 +170,13 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 				);
 				signal?.throwIfAborted();
 				if (!decision.authorized) {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text:
-									decision.reason ??
-									`"${immutableScript.name}" execution is not authorized by the host policy. Confirm with the operator before running.`,
-							},
-						],
-						details: { outcome: "confirmation_required", scriptName: immutableScript.name },
-						isError: true,
-					};
+					// A host refusal is a policy denial: its correction reaches the failure record's next action.
+					throw new AgentToolPolicyDeniedError(
+						decision.reason ??
+							`"${immutableScript.name}" execution is not authorized by the host policy. Confirm with the operator before running.`,
+						undefined,
+						decision.correction,
+					);
 				}
 			} else if (immutableScript.danger) {
 				return {

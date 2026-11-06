@@ -12,6 +12,7 @@ import {
 	stateDir,
 } from "../agent-paths.ts";
 import { getMachineCredentialBootstrapFiles } from "../secrets/credential-machine-session.ts";
+import type { ProtectedWritePaths } from "./edge-policy.ts";
 
 /** The project's own harness settings file: denied to a lane's file tools, but a file of the project, not harness storage. */
 export function projectLaneSettingsPath(cwd: string): string {
@@ -118,4 +119,21 @@ export function getHarnessWriteProtectedPaths(cwd: string, agentDir: string): st
 		}
 	}
 	return protectedPaths;
+}
+
+/**
+ * What a run carrying a third party's words writes only under a grant (the harness write-protected set) or never (the
+ * session store: the agent's sessions directory, the session's own directory and the directory of its file), for the
+ * session gate and the worker gate alike.
+ */
+export function thirdPartyProtectedWritePaths(
+	cwd: string,
+	agentDir: string,
+	session: { getSessionDir(): string; getSessionFile(): string | undefined },
+): ProtectedWritePaths {
+	const sessionFile = session.getSessionFile();
+	return {
+		harness: getHarnessWriteProtectedPaths(cwd, agentDir),
+		sessions: [sessionsDir(agentDir), session.getSessionDir(), ...(sessionFile ? [path.dirname(sessionFile)] : [])],
+	};
 }

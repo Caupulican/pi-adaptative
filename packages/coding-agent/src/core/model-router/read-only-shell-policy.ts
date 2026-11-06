@@ -1728,45 +1728,47 @@ function wrappedViolation(
 	return programViolation(args.slice(start), cwds, context);
 }
 
+/** The xargs options both readers know: flags, and options that take a value (`-I {}`, `-n 1`). */
+const XARGS_FLAGS = new Set([
+	"-0",
+	"--null",
+	"-r",
+	"--no-run-if-empty",
+	"-t",
+	"--verbose",
+	"-x",
+	"--exit",
+	"--show-limits",
+	"-l",
+	"-i",
+	"--replace",
+	"-e",
+]);
+const XARGS_VALUE_OPTIONS = new Set([
+	"-a",
+	"--arg-file",
+	"-d",
+	"--delimiter",
+	"-E",
+	"-e",
+	"--eof",
+	"-I",
+	"-i",
+	"--replace",
+	"-L",
+	"--max-lines",
+	"-l",
+	"-n",
+	"--max-args",
+	"-P",
+	"--max-procs",
+	"-s",
+	"--max-chars",
+]);
+
 function xargsViolation(args: readonly string[], cwds: WorkingDirectories, context: JudgeContext): string | undefined {
-	const flags = new Set([
-		"-0",
-		"--null",
-		"-r",
-		"--no-run-if-empty",
-		"-t",
-		"--verbose",
-		"-x",
-		"--exit",
-		"--show-limits",
-		"-l",
-		"-i",
-		"--replace",
-		"-e",
-	]);
-	const values = new Set([
-		"-a",
-		"--arg-file",
-		"-d",
-		"--delimiter",
-		"-E",
-		"-e",
-		"--eof",
-		"-I",
-		"-i",
-		"--replace",
-		"-L",
-		"--max-lines",
-		"-l",
-		"-n",
-		"--max-args",
-		"-P",
-		"--max-procs",
-		"-s",
-		"--max-chars",
-	]);
 	// Options left out (`-p`, `-o`, `--process-slot-var`) ask the terminal or set a variable: refused as unjudged.
-	const start = skipWrapperOptions(args, 1, flags, values, (option, value) => {
+	const start = skipWrapperOptions(args, 1, XARGS_FLAGS, XARGS_VALUE_OPTIONS, (option, value) => {
 		if ((option === "-a" || option === "--arg-file") && context.lane)
 			return lanePathViolation(value, cwds.list, false, context, context.lane);
 		return undefined;
@@ -2864,4 +2866,332 @@ export function readOnlyShellPrograms(command: string, dialect: ShellCommandDial
 /** Programs whose effects stay with semantic judgment even when the read/write line admits their arguments. */
 export function isEffectfulReadOnlyProgram(name: string): boolean {
 	return EFFECTFUL_INTERPRETERS.has(name) || SHELL_WRAPPERS.has(name);
+}
+
+/**
+ * What a command line runs, read with the walk's tokenizer and compound structure: every argument vector in every
+ * list, subshell, group, branch, loop, case item and command substitution, each wrapper (`sudo`, `env`, `xargs`,
+ * `timeout`, `nice`, ...) together with the program it runs, the command text of a nested `bash -c`, `watch`, `env -S`
+ * or `powershell -Command`, and a git alias defined on the command line (`git -c alias.p=push p`). `writes` are the
+ * files its redirections write. `unjudged` says why part of what it runs cannot be read from the line: code passed as
+ * text to an interpreter or `eval`, commands a shell or interpreter reads from its input (a pipe or a here-document), a
+ * program named by an expansion, or a line the structure cannot be read from. A script file it runs is not read.
+ */
+export interface ShellExecutions {
+	readonly invocations: string[][];
+	readonly writes: string[];
+	readonly unjudged: string[];
+}
+
+/** How deep command text nested in a line (`bash -c`, substitutions, PowerShell blocks) is read. */
+const MAX_EXECUTION_DEPTH = 4;
+
+/** Wrappers that run the rest of their arguments, with the options of theirs that take a value. */
+const RUNNING_WRAPPER_VALUE_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["builtin", new Set<string>()],
+	["caffeinate", new Set(["-t", "-w"])],
+	["chrt", new Set<string>()],
+	["command", new Set<string>()],
+	["doas", new Set(["-u", "-C"])],
+	["exec", new Set(["-a"])],
+	["ionice", new Set(["-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"])],
+	["nice", new Set(["-n", "--adjustment"])],
+	["nohup", new Set<string>()],
+	["setsid", new Set<string>()],
+	["stdbuf", new Set(["-i", "-o", "-e", "--input", "--output", "--error"])],
+	["strace", new Set(["-e", "-o", "-p", "-s", "-u", "-E", "-P", "-I", "-b", "-a", "-X"])],
+	[
+		"sudo",
+		new Set([
+			"-u",
+			"--user",
+			"-g",
+			"--group",
+			"-h",
+			"--host",
+			"-p",
+			"--prompt",
+			"-C",
+			"-D",
+			"-R",
+			"-T",
+			"-U",
+			"-r",
+			"-t",
+		]),
+	],
+	["taskset", new Set<string>()],
+	["time", new Set(["-f", "--format", "-o", "--output"])],
+	["timeout", new Set(["-s", "--signal", "-k", "--kill-after"])],
+	["unbuffer", new Set<string>()],
+]);
+/** Wrappers whose first operand is a setting, not the program (`timeout 5 cmd`, `chrt 10 cmd`, `taskset 0x3 cmd`). */
+const WRAPPERS_WITH_SETTING_OPERAND = new Set(["chrt", "taskset", "timeout"]);
+/** Interpreters and the options that hand them program text on the command line. */
+const INLINE_CODE_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["bun", new Set(["-e", "--eval", "-p", "--print"])],
+	["deno", new Set(["eval"])],
+	["lua", new Set(["-e"])],
+	["node", new Set(["-e", "--eval", "-p", "--print"])],
+	["nodejs", new Set(["-e", "--eval", "-p", "--print"])],
+	["osascript", new Set(["-e"])],
+	["perl", new Set(["-e", "-E"])],
+	["php", new Set(["-r"])],
+	["python", new Set(["-c"])],
+	["python2", new Set(["-c"])],
+	["python3", new Set(["-c"])],
+	["rscript", new Set(["-e"])],
+	["ruby", new Set(["-e"])],
+]);
+const INTERPRETER_QUERIES = new Set(["-v", "-V", "--version", "-h", "--help"]);
+
+export function shellExecutions(command: string, dialect: ShellCommandDialect = "posix"): ShellExecutions {
+	const executions: ShellExecutions = { invocations: [], writes: [], unjudged: [] };
+	collectLine(command, dialect, 0, executions);
+	return executions;
+}
+
+/** `shellExecutions` for an argument vector a tool runs without a shell (`run_process`). */
+export function argvExecutions(argv: readonly string[]): ShellExecutions {
+	const executions: ShellExecutions = { invocations: [], writes: [], unjudged: [] };
+	collectSimpleCommand(
+		argv.map((value) => ({ kind: "arg", value })),
+		[],
+		"posix",
+		0,
+		executions,
+	);
+	return executions;
+}
+
+function collectLine(command: string, dialect: ShellCommandDialect, depth: number, out: ShellExecutions): void {
+	if (!command.trim()) return;
+	if (depth > MAX_EXECUTION_DEPTH) {
+		out.unjudged.push("it nests command lines deeper than the gate reads");
+		return;
+	}
+	const tokens = tokenizeShellCommand(command, dialect, { compound: dialect === "posix" });
+	if (!tokens) {
+		out.unjudged.push("it has an unterminated quote, escape or substitution");
+		return;
+	}
+	if (dialect === "posix") {
+		const nodes = parseShellCompound(tokens);
+		if (typeof nodes !== "string") {
+			collectNodes(nodes, depth, out);
+			return;
+		}
+		out.unjudged.push(nodes);
+	}
+	// PowerShell, or a POSIX line whose structure cannot be read: the simple commands between its separators.
+	const stopped = judgeSimpleCommands(tokens, (words, redirections) => {
+		collectSimpleCommand(words, redirections, dialect, depth, out);
+		return undefined;
+	});
+	if (stopped) out.unjudged.push(stopped);
+}
+
+function collectNodes(nodes: readonly ShellCompoundNode[], depth: number, out: ShellExecutions): void {
+	for (const node of nodes) {
+		if (node.kind === "simple") {
+			collectSimpleCommand(node.words, node.redirections, "posix", depth, out);
+			continue;
+		}
+		collectRedirections(node.redirections, out);
+		switch (node.kind) {
+			case "group":
+				collectNodes(node.body, depth, out);
+				break;
+			case "if":
+				for (const list of node.lists) collectNodes(list, depth, out);
+				break;
+			case "loop":
+				for (const word of node.words) collectExpansions(word, "posix", depth, out);
+				collectNodes(node.condition, depth, out);
+				collectNodes(node.body, depth, out);
+				break;
+			case "case":
+				collectExpansions(node.word, "posix", depth, out);
+				for (const list of node.lists) collectNodes(list, depth, out);
+				break;
+		}
+	}
+}
+
+function collectRedirections(redirections: readonly ShellRedirection[], out: ShellExecutions): void {
+	for (const { operator, target } of redirections) if (target && operator.includes(">")) out.writes.push(target.value);
+}
+
+/** Command text inside a word: POSIX command and process substitutions, PowerShell blocks and subexpressions. */
+function collectExpansions(word: ShellToken, dialect: ShellCommandDialect, depth: number, out: ShellExecutions): void {
+	for (const expansion of word.expansions ?? [])
+		if (expansion.kind === "command" || expansion.kind === "process")
+			collectLine(expansion.body, "posix", depth + 1, out);
+	for (const group of word.groups ?? [])
+		if (group.kind === "block" || group.kind === "subexpression" || group.kind === "group")
+			collectLine(group.body, dialect, depth + 1, out);
+}
+
+function collectSimpleCommand(
+	words: readonly ShellToken[],
+	redirections: readonly ShellRedirection[],
+	dialect: ShellCommandDialect,
+	depth: number,
+	out: ShellExecutions,
+): void {
+	for (const word of words) collectExpansions(word, dialect, depth, out);
+	collectRedirections(redirections, out);
+	let args: string[] = words.map((word) => word.value);
+	// A wrapper is listed, then what it runs is read as its own invocation.
+	for (let guard = 0; guard < 16; guard++) {
+		let start = 0;
+		while (start < args.length && ASSIGNMENT_RE.test(args[start]!)) start++;
+		args = args.slice(start);
+		const program = args[0];
+		if (program === undefined) return;
+		if (dialect === "posix" && /[$`]/u.test(program)) {
+			out.unjudged.push(`it runs a program named by an expansion (${program})`);
+			return;
+		}
+		out.invocations.push(args);
+		const inner = wrappedInvocation(args, depth, out);
+		if (!inner) return;
+		args = inner;
+	}
+	out.unjudged.push("it nests wrappers deeper than the gate reads");
+}
+
+/** Index of the first word after options; `values` take the next word unless the value is attached. */
+function afterOptions(args: readonly string[], start: number, values: ReadonlySet<string>): number {
+	let index = start;
+	while (index < args.length) {
+		const arg = args[index]!;
+		if (arg === "--") return index + 1;
+		if (!arg.startsWith("-") || arg === "-") return index;
+		index += values.has(arg) ? 2 : 1;
+	}
+	return index;
+}
+
+/** What a wrapper runs, read here; undefined when the invocation runs nothing more the line names. */
+function wrappedInvocation(args: readonly string[], depth: number, out: ShellExecutions): string[] | undefined {
+	const name = executableName(args[0]!);
+	const runningValues = RUNNING_WRAPPER_VALUE_OPTIONS.get(name);
+	if (runningValues) {
+		if (name === "command" && (args.includes("-v") || args.includes("-V"))) return undefined;
+		let start = afterOptions(args, name === "nice" && /^-\d+$/u.test(args[1] ?? "") ? 2 : 1, runningValues);
+		if (WRAPPERS_WITH_SETTING_OPERAND.has(name)) start++;
+		return start < args.length ? args.slice(start) : undefined;
+	}
+	switch (name) {
+		case "env": {
+			let index = 1;
+			while (index < args.length) {
+				const arg = args[index]!;
+				const split = /^(?:-S|--split-string=?)(.*)$/su.exec(arg);
+				if (split) {
+					const text = split[1] || args[++index] || "";
+					collectLine([text, ...args.slice(index + 1)].join(" "), "posix", depth + 1, out);
+					return undefined;
+				}
+				if (ASSIGNMENT_RE.test(arg) || (arg.startsWith("-") && arg !== "--")) {
+					index += arg === "-u" || arg === "--unset" || arg === "-C" || arg === "--chdir" ? 2 : 1;
+					continue;
+				}
+				if (arg === "--") index++;
+				break;
+			}
+			return index < args.length ? args.slice(index) : undefined;
+		}
+		case "xargs": {
+			const start = skipWrapperOptions(args, 1, XARGS_FLAGS, XARGS_VALUE_OPTIONS);
+			if (typeof start === "string") {
+				out.unjudged.push(start);
+				return undefined;
+			}
+			const inner = args.slice(start);
+			if (inner.length > 0 && !XARGS_READ_ONLY_PROGRAMS.has(executableName(inner[0]!)))
+				out.unjudged.push(`xargs runs ${inner[0]} with arguments from its input`);
+			return inner.length > 0 ? inner : undefined;
+		}
+		case "watch": {
+			const start = afterOptions(args, 1, new Set(["-n", "--interval", "-d", "-q", "--equexit"]));
+			collectLine(args.slice(start).join(" "), "posix", depth + 1, out);
+			return undefined;
+		}
+		case "eval":
+			out.unjudged.push("eval runs text as a command");
+			return undefined;
+		case "git":
+			return gitAliasInvocation(args, depth, out);
+		case "powershell":
+		case "pwsh": {
+			const index = args.findIndex((arg) => /^-(?:c|command)$/iu.test(arg));
+			if (index > 0) collectLine(args.slice(index + 1).join(" "), "powershell", depth + 1, out);
+			else if (args.some((arg) => /^-(?:e|ec|encodedcommand)$/iu.test(arg)))
+				out.unjudged.push(`${name} runs an encoded command`);
+			return undefined;
+		}
+		default:
+			break;
+	}
+	if (SHELL_WRAPPERS.has(name) || name === "ksh" || name === "fish") {
+		for (let index = 1; index < args.length; index++) {
+			const arg = args[index]!;
+			if (arg === "-o" || arg === "+o") {
+				index++;
+				continue;
+			}
+			if (/^-[a-z]*c[a-z]*$/iu.test(arg)) {
+				collectLine(args[index + 1] ?? "", "posix", depth + 1, out);
+				return undefined;
+			}
+			if (arg === "-s" || arg === "--") break;
+			if (!arg.startsWith("-") && !arg.startsWith("+")) return undefined;
+		}
+		out.unjudged.push(`${name} runs commands from its input`);
+		return undefined;
+	}
+	const inline = INLINE_CODE_OPTIONS.get(name);
+	if (inline) {
+		const rest = args.slice(1);
+		if (
+			rest.some(
+				(arg) => inline.has(arg) || [...inline].some((option) => option.length === 2 && arg.startsWith(option)),
+			)
+		)
+			out.unjudged.push(`${name} runs program text given on the command line`);
+		else if (!rest.some((arg) => INTERPRETER_QUERIES.has(arg)) && rest.every((arg) => arg.startsWith("-")))
+			out.unjudged.push(`${name} runs a program from its input`);
+	}
+	return undefined;
+}
+
+/**
+ * `git -c alias.NAME=VALUE ... NAME ...` runs VALUE: a shell command when it starts with `!`, otherwise git with those
+ * words. An alias from a git config file is not read.
+ */
+function gitAliasInvocation(args: readonly string[], depth: number, out: ShellExecutions): string[] | undefined {
+	const aliases = new Map<string, string>();
+	let index = 1;
+	while (index < args.length) {
+		const arg = args[index]!;
+		if (!arg.startsWith("-")) break;
+		const config = arg === "-c" ? args[++index] : arg.startsWith("-c") ? arg.slice(2) : undefined;
+		const alias = config === undefined ? undefined : /^alias\.([^=]+)=(.*)$/isu.exec(config);
+		if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
+		index += GIT_GLOBAL_VALUE_OPTIONS.has(arg) && arg !== "-c" ? 2 : 1;
+	}
+	const value = aliases.get((args[index] ?? "").toLowerCase());
+	if (value === undefined) return undefined;
+	if (value.startsWith("!")) {
+		collectLine(value.slice(1), "posix", depth + 1, out);
+		return undefined;
+	}
+	const words = tokenizeShellCommand(value, "posix")?.map((token) => token.value);
+	if (!words) {
+		out.unjudged.push(`git alias ${args[index]} cannot be read`);
+		return undefined;
+	}
+	return ["git", ...words, ...args.slice(index + 1)];
 }

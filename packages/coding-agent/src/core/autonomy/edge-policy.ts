@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import nodePath from "node:path";
 import type { SessionEntry } from "../../kernel/node.ts";
+import { MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../../kernel/tool-failure-memory.ts";
+import { argvExecutions, type ShellExecutions, shellExecutions } from "../model-router/read-only-shell-policy.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import { expandPath } from "../tools/path-utils.ts";
-import { parseShellCommandSequence, stripShellInvocationPrefixes } from "../tools/shell-command-parser.ts";
+import type { ShellCommandDialect } from "../tools/shell-command-parser.ts";
 
 /**
  * The edge: the operations that can need the operator, and whether they still do.
@@ -32,6 +34,8 @@ export const EDGE_CLASSES = [
 	"settings.authority",
 	"toolkit.script",
 	"operation.irreversible",
+	"agent.delegate",
+	"forge.write",
 ] as const;
 export type EdgeClass = (typeof EDGE_CLASSES)[number];
 
@@ -45,6 +49,8 @@ export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
 	"toolkit.script": "running registered dangerous toolkit scripts",
 	"operation.irreversible":
 		"an operation System One finds irreversible, outward or unsettled (code piped into an interpreter, a destructive command on an unexpanded variable, sending data off the machine, a write outside the task) that the owner's request does not ask for",
+	"agent.delegate": "a run carrying a third party's words hands work to another agent",
+	"forge.write": "a run carrying a third party's words acts on GitHub beyond reading (gh pr, issue, api writes)",
 };
 
 /** Classes a tool call can still make the operator confirm. The other names stay for grants. */
@@ -73,6 +79,8 @@ export interface EdgeOperation {
 	scopeKey?: string;
 	/** Present when this is only an edge operation while the condition holds. */
 	condition?: EdgeCondition;
+	/** No grant covers it: only the owner's own turn performs it (a third-party run writing the session store). */
+	ungrantable?: true;
 }
 
 export interface ClassifyEdgeOptions {
@@ -92,6 +100,16 @@ export interface ClassifyEdgeInput {
 	scopeCwd: string;
 	/** Harness state directory whose authority files are the settings edge. Default: the agent dir. */
 	agentDir?: string;
+	/** Paths a run carrying a third party's words may not write; read only by `classifyOutwardEdgeOperations`. */
+	protectedWrites?: ProtectedWritePaths;
+}
+
+/** Harness files a third-party run writes only with a grant, and the session store it never writes. */
+export interface ProtectedWritePaths {
+	/** `getHarnessWriteProtectedPaths`: harness settings, state, extensions, and the files that run or configure git. */
+	readonly harness: readonly string[];
+	/** The session store: no grant opens it. */
+	readonly sessions: readonly string[];
 }
 
 const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
@@ -126,52 +144,18 @@ function positional(argv: readonly string[]): string[] {
 	return argv.filter((token) => !isOption(token));
 }
 
-function splitLoose(command: string): string[][] {
-	return command
-		.split(/\s*(?:&&|\|\||[;|]|\r?\n)\s*/)
-		.map((segment) => segment.trim())
-		.filter(Boolean)
-		.map((segment) => segment.split(/\s+/));
+/**
+ * Every argument vector a shell line runs, read by the read-only walk's structure (`shellExecutions`): `sudo -u root
+ * git push` lists the `sudo` invocation and the `git push` it runs, and `bash -c '...'`, subshells and command
+ * substitutions are read as lines of their own.
+ */
+export function shellInvocations(command: string, dialect: ShellCommandDialect = "posix"): string[][] {
+	return shellExecutions(command, dialect).invocations;
 }
 
-const WRAPPER_VALUE_OPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
-	sudo: new Set(["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "-D", "-R", "-T", "-U"]),
-	doas: new Set(["-u", "-C"]),
-	nice: new Set(["-n", "--adjustment"]),
-	timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
-	stdbuf: new Set(["-i", "-o", "-e"]),
-};
-const PLAIN_WRAPPERS = new Set(["nohup", "exec", "time", "builtin", "unbuffer", "caffeinate"]);
-
-/** `sudo -u root git push` is a git push: privilege and timing wrappers do not change the operation. */
-function stripWrappers(argv: string[]): string[] {
-	let args = argv;
-	for (let guard = 0; guard < 8 && args.length > 0; guard++) {
-		const tool = lower(args[0]);
-		if (PLAIN_WRAPPERS.has(tool)) {
-			args = args.slice(1);
-			continue;
-		}
-		const valueOptions = WRAPPER_VALUE_OPTIONS[tool];
-		if (!valueOptions) break;
-		let index = 1;
-		if (tool === "timeout" && index < args.length && !isOption(args[index] as string)) index++;
-		while (index < args.length && isOption(args[index] as string)) {
-			const option = args[index] as string;
-			index += valueOptions.has(option) && !option.includes("=") ? 2 : 1;
-		}
-		args = args.slice(index);
-	}
-	return args;
-}
-
-/** Simple commands of a shell line; the loose split covers what the parser refuses (subshells). */
-export function shellInvocations(command: string): string[][] {
-	const parsed = parseShellCommandSequence(command, { redirects: "drop" });
-	const invocations = parsed ? parsed.invocations : splitLoose(command);
-	return invocations
-		.map((argv) => stripWrappers(stripShellInvocationPrefixes([...argv])))
-		.filter((argv) => argv.length > 0);
+/** The dialect a shell tool's command is written in. */
+function toolDialect(name: string): ShellCommandDialect {
+	return name === "powershell" ? "powershell" : "posix";
 }
 
 const WINDOWS_ABSOLUTE_RE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
@@ -361,7 +345,7 @@ function classifyEveryEdgeOperation(input: ClassifyEdgeInput): EdgeOperation[] {
 	const command = typeof args.command === "string" ? args.command : "";
 	if (!command.trim()) return [];
 	const operations: EdgeOperation[] = [];
-	for (const argv of shellInvocations(command)) {
+	for (const argv of shellInvocations(command, toolDialect(name))) {
 		operations.push(...classifyInvokedArgv(argv, input.cwd, input.scopeCwd));
 	}
 	return operations;
@@ -372,69 +356,272 @@ export type YoloBoundaryDecision = { kind: "block" | "confirm"; reason: string }
 // ---------------------------------------------------------------------------------------------
 // Outward actions of a run that carries a third party's words
 
-const PACKAGE_PUBLISHERS: Readonly<Record<string, ReadonlySet<string>>> = {
-	npm: new Set(["publish"]),
-	pnpm: new Set(["publish"]),
-	yarn: new Set(["publish", "npm"]),
-	bun: new Set(["publish"]),
-	cargo: new Set(["publish"]),
-	docker: new Set(["push"]),
-	podman: new Set(["push"]),
-	gem: new Set(["push"]),
-	twine: new Set(["upload"]),
-	poetry: new Set(["publish"]),
-	vsce: new Set(["publish"]),
+/** Publishers, the subcommands that publish, and their options that take a value (`npm --registry URL publish`). */
+const PACKAGE_PUBLISHERS: Readonly<Record<string, { verbs: ReadonlySet<string>; values: ReadonlySet<string> }>> = {
+	npm: {
+		verbs: new Set(["publish"]),
+		values: new Set([
+			"--registry",
+			"--otp",
+			"--tag",
+			"--access",
+			"-w",
+			"--workspace",
+			"--prefix",
+			"-C",
+			"--userconfig",
+		]),
+	},
+	pnpm: {
+		verbs: new Set(["publish"]),
+		values: new Set(["--filter", "-F", "-C", "--dir", "--registry", "--otp", "--tag", "--access"]),
+	},
+	yarn: { verbs: new Set(["publish"]), values: new Set(["--cwd", "--registry", "--otp", "--tag", "--access"]) },
+	bun: { verbs: new Set(["publish"]), values: new Set(["--cwd", "--registry", "--otp", "--tag", "--access"]) },
+	cargo: {
+		verbs: new Set(["publish"]),
+		values: new Set([
+			"--manifest-path",
+			"-p",
+			"--package",
+			"--config",
+			"-Z",
+			"-C",
+			"--registry",
+			"--token",
+			"--index",
+		]),
+	},
+	docker: {
+		verbs: new Set(["push"]),
+		values: new Set(["--context", "-c", "-H", "--host", "--config", "-l", "--log-level"]),
+	},
+	podman: {
+		verbs: new Set(["push"]),
+		values: new Set(["--connection", "-c", "--url", "--root", "--runroot", "--log-level"]),
+	},
+	gem: { verbs: new Set(["push"]), values: new Set(["--key", "--host", "--otp"]) },
+	twine: {
+		verbs: new Set(["upload"]),
+		values: new Set(["-r", "--repository", "--repository-url", "-u", "-p", "--config-file"]),
+	},
+	poetry: {
+		verbs: new Set(["publish"]),
+		values: new Set(["-C", "--directory", "-P", "--project", "-r", "--repository"]),
+	},
+	vsce: { verbs: new Set(["publish"]), values: new Set(["-p", "--pat", "-i", "--packagePath"]) },
 };
-const GH_OUTWARD: Readonly<Record<string, ReadonlySet<string>>> = {
-	release: new Set(["create", "upload", "edit", "delete"]),
-	pr: new Set(["create", "merge", "comment", "review", "close", "edit"]),
-	issue: new Set(["create", "comment", "close", "edit"]),
-	gist: new Set(["create"]),
-};
+/** gh commands that only read; every other gh invocation acts on the forge (`forge.write`) or publishes a release. */
+const GH_READ_ONLY: ReadonlyMap<string, ReadonlySet<string> | "every"> = new Map<string, ReadonlySet<string> | "every">(
+	[
+		["alias", new Set(["list"])],
+		["auth", new Set(["status"])],
+		["cache", new Set(["list"])],
+		["completion", "every"],
+		["config", new Set(["get", "list"])],
+		["extension", new Set(["list", "search"])],
+		["gist", new Set(["list", "view"])],
+		["help", "every"],
+		["issue", new Set(["list", "status", "view"])],
+		["label", new Set(["list"])],
+		["pr", new Set(["checks", "diff", "list", "status", "view"])],
+		["release", new Set(["download", "list", "view"])],
+		["repo", new Set(["list", "view"])],
+		["run", new Set(["download", "list", "view", "watch"])],
+		["search", "every"],
+		["status", "every"],
+		["variable", new Set(["get", "list"])],
+		["version", "every"],
+		["workflow", new Set(["list", "view"])],
+	],
+);
+const GH_API_WRITE_OPTIONS = new Set(["-f", "-F", "--field", "--raw-field", "--input"]);
 /** Tool actions that hand the run's work to another agent: its authority would leave with it. */
 const DELEGATION_ACTIONS: Readonly<Record<string, ReadonlySet<string | undefined>>> = {
 	delegate: new Set([undefined, "start", "send", "broadcast", "follow_up", "resume"]),
 	pi_collaboration: new Set(["fire_task", "send_followup", "launch_workspace", "answer_question"]),
 	goal: new Set(["dispatch_worker"]),
 };
-/** Goal actions that set what the owner's goal is or may do; only the owner's turn decides them. */
-const OWNER_GOAL_ACTIONS: ReadonlySet<string> = new Set([
-	"start",
-	"add_requirement",
-	"set_requirement_check",
-	"satisfy_requirement",
-	"block_requirement",
-	"reopen_requirement",
-	"complete",
-	"block_goal",
-	"grant_edge",
-	"amend_goal",
+/**
+ * The closed table of actions a run carrying a third party's words may take on the harness's own action tools: the
+ * ones that only read. Every other action of these tools, and any action of a tool not listed here, is the owner's
+ * (`ownerOnlyToolCallReason`), except the delegation launches above, which are prepared like outward actions.
+ */
+const THIRD_PARTY_READ_ONLY_ACTIONS: ReadonlyMap<string, ReadonlySet<string | undefined>> = new Map([
+	[
+		"delegate",
+		new Set([
+			"tasks",
+			"list",
+			"transcript",
+			"wait",
+			"wait_many",
+			"inbox",
+			"inbox_wait",
+			"status",
+			"review",
+			"profile_inspect",
+			"events",
+		]),
+	],
+	[
+		"pi_collaboration",
+		new Set([
+			"status",
+			"setup_help",
+			"workspace_plan",
+			"job_status",
+			"list_jobs",
+			"list_variables",
+			"list_templates",
+			"show_template",
+		]),
+	],
+	["goal", new Set(["get"])],
+	["routine", new Set(["list", "get"])],
+	["knowledge", new Set(["search", "read", "history", "evidence"])],
+	["memory", new Set(["history_search", "history_source", "history_expand"])],
+	["proactivity", new Set(["view"])],
+	["repo_read", new Set(["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"])],
+	["decision_ledger_read", new Set(["sessions", "stages", "evaluations", "failures", "replay"])],
+	["secret_store", new Set(["status", "list"])],
+	["task_automation", new Set(["status", "spec", "validate"])],
+	["worktree_sync", new Set(["status", "git_status", "git_diff"])],
+	["pipeline", new Set(["list", "status"])],
+	["task_directory", new Set(["status"])],
+	["task_steps", new Set(["list"])],
+	["task_events", new Set(["events"])],
+	["bot_message", new Set(["list"])],
+	["runtime_update", new Set(["status"])],
+	["improvement_loop", new Set(["status"])],
+	["skill", new Set(["search", "read"])],
+	// Advisory judgments and reads; `resolve_uncertainty` records a disposition, so it stays the owner's.
+	["systemone", new Set(["status", "evaluate", "review", "vision", "evidence", "uncertainties", "locate"])],
 ]);
-/** Routine actions that create, change, restart or run standing work (`RoutineSessionController.requireOwnerTurn`). */
-const OWNER_ROUTINE_ACTIONS: ReadonlySet<string> = new Set(["create", "update", "resume", "run"]);
+
+/** The operands of an invocation: words that are not options or the values `values` options take. */
+function operands(argv: readonly string[], values: ReadonlySet<string>): string[] {
+	const words: string[] = [];
+	for (let index = 1; index < argv.length; index++) {
+		const word = argv[index]!;
+		if (isOption(word)) {
+			if (values.has(word)) index++;
+			continue;
+		}
+		// `cargo +nightly publish` names a toolchain.
+		if (!word.startsWith("+")) words.push(word);
+	}
+	return words.map(lower);
+}
+
+function classifyGhOutward(argv: readonly string[], joined: string): EdgeOperation | undefined {
+	const [group = "", verb = ""] = operands(
+		argv,
+		new Set(["-R", "--repo", "-X", "--method", "-H", "--header", "-q", "--jq", "-t", "--template"]),
+	);
+	if (group === "api") {
+		const method = argv.find((_, index) => argv[index - 1] === "-X" || argv[index - 1] === "--method");
+		const writes =
+			(method !== undefined && method.toUpperCase() !== "GET") ||
+			argv.some(
+				(word) =>
+					/^--method=(?!get$)/iu.test(word) || GH_API_WRITE_OPTIONS.has(word) || /^--(?:raw-)?field=/u.test(word),
+			);
+		return writes ? { class: "forge.write", operation: joined, reason: "writes through the GitHub API" } : undefined;
+	}
+	const readOnly = GH_READ_ONLY.get(group);
+	if (readOnly === "every" || readOnly?.has(verb)) return undefined;
+	return group === "release"
+		? { class: "git.publish", operation: joined, reason: "publishes or changes a release" }
+		: { class: "forge.write", operation: joined, reason: "acts on GitHub beyond reading" };
+}
 
 function classifyOutwardArgv(argv: readonly string[]): EdgeOperation | undefined {
 	const joined = argv.join(" ");
 	const tool = commandTool(argv[0]);
-	if (tool === "git" && gitInvocation(argv)?.subcommand === "push") {
-		return { class: "git.publish", operation: joined, reason: "pushes to a remote" };
+	if (tool === "git") {
+		const subcommand = gitInvocation(argv)?.subcommand;
+		if (subcommand === "push" || subcommand === "send-email")
+			return { class: "git.publish", operation: joined, reason: "sends commits to a remote" };
+		return undefined;
 	}
-	const words = positional(argv.slice(1)).map(lower);
-	if (tool === "gh" && GH_OUTWARD[words[0] ?? ""]?.has(words[1] ?? "")) {
-		return words[0] === "release"
-			? { class: "git.publish", operation: joined, reason: "publishes a release" }
-			: { class: "operation.irreversible", operation: joined, reason: "writes on the remote repository" };
+	if (tool === "gh") return classifyGhOutward(argv, joined);
+	const publisher = PACKAGE_PUBLISHERS[tool];
+	if (!publisher) return undefined;
+	// `yarn workspace web publish`, `yarn npm publish`, `docker image push`: the verb within the first operands.
+	const publishes =
+		operands(argv, publisher.values)
+			.slice(0, 3)
+			.some((word) => publisher.verbs.has(word)) ||
+		((tool === "docker" || tool === "podman") && argv.includes("--push"));
+	return publishes
+		? { class: "package.publish", operation: joined, reason: "publishes a package or image" }
+		: undefined;
+}
+
+/** Files an invocation writes by its arguments: `tee` files, a `cp`/`mv`/`install`/`ln` destination, `sed -i` files, `dd of=`. */
+function argvWriteTargets(argv: readonly string[]): string[] {
+	const tool = commandTool(argv[0]);
+	const rest = argv.slice(1);
+	if (tool === "tee") return positional(rest);
+	if (tool === "cp" || tool === "mv" || tool === "install" || tool === "ln") {
+		const target = rest.findIndex((word) => word === "-t" || word === "--target-directory");
+		if (target >= 0) return rest[target + 1] === undefined ? [] : [rest[target + 1]!];
+		const attached = rest.find((word) => word.startsWith("--target-directory="));
+		if (attached) return [attached.slice("--target-directory=".length)];
+		const targets = positional(rest);
+		return targets.length >= 2 ? [targets.at(-1)!] : [];
 	}
-	if (PACKAGE_PUBLISHERS[tool]?.has(words[0] ?? "")) {
-		return { class: "package.publish", operation: joined, reason: "publishes a package or image" };
+	if (tool === "sed" && rest.some((word) => /^(?:-[a-zA-Z]*i|--in-place)/u.test(word))) {
+		const files: string[] = [];
+		let script = rest.some((word) => /^(?:-[a-zA-Z]*[ef]|--expression|--file)/u.test(word));
+		for (let index = 0; index < rest.length; index++) {
+			const word = rest[index]!;
+			if (isOption(word)) {
+				if (/^-[a-zA-Z]*[efl]$/u.test(word) || word === "--expression" || word === "--file") index++;
+				continue;
+			}
+			if (!script) script = true;
+			else files.push(word);
+		}
+		return files;
 	}
-	return undefined;
+	if (tool === "dd") return rest.filter((word) => word.startsWith("of=")).map((word) => word.slice(3));
+	return [];
+}
+
+/** A write into a protected path: the session store is never granted; the other harness paths are settings authority. */
+function protectedWriteOperation(
+	target: string,
+	input: ClassifyEdgeInput,
+	operation: string,
+): EdgeOperation | undefined {
+	const paths = input.protectedWrites;
+	if (!paths || !target) return undefined;
+	const { resolved, api } = resolveTarget(target, input.cwd);
+	const inside = (list: readonly string[]) => list.some((entry) => pathContains(api.resolve(entry), resolved, api));
+	if (inside(paths.sessions))
+		return {
+			class: "settings.authority",
+			operation,
+			reason: `writes the session store (${target}), which only the owner's own turn changes`,
+			ungrantable: true,
+		};
+	return inside(paths.harness)
+		? {
+				class: "settings.authority",
+				operation,
+				reason: `writes ${target}, a harness file or one that runs or configures the harness or git`,
+			}
+		: undefined;
 }
 
 /**
- * What a run carrying a third party's words may not do on its own: push, publish, write on a remote repository, hand
- * its work to another agent, and every operation the edge already classifies. Literal, like the rest of the edge: a
- * script that pushes is not read. Only that run's gate reads this; the owner's own runs never do.
+ * What a run carrying a third party's words may not do on its own: push, publish, act on GitHub beyond reading, hand
+ * its work to another agent, write harness files or the session store, run code the gate cannot read (the python tool,
+ * code given to an interpreter or `eval` as text, a shell or interpreter reading its input), and every operation the
+ * edge already classifies. Literal, like the rest of the edge: a script file the run executes is not read, so what it
+ * does is not classified. Only that run's gate reads this; the owner's own runs never do.
  */
 export function classifyOutwardEdgeOperations(input: ClassifyEdgeInput): EdgeOperation[] {
 	const operations = classifyEveryEdgeOperation(input);
@@ -443,41 +630,73 @@ export function classifyOutwardEdgeOperations(input: ClassifyEdgeInput): EdgeOpe
 	const action = typeof args.action === "string" ? args.action : undefined;
 	if (DELEGATION_ACTIONS[name]?.has(action)) {
 		operations.push({
-			class: "operation.irreversible",
+			class: "agent.delegate",
 			operation: `${input.toolName} ${action ?? "start"}`,
 			reason: "hands the run's work to another agent, past this gate",
 		});
 	}
-	const invocations: string[][] = [];
+	if (name === "python") {
+		operations.push({
+			class: "operation.irreversible",
+			operation:
+				`${input.toolName} ${typeof args.code === "string" ? args.code.slice(0, 200) : String(args.scriptPath ?? "")}`.trim(),
+			reason: "runs Python code, which the gate does not read",
+		});
+	}
+	const writes: { target: string; operation: string }[] = [];
+	if (name === "write" || name === "edit" || name === "edit-diff") {
+		const target =
+			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		writes.push({ target, operation: `${input.toolName} ${target}` });
+	}
+	let executions: ShellExecutions | undefined;
+	let line = "";
 	if (name === "run_process" || name === "run-process") {
 		const executable = typeof args.executable === "string" ? args.executable.trim() : "";
 		const processArgs = Array.isArray(args.args)
 			? args.args.filter((item): item is string => typeof item === "string")
 			: [];
-		if (executable) invocations.push([executable, ...processArgs]);
+		line = [executable, ...processArgs].join(" ");
+		if (executable) executions = argvExecutions([executable, ...processArgs]);
 	}
 	if ((name === "bash" || name === "powershell" || name === "shell") && typeof args.command === "string") {
-		invocations.push(...shellInvocations(args.command));
+		line = args.command;
+		executions = shellExecutions(line, toolDialect(name));
 	}
-	for (const argv of invocations) {
+	for (const target of executions?.writes ?? []) writes.push({ target, operation: line });
+	for (const reason of new Set(executions?.unjudged))
+		operations.push({
+			class: "operation.irreversible",
+			operation: line,
+			reason: `${reason}, which the gate cannot read`,
+		});
+	for (const argv of executions?.invocations ?? []) {
 		const outward = classifyOutwardArgv(argv);
 		if (outward) operations.push(outward);
+		for (const target of argvWriteTargets(argv)) writes.push({ target, operation: argv.join(" ") });
+	}
+	for (const { target, operation } of writes) {
+		const write = protectedWriteOperation(target, input, operation);
+		if (write) operations.push(write);
 	}
 	return operations;
 }
 
-/** Why a tool call is the owner's own decision, which a run carrying a third party's words never makes. */
+/**
+ * Why a tool call is the owner's own decision, which a run carrying a third party's words never makes: an action
+ * outside `THIRD_PARTY_READ_ONLY_ACTIONS` (a tool not listed there may take no action at all), other than a delegation
+ * launch, which is prepared instead; and a knowledge grant to another agent.
+ */
 export function ownerOnlyToolCallReason(toolName: string, args: unknown): string | undefined {
 	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-	if (toolName === "goal" && typeof record.action === "string" && OWNER_GOAL_ACTIONS.has(record.action))
-		return `goal ${record.action} sets what the owner's goal is or may do`;
-	// The routine's own owner-turn rule reads the run's owner sources; a third party's later words do not remove them.
-	if (toolName === "routine" && typeof record.action === "string" && OWNER_ROUTINE_ACTIONS.has(record.action))
-		return `routine ${record.action} creates, changes, restarts or runs the owner's standing work`;
 	// A knowledge grant hands owner knowledge values to another agent, whatever grant covers the launch itself.
 	if ((toolName === "delegate" || toolName === "pi_collaboration") && record.knowledge !== undefined)
 		return `${toolName} knowledge hands the owner's recorded knowledge to another agent`;
-	return undefined;
+	const action = typeof record.action === "string" ? record.action : undefined;
+	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
+	const readOnly = THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName);
+	if (readOnly ? readOnly.has(action) : action === undefined) return undefined;
+	return `${toolName} ${action ?? "without an action"} changes state beyond reading`;
 }
 
 const POSIX_SYSTEM_DIRECTORIES: ReadonlySet<string> = new Set([
@@ -521,7 +740,7 @@ export function classifyYoloBoundary(input: YoloBoundaryInput): YoloBoundaryDeci
 						.join(" ")
 				: "";
 	if (!command) return undefined;
-	const invocations = shellInvocations(command);
+	const invocations = shellInvocations(command, toolDialect(name));
 	for (const pattern of input.denyCommands ?? []) {
 		if (
 			[command, ...invocations.map((argv) => argv.join(" "))].some((candidate) =>
@@ -610,8 +829,9 @@ export interface EdgeGrantRecord {
 	/** Optional exact operation scope key for narrow grants. */
 	scopeKey?: string;
 	/**
-	 * The owner stated it in their own typed words: it also covers a run that carries a third party's words. Absent on
-	 * a grant given at a prompt, which answers the run that asked.
+	 * The owner typed it as their own edge command (`/edge allow`): it also covers a run that carries a third party's
+	 * words. Absent on a grant given at a prompt (it answers the run that asked) and on a grant the model cited from the
+	 * owner's words.
 	 */
 	standing?: true;
 	grantedAt: string;
@@ -633,7 +853,7 @@ export interface EdgeGrantView {
 	scopeKey?: string;
 	grantedAt?: string;
 	messageEntryId?: string;
-	/** Settings grants the owner wrote (not the default) and grants the owner typed (see `EdgeGrantRecord.standing`). */
+	/** Settings grants from `edge.thirdPartyAllow` and grants the owner typed (see `EdgeGrantRecord.standing`). */
 	standing?: true;
 }
 
@@ -720,6 +940,7 @@ export function resolveToolkitScriptScope(
 
 /** Check whether an edge operation is covered by active grants (broad class grant or exact scopeKey). */
 export function isEdgeOperationGranted(operation: EdgeOperation, grants: readonly EdgeGrantView[]): boolean {
+	if (operation.ungrantable) return false;
 	return grants.some((grant) => {
 		if (grant.class !== operation.class) return false;
 		if (grant.scopeKey === undefined) return true;
@@ -798,6 +1019,8 @@ function revokeRecord(data: unknown): EdgeRevokeRecord | undefined {
  * Replay the branch's grant and revoke records over the machine's standing grants. A revoke removes
  * a session or instruction grant; a settings grant is the machine's and stays until the setting
  * changes. Supports multiple scoped grants for one class, broad class grants, and scoped revocation.
+ * Standing is kept per grant: a later record of the same class and scope that does not stand (a
+ * prompt answer, a cited grant) never takes it away; only a revoke does.
  */
 export function collectEdgeGrants(
 	entries: readonly EdgeGrantSourceEntry[],
@@ -821,7 +1044,9 @@ export function collectEdgeGrants(
 			const record = grantRecord(custom.data);
 			if (!record) continue;
 			const key = `${record.class}:${record.scopeKey ?? "*"}`;
-			if (grants.get(key)?.source === "settings") continue;
+			const prior = grants.get(key);
+			if (prior?.source === "settings") continue;
+			const standing = record.standing === true || prior?.standing === true;
 			grants.set(key, {
 				class: record.class,
 				source: record.source,
@@ -829,7 +1054,7 @@ export function collectEdgeGrants(
 				...(record.note ? { note: record.note } : {}),
 				...(record.scopeKey !== undefined ? { scopeKey: record.scopeKey } : {}),
 				...(record.messageEntryId ? { messageEntryId: record.messageEntryId } : {}),
-				...(record.standing ? { standing: true as const } : {}),
+				...(standing ? { standing: true as const } : {}),
 				grantedAt: record.grantedAt,
 			});
 		} else if (custom.customType === EDGE_REVOKE_CUSTOM_TYPE) {
@@ -865,12 +1090,40 @@ export type EdgeConfirmationHandler = (request: EdgeConfirmationRequest, signal?
 
 export const EDGE_CONFIRMATION_REQUIRED = "edge_confirmation_required";
 
+/** One line of at most `bound` characters: the action is shortened, never the head or the tail. */
+export function boundedActionLine(head: string, action: string, tail: string, bound: number): string {
+	const room = Math.max(16, bound - head.length - tail.length);
+	return `${head}${action.length <= room ? action : `${action.slice(0, room - 1)}…`}${tail}`;
+}
+
+/** The classes of `operations` a grant can cover (a write into the session store never is). */
+export function grantableEdgeClasses(operations: readonly EdgeOperation[]): EdgeClass[] {
+	return [...new Set(operations.filter((operation) => !operation.ungrantable).map((operation) => operation.class))];
+}
+
+/** How the owner lets a run carrying a third party's words do `operations`: their own turn, or a standing grant. */
+export function thirdPartyReleaseLine(operations: readonly EdgeOperation[]): string {
+	const grantable = grantableEdgeClasses(operations);
+	return `It runs only when the owner asks for it in their own turn${grantable.length > 0 ? `, or after they type ${grantable.map((edgeClass) => `/edge allow ${edgeClass}`).join(", ")} or list the classes in edge.thirdPartyAllow` : ""}.`;
+}
+
 /**
- * A worker's call in a run that carries a third party's words, outside the owner's standing grants: refused, never
- * prepared (a worker keeps no drafts), and reported to the parent, which tells the owner.
+ * A worker's calls in a run that carries a third party's words, outside the owner's standing grants: refused, never
+ * prepared (a worker keeps no drafts), and reported to the parent, which tells the owner. The reason is the failure
+ * record's bounded diagnostic (`MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS`); the release goes in the correction, its next action.
  */
-export function thirdPartyEdgeRefusal(operation: EdgeOperation): string {
-	return `Not run: ${operation.operation} (${operation.class}: ${operation.reason}). This run carries words written by someone else, and no standing grant of the owner covers ${operation.class}. Report the action in your result so the parent can tell the owner; only the owner decides it. Do not retry it in this run.`;
+export function thirdPartyEdgeRefusal(operations: readonly EdgeOperation[]): { reason: string; correction: string } {
+	const actions = operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`);
+	const classes = [...new Set(operations.map((operation) => operation.class))];
+	return {
+		reason: boundedActionLine(
+			"Not run: ",
+			actions.join("; "),
+			`; this run carries words written by someone else, and no standing grant of the owner covers ${classes.join(", ")}.`,
+			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
+		),
+		correction: `${thirdPartyReleaseLine(operations)} Report the action in your result so the parent can tell the owner, and continue with the rest.`,
+	};
 }
 
 /** The reason a blocked call carries: what stopped it and each way to grant it, pointers first. */

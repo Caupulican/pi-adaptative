@@ -13,7 +13,6 @@ import type { AgentMessage } from "./types.ts";
 
 export type TurnOriginKind =
 	| "owner-typed"
-	| "owner-paste"
 	| "extension-message"
 	| "routine"
 	| "host-event"
@@ -38,7 +37,6 @@ export interface TurnOriginRecord {
 const MAX_CHANNEL_CHARS = 128;
 const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"owner-typed",
-	"owner-paste",
 	"extension-message",
 	"routine",
 	"host-event",

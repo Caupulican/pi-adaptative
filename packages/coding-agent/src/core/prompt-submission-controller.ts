@@ -64,7 +64,7 @@ import type { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import type { ToolProtocolController } from "./tool-protocol-controller.ts";
-import { channelTurnOrigin } from "./turn-origin.ts";
+import { channelTurnOrigin, sendUserMessageOriginError } from "./turn-origin.ts";
 import { boundedLine } from "./util/bounded-line.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
@@ -364,6 +364,9 @@ export class PromptSubmissionController {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions, runtimeLease?: RuntimeWorkLease): Promise<void> {
+		// A third party's message names its origin; one that cannot is refused here, before it is accepted or queued.
+		const originError = options?.origin === undefined ? undefined : sendUserMessageOriginError(options.origin);
+		if (originError) throw new TypeError(`A message's origin is invalid: ${originError}.`);
 		// The owner's submission order, fixed now: every judgment of this submission carries it.
 		const acceptedOrder =
 			options?.internalContextType || options?.source === "extension" ? undefined : ++this.ownerSubmissionOrder;

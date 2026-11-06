@@ -525,7 +525,7 @@ export interface RuntimeBuilderDeps {
 	enforceEdgeOperation?(
 		operation: EdgeOperation,
 		signal?: AbortSignal,
-	): Promise<{ authorized: boolean; reason?: string }>;
+	): Promise<{ authorized: boolean; reason?: string; correction?: string }>;
 	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
 	authorizeGoalStartFromTool?(
 		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,

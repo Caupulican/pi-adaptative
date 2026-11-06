@@ -120,6 +120,8 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/** Whether the run in progress carries a third party's words: YOLO does not skip `checkOperation` for it. */
+	runsThirdParty?(): boolean;
 	/**
 	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
 	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
@@ -419,9 +421,11 @@ export class ToolGateController {
 			if (edge) return edge;
 			const delegation = await this.deps.checkDelegation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (delegation) return delegation;
-			const operation = yolo
-				? undefined
-				: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
+			// YOLO skips the operation gate on the owner's own runs only: it is not a grant to a third party's words.
+			const operation =
+				yolo && !this.deps.runsThirdParty?.()
+					? undefined
+					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (operation) return operation;
 			const soulWrite = await this.deps.checkSoulWrite?.(toolCall, args, effectiveCwd, signal);
 			if (soulWrite) return soulWrite;

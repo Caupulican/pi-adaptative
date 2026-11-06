@@ -3862,21 +3862,21 @@ export class SettingsManager {
 		// Load diagnostics already report the file error. Withhold standing grants, but keep
 		// provider planning and ordinary tools available so the session can diagnose and repair it.
 		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge)))
-			return { mode: "guarded", allow: [], standingAllow: [], deny: [] };
+			return { mode: "guarded", allow: [], thirdPartyAllow: [], deny: [] };
 		const configured = this.settings.edge?.allow;
 		// Resolve once here: foreground, worker inheritance and provider authority context all
 		// consume these grants. Autonomy/learning presets never narrow execution authority.
 		const allow =
 			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
-		// The default grants every class to the owner's own runs; only a list the owner wrote covers a third party's. A
-		// repository's own settings file is not one: a project without a trust decision loads it trusted by default
-		// (`getProjectTrustDefault`), so only the global and directory-profile layers under the agent directory count,
-		// and only within what the effective list allows.
-		const ownerWritten = [this.directoryProfileSettings.edge, this.globalSettings.edge]
-			.map((layer) => (isPlainRecord(layer) ? layer.allow : undefined))
+		// What a run carrying a third party's words may do is its own key, never `allow` (which grants the owner's own
+		// runs). A repository's own settings file never writes it: a project without a trust decision loads it trusted by
+		// default (`getProjectTrustDefault`), so only the global and directory-profile layers under the agent directory
+		// count, the directory profile first. It never exceeds what the owner's own runs may do (`allow`).
+		const thirdPartyWritten = [this.directoryProfileSettings.edge, this.globalSettings.edge]
+			.map((layer) => (isPlainRecord(layer) ? layer.thirdPartyAllow : undefined))
 			.find((list) => list !== undefined);
-		const standingAllow = Array.isArray(ownerWritten)
-			? [...new Set(allow)].filter((edgeClass) => ownerWritten.includes(edgeClass))
+		const thirdPartyAllow = Array.isArray(thirdPartyWritten)
+			? [...new Set(allow)].filter((edgeClass) => thirdPartyWritten.includes(edgeClass))
 			: [];
 		const configuredDeny = this.settings.edge?.deny;
 		// A deny list that cannot be read cannot be enforced, so YOLO waits until it is corrected. The
@@ -3885,12 +3885,12 @@ export class SettingsManager {
 			configuredDeny !== undefined &&
 			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
 		) {
-			return { mode: "guarded", allow: [...new Set(allow)], standingAllow, deny: [] };
+			return { mode: "guarded", allow: [...new Set(allow)], thirdPartyAllow, deny: [] };
 		}
 		return {
 			mode: this.settings.edge?.mode === "yolo" ? "yolo" : "guarded",
 			allow: [...new Set(allow)],
-			standingAllow,
+			thirdPartyAllow,
 			deny: [...new Set((configuredDeny ?? []).map((value) => value.trim()))],
 		};
 	}
