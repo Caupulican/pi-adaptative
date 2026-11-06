@@ -12,6 +12,7 @@ import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { registerBuiltInApiProviders } from "@caupulican/pi-ai/register-builtins";
 import { getAgentDir } from "../config.ts";
 import { Agent } from "../kernel/agent.ts";
+import type { AgentStreamOptions } from "../kernel/loop-config.ts";
 import { convertToLlm } from "../kernel/messages.ts";
 import { getDefaultSessionDir, SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
@@ -633,7 +634,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (!auth.ok) throw new Error(auth.error);
 				return materializeRequestAuth(auth);
 			},
-			streamFn: async (model, context, options) => {
+			streamFn: async (model, context, streamOptions) => {
+				// The conversation identity is the host's own: it keys the prefix monitor and never reaches the provider.
+				const { conversationId, ...options }: AgentStreamOptions = streamOptions ?? {};
 				const bedrockScope =
 					model.provider === BEDROCK_PROVIDER_ID ? getActiveBedrockScope(settingsManager) : undefined;
 				if (model.provider === BEDROCK_PROVIDER_ID && !bedrockScope && !isUnscopedBedrockProxy()) {
@@ -699,12 +702,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
 						? { ...model, serviceTiers }
 						: model;
-				const prefixChange = promptPrefixMonitor.check(
-					requestModel,
-					context,
-					providerOptions.sessionId,
-					sessionRef.current?.ownerSystemPrompt.lineageOf(context.systemPrompt ?? ""),
-				);
+				const prefixChange = promptPrefixMonitor.check(requestModel, context, {
+					sessionId: providerOptions.sessionId,
+					conversationId,
+					lineage: sessionRef.current?.ownerSystemPrompt.lineageOf(context.systemPrompt ?? ""),
+				});
 				if (prefixChange) sessionRef.current?.emitHostWarning(prefixChange);
 				return streamSimple(requestModel, context, providerOptions);
 			},

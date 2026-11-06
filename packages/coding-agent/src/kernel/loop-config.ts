@@ -24,6 +24,16 @@ import type {
 	ToolExecutionMode,
 } from "./types.ts";
 
+/** The options a stream function receives: the provider's options plus the host's identity of the request's conversation. */
+export interface AgentStreamOptions extends SimpleStreamOptions {
+	/**
+	 * The conversation the request belongs to when `sessionId` is a cache-affinity key that several conversations share
+	 * (a host's isolated lanes: two workers on one model and system prompt). Omitted, `sessionId` is the conversation.
+	 * Host-side only: per-conversation host policy and diagnostics key by it; it is never sent to a provider.
+	 */
+	conversationId?: string;
+}
+
 /**
  * Stream function used by the agent loop.
  *
@@ -36,7 +46,7 @@ import type {
 export type StreamFn = (
 	model: Model<Api>,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options?: AgentStreamOptions,
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 /**
@@ -513,7 +523,7 @@ export interface FollowUpState {
 	readonly lastReplyEmpty: boolean;
 }
 
-export interface AgentLoopConfig extends SimpleStreamOptions {
+export interface AgentLoopConfig extends AgentStreamOptions {
 	model: Model<any>;
 
 	/**
@@ -679,9 +689,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 			maxTokens?: number;
 			sourceMessages: readonly AgentMessage[];
 			/**
-			 * The conversation the request belongs to (`AgentLoopConfig.sessionId`). One resolver can serve
-			 * several conversations (a host's isolated lanes reuse its policy), so per-conversation state is
-			 * keyed by it.
+			 * The conversation the request belongs to (`AgentLoopConfig.conversationId`, else its `sessionId`). One
+			 * resolver can serve several conversations (a host's isolated lanes reuse its policy), so per-conversation
+			 * state is keyed by it.
 			 */
 			sessionId?: string;
 		},

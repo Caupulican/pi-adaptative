@@ -644,13 +644,14 @@ export async function startPlannedAgentProviderRequestWithId(
 			});
 			signal?.throwIfAborted();
 
+			const conversation = config.conversationId ?? config.sessionId;
 			const requestReasoning = config.resolveRequestReasoning
 				? config.resolveRequestReasoning(config.reasoning, {
 						model: config.model,
 						context: materialized.context,
 						maxTokens: requestMaxTokens,
 						sourceMessages: plan.messages,
-						...(config.sessionId !== undefined ? { sessionId: config.sessionId } : {}),
+						...(conversation !== undefined ? { sessionId: conversation } : {}),
 					})
 				: config.reasoning;
 			const streamFunction = streamFn ?? streamSimple;

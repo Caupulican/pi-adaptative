@@ -15,8 +15,13 @@ import {
  * request. The system prompt and the tool list must not change between requests (OpenAI Codex tracks
  * the same invariant as `tools_changed` and tests that tools are identical across requests), and the
  * marked chat-view prefix remains stable across overlapping blocks. The monitor compares each request
- * with the session's previous one and names the first changed segment. This detects prefix churn;
+ * with its conversation's previous one and names the first changed segment. This detects prefix churn;
  * provider usage is still needed to establish cache hits or their billed cost.
+ *
+ * A conversation is a session, or one conversation of an isolated lane: a lane's requests share one
+ * cache-affinity key (lane kind, model, system prompt), so two workers on one model are two
+ * conversations under one key, and the first request of each starts its own prefix. Each worker's
+ * tool set is its own grant (a worker for a third party's words is offered none of the owner's memory).
  *
  * It does not judge rewrites of already-sent messages. Those belong to the context shrinker, and the
  * cache custody guard classifies each one as a priced (sanctioned) rewrite or an unsanctioned break
@@ -26,9 +31,9 @@ import {
  * segment, in wire order. No prompt text is written.
  */
 
-/** Warnings reported per session before further changes are only counted. */
-const MAX_REPORTS_PER_SESSION = 5;
-const MAX_TRACKED_SESSIONS = 32;
+/** Warnings reported per conversation before further changes are only counted. */
+const MAX_REPORTS_PER_CONVERSATION = 5;
+const MAX_TRACKED_CONVERSATIONS = 32;
 
 function digest(value: unknown): string {
 	return createHash("sha1")
@@ -179,9 +184,22 @@ function prefixChange(
 
 type LineageSystem = Pick<RequestFingerprint, "model" | "system" | "systemText">;
 
+/** Who sent a request, as the monitor keys it. */
+export interface PromptPrefixRequest {
+	/** The provider session id the request carries: the session's own, or an isolated lane's cache-affinity key. */
+	readonly sessionId: string | undefined;
+	/** The lane conversation the request belongs to when `sessionId` is a key several conversations share. */
+	readonly conversationId: string | undefined;
+	/**
+	 * The variant of the session's system prompt the request sends (the owner's, or one with the owner's memory
+	 * withheld). Omitted, every request is one lineage.
+	 */
+	readonly lineage: string | undefined;
+}
+
 export class PromptPrefixMonitor {
 	private readonly previous = new Map<string, RequestFingerprint>();
-	/** Per session, the system prompt each lineage last sent: each variant of a session's prompt is its own prefix. */
+	/** Per conversation, the system prompt each lineage last sent: each variant of a session's prompt is its own prefix. */
 	private readonly lineageSystems = new Map<string, Map<string, LineageSystem>>();
 	private readonly reports = new Map<string, number>();
 	private readonly viewRewrites = new Map<string, ContinuousChatCacheRewrite>();
@@ -192,13 +210,14 @@ export class PromptPrefixMonitor {
 	}
 
 	/**
-	 * Fingerprint a request, optionally trace it, and describe how it broke the previous request's prefix. `lineage`
-	 * names the variant of the session's system prompt the request sends (the owner's, or one with the owner's memory
-	 * withheld): its system prompt is compared with the same lineage's last request, its tools and chat view with the
-	 * session's last request. Omitted, every request is one lineage.
+	 * Fingerprint a request, optionally trace it, and describe how it broke its conversation's previous request's
+	 * prefix: the system prompt is compared with the same lineage's last request, tools and chat view with the
+	 * conversation's last request. A conversation is the session id, or the lane conversation under its affinity key.
 	 */
-	check(model: Model<Api>, context: Context, sessionId: string | undefined, lineage = ""): string | undefined {
-		const key = sessionId ?? "";
+	check(model: Model<Api>, context: Context, request: PromptPrefixRequest): string | undefined {
+		const { sessionId, conversationId } = request;
+		const lineage = request.lineage ?? "";
+		const key = conversationId === undefined ? (sessionId ?? "") : `${sessionId ?? ""}\u0000${conversationId}`;
 		const current = fingerprintRequest(model, context);
 		const previous = this.previous.get(key);
 		const systems = this.lineageSystems.get(key) ?? new Map<string, LineageSystem>();
@@ -210,10 +229,10 @@ export class PromptPrefixMonitor {
 				? compareContinuousChatCache(previous.viewCache, current.viewCache)
 				: undefined;
 		if (viewChange?.rewrite) this.viewRewrites.set(key, viewChange.rewrite);
-		this.writeTrace(sessionId, current, viewChange?.rewrite);
+		this.writeTrace(sessionId, conversationId, current, viewChange?.rewrite);
 		this.previous.delete(key);
 		this.previous.set(key, current);
-		while (this.previous.size > MAX_TRACKED_SESSIONS) {
+		while (this.previous.size > MAX_TRACKED_CONVERSATIONS) {
 			const oldest = this.previous.keys().next().value;
 			if (oldest === undefined) break;
 			this.previous.delete(oldest);
@@ -226,13 +245,15 @@ export class PromptPrefixMonitor {
 		if (change === undefined) return undefined;
 		const reported = (this.reports.get(key) ?? 0) + 1;
 		this.reports.set(key, reported);
-		if (reported > MAX_REPORTS_PER_SESSION) return undefined;
-		const suffix = reported === MAX_REPORTS_PER_SESSION ? " Further changes in this session are not reported." : "";
+		if (reported > MAX_REPORTS_PER_CONVERSATION) return undefined;
+		const suffix =
+			reported === MAX_REPORTS_PER_CONVERSATION ? " Further changes in this conversation are not reported." : "";
 		return `Prompt cache prefix changed between requests: ${change}. Cache reuse may be reduced from that point.${suffix}`;
 	}
 
 	private writeTrace(
 		sessionId: string | undefined,
+		conversationId: string | undefined,
 		fingerprint: RequestFingerprint,
 		viewRewrite: ContinuousChatCacheRewrite | undefined,
 	): void {
@@ -247,7 +268,7 @@ export class PromptPrefixMonitor {
 		} = fingerprint;
 		appendFileSync(
 			path,
-			`${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced, ...(viewRewrite ? { viewRewrite } : {}) })}\n`,
+			`${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...(conversationId ? { conversation: conversationId } : {}), ...traced, ...(viewRewrite ? { viewRewrite } : {}) })}\n`,
 		);
 	}
 }

@@ -25,7 +25,7 @@ import type {
 } from "@caupulican/pi-ai/types";
 import type { Agent } from "../kernel/agent.ts";
 import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
-import type { AgentContext, AgentLoopConfig } from "../kernel/index.ts";
+import type { AgentContext, AgentLoopConfig, AgentStreamOptions } from "../kernel/index.ts";
 import { resolveProviderRequestOptions, resolveRequestPreflightMaxTokens } from "../kernel/provider-request-planner.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
@@ -1509,12 +1509,15 @@ export class ReflectionController {
 				model,
 				opts.systemPrompt,
 			);
-			const options: SimpleStreamOptions = {
+			// The affinity key is shared by every conversation of the lane: a caller's own conversation is named beside it.
+			const conversation = opts.conversationId !== undefined ? { conversationId: opts.conversationId } : {};
+			const options: AgentStreamOptions = {
 				maxTokens: opts.maxTokens,
 				signal: opts.signal,
 				interactionMode: "background",
 				cacheRetention: opts.cacheRetention,
 				sessionId: affinityKey,
+				...conversation,
 				requestGuard: opts.requestGuard,
 				providerResponseObserver: opts.providerResponseObserver,
 				maxRetries: opts.maxRetries,
@@ -1532,6 +1535,7 @@ export class ReflectionController {
 				cacheRetention: opts.cacheRetention,
 				// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
 				sessionId: affinityKey,
+				...conversation,
 				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
 				...(options.headers !== undefined ? { headers: options.headers } : {}),
 				...(options.credentialHeaders !== undefined ? { credentialHeaders: options.credentialHeaders } : {}),
@@ -1558,12 +1562,8 @@ export class ReflectionController {
 						temperature: textToolCallProtocol ? 0 : undefined,
 					};
 				},
-				// The host's reasoning policy, applied to this conversation's own state.
-				resolveRequestReasoning:
-					opts.conversationId !== undefined && agent.resolveRequestReasoning
-						? (reasoning, request) =>
-								agent.resolveRequestReasoning!(reasoning, { ...request, sessionId: opts.conversationId })
-						: agent.resolveRequestReasoning,
+				// The host's reasoning policy, applied to this conversation's own state (the planner keys it by `conversationId`).
+				resolveRequestReasoning: agent.resolveRequestReasoning,
 				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
 				transport: agent.transport,
 				thinkingBudgets: agent.thinkingBudgets,
