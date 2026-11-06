@@ -2768,9 +2768,10 @@ export class PersistentBotTeamStore {
 				input.ownerUpdate,
 				input.conditionMet,
 			);
-			// Its run time is measured from the running transition, so time waiting for a worker is not counted.
+			// Its run time is the span from its claim to its result: the lead must cover everything between starting the run
+			// and having its result, so a wait for a worker and a retried attempt count (a new attempt moves `updatedAt`).
 			if (input.outcome === "succeeded" && item.phase === "running")
-				this.recordRoutineRunDuration(item, input.nowMs - item.updatedAt);
+				this.recordRoutineRunDuration(item, input.nowMs - item.createdAt);
 			return finished;
 		});
 	}

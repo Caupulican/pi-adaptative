@@ -116,7 +116,7 @@ const readyFields = {
 	readyBy: Type.Optional(
 		Type.Literal(true, {
 			description:
-				"Optional: each slot is when the result should be ready, so a run may start before it, by readyLeadMs or, without it, by a lead the host derives from this routine's own measured run times (15 minutes before any run, at most 2 hours). The run still belongs to its slot, never overlaps an unfinished run of the routine, and any late bound counts from the slot.",
+				"Optional: each slot is when the result should be ready, so a run may start before it, by readyLeadMs or, without it, by a lead the host derives from this routine's own measured run times (15 minutes before any run, at most 2 hours). The run still belongs to its slot, a slot's run never starts early while an earlier run of the routine is unfinished, and any late bound counts from the slot.",
 		}),
 	),
 	readyLeadMs: Type.Optional(
@@ -1527,9 +1527,10 @@ export function routineReadyLead(
 /**
  * When the cursor's next slot may start, the one due computation the live session and the away daemon share: `slot`
  * is the slot's identity, `opensAt` the earliest instant its run may be claimed. Without `readyBy`, for a slot at or
- * after `expiresAt`, or while any run of the routine is unfinished (runs never overlap), it opens at the slot.
+ * after `expiresAt`, while any run of the routine is unfinished (a window never opens early over a run that has not
+ * finished), or for a calendar zone this runtime cannot place (the previous slot needs the zone), it opens at the slot.
  * Otherwise it opens the lead before the slot ({@link routineReadyLead}), never before the routine's last edit and
- * never earlier than halfway from the previous slot (or the anchor) to it.
+ * never earlier than halfway from the previous slot (or the anchor) to it. It never throws.
  */
 export function routineStartWindow(
 	routine: RoutineDefinitionView,
@@ -1543,6 +1544,7 @@ export function routineStartWindow(
 	if (
 		lead === undefined ||
 		schedule.kind === "event" ||
+		routineZoneUnsupported(schedule) !== undefined ||
 		(schedule.kind !== "once" && schedule.expiresAt !== undefined && slot >= schedule.expiresAt)
 	)
 		return { slot, opensAt: slot };
