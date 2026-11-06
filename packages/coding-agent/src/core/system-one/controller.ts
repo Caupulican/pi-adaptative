@@ -74,7 +74,7 @@ import {
 	evaluateDeterministicCompletionGates,
 	evaluateNoul,
 	type FinalCompletionVerdict,
-	noulFromAnswer,
+	readNoulBand,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
 import type { SemanticDoubtDecision, SemanticUncertaintyPort } from "./semantic-doubts.ts";
@@ -633,20 +633,16 @@ export class SystemOneController {
 		// An unasked question is neutral, not false-by-accident: every id here reads "the user is
 		// imposing or lifting something", so absent means the request did nothing to that axis.
 		const hardYes = (id: string): boolean =>
-			id in asked &&
-			evaluateNoul(noulFromAnswer(response.answers[id], false), "required_true", this.config.thresholds) ===
-				"hard_pass";
+			id in asked && readNoulBand(response.answers[id], "required_true", this.config.thresholds) === "hard_pass";
 		return {
 			status: "classified",
 			classification: {
 				...(optionalToolIntent ? { optionalToolIntent } : {}),
+				// Anything but a decisive no may change the pools, so an asked question with no answer counts as may.
 				mayChangeModelPools:
 					"changes_model_pools" in asked &&
-					evaluateNoul(
-						noulFromAnswer(response.answers.changes_model_pools, false),
-						"required_true",
-						this.config.thresholds,
-					) !== "hard_fail",
+					readNoulBand(response.answers.changes_model_pools, "required_true", this.config.thresholds) !==
+						"hard_fail",
 				capabilitiesAuthorized: hardYes("capabilities_authorized"),
 				localCommitsOnly: hardYes("local_commits_only"),
 				liftsDeliveryBlock: hardYes("lifts_delivery_block"),
@@ -690,11 +686,7 @@ export class SystemOneController {
 		const carriesInstruction = screenedIndex.map(
 			(index) =>
 				index === undefined ||
-				evaluateNoul(
-					noulFromAnswer(response.answers[`carries_${index}`], false),
-					"required_true",
-					this.config.thresholds,
-				) !== "hard_pass",
+				readNoulBand(response.answers[`carries_${index}`], "required_true", this.config.thresholds) !== "hard_pass",
 		);
 		if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId, "owner words screened", [], []);
 		return { status: "screened", carriesInstruction };

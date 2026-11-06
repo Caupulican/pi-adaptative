@@ -2,6 +2,7 @@ import {
 	type NoulBand,
 	type NoulBandThresholds,
 	type NoulDirection,
+	type NoulReading,
 	noulBand,
 	noulProbability,
 	readNoul,
@@ -39,23 +40,6 @@ export type FinalCompletionVerdict = {
 	| { verdict: "blocked_external"; diagnostic?: "evaluator_unavailable" }
 );
 
-/**
- * @deprecated A missing answer becomes `fallback`, which then reads as a decisive P=1 or P=0. Read
- * answers with `noulProbability` / `readNoul` (`decision/noul.ts`), where an unasked question is
- * undecided. Kept only until the remaining callers migrate.
- */
-export function noulFromAnswer(answer: unknown, fallback: boolean): number | boolean {
-	if (typeof answer === "boolean" || typeof answer === "number") return answer;
-	if (answer && typeof answer === "object") {
-		const record = answer as { noul?: unknown; boolean?: unknown; value?: unknown };
-		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
-		if (typeof record.boolean === "boolean") return record.boolean;
-		if (typeof record.value === "boolean") return record.value;
-		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
-	}
-	return fallback;
-}
-
 /** The operator's configured numbers, in the shape the band arithmetic takes. */
 export function noulBandThresholds(
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
@@ -72,6 +56,18 @@ export function noulBandThresholds(
 			hardFailMin: thresholds.noul_required_false.hard_fail_min,
 		},
 	};
+}
+
+/**
+ * The band a yes/no answer lands in against the end its decision requires, or "unasked" when it holds no
+ * probability: a question that was never asked is undecided, never a decisive yes or no.
+ */
+export function readNoulBand(
+	answer: unknown,
+	direction: NoulDirection,
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): NoulReading {
+	return readNoul(answer, direction, noulBandThresholds(thresholds));
 }
 
 export function evaluateNoul(
@@ -138,14 +134,10 @@ export function isAdverseAnswer(answer: unknown): boolean {
  * The yes/no a noul answer settles on, or undefined when it settles nothing: an ambiguous band, or an
  * answer that holds no probability (a question never asked is not a yes or a no).
  * The one sanctioned way to get a boolean out of a probability: there is no 0.5 cutoff anywhere.
- *
- * `_fallback` is deprecated and read by nothing: a missing answer used to become it, and so a P=1 or
- * P=0. Callers drop the argument as they migrate.
  */
 export function settledNoul(
 	answer: unknown,
 	direction: NoulDirection,
-	_fallback: boolean,
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): boolean | undefined {
 	const reading = readNoul(answer, direction, noulBandThresholds(thresholds));
@@ -165,7 +157,7 @@ export function noulHolds(
 	direction: NoulDirection,
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): boolean {
-	return settledNoul(answer, direction, false, thresholds) === true;
+	return settledNoul(answer, direction, thresholds) === true;
 }
 
 /** Only a `hard_pass`. A soft pass is provisional and an ambiguous answer decided nothing. */
