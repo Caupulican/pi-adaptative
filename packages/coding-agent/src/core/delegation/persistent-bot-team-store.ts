@@ -51,6 +51,7 @@ import {
 	ROUTINE_INTAKE_LIVE_CAP,
 	ROUTINE_INTAKE_WINDOW_CAP,
 	ROUTINE_JOURNAL_SHARE,
+	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
@@ -1847,7 +1848,7 @@ export class PersistentBotTeamStore {
 				throw new Error("Routine interval has no representable future instant.");
 			if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
 				throw new Error("Calendar rule never matches a date.");
-			const nextRunAt = plannedRunAt ?? Number.MAX_SAFE_INTEGER;
+			const nextRunAt = plannedRunAt ?? ROUTINE_NO_NEXT_RUN_AT;
 			const view: RoutineDefinitionView = {
 				...definition,
 				cursor,
@@ -2350,7 +2351,7 @@ export class PersistentBotTeamStore {
 			routine = {
 				...stored,
 				cursor: rebased,
-				nextRunAt: nextRoutineAt(schedule, rebased) ?? Number.MAX_SAFE_INTEGER,
+				nextRunAt: nextRoutineAt(schedule, rebased) ?? ROUTINE_NO_NEXT_RUN_AT,
 			};
 			this.routines.set(id, routine);
 			changed = true;
@@ -2364,7 +2365,7 @@ export class PersistentBotTeamStore {
 			this.routines.set(id, {
 				...from,
 				cursor,
-				nextRunAt: nextRoutineAt(schedule, cursor) ?? Number.MAX_SAFE_INTEGER,
+				nextRunAt: nextRoutineAt(schedule, cursor) ?? ROUTINE_NO_NEXT_RUN_AT,
 			});
 			return { changed: true, journalFull: false };
 		};

@@ -63,6 +63,8 @@ export const MAX_ROUTINE_EVENT_MISSED_COUNT = 100_000;
 export const MAX_ROUTINE_WORKFLOW_PATH_CHARS = 2_048;
 export const MAX_ROUTINE_SUMMARY_CHARS = 1_000;
 export const MAX_ROUTINE_INSTANT_MS = 8_640_000_000_000_000;
+/** `nextRunAt` of a routine with no slot left to place: an event routine, or a schedule that has run out of slots. It is not an instant. */
+export const ROUTINE_NO_NEXT_RUN_AT = Number.MAX_SAFE_INTEGER;
 export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
 /** Shortest start window: timer and claim latency must never close a window by themselves. */
 export const MIN_ROUTINE_START_WINDOW_MS = 60_000;
@@ -1564,7 +1566,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			cursor.throughOrdinal < definition.schedule.anchorOrdinal
 		)
 			return undefined;
-		const nextRunAt = nextRoutineAt(definition.schedule, cursor) ?? Number.MAX_SAFE_INTEGER;
+		const nextRunAt = nextRoutineAt(definition.schedule, cursor) ?? ROUTINE_NO_NEXT_RUN_AT;
 		if (
 			rawNextRunAt !== nextRunAt ||
 			(lastRunAt !== undefined && !validInstant(lastRunAt)) ||

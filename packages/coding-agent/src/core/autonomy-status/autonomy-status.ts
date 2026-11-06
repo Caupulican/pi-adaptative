@@ -26,7 +26,12 @@ import {
 	parentTurnWakes,
 } from "../proactivity/proactivity-controller.ts";
 import type { AwayServiceInspection } from "../routines/away-service.ts";
-import { type RoutineDefinitionView, routineAwaySpendRoom, routineEnded } from "../routines/routine-contract.ts";
+import {
+	ROUTINE_NO_NEXT_RUN_AT,
+	type RoutineDefinitionView,
+	routineAwaySpendRoom,
+	routineEnded,
+} from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -58,6 +63,7 @@ export interface RoutineStatusItem {
 	readonly state: "enabled" | "paused" | "paused-after-failures" | "ended";
 	readonly ended?: "spent" | "condition" | "expired";
 	readonly schedule: RoutineDefinitionView["schedule"]["kind"];
+	/** Absent for an event routine, an ended one, and a schedule with no slot left. */
 	readonly nextRunAt?: number;
 	readonly lastRunAt?: number;
 	readonly lastStatus?: RoutineDefinitionView["lastStatus"];
@@ -311,7 +317,7 @@ function routineItem(routine: RoutineDefinitionView, nowMs: number): RoutineStat
 		state: ended ? "ended" : routine.enabled ? "enabled" : routine.failurePause ? "paused-after-failures" : "paused",
 		...(ended ? { ended } : {}),
 		schedule: routine.schedule.kind,
-		...(ended ? {} : { nextRunAt: routine.nextRunAt }),
+		...(ended || routine.nextRunAt === ROUTINE_NO_NEXT_RUN_AT ? {} : { nextRunAt: routine.nextRunAt }),
 		...(routine.lastRunAt !== undefined ? { lastRunAt: routine.lastRunAt } : {}),
 		...(routine.lastStatus ? { lastStatus: routine.lastStatus } : {}),
 		...(routine.awayRefusal && awayReason ? { awayRefusal: { reason: awayReason, at: routine.awayRefusal.at } } : {}),
