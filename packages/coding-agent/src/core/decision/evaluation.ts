@@ -70,6 +70,8 @@ export interface ScoreDecisionResult {
 export interface SetDecisionResult {
 	readonly kind: "set";
 	readonly selected: readonly string[];
+	/** Members whose answer settled neither in nor out; absent when every member settled. */
+	readonly unsettled?: readonly string[];
 	readonly memberships: Record<string, number>;
 	readonly confidence: DecisionConfidence;
 }
@@ -109,6 +111,8 @@ export interface DecisionEvaluationAudit {
 	readonly consequence?: string;
 	readonly fallbackChain?: readonly string[];
 	readonly policyDisposition?: string;
+	/** The semantic ledger's id for this evaluation when a recording engine ran it: the key for `noteTrace`. */
+	readonly evaluationId?: string;
 	/** Persistence outcome of each paid provider response behind this evaluation (retries included). */
 	readonly receipts?: readonly SystemOneReceipt[];
 }
@@ -128,6 +132,8 @@ export interface DecisionEvaluation {
 	readonly timestamp: string;
 	readonly proposedFunctionCall?: FunctionCallDecisionResult;
 	readonly audit?: DecisionEvaluationAudit;
+	/** The engine's answers as returned, for readers that need fields the typed results do not carry. */
+	readonly rawAnswers?: Readonly<Record<string, unknown>>;
 }
 
 export function createDecisionEvaluation(input: {
@@ -140,6 +146,7 @@ export function createDecisionEvaluation(input: {
 	readonly proposedFunctionCall?: FunctionCallDecisionResult;
 	readonly timestamp?: string;
 	readonly audit?: DecisionEvaluationAudit;
+	readonly rawAnswers?: Readonly<Record<string, unknown>>;
 }): DecisionEvaluation {
 	return {
 		schema_version: "2.0",
@@ -156,5 +163,6 @@ export function createDecisionEvaluation(input: {
 		timestamp: input.timestamp ?? new Date().toISOString(),
 		proposedFunctionCall: input.proposedFunctionCall,
 		audit: input.audit,
+		...(input.rawAnswers ? { rawAnswers: input.rawAnswers } : {}),
 	};
 }

@@ -26,6 +26,8 @@ export interface JevEvaluationRequest {
 
 export interface JevEvaluationResponse {
 	model: string;
+	/** The provider driver that answered (its id). Absent from adapters that do not name one. */
+	provider?: string;
 	answers: Record<string, unknown>;
 	usage?: {
 		input_tokens?: number;
@@ -160,7 +162,7 @@ export interface SystemOneJevAdapterDeps {
  * R-006: Pin Jev to jev-1.13.0 in production.
  * R-007: Log the concrete model version and reject unexpected model drift.
  * R-032: Secrets, tokens, credentials, private keys, and user keys MUST NOT be leaked.
- * R-066: The adapter never invents an answer when Jev is unavailable: it throws, and the consumer applies the
+ * R-066: The adapter never invents an answer when System One is unavailable: it throws, and the consumer applies the
  * authority line (authority-line.ts). Objective transitions hold, delivery and edge classes stay with the
  * operator through the deterministic gates, and the shell gate's advisory judgment lets the call run with the
  * doubt shown, because code already decided every edge class before System One was asked.
@@ -320,7 +322,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (this.config.model.pin_required && !modelsMatch) {
 					throw new JevAdapterFailure(
 						"model_drift",
-						`Model drift detected: requested pinned model '${targetModel}', but Jev endpoint returned '${returnedModel}' (R-007)`,
+						`Model drift detected: requested pinned model '${targetModel}', but the System One endpoint returned '${returnedModel}' (R-007)`,
 						impact,
 						undefined,
 						result.receipts ?? [],
@@ -334,7 +336,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					if (missing.length > 0) {
 						throw new JevAdapterFailure(
 							"invalid_response",
-							`Incomplete Jev answers: missing '${missing[0]}'`,
+							`Incomplete System One answers: missing '${missing[0]}'`,
 							impact,
 							undefined,
 							result.receipts ?? [],
@@ -344,6 +346,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 
 				return {
 					model: returnedModel,
+					provider: driver.id,
 					answers,
 					usage: result.response.usage,
 					latency_ms,

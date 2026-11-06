@@ -2,11 +2,18 @@
  * Decision Action Policy.
  * Governs confidence, provenance, and consequence validation before semantic actions execute.
  * Conforms to DECISION_ENGINE_RULES.md and ROUTING_PROGRAM.md.
+ *
+ * Cuts come from `thresholds.ts`. A yes/no result is read by its band (which already carries the
+ * direction), never by max(p, 1-p): an answer in the middle band is uncertain, and so is a soft pass
+ * at critical consequence. A Choice is read on P(selected), never on `confidence`. Only a missing
+ * result or a disallowed provenance is an engine miss; an answer below a cut is uncertainty and stays
+ * uncertainty (`gather_more`), it is never handed to another engine as if the first had not answered.
  */
 
 import type { ConfidenceProvenance } from "./confidence.ts";
-import type { DecisionEvaluation } from "./evaluation.ts";
+import type { ChoiceDecisionResult, DecisionEvaluation } from "./evaluation.ts";
 import type { Consequence } from "./primitives.ts";
+import { CHOICE_RUNNER_UP_MARGIN, type ChoiceActReading, type ChoiceRisk, choiceAct } from "./thresholds.ts";
 
 export type DecisionPolicyDisposition =
 	| "accept"
@@ -19,7 +26,7 @@ export type DecisionPolicyDisposition =
 export interface DecisionActionPolicyOptions {
 	readonly consequence?: Consequence;
 	readonly requiredDecisionIds?: readonly string[];
-	readonly minimumConfidence?: number;
+	/** Runner-up margin a Choice must clear; by default {@link CHOICE_RUNNER_UP_MARGIN} at high and critical, none below. */
 	readonly minimumMargin?: number;
 	readonly allowedProvenances?: readonly ConfidenceProvenance[];
 }
@@ -30,18 +37,46 @@ export interface PolicyEvaluationResult {
 	readonly failedChecks: readonly string[];
 }
 
+/** What acting on a Choice risks at each consequence: the act floor on P(selected) rises with it. */
+const CHOICE_RISK_BY_CONSEQUENCE: Readonly<Record<Consequence, ChoiceRisk>> = Object.freeze({
+	low: "reversible",
+	medium: "reversible",
+	high: "consequential",
+	critical: "consequential",
+});
+
+function choiceMargin(consequence: Consequence, override?: number): number | undefined {
+	return override ?? (consequence === "high" || consequence === "critical" ? CHOICE_RUNNER_UP_MARGIN : undefined);
+}
+
+function readChoice(
+	choice: Pick<ChoiceDecisionResult, "selected" | "distribution">,
+	consequence: Consequence,
+	minimumMargin?: number,
+): ChoiceActReading {
+	const minMargin = choiceMargin(consequence, minimumMargin);
+	return choiceAct(
+		choice,
+		undefined,
+		CHOICE_RISK_BY_CONSEQUENCE[consequence],
+		minMargin !== undefined ? { minMargin } : {},
+	);
+}
+
 export class DecisionActionPolicy {
 	evaluate(evaluation: DecisionEvaluation, options?: DecisionActionPolicyOptions): PolicyEvaluationResult {
 		const failedChecks: string[] = [];
 		const consequence = options?.consequence ?? "medium";
 		const provenance = evaluation.engine.confidence_provenance;
+		let engineMiss = false;
 
-		// 1. Check required decisions are supported and not missing
+		// 1. Required decisions must be answered: a missing or unsupported one is an engine miss.
 		if (options?.requiredDecisionIds) {
 			for (const id of options.requiredDecisionIds) {
 				const res = evaluation.results[id];
 				if (!res || res.kind === "unsupported") {
 					failedChecks.push(`required_decision_${id}_unsupported`);
+					engineMiss = true;
 				}
 			}
 		}
@@ -54,89 +89,58 @@ export class DecisionActionPolicy {
 				provenance !== "derived_calibrated_probability"
 			) {
 				failedChecks.push(`critical_consequence_disallows_${provenance}`);
+				engineMiss = true;
 			}
 		}
 
 		// 3. Allowed provenances filter
 		if (options?.allowedProvenances && !options.allowedProvenances.includes(provenance)) {
 			failedChecks.push(`provenance_${provenance}_not_in_allowed_list`);
+			engineMiss = true;
 		}
 
-		// 4. Threshold checks
-		const minConf =
-			options?.minimumConfidence ?? (consequence === "critical" ? 0.9 : consequence === "high" ? 0.8 : 0.6);
-		const minMargin =
-			options?.minimumMargin ?? (consequence === "critical" ? 0.4 : consequence === "high" ? 0.2 : 0.05);
-
+		// 4. Whether each answer settled anything.
 		for (const [id, res] of Object.entries(evaluation.results)) {
 			if (options?.requiredDecisionIds && !options.requiredDecisionIds.includes(id)) continue;
 			if (res.kind === "choice") {
-				if (res.confidence.value < minConf) {
-					failedChecks.push(`choice_${id}_confidence_${res.confidence.value}_below_${minConf}`);
-				}
-				if (res.margin < minMargin) {
-					failedChecks.push(`choice_${id}_margin_${res.margin}_below_${minMargin}`);
+				const reading = readChoice(res, consequence, options?.minimumMargin);
+				if (reading !== "act") {
+					const p = res.distribution[res.selected];
+					failedChecks.push(`choice_${id}_${reading}_p_${p ?? "none"}_${CHOICE_RISK_BY_CONSEQUENCE[consequence]}`);
 				}
 			} else if (res.kind === "boolean") {
-				if (res.confidence.value < minConf) {
-					failedChecks.push(`boolean_${id}_confidence_${res.confidence.value}_below_${minConf}`);
+				if (res.band === "ambiguous") {
+					failedChecks.push(`boolean_${id}_ambiguous_p_${res.probabilityTrue}`);
+				} else if (res.band === "soft_pass" && consequence === "critical") {
+					failedChecks.push(`boolean_${id}_soft_pass_at_critical_p_${res.probabilityTrue}`);
 				}
+			} else if (res.kind === "set" && res.unsettled?.length) {
+				failedChecks.push(`set_${id}_unsettled_${res.unsettled.join(",")}`);
 			}
 		}
 
 		if (failedChecks.length === 0) {
-			return {
-				disposition: "accept",
-				reason: "policy_satisfied",
-				failedChecks: [],
-			};
-		}
-
-		// If required decisions are unsupported or provenance is disallowed -> try next engine
-		const hasUnsupported = failedChecks.some((c) => c.includes("unsupported") || c.includes("disallows"));
-		if (hasUnsupported) {
-			return {
-				disposition: "try_next_engine",
-				reason: failedChecks.join("; "),
-				failedChecks,
-			};
-		}
-
-		// Low confidence on high/critical consequence -> gather more evidence
-		if (consequence === "high" || consequence === "critical") {
-			return {
-				disposition: "gather_more",
-				reason: failedChecks.join("; "),
-				failedChecks,
-			};
+			return { disposition: "accept", reason: "policy_satisfied", failedChecks: [] };
 		}
 
 		return {
-			disposition: "try_next_engine",
+			disposition: engineMiss ? "try_next_engine" : "gather_more",
 			reason: failedChecks.join("; "),
 			failedChecks,
 		};
 	}
 
+	/** One Choice result read on P(selected) at `consequence`: accept when code may act on it, else gather more. */
 	evaluateChoice(
-		choice: { margin: number; confidence: { value: number; provenance: string } },
+		choice: Pick<ChoiceDecisionResult, "selected" | "distribution">,
 		consequence: Consequence = "medium",
 	): { action: DecisionPolicyDisposition; reason: string } {
-		const minConf = consequence === "critical" ? 0.9 : consequence === "high" ? 0.8 : 0.6;
-		const minMargin = consequence === "critical" ? 0.4 : consequence === "high" ? 0.2 : 0.05;
-
-		if (choice.confidence.value < minConf) {
-			return {
-				action: "gather_more",
-				reason: `confidence_${choice.confidence.value}_below_${minConf}`,
-			};
-		}
-		if (choice.margin < minMargin) {
-			return {
-				action: "gather_more",
-				reason: `margin_${choice.margin}_below_${minMargin}`,
-			};
-		}
-		return { action: "accept", reason: "accepted" };
+		const reading = readChoice(choice, consequence);
+		if (reading === "act") return { action: "accept", reason: "accepted" };
+		const p = choice.distribution[choice.selected];
+		return {
+			action: "gather_more",
+			reason: `${reading}_p_${p ?? "none"}_${CHOICE_RISK_BY_CONSEQUENCE[consequence]}`,
+		};
 	}
 }

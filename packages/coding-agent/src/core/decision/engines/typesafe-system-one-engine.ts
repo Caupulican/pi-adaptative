@@ -1,4 +1,5 @@
 import type { SystemOneReceipt } from "../../review/system-one-review-port.ts";
+import { canonicalDigest } from "../../steering/canonical.ts";
 import type { JevAdapter } from "../../system-one/adapter.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "../../system-one/catalog.ts";
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
@@ -13,6 +14,7 @@ import {
 } from "../noul.ts";
 import type { DecisionProgram } from "../program.ts";
 import { DecisionEngineProtocolError } from "../protocol-error.ts";
+import { YES_NO_BANDS } from "../thresholds.ts";
 
 export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 	readonly id = "typesafe-system-one";
@@ -65,13 +67,14 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 						: {}),
 				};
 			} else if (d.kind === "choice") {
-				const criteria: Record<string, string> = {};
+				// An option's exclusion is its own field, not prose pasted into the description. When any
+				// option carries one, every option is sent in the structured form so the criteria stay uniform.
+				const structured = Object.values(d.options).some((opt) => opt.notFor);
+				const criteria: Record<string, string | { what: string; not_for?: string }> = {};
 				for (const [key, opt] of Object.entries(d.options)) {
-					if (opt.notFor) {
-						criteria[key] = `${opt.description} (NOT for: ${opt.notFor})`;
-					} else {
-						criteria[key] = opt.description;
-					}
+					criteria[key] = structured
+						? { what: opt.description, ...(opt.notFor ? { not_for: opt.notFor } : {}) }
+						: opt.description;
 				}
 				questions[d.id] = {
 					type: "choice",
@@ -163,8 +166,11 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					confidence?: number;
 					probabilities?: Record<string, number>;
 				};
-				const allowUnlisted = d.allowUnlistedChoice === true || d.id === "specialist_domain";
-				if (ans.type !== "choice" || typeof ans.choice !== "string" || (!d.options[ans.choice] && !allowUnlisted)) {
+				if (
+					ans.type !== "choice" ||
+					typeof ans.choice !== "string" ||
+					(!d.options[ans.choice] && d.allowUnlistedChoice !== true)
+				) {
 					throw protocolError(`Invalid choice '${ans.choice}' for decision '${d.id}'`, {
 						decisionId: d.id,
 						raw,
@@ -284,7 +290,12 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					},
 				};
 			} else if (d.kind === "set") {
+				// A member is in at the advisory pass cut (or the program's own threshold), out at or below the
+				// advisory fail cut, and unsettled between: an undecided member is never silently "out".
+				const advisory = YES_NO_BANDS.advisory.requiredTrue;
+				const memberIn = d.threshold ?? advisory.hardPass;
 				const selected: string[] = [];
+				const unsettled: string[] = [];
 				const memberships: Record<string, number> = {};
 				let minConf = 1.0;
 
@@ -303,9 +314,8 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					}
 					const prob = ans.noul;
 					memberships[memberKey] = prob;
-					if (prob >= (d.threshold ?? 0.5)) {
-						selected.push(memberKey);
-					}
+					if (prob >= memberIn) selected.push(memberKey);
+					else if (prob > advisory.hardFail) unsettled.push(memberKey);
 					const conf = noulCertainty(prob);
 					if (conf < minConf) {
 						minConf = conf;
@@ -315,6 +325,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				results[d.id] = {
 					kind: "set",
 					selected,
+					...(unsettled.length > 0 ? { unsettled } : {}),
 					memberships,
 					confidence: {
 						value: minConf,
@@ -334,16 +345,19 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			results,
 			audit: {
 				engineId: this.id,
-				provider: "typesafe",
+				...(response.provider ? { provider: response.provider } : {}),
 				model: response.model || this.model,
 				programId: program.id,
 				programVersion: program.version,
+				programDigest: canonicalDigest(questions),
+				stateDigest: canonicalDigest(state),
 				confidenceProvenance: "native_calibrated",
 				latencyMs,
+				...(options?.consequence ? { consequence: options.consequence } : {}),
 				receipts,
 			},
+			rawAnswers: response.answers,
 		});
-		(evaluation as unknown as Record<string, unknown>).rawAnswers = response.answers;
 		return evaluation;
 	}
 }

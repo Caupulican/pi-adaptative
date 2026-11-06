@@ -127,7 +127,19 @@ export class SessionSemanticPlaneController {
 					const evaluation = await engine.evaluate(program, state, options);
 					const { verdict, reasons, questionStates } = verdictFromEvaluation(evaluation);
 					this.health.settleOk(evaluationId, verdict, reasons, questionStates);
-					return evaluation;
+					// The ledger id travels on the audit so the caller can attach its decision trace (`noteTrace`).
+					return {
+						...evaluation,
+						audit: {
+							engineId: evaluation.engine.id,
+							model: evaluation.engine.model,
+							programId: evaluation.program.id,
+							programVersion: evaluation.program.version,
+							confidenceProvenance: evaluation.engine.confidence_provenance,
+							...evaluation.audit,
+							evaluationId,
+						},
+					};
 				} catch (error) {
 					// A cancelled evaluation is not a degraded plane: the abort came from the operator or
 					// the caller, and the plane never reported an outcome to judge it by.

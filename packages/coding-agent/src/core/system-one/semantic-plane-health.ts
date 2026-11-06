@@ -204,27 +204,30 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 
 	/**
 	 * Patch a settled record (recent or retained as a doubt), re-observe it for doubts (idempotent for an
-	 * unchanged verdict), write it through to the durable ledger, notify.
+	 * unchanged verdict), write it through to the durable ledger, notify. False when no settled record is
+	 * held in memory any more.
 	 */
 	private updateSettled(
 		evaluationId: string,
 		patch: (original: SemanticEvaluationRecord) => SemanticEvaluationRecord,
 		write: (sink: SemanticEvaluationDurableSink, updated: SemanticEvaluationRecord) => void,
-	): void {
+	): boolean {
 		const index = this.recent.findIndex((record) => record.evaluationId === evaluationId);
 		const original = index >= 0 ? this.recent[index] : this.doubts.getRecord(evaluationId);
-		if (!original) return;
+		if (!original) return false;
 		const updated = patch(original);
 		if (index >= 0) this.recent[index] = updated;
 		this.doubts.observe(updated);
 		this.toDurable((sink) => write(sink, updated), this.durable?.());
 		this.notify(updated);
+		return true;
 	}
 
 	/**
 	 * The decision trace for an evaluation, bounded and redacted here whatever the caller passed. An
-	 * open evaluation carries it into its settled record; a settled one is updated in place. Either way
-	 * the durable ledger gets it at once.
+	 * open evaluation carries it into its settled record; a settled one is updated in place, and one no
+	 * longer held in memory (bounded out, or another session's) still reaches its durable row, which
+	 * the ledger finds by evaluation id. Either way the durable ledger gets it at once.
 	 */
 	noteTrace(evaluationId: string, trace: SemanticDecisionTrace): void {
 		this.refreshSession();
@@ -234,11 +237,9 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			this.toDurable((sink) => sink.noteTrace?.(evaluationId, bounded), this.evaluationSinks.get(evaluationId));
 			return;
 		}
-		this.updateSettled(
-			evaluationId,
-			(original) => ({ ...original, trace: bounded }),
-			(sink) => sink.noteTrace?.(evaluationId, bounded),
-		);
+		const write = (sink: SemanticEvaluationDurableSink) => sink.noteTrace?.(evaluationId, bounded);
+		if (!this.updateSettled(evaluationId, (original) => ({ ...original, trace: bounded }), write))
+			this.toDurable(write, this.durable?.());
 	}
 
 	/** Completed evaluations, oldest first, bounded. */

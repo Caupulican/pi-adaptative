@@ -89,7 +89,9 @@ export class DecisionEngineRouter {
 					};
 				}
 
-				// disposition === "try_next_engine" -> continue to next compatible engine
+				// "try_next_engine" means this engine missed (an unsupported result or a disallowed provenance).
+				// An answer below a cut comes back as "gather_more" above: uncertainty is returned to the
+				// caller, never re-asked of a less calibrated engine as if this one had not answered.
 			} catch (err) {
 				if (isRequestSpendRefusal(err) || options?.signal?.aborted) throw err;
 				lastError = err;
