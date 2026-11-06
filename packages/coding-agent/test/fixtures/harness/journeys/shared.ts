@@ -1435,6 +1435,18 @@ export function icmLatestResult(request: ScriptedRequest, toolName: string): { i
 	return result;
 }
 
+/**
+ * The diagnostic a refused call's `[harness]` failure record carries: the record is JSON, so a Windows path in the
+ * refusal reads with its separators escaped in the raw text and is compared only after the record is parsed.
+ */
+export function refusalDiagnostic(text: string): string | undefined {
+	if (!text.startsWith("[harness] ")) return undefined;
+	const record: unknown = JSON.parse(text.slice("[harness] ".length));
+	const diagnostic =
+		typeof record === "object" && record !== null ? (record as { diagnostic?: unknown }).diagnostic : undefined;
+	return typeof diagnostic === "string" ? diagnostic : undefined;
+}
+
 /** One answer of the session-model knowledge judge, in the fixed submission shape every program uses. */
 export type KnowledgeJudgmentAnswer =
 	| { readonly id: string; readonly value: boolean; readonly confidence: number }

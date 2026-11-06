@@ -14,7 +14,7 @@ import { parentInputOriginalDetails } from "../../../../src/kernel/session/paren
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { icmLatestResult } from "./shared.ts";
+import { icmLatestResult, refusalDiagnostic } from "./shared.ts";
 
 /**
  * A deployment's transport as the core sees it: it is started with the core's inbound handler, hands events over and
@@ -585,7 +585,10 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 				]) {
 					const refused = result(id);
 					expect(refused.isError, `${id} is refused`).toBe(true);
-					expect(refused.text, `${id} is refused by the private path scope before it runs`).toContain(
+					expect(
+						refusalDiagnostic(refused.text),
+						`${id} is refused by the private path scope before it runs`,
+					).toContain(
 						`envelope_path_denied: "${path}" is outside envelope worker-session-private-paths's path scope. The tool was NOT run.`,
 					);
 				}

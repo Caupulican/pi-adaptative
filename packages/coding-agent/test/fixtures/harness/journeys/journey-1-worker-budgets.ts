@@ -20,21 +20,9 @@ import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-gener
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults, refusalDiagnostic } from "./shared.ts";
 
 const e4Judgments = ICM_INTAKE_JUDGMENTS;
-
-/**
- * The diagnostic a refused call's `[harness]` failure record carries: the record is JSON, so a Windows path in the
- * refusal reads with its separators escaped in the raw text and is compared only after the record is parsed.
- */
-function refusalDiagnostic(text: string): string | undefined {
-	if (!text.startsWith("[harness] ")) return undefined;
-	const record: unknown = JSON.parse(text.slice("[harness] ".length));
-	const diagnostic =
-		typeof record === "object" && record !== null ? (record as { diagnostic?: unknown }).diagnostic : undefined;
-	return typeof diagnostic === "string" ? diagnostic : undefined;
-}
 
 /** One call's result in the latest tool batch: calls of the same tool are told apart by their id, not their name. */
 function batchResultById(request: ScriptedRequest, toolCallId: string): { isError: boolean; text: string } | undefined {
