@@ -259,7 +259,7 @@ export class SessionEdgeIntentController {
 	/** The last owner-policy settle failure reported, so a failure that persists is reported once until a settle succeeds. */
 	private lastOwnerPolicyFailure?: string;
 	private handoffValue = false;
-	/** The session whose owner was told the gates run without an engine (`gateEngine`). */
+	/** The session whose owner was told the gates run without an engine, until the episode ends (`gateEngine`). */
 	private gateEngineFaultToldIn?: string;
 
 	constructor(deps: SessionEdgeIntentControllerDeps) {
@@ -380,12 +380,19 @@ export class SessionEdgeIntentController {
 	/**
 	 * The engine both gates judge with, read where a gate meets a call. System One configured with none bound leaves the
 	 * call to the deterministic gates, as when it is off (System One is a quality plane, never an execution dependency),
-	 * and the owner is told once per session: a `system-one-engine` notice, or a warning where no notice can be kept.
+	 * and the owner is told once per episode: a `system-one-engine` notice, or a warning where no notice can be kept.
+	 * The episode ends (`clear`) when a later call finds an engine bound or System One no longer configured.
 	 */
 	private gateEngine(): ReturnType<SessionEdgeIntentControllerDeps["systemOne"]["semanticDecisionEngine"]> {
 		const engine = this.deps.systemOne.semanticDecisionEngine();
-		if (engine || !this.deps.systemOne.configured) return engine;
 		const sessionId = this.deps.getSessionManager().getSessionId();
+		if (engine || !this.deps.systemOne.configured) {
+			if (this.gateEngineFaultToldIn === sessionId) {
+				this.gateEngineFaultToldIn = undefined;
+				this.deps.observeHarnessNotice("system-one-engine", () => "clear");
+			}
+			return engine;
+		}
 		if (this.gateEngineFaultToldIn === sessionId) return engine;
 		this.gateEngineFaultToldIn = sessionId;
 		const text = `${SYSTEM_ONE_NO_ENGINE_CAUSE}, so tool calls run under the deterministic gates only, without System One's review of their effects.`;
