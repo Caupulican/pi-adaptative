@@ -33,6 +33,16 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import type { MemorySystem, ResolvedWorkerDelegationSettings } from "./settings/settings-schema.ts";
 import { buildSystemPrompt, promptDate } from "./system-prompt.ts";
 import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "./util/timer-port.ts";
+
+/**
+ * The line a run that carries a third party's words reads where the owner's memory block stands in the prompt (see
+ * `SystemPromptBuilder.withholdMemory`).
+ */
+export const THIRD_PARTY_MEMORY_WITHHELD = "MEMORY: withheld from this run, which carries a third party's words.";
+
+/** The memory blocks and projected prompts a builder keeps: one block per budget, a few prompts per tool surface. */
+const MAX_WITHHELD_ENTRIES = 8;
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SystemPromptBuilderSettingsSource {
@@ -83,6 +93,8 @@ export interface SystemPromptBuilderDeps {
 	getSystemPromptOverride?(): string | undefined;
 	/** The agent's identity (soul.md). Read once per builder so the cached prompt prefix stays stable. */
 	getAgentIdentity?(): AgentIdentity;
+	/** The clock the prompt's date is read from (the session's `system-prompt` timer owner); the system clock if omitted. */
+	promptClock?: Pick<TimerPort, "now">;
 }
 
 export function collectSelfModificationSourceCandidates(settings: {
@@ -142,13 +154,21 @@ export class SystemPromptBuilder {
 	/** The date every prompt this session builds states, pinned until `advancePromptDate` at a cold moment. */
 	private _promptDate: string | undefined;
 	private _agentIdentity: AgentIdentity | undefined;
+	/** Every owner memory block this builder rendered, oldest first (bounded). */
+	private readonly _memoryBlocks: string[] = [];
+	/** Owner prompt to its withheld variant, for the prompts projected most recently (bounded, least recent first). */
+	private readonly _withheld = new Map<string, string>();
 
 	constructor(deps: SystemPromptBuilderDeps) {
 		this.deps = deps;
 	}
 
+	private _promptNow(): Date {
+		return new Date((this.deps.promptClock ?? SYSTEM_TIMER_PORT).now());
+	}
+
 	/** Move the pinned date to today; true when it changed (the caller rebuilds the base prompt). */
-	advancePromptDate(now: Date = new Date()): boolean {
+	advancePromptDate(now: Date = this._promptNow()): boolean {
 		if (this.isIcmMode()) return false;
 		const today = promptDate(now);
 		if (this._promptDate === today) return false;
@@ -249,7 +269,46 @@ export class SystemPromptBuilder {
 						maxResults: 3,
 					};
 		}
-		return this.deps.getMemoryManager().freezeSystemPromptBlock(budget) || undefined;
+		const block = this.deps.getMemoryManager().freezeSystemPromptBlock(budget) || undefined;
+		if (block !== undefined && !this._memoryBlocks.includes(block)) {
+			this._memoryBlocks.push(block);
+			if (this._memoryBlocks.length > MAX_WITHHELD_ENTRIES) this._memoryBlocks.shift();
+			this._withheld.clear();
+		}
+		return block;
+	}
+
+	/**
+	 * `prompt` without the owner's memory: each memory block this builder rendered, where the prompt carries it after its
+	 * separator, becomes {@link THIRD_PARTY_MEMORY_WITHHELD} (or nothing when that line would be longer than the block),
+	 * so the variant is never longer than the owner's prompt and fits its budget. The same prompt always projects to the
+	 * same text, so owner and third-party runs that alternate each reuse their own cached prefix. A prompt that carries
+	 * no block (an ICM prompt, whose block holds no owner records, or a prompt with no memory) is returned as is.
+	 */
+	withholdMemory(prompt: string): string {
+		const known = this._withheld.get(prompt);
+		if (known !== undefined) {
+			this._withheld.delete(prompt);
+			this._withheld.set(prompt, known);
+			return known;
+		}
+		let projected = prompt;
+		for (const block of [...this._memoryBlocks].sort((left, right) => right.length - left.length)) {
+			const line = THIRD_PARTY_MEMORY_WITHHELD.length <= block.length ? `\n\n${THIRD_PARTY_MEMORY_WITHHELD}` : "";
+			projected = projected.split(`\n\n${block}`).join(line);
+		}
+		this._withheld.set(prompt, projected);
+		if (this._withheld.size > MAX_WITHHELD_ENTRIES) {
+			const oldest = this._withheld.keys().next().value;
+			if (oldest !== undefined) this._withheld.delete(oldest);
+		}
+		return projected;
+	}
+
+	/** Whether `prompt` is a variant {@link withholdMemory} produced lately that differs from its owner prompt. */
+	isMemoryWithheld(prompt: string): boolean {
+		for (const [owner, projected] of this._withheld) if (projected === prompt && projected !== owner) return true;
+		return false;
 	}
 
 	private _buildModelAdaptationPrompt(): string | undefined {
@@ -345,7 +404,7 @@ export class SystemPromptBuilder {
 		].filter((part): part is string => Boolean(part));
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
-		this._promptDate ??= promptDate(new Date());
+		this._promptDate ??= promptDate(this._promptNow());
 		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),

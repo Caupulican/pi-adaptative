@@ -54,6 +54,8 @@ export {
  *   its retry delay.
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
+ * - `system-prompt`: the clock the date a system prompt states is read from, pinned at the first build and advanced
+ *   only at a cold moment. It arms no alarm.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -78,7 +80,8 @@ export type TimerOwner =
 	| "knowledge-collection"
 	| "routines"
 	| "routine-intake"
-	| "tool-recovery-log";
+	| "tool-recovery-log"
+	| "system-prompt";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

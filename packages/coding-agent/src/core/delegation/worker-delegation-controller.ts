@@ -5619,7 +5619,10 @@ export class WorkerDelegationController {
 				processCapable: executionPlan.processEnabled,
 				projectContextFiles: this.deps.getSettingsManager().getProjectContextFiles(),
 				...(() => {
-					const personaGuidance = this.deps.getHandoffPersonaGuidance?.();
+					// An attempt that carries a third party's words gets no owner preferences, as a root run on them gets no memory.
+					const personaGuidance = this.carriesThirdPartyWords(durableHandle.attemptId)
+						? undefined
+						: this.deps.getHandoffPersonaGuidance?.();
 					return personaGuidance ? { personaGuidance } : {};
 				})(),
 				...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),

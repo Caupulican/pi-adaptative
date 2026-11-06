@@ -142,6 +142,8 @@ export interface AgentOptions {
 	 * unwired from the constructor.
 	 */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
+	/** The host's projection of the held system prompt into the one a request sends (see `Agent.requestSystemPrompt`). */
+	projectSystemPrompt?: (systemPrompt: string) => string;
 	streamFn?: StreamFn;
 	getApiKey?: AgentLoopConfig["getApiKey"];
 	resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
@@ -294,6 +296,7 @@ export class Agent {
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	public onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
 	public requestPreflight?: AgentLoopConfig["requestPreflight"];
+	public projectSystemPrompt?: (systemPrompt: string) => string;
 	public streamFn: StreamFn;
 	public getApiKey?: AgentLoopConfig["getApiKey"];
 	public resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
@@ -380,6 +383,7 @@ export class Agent {
 		this.resolveRequestReasoning = options.resolveRequestReasoning;
 		this.onSentPrefixDisturbance = options.onSentPrefixDisturbance;
 		this.requestPreflight = options.requestPreflight;
+		this.projectSystemPrompt = options.projectSystemPrompt;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
 		this.resolveProviderRequestAuth = options.resolveProviderRequestAuth;
@@ -725,9 +729,17 @@ export class Agent {
 		if (memory !== undefined) this.sanitizerMemory = memory;
 	}
 
+	/**
+	 * The system prompt the next request sends: the held prompt (`state.systemPrompt`) through the host's
+	 * `projectSystemPrompt`, read at the moment the request's context is taken. The held prompt is never changed by it.
+	 */
+	requestSystemPrompt(): string {
+		return this.projectSystemPrompt?.(this._state.systemPrompt) ?? this._state.systemPrompt;
+	}
+
 	private createContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this._state.systemPrompt,
+			systemPrompt: this.requestSystemPrompt(),
 			messages: this._state.messages.slice(),
 			tools: this._state.tools.slice(),
 		};

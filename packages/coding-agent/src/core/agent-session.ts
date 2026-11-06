@@ -955,11 +955,11 @@ export class AgentSession {
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			isChildSession: () => this._isChildSession,
-			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
-			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
+			// Self-gated by kill switch and evidence thresholds inside getActiveHints(): a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
 			getAgentIdentity: () => readAgentIdentity(this._agentDir),
+			promptClock: config.timers.port("system-prompt"),
 		});
 		this.ownerSystemPrompt = new SessionSystemPromptController({
 			builder: this._systemPromptBuilder,
@@ -973,6 +973,7 @@ export class AgentSession {
 				this._baseSystemPrompt = prompt;
 				this.agent.state.systemPrompt = prompt;
 			},
+			isThirdPartyRun: () => this._foregroundRecovery.turnOrigin.authority() === "third-party",
 		});
 		this.soul = new SoulController({
 			agentDir: this._agentDir,
@@ -1801,6 +1802,7 @@ export class AgentSession {
 						lane: cacheLaneKey(model.api, model.provider, model.id),
 					});
 				}
+				this.ownerSystemPrompt.observeRequest(context.systemPrompt ?? "", model);
 				this._guardCacheSurface();
 				this._toolSelection.observeProviderRequest(
 					requestId,
@@ -3014,7 +3016,7 @@ export class AgentSession {
 
 	private _createAgentContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this.agent.state.systemPrompt,
+			systemPrompt: this.agent.requestSystemPrompt(),
 			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
@@ -4398,9 +4400,7 @@ export class AgentSession {
 		return this._resourceLoader.getActivePrompts();
 	}
 
-	// System-prompt construction lives in SystemPromptBuilder (see system-prompt-builder.ts). These
-	// stubs keep the god file's internal call surface stable while the assembly logic — situational
-	// soul, self-modification/autonomy guardrails, per-tool snippet/guideline options — lives there.
+	// System-prompt construction lives in SystemPromptBuilder (see system-prompt-builder.ts).
 	private _refreshBaseSystemPrompt(): void {
 		const previousBaseSystemPrompt = this._baseSystemPrompt;
 		this._baseSystemPrompt = this._systemPromptBuilder.rebuildSystemPrompt(this.getActiveToolNames());

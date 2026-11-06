@@ -120,6 +120,8 @@ The block is bounded by lines, estimated tokens, characters and UTF-8 bytes, and
 
 Extension memory providers that implement a lifecycle `prefetch` still contribute a pre-turn recall page; history recall does not.
 
+In OKF the session's system prompt carries curated memory: `MEMORY.md`, the project's `MEMORY.md`, the `USER.md` preferences and the blocks of memory extensions. A run that carries a third party's words (a channel or pi-chat message, a host event someone else wrote) sends the prompt without that block and with one line saying the memory is withheld; its retrieved evidence and persona are cleared as well. The owner's next run sends the block again. Both variants stay the same from run to run, so each keeps its cached prefix. A delegated worker whose task carries such words gets no owner working preferences.
+
 ## Delegated workers
 
 A worker with `memory_read` gets read-only access, in both memory systems: a query or a `ref`. In ICM a worker granted `zoom` and `date` holds them as read-only tools through the same broker, by message id only; private worker logs stay root-readable (see [Continuous chat](#continuous-chat-icm)). A result may cite `tx:` source handles and `txn:` summary handles; the worker passes one back as `ref` to read that source or expand that summary, but only a handle an earlier `memory_read` of the same lane returned (or one returned by an admitted expansion), in the same memory generation (otherwise `memory_source_forbidden`). Workers cannot write memory or read arbitrary history. See [Task worker presets](worker-profiles.md).

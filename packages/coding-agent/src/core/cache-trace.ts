@@ -130,15 +130,19 @@ function describeTextChange(before: string, after: string): string {
 	return `from char ${index} of ${before.length}: ${snippet(before, index)} became ${snippet(after, index)}`;
 }
 
-/** Why `current` does not extend `previous`'s cached prefix, or undefined when it does. */
+/**
+ * Why `current` does not extend `previous`'s cached prefix, or undefined when it does. The system prompt is compared
+ * with `system`, the last request of the same prompt lineage (none: a lineage's first request starts its own prefix).
+ */
 function prefixChange(
 	previous: RequestFingerprint,
 	current: RequestFingerprint,
 	viewChange: ContinuousChatCacheComparison | undefined,
+	system: LineageSystem | undefined,
 ): string | undefined {
 	if (previous.model !== current.model) return undefined;
-	if (previous.system[1] !== current.system[1]) {
-		return `system prompt changed (${previous.system[2]} to ${current.system[2]} chars) ${describeTextChange(previous.systemText, current.systemText)}`;
+	if (system && system.model === current.model && system.system[1] !== current.system[1]) {
+		return `system prompt changed (${system.system[2]} to ${current.system[2]} chars) ${describeTextChange(system.systemText, current.systemText)}`;
 	}
 	const previousNames = previous.tools.map(([name]) => name);
 	const currentNames = current.tools.map(([name]) => name);
@@ -173,8 +177,12 @@ function prefixChange(
 		: undefined;
 }
 
+type LineageSystem = Pick<RequestFingerprint, "model" | "system" | "systemText">;
+
 export class PromptPrefixMonitor {
 	private readonly previous = new Map<string, RequestFingerprint>();
+	/** Per session, the system prompt each lineage last sent: each variant of a session's prompt is its own prefix. */
+	private readonly lineageSystems = new Map<string, Map<string, LineageSystem>>();
 	private readonly reports = new Map<string, number>();
 	private readonly viewRewrites = new Map<string, ContinuousChatCacheRewrite>();
 
@@ -183,11 +191,20 @@ export class PromptPrefixMonitor {
 		return this.viewRewrites.get(sessionId ?? "");
 	}
 
-	/** Fingerprint a request, optionally trace it, and describe how it broke the previous request's prefix. */
-	check(model: Model<Api>, context: Context, sessionId: string | undefined): string | undefined {
+	/**
+	 * Fingerprint a request, optionally trace it, and describe how it broke the previous request's prefix. `lineage`
+	 * names the variant of the session's system prompt the request sends (the owner's, or one with the owner's memory
+	 * withheld): its system prompt is compared with the same lineage's last request, its tools and chat view with the
+	 * session's last request. Omitted, every request is one lineage.
+	 */
+	check(model: Model<Api>, context: Context, sessionId: string | undefined, lineage = ""): string | undefined {
 		const key = sessionId ?? "";
 		const current = fingerprintRequest(model, context);
 		const previous = this.previous.get(key);
+		const systems = this.lineageSystems.get(key) ?? new Map<string, LineageSystem>();
+		const system = systems.get(lineage);
+		systems.set(lineage, { model: current.model, system: current.system, systemText: current.systemText });
+		this.lineageSystems.set(key, systems);
 		const viewChange =
 			previous?.viewCache && current.viewCache && previous.model === current.model
 				? compareContinuousChatCache(previous.viewCache, current.viewCache)
@@ -202,9 +219,10 @@ export class PromptPrefixMonitor {
 			this.previous.delete(oldest);
 			this.reports.delete(oldest);
 			this.viewRewrites.delete(oldest);
+			this.lineageSystems.delete(oldest);
 		}
 		if (previous === undefined) return undefined;
-		const change = prefixChange(previous, current, viewChange);
+		const change = prefixChange(previous, current, viewChange, system);
 		if (change === undefined) return undefined;
 		const reported = (this.reports.get(key) ?? 0) + 1;
 		this.reports.set(key, reported);

@@ -620,6 +620,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools: [],
 			},
 			convertToLlm: convertToLlmWithBlockImages,
+			// The session decides the variant each request sends (a third party's run withholds the owner's memory).
+			projectSystemPrompt: (systemPrompt) =>
+				sessionRef.current?.ownerSystemPrompt.forRequest(systemPrompt) ?? systemPrompt,
 			getApiKey: async (_provider, requestModel) => {
 				if (!requestModel) return authStorage.getApiKey(_provider);
 				const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
@@ -696,7 +699,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
 						? { ...model, serviceTiers }
 						: model;
-				const prefixChange = promptPrefixMonitor.check(requestModel, context, providerOptions.sessionId);
+				const prefixChange = promptPrefixMonitor.check(
+					requestModel,
+					context,
+					providerOptions.sessionId,
+					sessionRef.current?.ownerSystemPrompt.lineageOf(context.systemPrompt ?? ""),
+				);
 				if (prefixChange) sessionRef.current?.emitHostWarning(prefixChange);
 				return streamSimple(requestModel, context, providerOptions);
 			},

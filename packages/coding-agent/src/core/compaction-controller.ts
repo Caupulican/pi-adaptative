@@ -758,7 +758,8 @@ export class CompactionController {
 		const structuredRequest = sessionLaneSummarizerRequest({
 			compactionModel,
 			sessionModel,
-			systemPrompt: this.deps.agent.state.systemPrompt,
+			// The variant the run's own requests send: a run that carries a third party's words summarizes without the owner's memory.
+			systemPrompt: this.deps.agent.requestSystemPrompt(),
 			tools: projectToolsForProvider(this.deps.agent.state.tools),
 			messagesToSummarize: preparation.messagesToSummarize,
 			liveMessages: this.deps.agent.state.messages,

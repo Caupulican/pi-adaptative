@@ -2469,9 +2469,17 @@ const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 ]);
 
 /**
- * One owner's timers in a journey. `now()` is the wall clock plus the time the scenario advanced this owner, so the
- * timestamps the owner persists keep moving forward; an alarm is due on the advanced time, so advancing this owner fires
- * it and its exact delay is observable. A purely virtual owner has no real timer behind it: its alarms fire only when the
+ * The owners whose clock starts at a fixed instant instead of the wall clock: the date a system prompt states, so a
+ * journey that runs across midnight builds every prompt with the same date. Advancing the owner still moves it.
+ */
+const PINNED_CLOCK_OWNERS: ReadonlyMap<TimerOwner, number> = new Map<TimerOwner, number>([
+	["system-prompt", Date.parse("2026-01-15T12:00:00.000Z")],
+]);
+
+/**
+ * One owner's timers in a journey. `now()` is the wall clock (or the owner's pinned instant, `PINNED_CLOCK_OWNERS`) plus
+ * the time the scenario advanced this owner, so the timestamps the owner persists keep moving forward; an alarm is due on
+ * the advanced time, so advancing this owner fires it and its exact delay is observable. A purely virtual owner has no real timer behind it: its alarms fire only when the
  * scenario advances it. A wall owner (`WALL_CLOCK_OWNERS`) also fires each alarm on a real, unreferenced timer at its
  * delay, whichever comes first.
  */
@@ -2489,13 +2497,16 @@ class HarnessOwnerTimers implements TimerPort {
 		}
 	>();
 	private readonly armWaiters: Array<(delayMs: number) => void> = [];
+	/** The fixed instant this owner's clock starts at (`PINNED_CLOCK_OWNERS`); the wall clock when undefined. */
+	private readonly pinnedAt: number | undefined;
 
-	constructor(wall: boolean) {
+	constructor(wall: boolean, pinnedAt?: number) {
 		this.wall = wall;
+		this.pinnedAt = pinnedAt;
 	}
 
 	now(): number {
-		return Date.now() + this.advancedMs;
+		return (this.pinnedAt ?? Date.now()) + this.advancedMs;
 	}
 
 	setTimeout(callback: () => void, delayMs: number): number {
@@ -2608,7 +2619,7 @@ export class HarnessTimers implements TimerSource {
 	private ownerTimers(owner: TimerOwner): HarnessOwnerTimers {
 		let timers = this.owners.get(owner);
 		if (timers === undefined) {
-			timers = new HarnessOwnerTimers(WALL_CLOCK_OWNERS.has(owner));
+			timers = new HarnessOwnerTimers(WALL_CLOCK_OWNERS.has(owner), PINNED_CLOCK_OWNERS.get(owner));
 			this.owners.set(owner, timers);
 		}
 		return timers;

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { expect } from "vitest";
+import { configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type {
 	ChannelInboundHandler,
@@ -7,6 +8,7 @@ import type {
 	ChannelProvider,
 } from "../../../../src/core/gateways/channel-provider.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
+import { THIRD_PARTY_MEMORY_WITHHELD } from "../../../../src/core/system-prompt-builder.ts";
 import { entryTurnOrigin } from "../../../../src/core/turn-origin.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
@@ -107,6 +109,20 @@ function latestBatchText(request: ScriptedRequest): string {
 	return JSON.stringify(messages.slice(start));
 }
 
+/** A line of the owner's MEMORY.md: the owner's runs read it in their system prompt, a third party's runs never do. */
+const OWNER_MEMORY = "The owner keeps the release checklist in the team wiki.";
+
+function expectOwnerMemory(request: ScriptedRequest, carried: boolean): void {
+	const systemPrompt = request.context.systemPrompt ?? "";
+	if (carried) {
+		expect(systemPrompt, "the owner's run carries the owner's memory").toContain(OWNER_MEMORY);
+		expect(systemPrompt).not.toContain(THIRD_PARTY_MEMORY_WITHHELD);
+		return;
+	}
+	expect(systemPrompt, "a run that carries a third party's words has no owner memory").not.toContain(OWNER_MEMORY);
+	expect(systemPrompt, "the run reads that the memory is withheld").toContain(THIRD_PARTY_MEMORY_WITHHELD);
+}
+
 function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string, count = 1): Promise<void> {
 	return new Promise<void>((resolve) => {
 		const check = () => {
@@ -128,7 +144,8 @@ function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string
  * one notice tells the owner, and the owner's own turn sends it to the address the conversation came from and reads the
  * memory the channel's run was refused; a message that arrives during the owner's turn never joins it and opens its own
  * third-party turn after the owner's answer, whose reply is found by the batch id on that turn's origin; the same
- * event delivered again is not admitted twice. On `chat` (`replyMode: "auto"`, one turn a day): the answer goes back to
+ * event delivered again is not admitted twice. Each run that carries a channel's words sends the system prompt without
+ * the owner's MEMORY.md, the owner's run sends it again, and no switch reports a prompt prefix change. On `chat` (`replyMode: "auto"`, one turn a day): the answer goes back to
  * the same address without the owner, and later messages are held behind the bound with one notice. A registered
  * channel the owner wrote no policy for never starts, and its notice is saved once the session keeps entries. Closing
  * the session stops every channel and gives up the journal.
@@ -136,6 +153,8 @@ function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string
 export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-channels`;
+	world.io.seed(configFile(agentDir, "MEMORY.md"), `${OWNER_MEMORY}\n`);
+	const warningsBefore = world.warnings.length;
 	const manager = world.createSessionManager(agentDir);
 	const created = await world.createRootSession("root", {
 		agentDir,
@@ -202,6 +221,7 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 				{ id: "channels-mail-memory", name: "memory", arguments: { action: "list", target: "user" } },
 			]),
 			check: (request) => {
+				expectOwnerMemory(request, false);
 				const delivered = JSON.stringify(request.context.messages);
 				for (const words of batchWords) expect(delivered, "the batch carries every message").toContain(words);
 				expect(delivered.split('source=\\"channel:mail\\"').length - 1, "one fence holds the batch").toBe(1);
@@ -316,7 +336,8 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 				{ id: "channels-owner-send", name: "channel_reply", arguments: { action: "send", draft: draftId } },
 				{ id: "channels-owner-memory", name: "memory", arguments: { action: "list", target: "user" } },
 			]),
-			check: () => {
+			check: (request) => {
+				expectOwnerMemory(request, true);
 				lateDelivery = mail.deliver(event("m-4", "thread-2", alice, lateWords));
 			},
 		},
@@ -340,6 +361,7 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 		{
 			name: "channels-mail-late-answer",
 			check: (request) => {
+				expectOwnerMemory(request, false);
 				const messages = request.context.messages.map((message) => JSON.stringify(message));
 				const answered = messages.findIndex((message) => message.includes(ownerAnswer));
 				const late = messages.findIndex((message) => message.includes(lateWords));
@@ -402,6 +424,10 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 	expect(journal("chat").pending.length, "the held-back messages still wait").toBe(2);
 	expect(chat.sent.length, "nothing more went out on chat").toBe(1);
 	trace.mark("root", "channels.owner-released");
+	expect(
+		world.warnings.slice(warningsBefore).filter((warning) => warning.startsWith("Prompt cache prefix changed")),
+		"each variant of the prompt keeps its own cached prefix: switching between them reports no prefix change",
+	).toEqual([]);
 
 	expect(await world.disposeSessionInBody(session), "the channels session closes").toBeUndefined();
 	expect([mail.stops, chat.stops], "closing stops every started channel").toEqual([1, 1]);
