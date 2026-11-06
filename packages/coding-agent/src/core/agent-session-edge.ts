@@ -30,6 +30,7 @@ import {
 	parseEdgeScope,
 	thirdPartyReleaseLine,
 } from "./autonomy/edge-policy.ts";
+import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
 import { entryTurnOrigin, isThirdPartyOrigin, latestDecisiveEntry, type TurnOriginRecord } from "./turn-origin.ts";
 
@@ -68,6 +69,8 @@ export interface SessionEdgeDeps {
 	releaseOutward?(toolName: string, operations: () => readonly EdgeOperation[]): void;
 	/** Harness files and the session store, which a run carrying a third party's words does not write on its own. */
 	getProtectedWritePaths?(): ProtectedWritePaths;
+	/** Reports a call the third-party gate refused or prepared, for the run's tool manifest (`autonomy-status`). */
+	noteToolRefusal?(decision: ToolDecision): void;
 }
 
 /** An outward action held for the owner, as the gate saw it. */
@@ -390,6 +393,12 @@ async function enforceThirdPartyEdge(
 ): Promise<BeforeToolCallResult | undefined> {
 	const ownerOnly = ownerOnlyToolCallReason(toolName, args);
 	if (ownerOnly) {
+		deps.noteToolRefusal?.({
+			tool: toolName,
+			code: "third-party-owner-only",
+			owner: "third-party gate",
+			detail: ownerOnly,
+		});
 		return {
 			block: true,
 			reason: `Refused: ${ownerOnly}, which only the owner's own turn decides. This run carries words from ${originLabel(origin)}.`,
@@ -408,7 +417,14 @@ async function enforceThirdPartyEdge(
 	const operations = await resolveEdgeConditions(deps, classified, signal);
 	const grants = effectiveEdgeGrants(deps);
 	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
-	return ungranted.length === 0 ? undefined : { block: true, ...prepareOutward(deps, origin, toolName, ungranted) };
+	if (ungranted.length === 0) return undefined;
+	deps.noteToolRefusal?.({
+		tool: toolName,
+		code: "third-party-prepared",
+		owner: "third-party gate",
+		detail: `no standing grant covers ${[...new Set(ungranted.map((operation) => operation.class))].join(", ")}`,
+	});
+	return { block: true, ...prepareOutward(deps, origin, toolName, ungranted) };
 }
 
 /** Revoke a session or instruction grant; a settings grant is the machine's. Returns whether one was removed. */

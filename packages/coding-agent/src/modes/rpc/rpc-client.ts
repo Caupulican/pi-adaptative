@@ -7,6 +7,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
+import type { SessionAutonomyStatus } from "../../core/autonomy-status/autonomy-status.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
 import type { BashResult } from "../../core/tools/schemas/bash.ts";
@@ -373,6 +374,14 @@ export class RpcClient {
 	async getSessionStats(): Promise<SessionStats> {
 		const response = await this.send({ type: "get_session_stats" });
 		return this.getData(response);
+	}
+
+	/**
+	 * Get the read-only snapshot of the session's automatic work.
+	 */
+	async getAutonomyStatus(): Promise<SessionAutonomyStatus> {
+		const response = await this.send({ type: "get_autonomy_status" });
+		return this.getData<{ status: SessionAutonomyStatus }>(response).status;
 	}
 
 	/**

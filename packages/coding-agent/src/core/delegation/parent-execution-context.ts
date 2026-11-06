@@ -26,6 +26,7 @@ import type { EdgeGrantView } from "../autonomy/edge-policy.ts";
 import type { SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
+import type { RunToolManifests } from "../autonomy-status/tool-manifest.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import type { RouteChoiceJudge } from "../expert-routing/system-one-choice.ts";
@@ -327,6 +328,8 @@ export interface ForegroundStateReaders {
 	getContinuousChatBirthView?(): { view: string; timestamp: number } | undefined;
 	/** The origin of the run in progress (`RunTurnOrigin`): a worker the root starts or writes to now carries its taint. */
 	getRunTurnOrigin?(): TurnOriginRecord | undefined;
+	/** The session's recent run tool manifests (`autonomy-status`): a worker attempt reports its own into them. */
+	getToolManifests?(): RunToolManifests;
 }
 
 /** What worker execution reads from the parent transcript; every write goes through {@link ParentWritePort}. */

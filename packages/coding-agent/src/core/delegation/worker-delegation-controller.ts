@@ -38,6 +38,7 @@ import {
 	type WorkerToolAdapterRegistry,
 	type WorkerToolAdapterSources,
 } from "../autonomy/worker-tool-adapter-registry.ts";
+import type { ToolDecision } from "../autonomy-status/tool-manifest.ts";
 import { sameTaskBrief } from "../comms/comms-records.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
@@ -5503,12 +5504,20 @@ export class WorkerDelegationController {
 				// the session gate's outward classification (`enforceThirdPartyEdge`), refused instead of prepared. The
 				// session's closed table of reading actions is not applied: it names the parent's tools, not a worker's.
 				if (this.carriesThirdPartyWords(durableHandle.attemptId)) {
+					runManifest?.noteThirdParty();
 					// The broker granted before a steer tainted the attempt reads the owner's memory: refused from then on.
-					if (WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName))
+					if (WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName)) {
+						runManifest?.refuse({
+							tool: toolName,
+							code: "memory-withheld-third-party",
+							owner: "worker memory policy",
+							detail: "a third party's words reached the attempt after its broker was granted",
+						});
 						return {
 							block: true,
 							reason: `${toolName} is refused: this worker carries a third party's words, and the owner's memory is not read for them.`,
 						};
+					}
 					const standing = this.deps.getEdgeGrants?.(true) ?? [];
 					const ungranted = classifyOutwardEdgeOperations({
 						toolName,
@@ -5521,7 +5530,15 @@ export class WorkerDelegationController {
 							this.deps.getSessionManager(),
 						),
 					}).filter((operation) => !isEdgeOperationGranted(operation, standing));
-					if (ungranted.length > 0) return { block: true, ...thirdPartyEdgeRefusal(ungranted) };
+					if (ungranted.length > 0) {
+						runManifest?.refuse({
+							tool: toolName,
+							code: "third-party-not-run",
+							owner: "third-party gate",
+							detail: `no standing grant covers ${[...new Set(ungranted.map((operation) => operation.class))].join(", ")}`,
+						});
+						return { block: true, ...thirdPartyEdgeRefusal(ungranted) };
+					}
 					return this.deps.checkOperation?.(toolName, args, executionCwd, true);
 				}
 				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
@@ -5537,6 +5554,32 @@ export class WorkerDelegationController {
 			},
 			initialUsage,
 			sharedBudget,
+		});
+		// The attempt's tool manifest: the lane tools it holds, and why the others are not offered, as decided above.
+		const { attempts } = lifecycle.getTaskRuntimeSnapshot();
+		const startedAttempt = attempts[durableHandle.attemptId];
+		const attemptOrigin = startedAttempt ? conversationTurnOrigin(attempts, startedAttempt) : undefined;
+		const plannedTools = new Set(executionPlan.toolManifests.map((manifest) => manifest.toolName));
+		const runManifest = this.deps.getToolManifests?.().beginWorker({
+			attemptId: durableHandle.attemptId,
+			origin: attemptOrigin,
+			thirdParty: attemptOrigin?.thirdParty === true,
+			offered: toolSurface.tools.map((tool) => tool.name),
+			omitted: [
+				...prepared.executionPlan.toolManifests
+					.filter((manifest) => !plannedTools.has(manifest.toolName))
+					.map(
+						(manifest): ToolDecision => ({
+							tool: manifest.toolName,
+							code: "memory-withheld-third-party",
+							owner: "worker memory policy",
+							detail: "the attempt started carrying a third party's words",
+						}),
+					),
+				...toolSurface.withheld,
+			],
+			network: toolSurface.network,
+			nowMs: Date.now(),
 		});
 		const writeGranted =
 			executionPlan.writeEnabled &&
@@ -5774,6 +5817,7 @@ export class WorkerDelegationController {
 				this.inFlightLedgers.delete(startedRecord.laneId);
 				this.laneAbortControllers.delete(startedRecord.laneId);
 				runRetryableStep("clear worker lane halt", () => this.agentControl.clearLaneHalt(startedRecord.laneId));
+				runManifest?.end(Date.now());
 				let toolsReleased = false;
 				try {
 					await toolSurface.dispose();

@@ -122,6 +122,11 @@ interface AgentSession {
   registerChannelProvider(provider: ChannelProvider): void;
   channels: SessionChannelsView; // registerChannel, registerScheduler, getStates
 
+  // Read-only snapshot of the session's automatic work (routines, away daemon, host events,
+  // drafts, notices, grants, the last 16 runs' offered, omitted and refused tools); builds and
+  // writes nothing. formatSessionAutonomyStatus(status) renders it as /status prints it.
+  autonomyStatus(): Promise<SessionAutonomyStatus>;
+
   // Cleanup
   dispose(): void;
 }

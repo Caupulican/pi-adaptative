@@ -194,9 +194,9 @@ import { MemoryController, type MemoryOperatorPort } from "./memory-controller.t
 import {
 	deriveModelCapabilityProfile,
 	evaluateLaneWorkerModelRefusal,
-	filterToolNamesForCapability,
 	type LaneWorkerRefusal,
 	type ModelCapabilityProfile,
+	partitionToolNamesForCapability,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveLaunchedChildModel } from "./model-resolver.ts";
@@ -685,7 +685,7 @@ export class AgentSession {
 				this._operatorBlocker = blocker;
 			},
 			emitWarning: (msg) => this._emit({ type: "warning", message: msg }),
-			getRunTurnOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
+			getForegroundRun: () => this._foregroundRecovery,
 			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
 		});
 		this._unsettledLadder = new SessionUnsettledLadderController({
@@ -1134,6 +1134,7 @@ export class AgentSession {
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getRunTurnOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
+			getToolManifests: () => this._foregroundRecovery.toolManifests,
 			...createWorkerEdgePolicy({
 				...this._edgeIntent.workerEdgeSource(),
 				isAllocatable: (model) =>
@@ -1800,6 +1801,7 @@ export class AgentSession {
 					});
 				}
 				this.ownerSystemPrompt.observeRequest(context.systemPrompt ?? "", model);
+				this._foregroundRecovery.toolManifests.offerRoot(sourceContext.tools, this._runtimeBuilder);
 				this._guardCacheSurface();
 				this._toolSelection.observeProviderRequest(
 					requestId,
@@ -4057,9 +4059,7 @@ export class AgentSession {
 		}
 	}
 
-	// =========================================================================
-	// Read-only State Access
-	// =========================================================================
+	// ---- Read-only State Access ----
 
 	/** Full agent state */
 	get state(): AgentState {
@@ -4204,11 +4204,8 @@ export class AgentSession {
 				if (!this._isChildSession && requested.includes("memory")) {
 					requested.push("zoom", "date");
 				}
-				const capabilityFiltered = filterToolNamesForCapability(
-					requested,
-					this.getModelCapabilityProfile(),
-					this.model,
-				);
+				const capability = partitionToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
+				this._runtimeBuilder.noteCapabilityOmissions(capability.withheld);
 
 				const tools: AgentTool[] = [];
 				const validToolNames: string[] = [];
@@ -4222,7 +4219,7 @@ export class AgentSession {
 					validToolNames.push(name);
 				};
 
-				for (const name of capabilityFiltered) {
+				for (const name of capability.kept) {
 					addIfRegistered(name);
 				}
 				// A background tool task packs any tool's oversized terminal output (bash included) and names the artifact in its result.
@@ -5854,7 +5851,6 @@ export class AgentSession {
 		return this._analytics.exportToJsonl(outputPath);
 	}
 
-	// =========================================================================
 	getLastAssistantText(): string | undefined {
 		return this._analytics.getLastAssistantText();
 	}
@@ -5965,6 +5961,10 @@ export class AgentSession {
 	}
 	getPersistentBotDaemonStatus() {
 		return this._backgroundLanes.getPersistentBotDaemonStatus();
+	}
+	/** Read-only snapshot of the session's automatic work (`core/autonomy-status`): builds no owner, writes nothing. */
+	autonomyStatus() {
+		return this._backgroundLanes.readAutonomyStatus(this._foregroundRecovery, this._harnessNotices, this._memory);
 	}
 	startPersistentBotDaemon() {
 		return this._backgroundLanes.startPersistentBotDaemon();

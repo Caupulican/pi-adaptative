@@ -12,6 +12,7 @@ import {
 } from "../kernel/reliability/index.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
+import { RunToolManifests } from "./autonomy-status/tool-manifest.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts";
@@ -201,12 +202,16 @@ export class ForegroundRecoveryController {
 	private readonly unsubscribeTurnOrigin: () => void;
 	/** The authority of the run in progress, from the messages that open and steer it (`turn-origin.ts`). */
 	readonly turnOrigin = new RunTurnOrigin();
+	/** The tools each recent run was offered and why others were not, with the run's authority (in memory only). */
+	readonly toolManifests = new RunToolManifests();
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
 		this.deps = deps;
 		this.unsubscribeRuntime = deps.runtimeAdmission.subscribeAvailability(() => this.notifyActivity());
 		this.unsubscribeTurnOrigin = deps.agent.subscribe((event) => {
-			if (event.type === "message_end") this.turnOrigin.note(event.message);
+			if (event.type !== "message_end") return;
+			this.turnOrigin.note(event.message);
+			if (this.turnOrigin.isActive()) this.toolManifests.noteRootOrigin(this.turnOrigin.origin());
 		});
 		const admissionClock = (deps.timers ?? SYSTEM_TIMER_SOURCE).port("provider-admission");
 		this.retry = new RetryController(
@@ -1051,6 +1056,7 @@ export class ForegroundRecoveryController {
 			this.recoveryRoundAvailable = !atRoundCap();
 			// The run answers whoever the branch last answered, then its opening messages, until a later message decides again.
 			this.turnOrigin.begin(mode === "continue" ? [] : [messages ?? []].flat(), this.deps.getBranchEntries());
+			this.toolManifests.beginRoot(lease?.epoch, this.turnOrigin.origin(), Date.now());
 			if (mode !== "continue") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
 				// prompt([]) creates fresh loop limits and recovery state over the committed transcript.
@@ -1153,6 +1159,7 @@ export class ForegroundRecoveryController {
 			} finally {
 				// After the run's cleanup, so the turn covers every provider round the run made.
 				endChatTurn?.();
+				this.toolManifests.endRoot(Date.now());
 				this.turnOrigin.end();
 				detachAbort();
 				this.activeRuns--;

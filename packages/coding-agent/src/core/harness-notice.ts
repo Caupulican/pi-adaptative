@@ -59,6 +59,8 @@ export interface HarnessNoticeDeps {
 }
 
 interface KindState {
+	readonly kind: HarnessNoticeKind;
+	readonly scope?: string;
 	/** The state this runtime last observed for the kind, or `clear`; absent until the first observation. */
 	observed?: string;
 	/** The reason whose notice is saved, waiting, in flight or already carried for the current episode. */
@@ -140,6 +142,34 @@ export class HarnessNoticeController {
 		}
 	}
 
+	/**
+	 * Read-only: the state this runtime last observed per kind (and scope) in the current session, `clear` included,
+	 * and how many observed notices still wait to be saved. Nothing is observed, saved or retried by reading it.
+	 */
+	observedStates(): {
+		readonly states: readonly {
+			readonly kind: HarnessNoticeKind;
+			readonly scope?: string;
+			readonly observed: string;
+		}[];
+		readonly unsaved: number;
+	} {
+		// Observations of another session (before this runtime switched) are not this session's.
+		if (this.deps.getSessionManager().getSessionId() !== this.sessionId) return { states: [], unsaved: 0 };
+		const states = [...this.kinds.values()].flatMap((state) =>
+			state.observed === undefined
+				? []
+				: [
+						{
+							kind: state.kind,
+							...(state.scope === undefined ? {} : { scope: state.scope }),
+							observed: state.observed,
+						},
+					],
+		);
+		return { states, unsaved: this.pending.size };
+	}
+
 	close(): void {
 		this.closed = true;
 		this.offObserverFailures();
@@ -161,7 +191,7 @@ export class HarnessNoticeController {
 		const key = scope === undefined ? kind : JSON.stringify([kind, scope]);
 		let state = this.kinds.get(key);
 		if (!state) {
-			state = {};
+			state = { kind, ...(scope === undefined ? {} : { scope }) };
 			this.kinds.set(key, state);
 		}
 		const firstObservation = state.observed === undefined;

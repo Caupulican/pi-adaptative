@@ -5,7 +5,13 @@ import {
 	type OutwardDraftRecord,
 	outwardDraftStates,
 } from "../../../../src/core/agent-session-edge.ts";
-import { githubThreadEventId, isCiAttemptEvent } from "../../../../src/core/events/host-event-contract.ts";
+import { formatSessionAutonomyStatus } from "../../../../src/core/autonomy-status/format.ts";
+import { MAX_TOOL_MANIFEST_RUNS } from "../../../../src/core/autonomy-status/tool-manifest.ts";
+import {
+	githubThreadEventId,
+	type HostEventSink,
+	isCiAttemptEvent,
+} from "../../../../src/core/events/host-event-contract.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -130,6 +136,7 @@ export async function runJourney1GithubRoutinesPhase(
 	const abort = new AbortController();
 	const binding = lanes.openHostEventSession(abort.signal);
 	let source: CiHostRuntime | undefined;
+	let waitingSource: CiHostRuntime | undefined;
 	let prompt: Promise<void> | undefined;
 	try {
 		// A high-volume kind with no narrowing scope is refused at save, with the kind table's reason.
@@ -490,6 +497,102 @@ export async function runJourney1GithubRoutinesPhase(
 		expect(pushCalls(), "neither of them spawns git with the push either").toEqual([]);
 		expect(modelRequests("root") - rootBefore).toBe(2);
 
+		// The status snapshot reads each owner's own state. A second CI source whose repository does not answer reports
+		// that it waits; the snapshot then shows the saved routine, the waiting source, the pending draft and both
+		// third-party runs with the rules that left a tool out or refused a call, bounded, with one part unavailable.
+		const connected = createBarrier();
+		const waitingStore = join(input.paths.gitDir, "pi-ci-github-waiting");
+		waitingSource = await createCiHostRuntime({
+			cwd: HARNESS_PROJECT_CWD,
+			paths: { ...input.paths, statusDir: waitingStore },
+			provider: {
+				...provider,
+				repository: async () => {
+					throw new Error("GitHub did not answer");
+				},
+			},
+			store: new CiSourceStore(waitingStore),
+			onDiagnostic: (message) => diagnostics.push(message),
+		});
+		if (!waitingSource) throw new Error("The waiting CI source did not open.");
+		const waitingSink: HostEventSink = {
+			...binding.sink,
+			reportConnection: (sourceId, connection) => {
+				binding.sink.reportConnection(sourceId, connection);
+				connected.release();
+			},
+		};
+		await waitingSource.source.start(waitingSink);
+		await withDeadline(world.trace, "the second CI source waits for GitHub", connected.promise);
+		const status = await owner.session.autonomyStatus();
+		await waitingSource.source.stop();
+		expect(status.routines).toMatchObject({
+			status: "available",
+			value: { routines: { items: [{ routineId: ROUTINE_ID, state: "enabled", schedule: "event" }] } },
+		});
+		expect(status.hostEvents).toMatchObject({
+			status: "available",
+			value: { connections: { items: [{ source: "ci", state: "waiting", reason: "repository-unavailable" }] } },
+		});
+		expect(status.outwardDrafts).toMatchObject({
+			status: "available",
+			value: {
+				pending: { items: [{ id: kept[0]!.id, toolName: "bash", classes: ["git.publish"], origin: "host-event" }] },
+				released: 0,
+			},
+		});
+		expect(status.harnessNotices, "the prepared action's notice waits for the owner").toMatchObject({
+			status: "available",
+			value: {
+				pending: {
+					items: expect.arrayContaining([{ kind: "outward-action-prepared", reason: expect.any(String) }]),
+				},
+			},
+		});
+		if (status.runs.status !== "available") throw new Error(`Run manifests unavailable: ${status.runs.reason}`);
+		const rootRun = status.runs.value.find((entry) => entry.kind === "root");
+		expect(rootRun, "the parent's run answered the third party's result").toMatchObject({
+			origin: "host-event",
+			authority: "third-party",
+			refused: [
+				{
+					tool: "bash",
+					code: "third-party-prepared",
+					owner: "third-party gate",
+					detail: "no standing grant covers git.publish",
+				},
+			],
+		});
+		expect(rootRun?.offered, "the refusal is the gate's, not a missing tool").toContain("bash");
+		expect(rootRun?.omitted, "a tool the model capability withholds is named with its rule").toContainEqual(
+			expect.objectContaining({ tool: "image_generate", code: "capability-ceiling", owner: "model capability" }),
+		);
+		const workerRun = status.runs.value.find((entry) => entry.runId === `worker-${run!.executionRef!.attemptId}`);
+		expect(workerRun, "the routine's worker carried the same origin").toMatchObject({
+			kind: "worker",
+			origin: "host-event",
+			authority: "third-party",
+			refused: [
+				{
+					tool: "bash",
+					code: "third-party-not-run",
+					owner: "third-party gate",
+					detail: "no standing grant covers git.publish",
+				},
+			],
+		});
+		expect(workerRun?.offered).toEqual(expect.arrayContaining(["read", "bash"]));
+		// One part reads no owner record and says so; the snapshot stays bounded.
+		expect(status.awayDaemon).toMatchObject({
+			status: "available",
+			value: {
+				hostedParents: { status: "unavailable", reason: "the away daemon does not record the parents it hosts" },
+			},
+		});
+		expect(status.runs.value.length).toBeLessThanOrEqual(MAX_TOOL_MANIFEST_RUNS);
+		expect(JSON.stringify(status).length, "the snapshot is bounded").toBeLessThan(64 * 1024);
+		expect(formatSessionAutonomyStatus(status)).toContain("source ci: waiting (repository-unavailable)");
+
 		// Control: the owner's own turn runs the same push under the default grant, which releases the draft. It leaves the
 		// session where the platform sends it: the world's shell, or (with the platform's own engine) git spawned by the
 		// bash tool's git filter, whose remote exchange is the step below.
@@ -550,6 +653,7 @@ export async function runJourney1GithubRoutinesPhase(
 	} finally {
 		abort.abort();
 		await source?.source.stop();
+		await waitingSource?.source.stop();
 		await binding.close();
 		if (prompt) await prompt.catch(() => undefined);
 		expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();

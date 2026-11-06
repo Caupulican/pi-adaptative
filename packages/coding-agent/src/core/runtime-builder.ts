@@ -72,6 +72,7 @@ import {
 	buildWorkerSessionHarnessWriteEnvelope,
 	buildWorkerSessionPrivatePathEnvelope,
 } from "./autonomy/worker-session-private-scope.ts";
+import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
@@ -622,6 +623,8 @@ export interface RuntimeBuilderDeps {
 	reconcileLocalRuntimes?(): void;
 }
 
+type ToolDecisionReason = Omit<ToolDecision, "tool">;
+
 interface RuntimeToolAccessPolicy {
 	allowedToolNames: ReadonlySet<string> | undefined;
 	toolProfileFilter: Required<ResourceProfileFilterSettings> | undefined;
@@ -652,6 +655,10 @@ export class RuntimeBuilder {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	/** The access policy's latest refusal per tool name, and the other omission rules' (see `getToolOmissions`). */
+	private readonly _accessOmissions = new Map<string, ToolDecision>();
+	private _capabilityOmissions: readonly ToolDecision[] = [];
+	private _unboundGrantOmissions: readonly ToolDecision[] = [];
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -820,35 +827,63 @@ export class RuntimeBuilder {
 					block: mapToolNamesForPlatform(configuredToolProfileFilter.block),
 				}
 			: undefined;
+		const selection = (owner: string, detail: string): ToolDecisionReason => ({
+			code: "tool-selection",
+			owner,
+			detail,
+		});
+		const refusal = (name: string): ToolDecisionReason | undefined => {
+			// Strict worker UAC ceiling wins over every explicit grant: a worker process holds only the
+			// allow-listed surface, so catalogue and extension tools are never inherited by default.
+			if (role === "worker" && !isWorkerProcessToolAllowed(name, grantedExtensionTools))
+				return { code: "capability-ceiling", owner: "worker tool ceiling", detail: "outside the worker surface" };
+			const isRootMemoryCompanion = isRootSession && (name === "zoom" || name === "date");
+			if (allowedToolNames && !allowedToolNames.has(name))
+				return selection("allowed tool names", "not among the session's allowed tools");
+			if (excludedToolNames?.has(name) || (isRootMemoryCompanion && excludedToolNames?.has("memory"))) {
+				return selection("excluded tool names", "excluded from the session");
+			}
+			if (!toolProfileFilter) return undefined;
+			if (
+				toolProfileFilter.allow.length > 0 &&
+				!matchesResourceProfilePattern(name, toolProfileFilter.allow) &&
+				!(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.allow))
+			) {
+				return selection("tool profile filter", "outside the tool profile's allow list");
+			}
+			if (
+				matchesResourceProfilePattern(name, toolProfileFilter.block) ||
+				(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.block))
+			) {
+				return selection("tool profile filter", "blocked by the tool profile");
+			}
+			return undefined;
+		};
 		return {
 			allowedToolNames,
 			toolProfileFilter,
 			allows: (name) => {
-				// Strict worker UAC ceiling wins over every explicit grant: a worker process holds only the
-				// allow-listed surface, so catalogue and extension tools are never inherited by default.
-				if (role === "worker" && !isWorkerProcessToolAllowed(name, grantedExtensionTools)) return false;
-				const isRootMemoryCompanion = isRootSession && (name === "zoom" || name === "date");
-				if (allowedToolNames && !allowedToolNames.has(name)) return false;
-				if (excludedToolNames?.has(name) || (isRootMemoryCompanion && excludedToolNames?.has("memory"))) {
-					return false;
-				}
-				if (!toolProfileFilter) return true;
-				if (
-					toolProfileFilter.allow.length > 0 &&
-					!matchesResourceProfilePattern(name, toolProfileFilter.allow) &&
-					!(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.allow))
-				) {
-					return false;
-				}
-				if (
-					matchesResourceProfilePattern(name, toolProfileFilter.block) ||
-					(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.block))
-				) {
-					return false;
-				}
-				return true;
+				const refused = refusal(name);
+				// The generation's decisions are kept for the run tool manifest; nothing reads them to decide.
+				if (refused) this._accessOmissions.set(name, { tool: name, ...refused });
+				else this._accessOmissions.delete(name);
+				return refused === undefined;
 			},
 		};
+	}
+
+	/**
+	 * Read-only: why each tool this runtime decided on is not on its active surface, as each rule decided it: the access
+	 * policy, a setting that switches the tool off, the model capability filter, and profile grants no registered tool
+	 * binds. A run's tool manifest keeps those its requests did not offer.
+	 */
+	getToolOmissions(): readonly ToolDecision[] {
+		return [...this._capabilityOmissions, ...this._accessOmissions.values(), ...this._unboundGrantOmissions];
+	}
+
+	/** The model capability filter's withheld names for the active surface it just set (`partitionToolNamesForCapability`). */
+	noteCapabilityOmissions(withheld: readonly ToolDecision[]): void {
+		this._capabilityOmissions = [...withheld];
 	}
 
 	/** Owner sessions see mocked values; a worker lane is kept out of owner-private files entirely. */
@@ -1288,15 +1323,21 @@ export class RuntimeBuilder {
 			}
 			// An explicit grant that binds to NO registered tool is a silent no-op — typo'd
 			// name, or the owning extension is not granted/loaded. Surface it.
+			const unbound = explicitAllowPatterns.filter((pattern) => !boundPatterns.has(pattern));
+			this._unboundGrantOmissions = unbound.map((pattern) => ({
+				tool: pattern,
+				code: "extension-not-loaded",
+				owner: "tool profile filter",
+				detail: "the grant binds to no registered tool",
+			}));
 			this.deps.setUnboundToolGrantWarnings(
-				explicitAllowPatterns
-					.filter((pattern) => !boundPatterns.has(pattern))
-					.map(
-						(pattern) =>
-							`profile tool grant "${pattern}" binds to no registered tool (typo, or the owning extension is not granted/loaded)`,
-					),
+				unbound.map(
+					(pattern) =>
+						`profile tool grant "${pattern}" binds to no registered tool (typo, or the owning extension is not granted/loaded)`,
+				),
 			);
 		} else {
+			this._unboundGrantOmissions = [];
 			this.deps.setUnboundToolGrantWarnings([]);
 		}
 
@@ -1444,6 +1485,8 @@ export class RuntimeBuilder {
 		const windowsShell = settingsManager.getWindowsShellSettings();
 		const fileEncodings = settingsManager.getFileEncodings();
 		const baseToolsOverride = this.deps.getBaseToolsOverride();
+		// A new generation decides its own omissions; names an earlier generation decided do not linger.
+		this._accessOmissions.clear();
 		const toolAccess = this._createToolAccessPolicy();
 		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
 		// that nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
@@ -2109,12 +2152,21 @@ export class RuntimeBuilder {
 				});
 				this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
 			}
-			if (toolAccess.allows("context_scout") && settingsManager.getScoutSettings().enabled) {
-				const contextScoutToolDefinition = createContextScoutToolDefinition({
-					runScout: (input, signal) =>
-						this._runContextScout(input.query, input.maxTurns, toolArtifactStore, signal),
-				});
-				this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
+			if (toolAccess.allows("context_scout")) {
+				if (settingsManager.getScoutSettings().enabled) {
+					const contextScoutToolDefinition = createContextScoutToolDefinition({
+						runScout: (input, signal) =>
+							this._runContextScout(input.query, input.maxTurns, toolArtifactStore, signal),
+					});
+					this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
+				} else {
+					this._accessOmissions.set("context_scout", {
+						tool: "context_scout",
+						code: "settings-disabled",
+						owner: "scout settings",
+						detail: "scout.enabled is false",
+					});
+				}
 			}
 			if (toolAccess.allows("improvement_loop")) {
 				const improvementLoopTool: ToolDef = createImprovementLoopTool(async (command, args, options) =>

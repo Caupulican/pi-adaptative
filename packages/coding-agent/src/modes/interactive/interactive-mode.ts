@@ -32,6 +32,7 @@ import { APP_NAME, APP_TITLE, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { EdgeClass } from "../../core/autonomy/edge-policy.ts";
+import { formatSessionAutonomyStatus } from "../../core/autonomy-status/format.ts";
 import {
 	type CacheMissObservation,
 	detectCacheMissNotice,
@@ -1815,6 +1816,11 @@ export class InteractiveMode {
 			if (text === "/context") {
 				this.showStatus(this.session.formatContextCompositionDashboard());
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/status") {
+				this.editor.setText("");
+				this.showStatus(formatSessionAutonomyStatus(await this.session.autonomyStatus()));
 				return;
 			}
 			if (text === "/sysprompt" || text.startsWith("/sysprompt ")) {

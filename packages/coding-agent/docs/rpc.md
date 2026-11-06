@@ -612,6 +612,38 @@ Response:
 
 `contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
+#### get_autonomy_status
+
+Return the session's automatic-work snapshot, the same data `/status` prints and `session.autonomyStatus()` returns (`SessionAutonomyStatus`, `v: 1`). Reading it builds no owner and writes nothing.
+
+```json
+{"type": "get_autonomy_status"}
+```
+
+Response (abridged):
+```json
+{
+  "type": "response",
+  "command": "get_autonomy_status",
+  "success": true,
+  "data": {
+    "status": {
+      "v": 1,
+      "at": "2026-11-06T12:00:00.000Z",
+      "sessionId": "abc123",
+      "routines": { "status": "available", "value": { "routines": { "items": [{ "routineId": "nightly", "state": "enabled", "schedule": "cron" }] }, "resultWakes": { "used": 1, "max": 20 } } },
+      "hostEvents": { "status": "available", "value": { "connections": { "items": [{ "source": "ci", "state": "waiting", "reason": "repository-unavailable" }] } } },
+      "channels": { "status": "available", "value": { "channels": { "items": [] }, "journal": { "status": "unavailable", "reason": "reading a channel journal rewrites it today, so its wakes, spend and drafts are not read" } } },
+      "runs": { "status": "available", "value": [{ "runId": "root-3-1", "kind": "root", "authority": "third-party", "origin": "host-event", "offered": ["read", "bash"], "omitted": [{ "tool": "image_generate", "code": "capability-ceiling", "owner": "model capability", "detail": "image generation needs openai-codex" }], "refused": [{ "tool": "bash", "code": "third-party-prepared", "owner": "third-party gate", "detail": "no standing grant covers git.publish" }] }] }
+    }
+  }
+}
+```
+
+Every section is `{"status": "available", "value": ...}` or `{"status": "unavailable", "reason": "..."}`; a section whose owner is not loaded, or whose read failed, degrades on its own. Sections: `routines` (this session's routines and the day's result wakes), `awayDaemon` (heartbeat, away settings, rolling-day spend), `hostEvents` (each source's last reported connection, the worker ledger's sources and deliveries, GitHub interests), `actAhead`, `proactiveReview`, `channels`, `outwardDrafts` (pending drafts, released and dismissed counts), `harnessNotices` (notices waiting for the next owner turn, observed states), `knowledgeCollection`, `authority` (the current run's authority, edge mode, standing grants), and `runs`: the last 16 root runs and worker attempts, newest first, each with the tools it was offered, the tools a rule left out (`omitted`) and the calls a gate refused (`refused`), each with a `code` and the deciding rule's `owner`. Lists hold at most 16 items and report the rest in `omitted`. The run manifests are kept in memory only.
+
+Decision codes: `capability-ceiling`, `tool-selection`, `settings-disabled`, `extension-not-loaded`, `read-only-lane`, `memory-withheld-third-party`, `third-party-owner-only`, `third-party-prepared`, `third-party-not-run`.
+
 #### get_tool_repair_health
 
 Return the same tool repair health report shown by `/toolhealth`.

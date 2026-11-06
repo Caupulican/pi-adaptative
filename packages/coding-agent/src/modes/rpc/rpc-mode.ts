@@ -714,6 +714,10 @@ export async function runRpcMode(
 				return success(id, "get_session_stats", stats);
 			}
 
+			case "get_autonomy_status": {
+				return success(id, "get_autonomy_status", { status: await session.autonomyStatus() });
+			}
+
 			case "get_tool_repair_health": {
 				return success(id, "get_tool_repair_health", { report: session.formatToolRepairHealthReport() });
 			}

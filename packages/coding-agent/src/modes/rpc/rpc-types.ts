@@ -7,6 +7,7 @@
 
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
+import type { SessionAutonomyStatus } from "../../core/autonomy-status/autonomy-status.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
 import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
@@ -62,6 +63,7 @@ export type RpcCommand =
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
+	| { id?: string; type: "get_autonomy_status" }
 	| { id?: string; type: "get_tool_repair_health" }
 	| { id?: string; type: "tool_probe"; model?: string }
 	| { id?: string; type: "remove_tool_repair_rule"; model: string; mode: string }
@@ -184,6 +186,7 @@ export function decodeRpcCommand(value: unknown): RpcCommand | undefined {
 		case "abort_retry":
 		case "abort_bash":
 		case "get_session_stats":
+		case "get_autonomy_status":
 		case "get_tool_repair_health":
 		case "clone":
 		case "get_fork_messages":
@@ -317,6 +320,13 @@ export type RpcResponse =
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_autonomy_status";
+			success: true;
+			data: { status: SessionAutonomyStatus };
+	  }
 	| { id?: string; type: "response"; command: "get_tool_repair_health"; success: true; data: { report: string } }
 	| { id?: string; type: "response"; command: "tool_probe"; success: true; data: ToolProbeReport }
 	| { id?: string; type: "response"; command: "remove_tool_repair_rule"; success: true; data: { removed: boolean } }

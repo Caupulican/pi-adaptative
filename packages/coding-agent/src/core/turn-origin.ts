@@ -216,6 +216,11 @@ export class RunTurnOrigin {
 		this.latest = undefined;
 	}
 
+	/** True while a run is in progress (between `begin` and `end`). */
+	isActive(): boolean {
+		return this.active;
+	}
+
 	/** The decisive origin of the run in progress, if any. */
 	origin(): TurnOriginRecord | undefined {
 		return this.latest;

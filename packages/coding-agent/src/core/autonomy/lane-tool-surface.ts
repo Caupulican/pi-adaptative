@@ -9,6 +9,7 @@ import {
 	type BeforeToolCallResult,
 } from "../../kernel/index.ts";
 import { resolveInstalledManagedTool } from "../../utils/tools-manager.ts";
+import type { ToolDecision } from "../autonomy-status/tool-manifest.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
@@ -154,6 +155,10 @@ export interface LaneToolSurface {
 	deniedTools: string[];
 	/** Explicit grants that bind to no classified lane candidate (opaque tools stay fail-closed). */
 	unboundAllowPatterns: string[];
+	/** Each candidate the surface left off and each unbound grant, with the rule here that decided it. */
+	withheld: ToolDecision[];
+	/** `offline`: a read-only shell without `network.http`; `granted`: the grant holds `network.http`. */
+	network?: "granted" | "offline";
 	/** Per-call path and capability gate for the isolated worker loop. */
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
 	/** Retained fatal admission failures must be checked before accepting a lane result. */
@@ -514,6 +519,36 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 						!readOnlyDropped.includes(name),
 				);
 	const allowedToolSet = new Set<string>(allowedTools);
+	// The rule above that left each candidate off the surface, for the run's tool manifest.
+	const withheld: ToolDecision[] = [
+		...candidateNames.flatMap((name): ToolDecision[] => {
+			if (allowedToolSet.has(name)) return [];
+			if (readOnlyDropped.includes(name))
+				return [{ tool: name, code: "read-only-lane", owner: "read-only lane", detail: "the tool can edit" }];
+			if (options.grant)
+				return [
+					{ tool: name, code: "capability-ceiling", owner: "worker grant", detail: "outside the compiled grant" },
+				];
+			return [
+				{
+					tool: name,
+					code: "tool-selection",
+					owner: "worker profile",
+					detail: matchesResourceProfilePattern(name, patterns.block)
+						? "blocked by the worker profile"
+						: "outside the worker profile's allow list",
+				},
+			];
+		}),
+		...unboundAllowPatterns.map(
+			(pattern): ToolDecision => ({
+				tool: pattern,
+				code: "extension-not-loaded",
+				owner: "worker profile",
+				detail: "the grant binds to no lane tool",
+			}),
+		),
+	];
 	const manifestsByName = new Map(options.toolManifests?.map((manifest) => [manifest.toolName, manifest]) ?? []);
 	if (!options.yolo && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
@@ -754,6 +789,8 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,
+		withheld,
+		...(offline ? { network: "offline" as const } : networkGranted ? { network: "granted" as const } : {}),
 		toolUsage,
 		assertHealthy: () => admission.assertHealthy(),
 		onToolAdmitted: (observer) => admission.subscribe(observer),

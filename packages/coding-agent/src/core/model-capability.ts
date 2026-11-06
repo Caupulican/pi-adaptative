@@ -16,6 +16,7 @@ import {
 	supportsToolSchemaDisclosure,
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
+import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { ModelCapabilityClass } from "./capability-tier.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import type { ModelToolProtocolResolution } from "./model-tool-protocol.ts";
@@ -220,26 +221,52 @@ export function deriveModelCapabilityProfile(args: {
 	return profileForClass("chat", "chat_only_context_window", contextWindow);
 }
 
+interface CapabilityToolModel {
+	provider: string;
+	api?: string;
+	id?: string;
+	baseUrl?: string;
+	compat?: unknown;
+}
+
 /** Apply the profile's allow/block lists to a requested tool-name list, preserving order. */
 export function filterToolNamesForCapability(
 	toolNames: readonly string[],
 	profile: ModelCapabilityProfile,
-	model?: {
-		provider: string;
-		api?: string;
-		id?: string;
-		baseUrl?: string;
-		compat?: unknown;
-	},
+	model?: CapabilityToolModel,
 ): string[] {
-	let filtered = toolNames.filter((name) => name !== "image_generate" || model?.provider === "openai-codex");
+	return partitionToolNamesForCapability(toolNames, profile, model).kept;
+}
+
+/** The capability filter's decision, with the rule that withheld each requested name the filter dropped. */
+export function partitionToolNamesForCapability(
+	toolNames: readonly string[],
+	profile: ModelCapabilityProfile,
+	model?: CapabilityToolModel,
+): { kept: string[]; withheld: ToolDecision[] } {
+	const withheld: ToolDecision[] = [];
+	const keep = (name: string, kept: boolean, detail: string): boolean => {
+		if (!kept) withheld.push({ tool: name, code: "capability-ceiling", owner: "model capability", detail });
+		return kept;
+	};
+	let filtered = toolNames.filter((name) =>
+		keep(
+			name,
+			name !== "image_generate" || model?.provider === "openai-codex",
+			"image generation needs openai-codex",
+		),
+	);
 	if (profile.allowedToolNames !== undefined) {
 		const allowed = new Set(profile.allowedToolNames);
-		filtered = filtered.filter((name) => allowed.has(name));
+		filtered = filtered.filter((name) =>
+			keep(name, allowed.has(name), `outside the ${profile.class} capability class's tools`),
+		);
 	}
 	if (profile.blockedToolNames !== undefined) {
 		const blocked = new Set(profile.blockedToolNames);
-		filtered = filtered.filter((name) => !blocked.has(name));
+		filtered = filtered.filter((name) =>
+			keep(name, !blocked.has(name), `blocked for the ${profile.class} capability class`),
+		);
 	}
 	const toolSearchSupported =
 		filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME).length >=
@@ -255,8 +282,10 @@ export function filterToolNamesForCapability(
 					compat: model.compat,
 				})
 			: false;
-	filtered = filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME || toolSearchSupported);
-	return filtered;
+	filtered = filtered.filter((name) =>
+		keep(name, name !== TOOL_SCHEMA_SEARCH_NAME || toolSearchSupported, "the model does not support tool search"),
+	);
+	return { kept: filtered, withheld };
 }
 
 /**

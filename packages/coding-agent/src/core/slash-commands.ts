@@ -22,6 +22,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "secrets", description: "Store and activate project credentials with Bitwarden" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
 	{
+		name: "status",
+		description:
+			"What runs automatically: routines, away daemon, host events, drafts, notices, grants, recent runs' tools",
+		duringWork: "local",
+	},
+	{
 		name: "proactivity",
 		description: "Idle review that raises notes: /proactivity [status|on|off|review|prefs <text>]",
 	},

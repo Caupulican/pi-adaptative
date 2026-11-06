@@ -54,6 +54,9 @@ export {
 	encodeWorkerSessionAllowedPaths,
 	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "./core/autonomy/worker-session-private-scope.ts";
+export type { SessionAutonomyStatus, StatusSection } from "./core/autonomy-status/autonomy-status.ts";
+export { formatSessionAutonomyStatus } from "./core/autonomy-status/format.ts";
+export type { RunToolManifest, ToolDecision, ToolDecisionCode } from "./core/autonomy-status/tool-manifest.ts";
 export type {
 	ChannelRuntimeState,
 	ChannelStateView,

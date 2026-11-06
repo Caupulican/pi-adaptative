@@ -31,6 +31,11 @@ import type {
 } from "./agent-session-contracts.ts";
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
+import {
+	type AutonomyStatusSources,
+	readSessionAutonomyStatus,
+	type SessionAutonomyStatus,
+} from "./autonomy-status/autonomy-status.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
@@ -1800,6 +1805,36 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const store = this.getBotTeamStore();
 		store.reload();
 		return store.getDaemonStatus(this.deps.getTimers().port("routines").now());
+	}
+
+	/**
+	 * The session's automatic work at this instant (`autonomy-status/autonomy-status.ts`), read from the owners this
+	 * controller has loaded and the session's own: an owner that is not loaded is reported unavailable, never built.
+	 */
+	readAutonomyStatus(
+		foregroundRun: AutonomyStatusSources["foregroundRun"],
+		harnessNotices: AutonomyStatusSources["harnessNotices"],
+		memory: AutonomyStatusSources["memory"],
+	): Promise<SessionAutonomyStatus> {
+		const nowMs = Date.now();
+		const getEdgeGrants = this.deps.getEdgeGrants;
+		return readSessionAutonomyStatus({
+			nowMs,
+			sessionId: this.deps.getSessionId(),
+			childSession: this.deps.isChildSession(),
+			sessionManager: this.deps.getSessionManager(),
+			settings: this.deps.getSettingsManager(),
+			usageWindow: () => this.deps.aggregateUsageWindow(rollingDayWindow(nowMs)),
+			routineStore: this._botTeamStore,
+			routineIntake: this._routines?.intake.status(),
+			hostEventLedger: this.getTaskRuntimeSnapshot(),
+			proactivity: { daily: this.getProactivityDailyState(), lastSkipReason: this.getLastProactivitySkipReason() },
+			channelStates: () => this.channels.getStates(),
+			harnessNotices,
+			memory,
+			standingGrants: getEdgeGrants ? () => getEdgeGrants(true) : undefined,
+			foregroundRun,
+		});
 	}
 
 	/**

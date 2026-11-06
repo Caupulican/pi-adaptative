@@ -33,6 +33,7 @@ import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts"
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
+import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -86,7 +87,7 @@ import {
 	optionalToolRequestAliases,
 	readOptionalToolIntent,
 } from "./tool-applicability-gate.ts";
-import { isThirdPartyOrigin, type TurnOriginRecord } from "./turn-origin.ts";
+import { isThirdPartyOrigin } from "./turn-origin.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 
 /**
@@ -217,8 +218,8 @@ export interface SessionEdgeIntentControllerDeps {
 	pushPendingNextTurnMessage(message: CustomMessage): void;
 	setOperatorBlocker(blocker: string | undefined): void;
 	emitWarning(message: string): void;
-	/** The decisive origin of the foreground run in progress (`RunTurnOrigin`). */
-	getRunTurnOrigin(): TurnOriginRecord | undefined;
+	/** The foreground run in progress: its decisive origin (`RunTurnOrigin`) and its tool manifest. */
+	getForegroundRun(): Pick<ForegroundRecoveryController, "turnOrigin" | "toolManifests">;
 	/** Tells the owner once, with their next turn; returns whether they are told (`HarnessNoticeController.observe`). */
 	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 }
@@ -364,7 +365,7 @@ export class SessionEdgeIntentController {
 
 	/** Whether the run in progress carries a third party's words (`RunTurnOrigin`). */
 	private runsThirdParty(): boolean {
-		return isThirdPartyOrigin(this.deps.getRunTurnOrigin());
+		return isThirdPartyOrigin(this.deps.getForegroundRun().turnOrigin.origin());
 	}
 
 	/** The verdict caches' turn: the submission, the run's authority and the owner's request it reads. */
@@ -435,7 +436,8 @@ export class SessionEdgeIntentController {
 			},
 			mayHoldUnownedWorktreeChanges: (signal) =>
 				mayHoldUnownedWorktreeChanges(this.deps.getCwd(), [...this.deps.getWrittenMutationPaths()], signal),
-			getRunOrigin: () => this.deps.getRunTurnOrigin(),
+			getRunOrigin: () => this.deps.getForegroundRun().turnOrigin.origin(),
+			noteToolRefusal: (decision) => this.deps.getForegroundRun().toolManifests.refuseRoot(decision),
 			prepareOutward: (draft) => {
 				const held = keepOutwardDraft(this.deps.getSessionManager(), draft);
 				// One notice per kept draft (its id names the request and the action, so a repeat adds nothing), and one when
