@@ -1455,6 +1455,11 @@ export interface EffectPorts {
 	/** Current virtual generation's PID, read by the real owner-id constructors; restored with the guard. */
 	pid?(): number;
 	fetch?: typeof globalThis.fetch;
+	/**
+	 * The scripted socket one `new WebSocket(url, protocols)` returns, or undefined to refuse it. Without this port every
+	 * construction is refused; either way no socket leaves the process.
+	 */
+	webSocket?: (url: string, protocols: unknown) => object | undefined;
 	/** Keep the native SQL engine but route every database's storage to RAM. */
 	sqlite?: "memory";
 	/** An in-memory network of unix-socket endpoints in place of the refused `net` entry points. Nothing leaves the process. */
@@ -1477,6 +1482,9 @@ function sameOwnProperty(actual: PropertyDescriptor | undefined, expected: Prope
 	);
 }
 
+/** The globals the guard keeps pinned to its ports for the whole world. */
+type PinnedGlobal = "fetch" | "WebSocket";
+
 /** Installs at the external builtin boundary, before constructing any production session. */
 export class EffectGuard {
 	readonly escapes: string[] = [];
@@ -1486,8 +1494,8 @@ export class EffectGuard {
 	private readonly restore: Array<() => void> = [];
 	/** What each restore must leave behind, checked once the restores have run (see {@link dispose}). */
 	private readonly restored: Array<{ readonly label: string; readonly holds: () => boolean }> = [];
-	/** The pinned fetch property as installed: a redefinition that bypassed its setter no longer matches it at dispose. */
-	private pinnedFetch: PropertyDescriptor | undefined;
+	/** Each pinned global (fetch, WebSocket) as installed: a redefinition that bypassed its setter no longer matches it at dispose. */
+	private readonly pinnedGlobals = new Map<PinnedGlobal, PropertyDescriptor | undefined>();
 	private readonly sqlite: VirtualSqlite;
 	private readonly workerThreads: VirtualWorkerThreads;
 	private installed = false;
@@ -1534,7 +1542,8 @@ export class EffectGuard {
 				};
 			// Keep module exports as stable dispatchers: a lazy importer must never capture a world closure.
 			// The shared boundary rejects every active-world export absent from these adapter tables.
-			this.pinGlobalFetch(this.ports.fetch ?? reject("fetch"));
+			this.pinGlobal("fetch", this.ports.fetch ?? reject("fetch"));
+			this.pinGlobal("WebSocket", this.webSocketPort());
 			this.restoreUndiciInstallState();
 			const processExports: Record<string, unknown> = {};
 			for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) {
@@ -1670,11 +1679,9 @@ export class EffectGuard {
 		}
 		// A replacement of the pinned fetch is recorded by its setter and never installed; a redefinition would have bypassed that, so the
 		// pin must still be the property the guard installed when the restores run.
-		if (
-			this.pinnedFetch !== undefined &&
-			!sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, "fetch"), this.pinnedFetch)
-		) {
-			failures.push(new Error("globalThis.fetch was redefined outside the effect guard"));
+		for (const [name, pinned] of this.pinnedGlobals) {
+			if (!sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, name), pinned))
+				failures.push(new Error(`globalThis.${name} was redefined outside the effect guard`));
 		}
 		for (const restore of this.restore.reverse()) {
 			try {
@@ -1690,7 +1697,7 @@ export class EffectGuard {
 			if (!holds()) failures.push(new Error(`Effect guard restore did not take: ${label}`));
 		}
 		this.restored.length = 0;
-		this.pinnedFetch = undefined;
+		this.pinnedGlobals.clear();
 		try {
 			syncBuiltinESMExports();
 		} catch (error) {
@@ -1720,29 +1727,45 @@ export class EffectGuard {
 	}
 
 	/**
-	 * Production reinstalls the global fetch as undici's (configureHttpDispatcher's `undici.install()`, reached from InteractiveMode's
-	 * runtime settings). A plain value would let that replacement bypass the port and reach undici's sockets, so the world's fetch is an
-	 * accessor that stays the port until dispose; each replacement is recorded as an effect and never installed.
+	 * Production reinstalls the global fetch and WebSocket as undici's (configureHttpDispatcher's `undici.install()`, reached from
+	 * InteractiveMode's runtime settings), by assignment. A plain value would let that replacement bypass the port and reach undici's
+	 * sockets, so each pinned global is an accessor that stays the port until dispose; each replacement is recorded as an effect and
+	 * never installed.
 	 */
-	private pinGlobalFetch(port: unknown): void {
-		const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
-		if (descriptor && !descriptor.configurable) throw new Error("Cannot guard fetch");
-		Object.defineProperty(globalThis, "fetch", {
+	private pinGlobal(name: PinnedGlobal, port: unknown): void {
+		const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+		if (descriptor && !descriptor.configurable) throw new Error(`Cannot guard ${name}`);
+		Object.defineProperty(globalThis, name, {
 			configurable: true,
 			enumerable: descriptor?.enumerable ?? true,
 			get: () => port,
 			set: (replacement: unknown) => {
-				this.effects.push({ kind: "globalThis.fetch", arguments: [replacement] });
+				this.effects.push({ kind: `globalThis.${name}`, arguments: [replacement] });
 			},
 		});
-		this.pinnedFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+		this.pinnedGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 		this.restore.push(() => {
-			if (descriptor) Object.defineProperty(globalThis, "fetch", descriptor);
-			else Reflect.deleteProperty(globalThis, "fetch");
+			if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+			else Reflect.deleteProperty(globalThis, name);
 		});
 		this.restored.push({
-			label: "globalThis.fetch",
-			holds: () => sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, "fetch"), descriptor),
+			label: `globalThis.${name}`,
+			holds: () => sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, name), descriptor),
+		});
+	}
+
+	/**
+	 * A constructible stand-in for the WebSocket class: `new WebSocket(url, protocols)` returns the world's scripted socket, or is
+	 * refused and recorded as an escape. A real socket would reach the refused `net`/`tls` entry points anyway; this refuses it at once.
+	 */
+	private webSocketPort(): unknown {
+		const port = this.ports.webSocket;
+		const constants = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+		const target = Object.assign(function WebSocket(): void {}, constants);
+		return new Proxy(target, {
+			construct: (_target, arguments_: unknown[]) => {
+				return port?.(String(arguments_[0]), arguments_[1]) ?? this.reject("WebSocket");
+			},
 		});
 	}
 
@@ -1758,7 +1781,7 @@ export class EffectGuard {
 			holds: () => undici.getGlobalDispatcher() === dispatcher,
 		});
 		for (const name of HTTP_INSTALL_GLOBAL_NAMES) {
-			if (name === "fetch") continue; // The pinned fetch has its own restoration and evidence.
+			if (name === "fetch" || name === "WebSocket") continue; // A pinned global has its own restoration and evidence.
 			const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
 			this.restore.push(() => {
 				if (descriptor) Object.defineProperty(globalThis, name, descriptor);

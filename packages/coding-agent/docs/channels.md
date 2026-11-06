@@ -1,6 +1,6 @@
 # Channels
 
-A channel connects a chat or mail transport to an open root session. Pi ships Telegram (below); other transports still come from a deployment wrapper (a server, a bot runner, an SDK host) that implements the provider and registers it. The core decides everything with a cost or a consequence: whether the channel starts, which messages may start a turn, how many turns a day it may start, and whether an answer is sent or kept for the owner.
+A channel connects a chat or mail transport to an open root session. Pi ships Telegram and Slack (below); other transports still come from a deployment wrapper (a server, a bot runner, an SDK host) that implements the provider and registers it. The core decides everything with a cost or a consequence: whether the channel starts, which messages may start a turn, how many turns a day it may start, and whether an answer is sent or kept for the owner.
 
 A channel runs while a session is open, and also while none is when the owner names a working directory for it (`awayCwd`, see [While no session is open](#while-no-session-is-open)). Otherwise messages that arrive while no session serves the channel stay with the transport.
 
@@ -14,6 +14,17 @@ Pi ships a Telegram transport: one bot, private chats, text messages, over the B
 4. From then on your messages start turns; their answers wait as drafts unless `replyMode` is `"auto"`.
 
 The token is read when the channel starts and never written anywhere else; a missing token, a file other users can read, or a token Telegram rejects shows as `suspended` with the reason in the channel's state and one notice. A failed start is tried again when settings change or a session starts. Telegram allows one poller per bot: a second program polling the same bot (or a webhook set for it) shows as `suspended` with HTTP 409 until it stops. Group chats, edited messages, other bots' messages and media are not admitted. Replies are plain text, up to 4096 characters a message, about one message a second per chat.
+
+## Slack
+
+Pi ships a Slack transport: one Slack app, direct messages, text messages, over Socket Mode (the app opens an outbound WebSocket; no public URL, no listening port). It starts by itself when `channels.slack` has an explicit policy and no wrapper registered a provider named `slack` (a wrapper's provider wins). Setup:
+
+1. Create an app at api.slack.com/apps. Under Socket Mode, enable it and create an app-level token with the `connections:write` scope; it starts with `xapp-`.
+2. Under OAuth & Permissions add the bot token scopes `chat:write` and `im:history`. Under Event Subscriptions subscribe to the bot event `message.im`. Under App Home allow users to send messages from the Messages tab. Install the app to the workspace and copy its bot token; it starts with `xoxb-`.
+3. Write the app-level token to `~/.pi/agent/channels/slack.app-token` and the bot token to `~/.pi/agent/channels/slack.bot-token`, both readable by you only: `(umask 077; mkdir -p ~/.pi/agent/channels; cat > ~/.pi/agent/channels/slack.app-token)`, paste, Ctrl-D, and the same for `slack.bot-token`.
+4. Add `"channels": { "slack": { "mode": "explicit" } }` to `~/.pi/agent/settings.json`, open Pi and message the app. Pi holds the message and tells you your Slack user id; add it: `"allowedSenders": ["U0123ABCDEF"]`.
+
+Both tokens are read when the channel starts and never written anywhere else. A missing token, a file other users can read, or a file that does not hold the token shows as `suspended` with the file named; an app-level token Slack rejects, Socket Mode refused for the app, and Socket Mode turned off each show as `suspended` with their own reason while the connection is retried with backoff. Slack replaces its connections from time to time and says so first; Pi opens the next one at once. Each event is acknowledged to Slack only after Pi recorded it, so an event Pi could not record is delivered again by Slack. Only direct messages from people are admitted; channel messages, edits, deletions, files and other apps' or bots' messages are not. A message in a thread is its own conversation, and its reply goes into that thread. Replies are plain text (no formatting, no link previews), up to 3000 characters a message, about one message a second per conversation.
 
 ## Registering a provider
 
@@ -50,7 +61,7 @@ session.channels.getStates(); // [{ name: "mail", state: "armed" }]
 
 Registering does not start the provider. The session starts it under the owner's `channels.<name>` policy, now or once the session starts, and stops it when the session closes or the policy is removed. `session.channels` exposes `registerChannel`, `registerScheduler` and `getStates`; a wrapper cannot start a provider or send through it itself. A worker or other child session runs no channels.
 
-A `start` that rejects shows the channel as `suspended` ("its start failed"; the shipped Telegram transport's own reasons are shown in full). `start` also receives an optional second argument, `report`: a provider that later loses its connection calls `report({ state: "suspended", reason })` and the channel shows `suspended` with that reason (redacted, first line, told to the owner) until the provider calls `report({ state: "connected" })`. The reason is the provider's own words naming what the owner can fix, never text a remote party wrote and never a credential. A provider that never reports is taken as connected while it runs.
+A `start` that rejects shows the channel as `suspended` ("its start failed"; the shipped transports' own reasons are shown in full). `start` also receives an optional second argument, `report`: a provider that later loses its connection calls `report({ state: "suspended", reason })` and the channel shows `suspended` with that reason (redacted, first line, told to the owner) until the provider calls `report({ state: "connected" })`. The reason is the provider's own words naming what the owner can fix, never text a remote party wrote and never a credential. A provider that never reports is taken as connected while it runs.
 
 A channel name is lowercase letters, digits, `.`, `_` and `-`, at most 64 characters, starting with a letter or digit. `pi-chat` is reserved for the [pi-chat](pi-chat.md) mesh.
 

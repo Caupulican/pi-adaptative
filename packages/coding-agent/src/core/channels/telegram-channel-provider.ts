@@ -9,7 +9,6 @@
  * offset again after a backoff.
  */
 
-import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
 	ChannelCapabilities,
@@ -18,9 +17,21 @@ import type {
 	ChannelProvider,
 	ChannelStatusReporter,
 } from "../gateways/channel-provider.ts";
-import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import {
+	type ApiOutcome,
+	type Backoff,
+	backoffDelay,
+	boundedRetryAfterMs,
+	ConnectionReport,
+	DEFAULT_RETRY_AFTER_MS,
+	pause,
+	postJsonApi,
+	readChannelTokenFile,
+	SendPacer,
+	sendPaced,
+} from "./channel-transport.ts";
 
 export const TELEGRAM_CHANNEL = "telegram";
 
@@ -29,17 +40,10 @@ const API_BASE = "https://api.telegram.org";
 const POLL_TIMEOUT_SECONDS = 25;
 const POLL_ABORT_MS = 40_000;
 const SEND_ABORT_MS = 30_000;
-const MAX_TOKEN_FILE_BYTES = 256;
 /** The same shape the diagnostic redaction masks (`OUTBOUND_ONLY_TOKEN_SHAPES`, `core/security/secret-text.ts`). */
 const TOKEN_SHAPE = /^\d{6,12}:[A-Za-z0-9_-]{30,64}$/;
 /** Telegram allows about one message a second into one chat. */
 const SEND_SPACING_MS = 1000;
-const MAX_SEND_ATTEMPTS = 3;
-const MAX_RETRY_AFTER_MS = 5 * 60_000;
-const DEFAULT_RETRY_AFTER_MS = 5000;
-/** Transport failures in a row before the owner is told the channel is not receiving. */
-const FAILURES_BEFORE_REPORT = 3;
-const MAX_PACED_CHATS = 256;
 
 const CONFLICT_REASON =
 	"Telegram refused long polling (HTTP 409): another program polls this bot, or a webhook is set for it; stop it or delete the webhook. Polling is retried with backoff";
@@ -47,49 +51,9 @@ const TOKEN_REJECTED_REASON =
 	"Telegram rejected the bot token (HTTP 401 or 404). Replace the token file; it is read again on each retry";
 const UNREACHABLE_REASON = "Telegram's Bot API cannot be reached; polling is retried with backoff";
 
-interface Backoff {
-	readonly baseMs: number;
-	readonly maxMs: number;
-}
 const TRANSIENT_BACKOFF: Backoff = { baseMs: 1000, maxMs: 5 * 60_000 };
 const CONFLICT_BACKOFF: Backoff = { baseMs: 5000, maxMs: 5 * 60_000 };
 const TOKEN_BACKOFF: Backoff = { baseMs: 60_000, maxMs: 30 * 60_000 };
-
-/** Exponential delay with jitter: half the step plus up to the other half at random. */
-function backoffDelay(backoff: Backoff, attempt: number): number {
-	const step = Math.min(backoff.maxMs, backoff.baseMs * 2 ** Math.min(Math.max(0, attempt - 1), 20));
-	return Math.round(step / 2 + Math.random() * (step / 2));
-}
-
-type ApiOutcome =
-	| { readonly kind: "ok"; readonly result: unknown }
-	| { readonly kind: "refused"; readonly status: number; readonly retryAfterMs?: number }
-	| { readonly kind: "unreachable" }
-	| { readonly kind: "stopped" };
-
-/** Resolves after `ms`, or at once when `signal` aborts; leaves no timer or listener behind either way. */
-function pause(timers: TimerPort, ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal.aborted) {
-			resolve();
-			return;
-		}
-		const done = (): void => {
-			timers.clearTimeout(handle);
-			signal.removeEventListener("abort", done);
-			resolve();
-		};
-		const handle = timers.setTimeout(done, ms);
-		signal.addEventListener("abort", done, { once: true });
-	});
-}
-
-function retryAfterMs(payload: unknown, response: Response): number | undefined {
-	const parameters = isPlainRecord(payload) ? payload.parameters : undefined;
-	const seconds = isPlainRecord(parameters) ? parameters.retry_after : Number(response.headers.get("retry-after"));
-	if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return undefined;
-	return Math.min(MAX_RETRY_AFTER_MS, Math.ceil(seconds * 1000));
-}
 
 const safeInteger = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value);
 
@@ -141,15 +105,15 @@ export class TelegramChannelProvider implements ChannelProvider {
 	private token: string | undefined;
 	private abort: AbortController | undefined;
 	private loop: Promise<void> | undefined;
-	private reported: string | undefined;
 	/** When each chat may receive its next message. */
-	private readonly nextSendAt = new Map<string, number>();
+	private readonly pacer: SendPacer;
 
 	constructor(options: TelegramChannelProviderOptions) {
 		this.tokenPath = telegramTokenPath(options.agentDir);
 		this.fetchOverride = options.fetch;
 		this.warn = options.warn;
 		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
+		this.pacer = new SendPacer(this.timers, SEND_SPACING_MS);
 	}
 
 	/** Reads the token and starts polling; rejects with what the owner has to fix when the token file is not usable. */
@@ -158,7 +122,7 @@ export class TelegramChannelProvider implements ChannelProvider {
 		this.token = this.readToken();
 		const abort = new AbortController();
 		this.abort = abort;
-		this.loop = this.poll(onInbound, report, abort.signal);
+		this.loop = this.poll(onInbound, new ConnectionReport(report), abort.signal);
 	}
 
 	async stop(): Promise<void> {
@@ -168,36 +132,22 @@ export class TelegramChannelProvider implements ChannelProvider {
 		this.loop = undefined;
 		await loop;
 		this.token = undefined;
-		this.reported = undefined;
-		this.nextSendAt.clear();
+		this.pacer.clear();
 	}
 
 	async send(message: ChannelMessage): Promise<void> {
 		const chatId = message.address;
 		if (typeof chatId !== "string" || !/^-?\d{1,20}$/.test(chatId))
 			throw new Error("A Telegram reply needs the chat id its conversation came from.");
-		const signal = this.abort?.signal;
-		if (!signal || signal.aborted) throw new Error("The Telegram channel is not running; nothing was sent.");
-		const wait = (this.nextSendAt.get(chatId) ?? 0) - this.timers.now();
-		if (wait > 0) await pause(this.timers, wait, signal);
-		for (let attempt = 1; ; attempt++) {
-			const outcome = await this.call("sendMessage", { chat_id: chatId, text: message.text }, signal, SEND_ABORT_MS);
-			if (outcome.kind === "ok") {
-				this.paced(chatId);
-				return;
-			}
-			if (outcome.kind === "stopped") throw new Error("The Telegram channel stopped before the reply was sent.");
-			if (outcome.kind === "unreachable")
-				throw new Error(
-					"Telegram did not confirm the reply (network error or timeout); it may have been delivered.",
-				);
-			if (outcome.status === 429 && attempt < MAX_SEND_ATTEMPTS) {
-				await pause(this.timers, outcome.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS, signal);
-				if (signal.aborted) throw new Error("The Telegram channel stopped before the reply was sent.");
-				continue;
-			}
-			throw new Error(this.sendRefusal(outcome.status));
-		}
+		await sendPaced({
+			service: "Telegram",
+			destination: chatId,
+			signal: this.abort?.signal,
+			timers: this.timers,
+			pacer: this.pacer,
+			call: (signal) => this.call("sendMessage", { chat_id: chatId, text: message.text }, signal, SEND_ABORT_MS),
+			refusal: (outcome) => this.sendRefusal(outcome.status),
+		});
 	}
 
 	private sendRefusal(status: number): string {
@@ -210,41 +160,14 @@ export class TelegramChannelProvider implements ChannelProvider {
 		return `Telegram refused the reply (HTTP ${status}); it was not sent.`;
 	}
 
-	private paced(chatId: string): void {
-		const now = this.timers.now();
-		if (this.nextSendAt.size >= MAX_PACED_CHATS)
-			for (const [chat, at] of this.nextSendAt) if (at <= now) this.nextSendAt.delete(chat);
-		this.nextSendAt.set(chatId, now + SEND_SPACING_MS);
-	}
-
 	/** The token, or a throw naming the file and what is wrong with it (never its content). */
 	private readToken(): string {
-		const path = this.tokenPath;
-		let text: string | undefined;
-		try {
-			text = readOptionalBoundedTextFileSync(path, MAX_TOKEN_FILE_BYTES, "Telegram bot token file");
-		} catch {
-			throw new Error(
-				`the Telegram bot token file ${path} cannot be read; it must be a small file holding only the token`,
-			);
-		}
-		if (text === undefined) throw new Error(`no Telegram bot token: write it to ${path} (readable by you only)`);
-		if (process.platform !== "win32") {
-			let mode: number;
-			try {
-				mode = statSync(path).mode;
-			} catch {
-				throw new Error(`the Telegram bot token file ${path} cannot be read`);
-			}
-			if ((mode & 0o077) !== 0)
-				throw new Error(`the Telegram bot token file ${path} is readable by other users; run chmod 600 on it`);
-		}
-		const token = text.trim();
-		if (!TOKEN_SHAPE.test(token))
-			throw new Error(
-				`the Telegram bot token file ${path} does not hold a bot token (digits, a colon, then the secret)`,
-			);
-		return token;
+		return readChannelTokenFile({
+			path: this.tokenPath,
+			label: "Telegram bot token",
+			shape: TOKEN_SHAPE,
+			shapeHint: "a bot token (digits, a colon, then the secret)",
+		});
 	}
 
 	private async call(
@@ -255,46 +178,31 @@ export class TelegramChannelProvider implements ChannelProvider {
 	): Promise<ApiOutcome> {
 		const token = this.token;
 		if (!token || signal.aborted) return { kind: "stopped" };
-		const timeout = new AbortController();
-		const handle = this.timers.setTimeout(() => timeout.abort(), timeoutMs);
-		try {
-			const response = await (this.fetchOverride ?? globalThis.fetch)(`${API_BASE}/bot${token}/${method}`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(body),
-				signal: AbortSignal.any([signal, timeout.signal]),
-			});
-			let payload: unknown;
-			try {
-				payload = await response.json();
-			} catch {
-				payload = undefined;
-			}
-			if (signal.aborted) return { kind: "stopped" };
-			if (response.ok && isPlainRecord(payload) && payload.ok === true)
-				return { kind: "ok", result: payload.result };
-			const status = response.ok ? 502 : response.status;
-			const retryAfter = status === 429 ? retryAfterMs(payload, response) : undefined;
-			return { kind: "refused", status, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
-		} catch {
-			return signal.aborted ? { kind: "stopped" } : { kind: "unreachable" };
-		} finally {
-			this.timers.clearTimeout(handle);
-		}
+		const outcome = await postJsonApi({
+			fetch: this.fetchOverride ?? globalThis.fetch,
+			timers: this.timers,
+			url: `${API_BASE}/bot${token}/${method}`,
+			headers: { "content-type": "application/json" },
+			body,
+			signal,
+			timeoutMs,
+		});
+		if (outcome.kind !== "refused") return outcome;
+		// The Bot API answers a refusal it explains with HTTP 200 and `ok: false`; it says how long to wait in its body.
+		const status = outcome.status >= 200 && outcome.status < 300 ? 502 : outcome.status;
+		const payload = outcome.payload;
+		const parameters = isPlainRecord(payload) ? payload.parameters : undefined;
+		const retryAfter =
+			status !== 429
+				? undefined
+				: isPlainRecord(parameters)
+					? boundedRetryAfterMs(parameters.retry_after)
+					: outcome.retryAfterMs;
+		return { kind: "refused", status, payload, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
 	}
 
-	private async poll(
-		onInbound: ChannelInboundHandler,
-		report: ChannelStatusReporter | undefined,
-		signal: AbortSignal,
-	): Promise<void> {
-		const suspend = (reason: string): void => {
-			if (this.reported === reason) return;
-			this.reported = reason;
-			report?.({ state: "suspended", reason });
-		};
+	private async poll(onInbound: ChannelInboundHandler, reports: ConnectionReport, signal: AbortSignal): Promise<void> {
 		let offset: number | undefined;
-		let transient = 0;
 		let conflicts = 0;
 		let rejections = 0;
 		let handlerFailures = 0;
@@ -306,7 +214,7 @@ export class TelegramChannelProvider implements ChannelProvider {
 					this.token = this.readToken();
 					reloadToken = false;
 				} catch (error) {
-					suspend(error instanceof Error ? error.message : TOKEN_REJECTED_REASON);
+					reports.suspend(error instanceof Error ? error.message : TOKEN_REJECTED_REASON);
 					await pause(this.timers, backoffDelay(TOKEN_BACKOFF, ++rejections), signal);
 					continue;
 				}
@@ -322,17 +230,14 @@ export class TelegramChannelProvider implements ChannelProvider {
 				POLL_ABORT_MS,
 			);
 			if (outcome.kind === "stopped") return;
-			if (outcome.kind === "ok" && Array.isArray(outcome.result)) {
-				transient = 0;
+			const updates = outcome.kind === "ok" ? outcome.payload.result : undefined;
+			if (Array.isArray(updates)) {
 				conflicts = 0;
 				rejections = 0;
-				if (this.reported !== undefined) {
-					this.reported = undefined;
-					report?.({ state: "connected" });
-				}
+				reports.connected();
 				let handlerFailed = false;
 				const before = offset;
-				for (const raw of outcome.result) {
+				for (const raw of updates) {
 					const update = readUpdate(raw);
 					if (!update) {
 						if (!warnedUnreadable)
@@ -352,18 +257,18 @@ export class TelegramChannelProvider implements ChannelProvider {
 					offset = update.id + 1;
 				}
 				// A batch that moved nothing forward (a rejected handler, or only unreadable updates) is not polled again at once.
-				if (handlerFailed || (outcome.result.length > 0 && offset === before))
+				if (handlerFailed || (updates.length > 0 && offset === before))
 					await pause(this.timers, backoffDelay(TRANSIENT_BACKOFF, ++handlerFailures), signal);
 				else handlerFailures = 0;
 				continue;
 			}
 			if (outcome.kind === "refused" && outcome.status === 409) {
-				suspend(CONFLICT_REASON);
+				reports.suspend(CONFLICT_REASON);
 				await pause(this.timers, backoffDelay(CONFLICT_BACKOFF, ++conflicts), signal);
 				continue;
 			}
 			if (outcome.kind === "refused" && (outcome.status === 401 || outcome.status === 404)) {
-				suspend(TOKEN_REJECTED_REASON);
+				reports.suspend(TOKEN_REJECTED_REASON);
 				reloadToken = true;
 				await pause(this.timers, backoffDelay(TOKEN_BACKOFF, ++rejections), signal);
 				continue;
@@ -372,14 +277,12 @@ export class TelegramChannelProvider implements ChannelProvider {
 				await pause(this.timers, outcome.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS, signal);
 				continue;
 			}
-			transient++;
-			if (transient >= FAILURES_BEFORE_REPORT)
-				suspend(
-					outcome.kind === "refused"
-						? `Telegram's Bot API answered getUpdates with HTTP ${outcome.status}; polling is retried with backoff`
-						: UNREACHABLE_REASON,
-				);
-			await pause(this.timers, backoffDelay(TRANSIENT_BACKOFF, transient), signal);
+			const failures = reports.failed(
+				outcome.kind === "refused"
+					? `Telegram's Bot API answered getUpdates with HTTP ${outcome.status}; polling is retried with backoff`
+					: UNREACHABLE_REASON,
+			);
+			await pause(this.timers, backoffDelay(TRANSIENT_BACKOFF, failures), signal);
 		}
 	}
 }

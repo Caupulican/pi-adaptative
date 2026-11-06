@@ -2838,6 +2838,8 @@ export class HarnessWorld {
 	/** A witness-scoped answer to one fetch the guard receives; undefined passes it to System One's transport, as before. */
 	fetchResponder: ((input: RequestInfo | URL, init?: RequestInit) => Promise<Response> | undefined) | undefined =
 		undefined;
+	/** A witness-scoped scripted socket for one `new WebSocket(url, protocols)`; undefined (or no socket) refuses it. */
+	webSocketResponder: ((url: string, protocols: unknown) => object | undefined) | undefined = undefined;
 	readonly provider: ScriptedProvider;
 	/** The scripted shell transport: bash runs through it for root and every worker lane. */
 	readonly shell = new VirtualShell();
@@ -2896,6 +2898,7 @@ export class HarnessWorld {
 			pid: () => this.processTable.self,
 			...(options.virtualNetwork ? { net: this.network } : {}),
 			fetch: (input, init) => this.fetchResponder?.(input, init) ?? this.systemOne.fetch(input, init),
+			webSocket: (url, protocols) => this.webSocketResponder?.(url, protocols),
 		});
 		this.guard.install();
 		// The installed managed uv and interpreter are provisioned once per world, after the guard, at their actual canonical paths.
