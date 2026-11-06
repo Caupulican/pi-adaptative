@@ -9,9 +9,11 @@ import type { SemanticEvaluationOccupancy, SemanticEvaluationScope } from "../de
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import type { NoulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
+import { choiceProbability, choiceRunnerUp } from "../decision/thresholds.ts";
 import { findPackForCheckpoint } from "../steering/programs.ts";
 import type { SteeringCertificate } from "../steering/types.ts";
 import { isAdverseAnswer } from "./policy.ts";
+import { redactSecrets } from "./projector.ts";
 import type { ValidationStage } from "./types.ts";
 
 export type SemanticEvaluationOutcome = "ok" | "failed" | "cancelled";
@@ -50,6 +52,128 @@ export interface SemanticEvaluationRecord extends SemanticEvaluationStart {
 	readonly reasons?: readonly string[];
 	/** Full question identities and states; absent only on legacy/reasons-only records. */
 	readonly questionStates?: readonly SemanticQuestionState[];
+	/** How code reached its decision from the judgments; present when the decision's owner noted one. */
+	readonly trace?: SemanticDecisionTrace;
+}
+
+/** A code gate on the way to a decision: what it read, and whether it was the one that decided. */
+export interface SemanticTraceGate {
+	readonly id: string;
+	readonly result: string;
+	readonly decided: boolean;
+}
+
+/** One System One judgment as code read it. */
+export interface SemanticTraceJudgment {
+	readonly id: string;
+	readonly kind: "yes_no" | "choice" | "score" | "set";
+	/** Yes/no: P(true). Choice: P(chosen option). Score: the boundary mass the decision read. */
+	readonly p?: number;
+	/** What the reading settled: a noul band, a Choice act reading, a Score reading, or `unasked`. */
+	readonly band?: string;
+	readonly selected?: string;
+	readonly runnerUp?: { readonly option: string; readonly p: number };
+	/** This judgment drove the result. */
+	readonly drove?: boolean;
+}
+
+/**
+ * One decision, diagnosable: the gates code applied, the judgments with their probabilities (which one
+ * drove it), and the code-computed facts. With it "was the judgment wrong, or the rule?" has an answer.
+ */
+export interface SemanticDecisionTrace {
+	readonly decision: string;
+	readonly gates?: readonly SemanticTraceGate[];
+	readonly judgments?: readonly SemanticTraceJudgment[];
+	readonly facts?: readonly string[];
+	/** The judgments were reused (a certificate or answer cache), not asked again. */
+	readonly cached?: boolean;
+}
+
+export const TRACE_LIMITS = Object.freeze({ gates: 8, judgments: 16, facts: 8, text: 120 });
+
+function traceText(value: string): string {
+	return bounded(redactSecrets(value), TRACE_LIMITS.text);
+}
+
+function traceProbability(value: number | undefined): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
+}
+
+/**
+ * The trace as it may be stored: every list at its limit, every string secret-redacted (System One's
+ * redaction) and then bounded, every probability in [0, 1] or dropped. The recorder applies this to
+ * every trace it is given.
+ */
+export function boundedTrace(trace: SemanticDecisionTrace): SemanticDecisionTrace {
+	const gates = (trace.gates ?? []).slice(0, TRACE_LIMITS.gates).map((gate) => ({
+		id: traceText(gate.id),
+		result: traceText(gate.result),
+		decided: gate.decided === true,
+	}));
+	const judgments = (trace.judgments ?? []).slice(0, TRACE_LIMITS.judgments).map((judgment) => {
+		const p = traceProbability(judgment.p);
+		const runnerUpP = traceProbability(judgment.runnerUp?.p);
+		return {
+			id: traceText(judgment.id),
+			kind: judgment.kind,
+			...(p !== undefined ? { p } : {}),
+			...(judgment.band !== undefined ? { band: traceText(judgment.band) } : {}),
+			...(judgment.selected !== undefined ? { selected: traceText(judgment.selected) } : {}),
+			...(judgment.runnerUp && runnerUpP !== undefined
+				? { runnerUp: { option: traceText(judgment.runnerUp.option), p: runnerUpP } }
+				: {}),
+			...(judgment.drove === true ? { drove: true } : {}),
+		};
+	});
+	const facts = (trace.facts ?? []).slice(0, TRACE_LIMITS.facts).map(traceText);
+	return {
+		decision: traceText(trace.decision),
+		...(gates.length ? { gates } : {}),
+		...(judgments.length ? { judgments } : {}),
+		...(facts.length ? { facts } : {}),
+		...(trace.cached === true ? { cached: true } : {}),
+	};
+}
+
+/**
+ * One trace judgment per result of a raw evaluation, read the way the decision layer reads them: a
+ * yes/no carries P(true) and its band, a Choice P(chosen option) and its runner-up, a Score its
+ * confidence-settled value. `drove` names the results that decided.
+ */
+export function traceJudgmentsFromEvaluation(
+	evaluation: DecisionEvaluation,
+	drove: readonly string[] = [],
+): SemanticTraceJudgment[] {
+	const judgments: SemanticTraceJudgment[] = [];
+	for (const [id, result] of Object.entries(evaluation.results)) {
+		const mark = drove.includes(id) ? { drove: true } : {};
+		switch (result.kind) {
+			case "boolean":
+				judgments.push({ id, kind: "yes_no", p: result.probabilityTrue, band: result.band, ...mark });
+				break;
+			case "choice": {
+				const p = choiceProbability(result);
+				const runnerUp = choiceRunnerUp(result);
+				judgments.push({
+					id,
+					kind: "choice",
+					...(p !== undefined ? { p } : {}),
+					selected: result.selected,
+					...(runnerUp ? { runnerUp } : {}),
+					...mark,
+				});
+				break;
+			}
+			case "score":
+				judgments.push({ id, kind: "score", selected: String(result.value), ...mark });
+				break;
+			case "set":
+				judgments.push({ id, kind: "set", selected: result.selected.join(", "), ...mark });
+				break;
+		}
+	}
+	return judgments;
 }
 
 /** Unbounded question text and its semantic state, separate from the bounded display preview. */
@@ -86,6 +210,11 @@ export interface SemanticEvaluationObserver {
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
 	): void;
+	/**
+	 * Attaches the decision trace to an evaluation, open or settled; the last trace noted wins. The
+	 * recorder bounds and redacts it ({@link boundedTrace}) and makes it durable through the ledger.
+	 */
+	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;
 }
 
 const LABEL_LIMIT = 64;
@@ -234,10 +363,16 @@ export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 				uncertain = result.band === "ambiguous";
 				break;
 			}
-			case "choice":
+			case "choice": {
 				if (includeInPreview && verdict === undefined) verdict = result.selected;
-				line = `${id}: ${result.selected}`;
+				// The chosen option's probability and the runner-up's: what a misroute is diagnosed from.
+				const p = choiceProbability(result);
+				const runnerUp = choiceRunnerUp(result);
+				line = `${id}: ${result.selected}${p !== undefined ? ` P=${p.toFixed(2)}` : ""}${
+					runnerUp ? ` · runner-up ${runnerUp.option} P=${runnerUp.p.toFixed(2)}` : ""
+				}`;
 				break;
+			}
 			case "score":
 				line = `${id}: ${result.value}`;
 				break;

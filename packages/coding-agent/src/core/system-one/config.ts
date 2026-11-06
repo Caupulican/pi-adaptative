@@ -1,8 +1,9 @@
 /**
- * System One Reference Configuration and Thresholds.
- * Normative reference: jev_harness_reference_config.yaml
+ * System One configuration. Its thresholds are read from `decision/thresholds.ts`, the one table of
+ * cuts; this module only shapes them for the System One layer.
  */
 
+import { CHOICE_ACT, COMPLETION_THRESHOLDS, YES_NO_BANDS } from "../decision/thresholds.ts";
 import { OpenRouterSystemOneDriver, TypeSafeSystemOneDriver } from "./provider-driver.ts";
 
 export interface SystemOneStateBudget {
@@ -13,10 +14,14 @@ export interface SystemOneStateBudget {
 	readonly api_total_request_limit_tokens: number;
 }
 
+/**
+ * The probability of the chosen option a Choice needs (`*_auto_confidence`, a legacy name: it is not
+ * the answer's `confidence`) and its lead over the runner-up. `normal` is the route family, `hard`
+ * the authority family of `decision/thresholds.ts`.
+ */
 export interface SystemOneChoiceThresholds {
 	readonly normal_auto_confidence: number;
 	readonly hard_gate_auto_confidence: number;
-	readonly review_floor: number;
 	readonly min_top2_margin_normal: number;
 	readonly min_top2_margin_hard: number;
 }
@@ -24,49 +29,31 @@ export interface SystemOneChoiceThresholds {
 export interface SystemOneNoulRequiredTrueThresholds {
 	readonly hard_pass: number;
 	readonly soft_pass: number;
-	readonly ambiguous_low: number;
-	readonly ambiguous_high: number;
 	readonly hard_fail: number;
 }
 
 export interface SystemOneNoulRequiredFalseThresholds {
 	readonly hard_pass_max: number;
 	readonly soft_pass_max: number;
-	readonly ambiguous_low: number;
-	readonly ambiguous_high: number;
 	readonly hard_fail_min: number;
 }
 
-export interface SystemOneScoreThresholds {
-	readonly require_confidence_for_hard_gate: number;
-}
-
-/**
- * Where completion answers decide, measured against the real System One on the completion eval set
- * (`npm run eval:completion`, 2026-09-25: repository, machine, remote, information and mixed goals,
- * each done and with a planted gap). Done goals scored every required outcome 0.89-0.98 and every
- * defect at most 0.47, and always chose `complete` (confidence 0.76-1.00); planted gaps scored the
- * outcome 0.05-0.35, the gating defects 0.59 or more, and never chose `complete`.
- */
+/** Where completion answers decide; measured (see `COMPLETION_THRESHOLDS` in `decision/thresholds.ts`). */
 export interface SystemOneCompletionThresholds {
 	/** A required outcome holds at or above this. */
 	readonly outcome_min: number;
 	/** A defect holds (is judged absent) at or below this: it fails when more likely present than not. */
 	readonly defect_max: number;
-	/**
-	 * A claim in the model's account holds when System One reads the cited evidence as showing it at or above this
-	 * (and not as contradicting it). Measured live: claims about a diff or about cited evidence that held read
-	 * 0.63-0.96; vague or irrelevant evidence 0.14-0.27; a contradicted claim at most 0.03.
-	 */
+	/** A claim in the model's account holds when System One reads the cited evidence as showing it at or above this (and not as contradicting it). */
 	readonly claim_supported_min: number;
 }
 
+/** The gating yes/no family, the Choice families and the completion bounds, in the configuration's shape. */
 export interface SystemOneThresholds {
 	readonly choice: SystemOneChoiceThresholds;
 	readonly completion: SystemOneCompletionThresholds;
 	readonly noul_required_true: SystemOneNoulRequiredTrueThresholds;
 	readonly noul_required_false: SystemOneNoulRequiredFalseThresholds;
-	readonly score: SystemOneScoreThresholds;
 }
 
 export interface SystemOneLifecycleConfig {
@@ -140,33 +127,25 @@ export const DEFAULT_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 
 	thresholds: Object.freeze({
 		choice: Object.freeze({
-			normal_auto_confidence: 0.88,
-			hard_gate_auto_confidence: 0.93,
-			review_floor: 0.65,
-			min_top2_margin_normal: 0.15,
-			min_top2_margin_hard: 0.2,
+			normal_auto_confidence: CHOICE_ACT.route.minProbability,
+			hard_gate_auto_confidence: CHOICE_ACT.authority.minProbability,
+			min_top2_margin_normal: CHOICE_ACT.route.minMargin,
+			min_top2_margin_hard: CHOICE_ACT.authority.minMargin,
 		}),
 		noul_required_true: Object.freeze({
-			hard_pass: 0.93,
-			soft_pass: 0.85,
-			ambiguous_low: 0.3,
-			ambiguous_high: 0.7,
-			hard_fail: 0.2,
+			hard_pass: YES_NO_BANDS.gating.requiredTrue.hardPass,
+			soft_pass: YES_NO_BANDS.gating.requiredTrue.softPass,
+			hard_fail: YES_NO_BANDS.gating.requiredTrue.hardFail,
 		}),
 		noul_required_false: Object.freeze({
-			hard_pass_max: 0.07,
-			soft_pass_max: 0.15,
-			ambiguous_low: 0.3,
-			ambiguous_high: 0.7,
-			hard_fail_min: 0.8,
-		}),
-		score: Object.freeze({
-			require_confidence_for_hard_gate: 0.88,
+			hard_pass_max: YES_NO_BANDS.gating.requiredFalse.hardPassMax,
+			soft_pass_max: YES_NO_BANDS.gating.requiredFalse.softPassMax,
+			hard_fail_min: YES_NO_BANDS.gating.requiredFalse.hardFailMin,
 		}),
 		completion: Object.freeze({
-			outcome_min: 0.7,
-			defect_max: 0.5,
-			claim_supported_min: 0.5,
+			outcome_min: COMPLETION_THRESHOLDS.outcomeMin,
+			defect_max: COMPLETION_THRESHOLDS.defectMax,
+			claim_supported_min: COMPLETION_THRESHOLDS.claimSupportedMin,
 		}),
 	}),
 

@@ -3,6 +3,8 @@
  * Reference: policy/steering-policy.yaml
  */
 
+import type { Consequence } from "../decision/primitives.ts";
+import { CONSEQUENCE_MIN_CONFIDENCE } from "../decision/thresholds.ts";
 import { canonicalDigest } from "./canonical.ts";
 import type { SteeringCertificatePolicyRef } from "./types.ts";
 
@@ -12,34 +14,17 @@ export const STEERING_POLICY_ID = "pi:steering:policy:1.2" as const;
 export const PINNED_JEV_MODEL = "jev-1.13.0" as const;
 export const JEV_PROVIDER = "typesafe" as const;
 
+/** Per consequence, the floor below which a Choice, Score or Set answer is a doubt (`decision/thresholds.ts`). */
 export interface ConsequenceThresholds {
-	readonly minimumNoul: number;
 	readonly minimumConfidence: number;
-	readonly failThreshold: number;
 }
 
-export const CONSEQUENCE_THRESHOLDS: Record<"low" | "medium" | "high" | "critical", ConsequenceThresholds> = {
-	low: {
-		minimumNoul: 0.55,
-		minimumConfidence: 0.6,
-		failThreshold: 0.7,
-	},
-	medium: {
-		minimumNoul: 0.7,
-		minimumConfidence: 0.75,
-		failThreshold: 0.6,
-	},
-	high: {
-		minimumNoul: 0.82,
-		minimumConfidence: 0.85,
-		failThreshold: 0.5,
-	},
-	critical: {
-		minimumNoul: 0.9,
-		minimumConfidence: 0.9,
-		failThreshold: 0.4,
-	},
-};
+export const CONSEQUENCE_THRESHOLDS: Readonly<Record<Consequence, ConsequenceThresholds>> = Object.freeze({
+	low: Object.freeze({ minimumConfidence: CONSEQUENCE_MIN_CONFIDENCE.low }),
+	medium: Object.freeze({ minimumConfidence: CONSEQUENCE_MIN_CONFIDENCE.medium }),
+	high: Object.freeze({ minimumConfidence: CONSEQUENCE_MIN_CONFIDENCE.high }),
+	critical: Object.freeze({ minimumConfidence: CONSEQUENCE_MIN_CONFIDENCE.critical }),
+});
 
 export interface SteeringPolicyConfig {
 	readonly version: string;

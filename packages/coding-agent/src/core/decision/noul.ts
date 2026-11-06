@@ -7,9 +7,11 @@
  * probability reached it. Collapsing that to `noul >= 0.5` throws the band away and turns "I do not
  * know" into a yes -- which is how an undecided claim ends up authorizing work.
  *
- * This module owns the band arithmetic. `system-one/policy.ts` supplies the operator's configured
- * thresholds; nothing else is allowed to invent its own cutoff.
+ * This module owns the band arithmetic; the cuts live in `thresholds.ts` (one table of families), and
+ * nothing else is allowed to invent its own cutoff.
  */
+
+import { YES_NO_BANDS, type YesNoFamily } from "./thresholds.ts";
 
 export type NoulDirection = "required_true" | "required_false";
 
@@ -32,31 +34,31 @@ export interface NoulBandThresholds {
 	};
 }
 
-export const DEFAULT_NOUL_BAND_THRESHOLDS: NoulBandThresholds = Object.freeze({
-	requiredTrue: Object.freeze({ hardPass: 0.93, softPass: 0.85, hardFail: 0.2 }),
-	requiredFalse: Object.freeze({ hardPassMax: 0.07, softPassMax: 0.15, hardFailMin: 0.8 }),
-});
+/** The gating family: the bands every reader uses when it names no family. */
+export const DEFAULT_NOUL_BAND_THRESHOLDS: NoulBandThresholds = YES_NO_BANDS.gating;
 
 /** A probability outside [0, 1], or not a number at all, is not an answer. */
 export function isNoulProbability(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+/** The band of P(true) against the end the asker needs, under a family's cuts or explicit thresholds. */
 export function noulBand(
 	probabilityTrue: number,
 	direction: NoulDirection,
-	thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
+	thresholds: NoulBandThresholds | YesNoFamily = DEFAULT_NOUL_BAND_THRESHOLDS,
 ): NoulBand {
 	if (!isNoulProbability(probabilityTrue)) return "hard_fail";
+	const family = typeof thresholds === "string" ? YES_NO_BANDS[thresholds] : thresholds;
 	if (direction === "required_true") {
-		const bands = thresholds.requiredTrue;
+		const bands = family.requiredTrue;
 		if (probabilityTrue >= bands.hardPass) return "hard_pass";
 		if (probabilityTrue >= bands.softPass) return "soft_pass";
 		if (probabilityTrue <= bands.hardFail) return "hard_fail";
 		return "ambiguous";
 	}
 	// required_false reads the same number: a LOW P(true) is the confident answer it wants.
-	const bands = thresholds.requiredFalse;
+	const bands = family.requiredFalse;
 	if (probabilityTrue <= bands.hardPassMax) return "hard_pass";
 	if (probabilityTrue <= bands.softPassMax) return "soft_pass";
 	if (probabilityTrue >= bands.hardFailMin) return "hard_fail";
@@ -77,6 +79,49 @@ export function settledFromBand(band: NoulBand, direction: NoulDirection): boole
 	// to a yes on an unrecognised band is the 0.5 cutoff's failure mode in another costume.
 	if (!reachedRequiredEnd && band !== "hard_fail") return undefined;
 	return direction === "required_true" ? reachedRequiredEnd : !reachedRequiredEnd;
+}
+
+/**
+ * The P(true) an answer carries, or undefined when it carries none: a question that was never asked,
+ * an absent answer, or anything that is not a probability. There is no fallback: an unasked question
+ * is not a P=1 or a P=0. A literal boolean is an answer an engine computed (a mechanical read, a model
+ * that returned true/false), so it is P=1 or P=0.
+ */
+export function noulProbability(answer: unknown): number | undefined {
+	if (typeof answer === "boolean") return answer ? 1 : 0;
+	if (typeof answer === "number") return isNoulProbability(answer) ? answer : undefined;
+	if (!answer || typeof answer !== "object") return undefined;
+	const record = answer as { noul?: unknown; probabilityTrue?: unknown; value?: unknown; boolean?: unknown };
+	for (const candidate of [record.noul, record.probabilityTrue, record.value, record.boolean]) {
+		if (typeof candidate === "boolean") return candidate ? 1 : 0;
+		if (isNoulProbability(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/** A band, or `unasked` for an answer that holds no probability: its caller decides that outcome, never a pass or a fail. */
+export type NoulReading = NoulBand | "unasked";
+
+export function readNoul(
+	answer: unknown,
+	direction: NoulDirection,
+	thresholds: NoulBandThresholds | YesNoFamily = DEFAULT_NOUL_BAND_THRESHOLDS,
+): NoulReading {
+	const probability = noulProbability(answer);
+	return probability === undefined ? "unasked" : noulBand(probability, direction, thresholds);
+}
+
+/**
+ * {@link readNoul} on one answer of a program whose ids are a typed union: reading an id the program
+ * does not ask is a compile error, and an id it asks but did not answer reads `unasked`.
+ */
+export function readAskedNoul<Id extends string>(
+	answers: Readonly<Partial<Record<Id, unknown>>>,
+	id: Id,
+	direction: NoulDirection,
+	thresholds: NoulBandThresholds | YesNoFamily = DEFAULT_NOUL_BAND_THRESHOLDS,
+): NoulReading {
+	return readNoul(answers[id], direction, thresholds);
 }
 
 /** Certainty, not agreement: how far the probability is from ignorance, in [0.5, 1]. */

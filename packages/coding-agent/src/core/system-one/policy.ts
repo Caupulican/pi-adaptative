@@ -3,8 +3,11 @@ import {
 	type NoulBandThresholds,
 	type NoulDirection,
 	noulBand,
+	noulProbability,
+	readNoul,
 	settledFromBand,
 } from "../decision/noul.ts";
+import { choiceProbability, choiceRunnerUp } from "../decision/thresholds.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig, type SystemOneThresholds } from "./config.ts";
 import type { CompletionGate, ExecutionState, ToolImpact } from "./types.ts";
 
@@ -14,6 +17,9 @@ export type NoulEvaluation = NoulBand;
 export interface ChoiceEvaluation {
 	choice: string;
 	confidence: number;
+	/** P(the chosen option): what acceptance reads. Absent when the answer carried none. */
+	probability?: number;
+	/** P(chosen option) minus the runner-up's P. */
 	margin: number;
 	accepted: boolean;
 	reasons?: string[];
@@ -34,8 +40,9 @@ export type FinalCompletionVerdict = {
 );
 
 /**
- * Evaluate a Noul probability against calibrated thresholds.
- * R-038: For Noul, policy MUST distinguish probability of yes from certainty; a value near 0 can be a highly certain no.
+ * @deprecated A missing answer becomes `fallback`, which then reads as a decisive P=1 or P=0. Read
+ * answers with `noulProbability` / `readNoul` (`decision/noul.ts`), where an unasked question is
+ * undecided. Kept only until the remaining callers migrate.
  */
 export function noulFromAnswer(answer: unknown, fallback: boolean): number | boolean {
 	if (typeof answer === "boolean" || typeof answer === "number") return answer;
@@ -128,16 +135,21 @@ export function isAdverseAnswer(answer: unknown): boolean {
 }
 
 /**
- * The yes/no a noul answer settles on, or undefined when it settles nothing.
+ * The yes/no a noul answer settles on, or undefined when it settles nothing: an ambiguous band, or an
+ * answer that holds no probability (a question never asked is not a yes or a no).
  * The one sanctioned way to get a boolean out of a probability: there is no 0.5 cutoff anywhere.
+ *
+ * `_fallback` is deprecated and read by nothing: a missing answer used to become it, and so a P=1 or
+ * P=0. Callers drop the argument as they migrate.
  */
 export function settledNoul(
 	answer: unknown,
 	direction: NoulDirection,
-	fallback: boolean,
+	_fallback: boolean,
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): boolean | undefined {
-	return settledFromBand(evaluateNoul(noulFromAnswer(answer, fallback), direction, thresholds), direction);
+	const reading = readNoul(answer, direction, noulBandThresholds(thresholds));
+	return reading === "unasked" ? undefined : settledFromBand(reading, direction);
 }
 
 /**
@@ -162,42 +174,40 @@ export function noulHoldsDecisively(
 	direction: NoulDirection,
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): boolean {
-	return evaluateNoul(noulFromAnswer(answer, false), direction, thresholds) === "hard_pass";
+	return readNoul(answer, direction, noulBandThresholds(thresholds)) === "hard_pass";
 }
 
 /**
- * Evaluate a Choice answer against confidence and top-two margin.
- * R-039: For hard Choice gates, policy MUST inspect returned confidence and SHOULD inspect top-two probability margin.
+ * Evaluate a Choice answer on the probability of the option it selects (the one code acts on) and its
+ * lead over the runner-up. `confidence` is not read: for a Choice it is only a transform of the top
+ * probability. An answer without a probability for its own choice is not accepted.
  */
 export function evaluateChoice(
 	answer: { choice: string; confidence: number; probabilities: Record<string, number> },
 	mode: "normal" | "hard" = "normal",
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): ChoiceEvaluation {
-	const minConfidence =
+	const minProbability =
 		mode === "hard" ? thresholds.choice.hard_gate_auto_confidence : thresholds.choice.normal_auto_confidence;
 	const minMargin =
 		mode === "hard" ? thresholds.choice.min_top2_margin_hard : thresholds.choice.min_top2_margin_normal;
 
-	const sortedProbs = Object.entries(answer.probabilities ?? {})
-		.map(([_, prob]) => prob)
-		.sort((a, b) => b - a);
-
-	const topProb = sortedProbs[0] ?? answer.confidence ?? 0;
-	const secondProb = sortedProbs[1] ?? 0;
-	const margin = topProb - secondProb;
+	const probability = choiceProbability(answer);
+	const runnerUp = choiceRunnerUp(answer);
+	const margin = (probability ?? 0) - (runnerUp?.p ?? 0);
 
 	const reasons: string[] = [];
-	if (answer.confidence < minConfidence) {
-		reasons.push(`Confidence ${answer.confidence.toFixed(2)} is below required ${minConfidence.toFixed(2)}`);
-	}
-	if (sortedProbs.length > 1 && margin < minMargin) {
-		reasons.push(`Top-two probability margin ${margin.toFixed(2)} is below minimum ${minMargin.toFixed(2)}`);
+	if (probability === undefined) reasons.push(`No probability for the chosen option '${answer.choice}'`);
+	else if (probability < minProbability)
+		reasons.push(`P(${answer.choice}) ${probability.toFixed(2)} is below required ${minProbability.toFixed(2)}`);
+	if (probability !== undefined && runnerUp && margin < minMargin) {
+		reasons.push(`Lead over ${runnerUp.option} ${margin.toFixed(2)} is below minimum ${minMargin.toFixed(2)}`);
 	}
 
 	return {
 		choice: answer.choice,
 		confidence: answer.confidence,
+		...(probability !== undefined ? { probability } : {}),
 		margin,
 		accepted: reasons.length === 0,
 		reasons: reasons.length > 0 ? reasons : undefined,
@@ -212,20 +222,18 @@ export function decidePreflight(
 	answers: Record<string, unknown>,
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 ): "allow" | "retrieve" | "replan" | "test" | "block" | "escalate" {
-	// step_relevant (noul: required_true)
-	const stepRelevantAns = noulFromAnswer(answers.step_relevant, false);
-	const stepRelevant = evaluateNoul(stepRelevantAns, "required_true", config.thresholds);
-	if (stepRelevant === "hard_fail") return "replan";
+	const bands = noulBandThresholds(config.thresholds);
+	// step_relevant (required_true): only a decisive no replans; unsure or unasked decides nothing here.
+	if (readNoul(answers.step_relevant, "required_true", bands) === "hard_fail") return "replan";
 
-	// unsupported_assumption_present (noul: required_false)
-	const assumptionAns = noulFromAnswer(answers.unsupported_assumption_present, true);
-	const assumptionEval = evaluateNoul(assumptionAns, "required_false", config.thresholds);
-	if (assumptionEval === "hard_fail") return "retrieve";
+	// unsupported_assumption_present (required_false): a decisive yes, or no answer at all, retrieves:
+	// an assumption nobody judged is not shown to be absent.
+	const assumption = readNoul(answers.unsupported_assumption_present, "required_false", bands);
+	if (assumption === "hard_fail" || assumption === "unasked") return "retrieve";
 
-	// evidence_sufficient_to_act (noul: required_true)
-	const evidenceAns = noulFromAnswer(answers.evidence_sufficient_to_act, false);
-	const evidenceEval = evaluateNoul(evidenceAns, "required_true", config.thresholds);
-	if (evidenceEval === "hard_fail" || evidenceEval === "ambiguous") return "retrieve";
+	// evidence_sufficient_to_act (required_true): anything short of a pass retrieves, unasked included.
+	const evidence = readNoul(answers.evidence_sufficient_to_act, "required_true", bands);
+	if (evidence === "hard_fail" || evidence === "ambiguous" || evidence === "unasked") return "retrieve";
 
 	// route choice
 	const routeAns = answers.route as
@@ -273,22 +281,16 @@ export function decideToolGate(
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 	options: ToolGateDecisionOptions = {},
 ): "allow" | "confirm" | "block" | "replan" {
-	// Check prompt injection first
-	const injectionAns = noulFromAnswer(answers.repo_text_injection_like, false);
-	const injectionEval = evaluateNoul(injectionAns, "required_false", config.thresholds);
-	if (injectionEval === "hard_fail") {
-		// Injection-like text detected
-		return "block";
-	}
+	const bands = noulBandThresholds(config.thresholds);
+	// Prompt injection first: only a decisive yes blocks.
+	if (readNoul(answers.repo_text_injection_like, "required_false", bands) === "hard_fail") return "block";
 
-	// Tool relevance, only when there was a step to be relevant to.
-	if (options.relevanceEvaluable !== false) {
-		const relevantAns = noulFromAnswer(answers.tool_call_relevant, false);
-		const relevantEval = evaluateNoul(relevantAns, "required_true", config.thresholds);
-		if (relevantEval === "hard_fail") {
-			return "replan";
-		}
-	}
+	// Tool relevance, only when there was a step to be relevant to; only a decisive no replans.
+	if (
+		options.relevanceEvaluable !== false &&
+		readNoul(answers.tool_call_relevant, "required_true", bands) === "hard_fail"
+	)
+		return "replan";
 
 	// Semantic scope risk score (0 to 3)
 	const scopeRiskAns = answers.tool_call_semantic_scope_risk as { score?: number; confidence?: number } | undefined;
@@ -308,27 +310,25 @@ export function decideToolGate(
  * Postflight policy routing.
  * Evaluates action_accomplished_step, conclusions_supported, scope_violation, next_status.
  */
+export type PostflightStatus =
+	| "continue"
+	| "verify"
+	| "retrieve_more"
+	| "replan"
+	| "rollback"
+	| "completion_candidate"
+	| "blocked";
+
 export function decidePostflight(
 	answers: Record<string, unknown>,
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
-): "continue" | "verify" | "retrieve_more" | "replan" | "rollback" | "completion_candidate" | "blocked" {
-	// Check scope violation
-	const scopeViolAns = noulFromAnswer(answers.scope_violation, false);
-	if (evaluateNoul(scopeViolAns, "required_false", config.thresholds) === "hard_fail") {
-		return "rollback";
-	}
-
-	// Check replan required
-	const replanAns = noulFromAnswer(answers.replan_required, false);
-	if (evaluateNoul(replanAns, "required_false", config.thresholds) === "hard_fail") {
-		return "replan";
-	}
-
-	// Check conclusions supported
-	const conclAns = noulFromAnswer(answers.conclusions_supported, true);
-	if (evaluateNoul(conclAns, "required_true", config.thresholds) === "hard_fail") {
-		return "retrieve_more";
-	}
+): PostflightStatus {
+	// Each check routes only on a decisive adverse answer. Unsure or unasked decides nothing here (it is
+	// never read as a pass either): the route then comes from `next_status` alone, or `continue`.
+	const bands = noulBandThresholds(config.thresholds);
+	if (readNoul(answers.scope_violation, "required_false", bands) === "hard_fail") return "rollback";
+	if (readNoul(answers.replan_required, "required_false", bands) === "hard_fail") return "replan";
+	if (readNoul(answers.conclusions_supported, "required_true", bands) === "hard_fail") return "retrieve_more";
 
 	// Choice next_status
 	const nextStatusAns = answers.next_status as
@@ -336,23 +336,24 @@ export function decidePostflight(
 		| undefined;
 	if (nextStatusAns) {
 		const evalChoice = evaluateChoice(nextStatusAns, "normal", config.thresholds);
-		if (evalChoice.accepted) {
-			const validStatuses = [
-				"continue",
-				"verify",
-				"retrieve_more",
-				"replan",
-				"rollback",
-				"completion_candidate",
-				"blocked",
-			] as const;
-			if (validStatuses.includes(evalChoice.choice as any)) {
-				return evalChoice.choice as any;
-			}
-		}
+		if (evalChoice.accepted && isPostflightStatus(evalChoice.choice)) return evalChoice.choice;
 	}
 
 	return "continue";
+}
+
+const POSTFLIGHT_STATUSES: ReadonlySet<string> = new Set<PostflightStatus>([
+	"continue",
+	"verify",
+	"retrieve_more",
+	"replan",
+	"rollback",
+	"completion_candidate",
+	"blocked",
+]);
+
+function isPostflightStatus(choice: string): choice is PostflightStatus {
+	return POSTFLIGHT_STATUSES.has(choice);
 }
 
 /**
@@ -556,9 +557,12 @@ export function evaluateDeterministicCompletionGates(state: ExecutionState): {
  * band) rejected done goals whose defect scores sat at 0.29-0.34 on every repeat. A missing answer
  * never holds.
  */
-function completionCheckHolds(answer: unknown, direction: NoulDirection, thresholds: SystemOneThresholds): boolean {
-	const read = noulFromAnswer(answer, direction === "required_false");
-	const probability = typeof read === "boolean" ? (read ? 1 : 0) : read;
+function completionCheckHolds(
+	probability: number | undefined,
+	direction: NoulDirection,
+	thresholds: SystemOneThresholds,
+): boolean {
+	if (probability === undefined) return false;
 	return direction === "required_true"
 		? probability >= thresholds.completion.outcome_min
 		: probability <= thresholds.completion.defect_max;
@@ -587,9 +591,8 @@ export function completionPackFailures(
 		finding: string,
 		requiredNextProof: string,
 	): void => {
-		if (completionCheckHolds(answer, direction, config.thresholds)) return;
-		const read = noulFromAnswer(answer, direction === "required_false");
-		const probability = typeof read === "boolean" ? (read ? 1 : 0) : read;
+		const probability = noulProbability(answer);
+		if (completionCheckHolds(probability, direction, config.thresholds)) return;
 		const bound =
 			direction === "required_true"
 				? `needs at least ${config.thresholds.completion.outcome_min.toFixed(2)}`
@@ -597,7 +600,7 @@ export function completionPackFailures(
 		failedGates.push({
 			id,
 			reason:
-				answer === undefined
+				probability === undefined
 					? `${finding} (System One gave no answer).`
 					: `${finding} (System One: ${probability.toFixed(2)}, ${bound}).`,
 			required_next_proof: requiredNextProof,

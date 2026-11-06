@@ -25,6 +25,8 @@ import {
 	type SemanticUncertaintyPort,
 } from "./semantic-doubts.ts";
 import {
+	boundedTrace,
+	type SemanticDecisionTrace,
 	type SemanticEvaluationObserver,
 	type SemanticEvaluationOccupancy,
 	type SemanticEvaluationRecord,
@@ -66,6 +68,8 @@ export interface SemanticEvaluationDurableSink {
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
 	): void;
+	/** Stores an evaluation's bounded decision trace; a sink without it keeps the trace in memory only. */
+	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;
 }
 
 const MAX_RECENT_EVALUATIONS = 32;
@@ -85,6 +89,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	private hydratedSessionId?: string;
 	private readonly evaluationSessions = new Map<string, string | undefined>();
 	private readonly evaluationSinks = new Map<string, SemanticEvaluationDurableSink | undefined>();
+	/** Traces noted while their evaluation was still open; carried into the settled record. */
+	private readonly pendingTraces = new Map<string, SemanticDecisionTrace>();
 	private readonly listeners = new IndependentObserverSet<(record: SemanticEvaluationRecord) => void>();
 	private durable?: () => SemanticEvaluationDurableSink | undefined;
 	private durableFailure?: string;
@@ -184,22 +190,55 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		questionStates?: readonly SemanticQuestionState[],
 	): void {
 		this.refreshSession();
+		this.updateSettled(
+			evaluationId,
+			(original) => ({
+				...original,
+				verdict,
+				...(reasons ? { reasons } : {}),
+				...(questionStates !== undefined ? { questionStates } : {}),
+			}),
+			(sink, updated) => sink.noteVerdict(evaluationId, verdict, reasons, updated.questionStates),
+		);
+	}
+
+	/**
+	 * Patch a settled record (recent or retained as a doubt), re-observe it for doubts (idempotent for an
+	 * unchanged verdict), write it through to the durable ledger, notify.
+	 */
+	private updateSettled(
+		evaluationId: string,
+		patch: (original: SemanticEvaluationRecord) => SemanticEvaluationRecord,
+		write: (sink: SemanticEvaluationDurableSink, updated: SemanticEvaluationRecord) => void,
+	): void {
 		const index = this.recent.findIndex((record) => record.evaluationId === evaluationId);
 		const original = index >= 0 ? this.recent[index] : this.doubts.getRecord(evaluationId);
 		if (!original) return;
-		const updated: SemanticEvaluationRecord = {
-			...original,
-			verdict,
-			...(reasons ? { reasons } : {}),
-			...(questionStates !== undefined ? { questionStates } : {}),
-		};
+		const updated = patch(original);
 		if (index >= 0) this.recent[index] = updated;
 		this.doubts.observe(updated);
-		this.toDurable(
-			(sink) => sink.noteVerdict(evaluationId, verdict, reasons, updated.questionStates),
-			this.durable?.(),
-		);
+		this.toDurable((sink) => write(sink, updated), this.durable?.());
 		this.notify(updated);
+	}
+
+	/**
+	 * The decision trace for an evaluation, bounded and redacted here whatever the caller passed. An
+	 * open evaluation carries it into its settled record; a settled one is updated in place. Either way
+	 * the durable ledger gets it at once.
+	 */
+	noteTrace(evaluationId: string, trace: SemanticDecisionTrace): void {
+		this.refreshSession();
+		const bounded = boundedTrace(trace);
+		if (this.open.has(evaluationId)) {
+			this.pendingTraces.set(evaluationId, bounded);
+			this.toDurable((sink) => sink.noteTrace?.(evaluationId, bounded), this.evaluationSinks.get(evaluationId));
+			return;
+		}
+		this.updateSettled(
+			evaluationId,
+			(original) => ({ ...original, trace: bounded }),
+			(sink) => sink.noteTrace?.(evaluationId, bounded),
+		);
 	}
 
 	/** Completed evaluations, oldest first, bounded. */
@@ -397,6 +436,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		questionStates?: readonly SemanticQuestionState[],
 	): void {
 		const endedAt = this.now();
+		const trace = this.pendingTraces.get(start.evaluationId);
+		this.pendingTraces.delete(start.evaluationId);
 		const record: SemanticEvaluationRecord = {
 			...start,
 			endedAt,
@@ -405,6 +446,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			...(verdict !== undefined ? { verdict } : {}),
 			...(reasons?.length ? { reasons } : {}),
 			...(questionStates !== undefined ? { questionStates } : {}),
+			...(trace ? { trace } : {}),
 		};
 		this.doubts.observe(record);
 		const current = this.evaluationSessions.get(record.evaluationId) === this.sessionId;

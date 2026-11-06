@@ -15,6 +15,7 @@ import { getParentPid } from "../process-identity.ts";
 import { getSessionRole, type SessionRole } from "../session-role.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
 import type {
+	SemanticDecisionTrace,
 	SemanticEvaluationOutcome,
 	SemanticEvaluationScope,
 	SemanticQuestionState,
@@ -46,6 +47,7 @@ export interface SemanticEvaluationLedgerRow {
 	readonly verdict?: string;
 	readonly reasons?: readonly string[];
 	readonly questionStates?: readonly SemanticQuestionState[];
+	readonly trace?: SemanticDecisionTrace;
 	readonly model?: string;
 }
 
@@ -270,7 +272,8 @@ export class DecisionLedgerStore {
 				model TEXT,
 				scope_kind TEXT,
 				scope_id TEXT,
-				question_namespace TEXT
+				question_namespace TEXT,
+				trace TEXT
 			);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_session ON semantic_evaluations (session_id, started_at);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_cwd ON semantic_evaluations (cwd, started_at);
@@ -420,7 +423,7 @@ export class DecisionLedgerStore {
 							.all()
 							.map((column) => column.name),
 					);
-					for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
+					for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states", "trace"])
 						if (!evaluationColumns.has(column))
 							database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
 					if (
@@ -582,7 +585,10 @@ export class DecisionLedgerStore {
 
 	/** Records the start of a semantic evaluation; settled later by `settleSemanticEvaluation`. */
 	startSemanticEvaluation(
-		row: Omit<SemanticEvaluationLedgerRow, "endedAt" | "outcome" | "verdict" | "reasons" | "questionStates">,
+		row: Omit<
+			SemanticEvaluationLedgerRow,
+			"endedAt" | "outcome" | "verdict" | "reasons" | "questionStates" | "trace"
+		>,
 	): void {
 		this.attributeSession(row.sessionId);
 		this.database
@@ -614,11 +620,12 @@ export class DecisionLedgerStore {
 			verdict?: string;
 			reasons?: readonly string[];
 			questionStates?: readonly SemanticQuestionState[];
+			trace?: SemanticDecisionTrace;
 		},
 	): void {
 		this.database
 			.prepare(
-				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states) WHERE evaluation_id = ?",
+				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states), trace = COALESCE(?, trace) WHERE evaluation_id = ?",
 			)
 			.run(
 				settlement.endedAt,
@@ -626,8 +633,16 @@ export class DecisionLedgerStore {
 				settlement.verdict ?? null,
 				settlement.reasons ? JSON.stringify(settlement.reasons) : null,
 				settlement.questionStates !== undefined ? JSON.stringify(settlement.questionStates) : null,
+				settlement.trace !== undefined ? JSON.stringify(settlement.trace) : null,
 				evaluationId,
 			);
+	}
+
+	/** The decision trace of an evaluation, open or settled (already bounded and redacted by the recorder). */
+	noteSemanticTrace(evaluationId: string, trace: SemanticDecisionTrace): void {
+		this.database
+			.prepare("UPDATE semantic_evaluations SET trace = ? WHERE evaluation_id = ?")
+			.run(JSON.stringify(trace), evaluationId);
 	}
 
 	/** The verdict of an evaluation that settled before its policy result was known (System One stages). */
@@ -1301,6 +1316,26 @@ export class DecisionLedgerStore {
 					questionStates = undefined;
 				}
 			}
+			// A trace that does not parse is dropped; it never makes the row, or the store, unreadable.
+			let trace: SemanticDecisionTrace | undefined;
+			const rawTrace = asText(row.trace);
+			if (rawTrace !== undefined) {
+				try {
+					const parsed: unknown = JSON.parse(rawTrace);
+					if (
+						typeof parsed === "object" &&
+						parsed !== null &&
+						typeof (parsed as { decision?: unknown }).decision === "string" &&
+						["gates", "judgments", "facts"].every((key) => {
+							const list = (parsed as Record<string, unknown>)[key];
+							return list === undefined || Array.isArray(list);
+						})
+					)
+						trace = parsed as SemanticDecisionTrace;
+				} catch {
+					trace = undefined;
+				}
+			}
 			const consequence = asText(row.consequence);
 			const model = asText(row.model);
 			const scopeKind = asText(row.scope_kind);
@@ -1319,6 +1354,7 @@ export class DecisionLedgerStore {
 				...(verdict !== undefined ? { verdict } : {}),
 				...(reasons !== undefined ? { reasons } : {}),
 				...(questionStates !== undefined ? { questionStates } : {}),
+				...(trace !== undefined ? { trace } : {}),
 				...(model !== undefined ? { model } : {}),
 				...(scopeId !== undefined && (scopeKind === "session" || scopeKind === "worker-task")
 					? { evaluationScope: { kind: scopeKind, id: scopeId } }

@@ -227,6 +227,7 @@ export class SessionSemanticPlaneController {
 							...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
 							...(row.reasons ? { reasons: row.reasons } : {}),
 							...(row.questionStates ? { questionStates: row.questionStates } : {}),
+							...(row.trace ? { trace: row.trace } : {}),
 						},
 					];
 				}),
@@ -250,9 +251,11 @@ export class SessionSemanticPlaneController {
 					...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
 					...(record.reasons ? { reasons: record.reasons } : {}),
 					...(record.questionStates ? { questionStates: record.questionStates } : {}),
+					...(record.trace ? { trace: record.trace } : {}),
 				}),
 			noteVerdict: (evaluationId, verdict, reasons, questionStates) =>
 				ledger.noteSemanticVerdict(evaluationId, verdict, reasons, questionStates),
+			noteTrace: (evaluationId, trace) => ledger.noteSemanticTrace(evaluationId, trace),
 		};
 	}
 

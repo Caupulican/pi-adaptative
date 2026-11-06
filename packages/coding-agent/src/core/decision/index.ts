@@ -14,3 +14,4 @@ export * from "./policy.ts";
 export * from "./primitives.ts";
 export * from "./program.ts";
 export * from "./protocol-error.ts";
+export * from "./thresholds.ts";

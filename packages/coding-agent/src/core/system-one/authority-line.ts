@@ -12,6 +12,8 @@
  * This is the one table; the steering plane and the decision graph read it, nothing re-derives it.
  */
 
+import { CHOICE_FOLLOW_UP, choiceProbability } from "../decision/thresholds.ts";
+
 export type AuthorityKind = "reversible_work" | "objective_transition" | "irreversible" | "operation";
 
 /** What the judgment settled, already reduced from its band or confidence. */
@@ -95,18 +97,26 @@ export function decideByAuthority(
 	}
 }
 
-/** A Choice or Score answer at or above this confidence decides. */
-export const DECIDING_CONFIDENCE = 0.9;
+/** A Choice (on P(chosen option)) or Score (on its confidence) at or above this decides. */
+export const DECIDING_CONFIDENCE = CHOICE_FOLLOW_UP.decide;
 /** Between this and {@link DECIDING_CONFIDENCE} the answer asks a narrower follow-up first. */
-export const FOLLOW_UP_CONFIDENCE = 0.8;
+export const FOLLOW_UP_CONFIDENCE = CHOICE_FOLLOW_UP.askMore;
+
+export type FollowUpGate = "decide" | "ask_more" | "undecided";
 
 /**
- * What a Choice or Score confidence allows: `decide` at 0.90 and above; `ask_more` from 0.80, where
- * a narrower follow-up question settles it or, for reversible work, the answer may stand with its
- * doubt visible; `undecided` below 0.80, where the answer decides nothing.
+ * What a value allows: `decide` at 0.90 and above; `ask_more` from 0.80, where a narrower follow-up
+ * question settles it or, for reversible work, the answer may stand with its doubt visible;
+ * `undecided` below 0.80, where the answer decides nothing. Pass a Score's confidence; a Choice goes
+ * through {@link choiceGate}, which reads the probability of the option acted on.
  */
-export function confidenceGate(confidence: unknown): "decide" | "ask_more" | "undecided" {
+export function confidenceGate(confidence: unknown): FollowUpGate {
 	if (typeof confidence !== "number" || !Number.isFinite(confidence)) return "undecided";
 	if (confidence >= DECIDING_CONFIDENCE) return "decide";
 	return confidence >= FOLLOW_UP_CONFIDENCE ? "ask_more" : "undecided";
+}
+
+/** {@link confidenceGate} on P(option) of a Choice answer, the selected option by default; no probability is undecided. */
+export function choiceGate(answer: unknown, option?: string): FollowUpGate {
+	return confidenceGate(choiceProbability(answer, option));
 }
