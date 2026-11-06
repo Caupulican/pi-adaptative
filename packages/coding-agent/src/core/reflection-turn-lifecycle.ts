@@ -1,4 +1,5 @@
 import type { StopReason } from "@caupulican/pi-ai";
+import { AgentBusyError } from "../kernel/agent.ts";
 import { isInterruptedAssistantStopReason, type PromptOptions } from "./agent-session-contracts.ts";
 import { REFLECTION_TURN_TRIGGER_CUSTOM_TYPE } from "./reflection-controller.ts";
 
@@ -120,7 +121,12 @@ export class ReflectionTurnLifecycle {
 				// A cancelled turn is not one of those. Preemption and disposal are this class deciding the
 				// turn should stop; warning about them would report the mechanism working as a fault, and
 				// the user would see "Reflection turn failed" for having typed a second prompt.
-				if (!cancel.signal.aborted) {
+				//
+				// Nor is a turn another submission outran. The run that bought it released the foreground, and a submission
+				// already waiting for it (a parent note saved at that tail, a queued owner input) takes it before this turn
+				// is admitted, which refuses it busy. Nothing ran: the cue was only claimed, stays due, and buys its turn at
+				// the next completed turn, as an aborted run's cue does.
+				if (!cancel.signal.aborted && !(error instanceof AgentBusyError)) {
 					this.deps.warn(`Reflection turn failed: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			} finally {

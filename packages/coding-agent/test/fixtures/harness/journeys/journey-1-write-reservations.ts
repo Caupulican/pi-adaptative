@@ -2790,10 +2790,23 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		).length,
 		"the uncertain relation warns exactly once on and never off across the whole journey",
 	).toBe(world.systemOne.enabled ? 1 : 0);
-	// The intentional evaluator outage (the long-path turn) emits exactly one warning on; off runs no System One and emits none.
+	// The intentional evaluator outage (the long-path turn) emits exactly one intake warning on; off runs no System One and emits none.
 	expect(
-		world.warnings.filter((message) => message.includes("System One unavailable")).length,
+		world.warnings.filter(
+			(message) =>
+				message ===
+				"Optional integrations stay available; owner intent for them was not classified: System One unavailable for impact 'read_only': TypeSafe HTTP 503.",
+		).length,
 		"the intentional evaluator outage warns exactly as its scripted turn requires",
+	).toBe(world.systemOne.enabled ? 1 : 0);
+	// The same outage meets the held soul write once: the operation gate lets the unjudged write run on to the soul gate.
+	expect(
+		world.warnings.filter((message) =>
+			/^System One: write (?:\/harness\/agent-journey-1-system-one-on\/soul\.md|[A-Z]:\\harness\\agent-journey-1-system-one-on\\soul\.md): System One could not judge it \((?:System One unavailable for impact 'read_only': TypeSafe HTTP 503|TypeSafe review cancelled or timed out)\); it runs\.$/.test(
+				message,
+			),
+		).length,
+		"the held soul write's operation-gate outage warns exactly once on and never off",
 	).toBe(world.systemOne.enabled ? 1 : 0);
 	// Production default window, asserted on its own: the short window below replaces it only for this session's ask tool.
 	expect(DEFAULT_OWNER_WAIT_TIMEOUT_MS, "the production owner window keeps its default").toBe(300_000);

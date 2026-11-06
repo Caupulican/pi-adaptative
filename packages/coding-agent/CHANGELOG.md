@@ -67,6 +67,7 @@
 
 ### Fixed
 
+- A reflection turn that another submission outran (a parent note or queued input that was waiting for the foreground took it when the bought turn released it) no longer reports "Reflection turn failed: Agent is already processing". Nothing ran; the reflection cue stays due and buys its turn after the next completed turn.
 - Two delegated workers that run one profile on one model no longer raise "Prompt cache prefix changed between requests" against each other. A worker's request is now compared only with that worker's own previous request; before, the second worker's first request was compared with the other worker's last request, so a worker started for a peer's words (offered no `memory_read`) followed by the owner's own worker reported `tool set changed (+memory_read)`.
 - The decision action policy no longer accepts a yes/no answer in the undecided middle (P(true) 0.35 passed as a confident no), and an answer below a cut is returned as needing more evidence instead of being asked again of another engine. A soft pass is not enough at critical consequence, and a Set member System One could not place is reported as unsettled instead of left out.
 - System One model-drift and incomplete-answer errors name System One.
