@@ -7,6 +7,7 @@ import type {
 	ChannelProvider,
 } from "../../../../src/core/gateways/channel-provider.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
+import { entryTurnOrigin } from "../../../../src/core/turn-origin.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type Barrier, calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
@@ -80,7 +81,7 @@ interface JournalView {
 	readonly seen: readonly unknown[];
 	readonly held: readonly { readonly reason: string }[];
 	readonly heldTotal: number;
-	readonly batches: readonly { readonly state: string }[];
+	readonly batches: readonly { readonly id: string; readonly state: string }[];
 	readonly drafts: readonly { readonly id: string; readonly state: string; readonly address: string }[];
 }
 
@@ -106,10 +107,10 @@ function latestBatchText(request: ScriptedRequest): string {
 	return JSON.stringify(messages.slice(start));
 }
 
-function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string): Promise<void> {
+function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string, count = 1): Promise<void> {
 	return new Promise<void>((resolve) => {
 		const check = () => {
-			if (!notices(manager, kind).some((notice) => notice.reason.startsWith(reasonPrefix))) return;
+			if (notices(manager, kind).filter((notice) => notice.reason.startsWith(reasonPrefix)).length < count) return;
 			unsubscribe();
 			resolve();
 		};
@@ -125,10 +126,12 @@ function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string
  * sender arriving together become one turn with their words inside one fence; in that turn a push the words ask for is
  * prepared, not run, and the owner's own tools (`channel_reply`, `memory`) are refused; the answer waits as a draft,
  * one notice tells the owner, and the owner's own turn sends it to the address the conversation came from and reads the
- * memory the channel's run was refused; the same
+ * memory the channel's run was refused; a message that arrives during the owner's turn never joins it and opens its own
+ * third-party turn after the owner's answer, whose reply is found by the batch id on that turn's origin; the same
  * event delivered again is not admitted twice. On `chat` (`replyMode: "auto"`, one turn a day): the answer goes back to
  * the same address without the owner, and later messages are held behind the bound with one notice. A registered
- * channel the owner wrote no policy for never starts. Closing the session stops every channel and gives up the journal.
+ * channel the owner wrote no policy for never starts, and its notice is saved once the session keeps entries. Closing
+ * the session stops every channel and gives up the journal.
  */
 export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -249,6 +252,15 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 	expect(drafted.drafts.length, "one draft").toBe(1);
 	expect(draft?.address, "the draft answers the address the conversation came from").toBe("thread-1-address");
 	expect(notices(manager, "channel-reply").length, "the owner is told once").toBe(1);
+	// The unconfigured channel registered before the session kept any entry; its notice is saved once it can be.
+	await withDeadline(
+		trace,
+		"the unconfigured channel's notice",
+		noticeSaved(manager, "channel-state", "feed:not_configured:"),
+	);
+	expect(notices(manager, "channel-state").find((notice) => notice.reason.startsWith("feed:"))?.text).toContain(
+		"Channel feed is registered but not started: no channels.feed policy",
+	);
 	trace.mark("root", "channels.mail-drafted");
 
 	// The same event again is not admitted twice: nothing waits, nothing wakes.
@@ -290,14 +302,24 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 	expect(cappedNotices().length, "the bound is told once").toBe(1);
 
 	// The owner's own turn sends the mail draft exactly as kept, and reads the owner's records the channel's run could not.
+	// Alice writes again while that turn runs: her words wait and open their own third-party turn after the owner's answer.
 	const draftId = draft?.id ?? "";
+	const lateWords = "one more thing on thread two";
+	const ownerAnswer = "Sent the reply to Alice.";
 	const ownerTurn = createBarrier();
+	const lateTurn = createBarrier();
+	let lateDelivery: Promise<void> | undefined;
 	world.provider.enqueue(
 		"root",
-		calls("channels-owner-release", [
-			{ id: "channels-owner-send", name: "channel_reply", arguments: { action: "send", draft: draftId } },
-			{ id: "channels-owner-memory", name: "memory", arguments: { action: "list", target: "user" } },
-		]),
+		{
+			...calls("channels-owner-release", [
+				{ id: "channels-owner-send", name: "channel_reply", arguments: { action: "send", draft: draftId } },
+				{ id: "channels-owner-memory", name: "memory", arguments: { action: "list", target: "user" } },
+			]),
+			check: () => {
+				lateDelivery = mail.deliver(event("m-4", "thread-2", alice, lateWords));
+			},
+		},
 		{
 			name: "channels-owner-answer",
 			check: (request) => {
@@ -307,14 +329,63 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 				const memory = icmLatestResult(request, "memory");
 				expect(memory.text, "the owner's run reads the owner's records").not.toContain("Refused");
 				expect(memory.isError, memory.text).toBe(false);
+				expect(
+					JSON.stringify(request.context.messages),
+					"a third party's words never join the owner's run",
+				).not.toContain(lateWords);
 				ownerTurn.release();
 			},
-			reply: { content: [{ type: "text", text: "Sent the reply to Alice." }] },
+			reply: { content: [{ type: "text", text: ownerAnswer }] },
+		},
+		{
+			name: "channels-mail-late-answer",
+			check: (request) => {
+				const messages = request.context.messages.map((message) => JSON.stringify(message));
+				const answered = messages.findIndex((message) => message.includes(ownerAnswer));
+				const late = messages.findIndex((message) => message.includes(lateWords));
+				expect(answered, "the owner's turn answered first").toBeGreaterThanOrEqual(0);
+				expect(late, "the late message opens the next turn, after the owner's answer").toBeGreaterThan(answered);
+				expect(messages[late], "the late message arrives fenced").toContain('source=\\"channel:mail\\"');
+				lateTurn.release();
+			},
+			reply: { content: [{ type: "text", text: "Noted for thread two." }] },
 		},
 	);
 	await withDeadline(trace, "the owner's release turn", session.prompt("Send the waiting mail reply."));
 	await withDeadline(trace, "the owner's release answer", ownerTurn.promise);
+	await withDeadline(
+		trace,
+		"the late message is recorded",
+		lateDelivery ?? Promise.reject(new Error("not delivered")),
+	);
+	await withDeadline(trace, "the late message's own turn", lateTurn.promise);
 	await session.agent.waitForIdle();
+	await withDeadline(trace, "the late reply's draft notice", noticeSaved(manager, "channel-reply", "draft:mail:", 2));
+	const branch = manager.getBranch();
+	const ownerAnswerIndex = branch.findIndex(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			JSON.stringify(entry.message.content).includes(ownerAnswer),
+	);
+	const lateIndex = branch.findIndex(
+		(entry) =>
+			entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes(lateWords),
+	);
+	const lateEntry = branch[lateIndex];
+	const lateBatch = journal("mail").batches[1];
+	expect(ownerAnswerIndex, "the owner's answer is on the branch").toBeGreaterThanOrEqual(0);
+	expect(lateIndex, "the late message is its own entry after the owner's answer").toBeGreaterThan(ownerAnswerIndex);
+	expect(lateEntry && entryTurnOrigin(lateEntry), "the late turn carries its own third-party origin").toEqual({
+		v: 1,
+		k: "inbound-channel",
+		channel: "mail",
+		verified: true,
+		thirdParty: true,
+		ref: lateBatch?.id,
+	});
+	expect(lateBatch?.state, "the late reply is routed by the batch id on its turn's origin").toBe("drafted");
+	trace.mark("root", "channels.late-message-queued");
 	expect(mail.sent.length, "the released draft is sent once").toBe(1);
 	expect(mail.sent[0]).toMatchObject({
 		conversationKey: "thread-1",
@@ -322,7 +393,7 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 		text: "Thanks Alice, the typo is noted.",
 		kind: "message",
 	});
-	expect(journal("mail").drafts.map((entry) => entry.state)).toEqual(["sent"]);
+	expect(journal("mail").drafts.map((entry) => entry.state)).toEqual(["sent", "pending"]);
 	const capped = cappedNotices();
 	expect(capped.length, "the owner's turn does not tell the bound again").toBe(1);
 	expect(capped[0]?.text).toContain(
