@@ -67,6 +67,11 @@ const MAX_WORKFLOWS = 32;
 const MAX_DEPARTED = 128;
 /** Retained GitHub thread occurrences: their own bound inside the event list, so a burst cannot crowd out CI. */
 export const CI_SOURCE_MAX_THREAD_EVENTS = 512;
+/**
+ * Serialized bytes the retained GitHub thread occurrences may hold together: the journal is rewritten whole on every
+ * change, so a burst of long bodies is bounded by size as well as by count.
+ */
+export const CI_SOURCE_MAX_THREAD_BYTES = 1024 * 1024;
 const MAX_THREAD_REPOSITORIES = 8;
 const MAX_REVIEW_CURSORS = 64;
 
@@ -804,7 +809,7 @@ export class CiSourceStore {
 				(a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.githubId - b.githubId,
 			)) {
 				if (retained.has(event.eventId)) continue;
-				this.makeRoom(state, false, true);
+				this.makeRoom(state, false, event);
 				state.events.push(
 					parseHostEventEnvelope({
 						sourceId: state.sourceId,
@@ -881,14 +886,20 @@ export class CiSourceStore {
 
 	/**
 	 * Admission at capacity first drops an unpinned run cursor, then expires the parked consumer
-	 * pinning the most history. Live consumers' custody is never evicted: that is backpressure.
+	 * pinning the most history. Live consumers' custody is never evicted: that is backpressure. A thread occurrence
+	 * needs room by count and by serialized size.
 	 */
-	private makeRoom(state: SourceState, newRun: boolean, thread = false): void {
+	private makeRoom(state: SourceState, newRun: boolean, thread?: GithubThreadEvent): void {
+		const size = (event: unknown) => Buffer.byteLength(JSON.stringify(event), "utf8");
 		for (;;) {
 			this.compact(state);
+			const threads = thread ? state.events.filter((entry) => !isCiEnvelope(entry)) : [];
 			const eventsFull =
 				state.events.length >= CI_SOURCE_MAX_EVENTS ||
-				(thread && state.events.filter((entry) => !isCiEnvelope(entry)).length >= CI_SOURCE_MAX_THREAD_EVENTS);
+				(thread !== undefined &&
+					(threads.length >= CI_SOURCE_MAX_THREAD_EVENTS ||
+						threads.reduce((total, entry) => total + size(entry.event), size(thread)) >
+							CI_SOURCE_MAX_THREAD_BYTES));
 			if (!eventsFull && (!newRun || state.runs.length < MAX_RUNS)) return;
 			if (!eventsFull && this.dropUnpinnedRun(state)) return;
 			const evicted = oldestParkedConsumer(state);

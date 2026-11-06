@@ -8,6 +8,7 @@ import {
 	githubLogin,
 	HostEventError,
 } from "../../core/events/host-event-contract.ts";
+import { MAX_OWN_PULL_REQUESTS } from "../../core/events/host-event-kinds.ts";
 import type { CiCommandPort, CiRepository } from "./ci-provider.ts";
 
 /** Items per GitHub page, and the pages one endpoint reads per collection. */
@@ -134,9 +135,11 @@ export class GithubThreadProvider {
 			body?: unknown;
 			state?: GithubReviewState;
 		},
+		owned: ReadonlySet<number>,
 		signal: AbortSignal,
 	): Promise<GithubThreadEvent> {
 		const branch = item.thread.pullRequest ? await this.branchOf(repository, item.thread.number, signal) : undefined;
+		const ownedByViewer = item.thread.pullRequest && owned.has(item.thread.number);
 		if (item.body !== undefined && item.body !== null && typeof item.body !== "string")
 			throw new GithubItemError("Invalid GitHub body.");
 		const text = typeof item.body === "string" && item.body ? item.body : undefined;
@@ -144,7 +147,11 @@ export class GithubThreadProvider {
 			kind,
 			githubId: positive(item.id),
 			repository: { host: repository.host, repositoryId: repository.repositoryId },
-			thread: { ...item.thread, ...(branch === undefined ? {} : { branch }) },
+			thread: {
+				...item.thread,
+				...(branch === undefined ? {} : { branch }),
+				...(ownedByViewer ? { ownedByViewer: true as const } : {}),
+			},
 			author: githubLogin(record(item.author).login),
 			occurredAt: instant(item.at),
 			url: typeof item.url === "string" ? item.url : "",
@@ -153,12 +160,16 @@ export class GithubThreadProvider {
 		});
 	}
 
-	/** Pull request conversation comments (`issues/comments`) or review comments (`pulls/comments`) since a cursor. */
+	/**
+	 * Pull request conversation comments (`issues/comments`) or review comments (`pulls/comments`) since a cursor.
+	 * `owned` names the pull requests the signed-in login opened ({@link ownPullRequests}); their occurrences say so.
+	 */
 	async comments(
 		repository: CiRepository,
 		kind: "pull-request-comment" | "review-comment",
 		cursor: GithubCommentCursor,
 		signal: AbortSignal,
+		owned: ReadonlySet<number>,
 	): Promise<GithubCollection<GithubCommentCursor>> {
 		const endpoint = kind === "review-comment" ? "pulls/comments" : "issues/comments";
 		const events: GithubThreadEvent[] = [];
@@ -196,6 +207,7 @@ export class GithubThreadProvider {
 							repository,
 							kind,
 							{ id, url: item.html_url, thread, author: item.user, at: item.created_at, body: item.body ?? "" },
+							owned,
 							signal,
 						),
 					);
@@ -219,6 +231,7 @@ export class GithubThreadProvider {
 		repository: CiRepository,
 		cursor: GithubIdCursor,
 		signal: AbortSignal,
+		owned: ReadonlySet<number>,
 	): Promise<GithubCollection<GithubIdCursor>> {
 		const viewer = await this.login(repository, signal);
 		const events: GithubThreadEvent[] = [];
@@ -252,6 +265,7 @@ export class GithubThreadProvider {
 							repository,
 							kind,
 							{ id, url: issue.html_url, thread, author: item.actor, at: item.created_at },
+							owned,
 							signal,
 						),
 					);
@@ -289,6 +303,7 @@ export class GithubThreadProvider {
 		pullRequest: number,
 		cursor: GithubIdCursor,
 		signal: AbortSignal,
+		owned: ReadonlySet<number>,
 	): Promise<GithubCollection<GithubIdCursor>> {
 		const events: GithubThreadEvent[] = [];
 		let afterId = cursor.afterId;
@@ -324,6 +339,7 @@ export class GithubThreadProvider {
 								body: item.body ?? "",
 								state,
 							},
+							owned,
 							signal,
 						),
 					);
@@ -355,5 +371,39 @@ export class GithubThreadProvider {
 				return [];
 			}
 		});
+	}
+
+	/**
+	 * Pull requests the signed-in login opened among the repository's 100 most recently updated pull requests in any
+	 * state (a just-merged or just-closed one is still among them), read from one listing, at most
+	 * {@link MAX_OWN_PULL_REQUESTS}. `bounded`: more of the login's pull requests were listed than are kept. A login that
+	 * cannot be read fails the collection.
+	 */
+	async ownPullRequests(
+		repository: CiRepository,
+		signal: AbortSignal,
+	): Promise<{ readonly numbers: ReadonlySet<number>; readonly bounded: boolean }> {
+		const viewer = await this.login(repository, signal);
+		const items = list(
+			await this.api(
+				repository,
+				`repos/${repository.nameWithOwner}/pulls?state=all&sort=updated&direction=desc&per_page=${PER_PAGE}`,
+				signal,
+			),
+		);
+		const numbers: number[] = [];
+		for (const value of items) {
+			try {
+				const item = record(value);
+				const login = record(item.user).login;
+				if (typeof login === "string" && login.toLowerCase() === viewer) numbers.push(positive(item.number));
+			} catch (error) {
+				if (!skippable(error)) throw error;
+			}
+		}
+		return {
+			numbers: new Set(numbers.slice(0, MAX_OWN_PULL_REQUESTS)),
+			bounded: numbers.length > MAX_OWN_PULL_REQUESTS,
+		};
 	}
 }

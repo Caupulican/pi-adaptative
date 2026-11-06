@@ -21,6 +21,7 @@ import {
 	type GithubThreadInterest,
 	githubInterestMatches,
 	HOST_EVENT_KINDS,
+	MAX_OWN_PULL_REQUESTS,
 } from "../../core/events/host-event-kinds.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
@@ -874,13 +875,21 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			if (collection.skipped) notes.push(`${collection.skipped} ${label} did not fit an event and were skipped`);
 		};
 		try {
+			// One listing per collection names the signed-in login's pull requests, read only when a listener asks for them.
+			let owned: ReadonlySet<number> = new Set();
+			if (interests.some((interest) => interest.ownPullRequests)) {
+				const own = await this.threads.ownPullRequests(repository, signal);
+				owned = own.numbers;
+				if (own.bounded)
+					notes.push(`only the ${MAX_OWN_PULL_REQUESTS} most recently updated own pull requests are watched`);
+			}
 			for (const kind of COMMENT_KINDS) {
 				const anchor = anchorOf(interests, [kind], floor);
 				if (!anchor) continue;
 				const field = kind === "review-comment" ? "reviewComments" : "comments";
 				const recorded = previous?.[field];
 				const start = recorded && recorded.at >= floor ? recorded : { at: anchor, ids: [] };
-				const collection = await this.threads.comments(repository, kind, start, signal);
+				const collection = await this.threads.comments(repository, kind, start, signal, owned);
 				next[field] = collection.cursor;
 				take(kind, collection);
 			}
@@ -890,6 +899,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 					repository,
 					idCursor(previous?.issueEvents, issueAnchor, floor),
 					signal,
+					owned,
 				);
 				next.issueEvents = collection.cursor;
 				take("issue events", collection);
@@ -900,6 +910,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 				for (const interest of interests) {
 					if (!interest.kinds.includes("review-submitted")) continue;
 					if (interest.pullRequest !== undefined) pullRequests.add(interest.pullRequest);
+					if (interest.ownPullRequests) for (const number of owned) pullRequests.add(number);
 					if (interest.branch !== undefined)
 						for (const number of await this.threads.pullRequestsOf(repository, interest.branch, signal))
 							pullRequests.add(number);
@@ -914,6 +925,7 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 						pullRequest,
 						idCursor(recorded, reviewAnchor, floor),
 						signal,
+						owned,
 					);
 					next.reviews.push({ pullRequest, cursor: collection.cursor });
 					take("reviews", collection);

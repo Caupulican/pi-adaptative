@@ -38,6 +38,9 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 					onDiagnostic,
 					getSubscribedSubjects: () => session.backgroundLanes.getHostEventSubjects(),
 					subscribeSubjects: (listener) => session.backgroundLanes.subscribeOrchestrationStore(listener),
+					// GitHub routines need this same source, so they watch only a checkout with the CI workflow.
+					getGithubInterests: () => session.backgroundLanes.getGithubInterests(),
+					subscribeGithubInterests: (listener) => session.backgroundLanes.subscribeRoutineDefinitions(listener),
 				});
 				signal.throwIfAborted();
 				if (!runtime) return [];

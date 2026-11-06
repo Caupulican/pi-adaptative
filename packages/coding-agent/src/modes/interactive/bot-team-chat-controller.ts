@@ -98,8 +98,21 @@ function routineScheduleLabel(routine: RoutineDefinitionView): string {
 			return `once at ${new Date(routine.schedule.at).toISOString()}`;
 		case "calendar":
 			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
-		case "event":
-			return `on CI ${routine.schedule.conclusions.join("/")}${routine.schedule.workflowPath === undefined ? "" : ` of ${routine.schedule.workflowPath}`}`;
+		case "event": {
+			const schedule = routine.schedule;
+			if (schedule.source === "github") {
+				const scope = [
+					schedule.pullRequest === undefined ? undefined : `#${schedule.pullRequest}`,
+					schedule.branch === undefined ? undefined : `branch ${schedule.branch}`,
+					schedule.ownPullRequests ? "own pull requests" : undefined,
+					schedule.authors === undefined
+						? undefined
+						: `by ${schedule.authors.map((login) => `@${login}`).join(", ")}`,
+				].filter((part) => part !== undefined);
+				return `on GitHub ${schedule.kinds.join("/")}${scope.length ? ` (${scope.join("; ")})` : ""}`;
+			}
+			return `on CI ${schedule.conclusions.join("/")}${schedule.workflowPath === undefined ? "" : ` of ${schedule.workflowPath}`}`;
+		}
 	}
 }
 

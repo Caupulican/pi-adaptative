@@ -168,6 +168,7 @@ import {
 	RoutineSchedulerController,
 	routineCiWorkflowPaths,
 	routineEventAnchor,
+	routineGithubInterests,
 	routineHostEventFeed,
 	routineWorkerRequest,
 } from "./routines/routine-scheduler-controller.ts";
@@ -704,6 +705,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getHostEventSubjects() {
 		return this._workerLifecycle?.ledger.runtime.hostEvents.subscribedSubjects() ?? [];
+	}
+
+	/** What this session's GitHub routines ask its CI source to collect; changes with the routine store. */
+	getGithubInterests() {
+		return routineGithubInterests(this.getBotTeamStore().listRoutines(), this.deps.getSessionId(), Date.now());
+	}
+
+	subscribeRoutineDefinitions(listener: () => void): () => void {
+		return this.getBotTeamStore().subscribe(listener);
 	}
 
 	readHostEvents(query: HostEventQuery, scope?: HostEventControlScope) {

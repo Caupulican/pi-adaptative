@@ -8,8 +8,23 @@ import {
 	CI_TERMINAL_CONCLUSIONS,
 	type CiAttemptTerminalEvent,
 	type CiTerminalConclusion,
+	createGithubThreadEvent,
+	GITHUB_THREAD_EVENT_KINDS,
+	type GithubThreadEvent,
+	type GithubThreadEventKind,
+	githubBranchName,
+	githubLogin,
+	isCiAttemptEvent,
 	parseCiAttemptTerminalEvent,
+	parseGithubThreadEvent,
 } from "../events/host-event-contract.ts";
+import {
+	type GithubThreadInterest,
+	githubInterestMatches,
+	HOST_EVENT_LISTENER_LIMITS,
+	type HostEventScopeKey,
+	hostEventListenerRefusal,
+} from "../events/host-event-kinds.ts";
 import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -174,8 +189,53 @@ const eventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const githubEventSchema = Type.Object(
+	{
+		kind: Type.Literal("event"),
+		source: Type.Literal("github", {
+			description:
+				"Pull request and issue occurrences of the checked-out repository on GitHub, read through the signed-in gh login.",
+		}),
+		kinds: Type.Array(StringEnum(GITHUB_THREAD_EVENT_KINDS), {
+			minItems: 1,
+			maxItems: HOST_EVENT_LISTENER_LIMITS.maxKinds,
+			uniqueItems: true,
+			description:
+				"Occurrences that start a run. Comments, review comments, submitted reviews, merges and closes need a pull request, branch, ownPullRequests or authors scope; review requests and assignments name the signed-in login and need none.",
+		}),
+		pullRequest: Type.Optional(Type.Integer({ minimum: 1, description: "Only this pull request number." })),
+		branch: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 255, description: "Only pull requests whose head is this branch." }),
+		),
+		ownPullRequests: Type.Optional(
+			Type.Literal(true, { description: "Only pull requests the signed-in gh login opened." }),
+		),
+		authors: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: 44 }), {
+				minItems: 1,
+				maxItems: HOST_EVENT_LISTENER_LIMITS.maxAuthors,
+				description: "Only occurrences these GitHub logins wrote or did.",
+			}),
+		),
+		stopAfterFirstRun: Type.Optional(
+			Type.Literal(true, {
+				description:
+					"Run for the next matching occurrences only; the routine is removed once that run is delivered.",
+			}),
+		),
+		expiresAt: expiresAtField,
+	},
+	{ additionalProperties: false },
+);
+
 /** Only schedules the host can execute are accepted; calendar rules are validated by the calendar owner. */
-export const routineScheduleInputSchema = Type.Union([intervalSchema, onceSchema, calendarSchema, eventSchema]);
+export const routineScheduleInputSchema = Type.Union([
+	intervalSchema,
+	onceSchema,
+	calendarSchema,
+	eventSchema,
+	githubEventSchema,
+]);
 
 /** Model-facing authoring input. Recipient and compiled authority are host-owned and absent from this schema. */
 export const routineAuthoringSchema = Type.Object(
@@ -250,7 +310,29 @@ export type RoutineSchedule =
 			readonly expiresAt?: number;
 			readonly anchorOrdinal: number;
 			readonly anchorReplayGaps: string;
-	  };
+	  }
+	/**
+	 * GitHub occurrences accepted into the session ledger after `anchorOrdinal` that happened at or after `anchorAt` (the
+	 * instant the filter was saved, kept while it is unchanged). Kinds are in contract order, authors lowercase.
+	 */
+	| RoutineGithubSchedule;
+
+export interface RoutineGithubSchedule {
+	readonly kind: "event";
+	readonly source: "github";
+	readonly kinds: readonly GithubThreadEventKind[];
+	readonly pullRequest?: number;
+	readonly branch?: string;
+	readonly ownPullRequests?: true;
+	readonly authors?: readonly string[];
+	readonly stopAfterFirstRun?: true;
+	readonly expiresAt?: number;
+	readonly anchorOrdinal: number;
+	readonly anchorReplayGaps: string;
+	readonly anchorAt: number;
+}
+
+export type RoutineEventSchedule = Extract<RoutineSchedule, { kind: "event" }>;
 
 /** Host-owned ledger position an event routine is authored at: later events only. */
 export interface RoutineEventAnchor {
@@ -262,12 +344,15 @@ export interface RoutineEventAnchor {
 export interface RoutineHostEventFact {
 	readonly acceptedOrdinal: number;
 	readonly sourceSequence: number;
-	readonly event: CiAttemptTerminalEvent;
+	readonly event: CiAttemptTerminalEvent | GithubThreadEvent;
 	/** This live session has sealed the event's source frontier. */
 	readonly ready: boolean;
 	/** The event is the completed observation of its subject in the source's current seal. */
 	readonly current: boolean;
-	/** The event's subject is one of the source's current root subjects: the checked-out revision. */
+	/**
+	 * A CI attempt's subject is one of the source's current root subjects (the checked-out revision); a GitHub
+	 * occurrence always applies, its routine's filter scopes it.
+	 */
 	readonly rootApplicable: boolean;
 }
 
@@ -480,7 +565,21 @@ export type RoutineOccurrencePhase = "pending" | "claimed" | "dispatching" | "ru
 export type RoutineOccurrenceTrigger =
 	| { readonly kind: "schedule"; readonly scheduledAt: number; readonly missedCount: number }
 	| { readonly kind: "manual"; readonly commandId: string; readonly requestedAt: number }
-	/** A bounded copy of the deciding event, so instructions never depend on ledger retention. */
+	/**
+	 * A bounded copy of the deciding event, so instructions never depend on ledger retention. A GitHub run carries a
+	 * batch: `event` is its latest occurrence and `earlier` the others it carries, oldest first, at most
+	 * {@link HOST_EVENT_LISTENER_LIMITS}.maxBatch in all; `missedCount` counts the ones it does not carry.
+	 * `bodiesElided`: the run's result was delivered, and the occurrences' bodies were dropped from history.
+	 */
+	| RoutineEventTrigger
+	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
+	| { readonly kind: "expiry"; readonly expiresAt: number }
+	/**
+	 * The host's notice that a run reported the routine's stated end met and the routine was removed; recorded terminal,
+	 * never run. Keyed by the reporting occurrence, so a replayed retirement writes the same notice.
+	 */
+	| { readonly kind: "condition"; readonly occurrenceId: string; readonly metAt: number };
+export type RoutineEventTrigger =
 	| {
 			readonly kind: "event";
 			readonly triggeredAt: number;
@@ -489,13 +588,16 @@ export type RoutineOccurrenceTrigger =
 			readonly historyGap?: true;
 			readonly event: CiAttemptTerminalEvent;
 	  }
-	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
-	| { readonly kind: "expiry"; readonly expiresAt: number }
-	/**
-	 * The host's notice that a run reported the routine's stated end met and the routine was removed; recorded terminal,
-	 * never run. Keyed by the reporting occurrence, so a replayed retirement writes the same notice.
-	 */
-	| { readonly kind: "condition"; readonly occurrenceId: string; readonly metAt: number };
+	| {
+			readonly kind: "event";
+			readonly triggeredAt: number;
+			readonly acceptedOrdinal: number;
+			readonly missedCount: number;
+			readonly historyGap?: true;
+			readonly event: GithubThreadEvent;
+			readonly earlier?: readonly GithubThreadEvent[];
+			readonly bodiesElided?: true;
+	  };
 export type RoutineTerminalOutcome = "succeeded" | "failed" | "cancelled" | "uncertain";
 
 export interface RoutineResult {
@@ -822,15 +924,40 @@ export function routineOccurrencesSettled(
 	return true;
 }
 
-/** Whether a CI attempt satisfies an event schedule's filter. Root applicability is decided by the caller. */
+/**
+ * Whether an event satisfies an event schedule's filter: a CI attempt a CI filter, a GitHub occurrence a GitHub
+ * filter. Root applicability is decided by the caller.
+ */
 export function routineEventMatches(
-	schedule: Extract<RoutineSchedule, { kind: "event" }>,
-	event: CiAttemptTerminalEvent,
+	schedule: RoutineEventSchedule,
+	event: CiAttemptTerminalEvent | GithubThreadEvent,
 ): boolean {
+	if (schedule.source === "github")
+		return !isCiAttemptEvent(event) && githubInterestMatches(routineGithubInterest(schedule), event);
 	return (
+		isCiAttemptEvent(event) &&
 		schedule.conclusions.includes(event.conclusion) &&
 		(schedule.workflowPath === undefined || schedule.workflowPath === event.workflowPath)
 	);
+}
+
+/** What a GitHub routine asks its session's source to collect; it starts at the instant its filter was saved. */
+export function routineGithubInterest(schedule: RoutineGithubSchedule): GithubThreadInterest {
+	return {
+		kinds: schedule.kinds,
+		...(schedule.pullRequest === undefined ? {} : { pullRequest: schedule.pullRequest }),
+		...(schedule.branch === undefined ? {} : { branch: schedule.branch }),
+		...(schedule.ownPullRequests ? { ownPullRequests: true as const } : {}),
+		...(schedule.authors === undefined ? {} : { authors: schedule.authors }),
+		since: new Date(schedule.anchorAt).toISOString(),
+	};
+}
+
+/** Every event a run carries, oldest first; the deciding one last. */
+export function routineTriggerEvents(
+	trigger: RoutineEventTrigger,
+): readonly (CiAttemptTerminalEvent | GithubThreadEvent)[] {
+	return "earlier" in trigger && trigger.earlier ? [...trigger.earlier, trigger.event] : [trigger.event];
 }
 
 export interface RoutineOccurrenceClaimInput {
@@ -1045,9 +1172,98 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			...(value.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
 			...expiry,
 		};
+	if (
+		value.kind === "event" &&
+		value.source === "github" &&
+		hasOnlyKeys(value, [
+			"kind",
+			"source",
+			"kinds",
+			"pullRequest",
+			"branch",
+			"ownPullRequests",
+			"authors",
+			"stopAfterFirstRun",
+			"expiresAt",
+		]) &&
+		(value.stopAfterFirstRun === undefined || value.stopAfterFirstRun === true)
+	)
+		return {
+			...githubRoutineFilter(value),
+			...(value.stopAfterFirstRun ? { stopAfterFirstRun: true } : {}),
+			...expiry,
+		};
 	throw new TypeError(
-		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule or CI event filter.",
+		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule, CI event filter or GitHub event filter.",
 	);
+}
+
+interface GithubRoutineFilter {
+	kind: "event";
+	source: "github";
+	kinds: GithubThreadEventKind[];
+	pullRequest?: number;
+	branch?: string;
+	ownPullRequests?: true;
+	authors?: string[];
+}
+
+/**
+ * The canonical GitHub filter: kinds in contract order, logins lowercase and distinct, and the kind table's listener
+ * rules (a high-volume kind needs a scope that narrows it).
+ */
+function githubRoutineFilter(value: Record<string, unknown>): GithubRoutineFilter {
+	const invalid = (reason: string) => new TypeError(`Routine GitHub filter ${reason}.`);
+	const kinds = value.kinds;
+	if (!Array.isArray(kinds) || kinds.some((kind) => typeof kind !== "string"))
+		throw invalid("needs a list of GitHub event kinds");
+	const scopes = new Set<HostEventScopeKey>();
+	let pullRequest: number | undefined;
+	if (value.pullRequest !== undefined) {
+		if (!Number.isSafeInteger(value.pullRequest) || (value.pullRequest as number) < 1)
+			throw invalid("names an invalid pull request number");
+		pullRequest = value.pullRequest as number;
+		scopes.add("pullRequest");
+	}
+	let branch: string | undefined;
+	if (value.branch !== undefined) {
+		try {
+			branch = githubBranchName(value.branch);
+		} catch {
+			throw invalid("names an invalid branch");
+		}
+		scopes.add("branch");
+	}
+	if (value.ownPullRequests !== undefined) {
+		if (value.ownPullRequests !== true) throw invalid("has an invalid ownPullRequests flag");
+		scopes.add("ownPullRequests");
+	}
+	let authors: string[] | undefined;
+	if (value.authors !== undefined) {
+		if (
+			!Array.isArray(value.authors) ||
+			value.authors.length === 0 ||
+			value.authors.length > HOST_EVENT_LISTENER_LIMITS.maxAuthors
+		)
+			throw invalid(`needs between 1 and ${HOST_EVENT_LISTENER_LIMITS.maxAuthors} authors`);
+		try {
+			authors = [...new Set(value.authors.map((login) => githubLogin(login).toLowerCase()))].sort();
+		} catch {
+			throw invalid("names an invalid GitHub login");
+		}
+		scopes.add("authors");
+	}
+	const refusal = hostEventListenerRefusal("github", kinds as string[], scopes);
+	if (refusal) throw invalid(refusal);
+	return {
+		kind: "event",
+		source: "github",
+		kinds: GITHUB_THREAD_EVENT_KINDS.filter((kind) => (kinds as string[]).includes(kind)),
+		...(pullRequest === undefined ? {} : { pullRequest }),
+		...(branch === undefined ? {} : { branch }),
+		...(value.ownPullRequests ? { ownPullRequests: true as const } : {}),
+		...(authors === undefined ? {} : { authors }),
+	};
 }
 
 /** Unique conclusions in contract order; an omitted filter means failed attempts only. */
@@ -1084,6 +1300,12 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				...expiry,
 			};
 		case "event":
+			if (schedule.source === "github")
+				return {
+					...githubFilterOf(schedule),
+					...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...expiry,
+				};
 			return {
 				kind: "event",
 				source: schedule.source,
@@ -1093,6 +1315,20 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				...expiry,
 			};
 	}
+}
+
+function githubFilterOf(
+	schedule: Pick<RoutineGithubSchedule, "kinds" | "pullRequest" | "branch" | "ownPullRequests" | "authors">,
+): GithubRoutineFilter {
+	return {
+		kind: "event",
+		source: "github",
+		kinds: [...schedule.kinds],
+		...(schedule.pullRequest === undefined ? {} : { pullRequest: schedule.pullRequest }),
+		...(schedule.branch === undefined ? {} : { branch: schedule.branch }),
+		...(schedule.ownPullRequests ? { ownPullRequests: true as const } : {}),
+		...(schedule.authors === undefined ? {} : { authors: [...schedule.authors] }),
+	};
 }
 
 /**
@@ -1114,6 +1350,11 @@ export function routineSlotRule(schedule: RoutineScheduleInput): RoutineSchedule
 		case "event":
 			// The whole filter decides which events run it: any change re-anchors at the ledger's current position. The
 			// one-run flag is part of it, so turning it off after the run starts a fresh cursor instead of a spent one.
+			if (schedule.source === "github")
+				return {
+					...githubRoutineFilter(schedule),
+					...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+				};
 			return {
 				kind: "event",
 				source: schedule.source,
@@ -1508,7 +1749,16 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "event" &&
 			definition.schedule.kind === "event" &&
-			hasOnlyKeys(value.trigger, ["kind", "triggeredAt", "acceptedOrdinal", "missedCount", "historyGap", "event"]) &&
+			hasOnlyKeys(value.trigger, [
+				"kind",
+				"triggeredAt",
+				"acceptedOrdinal",
+				"missedCount",
+				"historyGap",
+				"event",
+				"earlier",
+				"bodiesElided",
+			]) &&
 			validInstant(value.trigger.triggeredAt) &&
 			value.trigger.triggeredAt === value.createdAt &&
 			Number.isSafeInteger(value.trigger.acceptedOrdinal) &&
@@ -1518,16 +1768,46 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			(value.trigger.missedCount as number) <= MAX_ROUTINE_EVENT_MISSED_COUNT &&
 			(value.trigger.historyGap === undefined || value.trigger.historyGap === true)
 		) {
-			const event = parseCiAttemptTerminalEvent(value.trigger.event);
-			if (!routineEventMatches(definition.schedule, event)) return undefined;
-			trigger = {
-				kind: "event",
+			const base = {
+				kind: "event" as const,
 				triggeredAt: value.trigger.triggeredAt,
 				acceptedOrdinal: value.trigger.acceptedOrdinal as number,
 				missedCount: value.trigger.missedCount as number,
 				...(value.trigger.historyGap ? { historyGap: true as const } : {}),
-				event,
 			};
+			if (definition.schedule.source === "ci") {
+				if (value.trigger.earlier !== undefined || value.trigger.bodiesElided !== undefined) return undefined;
+				const event = parseCiAttemptTerminalEvent(value.trigger.event);
+				if (!routineEventMatches(definition.schedule, event)) return undefined;
+				trigger = { ...base, event };
+			} else {
+				const elided = value.trigger.bodiesElided;
+				if (elided !== undefined && (elided !== true || value.phase !== "terminal")) return undefined;
+				const earlierValue = value.trigger.earlier;
+				if (
+					earlierValue !== undefined &&
+					(!Array.isArray(earlierValue) ||
+						earlierValue.length === 0 ||
+						earlierValue.length >= HOST_EVENT_LISTENER_LIMITS.maxBatch)
+				)
+					return undefined;
+				const event = parseGithubThreadEvent(value.trigger.event);
+				const earlier = (earlierValue ?? []).map((entry: unknown) => parseGithubThreadEvent(entry));
+				const carried = [...earlier, event];
+				const schedule = definition.schedule;
+				if (
+					new Set(carried.map((entry) => entry.eventId)).size !== carried.length ||
+					carried.some((entry) => !routineEventMatches(schedule, entry)) ||
+					(elided && carried.some((entry) => !isElidedGithubEvent(entry)))
+				)
+					return undefined;
+				trigger = {
+					...base,
+					event,
+					...(earlier.length > 0 ? { earlier } : {}),
+					...(elided ? { bodiesElided: true as const } : {}),
+				};
+			}
 		} else if (
 			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "expiry" &&
@@ -1798,6 +2078,30 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 			};
 		throw new TypeError("Persisted calendar schedule requires a canonical rule, a zone name and an anchor.");
 	}
+	if (value.kind === "event" && value.source === "github") {
+		const { anchorOrdinal, anchorReplayGaps, anchorAt, ...rest } = value;
+		if (
+			Number.isSafeInteger(anchorOrdinal) &&
+			(anchorOrdinal as number) >= 0 &&
+			isRoutineDigest(anchorReplayGaps) &&
+			validInstant(anchorAt)
+		) {
+			const authored = parseRoutineScheduleInput(rest);
+			// Only the canonical form is stored: a filter in another order or case is not this host's record.
+			if (authored.kind === "event" && authored.source === "github" && isDeepStrictEqual(authored, rest))
+				return {
+					...githubFilterOf(authored),
+					...(authored.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...expiry,
+					anchorOrdinal: anchorOrdinal as number,
+					anchorReplayGaps,
+					anchorAt,
+				};
+		}
+		throw new TypeError(
+			"Persisted GitHub event schedule requires a canonical filter, a ledger anchor and its start.",
+		);
+	}
 	if (value.kind === "event") {
 		if (
 			hasOnlyKeys(value, [
@@ -1822,7 +2126,11 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 				...(value.stopAfterFirstRun === undefined ? {} : { stopAfterFirstRun: value.stopAfterFirstRun }),
 				...expiry,
 			});
-			if (authored.kind === "event" && isDeepStrictEqual(authored.conclusions, value.conclusions))
+			if (
+				authored.kind === "event" &&
+				authored.source === "ci" &&
+				isDeepStrictEqual(authored.conclusions, value.conclusions)
+			)
 				return {
 					kind: "event",
 					source: authored.source,
@@ -2257,6 +2565,11 @@ export function routineOccurrenceId(
 		suffix = `condition:${createHash("sha256").update(trigger.occurrenceId).digest("hex")}`;
 	else if (trigger.kind === "manual")
 		suffix = `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
+	else if (!isCiAttemptEvent(trigger.event))
+		return githubBatchId(
+			definition,
+			routineTriggerEvents(trigger).map((event) => event.eventId),
+		);
 	else {
 		// Keyed by the attempt, not the ledger position: a re-presented attempt is the same occurrence.
 		const identity = trigger.event.identity;
@@ -2264,4 +2577,81 @@ export function routineOccurrenceId(
 		suffix = `event:${createHash("sha256").update(JSON.stringify(key)).digest("hex")}`;
 	}
 	return `${definition.incarnationId}:${definition.revision}:${suffix}`;
+}
+
+/** A GitHub run is keyed by the occurrences it carries, as a set: a re-presented batch is the same occurrence. */
+function githubBatchId(
+	definition: Pick<PersistentRoutineDefinition, "incarnationId" | "revision">,
+	eventIds: readonly string[],
+): string {
+	const key = ["github", ...[...eventIds].sort()];
+	return `${definition.incarnationId}:${definition.revision}:event:${createHash("sha256").update(JSON.stringify(key)).digest("hex")}`;
+}
+
+/**
+ * The replay key of one event for a routine revision: what its journal entry or, once pruned, its tombstone records.
+ * A CI attempt's is its occurrence id; a GitHub occurrence's is the id a run carrying it alone would have, so every
+ * occurrence a batch carries is consumed with it.
+ */
+export function routineEventKey(
+	definition: Pick<PersistentRoutineDefinition, "incarnationId" | "revision">,
+	event: CiAttemptTerminalEvent | GithubThreadEvent,
+): string {
+	return isCiAttemptEvent(event)
+		? routineOccurrenceId(definition, { kind: "event", triggeredAt: 0, acceptedOrdinal: 0, missedCount: 0, event })
+		: githubBatchId(definition, [event.eventId]);
+}
+
+/** The replay keys an occurrence consumes: its own id, and for a GitHub run every carried occurrence's key. */
+export function routineOccurrenceReplayKeys(
+	occurrence: Pick<RoutineOccurrence, "occurrenceId" | "trigger" | "definition">,
+): readonly string[] {
+	const trigger = occurrence.trigger;
+	if (trigger.kind !== "event" || isCiAttemptEvent(trigger.event)) return [occurrence.occurrenceId];
+	return [
+		...new Set([
+			occurrence.occurrenceId,
+			...routineTriggerEvents(trigger).map((event) => routineEventKey(occurrence.definition, event)),
+		]),
+	];
+}
+
+function isElidedGithubEvent(event: GithubThreadEvent): boolean {
+	return event.body === undefined || (event.body.text === "" && (event.body.truncated || event.body.bytes === 0));
+}
+
+/**
+ * A delivered GitHub run's history without the third party's words: each carried body keeps only its length, the
+ * rest of the occurrence stays. The same object when there is nothing to drop (not a delivered terminal GitHub run,
+ * or already elided). Delivered runs are never dispatched or reconciled again, and notification ownership skips them,
+ * so their brief, which no longer equals the dispatched text, is never matched against their attempts.
+ */
+export function elideDeliveredRoutineEventBodies(occurrence: RoutineOccurrence): RoutineOccurrence {
+	const trigger = occurrence.trigger;
+	if (
+		trigger.kind !== "event" ||
+		isCiAttemptEvent(trigger.event) ||
+		("bodiesElided" in trigger && trigger.bodiesElided) ||
+		occurrence.phase !== "terminal" ||
+		occurrence.result?.delivery !== "acknowledged" ||
+		(occurrence.priorUncertaintyResult !== undefined && occurrence.priorUncertaintyResult.delivery !== "acknowledged")
+	)
+		return occurrence;
+	const elide = (event: GithubThreadEvent): GithubThreadEvent =>
+		event.body === undefined
+			? event
+			: createGithubThreadEvent({
+					...event,
+					body: { text: "", truncated: event.body.bytes > 0, bytes: event.body.bytes },
+				});
+	const earlier = "earlier" in trigger && trigger.earlier ? trigger.earlier.map(elide) : undefined;
+	return {
+		...occurrence,
+		trigger: {
+			...trigger,
+			event: elide(trigger.event),
+			...(earlier ? { earlier } : {}),
+			bodiesElided: true,
+		},
+	};
 }

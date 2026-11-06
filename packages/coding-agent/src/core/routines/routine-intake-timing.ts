@@ -9,7 +9,19 @@
  */
 import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { type Static, Type } from "typebox";
-import { CI_TERMINAL_CONCLUSIONS, type CiTerminalConclusion } from "../events/host-event-contract.ts";
+import {
+	CI_TERMINAL_CONCLUSIONS,
+	type CiTerminalConclusion,
+	GITHUB_THREAD_EVENT_KINDS,
+	type GithubThreadEventKind,
+	githubBranchName,
+	githubLogin,
+} from "../events/host-event-contract.ts";
+import {
+	HOST_EVENT_LISTENER_LIMITS,
+	type HostEventScopeKey,
+	hostEventListenerRefusal,
+} from "../events/host-event-kinds.ts";
 import { type OwnerWords, ownerShownRegions } from "../learning/owner-evidence-ledger.ts";
 import { canonicalCalendarTimeZone, MAX_CALENDAR_TIME_ZONE_CHARS, nextCalendarSlotAfter } from "./calendar-schedule.ts";
 import {
@@ -145,6 +157,40 @@ export const intakeTimingSchema = Type.Union([
 		},
 		{ additionalProperties: false },
 	),
+	Type.Object(
+		{
+			kind: Type.Literal("github"),
+			kinds: Type.Array(StringEnum(GITHUB_THREAD_EVENT_KINDS), {
+				minItems: 1,
+				maxItems: GITHUB_THREAD_EVENT_KINDS.length,
+				uniqueItems: true,
+				description:
+					"Every GitHub occurrence the owner named: a comment, a review comment (on a line of code), a submitted review, a review requested from the signed-in login, an assignment to it, a merge or a close.",
+			}),
+			pullRequest: Type.Optional(
+				Type.Integer({ minimum: 1, description: "Only when the owner wrote the number (#12, PR 12)." }),
+			),
+			branch: Type.Optional(
+				Type.String({
+					minLength: 1,
+					maxLength: 255,
+					description: "Only when the owner wrote a branch name right after the word branch.",
+				}),
+			),
+			ownPullRequests: Type.Optional(
+				Type.Literal(true, { description: "Only when the owner said their own pull requests (my PR)." }),
+			),
+			authors: Type.Optional(
+				Type.Array(Type.String({ minLength: 1, maxLength: 44 }), {
+					minItems: 1,
+					maxItems: HOST_EVENT_LISTENER_LIMITS.maxAuthors,
+					uniqueItems: true,
+					description: "Only logins the owner wrote after @, without the @.",
+				}),
+			),
+		},
+		{ additionalProperties: false },
+	),
 ]);
 
 export type IntakeTiming = Static<typeof intakeTimingSchema>;
@@ -235,7 +281,8 @@ export function compileIntakeTiming(
 
 /**
  * Whether the owner's stated (not shown) words carry timing the host grammar can compile: a construct of any of its
- * languages that a schedule derives from, or a CI subject together with an outcome word. Every compile derives from
+ * languages that a schedule derives from, a CI subject together with an outcome word, or a GitHub subject together with
+ * an occurrence word. Every compile derives from
  * such a construct or such words of the same parse, so a message for which it is false can never compile a request
  * and buys no extraction.
  */
@@ -246,7 +293,9 @@ export function statesIntakeTiming(owner: OwnerWords): boolean {
 		(language) =>
 			parseTokens(tokens, language).some(
 				(construct) => SCHEDULE_TYPES.has(construct.type) || (construct.type === "part" && construct.recurring),
-			) || readsCi(language, tokens, everywhere),
+			) ||
+			readsCi(language, tokens, everywhere) ||
+			readsGithub(language, owner.text, tokens, everywhere),
 	);
 }
 
@@ -289,8 +338,12 @@ interface StatedUntil {
 function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal | Unread {
 	const { language, tokens, span, timing, context } = reading;
 	const text = context.owner.text;
-	const event = timing.kind === "event";
-	const constructs = parseTokens(tokens, language);
+	const watch = timing.kind === "event" ? "ci" : timing.kind === "github" ? "github" : undefined;
+	// A pull request number, branch name or login a GitHub watch names is that name, never timing.
+	const github = watch === "github" ? githubMentions(language, text, tokens) : undefined;
+	const constructs = parseTokens(tokens, language).filter(
+		(construct) => !github?.named.subarray(construct.start, construct.end).includes(1),
+	);
 	const instruction = excerptSpan(tokens, context.instruction);
 	const sentences = new Set<number>();
 	for (const excerpt of [span, instruction])
@@ -312,15 +365,20 @@ function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal
 	}
 
 	// A workflow file a CI watch's timing excerpt names before any until-word is read as that name, never as timing.
-	const workflows = event
-		? workflowMentions(text, tokens).filter(
-				(mention) => mention.first >= span.first && mention.last <= span.last && !tail[mention.first],
-			)
-		: [];
+	const workflows =
+		watch === "ci"
+			? workflowMentions(text, tokens).filter(
+					(mention) => mention.first >= span.first && mention.last <= span.last && !tail[mention.first],
+				)
+			: [];
+	const mentions = (github?.mentions ?? []).filter(
+		(mention) => mention.first >= span.first && mention.last <= span.last && !tail[mention.first],
+	);
 	const named = new Uint8Array(tokens.length);
-	for (const mention of workflows) named.fill(1, mention.first, mention.last);
+	for (const mention of [...workflows, ...mentions]) named.fill(1, mention.first, mention.last);
 
-	const vocabulary = event ? eventVocabulary(language) : language.fillers;
+	const vocabulary =
+		watch === "ci" ? eventVocabulary(language) : watch === "github" ? githubVocabulary(language) : language.fillers;
 	const unread: Token[] = [];
 	for (let index = span.first; index < span.last; ) {
 		if (covered[index] || tail[index] || named[index] || within(index, instruction)) {
@@ -352,7 +410,7 @@ function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal
 	}
 	if (refusal) return { refused: exactReason(constructWords(text, tokens, refusal)) };
 	if (misplaced) return { refused: placeReason(constructWords(text, tokens, misplaced)) };
-	const watchWords = event ? eventWords(language) : undefined;
+	const watchWords = watch === undefined ? undefined : watchWordsOf(language, watch);
 	const stray: Token[] = [];
 	for (const [index, token] of tokens.entries())
 		if (
@@ -361,16 +419,20 @@ function compileIn(reading: Reading): CompiledIntakeTiming | IntakeTimingRefusal
 			!tail[index] &&
 			!within(index, span) &&
 			!within(index, instruction) &&
+			!github?.named[index] &&
 			(isAnchor(token) || watchWords?.has(token.text) === true)
 		)
 			stray.push(token);
 	if (stray.length > 0) return { refused: placeReason(tokenWords(text, stray)) };
-	const modifier = modifierSentence(language, tokens, constructs, covered, sentences, event);
+	const modifier = modifierSentence(language, tokens, constructs, covered, sentences, watch);
 	if (modifier) return { refused: placeReason(spanText(text, tokens, modifier)) };
 	if (untils.length > 1) return { refused: exactReason(reading.when) };
-	return timing.kind === "event"
-		? compileEvent(reading, timing, stated, untils[0], workflows)
-		: compileCalendar(reading, timing, stated, untils[0]);
+	if (timing.kind === "event") return compileEvent(reading, timing, stated, untils[0], workflows);
+	if (timing.kind === "github") {
+		if (github?.invalid) return { refused: github.invalid };
+		return compileGithub(reading, timing, stated, untils[0], mentions);
+	}
+	return compileCalendar(reading, timing, stated, untils[0]);
 }
 
 /** A workflow file the owner named ("ci.yml", "release-please.yaml"): its tokens, end exclusive, and its name. */
@@ -401,6 +463,102 @@ function workflowMentions(text: string, tokens: readonly Token[]): WorkflowMenti
 		mentions.push({ first, last: index + 1, name: text.slice(tokens[first]!.start, token.end).toLowerCase() });
 	}
 	return mentions;
+}
+
+/** A pull request number, branch name or login a GitHub watch's owner typed: its tokens, end exclusive. */
+interface GithubMention {
+	readonly kind: "pullRequest" | "branch" | "author";
+	readonly first: number;
+	readonly last: number;
+	/** The number's digits, the branch name as written, or the login lowercased. */
+	readonly value: string;
+}
+
+/** Words right before a number that make it a pull request's ("PR 12", "pull request 12"). */
+const PULL_REQUEST_WORDS: readonly string[] = ["pr", "pull request"];
+
+/**
+ * The names a GitHub watch's owner typed, read from the original text: `#12`, or a number right after a pull request
+ * word; a `@login` (letters, digits and inner hyphens); and a branch name right after a branch word, its parts joined
+ * by nothing or one of `-_./` (a period ends the sentence, so a dotted name refuses). `named` marks their tokens;
+ * `invalid` is the refusal for a typed login or branch GitHub would not accept.
+ */
+function githubMentions(
+	language: Language,
+	text: string,
+	tokens: readonly Token[],
+): { readonly mentions: readonly GithubMention[]; readonly named: Uint8Array; readonly invalid?: string } {
+	const mentions: GithubMention[] = [];
+	const named = new Uint8Array(tokens.length);
+	let invalid: string | undefined;
+	const extend = (first: number, joins: RegExp) => {
+		let last = first + 1;
+		while (
+			last < tokens.length &&
+			tokens[last]!.run === tokens[first]!.run &&
+			joins.test(text.slice(tokens[last - 1]!.end, tokens[last]!.start))
+		)
+			last++;
+		return last;
+	};
+	const add = (kind: GithubMention["kind"], first: number, last: number, value: string) => {
+		mentions.push({ kind, first, last, value });
+		named.fill(1, first, last);
+	};
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		const before = text.charAt(token.start - 1);
+		const spaced = /\s/u.test(before);
+		const words = (count: number) =>
+			tokens
+				.slice(Math.max(0, index - count), index)
+				.map((entry) => entry.text)
+				.join(" ");
+		const afterWord = (phrases: readonly string[]) =>
+			phrases.some((phrase) => {
+				const count = phrase.split(" ").length;
+				return index >= count && tokens[index - count]!.run === token.run && words(count) === phrase;
+			});
+		if (token.kind === "number" && (before === "#" || (spaced && afterWord(PULL_REQUEST_WORDS)))) {
+			if (token.text.length <= 9 && Number(token.text) >= 1) add("pullRequest", index, index + 1, token.text);
+			else invalid ??= `${quoted(token.text)} is not a pull request number`;
+		} else if (before === "@" && (token.kind === "word" || token.kind === "number")) {
+			const last = extend(index, /^-$/u);
+			const login = text.slice(token.start, tokens[last - 1]!.end);
+			try {
+				add("author", index, last, githubLogin(login).toLowerCase());
+			} catch {
+				invalid ??= `${quoted(`@${login}`)} is not a GitHub login`;
+			}
+			index = last - 1;
+		} else if (spaced && afterWord(language.githubBranchWords)) {
+			const last = extend(index, /^[-_./]?$/u);
+			const branch = text.slice(token.start, tokens[last - 1]!.end);
+			try {
+				add("branch", index, last, githubBranchName(branch));
+			} catch {
+				invalid ??= `${quoted(branch)} is not a branch name the host can watch`;
+			}
+			index = last - 1;
+		}
+	}
+	return { mentions, named, ...(invalid ? { invalid } : {}) };
+}
+
+/** The longest listed phrase at `index` ending by `end`, with its value. */
+function longestEntry<T>(
+	tokens: readonly Token[],
+	index: number,
+	end: number,
+	entries: readonly (readonly [string, T])[],
+): readonly [number, T] | undefined {
+	let best: readonly [number, T] | undefined;
+	for (const [phrase, value] of entries) {
+		const parts = phrase.split(" ");
+		if (index + parts.length > end || (best !== undefined && index + parts.length <= best[0])) continue;
+		if (parts.every((part, offset) => tokens[index + offset]!.text === part)) best = [index + parts.length, value];
+	}
+	return best;
 }
 
 /** A workflow path's file name. */
@@ -476,11 +634,12 @@ function modifierSentence(
 	constructs: readonly Construct[],
 	covered: Uint8Array,
 	excerpts: ReadonlySet<number>,
-	event: boolean,
+	watch: "ci" | "github" | undefined,
 ): TokenSpan | undefined {
 	const timed = new Set(constructs.map((construct) => tokens[construct.start]!.sentence));
-	if (event) for (const token of tokens) if (eventWords(language).has(token.text)) timed.add(token.sentence);
-	const vocabulary = event ? eventVocabulary(language) : language.fillers;
+	if (watch) for (const token of tokens) if (watchWordsOf(language, watch).has(token.text)) timed.add(token.sentence);
+	const vocabulary =
+		watch === "ci" ? eventVocabulary(language) : watch === "github" ? githubVocabulary(language) : language.fillers;
 	for (const sentence of timed) {
 		if (excerpts.has(sentence)) continue;
 		const first = tokens.findIndex((token) => token.sentence === sentence);
@@ -504,30 +663,17 @@ function compileEvent(
 	until: StatedUntil | undefined,
 	workflows: readonly WorkflowMention[],
 ): CompiledIntakeTiming | IntakeTimingRefusal {
-	const { language, tokens, span, when } = reading;
+	const { language, tokens, when } = reading;
 	// A CI watch has no clock, day or zone: any other construct of its excerpt means the owner asked for something else.
 	if (stated.some((construct) => construct.type !== "event")) return { refused: exactReason(when) };
 	// The workflow is the host's reading of a named file against what it watches; the model's slot must equal it.
 	const workflow = watchedWorkflow(workflows, reading.context.workflowPaths);
 	if ("refused" in workflow) return workflow;
 	if (timing.workflowPath !== workflow.path) return { refused: differsReason(when) };
-	// Outcomes and lifetime words are read before an until-word; the words after it are the stated end.
-	const untilAt = until?.construct.start ?? span.last;
-	const head: TokenSpan = {
-		first: span.first,
-		last: untilAt > span.first && untilAt < span.last ? untilAt : span.last,
-	};
+	const head = watchHead(reading, until);
 	if (!readsCi(language, tokens, head)) return { refused: `${quoted(when)} names no CI result the host watches` };
-	let standing = false;
-	let next = language.nextWords.some((word) => spanHas(tokens, head, word));
-	for (const construct of stated)
-		if (construct.type === "event") {
-			if (construct.lifetime === "standing") standing = true;
-			else next = true;
-		}
-	if (!standing && !next) return { refused: `${quoted(when)} does not say whether every time or only the next time` };
-	if (next && (standing || until)) return { refused: exactReason(when) };
-	const lifetime: Lifetime = until ? "until" : standing ? "standing" : "next";
+	const lifetime = watchLifetime(reading, stated, until, head);
+	if (typeof lifetime !== "string") return lifetime;
 	const named = new Set<CiOutcome>();
 	for (const outcome of Object.keys(language.outcomes) as CiOutcome[])
 		if (language.outcomes[outcome].some((phrase) => spanHas(tokens, head, phrase))) named.add(outcome);
@@ -558,9 +704,142 @@ function compileEvent(
 	);
 }
 
+/** A watch's words before an until-word: its subject and lifetime words; the words after it are the stated end. */
+function watchHead(reading: Reading, until: StatedUntil | undefined): TokenSpan {
+	const { span } = reading;
+	const untilAt = until?.construct.start ?? span.last;
+	return { first: span.first, last: untilAt > span.first && untilAt < span.last ? untilAt : span.last };
+}
+
+/** Every time, the next time only (a bare "when" too) or until a stated end: exactly one, as the words state it. */
+function watchLifetime(
+	reading: Reading,
+	stated: readonly Construct[],
+	until: StatedUntil | undefined,
+	head: TokenSpan,
+): Lifetime | IntakeTimingRefusal {
+	const { language, tokens, when } = reading;
+	let standing = false;
+	let next = language.nextWords.some((word) => spanHas(tokens, head, word));
+	for (const construct of stated)
+		if (construct.type === "event") {
+			if (construct.lifetime === "standing") standing = true;
+			else next = true;
+		}
+	if (!standing && !next) return { refused: `${quoted(when)} does not say whether every time or only the next time` };
+	if (next && (standing || until)) return { refused: exactReason(when) };
+	return until ? "until" : standing ? "standing" : "next";
+}
+
+/** How the owner reads each GitHub kind in a cadence. */
+const GITHUB_KIND_NAMES: Readonly<Record<GithubThreadEventKind, string>> = {
+	"pull-request-comment": "a pull request comment",
+	"review-comment": "a review comment",
+	"review-submitted": "a submitted review",
+	"review-requested": "a review requested from the signed-in GitHub login",
+	"issue-assigned": "an assignment to the signed-in GitHub login",
+	"pull-request-merged": "a merge",
+	"pull-request-closed": "a close without merge",
+};
+
+/**
+ * A GitHub watch: its kinds from the occurrence words of its excerpt, its pull request, branch and authors only from
+ * what the owner typed (`#12`, `PR 12`, `branch name`, `@login`), and "my PR" as the signed-in login's own pull
+ * requests. A kind that fires on every thread must be narrowed: unnarrowed it refuses with the listener rule's reason.
+ */
+function compileGithub(
+	reading: Reading,
+	timing: Extract<IntakeTiming, { kind: "github" }>,
+	stated: readonly Construct[],
+	until: StatedUntil | undefined,
+	mentions: readonly GithubMention[],
+): CompiledIntakeTiming | IntakeTimingRefusal {
+	const { language, tokens, when } = reading;
+	if (stated.some((construct) => construct.type !== "event")) return { refused: exactReason(when) };
+	const head = watchHead(reading, until);
+	if (readsCi(language, tokens, head))
+		return { refused: `${quoted(when)} names both a CI result and a GitHub occurrence; a watch follows one` };
+	// What the cost gate reads, so every compiled GitHub watch is one the gate let through.
+	if (!readsGithub(language, reading.context.owner.text, tokens, head))
+		return { refused: `${quoted(when)} names no GitHub pull request or issue occurrence the host watches` };
+	const kinds = new Set<GithubThreadEventKind>();
+	for (let index = head.first; index < head.last; index++) {
+		// A typed name ("branch fix-merge") is never an occurrence word.
+		if (mentions.some((mention) => index >= mention.first && index < mention.last)) continue;
+		const hit = longestEntry(tokens, index, head.last, language.githubKinds);
+		if (hit) {
+			kinds.add(hit[1]);
+			index = hit[0] - 1;
+		}
+	}
+	const kindList = GITHUB_THREAD_EVENT_KINDS.filter((kind) => kinds.has(kind));
+	if (kindList.length === 0) return { refused: `${quoted(when)} names no GitHub occurrence the host watches` };
+	const lifetime = watchLifetime(reading, stated, until, head);
+	if (typeof lifetime !== "string") return lifetime;
+	const of = (kind: GithubMention["kind"]) => [
+		...new Set(mentions.filter((mention) => mention.kind === kind).map((mention) => mention.value)),
+	];
+	const [pullRequests, branches, authors] = [of("pullRequest"), of("branch"), of("author").sort()];
+	if (pullRequests.length > 1 || branches.length > 1)
+		return { refused: `${quoted(when)} names more than one pull request or branch; a GitHub watch follows one` };
+	if (authors.length > HOST_EVENT_LISTENER_LIMITS.maxAuthors)
+		return { refused: `${quoted(when)} names more than ${HOST_EVENT_LISTENER_LIMITS.maxAuthors} GitHub logins` };
+	const pullRequest = pullRequests[0] === undefined ? undefined : Number(pullRequests[0]);
+	const branch = branches[0];
+	const own = language.githubOwn.some((phrase) => spanHas(tokens, head, phrase));
+	const scopes = new Set<HostEventScopeKey>([
+		...(pullRequest === undefined ? [] : (["pullRequest"] as const)),
+		...(branch === undefined ? [] : (["branch"] as const)),
+		...(own ? (["ownPullRequests"] as const) : []),
+		...(authors.length ? (["authors"] as const) : []),
+	]);
+	const refusal = hostEventListenerRefusal("github", kindList, scopes);
+	if (refusal) return { refused: `${quoted(when)} ${refusal}` };
+	if (
+		!sameMembers(timing.kinds, kindList) ||
+		timing.pullRequest !== pullRequest ||
+		timing.branch !== branch ||
+		(timing.ownPullRequests === true) !== own ||
+		!sameMembers(
+			(timing.authors ?? []).map((login) => login.toLowerCase()),
+			authors,
+		) ||
+		!lifetimeMatches(lifetime, reading.lasts)
+	)
+		return { refused: differsReason(when) };
+	const names = kindList.map((kind) => GITHUB_KIND_NAMES[kind]);
+	const where = [
+		pullRequest === undefined ? undefined : `on pull request #${pullRequest}`,
+		branch === undefined ? undefined : `on the pull request of branch ${branch}`,
+		own ? "on a pull request the signed-in GitHub login opened" : undefined,
+		authors.length ? `by ${authors.map((login) => `@${login}`).join(", ")}` : undefined,
+	].filter((part) => part !== undefined);
+	const subject = `GitHub shows ${names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names.at(-1)}` : names[0]}${where.length ? ` ${where.join(" ")}` : ""} in this checkout's repository`;
+	return withLifetime(
+		reading,
+		lifetime,
+		until,
+		{
+			kind: "event",
+			source: "github",
+			kinds: kindList,
+			...(pullRequest === undefined ? {} : { pullRequest }),
+			...(branch === undefined ? {} : { branch }),
+			...(own ? { ownPullRequests: true as const } : {}),
+			...(authors.length ? { authors } : {}),
+		},
+		lifetime === "next" ? `once, the next time ${subject}, then it is removed` : `every time ${subject}`,
+		own
+			? [
+					`reads the owner's own pull requests as the 50 most recently updated ones the signed-in GitHub login opened, among the repository's 100 most recently updated`,
+				]
+			: [],
+	);
+}
+
 function compileCalendar(
 	reading: Reading,
-	timing: Exclude<IntakeTiming, { kind: "event" }>,
+	timing: Exclude<IntakeTiming, { kind: "event" | "github" }>,
 	stated: readonly Construct[],
 	until: StatedUntil | undefined,
 ): CompiledIntakeTiming | IntakeTimingRefusal {
@@ -955,6 +1234,65 @@ function eventVocabulary(language: Language): readonly string[] {
 		eventVocabularies.set(language, vocabulary);
 	}
 	return vocabulary;
+}
+
+const githubVocabularies = new Map<Language, readonly string[]>();
+
+/**
+ * Everything a GitHub watch's excerpt may hold besides constructs and typed names: fillers, its subjects, occurrence
+ * words, own-pull-request and branch words, and lifetime words. Kept apart from a CI watch's.
+ */
+function githubVocabulary(language: Language): readonly string[] {
+	let vocabulary = githubVocabularies.get(language);
+	if (!vocabulary) {
+		vocabulary = [
+			...language.fillers,
+			...language.eventFillers,
+			...language.githubFillers,
+			...language.githubSubjects,
+			...language.githubKinds.map(([phrase]) => phrase),
+			...language.githubOwn,
+			...language.githubBranchWords,
+			...language.nextWords,
+			...language.ifWords,
+		];
+		githubVocabularies.set(language, vocabulary);
+	}
+	return vocabulary;
+}
+
+const githubWordSets = new Map<Language, ReadonlySet<string>>();
+
+/** The single words that carry a watch of either source, for stray and modifier sentences. */
+function watchWordsOf(language: Language, watch: "ci" | "github"): ReadonlySet<string> {
+	if (watch === "ci") return eventWords(language);
+	let words = githubWordSets.get(language);
+	if (!words) {
+		words = new Set(
+			[...language.githubSubjects, ...language.githubKinds.map(([phrase]) => phrase), ...language.nextWords].filter(
+				(phrase) => !phrase.includes(" "),
+			),
+		);
+		githubWordSets.set(language, words);
+	}
+	return words;
+}
+
+/**
+ * A GitHub subject (a pull request or issue word, a typed `#12` or `@login`) together with an occurrence word of one language,
+ * within the span: a lone common word ("merged", "review") never buys an extraction.
+ */
+function readsGithub(language: Language, text: string, tokens: readonly Token[], span: TokenSpan): boolean {
+	const subject =
+		language.githubSubjects.some((phrase) => spanHas(tokens, span, phrase)) ||
+		tokens
+			.slice(span.first, span.last)
+			.some(
+				(token) =>
+					(token.kind === "number" && text.charAt(token.start - 1) === "#") ||
+					text.charAt(token.start - 1) === "@",
+			);
+	return subject && language.githubKinds.some(([phrase]) => spanHas(tokens, span, phrase));
 }
 
 const eventWordSets = new Map<Language, ReadonlySet<string>>();
@@ -2191,9 +2529,25 @@ interface Language {
 	readonly abbreviations: readonly string[];
 	readonly ciSubjects: readonly string[];
 	readonly outcomes: Readonly<Record<CiOutcome, readonly string[]>>;
+	/** A GitHub watch's thread words ("pr", "pull request", "issue"). */
+	readonly githubSubjects: readonly string[];
+	/** Occurrence words and the kind each names; the longest phrase wins ("review comment" before "review"). */
+	readonly githubKinds: readonly (readonly [string, GithubThreadEventKind])[];
+	/** The owner's own pull requests ("my pr"): those the signed-in login opened. */
+	readonly githubOwn: readonly string[];
+	/** Words right before a typed branch name. */
+	readonly githubBranchWords: readonly string[];
+	/** Words a GitHub watch's excerpt may hold around its subject and occurrence ("someone", "new", "posted"). */
+	readonly githubFillers: readonly string[];
 }
 
 const list = (phrases: string): readonly string[] => phrases.split("|");
+
+function kindTable(
+	entries: Readonly<Record<GithubThreadEventKind, string>>,
+): readonly (readonly [string, GithubThreadEventKind])[] {
+	return GITHUB_THREAD_EVENT_KINDS.flatMap((kind) => list(entries[kind]).map((phrase) => [phrase, kind] as const));
+}
 const WORKWEEK = [1, 2, 3, 4, 5] as const;
 const WEEKEND = [0, 6] as const;
 
@@ -2452,6 +2806,24 @@ const ENGLISH: Language = {
 			"finish|finishes|finished|finishing|complete|completes|completed|completing|end|ends|ended|done|conclude|concludes|concluded",
 		),
 	},
+	githubSubjects: list("pr|prs|pull request|pull requests|issue|issues|thread|threads|github"),
+	githubKinds: kindTable({
+		"pull-request-comment": "comment|comments|commented|commenting|reply|replies|replied",
+		"review-comment":
+			"review comment|review comments|inline comment|inline comments|code comment|code comments|line comment|line comments",
+		"review-submitted":
+			"review|reviews|reviewed|reviewing|approve|approves|approved|approval|request changes|requests changes|requested changes|changes requested",
+		"review-requested":
+			"review request|review requests|review requested|requests a review|requested a review|requests my review|requested my review|asks for a review|asked for a review|asks for my review|asked for my review|my review is requested|requests review|requested review|asks me to review|asked me to review",
+		"issue-assigned": "assign|assigns|assigned|assignment|gets assigned",
+		"pull-request-merged": "merge|merges|merged|merging|gets merged",
+		"pull-request-closed": "close|closes|closed|closing|gets closed",
+	}),
+	githubOwn: list("my pr|my prs|my pull request|my pull requests"),
+	githubBranchWords: list("branch"),
+	githubFillers: list(
+		"someone|somebody|anyone|anybody|new|by|to|with|from|there|post|posts|posted|leave|leaves|left|add|adds|added|write|writes|wrote|written",
+	),
 };
 
 const PORTUGUESE: Language = {
@@ -2662,6 +3034,29 @@ const PORTUGUESE: Language = {
 			"termina|terminar|terminou|terminarem|termine|terminem|conclui|concluir|concluiu|conclua|acaba|acabar|acabou|acabe|acabem|finaliza|finalizar|finalizou|finalize",
 		),
 	},
+	githubSubjects: list("pr|prs|pull request|pull requests|issue|issues|github"),
+	githubKinds: kindTable({
+		"pull-request-comment":
+			"comentar|comentarem|comentou|comenta|comente|comentem|comentario|comentarios|responder|responderem|respondeu|resposta|respostas",
+		"review-comment":
+			"comentario de revisao|comentarios de revisao|comentario de review|comentarios de review|comentario no codigo|comentarios no codigo|comentario de codigo|comentarios de codigo|comentario inline|comentarios inline",
+		"review-submitted":
+			"revisar|revisarem|revisou|revise|revisem|revisao|revisoes|review|reviews|aprovar|aprovarem|aprovou|aprove|aprovem|aprovado|aprovada|aprovacao|pedir mudancas|pedirem mudancas|pediu mudancas|pedir alteracoes|pedirem alteracoes|pediu alteracoes",
+		"review-requested":
+			"pedido de revisao|pedidos de revisao|pedir revisao|pedirem revisao|pediu revisao|pedir minha revisao|pedirem minha revisao|pediu minha revisao|solicitar revisao|solicitarem revisao|solicitou revisao|solicitar minha revisao|solicitou minha revisao|pedido de review|pedir review|pediu review",
+		"issue-assigned":
+			"atribuir|atribuirem|atribuiu|atribuido|atribuida|atribuicao|designar|designarem|designou|designado|designada",
+		"pull-request-merged":
+			"merge|mergear|mergearem|mergeou|mergeado|mergeada|integrar|integrarem|integrou|integrado|integrada",
+		"pull-request-closed": "fechar|fecharem|fechou|fechado|fechada|encerrar|encerrarem|encerrou|encerrado|encerrada",
+	}),
+	githubOwn: list(
+		"meu pr|meus prs|minha pr|minhas prs|meu pull request|meus pull requests|minha pull request|minhas pull requests",
+	),
+	githubBranchWords: list("branch|ramo"),
+	githubFillers: list(
+		"alguem|novo|nova|novos|novas|por|para|com|um|uma|houver|tiver|mim|postar|postarem|postou|postado|deixar|deixarem|deixou|escrever|escreverem|escreveu|adicionar|adicionarem|adicionou",
+	),
 };
 
 const SPANISH: Language = {
@@ -2848,6 +3243,26 @@ const SPANISH: Language = {
 			"termina|terminar|termino|terminen|termine|concluye|concluir|concluyo|concluya|acaba|acabar|acabo|acabe|acaben|finaliza|finalizar|finalizo|finalice",
 		),
 	},
+	githubSubjects: list("pr|prs|pull request|pull requests|issue|issues|github"),
+	githubKinds: kindTable({
+		"pull-request-comment":
+			"comentar|comenten|comente|comento|comenta|comentario|comentarios|responder|respondan|responda|respondio|respuesta|respuestas",
+		"review-comment":
+			"comentario de revision|comentarios de revision|comentario de review|comentarios de review|comentario en el codigo|comentarios en el codigo|comentario de codigo|comentarios de codigo|comentario inline|comentarios inline",
+		"review-submitted":
+			"revisar|revisen|revise|reviso|revision|revisiones|review|reviews|aprobar|aprueben|apruebe|aprobo|aprobado|aprobada|aprobacion|pedir cambios|pidan cambios|pida cambios|pidio cambios",
+		"review-requested":
+			"solicitud de revision|solicitudes de revision|pedir revision|pidan revision|pida revision|pidio revision|pedir mi revision|pidan mi revision|pida mi revision|pidio mi revision|solicitar revision|soliciten revision|solicite revision|solicito revision|solicitar mi revision|soliciten mi revision|solicito mi revision",
+		"issue-assigned": "asignar|asignen|asigne|asigno|asignado|asignada|asignacion",
+		"pull-request-merged":
+			"merge|mergear|mergeen|mergee|mergeo|mergeado|mergeada|fusionar|fusionen|fusione|fusiono|fusionado|fusionada",
+		"pull-request-closed": "cerrar|cierren|cierre|cerro|cerrado|cerrada",
+	}),
+	githubOwn: list("mi pr|mis pr|mis prs|mi pull request|mis pull requests"),
+	githubBranchWords: list("rama|branch"),
+	githubFillers: list(
+		"alguien|nuevo|nueva|nuevos|nuevas|para|con|un|una|haya|hay|publicar|publiquen|publique|publico|publicado|dejar|dejen|deje|dejo|escribir|escriban|escriba|escribio|agregar|agreguen|agregue|agrego",
+	),
 };
 
 const LANGUAGES: readonly Language[] = [ENGLISH, PORTUGUESE, SPANISH];

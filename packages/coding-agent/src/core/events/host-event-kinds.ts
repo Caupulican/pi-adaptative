@@ -20,8 +20,11 @@ import {
  */
 export type HostEventAuthorship = "owner-controlled" | "third-party-authored";
 
-/** A scope a listener names to narrow a kind. */
-export type HostEventScopeKey = "revision" | "workflow" | "pullRequest" | "branch" | "authors";
+/**
+ * A scope a listener names to narrow a kind. `ownPullRequests` selects pull requests the signed-in login opened;
+ * `authors` selects who wrote or did the occurrence itself.
+ */
+export type HostEventScopeKey = "revision" | "workflow" | "pullRequest" | "branch" | "ownPullRequests" | "authors";
 
 /** One declared event kind. Every kind a source emits is declared here, with how a listener may scope it. */
 export interface HostEventKindDeclaration {
@@ -43,7 +46,7 @@ export interface HostEventKindDeclaration {
 
 export type HostEventKind = HostEventEnvelope["event"]["kind"];
 
-const GITHUB_SCOPE: readonly HostEventScopeKey[] = ["pullRequest", "branch", "authors"];
+const GITHUB_SCOPE: readonly HostEventScopeKey[] = ["pullRequest", "branch", "ownPullRequests", "authors"];
 const GITHUB_RECALL_MS = 24 * 60 * 60 * 1000;
 
 /** The closed kind table. A kind without a delivery path is never declared. */
@@ -78,13 +81,13 @@ export const HOST_EVENT_KINDS: { readonly [K in HostEventKind]: HostEventKindDec
 		authorship: "third-party-authored",
 		recallMs: GITHUB_RECALL_MS,
 	},
-	// Reviews are listed per pull request, so only a pull request or its branch can scope them.
+	// Reviews are listed per pull request, so only named pull requests (by number, branch or ownership) can scope them.
 	"review-submitted": {
 		source: "github",
 		scope: GITHUB_SCOPE,
 		idempotency: "review id (host, repository, kind, review)",
 		volume: "high",
-		narrowedBy: ["pullRequest", "branch"],
+		narrowedBy: ["pullRequest", "branch", "ownPullRequests"],
 		currency: "occurrence",
 		authorship: "third-party-authored",
 		recallMs: GITHUB_RECALL_MS,
@@ -159,10 +162,15 @@ export interface GithubThreadInterest {
 	readonly kinds: readonly GithubThreadEventKind[];
 	readonly pullRequest?: number;
 	readonly branch?: string;
+	/** Only pull requests the signed-in login opened (the event's `thread.ownedByViewer`). */
+	readonly ownPullRequests?: true;
 	/** Logins compare case-insensitively, as GitHub's do. */
 	readonly authors?: readonly string[];
 	readonly since: string;
 }
+
+/** Most recently updated pull requests of the signed-in login one collection treats as its own. */
+export const MAX_OWN_PULL_REQUESTS = 50;
 
 export function githubInterestMatches(interest: GithubThreadInterest, event: GithubThreadEvent): boolean {
 	if (!interest.kinds.includes(event.kind) || Date.parse(event.occurredAt) < Date.parse(interest.since)) return false;
@@ -172,6 +180,7 @@ export function githubInterestMatches(interest: GithubThreadInterest, event: Git
 	)
 		return false;
 	if (interest.branch !== undefined && event.thread.branch !== interest.branch) return false;
+	if (interest.ownPullRequests && event.thread.ownedByViewer !== true) return false;
 	const author = event.author.toLowerCase();
 	return interest.authors === undefined || interest.authors.some((login) => login.toLowerCase() === author);
 }
@@ -182,12 +191,19 @@ export function githubInterestScopeKey(interest: GithubThreadInterest): string {
 		[...interest.kinds].sort(),
 		interest.pullRequest ?? null,
 		interest.branch ?? null,
+		interest.ownPullRequests ?? null,
 		interest.authors ? [...new Set(interest.authors.map((login) => login.toLowerCase()))].sort() : null,
 	]);
 }
 
 export function parseGithubThreadInterest(value: unknown): GithubThreadInterest {
-	const entry = hostEventRecord(value, ["kinds", "pullRequest", "branch", "authors", "since"], "GitHub interest");
+	const entry = hostEventRecord(
+		value,
+		["kinds", "pullRequest", "branch", "ownPullRequests", "authors", "since"],
+		"GitHub interest",
+	);
+	if (entry.ownPullRequests !== undefined && entry.ownPullRequests !== true)
+		throw new HostEventError("invalid", "GitHub interest ownership scope is invalid.");
 	const kinds = hostEventArray(
 		entry.kinds,
 		HOST_EVENT_LISTENER_LIMITS.maxKinds,
@@ -203,6 +219,7 @@ export function parseGithubThreadInterest(value: unknown): GithubThreadInterest 
 		kinds,
 		...(entry.pullRequest === undefined ? {} : { pullRequest: hostEventInteger(entry.pullRequest, "pullRequest") }),
 		...(entry.branch === undefined ? {} : { branch: githubBranchName(entry.branch) }),
+		...(entry.ownPullRequests ? { ownPullRequests: true as const } : {}),
 		...(entry.authors === undefined
 			? {}
 			: {

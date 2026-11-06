@@ -106,6 +106,11 @@ export interface GithubThreadEvent {
 		readonly pullRequest: boolean;
 		/** A pull request's head branch in this repository; absent for issues and for pull requests from forks. */
 		readonly branch?: string;
+		/**
+		 * The pull request was opened by the signed-in login: it was among that login's most recently updated pull requests
+		 * when the occurrence was collected. Absent otherwise.
+		 */
+		readonly ownedByViewer?: true;
 	};
 	/** Login of who wrote the comment or review, or who acted (requested, assigned, merged, closed). */
 	readonly author: string;
@@ -691,6 +696,8 @@ export function createGithubThreadEvent(
 	if (typeof pullRequest !== "boolean") throw new HostEventError("invalid", "GitHub thread kind is invalid.");
 	if (input.thread.branch !== undefined && !pullRequest)
 		throw new HostEventError("invalid", "Only a pull request has a head branch.");
+	if (input.thread.ownedByViewer !== undefined && (input.thread.ownedByViewer !== true || !pullRequest))
+		throw new HostEventError("invalid", "Only a pull request is owned by the signed-in login.");
 	const body = input.body === undefined ? undefined : parseGithubEventBody(input.body);
 	const commented = input.kind === "pull-request-comment" || input.kind === "review-comment";
 	if (
@@ -712,6 +719,7 @@ export function createGithubThreadEvent(
 			number: hostEventInteger(input.thread.number, "thread number"),
 			pullRequest,
 			...(input.thread.branch === undefined ? {} : { branch: githubBranchName(input.thread.branch) }),
+			...(input.thread.ownedByViewer ? { ownedByViewer: true as const } : {}),
 		},
 		author: githubLogin(input.author),
 		occurredAt: hostEventDate(input.occurredAt, "occurredAt"),
@@ -746,7 +754,7 @@ export function parseGithubThreadEvent(value: unknown): GithubThreadEvent {
 	);
 	if (entry.version !== 1) throw new HostEventError("invalid", "Unknown host event format.");
 	const repository = hostEventRecord(entry.repository, ["host", "repositoryId"], "GitHub repository");
-	const thread = hostEventRecord(entry.thread, ["number", "pullRequest", "branch"], "GitHub thread");
+	const thread = hostEventRecord(entry.thread, ["number", "pullRequest", "branch", "ownedByViewer"], "GitHub thread");
 	const event = createGithubThreadEvent({
 		kind: entry.kind as GithubThreadEventKind,
 		githubId: entry.githubId as number,
@@ -755,6 +763,7 @@ export function parseGithubThreadEvent(value: unknown): GithubThreadEvent {
 			number: thread.number as number,
 			pullRequest: thread.pullRequest as boolean,
 			...(thread.branch === undefined ? {} : { branch: thread.branch as string }),
+			...(thread.ownedByViewer === undefined ? {} : { ownedByViewer: thread.ownedByViewer as true }),
 		},
 		author: entry.author as string,
 		occurredAt: entry.occurredAt as string,

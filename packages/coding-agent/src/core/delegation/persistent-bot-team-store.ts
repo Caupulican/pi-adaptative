@@ -8,6 +8,8 @@ import type { WorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { isCiAttemptEvent } from "../events/host-event-contract.ts";
+import { HOST_EVENT_LISTENER_LIMITS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
 	countCalendarSlots,
@@ -18,6 +20,7 @@ import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
 	decideRoutineEvents,
+	elideDeliveredRoutineEventBodies,
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
@@ -70,9 +73,11 @@ import {
 	routineAwaySpendRoom,
 	routineCursorAfter,
 	routineEnded,
+	routineEventKey,
 	routineJournalRemovable,
 	routineJournalShare,
 	routineOccurrenceId,
+	routineOccurrenceReplayKeys,
 	routineOccurrencesSettled,
 	routinePreviousSlot,
 	routineResultDigest,
@@ -1054,10 +1059,11 @@ export class PersistentBotTeamStore {
 			const item = removable.shift();
 			if (!item) continue;
 			// Slot occurrences cannot recur behind their cursor, nor an end notice after its routine is removed; manual
-			// commands and CI attempts can be re-presented.
+			// commands and host events can be re-presented. A GitHub run tombstones every occurrence it carried, or none.
 			if (item.trigger.kind === "manual" || item.trigger.kind === "event") {
-				if (this.routineReplayTombstones.size >= MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
-				this.routineReplayTombstones.add(item.occurrenceId);
+				const keys = routineOccurrenceReplayKeys(item).filter((key) => !this.routineReplayTombstones.has(key));
+				if (this.routineReplayTombstones.size + keys.length > MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
+				for (const key of keys) this.routineReplayTombstones.add(key);
 			}
 			this.routineOccurrences.delete(item.occurrenceId);
 		}
@@ -1167,6 +1173,11 @@ export class PersistentBotTeamStore {
 	 * `routines` array, so every save also seals the store against that writer (see `bot-daemon-legacy.ts`).
 	 */
 	private save(): void {
+		// A delivered GitHub run keeps its occurrences' identity and lengths, not the third party's words.
+		for (const [occurrenceId, occurrence] of this.routineOccurrences) {
+			const elided = elideDeliveredRoutineEventBodies(occurrence);
+			if (elided !== occurrence) this.routineOccurrences.set(occurrenceId, elided);
+		}
 		if (this.routines.size > MAX_ROUTINE_OCCURRENCES)
 			throw new Error("Routine definition registry exceeds its bounded capacity.");
 		if (
@@ -1742,16 +1753,37 @@ export class PersistentBotTeamStore {
 					? { ordinal: kept.anchorOrdinal, replayGaps: kept.anchorReplayGaps }
 					: input.eventAnchor;
 				if (!anchor) throw new Error("Event routines require the session's host-event ledger position.");
-				schedule = {
-					kind: "event",
-					source: scheduleInput.source,
-					conclusions: scheduleInput.conclusions ?? ["failure"],
-					...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
-					...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
-					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
-					anchorOrdinal: anchor.ordinal,
-					anchorReplayGaps: anchor.replayGaps,
-				};
+				if (scheduleInput.source === "github") {
+					const sessionId = input.target.kind === "session" ? input.target.parentSessionId : undefined;
+					const listeners = Array.from(this.routines.values()).filter(
+						(routine) =>
+							routine.routineId !== normalizedId &&
+							routine.target.kind === "session" &&
+							routine.target.parentSessionId === sessionId &&
+							routine.schedule.kind === "event" &&
+							routine.schedule.source === "github",
+					).length;
+					if (listeners >= HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource)
+						throw new Error(
+							`This session already holds ${HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource} GitHub event routines, the most one session may hold; delete one first.`,
+						);
+					schedule = {
+						...scheduleInput,
+						anchorOrdinal: anchor.ordinal,
+						anchorReplayGaps: anchor.replayGaps,
+						anchorAt,
+					};
+				} else
+					schedule = {
+						kind: "event",
+						source: scheduleInput.source,
+						conclusions: scheduleInput.conclusions ?? ["failure"],
+						...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
+						...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+						...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+						anchorOrdinal: anchor.ordinal,
+						anchorReplayGaps: anchor.replayGaps,
+					};
 			} else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
 			else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
 			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
@@ -2449,20 +2481,31 @@ export class PersistentBotTeamStore {
 			)
 				return "unchanged";
 		const decision = decideRoutineEvents(routine.schedule, routine.cursor, feed);
-		const eventTrigger = (fact: RoutineHostEventFact, missedCount: number): RoutineOccurrence["trigger"] => ({
-			kind: "event",
-			triggeredAt: input.nowMs,
-			acceptedOrdinal: fact.acceptedOrdinal,
-			missedCount,
-			...(decision.cursor.historyGap ? { historyGap: true as const } : {}),
-			event: fact.event,
-		});
-		// The same attempt is the same occurrence: journaled or tombstoned attempts never run again.
+		// A run carries its deciding event last; a GitHub run also carries the earlier fresh occurrences, oldest first.
+		const eventTrigger = (
+			carried: readonly RoutineHostEventFact[],
+			missedCount: number,
+		): RoutineOccurrence["trigger"] => {
+			const latest = carried.at(-1)!;
+			const base = {
+				kind: "event" as const,
+				triggeredAt: input.nowMs,
+				acceptedOrdinal: latest.acceptedOrdinal,
+				missedCount,
+				...(decision.cursor.historyGap ? { historyGap: true as const } : {}),
+			};
+			if (isCiAttemptEvent(latest.event)) return { ...base, event: latest.event };
+			const earlier = carried.slice(0, -1).flatMap((fact) => (isCiAttemptEvent(fact.event) ? [] : [fact.event]));
+			return { ...base, event: latest.event, ...(earlier.length ? { earlier } : {}) };
+		};
+		// The same event is the same work: an event a journaled run carries or a tombstone records never runs again.
+		const known = new Set([...this.routineOccurrences.values()].flatMap(routineOccurrenceReplayKeys));
 		const fresh = decision.candidates.filter((fact) => {
-			const id = routineOccurrenceId(routine, eventTrigger(fact, 0));
-			return !this.routineOccurrences.has(id) && !this.routineReplayTombstones.has(id);
+			const key = routineEventKey(routine, fact.event);
+			return !known.has(key) && !this.routineReplayTombstones.has(key);
 		});
-		const latest = fresh.at(-1);
+		const carried = fresh.slice(routine.schedule.source === "github" ? -HOST_EVENT_LISTENER_LIMITS.maxBatch : -1);
+		const latest = carried.at(-1);
 		if (latest) {
 			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
 			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
@@ -2471,10 +2514,10 @@ export class PersistentBotTeamStore {
 			if (!this.routineJournalHasRoom(input.nowMs)) return "journal-full";
 			if (!this.routineHasJournalShare(routine.routineId, input.nowMs)) return "share-full";
 			const coalesced = fresh
-				.slice(0, -1)
+				.slice(0, fresh.length - carried.length)
 				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;
 			const trigger = eventTrigger(
-				latest,
+				carried,
 				Math.min(MAX_ROUTINE_EVENT_MISSED_COUNT, (decision.cursor.skipped ?? 0) + coalesced),
 			);
 			const occurrenceId = routineOccurrenceId(routine, trigger);

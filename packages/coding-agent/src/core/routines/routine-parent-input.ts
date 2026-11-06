@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import { isCiAttemptEvent } from "../events/host-event-contract.ts";
 import { HOST_EVENT_KINDS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
@@ -10,8 +11,10 @@ import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
 import {
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
 	type RoutineDelivery,
+	type RoutineEventTrigger,
 	type RoutineIntakeNoticeRecord,
 	type RoutineOccurrence,
+	routineTriggerEvents,
 } from "./routine-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
@@ -20,15 +23,42 @@ export const ROUTINE_RESULT_WAKES_HOLD = "max_result_wakes_per_day_reached";
 export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
 
 /**
- * Who wrote the words a routine run carries, when not the owner: an event trigger of a third-party-authored kind. It
- * travels with the run, in its worker dispatch and in its result, and derives from the occurrence alone, so a replay
- * and a redelivery carry the same origin.
+ * Who wrote the words a routine run carries, when not the owner: an event trigger carrying any occurrence of a
+ * third-party-authored kind. It travels with the run, in its worker dispatch and in its result, and derives from the
+ * occurrence alone, so a replay and a redelivery carry the same origin.
  */
 export function routineTurnOrigin(occurrence: Pick<RoutineOccurrence, "trigger">): TurnOriginRecord | undefined {
 	const trigger = occurrence.trigger;
-	if (trigger.kind !== "event" || HOST_EVENT_KINDS[trigger.event.kind].authorship !== "third-party-authored")
+	if (
+		trigger.kind !== "event" ||
+		!routineTriggerEvents(trigger).some((event) => HOST_EVENT_KINDS[event.kind].authorship === "third-party-authored")
+	)
 		return undefined;
 	return { v: 1, k: "host-event", thirdParty: true };
+}
+
+/** What the parent reads about the event trigger, outside the worker's evidence: the host's own facts. */
+function routineEventCause(trigger: RoutineEventTrigger, count: string): string {
+	const { missedCount } = trigger;
+	if (isCiAttemptEvent(trigger.event)) {
+		const missed =
+			missedCount > 0
+				? ` It also covers ${count} earlier matching CI ${missedCount === 1 ? "attempt that did not start a run of its own" : "attempts that did not start a run of their own"}.`
+				: "";
+		const gap = trigger.historyGap
+			? " Some CI history was not observed by this session; attempts in between may be missing."
+			: "";
+		return ` It ran for a CI ${trigger.event.conclusion} result.${missed}${gap}`;
+	}
+	const carried = routineTriggerEvents(trigger).length;
+	const missed =
+		missedCount > 0
+			? ` ${count} more matching GitHub ${missedCount === 1 ? "occurrence was" : "occurrences were"} not carried by any run.`
+			: "";
+	const gap = trigger.historyGap
+		? " Some GitHub history was not observed by this session; occurrences in between may be missing."
+		: "";
+	return ` It ran for ${carried} GitHub ${carried === 1 ? "occurrence" : "occurrences"}, the latest a ${trigger.event.kind} by ${trigger.event.author}.${missed}${gap}`;
 }
 
 /**
@@ -52,15 +82,9 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 			: occurrence.definition.schedule.kind === "calendar" && missedCount >= MAX_CALENDAR_MISSED_COUNT;
 	const count = saturated ? `at least ${missedCount}` : `${missedCount}`;
 	let missed = "";
-	if (missedCount > 0 && trigger.kind === "event")
-		missed = ` It also covers ${count} earlier matching CI ${missedCount === 1 ? "attempt that did not start a run of its own" : "attempts that did not start a run of their own"}.`;
+	if (trigger.kind === "event") missed = routineEventCause(trigger, count);
 	else if (missedCount > 0)
 		missed = ` It also covers ${count} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
-	if (trigger.kind === "event") {
-		missed = ` It ran for a CI ${trigger.event.conclusion} result.${missed}`;
-		if (trigger.historyGap)
-			missed += " Some CI history was not observed by this session; attempts in between may be missing.";
-	}
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
 		nonce: result.digest,
 	});
@@ -84,8 +108,9 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 				? {
 						hostEvent: {
 							eventId: trigger.event.eventId,
-							runAttempt: trigger.event.identity.runAttempt,
-							conclusion: trigger.event.conclusion,
+							...(isCiAttemptEvent(trigger.event)
+								? { runAttempt: trigger.event.identity.runAttempt, conclusion: trigger.event.conclusion }
+								: { eventIds: routineTriggerEvents(trigger).map((event) => event.eventId) }),
 							...(trigger.historyGap ? { historyGap: true as const } : {}),
 						},
 					}
