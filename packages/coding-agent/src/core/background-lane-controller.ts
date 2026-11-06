@@ -364,6 +364,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isDisposed: () => deps.isDisposed(),
 			isChildSession: () => deps.isChildSession(),
 			refreshTools: () => deps.refreshToolRegistry(),
+			timers: deps.getTimers().port("channel-poll"),
 		});
 		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
 		this._laneModels = new LaneModelResolver(deps);

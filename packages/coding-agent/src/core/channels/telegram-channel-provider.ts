@@ -15,21 +15,20 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
-	ChannelStatusReporter,
 } from "../gateways/channel-provider.ts";
-import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	type ApiOutcome,
 	type Backoff,
 	backoffDelay,
 	boundedRetryAfterMs,
-	ConnectionReport,
+	ChannelTransport,
+	type ConnectionReport,
 	DEFAULT_RETRY_AFTER_MS,
 	pause,
 	postJsonApi,
 	readChannelTokenFile,
-	SendPacer,
 	sendPaced,
 } from "./channel-transport.ts";
 
@@ -95,44 +94,30 @@ export function telegramTokenPath(agentDir: string): string {
 	return join(agentDir, "channels", "telegram.token");
 }
 
-export class TelegramChannelProvider implements ChannelProvider {
+export class TelegramChannelProvider extends ChannelTransport implements ChannelProvider {
 	readonly name = TELEGRAM_CHANNEL;
 	readonly capabilities: ChannelCapabilities = { maxMessageChars: 4096, markdown: false };
 	private readonly tokenPath: string;
-	private readonly fetchOverride: typeof globalThis.fetch | undefined;
 	private readonly warn: (message: string) => void;
-	private readonly timers: TimerPort;
 	private token: string | undefined;
-	private abort: AbortController | undefined;
-	private loop: Promise<void> | undefined;
-	/** When each chat may receive its next message. */
-	private readonly pacer: SendPacer;
 
 	constructor(options: TelegramChannelProviderOptions) {
+		super(options, SEND_SPACING_MS);
 		this.tokenPath = telegramTokenPath(options.agentDir);
-		this.fetchOverride = options.fetch;
 		this.warn = options.warn;
-		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
-		this.pacer = new SendPacer(this.timers, SEND_SPACING_MS);
 	}
 
-	/** Reads the token and starts polling; rejects with what the owner has to fix when the token file is not usable. */
-	start(onInbound: ChannelInboundHandler, report?: ChannelStatusReporter): void {
-		if (this.loop) return;
-		this.token = this.readToken();
-		const abort = new AbortController();
-		this.abort = abort;
-		this.loop = this.poll(onInbound, new ConnectionReport(report), abort.signal);
+	protected readSecrets(): void {
+		this.token = readChannelTokenFile({
+			path: this.tokenPath,
+			label: "Telegram bot token",
+			shape: TOKEN_SHAPE,
+			shapeHint: "a bot token (digits, a colon, then the secret)",
+		});
 	}
 
-	async stop(): Promise<void> {
-		this.abort?.abort();
-		this.abort = undefined;
-		const loop = this.loop;
-		this.loop = undefined;
-		await loop;
+	protected forgetRun(): void {
 		this.token = undefined;
-		this.pacer.clear();
 	}
 
 	async send(message: ChannelMessage): Promise<void> {
@@ -142,7 +127,7 @@ export class TelegramChannelProvider implements ChannelProvider {
 		await sendPaced({
 			service: "Telegram",
 			destination: chatId,
-			signal: this.abort?.signal,
+			signal: this.signal,
 			timers: this.timers,
 			pacer: this.pacer,
 			call: (signal) => this.call("sendMessage", { chat_id: chatId, text: message.text }, signal, SEND_ABORT_MS),
@@ -160,16 +145,6 @@ export class TelegramChannelProvider implements ChannelProvider {
 		return `Telegram refused the reply (HTTP ${status}); it was not sent.`;
 	}
 
-	/** The token, or a throw naming the file and what is wrong with it (never its content). */
-	private readToken(): string {
-		return readChannelTokenFile({
-			path: this.tokenPath,
-			label: "Telegram bot token",
-			shape: TOKEN_SHAPE,
-			shapeHint: "a bot token (digits, a colon, then the secret)",
-		});
-	}
-
 	private async call(
 		method: "getUpdates" | "sendMessage",
 		body: Record<string, unknown>,
@@ -179,7 +154,7 @@ export class TelegramChannelProvider implements ChannelProvider {
 		const token = this.token;
 		if (!token || signal.aborted) return { kind: "stopped" };
 		const outcome = await postJsonApi({
-			fetch: this.fetchOverride ?? globalThis.fetch,
+			fetch: this.fetch,
 			timers: this.timers,
 			url: `${API_BASE}/bot${token}/${method}`,
 			headers: { "content-type": "application/json" },
@@ -201,7 +176,12 @@ export class TelegramChannelProvider implements ChannelProvider {
 		return { kind: "refused", status, payload, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
 	}
 
-	private async poll(onInbound: ChannelInboundHandler, reports: ConnectionReport, signal: AbortSignal): Promise<void> {
+	/** Long polling: an update is acknowledged (the next `offset`) only after the core's handler resolved. */
+	protected async receive(
+		onInbound: ChannelInboundHandler,
+		reports: ConnectionReport,
+		signal: AbortSignal,
+	): Promise<void> {
 		let offset: number | undefined;
 		let conflicts = 0;
 		let rejections = 0;
@@ -211,7 +191,7 @@ export class TelegramChannelProvider implements ChannelProvider {
 		while (!signal.aborted) {
 			if (reloadToken) {
 				try {
-					this.token = this.readToken();
+					this.readSecrets();
 					reloadToken = false;
 				} catch (error) {
 					reports.suspend(error instanceof Error ? error.message : TOKEN_REJECTED_REASON);

@@ -39,15 +39,20 @@ export type InboundChannelParse =
 const boundedId = (value: unknown, max: number): value is string =>
 	typeof value === "string" && value.length > 0 && value.length <= max;
 
-/** One line, no control characters, bounded: what a self-declared label may look like where it is shown. */
-export function plainLabel(value: string): string {
-	const flat = Array.from(value, (char) => {
+/** The text on one line: control characters and line separators as spaces, runs of white space as one, trimmed. */
+export function plainLine(value: string): string {
+	return Array.from(value, (char) => {
 		const code = char.codePointAt(0) ?? 0;
 		return code < 0x20 || (code >= 0x7f && code < 0xa0) || code === 0x2028 || code === 0x2029 ? " " : char;
 	})
 		.join("")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+/** One line, no control characters, bounded: what a self-declared label may look like where it is shown. */
+export function plainLabel(value: string): string {
+	const flat = plainLine(value);
 	return flat.length > MAX_LABEL_CHARS ? `${flat.slice(0, MAX_LABEL_CHARS - 1)}…` : flat;
 }
 

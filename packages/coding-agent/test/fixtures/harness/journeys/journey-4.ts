@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { runJourney4AwayChannelsPhase, runJourney4ChannelsPhase } from "./journey-4-channels.ts";
+import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
 import { runJourney4TelegramPhase } from "./journey-4-telegram.ts";
@@ -30,6 +31,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4TelegramPhase(world);
 			await runJourney4AwayChannelsPhase(world);
 			await runJourney4SlackPhase(world);
+			await runJourney4GmailPhase(world);
 		},
 	);
 }

@@ -1,13 +1,13 @@
 /**
- * The pieces every shipped channel transport shares: its token files, its HTTPS calls, its retry pacing and the way it
- * tells the core that it lost or regained its connection. Every text built here is Pi's own words: a token, a URL or
+ * The pieces every shipped channel transport shares: its secret files, its HTTPS calls, its retry pacing, its receive
+ * loop's lifecycle and the way it tells the core that it lost or regained its connection. Every text built here is Pi's own words: a token, a URL or
  * an error the runtime or the remote side produced never enters one.
  */
 
 import { statSync } from "node:fs";
-import type { ChannelStatusReporter } from "../gateways/channel-provider.ts";
+import type { ChannelInboundHandler, ChannelStatusReporter } from "../gateways/channel-provider.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 const MAX_TOKEN_FILE_BYTES = 256;
@@ -63,14 +63,24 @@ export interface ChannelTokenFile {
 	readonly shapeHint: string;
 }
 
-/** The token, or a throw naming the file and what is wrong with it (never its content). */
-export function readChannelTokenFile(file: ChannelTokenFile): string {
+/** One secret file a transport reads whole: its bound, and what it holds in the owner's words. */
+export interface ChannelSecretFile {
+	readonly path: string;
+	/** What the owner calls the file's content, e.g. "Gmail credentials". */
+	readonly label: string;
+	readonly maxBytes: number;
+	/** What the file holds and nothing else, e.g. "the token". */
+	readonly holds: string;
+}
+
+/** The file's text, or a throw naming the file and what is wrong with it (never its content): missing, too large, open to others. */
+export function readChannelSecretFile(file: ChannelSecretFile): string {
 	const { path, label } = file;
 	let text: string | undefined;
 	try {
-		text = readOptionalBoundedTextFileSync(path, MAX_TOKEN_FILE_BYTES, `${label} file`);
+		text = readOptionalBoundedTextFileSync(path, file.maxBytes, `${label} file`);
 	} catch {
-		throw new Error(`the ${label} file ${path} cannot be read; it must be a small file holding only the token`);
+		throw new Error(`the ${label} file ${path} cannot be read; it must be a small file holding only ${file.holds}`);
 	}
 	if (text === undefined) throw new Error(`no ${label}: write it to ${path} (readable by you only)`);
 	if (process.platform !== "win32") {
@@ -83,12 +93,40 @@ export function readChannelTokenFile(file: ChannelTokenFile): string {
 		if ((mode & 0o077) !== 0)
 			throw new Error(`the ${label} file ${path} is readable by other users; run chmod 600 on it`);
 	}
-	const token = text.trim();
+	return text;
+}
+
+/** The token, or a throw naming the file and what is wrong with it (never its content). */
+export function readChannelTokenFile(file: ChannelTokenFile): string {
+	const { path, label } = file;
+	const token = readChannelSecretFile({ path, label, maxBytes: MAX_TOKEN_FILE_BYTES, holds: "the token" }).trim();
 	if (!file.shape.test(token)) throw new Error(`the ${label} file ${path} does not hold ${file.shapeHint}`);
 	return token;
 }
 
-/** How one call of a JSON Web API ended. Both shipped APIs answer `{ "ok": true, ... }` on success. */
+/**
+ * A response body read whole, or undefined once it passes `maxBytes` (the rest is never read). The stream is cancelled
+ * when the read stops early.
+ */
+async function readBodyWithin(response: Response, maxBytes: number): Promise<string | undefined> {
+	if (!response.body) return "";
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for await (const chunk of response.body) {
+		size += chunk.byteLength;
+		if (size > maxBytes) return undefined;
+		chunks.push(chunk);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+
+/** How a call's answer is read as a success: the Telegram and Slack APIs say `{ "ok": true, ... }`. */
+const okField = (payload: Record<string, unknown>): boolean => payload.ok === true;
+
+/**
+ * How one call of a JSON Web API ended. By default a success is an HTTP 2xx answer `{ "ok": true, ... }` (Telegram,
+ * Slack); a call may name its own test (Google's APIs answer a plain object).
+ */
 export type ApiOutcome =
 	| { readonly kind: "ok"; readonly payload: Record<string, unknown> }
 	| {
@@ -107,37 +145,56 @@ export interface JsonApiCall {
 	readonly fetch: typeof globalThis.fetch;
 	readonly timers: TimerPort;
 	readonly url: string;
+	/** Defaults to POST. A GET sends no body. */
+	readonly method?: "GET" | "POST";
 	readonly headers?: Readonly<Record<string, string>>;
 	/** Sent as JSON; omitted sends no body. */
 	readonly body?: Readonly<Record<string, unknown>>;
+	/** Sent as an `application/x-www-form-urlencoded` body instead of JSON. */
+	readonly form?: Readonly<Record<string, string>>;
+	/** Whether a 2xx answer's object is a success; defaults to its `ok: true` field. */
+	readonly succeeded?: (payload: Record<string, unknown>) => boolean;
+	/** The longest answer read; a longer one is a refusal with no payload. Unbounded when omitted. */
+	readonly maxResponseBytes?: number;
 	readonly signal: AbortSignal;
 	readonly timeoutMs: number;
 }
 
-/** One POST, bounded by `timeoutMs` and ended by `signal`. A refusal carries the HTTP status and any `Retry-After`. */
+/** One call, bounded by `timeoutMs` and ended by `signal`. A refusal carries the HTTP status and any `Retry-After`. */
 export async function postJsonApi(call: JsonApiCall): Promise<ApiOutcome> {
-	const { signal } = call;
+	const { signal, form, body } = call;
 	if (signal.aborted) return { kind: "stopped" };
 	const timeout = new AbortController();
 	const handle = call.timers.setTimeout(() => timeout.abort(), call.timeoutMs);
 	try {
+		const contentType =
+			form !== undefined
+				? "application/x-www-form-urlencoded"
+				: body !== undefined
+					? "application/json; charset=utf-8"
+					: undefined;
 		const response = await call.fetch(call.url, {
-			method: "POST",
-			headers: {
-				...(call.body !== undefined ? { "content-type": "application/json; charset=utf-8" } : {}),
-				...call.headers,
-			},
-			...(call.body !== undefined ? { body: JSON.stringify(call.body) } : {}),
+			method: call.method ?? "POST",
+			headers: { ...(contentType ? { "content-type": contentType } : {}), ...call.headers },
+			...(form !== undefined
+				? { body: new URLSearchParams(form).toString() }
+				: body !== undefined
+					? { body: JSON.stringify(body) }
+					: {}),
 			signal: AbortSignal.any([signal, timeout.signal]),
 		});
 		let payload: unknown;
 		try {
-			payload = await response.json();
+			const text =
+				call.maxResponseBytes === undefined
+					? await response.text()
+					: await readBodyWithin(response, call.maxResponseBytes);
+			payload = text === undefined ? undefined : JSON.parse(text);
 		} catch {
 			payload = undefined;
 		}
 		if (signal.aborted) return { kind: "stopped" };
-		if (response.ok && isPlainRecord(payload) && payload.ok === true) return { kind: "ok", payload };
+		if (response.ok && isPlainRecord(payload) && (call.succeeded ?? okField)(payload)) return { kind: "ok", payload };
 		const retryAfter =
 			response.status === 429 ? boundedRetryAfterMs(Number(response.headers.get("retry-after"))) : undefined;
 		return {
@@ -255,4 +312,70 @@ export class ConnectionReport {
 		if (this.failures >= FAILURES_BEFORE_REPORT) this.suspend(reason);
 		return this.failures;
 	}
+}
+
+export interface ChannelTransportOptions {
+	readonly fetch?: typeof globalThis.fetch;
+	readonly timers?: TimerPort;
+}
+
+/**
+ * What every shipped transport shares: its fetch, its timers, its per-destination send pacing and its one receive loop.
+ * `start` reads the transport's secrets (throwing what the owner has to fix) and starts the loop; `stop` ends the loop,
+ * waits for it and forgets what the run held.
+ */
+export abstract class ChannelTransport {
+	protected readonly timers: TimerPort;
+	/** When each destination may receive its next message. */
+	protected readonly pacer: SendPacer;
+	private readonly fetchOverride: typeof globalThis.fetch | undefined;
+	private abort: AbortController | undefined;
+	private loop: Promise<void> | undefined;
+
+	constructor(options: ChannelTransportOptions, sendSpacingMs: number) {
+		this.fetchOverride = options.fetch;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
+		this.pacer = new SendPacer(this.timers, sendSpacingMs);
+	}
+
+	/** Reads the secrets and starts receiving; rejects with what the owner has to fix when a secret file is not usable. */
+	start(onInbound: ChannelInboundHandler, report?: ChannelStatusReporter): void {
+		if (this.loop) return;
+		this.readSecrets();
+		const abort = new AbortController();
+		this.abort = abort;
+		this.loop = this.receive(onInbound, new ConnectionReport(report), abort.signal);
+	}
+
+	async stop(): Promise<void> {
+		this.abort?.abort();
+		this.abort = undefined;
+		const loop = this.loop;
+		this.loop = undefined;
+		await loop;
+		this.forgetRun();
+		this.pacer.clear();
+	}
+
+	/** The fetch the transport was given, else the runtime's global one, read at call time. */
+	protected get fetch(): typeof globalThis.fetch {
+		return this.fetchOverride ?? globalThis.fetch;
+	}
+
+	/** The running loop's stop signal; undefined while none runs. */
+	protected get signal(): AbortSignal | undefined {
+		return this.abort?.signal;
+	}
+
+	/** Reads every secret the run needs, or throws naming the file and what is wrong with it (never its content). */
+	protected abstract readSecrets(): void;
+
+	/** Drops what the run held (its secrets among them) once its loop ended. */
+	protected abstract forgetRun(): void;
+
+	protected abstract receive(
+		onInbound: ChannelInboundHandler,
+		reports: ConnectionReport,
+		signal: AbortSignal,
+	): Promise<void>;
 }

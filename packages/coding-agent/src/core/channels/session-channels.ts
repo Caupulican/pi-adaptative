@@ -31,6 +31,7 @@ import {
 	MAX_RETAINED_DIAGNOSTIC_CHARS,
 } from "../security/secret-text.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel } from "./built-in-providers.ts";
 import {
@@ -67,8 +68,16 @@ import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelP
 const MAX_NAMED_AWAY_DRAFTS = 3;
 /** Pending drafts per channel; past it the channel delivers nothing new until the owner sends or dismisses some. */
 const MAX_PENDING_DRAFTS = 32;
-/** A sender id the owner is told verbatim: plain, short, never prose (a notice enters the owner's turn unfenced). */
-const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
+/**
+ * A sender id the owner is told verbatim: plain, never prose (a notice enters the owner's turn unfenced), at most a mail
+ * address long. It is told only when the whole notice fits its one line, so the key to add is never cut.
+ */
+const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,254}$/;
+
+/** The one line that tells the owner a held sender's id and the exact key to add it to. */
+function senderNoticeText(name: string, senderId: string): string {
+	return `Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`;
+}
 /** New senders per channel the owner is told about in 24 hours, each once. */
 const MAX_SENDER_NOTICES_PER_DAY = 3;
 
@@ -174,6 +183,8 @@ export interface SessionChannelsDeps {
 	/** Rebuild the session's tools: the release tool is offered only while a channel has an explicit policy. */
 	refreshTools?(): void;
 	now?(): number;
+	/** The schedule clock a shipped polling transport waits on (`channel-poll`); the system clock when omitted. */
+	timers?: TimerPort;
 	/**
 	 * Set for the daemon's host while no session is open (`away-channel-host.ts`): it serves a channel only while no open
 	 * session does and yields to one at once, marks its batches and drafts `away`, and delivers a turn only while
@@ -313,6 +324,7 @@ export class SessionChannels {
 				const provider = createBuiltInChannelProvider(name, policy, {
 					agentDir: this.deps.getAgentDir(),
 					warn: (message) => this.deps.warn(message),
+					...(this.deps.timers ? { timers: this.deps.timers } : {}),
 				});
 				if (!provider) continue;
 				this.builtIns.set(name, provider);
@@ -996,6 +1008,7 @@ export class SessionChannels {
 				const recent = state.onboarding.filter((entry) => now - entry.at < DAY_MS);
 				const tell =
 					PLAIN_SENDER_ID.test(event.senderId) &&
+					senderNoticeText(name, event.senderId).length <= MAX_RETAINED_DIAGNOSTIC_CHARS &&
 					!recent.some((entry) => entry.sender === sender) &&
 					recent.length < MAX_SENDER_NOTICES_PER_DAY;
 				if (tell) state.onboarding.push({ sender, at: now });
@@ -1043,7 +1056,7 @@ export class SessionChannels {
 			scope: `${name}:${sender}`,
 			state: {
 				reason: `sender:${name}:${sender}:${at}`,
-				text: `Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`,
+				text: senderNoticeText(name, senderId),
 			},
 		}));
 	}

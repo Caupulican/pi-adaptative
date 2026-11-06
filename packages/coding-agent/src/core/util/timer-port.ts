@@ -56,6 +56,8 @@ export {
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  * - `system-prompt`: the clock the date a system prompt states is read from, pinned at the first build and advanced
  *   only at a cold moment. It arms no alarm.
+ * - `channel-poll`: the schedule of a shipped channel transport that polls (Gmail): the wait between quiet polls, its
+ *   error backoffs, its access-token expiry clock and its send pacing. Its request timeouts stay on the system clock.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -81,7 +83,8 @@ export type TimerOwner =
 	| "routines"
 	| "routine-intake"
 	| "tool-recovery-log"
-	| "system-prompt";
+	| "system-prompt"
+	| "channel-poll";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

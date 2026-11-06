@@ -8,6 +8,9 @@ const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
 	/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/i,
 	// A Slack app-level token: the prefix and 20+ token characters never occur in prose, so the transcript filter drops it too.
 	/\bxapp-[A-Za-z0-9-]{20,}\b/i,
+	// A Google OAuth client secret and a Google access token: neither prefix with 20+ token characters occurs in prose.
+	/\bGOCSPX-[A-Za-z0-9_-]{20,}/,
+	/\bya29\.[A-Za-z0-9_-]{20,}/,
 	/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
 	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
 	/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/i,
@@ -30,6 +33,8 @@ const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [
 	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_])/,
 	// A Telegram bot token, bare or inside a Bot API URL path (`/bot<token>/`), where no word boundary precedes it.
 	/(?:(?<=\/bot)|(?<![A-Za-z0-9_]))\d{6,12}:[A-Za-z0-9_-]{30,64}(?![A-Za-z0-9_-])/,
+	// A Google refresh token. `1//` followed by an identifier also reads as floor division in source text.
+	/(?<![A-Za-z0-9_])1\/\/[A-Za-z0-9_-]{40,}/,
 ];
 
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CONTEXTUAL_SECRET_PATTERNS];

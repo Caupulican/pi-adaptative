@@ -17,21 +17,20 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
-	ChannelStatusReporter,
 } from "../gateways/channel-provider.ts";
-import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	type ApiOutcome,
 	type Backoff,
 	backoffDelay,
-	ConnectionReport,
+	ChannelTransport,
+	type ConnectionReport,
 	DEFAULT_RETRY_AFTER_MS,
 	pause,
 	postJsonApi,
 	type RefusedApiOutcome,
 	readChannelTokenFile,
-	SendPacer,
 	sendPaced,
 } from "./channel-transport.ts";
 
@@ -166,44 +165,39 @@ export function slackTokenPaths(agentDir: string): { readonly app: string; reado
 	return { app: join(agentDir, "channels", "slack.app-token"), bot: join(agentDir, "channels", "slack.bot-token") };
 }
 
-export class SlackChannelProvider implements ChannelProvider {
+export class SlackChannelProvider extends ChannelTransport implements ChannelProvider {
 	readonly name = SLACK_CHANNEL;
 	readonly capabilities: ChannelCapabilities = { maxMessageChars: 3000, markdown: false, threads: true };
 	private readonly tokenPaths: { readonly app: string; readonly bot: string };
-	private readonly fetchOverride: typeof globalThis.fetch | undefined;
 	private readonly webSocketOverride: typeof globalThis.WebSocket | undefined;
-	private readonly timers: TimerPort;
 	private tokens: SlackTokens | undefined;
-	private abort: AbortController | undefined;
-	private loop: Promise<void> | undefined;
-	/** When each conversation may receive its next message. */
-	private readonly pacer: SendPacer;
 
 	constructor(options: SlackChannelProviderOptions) {
+		super(options, SEND_SPACING_MS);
 		this.tokenPaths = slackTokenPaths(options.agentDir);
-		this.fetchOverride = options.fetch;
 		this.webSocketOverride = options.webSocket;
-		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
-		this.pacer = new SendPacer(this.timers, SEND_SPACING_MS);
 	}
 
-	/** Reads both tokens and starts connecting; rejects with what the owner has to fix when a token file is not usable. */
-	start(onInbound: ChannelInboundHandler, report?: ChannelStatusReporter): void {
-		if (this.loop) return;
-		this.tokens = this.readTokens();
-		const abort = new AbortController();
-		this.abort = abort;
-		this.loop = this.run(onInbound, new ConnectionReport(report), abort.signal);
+	/** Both tokens, or a throw naming the file and what is wrong with it (never its content). */
+	protected readSecrets(): void {
+		this.tokens = {
+			app: readChannelTokenFile({
+				path: this.tokenPaths.app,
+				label: "Slack app-level token",
+				shape: APP_TOKEN_SHAPE,
+				shapeHint: "an app-level token (xapp-...)",
+			}),
+			bot: readChannelTokenFile({
+				path: this.tokenPaths.bot,
+				label: "Slack bot token",
+				shape: BOT_TOKEN_SHAPE,
+				shapeHint: "a bot token (xoxb-...)",
+			}),
+		};
 	}
 
-	async stop(): Promise<void> {
-		this.abort?.abort();
-		this.abort = undefined;
-		const running = this.loop;
-		this.loop = undefined;
-		await running;
+	protected forgetRun(): void {
 		this.tokens = undefined;
-		this.pacer.clear();
 	}
 
 	async send(message: ChannelMessage): Promise<void> {
@@ -215,7 +209,7 @@ export class SlackChannelProvider implements ChannelProvider {
 		await sendPaced({
 			service: "Slack",
 			destination: channel,
-			signal: this.abort?.signal,
+			signal: this.signal,
 			timers: this.timers,
 			pacer: this.pacer,
 			call: (signal) =>
@@ -237,24 +231,6 @@ export class SlackChannelProvider implements ChannelProvider {
 		});
 	}
 
-	/** Both tokens, or a throw naming the file and what is wrong with it (never its content). */
-	private readTokens(): SlackTokens {
-		return {
-			app: readChannelTokenFile({
-				path: this.tokenPaths.app,
-				label: "Slack app-level token",
-				shape: APP_TOKEN_SHAPE,
-				shapeHint: "an app-level token (xapp-...)",
-			}),
-			bot: readChannelTokenFile({
-				path: this.tokenPaths.bot,
-				label: "Slack bot token",
-				shape: BOT_TOKEN_SHAPE,
-				shapeHint: "a bot token (xoxb-...)",
-			}),
-		};
-	}
-
 	private call(
 		method: "apps.connections.open" | "chat.postMessage",
 		token: keyof SlackTokens,
@@ -265,7 +241,7 @@ export class SlackChannelProvider implements ChannelProvider {
 		const tokens = this.tokens;
 		if (!tokens || signal.aborted) return Promise.resolve({ kind: "stopped" });
 		return postJsonApi({
-			fetch: this.fetchOverride ?? globalThis.fetch,
+			fetch: this.fetch,
 			timers: this.timers,
 			url: `${API_BASE}/${method}`,
 			headers: {
@@ -278,14 +254,19 @@ export class SlackChannelProvider implements ChannelProvider {
 		});
 	}
 
-	private async run(onInbound: ChannelInboundHandler, reports: ConnectionReport, signal: AbortSignal): Promise<void> {
+	/** Socket Mode: open a connection, read it until it ends, open the next one. */
+	protected async receive(
+		onInbound: ChannelInboundHandler,
+		reports: ConnectionReport,
+		signal: AbortSignal,
+	): Promise<void> {
 		let refusals = 0;
 		let rejections = 0;
 		let reloadTokens = false;
 		while (!signal.aborted) {
 			if (reloadTokens) {
 				try {
-					this.tokens = this.readTokens();
+					this.readSecrets();
 					reloadTokens = false;
 				} catch (error) {
 					reports.suspend(error instanceof Error ? error.message : TOKEN_REJECTED_REASON);

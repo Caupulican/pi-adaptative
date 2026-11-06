@@ -1,8 +1,8 @@
 /**
  * Interface-driven gateways & scheduling (adaptive-agent design R8).
  *
- * pi ships two transports (Telegram and Slack, `core/channels/built-in-providers.ts`) and no cron tick
- * loop; every other transport (Discord/email/webhooks) comes from a deployment wrapper (server, headless
+ * pi ships three transports (Telegram, Slack and Gmail, `core/channels/built-in-providers.ts`) and no cron
+ * tick loop; every other transport (Discord, other mail, webhooks) comes from a deployment wrapper (server, headless
  * runner) that implements these provider contracts and registers them; the core only manages their
  * lifecycle. The shipped transports implement the same contract, so the core treats them alike.
  */
