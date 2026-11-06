@@ -141,9 +141,9 @@ function latestBatchText(request: ScriptedRequest): string {
 }
 
 /** A line of the owner's MEMORY.md: the owner's runs read it in their system prompt, a third party's runs never do. */
-const OWNER_MEMORY = "The owner keeps the release checklist in the team wiki.";
+export const OWNER_MEMORY = "The owner keeps the release checklist in the team wiki.";
 
-function expectOwnerMemory(request: ScriptedRequest, carried: boolean): void {
+export function expectOwnerMemory(request: ScriptedRequest, carried: boolean): void {
 	const systemPrompt = request.context.systemPrompt ?? "";
 	if (carried) {
 		expect(systemPrompt, "the owner's run carries the owner's memory").toContain(OWNER_MEMORY);
