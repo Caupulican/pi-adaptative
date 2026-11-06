@@ -1508,7 +1508,12 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				check();
 			});
 		const firstSlot = store().getRoutine(readyId)!.nextRunAt;
-		expect(store().getRoutine(readyControlId)!.nextRunAt, "both routines share the slot").toBe(firstSlot);
+		// Each interval slot is placed from its own save instant (the routines clock follows the wall clock), so the control's
+		// first slot is the windowed one's or later, never earlier.
+		expect(
+			store().getRoutine(readyControlId)!.nextRunAt,
+			"the routine without a window was saved after the windowed one",
+		).toBeGreaterThanOrEqual(firstSlot);
 		const readyGate = createBarrier();
 		world.provider.enqueue(
 			"worker-a",
