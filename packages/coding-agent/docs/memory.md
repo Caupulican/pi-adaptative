@@ -120,7 +120,7 @@ The block is bounded by lines, estimated tokens, characters and UTF-8 bytes, and
 
 Extension memory providers that implement a lifecycle `prefetch` still contribute a pre-turn recall page; history recall does not.
 
-In OKF the session's system prompt carries curated memory: `MEMORY.md`, the project's `MEMORY.md`, the `USER.md` preferences and the blocks of memory extensions. A run that carries a third party's words (a channel or pi-chat message, a host event someone else wrote) sends the prompt without that block and with one line saying the memory is withheld; its retrieved evidence and persona are cleared as well. The owner's next run sends the block again. Both variants stay the same from run to run, so each keeps its cached prefix. A delegated worker whose task carries such words gets no owner working preferences.
+In OKF the session's system prompt carries curated memory: `MEMORY.md`, the project's `MEMORY.md`, the `USER.md` preferences and the blocks of memory extensions. A run that carries a third party's words (a channel or pi-chat message, a host event someone else wrote) sends the prompt without that block and with one line saying the memory is withheld; its retrieved evidence and persona are cleared as well. The owner's next run sends the block again, and a compaction between runs sends the variant of whoever the branch last answered. Both variants stay the same from run to run, so each keeps its cached prefix. A delegated worker whose task carries such words gets no owner working preferences.
 
 ## Delegated workers
 

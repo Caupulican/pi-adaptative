@@ -7,10 +7,11 @@ import {
 	readSessionSystemPromptOverride,
 } from "./session-system-prompt-override.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
+import { isThirdPartyOrigin, latestDecisiveEntry, type TurnOriginRecord } from "./turn-origin.ts";
 
 export interface SessionSystemPromptControllerDeps {
 	builder: SystemPromptBuilder;
-	getSessionManager(): Pick<SessionManager, "getLatestCustomEntryOnBranch" | "appendCustomEntry">;
+	getSessionManager(): Pick<SessionManager, "getLatestCustomEntryOnBranch" | "appendCustomEntry" | "getBranch">;
 	isStreaming(): boolean;
 	getActiveToolNames(): string[];
 	getModel(): Model<Api> | undefined;
@@ -19,8 +20,8 @@ export interface SessionSystemPromptControllerDeps {
 	getPrompts(): { base: string; live: string };
 	/** Makes `prompt` both the base and the live prompt. */
 	installPrompt(prompt: string): void;
-	/** Whether the foreground run in progress carries a third party's words (`RunTurnOrigin.authority`). */
-	isThirdPartyRun(): boolean;
+	/** The decisive origin of the foreground run in progress (`RunTurnOrigin.origin`); undefined outside a run. */
+	getRunOrigin(): TurnOriginRecord | undefined;
 }
 
 /** The variant of the session's prompt a request sent: the owner's, or the one with the owner's memory withheld. */
@@ -75,12 +76,14 @@ export class SessionSystemPromptController {
 
 	/**
 	 * The system prompt a request sends for the held prompt `prompt` (installed as the agent's `projectSystemPrompt`):
-	 * a run that carries a third party's words gets it with the owner's memory withheld, any other request the prompt
-	 * itself. The authority is read when the request's context is taken, so a run whose authority changes mid-run sends
-	 * the other variant from its next turn on.
+	 * a request on a third party's words gets it with the owner's memory withheld, any other request the prompt itself.
+	 * The words are the run's decisive origin, or, for a request outside a run (an idle compaction's summarizer), the
+	 * branch's latest decisive entry, the origin the next run would begin with. They are read when the request's context
+	 * is taken, so a run whose authority changes mid-run sends the other variant from its next turn on.
 	 */
 	forRequest(prompt: string): string {
-		return this.deps.isThirdPartyRun() ? this.deps.builder.withholdMemory(prompt) : prompt;
+		const origin = this.deps.getRunOrigin() ?? latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin;
+		return isThirdPartyOrigin(origin) ? this.deps.builder.withholdMemory(prompt) : prompt;
 	}
 
 	/** The lineage of a sent system prompt, read from the text itself. */

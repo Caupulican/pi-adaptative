@@ -973,7 +973,7 @@ export class AgentSession {
 				this._baseSystemPrompt = prompt;
 				this.agent.state.systemPrompt = prompt;
 			},
-			isThirdPartyRun: () => this._foregroundRecovery.turnOrigin.authority() === "third-party",
+			getRunOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
 		});
 		this.soul = new SoulController({
 			agentDir: this._agentDir,
