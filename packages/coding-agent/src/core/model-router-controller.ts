@@ -43,6 +43,7 @@ import type {
 } from "./agent-session-contracts.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { ExpertSelectionPlan } from "./expert-routing/contracts.ts";
 import { buildWorkerCapabilityRequest } from "./expert-routing/request-builder.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
@@ -62,7 +63,7 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "./expert-routing/vocabulary.ts";
-import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
+import { deriveModelCapabilityProfile, partitionToolNamesForCapability } from "./model-capability.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
@@ -232,6 +233,8 @@ export interface ModelRouterControllerDeps {
 	runAgentContinuation(signal?: AbortSignal): Promise<void>;
 	/** Rebuilds the system prompt for a filtered tool surface (routed-model capability shedding). */
 	buildSystemPromptForToolNames(toolNames: string[]): string;
+	/** The tools the routed model's capability class left out of this turn; an empty list when the turn ends. */
+	noteRoutedToolOmissions(withheld: readonly ToolDecision[]): void;
 	/** Re-resolves the restored model against the registry after a routed turn (provider override safety). */
 	refreshCurrentModelFromRegistry(): void;
 	/** One-shot, tool-less LLM call — the routing judge and the executor reflex-brain warmup ride this. */
@@ -1426,6 +1429,7 @@ export class ModelRouterController {
 		// restore ONLY what IT put there — never assigned when no tool restriction applies.
 		let swappedTools: typeof previousTurnTools | undefined;
 		let swappedSystemPrompt: typeof previousSystemPrompt | undefined;
+		let routedOmissionsNoted = false;
 		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
 		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
@@ -1506,18 +1510,20 @@ export class ModelRouterController {
 						contextWindow: routedModel.contextWindow,
 						mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
 					});
-					const allowed = new Set(
-						filterToolNamesForCapability(
-							previousTurnTools.map((tool) => tool.name),
-							routedProfile,
-							routedModel,
-						),
+					const capability = partitionToolNamesForCapability(
+						previousTurnTools.map((tool) => tool.name),
+						routedProfile,
+						routedModel,
 					);
+					const allowed = new Set(capability.kept);
 					if (allowed.size !== previousTurnTools.length) {
 						agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
 						// Agent owns a defensive copy on assignment. Fence against the installed array,
 						// not our input array, so restoration works without overwriting live tool changes.
 						swappedTools = agent.state.tools;
+						// The turn's tool manifest names what the routed model's class left out, until the turn ends.
+						this.deps.noteRoutedToolOmissions(capability.withheld);
+						routedOmissionsNoted = true;
 					}
 				}
 				// A side trip keeps the whole surface, since reaching for a mutating tool is how it hands work it
@@ -1593,6 +1599,7 @@ export class ModelRouterController {
 				this._lastModelRouterDecision = completedDecision;
 			}
 		} finally {
+			if (routedOmissionsNoted) this.deps.noteRoutedToolOmissions([]);
 			// Restore the pre-route model ONLY if the routed model is still in place: a command
 			// handler may have legitimately changed the session model mid-turn (setModel or a
 			// provider re-registration), and clobbering that would silently undo the change.

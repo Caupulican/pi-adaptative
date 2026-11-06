@@ -1756,6 +1756,7 @@ export class AgentSession {
 				this._foregroundRecovery.runAgentContinuation(this._promptSubmission.foregroundPromptLease, signal),
 			buildSystemPromptForToolNames: (toolNames) =>
 				this._systemPromptBuilder.buildSystemPromptForToolNames(toolNames),
+			noteRoutedToolOmissions: (withheld) => this._runtimeBuilder.noteRoutedCapabilityOmissions(withheld),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),

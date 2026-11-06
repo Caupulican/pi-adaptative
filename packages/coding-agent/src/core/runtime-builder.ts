@@ -658,6 +658,8 @@ export class RuntimeBuilder {
 	/** The access policy's latest refusal per tool name, and the other omission rules' (see `getToolOmissions`). */
 	private readonly _accessOmissions = new Map<string, ToolDecision>();
 	private _capabilityOmissions: readonly ToolDecision[] = [];
+	/** What the routed model's capability class left out of the turn in progress (`noteRoutedCapabilityOmissions`). */
+	private _routedOmissions: readonly ToolDecision[] = [];
 	private _unboundGrantOmissions: readonly ToolDecision[] = [];
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
@@ -874,16 +876,27 @@ export class RuntimeBuilder {
 
 	/**
 	 * Read-only: why each tool this runtime decided on is not on its active surface, as each rule decided it: the access
-	 * policy, a setting that switches the tool off, the model capability filter, and profile grants no registered tool
-	 * binds. A run's tool manifest keeps those its requests did not offer.
+	 * policy, a setting that switches the tool off, the model capability filter (for the session model, and for the
+	 * routed model while a routed turn runs), and profile grants no registered tool binds. A run's tool manifest keeps
+	 * those its requests did not offer.
 	 */
 	getToolOmissions(): readonly ToolDecision[] {
-		return [...this._capabilityOmissions, ...this._accessOmissions.values(), ...this._unboundGrantOmissions];
+		return [
+			...this._capabilityOmissions,
+			...this._routedOmissions,
+			...this._accessOmissions.values(),
+			...this._unboundGrantOmissions,
+		];
 	}
 
 	/** The model capability filter's withheld names for the active surface it just set (`partitionToolNamesForCapability`). */
 	noteCapabilityOmissions(withheld: readonly ToolDecision[]): void {
 		this._capabilityOmissions = [...withheld];
+	}
+
+	/** What the routed model's capability class left out of the turn in progress; an empty list when the turn ends. */
+	noteRoutedCapabilityOmissions(withheld: readonly ToolDecision[]): void {
+		this._routedOmissions = [...withheld];
 	}
 
 	/** Owner sessions see mocked values; a worker lane is kept out of owner-private files entirely. */
