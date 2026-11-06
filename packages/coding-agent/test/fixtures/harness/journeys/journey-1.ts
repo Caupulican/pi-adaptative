@@ -45,8 +45,9 @@ export async function runJourney1(): Promise<void> {
 				/^Provider request [0-9a-f-]{36} ended locally with usage still unknown; its original accounting identity is retained in the session journal\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: the judgment was uncertain\.$/,
-				// The held soul write of the long-path outage: the operation gate lets the unjudged write outside the task run to the soul gate.
-				/^System One: write (?:\/harness\/agent-journey-1-system-one-on\/soul\.md|[A-Z]:\\harness\\agent-journey-1-system-one-on\\soul\.md): System One could not judge it \(TypeSafe HTTP 503\); it runs\.$/,
+				// The held soul write of the long-path outage: the operation gate lets the unjudged write outside the task run on to the soul
+				// gate. The finding is the outage after the three 503 attempts, or the timeout when a slow runner reaches the gate's 2 s bound first.
+				/^System One: write (?:\/harness\/agent-journey-1-system-one-on\/soul\.md|[A-Z]:\\harness\\agent-journey-1-system-one-on\\soul\.md): System One could not judge it \((?:System One unavailable for impact 'read_only': TypeSafe HTTP 503|TypeSafe review cancelled or timed out)\); it runs\.$/,
 				// The E13R and E13Q live owners' refused releases: the settled lane hands the record to its retry, and the backoff alarm reports
 				// each retry it makes before the refusal is cleared. Each refusal is named exactly (E13R, and the three E13Q entrances). Each message exactly: the lane, the reservation uuid, the refused unlink of the
 				// store or rename of its temporary rewrite, with the platform root narrowed to its POSIX or drive-letter form.

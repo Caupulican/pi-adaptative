@@ -831,6 +831,19 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				? [details.reason]
 				: [];
 		});
+	// A notice is saved after the turn that observed it; the next one may only be observed after the earlier one is saved.
+	const soulNoticesSaved = async (label: string, count: number, holds: () => boolean = () => true) => {
+		const saved = createBarrier();
+		const reached = () => soulNoticeReasons().length >= count && holds();
+		const stop = created.sessionManager.onEntriesPersisted(() => {
+			if (reached()) saved.release();
+		});
+		try {
+			if (!reached()) await withDeadline(trace, label, saved.promise);
+		} finally {
+			stop();
+		}
+	};
 	const soulSteps: ScriptStep[] = world.systemOne.enabled
 		? [
 				{
@@ -947,6 +960,8 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			new SoulHistory(world.agentDir).list().filter((entry) => entry.sha256 === soulSha256(soulText)),
 			"a held soul.md write records no entry while it waits",
 		).toEqual([]);
+		await soulNoticesSaved("held soul write notice", 1);
+		expect(soulNoticeReasons(), "the held write tells the owner once").toEqual(["write-held"]);
 	}
 	// The alias is persisted in the session's SQL alias store, not only in the transcript: read it back through a read-only
 	// connection, then close that connection before the body continues.
@@ -1053,11 +1068,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	await withDeadline(trace, "approval turn", session.prompt("Remove the .git directory of this project."));
 	if (world.systemOne.enabled) {
 		// Recovery: the harness reviews the held text and writes it through the soul write path, with one notice each way.
-		await withDeadline(
-			trace,
-			"held soul write applied",
-			world.io.waitForMutation(() => world.io.existsSync(soulPath) && soulNoticeReasons().length === 2),
-		);
+		await soulNoticesSaved("held soul write applied", 2, () => world.io.existsSync(soulPath));
 		expect(String(world.io.readFileSync(soulPath, "utf8")), "the reviewed held text is the soul").toBe(soulText);
 		const applied = new SoulHistory(world.agentDir).list().at(-1);
 		expect(
