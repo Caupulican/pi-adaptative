@@ -415,8 +415,8 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	const attemptsOfC = () => Object.values(sessionC.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {});
 	/**
 	 * One delegation of the reader: the run starts it and answers, the worker reports, and its report wakes C once. The
-	 * attempt is the one the leg started: its dispatch names the profile the host compiled (the preset with the host's own
-	 * additions, under a derived id), not the preset id the call selected.
+	 * attempt is the one the leg started: its dispatch names the profile the host compiled, which takes a derived id when
+	 * compilation changes the preset (it adds process.exec to this reader's ceiling), not the preset id the call selected.
 	 */
 	const readerLeg = async (label: string, open: () => Promise<unknown>, offeredMemory: boolean) => {
 		const answered = createBarrier();
