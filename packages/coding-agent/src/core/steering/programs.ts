@@ -90,6 +90,14 @@ function compileCandidateFitChoices(
 	return options;
 }
 
+/**
+ * A yes/no question restating a fact code has already established is not asked: the caller checked
+ * the fact (and stops on its failure) before the checkpoint, and the fact stays in the state.
+ */
+function unlessSettledByCode(fact: unknown, decision: DecisionDefinition): DecisionDefinition[] {
+	return fact === true ? [] : [decision];
+}
+
 function buildDecisionsFromPack(
 	stage: ValidationStage,
 	decisions: DecisionDefinition[],
@@ -383,9 +391,13 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "spec_fulfilled",
-					instruction: "Did candidate pass mechanical verification against spec?",
+					instruction: "Does the candidate fulfill what `spec` requires of it?",
 				},
-				{ kind: "boolean", id: "tests_valid", instruction: "Are deterministic candidate tests passing?" },
+				...unlessSettledByCode((s.mechanicalVerification as { passed?: unknown } | undefined)?.passed, {
+					kind: "boolean",
+					id: "tests_valid",
+					instruction: "Are deterministic candidate tests passing?",
+				}),
 				{ kind: "boolean", id: "safety_satisfied", instruction: "Are safety boundaries and invariants intact?" },
 			);
 			break;
@@ -402,8 +414,16 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 
 		case "JEV-015": {
 			decisions.push(
-				{ kind: "boolean", id: "activation_succeeded", instruction: "Did capability activate cleanly in runtime?" },
-				{ kind: "boolean", id: "runtime_healthy", instruction: "Did runtime smoke verification pass?" },
+				...unlessSettledByCode(s.activationSucceeded, {
+					kind: "boolean",
+					id: "activation_succeeded",
+					instruction: "Did capability activate cleanly in runtime?",
+				}),
+				...unlessSettledByCode(s.runtimeHealthy, {
+					kind: "boolean",
+					id: "runtime_healthy",
+					instruction: "Did runtime smoke verification pass?",
+				}),
 				{
 					kind: "boolean",
 					id: "capability_available",
@@ -415,11 +435,11 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 
 		case "JEV-016": {
 			decisions.push(
-				{
+				...unlessSettledByCode(s.taskProofPassed, {
 					kind: "boolean",
 					id: "task_proof_passed",
 					instruction: "Did task-specific proof pass with actual evidence?",
-				},
+				}),
 				{ kind: "boolean", id: "regression_absent", instruction: "Are side-effects and regressions absent?" },
 				{
 					kind: "boolean",
@@ -657,11 +677,11 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 
 		case "JEV-034": {
 			decisions.push(
-				{
+				...unlessSettledByCode(s.dependenciesComplete, {
 					kind: "boolean",
 					id: "dependencies_resolved",
 					instruction: "Are all specialist dependencies (tools, capabilities, skills) resolved?",
-				},
+				}),
 				{ kind: "boolean", id: "capabilities_ready", instruction: "Are required capabilities active and usable?" },
 				{
 					kind: "boolean",

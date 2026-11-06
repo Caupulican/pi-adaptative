@@ -697,6 +697,9 @@ export class AdaptiveCapabilityController {
 			"JEV-015",
 			{
 				spec,
+				// Established above: the activator reported the candidate active and the smoke check passed.
+				activationSucceeded: true,
+				runtimeHealthy: true,
 				...(activationRes.projection !== undefined
 					? {
 							activation: activationRes.projection,
@@ -732,6 +735,7 @@ export class AdaptiveCapabilityController {
 				gap,
 				spec,
 				taskProof,
+				taskProofPassed: true,
 			},
 			{
 				objectiveId: input.objectiveId,

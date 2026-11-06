@@ -10,7 +10,8 @@ import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
-import type { DecisionProgram } from "../decision/program.ts";
+import type { Consequence } from "../decision/primitives.ts";
+import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
 import { completionPackFailures, evaluateNoul, isAdverseAnswer, noulFromAnswer } from "../system-one/policy.ts";
@@ -507,7 +508,9 @@ export class SystemOneSteeringPlane {
 
 			case "JEV-013": {
 				if (!this.isTruthy(answers.spec_fulfilled, 0.7, "spec_fulfilled")) failed.push("spec_fulfilled");
-				if (!this.isTruthy(answers.tests_valid, undefined, "tests_valid")) failed.push("tests_valid");
+				// Not asked when code already verified the candidate (see `unlessSettledByCode`).
+				if (answers.tests_valid !== undefined && !this.isTruthy(answers.tests_valid, undefined, "tests_valid"))
+					failed.push("tests_valid");
 				if (!this.isTruthy(answers.safety_satisfied, undefined, "safety_satisfied"))
 					failed.push("safety_satisfied");
 				if (failed.length > 0) outcome = "repair";
@@ -524,9 +527,17 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-015": {
-				if (!this.isTruthy(answers.activation_succeeded, undefined, "activation_succeeded"))
+				// The activation and the smoke check are not asked when code already established them.
+				if (
+					answers.activation_succeeded !== undefined &&
+					!this.isTruthy(answers.activation_succeeded, undefined, "activation_succeeded")
+				)
 					failed.push("activation_succeeded");
-				if (!this.isTruthy(answers.runtime_healthy, undefined, "runtime_healthy")) failed.push("runtime_healthy");
+				if (
+					answers.runtime_healthy !== undefined &&
+					!this.isTruthy(answers.runtime_healthy, undefined, "runtime_healthy")
+				)
+					failed.push("runtime_healthy");
 				if (!this.isTruthy(answers.capability_available, undefined, "capability_available"))
 					failed.push("capability_available");
 				if (failed.length > 0) outcome = "fail";
@@ -534,7 +545,10 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-016": {
-				if (!this.isTruthy(answers.task_proof_passed, undefined, "task_proof_passed"))
+				if (
+					answers.task_proof_passed !== undefined &&
+					!this.isTruthy(answers.task_proof_passed, undefined, "task_proof_passed")
+				)
 					failed.push("task_proof_passed");
 				if (!this.isTruthy(answers.regression_absent, undefined, "regression_absent"))
 					failed.push("regression_absent");
@@ -706,7 +720,10 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-034": {
-				if (!this.isTruthy(answers.dependencies_resolved, undefined, "dependencies_resolved"))
+				if (
+					answers.dependencies_resolved !== undefined &&
+					!this.isTruthy(answers.dependencies_resolved, undefined, "dependencies_resolved")
+				)
 					failed.push("dependencies_resolved");
 				if (!this.isTruthy(answers.capabilities_ready, undefined, "capabilities_ready"))
 					failed.push("capabilities_ready");
@@ -859,69 +876,73 @@ export class SystemOneSteeringPlane {
 						occupancy: options.occupancy,
 					}
 				: requestOrCheckpointId;
-		const stateDigest = canonicalDigest(request.state);
-		const program = compileDecisionProgramForCheckpoint(request.checkpointId, request.state);
-		const programDigest = canonicalDigest(program);
-		const policyDigest = computePolicyDigest(this.policy);
+		const bound = this.bindCheckpoint(request);
+		const cached = this.cachedResult(bound);
+		if (cached) return cached;
 
-		const model = this.policy.model.id || PINNED_JEV_MODEL;
-		const provider = this.policy.model.provider || "typesafe";
-		const consequence = request.consequence ?? "medium";
-
-		const objectiveId =
-			request.objectiveId ?? (request.taskId ? `obj-${request.taskId}` : `obj-${request.checkpointId}`);
-		const evidenceRevision = request.evidenceRevision ?? 1;
-
-		// Check if a fresh certificate already exists in cache with full key binding
-		const existing = this.certificates.findCurrent({
-			objectiveId,
-			checkpointId: request.checkpointId,
-			stateDigest,
-			evidenceRevision,
-			policyDigest,
-			programDigest,
-			provider,
-			model,
-		});
-		if (existing) {
-			const directive = this.composeDirective(request.checkpointId, existing.answers, program);
-			return { certificate: existing, directive };
-		}
-
-		// A cache hit above records nothing: no evaluation ran. From here on one did, and the one
-		// recorder learns its start, its verdict and its failure or cancellation.
-		const evaluationId = this.evaluationObserver?.start({
-			programId: program.id,
-			consequence,
-			occupancy: request.occupancy,
-			...(request.objectiveId && request.taskId
-				? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
-				: {}),
-		});
+		const evaluationId = this.startObserved(bound);
 		try {
-			return await this.evaluateFresh(request, program, evaluationId, {
-				stateDigest,
-				programDigest,
-				policyDigest,
-				model,
-				provider,
-				consequence,
-				objectiveId,
-				evidenceRevision,
-			});
+			const evaluation = await this.runEngine(request.checkpointId, bound.program, request, bound.consequence);
+			return await this.certify(bound, evaluation, evaluationId);
 		} catch (error) {
-			if (evaluationId !== undefined) {
-				if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-					this.evaluationObserver?.settleCancelled(evaluationId);
-				} else {
-					// The ledger diagnoses the engine's own failure (its kind and receipt), not the outage wrapper.
-					const cause =
-						error instanceof SystemOneSteeringUnavailableError && error.cause !== undefined ? error.cause : error;
-					this.evaluationObserver?.settleFailed(evaluationId, cause);
-				}
-			}
+			this.settleObservedFailure(evaluationId, request, error);
 			throw error;
 		}
+	}
+
+	/**
+	 * Several checkpoints judged on the same state, sent as ONE engine request: their questions are
+	 * independent, so fanning them out together costs one round trip instead of one each. Each checkpoint
+	 * still gets its own certificate, cache key, outcome and evaluation record; a cached checkpoint is
+	 * not asked again. All requests share the first request's signal, consequence and occupancy.
+	 */
+	async evaluateTogether(
+		requests: readonly SteeringCheckpointRequest[],
+	): Promise<PromiseSettledResult<SteeringResult>[]> {
+		const bounds = requests.map((request) => this.bindCheckpoint(request));
+		const results: PromiseSettledResult<SteeringResult>[] = [];
+		const fresh: number[] = [];
+		for (const [index, bound] of bounds.entries()) {
+			const cached = this.cachedResult(bound);
+			if (cached) results[index] = { status: "fulfilled", value: cached };
+			else fresh.push(index);
+		}
+		const first = fresh.length > 0 ? bounds[fresh[0]] : undefined;
+		if (!first) return results;
+
+		const label = fresh.map((index) => bounds[index].request.checkpointId).join("+");
+		// One request carries one state: checkpoints judged on different states cannot share it.
+		if (fresh.some((index) => bounds[index].stateDigest !== first.stateDigest))
+			throw new Error(`Checkpoints ${label} are judged on different states and cannot share one request.`);
+		const decisions = fresh.flatMap((index) => bounds[index].program.decisions);
+		const ids = new Set(decisions.map((decision) => decision.id));
+		if (ids.size !== decisions.length) throw new Error(`Checkpoints ${label} ask overlapping question ids.`);
+		const program =
+			fresh.length === 1 ? first.program : createDecisionProgram({ id: `pi:steering:together:${label}`, decisions });
+
+		const evaluationIds = fresh.map((index) => this.startObserved(bounds[index]));
+		let evaluation: DecisionEvaluation;
+		try {
+			evaluation = await this.runEngine(label, program, first.request, first.consequence);
+		} catch (error) {
+			for (const [position, index] of fresh.entries()) {
+				this.settleObservedFailure(evaluationIds[position], bounds[index].request, error);
+				results[index] = { status: "rejected", reason: error };
+			}
+			return results;
+		}
+		for (const [position, index] of fresh.entries()) {
+			try {
+				results[index] = {
+					status: "fulfilled",
+					value: await this.certify(bounds[index], evaluation, evaluationIds[position]),
+				};
+			} catch (error) {
+				this.settleObservedFailure(evaluationIds[position], bounds[index].request, error);
+				results[index] = { status: "rejected", reason: error };
+			}
+		}
+		return results;
 	}
 
 	/** Binds the session's one evaluation sink; late-bound because the plane is built before the session. */
@@ -929,24 +950,81 @@ export class SystemOneSteeringPlane {
 		this.evaluationObserver = observer;
 	}
 
-	private async evaluateFresh(
-		request: SteeringCheckpointRequest,
-		program: DecisionProgram,
+	/** The checkpoint's program and every key its certificate is cached under. */
+	private bindCheckpoint(request: SteeringCheckpointRequest): BoundCheckpoint {
+		const program = compileDecisionProgramForCheckpoint(request.checkpointId, request.state);
+		return {
+			request,
+			program,
+			stateDigest: canonicalDigest(request.state),
+			programDigest: canonicalDigest(program),
+			policyDigest: computePolicyDigest(this.policy),
+			model: this.policy.model.id || PINNED_JEV_MODEL,
+			provider: this.policy.model.provider || "typesafe",
+			consequence: request.consequence ?? "medium",
+			objectiveId: request.objectiveId ?? (request.taskId ? `obj-${request.taskId}` : `obj-${request.checkpointId}`),
+			evidenceRevision: request.evidenceRevision ?? 1,
+		};
+	}
+
+	/** A certificate already issued under the full key binding, with its directive recomposed. */
+	private cachedResult(bound: BoundCheckpoint): SteeringResult | undefined {
+		const existing = this.certificates.findCurrent({
+			objectiveId: bound.objectiveId,
+			checkpointId: bound.request.checkpointId,
+			stateDigest: bound.stateDigest,
+			evidenceRevision: bound.evidenceRevision,
+			policyDigest: bound.policyDigest,
+			programDigest: bound.programDigest,
+			provider: bound.provider,
+			model: bound.model,
+		});
+		if (!existing) return undefined;
+		return {
+			certificate: existing,
+			directive: this.composeDirective(bound.request.checkpointId, existing.answers, bound.program),
+		};
+	}
+
+	/**
+	 * A cache hit records nothing: no evaluation ran. From here on one did, and the one recorder learns
+	 * its start, its verdict and its failure or cancellation.
+	 */
+	private startObserved(bound: BoundCheckpoint): string | undefined {
+		const { request } = bound;
+		return this.evaluationObserver?.start({
+			programId: bound.program.id,
+			consequence: bound.consequence,
+			occupancy: request.occupancy,
+			...(request.objectiveId && request.taskId
+				? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
+				: {}),
+		});
+	}
+
+	private settleObservedFailure(
 		evaluationId: string | undefined,
-		bound: {
-			stateDigest: string;
-			programDigest: string;
-			policyDigest: string;
-			model: string;
-			provider: string;
-			consequence: "low" | "medium" | "high" | "critical";
-			objectiveId: string;
-			evidenceRevision: number;
-		},
-	): Promise<SteeringResult> {
-		const { stateDigest, programDigest, policyDigest, model, provider, consequence, objectiveId, evidenceRevision } =
-			bound;
-		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
+		request: SteeringCheckpointRequest,
+		error: unknown,
+	): void {
+		if (evaluationId === undefined) return;
+		if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+			this.evaluationObserver?.settleCancelled(evaluationId);
+			return;
+		}
+		// The ledger diagnoses the engine's own failure (its kind and receipt), not the outage wrapper.
+		const cause =
+			error instanceof SystemOneSteeringUnavailableError && error.cause !== undefined ? error.cause : error;
+		this.evaluationObserver?.settleFailed(evaluationId, cause);
+	}
+
+	/** One engine or router request for `program`; every failure to judge is the plane's unavailable error. */
+	private async runEngine(
+		label: string,
+		program: DecisionProgram,
+		request: SteeringCheckpointRequest,
+		consequence: Consequence,
+	): Promise<DecisionEvaluation> {
 		const required = this.policy.mode === "system_one_required";
 		let evaluation: DecisionEvaluation;
 
@@ -957,7 +1035,7 @@ export class SystemOneSteeringPlane {
 					occupancy: request.occupancy,
 				});
 			} catch (err) {
-				throw engineCallFailure(err, request.signal, request.checkpointId, "Decision router", required);
+				throw engineCallFailure(err, request.signal, label, "Decision router", required);
 			}
 		} else if (this.decisionEngine) {
 			try {
@@ -970,42 +1048,65 @@ export class SystemOneSteeringPlane {
 					...(request.signal ? { signal: request.signal } : {}),
 				});
 			} catch (err) {
-				throw engineCallFailure(err, request.signal, request.checkpointId, "System One steering engine", required);
+				throw engineCallFailure(err, request.signal, label, "System One steering engine", required);
 			}
 		} else {
 			if (required) {
 				throw new SystemOneSteeringUnavailableError(
-					`Decision engine missing for mandatory checkpoint ${request.checkpointId} in system_one_required mode.`,
+					`Decision engine missing for mandatory checkpoint ${label} in system_one_required mode.`,
 				);
 			}
-			throw new SystemOneSteeringUnavailableError(
-				`No decision engine configured for checkpoint ${request.checkpointId}.`,
-			);
+			throw new SystemOneSteeringUnavailableError(`No decision engine configured for checkpoint ${label}.`);
 		}
 
 		if (required) {
 			const provenance = evaluation.engine.confidence_provenance;
 			if (isForbiddenRequiredProvenance(provenance)) {
 				throw new SystemOneSteeringUnavailableError(
-					`Required checkpoint ${request.checkpointId} cannot be satisfied by ${provenance} provenance (engine ${evaluation.engine.id}).`,
+					`Required checkpoint ${label} cannot be satisfied by ${provenance} provenance (engine ${evaluation.engine.id}).`,
 				);
 			}
 		}
 
 		if (!evaluation?.results || Object.keys(evaluation.results).length === 0) {
 			throw new SteeringProtocolError(
-				`Empty evaluation response from decision engine for checkpoint ${request.checkpointId}`,
-				request.checkpointId,
+				`Empty evaluation response from decision engine for checkpoint ${label}`,
+				label,
 			);
 		}
+		return evaluation;
+	}
 
-		// Map normalized results to answers
+	/** The certificate for one checkpoint, read from the results of the request that asked its questions. */
+	private async certify(
+		bound: BoundCheckpoint,
+		evaluation: DecisionEvaluation,
+		evaluationId: string | undefined,
+	): Promise<SteeringResult> {
+		const {
+			request,
+			program,
+			stateDigest,
+			programDigest,
+			policyDigest,
+			model,
+			provider,
+			consequence,
+			objectiveId,
+			evidenceRevision,
+		} = bound;
+		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
+
+		// Map normalized results to answers. Raw answers are kept only for this program's own questions
+		// (a set decision's members are `<id>__<member>`), so a request shared with other checkpoints
+		// never leaks their answers into this certificate.
 		const answers: Record<string, unknown> = {};
-		if (
-			(evaluation as unknown as Record<string, unknown>).rawAnswers &&
-			typeof (evaluation as unknown as Record<string, unknown>).rawAnswers === "object"
-		) {
-			Object.assign(answers, (evaluation as unknown as Record<string, unknown>).rawAnswers);
+		const rawAnswers = (evaluation as unknown as Record<string, unknown>).rawAnswers;
+		if (rawAnswers && typeof rawAnswers === "object") {
+			const own = new Set(program.decisions.map((decision) => decision.id));
+			for (const [id, answer] of Object.entries(rawAnswers)) {
+				if (own.has(id) || own.has(id.split("__")[0] ?? id)) answers[id] = answer;
+			}
 		}
 		// Confidence belongs to Choice, Score and Set answers only. A Noul has none (TypeSafe docs): its
 		// probability is the certainty, and its band already says whether it settled anything.
@@ -1126,51 +1227,59 @@ export class SystemOneSteeringPlane {
 	async requireCertificate(
 		checkpointId: string,
 		state: unknown,
-		options: {
-			objectiveId?: string;
-			taskId?: string;
-			workUnitId?: string;
-			evidenceRevision?: number;
-			consequence?: "low" | "medium" | "high" | "critical";
-			parentCertificateIds?: readonly string[];
-			signal?: AbortSignal;
-			occupancy?: SemanticEvaluationOccupancy;
-			requirePass?: boolean;
-		} = {},
+		options: RequireCertificateOptions = {},
 	): Promise<SteeringCertificate> {
 		if (options.signal?.aborted) {
 			throw new Error(`Steering evaluation aborted for ${checkpointId}`);
 		}
-
-		const objectiveId = options.objectiveId ?? "obj_default";
-		const evidenceRevision = options.evidenceRevision ?? 1;
-
-		const authority = authorityForCheckpoint(checkpointId);
 		let result: SteeringResult;
 		try {
-			result = await this.evaluate({
-				checkpointId,
-				objectiveId,
-				taskId: options.taskId,
-				workUnitId: options.workUnitId,
-				state,
-				evidenceRevision,
-				consequence: options.consequence,
-				parentCertificateIds: options.parentCertificateIds,
-				// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
-				signal: options.signal,
-				occupancy: options.occupancy,
-			});
+			result = await this.evaluate(certificateRequest(checkpointId, state, options));
 		} catch (error) {
-			if (error instanceof SystemOneSteeringUnavailableError && !(error instanceof SteeringJudgmentUnavailableError))
-				throw new SteeringJudgmentUnavailableError(checkpointId, authority, error);
-			throw error;
+			throw judgmentUnavailable(checkpointId, error);
 		}
+		return this.acceptCertificate(checkpointId, result, options);
+	}
 
+	/**
+	 * `requireCertificate` for several checkpoints judged on one state, asked in ONE engine request
+	 * (`evaluateTogether`). Each checkpoint settles on its own: its certificate, its gather counter, its
+	 * pass requirement and its outage error under its own authority.
+	 */
+	async requireCertificates(
+		checkpointIds: readonly string[],
+		state: unknown,
+		options: RequireCertificateOptions = {},
+	): Promise<PromiseSettledResult<SteeringCertificate>[]> {
+		if (options.signal?.aborted) {
+			throw new Error(`Steering evaluation aborted for ${checkpointIds.join("+")}`);
+		}
+		const evaluated = await this.evaluateTogether(
+			checkpointIds.map((checkpointId) => certificateRequest(checkpointId, state, options)),
+		);
+		return evaluated.map((outcome, index): PromiseSettledResult<SteeringCertificate> => {
+			const checkpointId = checkpointIds[index];
+			try {
+				if (outcome.status === "rejected") throw judgmentUnavailable(checkpointId, outcome.reason);
+				return { status: "fulfilled", value: this.acceptCertificate(checkpointId, outcome.value, options) };
+			} catch (reason) {
+				return { status: "rejected", reason };
+			}
+		});
+	}
+
+	private acceptCertificate(
+		checkpointId: string,
+		result: SteeringResult,
+		options: RequireCertificateOptions,
+	): SteeringCertificate {
+		const authority = authorityForCheckpoint(checkpointId);
 		// An ambiguous judgment asks for evidence at most GATHER_MORE_LIMIT times on the same evidence
 		// revision. After that, reversible work proceeds with the doubt on the certificate; an objective
 		// transition keeps failing closed (it never closes on a doubt).
 		if (result.certificate.semantic_outcome === "gather_more") {
+			const objectiveId = options.objectiveId ?? "obj_default";
+			const evidenceRevision = options.evidenceRevision ?? 1;
 			const key = `${objectiveId}\u0000${options.taskId ?? ""}\u0000${checkpointId}\u0000${evidenceRevision}`;
 			const gatherCount = this.gatherCounts.get(key) ?? 0;
 			this.gatherCounts.set(key, gatherCount + 1);
@@ -1190,4 +1299,57 @@ export class SystemOneSteeringPlane {
 
 		return result.certificate;
 	}
+}
+
+interface RequireCertificateOptions {
+	objectiveId?: string;
+	taskId?: string;
+	workUnitId?: string;
+	evidenceRevision?: number;
+	consequence?: Consequence;
+	parentCertificateIds?: readonly string[];
+	signal?: AbortSignal;
+	occupancy?: SemanticEvaluationOccupancy;
+	requirePass?: boolean;
+}
+
+/** A checkpoint request bound to its program and to every key its certificate is cached under. */
+interface BoundCheckpoint {
+	readonly request: SteeringCheckpointRequest;
+	readonly program: DecisionProgram;
+	readonly stateDigest: string;
+	readonly programDigest: string;
+	readonly policyDigest: string;
+	readonly model: string;
+	readonly provider: string;
+	readonly consequence: Consequence;
+	readonly objectiveId: string;
+	readonly evidenceRevision: number;
+}
+
+function certificateRequest(
+	checkpointId: string,
+	state: unknown,
+	options: RequireCertificateOptions,
+): SteeringCheckpointRequest {
+	return {
+		checkpointId,
+		objectiveId: options.objectiveId ?? "obj_default",
+		taskId: options.taskId,
+		workUnitId: options.workUnitId,
+		state,
+		evidenceRevision: options.evidenceRevision ?? 1,
+		consequence: options.consequence,
+		parentCertificateIds: options.parentCertificateIds,
+		// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
+		signal: options.signal,
+		occupancy: options.occupancy,
+	};
+}
+
+/** The plane's outage error named for the checkpoint and its authority; any other error passes through. */
+function judgmentUnavailable(checkpointId: string, error: unknown): unknown {
+	if (error instanceof SystemOneSteeringUnavailableError && !(error instanceof SteeringJudgmentUnavailableError))
+		return new SteeringJudgmentUnavailableError(checkpointId, authorityForCheckpoint(checkpointId), error);
+	return error;
 }

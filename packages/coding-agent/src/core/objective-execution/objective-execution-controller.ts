@@ -1105,12 +1105,12 @@ export class ObjectiveExecutionController {
 				// Admission steers reversible work: an outage or an unsettled answer does not end the objective.
 				// The route's own evidence gathering answers what admission could not; a decisive failure
 				// (an incoherent objective) still stops here.
-				// The three are independent judgments of one state: evaluate them concurrently.
-				const plane = this.deps.steeringPlane;
-				const settled = await Promise.allSettled(
-					(["JEV-001", "JEV-002", "JEV-003"] as const).map((checkpointId) =>
-						plane.requireCertificate(checkpointId, admissionState, { objectiveId, signal }),
-					),
+				// The three are independent judgments of one state: one System One request asks them all,
+				// and each still settles as its own certificate.
+				const settled = await this.deps.steeringPlane.requireCertificates(
+					["JEV-001", "JEV-002", "JEV-003"],
+					admissionState,
+					{ objectiveId, signal },
 				);
 				const admitted: string[] = [];
 				for (const outcome of settled) {

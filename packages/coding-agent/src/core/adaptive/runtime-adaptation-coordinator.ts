@@ -262,7 +262,8 @@ export class RuntimeAdaptationCoordinator {
 			if (!taskProof && this.runtimeUpdater.runTaskProof) {
 				taskProof = await this.runtimeUpdater.runTaskProof(input.spec);
 			}
-			taskProof = taskProof || "runtime_patch_task_proof_verified";
+			// PH-064: no proof ran, so there is nothing to judge; a fabricated proof string would pass as one.
+			if (!taskProof) throw new Error("Runtime patch has no task-specific proof (PH-064)");
 
 			// JEV-016: Task-specific proof certificate
 			const jev016 = await this.steering.requireCertificate(

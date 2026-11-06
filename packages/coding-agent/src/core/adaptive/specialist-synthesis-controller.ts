@@ -269,6 +269,12 @@ export class SpecialistSynthesisController {
 		}
 
 		const dependenciesComplete = missingCaps.length === 0;
+		// Unresolved dependencies are a code fact that ends materialization; no judgment can change it.
+		if (!dependenciesComplete) {
+			throw new SpecialistMaterializationError(
+				`Specialist dependencies could not be resolved: ${missingCaps.join(", ")}`,
+			);
+		}
 
 		// JEV-034: Specialist dependencies resolution status (PH-046: never pass constant true)
 		await this.steering.requireCertificate(
@@ -287,12 +293,6 @@ export class SpecialistSynthesisController {
 				signal: input.signal,
 			},
 		);
-
-		if (!dependenciesComplete) {
-			throw new SpecialistMaterializationError(
-				`Specialist dependencies could not be resolved: ${missingCaps.join(", ")}`,
-			);
-		}
 
 		// 5. Select model via H-MoE (PH-040, PH-044)
 		const routingBand = "expensive";
