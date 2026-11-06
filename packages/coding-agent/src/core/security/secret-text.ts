@@ -6,8 +6,6 @@ const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
 	/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/i,
 	/\b(?:npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{20,})\b/i,
 	/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/i,
-	// A Telegram bot token, bare or inside a Bot API URL path (`/bot<token>/`), where no word boundary precedes it.
-	/(?:(?<=\/bot)|(?<![A-Za-z0-9_]))\d{6,12}:[A-Za-z0-9_-]{30,64}(?![A-Za-z0-9_-])/,
 	/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
 	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
 	/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/i,
@@ -28,6 +26,8 @@ const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
 const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [
 	/\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_])/,
 	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_])/,
+	// A Telegram bot token, bare or inside a Bot API URL path (`/bot<token>/`), where no word boundary precedes it.
+	/(?:(?<=\/bot)|(?<![A-Za-z0-9_]))\d{6,12}:[A-Za-z0-9_-]{30,64}(?![A-Za-z0-9_-])/,
 ];
 
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CONTEXTUAL_SECRET_PATTERNS];

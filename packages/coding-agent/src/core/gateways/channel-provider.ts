@@ -70,8 +70,8 @@ export interface ChannelProvider {
 	readonly name: string;
 	readonly capabilities?: ChannelCapabilities;
 	/**
-	 * Begin listening; deliver inbound messages to `onInbound`. A rejection's message is shown to the owner (redacted),
-	 * so it names what to fix and never a credential. `report` tells a later loss or return of the connection.
+	 * Begin listening; deliver inbound messages to `onInbound`. `report` tells a later loss or return of the connection;
+	 * its reason is shown to the owner (redacted), so it is the provider's own words, never remote text or a credential.
 	 */
 	start(onInbound: ChannelInboundHandler, report?: ChannelStatusReporter): void | Promise<void>;
 	/** Send an outbound message on this channel: a reply carries the inbound `address` and a reply `eventId`. */

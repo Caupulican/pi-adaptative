@@ -30,7 +30,7 @@ const POLL_TIMEOUT_SECONDS = 25;
 const POLL_ABORT_MS = 40_000;
 const SEND_ABORT_MS = 30_000;
 const MAX_TOKEN_FILE_BYTES = 256;
-/** The same shape the diagnostic redaction masks (`core/security/secret-text.ts`). */
+/** The same shape the diagnostic redaction masks (`OUTBOUND_ONLY_TOKEN_SHAPES`, `core/security/secret-text.ts`). */
 const TOKEN_SHAPE = /^\d{6,12}:[A-Za-z0-9_-]{30,64}$/;
 /** Telegram allows about one message a second into one chat. */
 const SEND_SPACING_MS = 1000;

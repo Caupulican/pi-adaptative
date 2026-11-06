@@ -138,7 +138,8 @@ export function noticeSaved(manager: SessionManager, kind: string, reasonPrefix:
 /**
  * Channels registered by a deployment wrapper start under the owner's `channels.<name>` policy and wake the session only
  * for a verified, allowlisted sender. On `mail` (draft replies): an unverified event under an allowlisted id and a
- * verified sender the policy does not list are journaled as held and wake nothing; three messages of the allowlisted
+ * verified sender the policy does not list are journaled as held and wake nothing (the owner is told that sender's id
+ * once, without its label or words); three messages of the allowlisted
  * sender arriving together become one turn with their words inside one fence; in that turn a push the words ask for is
  * prepared, not run, and the owner's own tools (`channel_reply`, `memory`) are refused; the answer waits as a draft,
  * one notice tells the owner, and the owner's own turn sends it to the address the conversation came from and reads the
@@ -281,6 +282,13 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 	expect(notices(manager, "channel-state").find((notice) => notice.reason.startsWith("feed:"))?.text).toContain(
 		"Channel feed is registered but not started: no channels.feed policy",
 	);
+	// The verified stranger is named to the owner by id only: never by the label it chose, never with its words.
+	await withDeadline(trace, "the stranger's sender notice", noticeSaved(manager, "channel-sender", "sender:mail:"));
+	const senderNotice = notices(manager, "channel-sender")[0]?.text ?? "";
+	expect(senderNotice).toContain('add \\"mallory\\" to that list');
+	expect(senderNotice, "the sender's self-chosen label is not shown").not.toContain("Alice");
+	expect(senderNotice, "nor the held words").not.toContain(heldWords[1] ?? "");
+	expect(notices(manager, "channel-sender").length, "the unverified event tells nothing").toBe(1);
 	trace.mark("root", "channels.mail-drafted");
 
 	// The same event again is not admitted twice: nothing waits, nothing wakes.

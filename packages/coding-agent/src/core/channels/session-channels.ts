@@ -471,13 +471,10 @@ export class SessionChannels {
 			return;
 		}
 		runtime.connection = undefined;
-		this.setState(
-			name,
-			"suspended",
-			outcome === "timed_out"
-				? "its start timed out"
-				: ((reason === undefined ? undefined : boundedRedactedDiagnosticText(reason)) ?? "its start failed"),
-		);
+		// Only a shipped transport's rejection is shown: its text is Pi's own words. A wrapper's may carry remote text, and
+		// a notice enters the owner's turn unfenced.
+		const shown = reason !== undefined && this.builtIns.has(name) ? boundedRedactedDiagnosticText(reason) : undefined;
+		this.setState(name, "suspended", outcome === "timed_out" ? "its start timed out" : (shown ?? "its start failed"));
 	}
 
 	/** The started provider lost or regained what it receives on; messages it already handed over are unaffected. */
