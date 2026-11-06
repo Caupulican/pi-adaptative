@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { expect } from "vitest";
 import { configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
@@ -585,11 +585,16 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 				]) {
 					const refused = result(id);
 					expect(refused.isError, `${id} is refused`).toBe(true);
+					// The model's context shortens a long path to its `p/<name>` alias, so the refusal names the path as the
+					// tool received it: the file name is what identifies it, the scope and the "not run" verdict are exact.
+					const named = basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 					expect(
 						refusalDiagnostic(refused.text),
 						`${id} is refused by the private path scope before it runs`,
-					).toContain(
-						`envelope_path_denied: "${path}" is outside envelope worker-session-private-paths's path scope. The tool was NOT run.`,
+					).toMatch(
+						new RegExp(
+							`^envelope_path_denied: ".*${named}" is outside envelope worker-session-private-paths's path scope\\. The tool was NOT run\\.`,
+						),
 					);
 				}
 				const notes = result("away-read-notes");
