@@ -91,13 +91,15 @@ export function draftPresentation(view: OwnerDraftView, terminalOnlyClasses: rea
 
 /**
  * The approval turn's text: deterministic, built only from the draft's harness rendering (fenced: the arguments are
- * model-written), asking for exactly that one call.
+ * model-written). It asks the model to repeat its own earlier held call unchanged; the fence shows what the owner
+ * approved, never a call to build from it.
  */
 export function approvalTurnText(channel: string, view: OwnerDraftView): string {
 	const rendering = view.rendering ?? "";
 	return (
 		`Owner approval on channel ${channel}: the owner approved held draft ${view.id} (${view.toolName}; ${classLabels(view)}). ` +
-		"Perform exactly the call shown in the fence below, once, with the same tool and the same arguments, and nothing else; then answer in one line whether it ran.\n" +
+		`Repeat your earlier ${view.toolName} call that was held as this draft, once, verbatim: the same tool and the same arguments, unchanged, and nothing else; then answer in one line whether it ran. ` +
+		"The fence below shows what the owner approved, for reference only.\n" +
 		wrapUntrustedText(rendering, `held-call:${view.id}`, { nonce: digest(`${view.id}:${rendering}`).slice(0, 32) })
 	);
 }
@@ -116,8 +118,8 @@ export interface OwnerDecisionFacts {
 	readonly receivedAt: number;
 	/** Why no turn may start now (the owner pool at its bound, the emergency stop); undefined when one may. */
 	turnRefusal(): string | undefined;
-	/** A turn already performs this draft. */
-	approvalDelivered(draftId: string): boolean;
+	/** An approval turn of this draft is still accepted (running); an ended one does not block a new approval. */
+	approvalRunning(draftId: string): boolean;
 }
 
 /** The reply to a decision, and on `approved` the draft whose approval turn the channels core delivers. */
@@ -155,7 +157,8 @@ export function decideOwnerDraft(control: OwnerControl, facts: OwnerDecisionFact
 	if (!view || !draftInScope(view, facts.channel, facts.by.senderDigest, facts.openerOf))
 		return { reply: stateReply(id, "absent") };
 	if (control.kind === "deny") {
-		if (view.state !== "pending") return { reply: stateReply(id, view.state) };
+		// An approved draft may still be denied: the decisions side ends its approval.
+		if (view.state !== "pending" && view.state !== "approved") return { reply: stateReply(id, view.state) };
 		const result = handle.deny(id, facts.by);
 		return { reply: result === "denied" ? `Denied draft ${id}; it will not run.` : stateReply(id, result) };
 	}
@@ -165,7 +168,7 @@ export function decideOwnerDraft(control: OwnerControl, facts: OwnerDecisionFact
 	// Platform times are whole seconds: an approval sent in the second the presentation went out is after it.
 	if (presentedAt === undefined || facts.receivedAt < Math.floor(presentedAt / 1000) * 1000)
 		return { reply: `Draft ${id} was not shown to this chat before your approval; send status to see it.` };
-	if (facts.approvalDelivered(id)) return { reply: stateReply(id, "approved") };
+	if (facts.approvalRunning(id)) return { reply: stateReply(id, "approved") };
 	const refusal = facts.turnRefusal();
 	if (refusal) return { reply: `Approve refused: ${refusal}. deny, status and stop still work.` };
 	const result = handle.approve(id, facts.by, { terminalOnlyClasses: facts.terminalOnlyClasses });

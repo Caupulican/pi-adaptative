@@ -1636,6 +1636,9 @@ export class SessionChannels {
 		}
 		const run: OwnerRun = { name, live, accepted: false, stopped: false };
 		this.ownerRuns.set(origin.ref, run);
+		// A stop ends the ref's authority for good: a still-queued batch, guarded calls that raced the abort and later runs
+		// that inherit the ref are refused at the edge.
+		const guarded = () => !run.stopped && live();
 		let answered = false;
 		const accept = (accepted: boolean) => {
 			if (answered) return;
@@ -1664,8 +1667,8 @@ export class SessionChannels {
 			this.scheduleWork();
 		};
 		try {
-			if (approval) delivery.deliverApproval(text, origin, live, accept);
-			else delivery.deliver(text, origin, live, accept);
+			if (approval) delivery.deliverApproval(text, origin, guarded, accept);
+			else delivery.deliver(text, origin, guarded, accept);
 		} catch (error) {
 			this.deps.warn(
 				`Channel ${name}: an owner turn was not delivered (${error instanceof Error ? error.message : String(error)}).`,
@@ -1765,7 +1768,16 @@ export class SessionChannels {
 			if (entry === undefined) continue;
 			const origin = entryTurnOrigin(entry);
 			if (origin && isDecisiveOrigin(origin))
-				return { kind: "unanswered", reason: origin.k === "owner-typed" ? "owner_steered" : "mixed", usd };
+				return {
+					kind: "unanswered",
+					reason:
+						origin.k === "owner-typed"
+							? "owner_steered"
+							: batch.owner === true && origin.k === "owner-channel" && origin.channel === name
+								? "owner_channel_joined"
+								: "mixed",
+					usd,
+				};
 			if (entry.type !== "message") continue;
 			const message = entry.message;
 			if (message.role !== "assistant") continue;
@@ -1887,8 +1899,9 @@ export class SessionChannels {
 					text: `Channel ${name}: an owner message got no reply (${outcome.reason.replaceAll("_", " ")}).`,
 				},
 			}));
-			// An aborted turn was stopped by its bound, a kill switch or `stop`: each tells the chat itself.
-			if (outcome.reason !== "aborted")
+			// An aborted turn was stopped by its bound, a kill switch or `stop`: each tells the chat itself. A turn an
+			// approval turn of the same channel joined goes on in that turn, whose answer the chat gets.
+			if (outcome.reason !== "aborted" && outcome.reason !== "owner_channel_joined")
 				void this.ownerPush.push(
 					name,
 					`unanswered:${batch.id}`,
@@ -2123,10 +2136,10 @@ export class SessionChannels {
 				presentedAt: (draftId) => this.ownerPush.presentedAt(name, draftId, event.conversationKey),
 				receivedAt: event.receivedAt,
 				turnRefusal: () => this.ownerTurnRefusal(name, policy, this.journal(name).read().result, this.now()),
-				approvalDelivered: (draftId) =>
+				approvalRunning: (draftId) =>
 					this.journal(name)
 						.read()
-						.result.batches.some((batch) => batch.approval === draftId),
+						.result.batches.some((batch) => batch.approval === draftId && batch.state === "accepted"),
 			});
 			// An approval's reply waits for its turn: the delivery is started first and answers whether a turn runs it.
 			if (result.approved)
