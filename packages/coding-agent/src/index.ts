@@ -54,6 +54,11 @@ export {
 	encodeWorkerSessionAllowedPaths,
 	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "./core/autonomy/worker-session-private-scope.ts";
+export type {
+	ChannelRuntimeState,
+	ChannelStateView,
+	SessionChannelsView,
+} from "./core/channels/session-channels.ts";
 export { type ChatExtensionOptions, piChatExtension } from "./core/chat/extension.ts";
 export { type CollaborationExtensionOptions, piCollaborationExtension } from "./core/collaboration/extension.ts";
 export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";
@@ -190,6 +195,17 @@ export {
 export { createExtensionRuntime, discoverAndLoadExtensions } from "./core/extensions/loader.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-contract.ts";
+// Channel and scheduler providers a deployment wrapper registers on a session (see docs/channels.md)
+export type {
+	ChannelCapabilities,
+	ChannelInboundHandler,
+	ChannelMessage,
+	ChannelMessageKind,
+	ChannelProvider,
+	ChannelSender,
+	JobSchedulerProvider,
+	ScheduledJob,
+} from "./core/gateways/channel-provider.ts";
 // Public Execution-Integrity Substrate SDK
 export {
 	canonicalJsonStringify,
