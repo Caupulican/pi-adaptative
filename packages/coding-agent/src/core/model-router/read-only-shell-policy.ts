@@ -2312,11 +2312,14 @@ function redirectionViolation(
 
 /**
  * Splits a tokenized command line into simple commands (words and redirections) and judges each with the separator
- * that preceded it; the first refusal ends the walk.
+ * that preceded it; the first refusal ends the walk. With `onUnread`, a here-document or a redirection without a file
+ * is reported there and the walk goes on past it (the here-document's delimiter word skipped, its text read as
+ * commands), for a reader that must see every command the line may run.
  */
 function judgeSimpleCommands(
 	tokens: readonly ShellToken[],
 	judge: (words: ShellToken[], redirections: ShellRedirection[], previous: string | undefined) => string | undefined,
+	onUnread?: (reason: string) => void,
 ): string | undefined {
 	let words: ShellToken[] = [];
 	let redirections: ShellRedirection[] = [];
@@ -2328,13 +2331,24 @@ function judgeSimpleCommands(
 			continue;
 		}
 		if (token.kind === "redirect") {
-			if (/^<<-?$/u.test(token.value)) return "it uses a here-document, whose text the gate does not judge";
+			if (/^<<-?$/u.test(token.value)) {
+				const reason = "it uses a here-document, whose text the gate does not judge";
+				if (!onUnread) return reason;
+				onUnread(reason);
+				if (tokens[index + 1]?.kind === "arg") index++;
+				continue;
+			}
 			if (!redirectTakesTarget(token.value)) {
 				redirections.push({ operator: token.value });
 				continue;
 			}
 			const target = tokens[index + 1];
-			if (target?.kind !== "arg") return "it redirects without naming a file";
+			if (target?.kind !== "arg") {
+				const reason = "it redirects without naming a file";
+				if (!onUnread) return reason;
+				onUnread(reason);
+				continue;
+			}
 			index++;
 			redirections.push({ operator: token.value, target });
 			continue;
@@ -2970,11 +2984,20 @@ function collectLine(command: string, dialect: ShellCommandDialect, depth: numbe
 		out.unjudged.push("it nests command lines deeper than the gate reads");
 		return;
 	}
-	const tokens = tokenizeShellCommand(command, dialect, { compound: dialect === "posix" });
-	if (!tokens) {
+	// A here-document is input, not shell syntax: its text and its operator are left out, so the line's structure is read
+	// and an apostrophe in the text hides no later command. Input fed to a shell or interpreter is unjudged below.
+	const read = tokenizeShellCommand(dialect === "posix" ? withoutHereDocumentText(command) : command, dialect, {
+		compound: dialect === "posix",
+	});
+	if (!read) {
 		out.unjudged.push("it has an unterminated quote, escape or substitution");
 		return;
 	}
+	const tokens = read.filter(
+		(token, index) =>
+			!(token.kind === "redirect" && /^<<-?$/u.test(token.value)) &&
+			!(read[index - 1]?.kind === "redirect" && /^<<-?$/u.test(read[index - 1]!.value) && token.kind === "arg"),
+	);
 	if (dialect === "posix") {
 		const nodes = parseShellCompound(tokens);
 		if (typeof nodes !== "string") {
@@ -2983,12 +3006,32 @@ function collectLine(command: string, dialect: ShellCommandDialect, depth: numbe
 		}
 		out.unjudged.push(nodes);
 	}
-	// PowerShell, or a POSIX line whose structure cannot be read: the simple commands between its separators.
-	const stopped = judgeSimpleCommands(tokens, (words, redirections) => {
-		collectSimpleCommand(words, redirections, dialect, depth, out);
-		return undefined;
-	});
-	if (stopped) out.unjudged.push(stopped);
+	// PowerShell, or a POSIX line whose structure cannot be read: every simple command between its separators.
+	judgeSimpleCommands(
+		tokens,
+		(words, redirections) => {
+			collectSimpleCommand(words, redirections, dialect, depth, out);
+			return undefined;
+		},
+		(reason) => out.unjudged.push(reason),
+	);
+}
+
+/** The line without the text of its here-documents (`<<EOF` ... `EOF`); the operator and delimiter stay. */
+function withoutHereDocumentText(command: string): string {
+	const kept: string[] = [];
+	const pending: { delimiter: string; tabs: boolean }[] = [];
+	for (const line of command.split("\n")) {
+		const open = pending[0];
+		if (open) {
+			if ((open.tabs ? line.replace(/^\t+/u, "") : line).replace(/\r$/u, "") === open.delimiter) pending.shift();
+			continue;
+		}
+		kept.push(line);
+		for (const match of line.matchAll(/(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][\w.-]*)\2/gu))
+			pending.push({ delimiter: match[3]!, tabs: match[1] === "-" });
+	}
+	return kept.join("\n");
 }
 
 function collectNodes(nodes: readonly ShellCompoundNode[], depth: number, out: ShellExecutions): void {
@@ -3115,7 +3158,7 @@ function wrappedInvocation(args: readonly string[], depth: number, out: ShellExe
 			return inner.length > 0 ? inner : undefined;
 		}
 		case "watch": {
-			const start = afterOptions(args, 1, new Set(["-n", "--interval", "-d", "-q", "--equexit"]));
+			const start = afterOptions(args, 1, new Set(["-n", "--interval", "-q", "--equexit"]));
 			collectLine(args.slice(start).join(" "), "posix", depth + 1, out);
 			return undefined;
 		}

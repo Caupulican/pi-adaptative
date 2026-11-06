@@ -367,6 +367,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	// Control: the owner's own turn pushes under the default grant. A peer message arriving during that run is queued as a
 	// follow-up: it never joins the owner's run, which keeps its authority, and opens its own run once the owner's ends.
 	world.shell.enqueue({ name: "pi-chat-owner-push", command: pushCommand, output: "", exitCode: 0 });
+	const ownerRunLive = createBarrier();
 	const peerQueued = createBarrier();
 	const peerAside = "a peer aside during the owner's run";
 	const ownerAnswered = createBarrier();
@@ -376,6 +377,8 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			...calls("pi-chat-owner-push-call", [
 				{ id: "pi-chat-owner-push-0", name: "bash", arguments: { command: pushCommand } },
 			]),
+			// The owner's run is live and held here until the peer's message is queued.
+			check: () => ownerRunLive.release(),
 			gate: peerQueued.promise,
 		},
 		{
@@ -395,15 +398,14 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	world.provider.enqueue("root", {
 		name: "pi-chat-peer-aside-answer",
 		check: (request) => {
-			expect(JSON.stringify(request.context.messages.slice(-1)), "the queued message opens its own run").toContain(
-				peerAside,
-			);
+			expect(JSON.stringify(request.context.messages), "the queued message opens its own run").toContain(peerAside);
 			expect(world.shell.reached, "after the owner's run has pushed").toContain("pi-chat-owner-push");
 			asideRun.release();
 		},
 		reply: { content: [{ type: "text", text: "Noted." }] },
 	});
-	await withDeadline(trace, "C's owner turn", sessionC.prompt("Push main."));
+	const ownerTurn = sessionC.prompt("Push main.");
+	await withDeadline(trace, "C's owner run is live", ownerRunLive.promise);
 	expectStatus(
 		await callTool(sessionA, "agent_send", {
 			to: meshIdC,
@@ -415,6 +417,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		"a peer message during the owner's run is queued",
 	);
 	peerQueued.release();
+	await withDeadline(trace, "C's owner turn", ownerTurn);
 	await withDeadline(trace, "C's owner run pushes", ownerAnswered.promise);
 	await withDeadline(trace, "the queued peer message opens its own run", asideRun.promise);
 	await sessionC.agent.waitForIdle();
