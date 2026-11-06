@@ -13,10 +13,9 @@ export type SoulReviewer = "allow" | "block" | "unreviewed";
  * Typed entries for a change the harness reverted: `reverted` (an ungated write that failed the screen or the review
  * was undone) and `removed` (the file was deleted outside the gate and put back); both carry the restored text.
  * `unresolved`: a verdict on a change could not be committed because the soul lock stayed held elsewhere, and the
- * change was adopted without it. `withheld`: an agent write or change System One could not review was not taken in (a
- * held write that was never written, a held change that was reverted); its text is kept so the owner can restore it.
+ * change was adopted without it.
  */
-export type SoulHistoryEvent = "reverted" | "removed" | "unresolved" | "withheld";
+export type SoulHistoryEvent = "reverted" | "removed" | "unresolved";
 
 /**
  * One write to `soul.md`. `sha256` and `bytes` identify the exact text the write put (or tried to put) in the file;
@@ -31,6 +30,14 @@ export interface SoulHistoryEntry {
 	readonly reviewer: SoulReviewer;
 	readonly bytes: number;
 	readonly event?: SoulHistoryEvent;
+	/**
+	 * An agent write or change System One could not review was not taken in (a held write that was never written, a held
+	 * change that was reverted); the entry is `agent`/`unreviewed` and keeps its text so the owner can restore it. A field
+	 * rather than an `event` because every released reader since the history began accepts an entry with an unknown field
+	 * and writes it back unchanged when it rewrites the file, while it drops an entry with an `event` it does not know,
+	 * and the version file with it: two builds sharing an agent directory would lose the owner's restore copy.
+	 */
+	readonly withheld?: true;
 }
 
 /** Whether the entry's text is kept in `versions/`: every entry but a blocked attempt, which is only a record. */
@@ -55,8 +62,8 @@ function isEntry(value: unknown): value is SoulHistoryEntry {
 		(entry.event === undefined ||
 			entry.event === "reverted" ||
 			entry.event === "removed" ||
-			entry.event === "unresolved" ||
-			entry.event === "withheld")
+			entry.event === "unresolved") &&
+		(entry.withheld === undefined || entry.withheld === true)
 	);
 }
 
@@ -115,6 +122,7 @@ export class SoulHistory {
 		author: SoulAuthor;
 		reviewer: SoulReviewer;
 		event?: SoulHistoryEvent;
+		withheld?: true;
 		now?: Date;
 	}): void {
 		const now = input.now ?? new Date();
@@ -122,7 +130,8 @@ export class SoulHistory {
 		if (input.standing !== undefined && !this.holdsVersion(entries, soulSha256(input.standing))) {
 			entries.push(this.entry(input.standing, "owner", "unreviewed", now, true));
 		}
-		entries.push(this.entry(input.text, input.author, input.reviewer, now, input.keepText, input.event));
+		const entry = this.entry(input.text, input.author, input.reviewer, now, input.keepText, input.event);
+		entries.push(input.withheld ? { ...entry, withheld: true } : entry);
 		const kept = entries.slice(-SOUL_HISTORY_LIMIT);
 		writeFileAtomicSync(this.historyFile, `${kept.map((item) => JSON.stringify(item)).join("\n")}\n`);
 		this.removeUnreferencedVersions(kept);

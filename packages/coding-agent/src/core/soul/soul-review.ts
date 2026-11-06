@@ -82,7 +82,12 @@ export type SoulReviewOutcome =
 	/** No decision was adverse, but at least one settled nothing. */
 	| { readonly kind: "unsettled"; readonly findings: readonly SoulReviewFinding[] }
 	/** The evaluation threw or timed out. */
-	| { readonly kind: "failed"; readonly error: string };
+	| { readonly kind: "failed"; readonly error: string }
+	/**
+	 * The bound engine can never run this review (it lacks yes/no decisions, or the policy refuses its confidence
+	 * provenance at high consequence): a configuration fault, not an outage, so asking again cannot help.
+	 */
+	| { readonly kind: "unsupported"; readonly error: string };
 
 /**
  * Judges one soul text. A decision settles through the band, never a probability cutoff: `settledBoolean`
@@ -93,10 +98,17 @@ export async function reviewSoulText(
 	state: { readonly proposedText: string; readonly currentSoul: string },
 	signal?: AbortSignal,
 ): Promise<SoulReviewOutcome> {
+	const router = new DecisionEngineRouter([engine]);
+	if (!router.select(SOUL_REVIEW_PROGRAM, "high")) {
+		return {
+			kind: "unsupported",
+			error: `System One's engine ${engine.id} cannot run the soul review (confidence provenance ${engine.capabilities().confidenceProvenance}, consequence high)`,
+		};
+	}
 	const deadline = AbortSignal.timeout(SOUL_REVIEW_TIMEOUT_MS);
 	let results: Awaited<ReturnType<DecisionEngineRouter["evaluateOrFallback"]>>["results"];
 	try {
-		const evaluation = await new DecisionEngineRouter([engine]).evaluateOrFallback(SOUL_REVIEW_PROGRAM, state, {
+		const evaluation = await router.evaluateOrFallback(SOUL_REVIEW_PROGRAM, state, {
 			consequence: "high",
 			signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
 		});
@@ -120,6 +132,7 @@ export async function reviewSoulText(
 /** One line per decision for the owner-facing review listing. */
 export function formatSoulReview(outcome: SoulReviewOutcome): string {
 	if (outcome.kind === "failed") return `Soul review failed: ${outcome.error}`;
+	if (outcome.kind === "unsupported") return `Soul review cannot run: ${outcome.error}`;
 	const lines = outcome.findings.map((finding) =>
 		finding.answer === "adverse"
 			? `${finding.id}: adverse (the text ${finding.adverse})`

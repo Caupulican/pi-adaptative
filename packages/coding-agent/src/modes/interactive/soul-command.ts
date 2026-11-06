@@ -24,7 +24,7 @@ function formatHistory(soul: SoulController): string {
 		"Soul history, newest first (restore with /soul restore <n>):",
 		...entries.map(
 			(entry, index) =>
-				`${index + 1}. ${entry.at}  ${entry.author}, review ${entry.reviewer}${entry.event ? `, ${entry.event}` : ""}  ${entry.bytes} bytes  ${entry.sha256.slice(0, 8)}`,
+				`${index + 1}. ${entry.at}  ${entry.author}, review ${entry.reviewer}${entry.event ? `, ${entry.event}` : ""}${entry.withheld ? ", withheld" : ""}  ${entry.bytes} bytes  ${entry.sha256.slice(0, 8)}`,
 		),
 	].join("\n");
 }
