@@ -56,7 +56,6 @@ import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
 	directiveFromPreflight,
-	directiveFromToolReplan,
 	isSameLaneVerificationDirective,
 	SAME_LANE_VERIFICATION_REASON_CODE,
 	type SystemOneControlDirective,
@@ -69,10 +68,7 @@ import {
 	decideFinalCompletion,
 	decidePostflight,
 	decidePreflight,
-	decideToolGate,
-	evaluateChoice,
 	evaluateDeterministicCompletionGates,
-	evaluateNoul,
 	type FinalCompletionVerdict,
 	readNoulBand,
 } from "./policy.ts";
@@ -779,45 +775,6 @@ export class SystemOneController {
 		return { change, doubts };
 	}
 
-	async validateIntake(): Promise<{
-		objectiveClear: boolean;
-		taskKind: string;
-		externalBlockerPresent: boolean;
-		decision: ValidationDecision;
-	}> {
-		const scope = this.captureStageExecution("intake");
-		this.syncCanonicalTruth();
-		this.assertStageCurrent(scope);
-		const projection = this.projector.intake(this.store.snapshot());
-		const { decision, answers, evaluationId } = await this.runStageValidation("intake", projection);
-
-		const clearAns = (answers.objective_clear as { noul?: number } | undefined)?.noul ?? 0;
-		const objectiveClear = evaluateNoul(clearAns, "required_true", this.config.thresholds) !== "hard_fail";
-
-		const taskKindAns = answers.task_kind as { choice?: string } | undefined;
-		const taskKind = taskKindAns?.choice ?? "implementation";
-
-		const blockerAns = (answers.external_blocker_present as { noul?: number } | undefined)?.noul ?? 0;
-		const externalBlockerPresent = evaluateNoul(blockerAns, "required_false", this.config.thresholds) === "hard_fail";
-
-		this.sealDecision(
-			decision,
-			objectiveClear && !externalBlockerPresent ? "accepted" : "blocked",
-			evaluationId,
-			undefined,
-			undefined,
-			scope,
-		);
-
-		if (externalBlockerPresent) {
-			this.store.transitionPhase("blocked_external", true);
-		} else if (this.store.phase === "init") {
-			this.store.transitionPhase("discovery", true);
-		}
-
-		return { objectiveClear, taskKind, externalBlockerPresent, decision };
-	}
-
 	/**
 	 * Validate preflight step before execution.
 	 * R-018: A semantic preflight validation MUST run before each repo mutation and before high-impact external actions.
@@ -842,77 +799,6 @@ export class SystemOneController {
 		if (directive) this.noteControlDirective(directive);
 
 		return { route, decision };
-	}
-
-	/**
-	 * Validate tool gate before execution.
-	 * R-020 / R-034 / R-035: Deterministic checks first; Jev cannot override deterministic denials.
-	 */
-	async validateToolGate(
-		toolRequest: { tool: string; intent: string; impact: ToolImpact; args?: unknown; call_id?: string },
-		deterministicCheck?: () => { allowed: boolean; reason?: string },
-	): Promise<{
-		outcome: "allow" | "confirm" | "block" | "replan";
-		reason?: string;
-		decision?: ValidationDecision;
-		toolEventId?: string;
-	}> {
-		const scope = this.captureStageExecution("tool_gate");
-		this.syncCanonicalTruth();
-		this.assertStageCurrent(scope);
-		// 1. Run deterministic checks first (R-020, R-034)
-		if (deterministicCheck) {
-			const det = deterministicCheck();
-			this.assertStageCurrent(scope);
-			if (!det.allowed) {
-				// Deterministic failure cannot be overridden by Jev (R-035)
-				const denied = this.store.recordToolEvent({
-					tool: toolRequest.tool,
-					intent: toolRequest.intent,
-					impact: toolRequest.impact,
-					status: "denied",
-					input_payload: toolRequest.args,
-					call_id: toolRequest.call_id,
-					reason: det.reason,
-				});
-				return {
-					outcome: "block",
-					reason: det.reason ?? "Blocked by deterministic tool authorization gate",
-					toolEventId: denied.id,
-				};
-			}
-		}
-
-		// 2. Semantic tool gate
-		const projection = this.projector.toolGate(this.store.snapshot(), toolRequest);
-		// No step to be relevant to (a plain session): the relevance question is not sent at all.
-		const relevanceEvaluable = projection.current_step !== undefined;
-		const { decision, answers, evaluationId } = await this.runStageValidation(
-			"tool_gate",
-			projection,
-			toolRequest.impact,
-			relevanceEvaluable ? [] : ["tool_call_relevant"],
-		);
-
-		const outcome = decideToolGate(answers, toolRequest.impact, this.config, { relevanceEvaluable });
-		this.sealDecision(decision, outcome, evaluationId, undefined, undefined, scope);
-
-		const status = outcome === "block" ? "denied" : outcome === "replan" ? "refused" : "allowed";
-		if (outcome === "replan") {
-			this.noteControlDirective(directiveFromToolReplan(toolRequest.tool));
-		}
-		this.assertStageCurrent(scope);
-		const event = this.store.recordToolEvent({
-			tool: toolRequest.tool,
-			intent: toolRequest.intent,
-			impact: toolRequest.impact,
-			status,
-			input_payload: toolRequest.args,
-			call_id: toolRequest.call_id,
-			reason: outcome === "replan" ? "not relevant to the current step" : undefined,
-		});
-
-		return { outcome, decision, toolEventId: event.id };
 	}
 
 	/**
@@ -1374,127 +1260,6 @@ export class SystemOneController {
 		this.syncCanonicalTruth();
 		if (!this.hasLiveObjective()) return;
 		await this.validatePostflight(objectiveId);
-	}
-
-	/**
-	 * Validate claim against cited evidence.
-	 * R-009 / R-010: Every material claim MUST reference fresh evidence.
-	 */
-	/** Stage-pack claim check. Production evidence authority is CompletionCoordinator + runtime evidence. */
-	async validateClaimEvidence(
-		claimId: string,
-		evidenceId: string,
-	): Promise<{
-		relationship: "supports" | "partially_supports" | "contradicts" | "insufficient" | "unrelated";
-		decision: ValidationDecision;
-	}> {
-		this.syncCanonicalTruth();
-		const projection = this.projector.evidenceCheck(this.store.snapshot(), claimId, evidenceId);
-		const { decision, answers, evaluationId } = await this.runStageValidation("evidence_check", projection);
-
-		const relAns = answers.relationship as
-			| {
-					choice?: string;
-					confidence?: number;
-					probabilities?: Record<string, number>;
-			  }
-			| undefined;
-		let relationship: "supports" | "partially_supports" | "contradicts" | "insufficient" | "unrelated" =
-			"insufficient";
-
-		if (relAns?.choice) {
-			const evalChoice = evaluateChoice(relAns as any, "normal", this.config.thresholds);
-			if (evalChoice.accepted) {
-				relationship = evalChoice.choice as any;
-			}
-		}
-
-		this.sealDecision(decision, relationship, evaluationId);
-
-		// Update claim status in store
-		switch (relationship) {
-			case "supports":
-				this.store.updateClaimStatus(claimId, "supported", decision.id);
-				break;
-			case "partially_supports":
-				this.store.updateClaimStatus(claimId, "partially_supported", decision.id);
-				break;
-			case "contradicts":
-				this.store.updateClaimStatus(claimId, "contradicted", decision.id);
-				break;
-			case "insufficient":
-			case "unrelated":
-				this.store.updateClaimStatus(claimId, "unverified", decision.id);
-				break;
-		}
-
-		return { relationship, decision };
-	}
-
-	/**
-	 * Duplicate logic stage pack. Production owner is SemanticResponsibilityController + SteeringPlane JEV-041..045.
-	 */
-	async validateDuplicateLogic(
-		candidateExistingLogic: string,
-		proposedLogic: string,
-	): Promise<{
-		sameResponsibility: boolean;
-		reusePreferable: "reuse_existing" | "extract_shared" | "separate_required" | "insufficient_evidence";
-		decision: ValidationDecision;
-	}> {
-		this.syncCanonicalTruth();
-		const projection = this.projector.duplicateLogic(candidateExistingLogic, proposedLogic);
-		const { decision, answers, evaluationId } = await this.runStageValidation("duplicate_logic", projection);
-
-		const respAns = (answers.same_responsibility as { noul?: number } | undefined)?.noul ?? 0;
-		const sameResponsibility = evaluateNoul(respAns, "required_true", this.config.thresholds) !== "hard_fail";
-
-		const reuseAns = answers.reuse_preferable as { choice?: string } | undefined;
-		const reusePreferable = (reuseAns?.choice as any) ?? "insufficient_evidence";
-
-		this.sealDecision(decision, `${sameResponsibility ? "duplicate" : "unique"}:${reusePreferable}`, evaluationId);
-
-		return { sameResponsibility, reusePreferable, decision };
-	}
-
-	/**
-	 * Drift stage pack. Production owner is ObjectiveStallDetector + JEV-004 strategy_repetition.
-	 */
-	async validateDriftLoop(): Promise<{
-		goalDrift: boolean;
-		repeatedStrategy: boolean;
-		staleContextDependency: boolean;
-		decision: ValidationDecision;
-	}> {
-		const scope = this.captureStageExecution("drift_loop");
-		this.syncCanonicalTruth();
-		this.assertStageCurrent(scope);
-		const projection = this.projector.driftCheck(this.store.snapshot());
-		const { decision, answers, evaluationId } = await this.runStageValidation("drift_loop", projection);
-
-		const driftAns = (answers.goal_drift as { noul?: number } | undefined)?.noul ?? 0;
-		const goalDrift = evaluateNoul(driftAns, "required_false", this.config.thresholds) === "hard_fail";
-
-		const repeatAns = (answers.repeated_strategy as { noul?: number } | undefined)?.noul ?? 0;
-		const repeatedStrategy = evaluateNoul(repeatAns, "required_false", this.config.thresholds) === "hard_fail";
-
-		const staleAns = (answers.stale_context_dependency as { noul?: number } | undefined)?.noul ?? 0;
-		const staleContextDependency = evaluateNoul(staleAns, "required_false", this.config.thresholds) === "hard_fail";
-
-		this.sealDecision(
-			decision,
-			goalDrift || repeatedStrategy || staleContextDependency ? "drift_detected" : "aligned",
-			evaluationId,
-			undefined,
-			undefined,
-			scope,
-		);
-
-		if (repeatedStrategy || goalDrift) {
-			this.store.transitionPhase("replan_required", true);
-		}
-
-		return { goalDrift, repeatedStrategy, staleContextDependency, decision };
 	}
 
 	/**

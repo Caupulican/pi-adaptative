@@ -1,6 +1,5 @@
 /**
- * Steering decision programs and question packs for JEV-001 through JEV-045.
- * Normative reference: STEERING_DECISION_PROGRAMS.md and MANDATORY_JEV_CHECKPOINTS.md
+ * Steering decision programs and question packs for the steering checkpoints the harness asks.
  * Implements typed Decision Kernel integration (PH-001..PH-005, PH-011, PH-066).
  */
 
@@ -29,7 +28,7 @@ export interface SteeringQuestionPack {
 }
 
 /**
- * The classes of remaining work the route checkpoint (JEV-004/005/006/024) offers in
+ * The classes of remaining work the route checkpoint (JEV-004/006/024) offers in
  * `missing_work_class`. The program's options and the route policy's switch both derive from this
  * type, so an option the policy does not route is a compile error rather than a silent implement.
  */
@@ -262,7 +261,6 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		case "JEV-004":
-		case "JEV-005":
 		case "JEV-006":
 		case "JEV-024": {
 			decisions.push(
@@ -514,112 +512,6 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 			break;
 		}
 
-		case "JEV-017": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "claim_supported",
-					instruction: "Is the worker claim supported by produced evidence?",
-				},
-				{
-					kind: "boolean",
-					id: "evidence_sufficient",
-					instruction: "Is evidence complete for worker turn finalization?",
-				},
-			);
-			break;
-		}
-
-		case "JEV-018": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "patch_matches_requirements",
-					instruction: "Does code mutation match objective requirements?",
-				},
-				{
-					kind: "boolean",
-					id: "side_effects_acceptable",
-					instruction: "Are all side effects within authorized envelope?",
-				},
-			);
-			break;
-		}
-
-		case "JEV-019": {
-			decisions.push(
-				{ kind: "boolean", id: "bug_reproduced", instruction: "Was the defect reproduced before fix?" },
-				{
-					kind: "boolean",
-					id: "fix_verified",
-					instruction:
-						"Does the evidence show the original reproduction, or an equivalent live check, passing on the fixed code?",
-				},
-				{ kind: "boolean", id: "causal_link_proven", instruction: "Is causal link between change and fix proven?" },
-			);
-			break;
-		}
-
-		case "JEV-020": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "boundaries_respected",
-					instruction: "Are coordinator and module boundaries respected?",
-				},
-				{ kind: "boolean", id: "invariants_held", instruction: "Are architectural doctrine invariants preserved?" },
-			);
-			break;
-		}
-
-		case "JEV-021": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "test_coverage_sufficient",
-					instruction: "Is regression coverage adequate for changed code?",
-				},
-				{
-					kind: "boolean",
-					id: "negative_tests_present",
-					instruction: "Are negative tests and abuse boundaries tested?",
-				},
-			);
-			break;
-		}
-
-		case "JEV-022": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "checks_relevant",
-					instruction: "Are verification checks directly relevant to requirements?",
-				},
-				{
-					kind: "boolean",
-					id: "criteria_covered",
-					instruction: "Are all acceptance criteria covered by verification?",
-				},
-			);
-			break;
-		}
-
-		case "JEV-023": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "repairs_sufficient",
-					instruction: "Are repair tasks sufficient to clear failed gates?",
-				},
-				{
-					kind: "boolean",
-					id: "root_cause_addressed",
-					instruction: "Is root cause addressed rather than symptomatic patch?",
-				},
-			);
-			break;
-		}
-
 		// Completion asks what the goal promised: the questions an evidence matrix settles. What needs reasoning
 		// about the change is the model's account, checked by the completion transaction.
 		case "JEV-025": {
@@ -665,23 +557,6 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					kind: "boolean",
 					id: "deploy_safe",
 					instruction: "Is deployment to target environment authorized and safe?",
-				},
-			);
-			break;
-		}
-
-		case "JEV-029":
-		case "JEV-030": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "demotion_recommended",
-					instruction: "Should this capability be demoted or retired?",
-				},
-				{
-					kind: "boolean",
-					id: "reuse_frequency_low",
-					instruction: "Has capability usage fallen below retention threshold?",
 				},
 			);
 			break;
@@ -786,42 +661,6 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				},
 				{ kind: "boolean", id: "proof_satisfied", instruction: "Were proof obligations satisfied with evidence?" },
 				{ kind: "boolean", id: "errors_cleared", instruction: "Were any execution errors resolved?" },
-			);
-			break;
-		}
-
-		case "JEV-037": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "quality_acceptable",
-					instruction: "Is specialist execution outcome of high quality?",
-				},
-				{ kind: "boolean", id: "reusability_high", instruction: "Is this specialist worth retaining in catalog?" },
-			);
-			break;
-		}
-
-		case "JEV-038":
-		case "JEV-039": {
-			decisions.push(
-				{
-					kind: "choice",
-					id: "lifecycle_choice",
-					instruction: "Recommended specialist retention lifecycle",
-					options: {
-						retain_one_task: { description: "Discard after single task" },
-						retain_session: { description: "Retain across active session" },
-						promote_project: { description: "Promote to project-level specialist" },
-						demote_ephemeral: { description: "Demote to ephemeral" },
-						retire: { description: "Retire specialist permanently" },
-					},
-				},
-				{
-					kind: "boolean",
-					id: "performance_adequate",
-					instruction: "Has specialist delivered verified positive outcomes?",
-				},
 			);
 			break;
 		}
@@ -1142,7 +981,7 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 	objective_route: {
 		id: "pi:steering:pack:objective_route:1.0",
 		version: "1.0",
-		checkpointIds: ["JEV-004", "JEV-005", "JEV-006", "JEV-024"],
+		checkpointIds: ["JEV-004", "JEV-006", "JEV-024"],
 		questions: [
 			{
 				id: "work_remaining",

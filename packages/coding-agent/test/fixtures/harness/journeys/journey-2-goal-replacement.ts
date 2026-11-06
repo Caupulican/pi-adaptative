@@ -35,9 +35,6 @@ const TURN_JUDGMENTS = {
 	evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
 	unsupported_assumption_present: { kind: "noul", probability: 0.02 },
 	route: { kind: "choice", choice: "inspect", confidence: 0.97 },
-	claim_supported: { kind: "noul", probability: 0.97 },
-	patch_matches_requirements: { kind: "noul", probability: 0.97 },
-	side_effects_acceptable: { kind: "noul", probability: 0.97 },
 	action_accomplished_step: { kind: "noul", probability: 0.02 },
 	conclusions_supported: { kind: "noul", probability: 0.97 },
 	scope_violation: { kind: "noul", probability: 0.02 },
@@ -46,14 +43,6 @@ const TURN_JUDGMENTS = {
 	next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 } as const;
 
-// The completed cancel/start control in CI asks none of these three judgments for B's turn.
-const {
-	claim_supported: _claimSupported,
-	patch_matches_requirements: _patchMatchesRequirements,
-	side_effects_acceptable: _sideEffectsAcceptable,
-	...REPLACEMENT_TURN_JUDGMENTS
-} = TURN_JUDGMENTS;
-
 const {
 	objective_coherent: _objectiveCoherent,
 	ambiguity_severity: _ambiguitySeverity,
@@ -61,7 +50,7 @@ const {
 	acceptance_complete: _acceptanceComplete,
 	grounding_sufficient: _groundingSufficient,
 	...CONTINUATION_TURN_JUDGMENTS
-} = REPLACEMENT_TURN_JUDGMENTS;
+} = TURN_JUDGMENTS;
 
 /** Extend journey 2's goal orchestration across a late route judgment and a real goal replacement. */
 export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Promise<void> {
@@ -69,7 +58,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 	await verifyReplacementVariant(world, true, true);
 	await verifyGoalRetrievalReplacement(world, {
 		bootstrap: TURN_JUDGMENTS,
-		first: REPLACEMENT_TURN_JUDGMENTS,
+		first: TURN_JUDGMENTS,
 		later: CONTINUATION_TURN_JUDGMENTS,
 		route: ROUTE_JUDGMENTS,
 	});
@@ -78,7 +67,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 		replacement: TURN_JUDGMENTS,
 		route: ROUTE_JUDGMENTS,
 	});
-	await verifyGoalCancellation(world, { active: TURN_JUDGMENTS, replacement: REPLACEMENT_TURN_JUDGMENTS });
+	await verifyGoalCancellation(world, { active: TURN_JUDGMENTS, replacement: TURN_JUDGMENTS });
 	await verifyToolHandoffOwnership(world, TURN_JUDGMENTS);
 }
 
@@ -187,7 +176,7 @@ async function verifyReplacementVariant(
 		expect(world.provider.requests, `${label}: replacement needs no provider turn`).toHaveLength(beforeRequests);
 		// A held transport request answers from its captured phase. B's script is ready before it
 		// settles, so an unintended old turn is observed as a real request rather than an unscripted-I/O failure.
-		world.systemOne.enterPhase(`${label}-b-control`, REPLACEMENT_TURN_JUDGMENTS);
+		world.systemOne.enterPhase(`${label}-b-control`, TURN_JUDGMENTS);
 		const answer = "The second boundary remains under inspection.";
 		world.provider.enqueue("root", text(`${label}-b-control`, answer));
 		releaseRoute.release();

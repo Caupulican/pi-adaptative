@@ -17,7 +17,7 @@ export type SystemOnePostflightStatus =
 	| "blocked";
 
 export interface SystemOneControlDirective {
-	readonly source: "preflight" | "postflight" | "tool_gate";
+	readonly source: "preflight" | "postflight";
 	readonly objectiveRoute: ObjectiveRouteName;
 	readonly reasonCodes: readonly string[];
 }
@@ -134,12 +134,4 @@ export function directiveFromPostflight(status: SystemOnePostflightStatus): Syst
 				reasonCodes: ["system_one_postflight_blocked"],
 			};
 	}
-}
-
-export function directiveFromToolReplan(tool: string): SystemOneControlDirective {
-	return {
-		source: "tool_gate",
-		objectiveRoute: "replan",
-		reasonCodes: [`system_one_tool_replan:${tool}`],
-	};
 }

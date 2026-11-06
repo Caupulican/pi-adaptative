@@ -590,8 +590,8 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			"the setup leaves exactly one open requirement",
 		).toBe(1);
 		// The cycle pattern of the orchestration objective cycle, routed to the executable edit path; the third cycle reports a repeated strategy.
-		// Judgment groups by cycle. Objective intake is asked once, in the first cycle; the implement turn is checked for its patch and side effects;
-		// the replan turn is checked for its repairs. The strategy_repetition answer is the only difference between the implement and replan groups.
+		// Judgment groups by cycle. Objective intake is asked once, in the first cycle. The strategy_repetition answer is the only difference
+		// between the implement and replan groups.
 		const e9Intake = {
 			objective_coherent: { kind: "noul", probability: 0.97 },
 			ambiguity_severity: { kind: "score", level: 0, confidence: 1 },
@@ -613,7 +613,6 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
 			unsupported_assumption_present: { kind: "noul", probability: 0.02 },
 			route: { kind: "choice", choice: "edit", confidence: 0.97 },
-			claim_supported: { kind: "noul", probability: 0.97 },
 			action_accomplished_step: { kind: "noul", probability: 0.02 },
 			conclusions_supported: { kind: "noul", probability: 0.97 },
 			scope_violation: { kind: "noul", probability: 0.02 },
@@ -623,13 +622,9 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		} as const;
 		const e9Implement = {
 			strategy_repetition: { kind: "noul", probability: 0.02 },
-			patch_matches_requirements: { kind: "noul", probability: 0.97 },
-			side_effects_acceptable: { kind: "noul", probability: 0.97 },
 		} as const;
 		const e9Replan = {
 			strategy_repetition: { kind: "noul", probability: 0.97 },
-			repairs_sufficient: { kind: "noul", probability: 0.97 },
-			root_cause_addressed: { kind: "noul", probability: 0.97 },
 		} as const;
 		const e9CycleJudgments = (cycle: number): Parameters<typeof world.systemOne.enterPhase>[1] => {
 			if (cycle === 1) return { ...e9Shared, ...e9Intake, ...e9Implement };

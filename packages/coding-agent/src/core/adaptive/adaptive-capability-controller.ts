@@ -1,7 +1,7 @@
 /**
  * Adaptive Capability Controller.
  * Resolves, synthesizes, tests, activates, and records lifecycle of capabilities.
- * Implements S1A-070..S1A-081, S1A-140..S1A-145, JEV-009..JEV-016, JEV-029..JEV-030.
+ * Implements S1A-070..S1A-081, S1A-140, S1A-141, JEV-009..JEV-016.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -13,7 +13,6 @@ import { EXPERT_ROUTING_SCHEMA_VERSION, type WorkerCapabilityRequest } from "../
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { AdaptationProjection } from "../operator-projection/types.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
-import { SteeringProtocolError } from "../steering/types.ts";
 import type { CapabilityCatalog } from "./capability-catalog.ts";
 import {
 	CAPABILITY_KIND_SUPPORT,
@@ -32,7 +31,6 @@ import { type CapabilityNeed, CapabilityResolver } from "./capability-resolution
 import type {
 	CapabilityGap,
 	CapabilityKind,
-	CapabilityLifetime,
 	CapabilityRecord,
 	CapabilitySpec,
 	EstablishedCapability,
@@ -783,77 +781,5 @@ export class AdaptiveCapabilityController {
 					: {}),
 			},
 		};
-	}
-
-	/**
-	 * Evaluates retention for a synthesized capability.
-	 * S1A-142: JEV-029 capability retention.
-	 */
-	async evaluateRetention(
-		capability: EstablishedCapability,
-		options: { objectiveId: string; taskId: string; evidenceRevision?: number },
-	): Promise<CapabilityLifetime | "discard"> {
-		const cert = await this.steering.requireCertificate(
-			"JEV-029",
-			{
-				capability: capability.spec,
-				record: capability.record,
-			},
-			{
-				objectiveId: options.objectiveId,
-				taskId: options.taskId,
-				evidenceRevision: options.evidenceRevision ?? 1,
-			},
-		);
-
-		const actionChoice = (cert.answers.lifecycle_action as { choice?: string })?.choice;
-		if (!actionChoice) {
-			throw new SteeringProtocolError("Missing lifecycle_action answer for JEV-029 capability retention", "JEV-029");
-		}
-
-		if (actionChoice === "project" || actionChoice === "global") {
-			// S1A-143: JEV-030 capability promotion
-			await this.steering.requireCertificate(
-				"JEV-030",
-				{
-					capability: capability.spec,
-					targetScope: actionChoice,
-				},
-				{
-					objectiveId: options.objectiveId,
-					taskId: options.taskId,
-					evidenceRevision: options.evidenceRevision ?? 1,
-				},
-			);
-
-			// S1A-145: Promoted capability enters catalog
-			const updatedSpec: CapabilitySpec = {
-				...capability.spec,
-				lifetime: actionChoice,
-			};
-			const updatedRecord: CapabilityRecord = {
-				...capability.record,
-				state: actionChoice === "global" ? "active_global" : "active_project",
-				updated_at: new Date().toISOString(),
-			};
-			this.catalog.registerCapability(updatedSpec, updatedRecord);
-			return actionChoice;
-		}
-
-		if (actionChoice === "session" || actionChoice === "discard") {
-			if (actionChoice === "discard") {
-				// S1A-144: One-shot discard
-				const discardedRecord: CapabilityRecord = {
-					...capability.record,
-					state: "discarded",
-					updated_at: new Date().toISOString(),
-				};
-				this.records.set(capability.capabilityId, discardedRecord);
-				return "discard";
-			}
-			return "session";
-		}
-
-		return "one_shot";
 	}
 }

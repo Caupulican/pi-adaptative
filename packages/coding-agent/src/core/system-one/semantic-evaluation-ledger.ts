@@ -245,7 +245,6 @@ const HOST_PROGRAM_FAMILIES: readonly { pattern: RegExp; label: string; namespac
 	{ pattern: /^rule_program_/, label: "project rules", namespace: "project-rules" },
 	{ pattern: /^retention_eval_/, label: "retention", namespace: "retention" },
 	{ pattern: /^supervision_eval_/, label: "worker supervision", namespace: "worker-supervision" },
-	{ pattern: /^objective-route-v2$/, label: "objective route", namespace: "objective-route" },
 	{ pattern: /^system-one:locate$/, label: "file locate", namespace: "file-locate" },
 	{ pattern: /^memory-summary-admission$/, label: "summary admission", namespace: "memory-summary-admission" },
 ];

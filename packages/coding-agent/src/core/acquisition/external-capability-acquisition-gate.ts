@@ -10,14 +10,6 @@ import type {
 	ResolvedSafeRoute,
 } from "./types.ts";
 
-export interface SteeringPlane {
-	requireCertificate(
-		checkpoint: string,
-		payload: unknown,
-		context?: { objectiveId?: string; taskId?: string; evidenceRevision?: number; signal?: AbortSignal },
-	): Promise<{ certificate_id: string; answers?: Record<string, unknown> }>;
-}
-
 export interface DecisionEngine {
 	evaluate(
 		program: unknown,
@@ -77,7 +69,6 @@ function noulProbability(answer: unknown): number | undefined {
 }
 
 export interface ExternalCapabilityAcquisitionGateDeps {
-	steering?: SteeringPlane;
 	decisionEngine?: DecisionEngine;
 	/** A semantic evaluation that threw: the gate keeps its conservative stance and says so here. */
 	onSemanticFailure?: (error: unknown) => void;
@@ -131,7 +122,6 @@ const NO_ACQUISITION_AUTHORITY = {
  * Implements FR-080..FR-090.
  */
 export class ExternalCapabilityAcquisitionGate {
-	private readonly steering?: SteeringPlane;
 	private readonly decisionEngine?: DecisionEngine;
 	private readonly availableCapabilities: Set<string>;
 	private readonly installedPackages: Set<string>;
@@ -147,7 +137,6 @@ export class ExternalCapabilityAcquisitionGate {
 	private readonly records: ExternalAcquisitionRecord[] = [];
 
 	constructor(deps: ExternalCapabilityAcquisitionGateDeps = {}) {
-		this.steering = deps.steering;
 		this.decisionEngine = deps.decisionEngine;
 		this.availableCapabilities = new Set(deps.availableCapabilities ?? []);
 		this.installedPackages = new Set(deps.installedPackages ?? []);
@@ -255,7 +244,7 @@ export class ExternalCapabilityAcquisitionGate {
 			);
 
 			if (isSevereExploit || (!fetchToShell && !unpinnedPkg)) {
-				const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null, null);
+				const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null);
 				const firstDeny = deterministicFindings.find((f) => f.level === "deny");
 				return {
 					disposition: "deny",
@@ -269,71 +258,24 @@ export class ExternalCapabilityAcquisitionGate {
 
 			// FR-086: For raw fetch-to-shell or unpinned requests, route to safe inspectable alternative
 			const safeRoute = this.determineSafeRoute(request);
-			const record = this.createAndStoreRecord(
+			return this.safeRouteDecision(
 				request,
 				digest,
 				deterministicFindings,
-				"rewrite_safe_route",
 				safeRoute,
-				null,
+				this.resolveRoute(safeRoute, request),
+				`Acquisition hardened · replaced unverified execution with ${safeRoute}`,
 			);
-
-			return {
-				disposition: "rewrite_safe_route",
-				chosenRoute: safeRoute,
-				resolvedRoute: this.resolveRoute(safeRoute, request),
-				record,
-				summaryEvent: `Acquisition hardened · replaced unverified execution with ${safeRoute}`,
-				allowed: false,
-				rewritten: true,
-				denied: false,
-			};
 		}
 
-		// FR-084: Jev semantic questions (only after deterministic screening passes)
-		let certificateId: string | null = null;
+		// FR-084: System One questions (only after deterministic screening passes)
 		let saferExistingPreferred = false;
 		let acquisitionRequired = true;
 		let sideEffectsProportionate = true;
 		let sourceMatchesCapability = true;
 		let semanticDecisionObserved = false;
 
-		if (this.steering) {
-			try {
-				const cert = await this.steering.requireCertificate(
-					"external_capability_acquisition",
-					{
-						objective_id: request.objectiveId,
-						...(request.capabilityId !== undefined ? { capability_id: request.capabilityId } : {}),
-						source: request.source,
-						...(request.revision !== undefined ? { revision: request.revision } : {}),
-						...(request.checksum !== undefined ? { checksum: request.checksum } : {}),
-						digest,
-						deterministic_findings: deterministicFindings,
-					},
-					{ objectiveId: request.objectiveId, signal: request.signal },
-				);
-				certificateId = cert.certificate_id;
-				if (cert.answers) {
-					semanticDecisionObserved = true;
-					if (typeof cert.answers.acquisition_required_for_objective === "boolean") {
-						acquisitionRequired = cert.answers.acquisition_required_for_objective;
-					}
-					if (typeof cert.answers.side_effects_proportionate === "boolean") {
-						sideEffectsProportionate = cert.answers.side_effects_proportionate;
-					}
-					if (typeof cert.answers.safer_existing_route_preferred === "boolean") {
-						saferExistingPreferred = cert.answers.safer_existing_route_preferred;
-					}
-					if (typeof cert.answers.source_matches_requested_capability === "boolean") {
-						sourceMatchesCapability = cert.answers.source_matches_requested_capability;
-					}
-				}
-			} catch (error) {
-				// The plane failed: the conservative stance stands, and the failure is reported, not hidden.
-				this.onSemanticFailure?.(error);
-			}
-		} else if (this.decisionEngine) {
+		if (this.decisionEngine) {
 			try {
 				const judgedRequest = request.request?.trim() || "(no request recorded)";
 				const evalRes = await this.decisionEngine.evaluate(
@@ -371,26 +313,16 @@ export class ExternalCapabilityAcquisitionGate {
 			const safeRoute = this.determineSafeRoute(request);
 			const resolved = this.resolveRoute(safeRoute, request);
 			if (resolved.command || resolved.requiresManualStep) {
-				const record = this.createAndStoreRecord(
+				return this.safeRouteDecision(
 					request,
 					digest,
 					deterministicFindings,
-					"rewrite_safe_route",
 					safeRoute,
-					certificateId,
+					resolved,
+					"Acquisition hardened · semantic decision unavailable under a mandatory plane",
 				);
-				return {
-					disposition: "rewrite_safe_route",
-					chosenRoute: safeRoute,
-					resolvedRoute: resolved,
-					record,
-					summaryEvent: "Acquisition hardened · semantic decision unavailable under a mandatory plane",
-					allowed: false,
-					rewritten: true,
-					denied: false,
-				};
 			}
-			const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null, certificateId);
+			const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null);
 			return {
 				disposition: "deny",
 				record,
@@ -402,7 +334,7 @@ export class ExternalCapabilityAcquisitionGate {
 		}
 
 		if (!acquisitionRequired || !sourceMatchesCapability) {
-			const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null, certificateId);
+			const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null);
 			return {
 				disposition: "deny",
 				record,
@@ -415,35 +347,18 @@ export class ExternalCapabilityAcquisitionGate {
 
 		if (!sideEffectsProportionate || saferExistingPreferred || hasRiskSignals) {
 			const safeRoute = this.determineSafeRoute(request);
-			const record = this.createAndStoreRecord(
+			return this.safeRouteDecision(
 				request,
 				digest,
 				deterministicFindings,
-				"rewrite_safe_route",
 				safeRoute,
-				certificateId,
+				this.resolveRoute(safeRoute, request),
+				`Acquisition hardened · replaced mutable installer with ${safeRoute}`,
 			);
-			return {
-				disposition: "rewrite_safe_route",
-				chosenRoute: safeRoute,
-				resolvedRoute: this.resolveRoute(safeRoute, request),
-				record,
-				summaryEvent: `Acquisition hardened · replaced mutable installer with ${safeRoute}`,
-				allowed: false,
-				rewritten: true,
-				denied: false,
-			};
 		}
 
 		// FR-089: Routine allow is silent
-		const record = this.createAndStoreRecord(
-			request,
-			digest,
-			deterministicFindings,
-			"allow",
-			"direct_verified",
-			certificateId,
-		);
+		const record = this.createAndStoreRecord(request, digest, deterministicFindings, "allow", "direct_verified");
 
 		return {
 			disposition: "allow",
@@ -584,6 +499,27 @@ export class ExternalCapabilityAcquisitionGate {
 	 * Turns a route label into something the caller can actually carry out. A label with no command
 	 * and no manual step is not a resolved route, and the gate treats that as a denial.
 	 */
+	/** The request replaced by its safer route, recorded as such. */
+	private safeRouteDecision(
+		request: AcquisitionRequest,
+		digest: string,
+		deterministicFindings: DeterministicFinding[],
+		safeRoute: string,
+		resolvedRoute: ResolvedSafeRoute,
+		summaryEvent: string,
+	): AcquisitionDecision {
+		return {
+			disposition: "rewrite_safe_route",
+			chosenRoute: safeRoute,
+			resolvedRoute,
+			record: this.createAndStoreRecord(request, digest, deterministicFindings, "rewrite_safe_route", safeRoute),
+			summaryEvent,
+			allowed: false,
+			rewritten: true,
+			denied: false,
+		};
+	}
+
 	private resolveRoute(route: string, request: AcquisitionRequest): ResolvedSafeRoute {
 		if (this.resolveRouteFn) return this.resolveRouteFn(route, request);
 		return resolveDefaultSafeRoute(route, request);
@@ -618,7 +554,6 @@ export class ExternalCapabilityAcquisitionGate {
 		deterministicFindings: DeterministicFinding[],
 		disposition: AcquisitionDisposition,
 		chosenRoute: string | null,
-		certificateId: string | null = null,
 	): ExternalAcquisitionRecord {
 		const record: ExternalAcquisitionRecord = {
 			schema_version: "1.0",
@@ -629,7 +564,6 @@ export class ExternalCapabilityAcquisitionGate {
 			revision: request.revision ?? null,
 			digest,
 			deterministic_findings: deterministicFindings,
-			jev_certificate_id: certificateId,
 			disposition,
 			chosen_route: chosenRoute,
 			created_at: new Date().toISOString(),

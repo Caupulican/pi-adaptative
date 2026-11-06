@@ -16,7 +16,6 @@ export interface ExternalAcquisitionRecord {
 	readonly revision?: string | null;
 	readonly digest?: string | null;
 	readonly deterministic_findings: readonly DeterministicFinding[];
-	readonly jev_certificate_id?: string | null;
 	readonly disposition: AcquisitionDisposition;
 	readonly chosen_route?: string | null;
 	readonly created_at: string;

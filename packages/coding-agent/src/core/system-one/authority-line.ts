@@ -47,12 +47,8 @@ const OBJECTIVE_TRANSITION_CHECKPOINTS: ReadonlySet<string> = new Set([
 	"JEV-028",
 ]);
 
-/** Checkpoints that authorize an operation which may not be undone or which leaves the machine. */
-const IRREVERSIBLE_CHECKPOINTS: ReadonlySet<string> = new Set(["external_capability_acquisition"]);
-
 export function authorityForCheckpoint(checkpointId: string): AuthorityKind {
 	if (OBJECTIVE_TRANSITION_CHECKPOINTS.has(checkpointId)) return "objective_transition";
-	if (IRREVERSIBLE_CHECKPOINTS.has(checkpointId)) return "irreversible";
 	return "reversible_work";
 }
 

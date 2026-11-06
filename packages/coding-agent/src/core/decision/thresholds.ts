@@ -167,8 +167,8 @@ export const STEERING_CUTS = Object.freeze({
 	/** JEV-004 and JEV-024 semantic outcome: `completion_plausible`. */
 	outcomeCompletionPlausible: 0.65,
 	/**
-	 * JEV-001 `ambiguity_severity` at level 2 or more, JEV-005 `semantic_progress` at level 0 or less: this much Score
-	 * mass on the adverse side flags it. A flag only sends the pass to `gather_more` or `replan`, the safe side, so the
+	 * JEV-001 `ambiguity_severity` at level 2 or more: this much Score mass on the adverse side flags it. A flag only
+	 * sends the pass to `gather_more`, the safe side, so the
 	 * pass needs more than half its mass clear of it. It is not {@link SCORE_BOUNDARY_MASS} (0.7, with a confidence
 	 * floor), which settles a side to act on; reading these flags at 0.7 would let a pass through on a 0.6 adverse mass.
 	 */

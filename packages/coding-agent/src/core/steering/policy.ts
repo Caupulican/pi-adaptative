@@ -53,8 +53,6 @@ export interface SteeringPolicyConfig {
 		readonly require_dependencies_certificate: string;
 		readonly require_materialization_certificate: string;
 		readonly require_effectiveness_certificate: string;
-		readonly require_retention_certificate: string;
-		readonly project_global_promotion_certificate: string;
 	};
 	readonly semantic_dedup: {
 		readonly enabled: boolean;
@@ -68,8 +66,6 @@ export interface SteeringPolicyConfig {
 		readonly textual_clone_gate_required: boolean;
 	};
 	readonly completion: {
-		readonly primary_certificate: string;
-		readonly adversarial_certificate: string;
 		readonly delivery_claim_certificate: string;
 		readonly release_readiness_certificate: string;
 	};
@@ -102,8 +98,6 @@ export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 		require_dependencies_certificate: "JEV-034",
 		require_materialization_certificate: "JEV-035",
 		require_effectiveness_certificate: "JEV-036",
-		require_retention_certificate: "JEV-038",
-		project_global_promotion_certificate: "JEV-039",
 	},
 	semantic_dedup: {
 		enabled: true,
@@ -117,8 +111,6 @@ export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 		textual_clone_gate_required: true,
 	},
 	completion: {
-		primary_certificate: "JEV-025",
-		adversarial_certificate: "JEV-026",
 		delivery_claim_certificate: "JEV-027",
 		release_readiness_certificate: "JEV-028",
 	},

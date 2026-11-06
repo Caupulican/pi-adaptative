@@ -18,9 +18,10 @@ Mandatory findings require receiving-lane reproduction, repair when confirmed, a
 
 - `objective_primary` (default whenever System One is bound): each continuation pass evaluates one
   objective route and executes it. The route comes from deterministic facts (cancellation, budget,
-  running attempts, the ledger's stall reading) and System One's judgments (`objective-route-v2`: task
-  kind, work remaining, missing work class, worker can continue, independent worker required,
-  capability escalation, external blocker, progress, context stale, strategy repetition).
+  running attempts, the ledger's stall reading) and System One's judgments (`JEV-004`: work
+  remaining, missing work class, evidence sufficient, semantic progress, strategy repetition, context
+  stale, independent worker required, capability escalation, capability gap suspected, completion
+  plausible).
 - `objective_shadow`: the legacy continuation drives; the route is evaluated for disagreement
   telemetry only.
 - `legacy_goal` (default without System One): the legacy continuation alone.
@@ -90,16 +91,17 @@ verification obligations before it evaluates. That store is a projection, not a 
 Completion cannot pass an empty or disconnected objective, empty required criteria on a real
 objective, or unresolved verification.
 
-Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024/025/026
-for objective-loop completion, JEV-041.. for semantic dedup. The goal tool first proves its
+Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024 and the
+completion transaction for objective-loop completion (JEV-025/026 ask the same packs only when no
+transaction verdict exists: a mechanical or reviewer profile, or an evaluator exception), JEV-041.. for semantic dedup. The goal tool first proves its
 deterministic requirements and checks, then asks `SystemOneController` to evaluate the same canonical
 completion view without persisting a terminal state. Every completion request reruns current proof;
 a previous rejection never latches an owner question. Received completion findings take priority in
 the receiving agent's own lane: verify against current evidence, revise confirmed failures, and
 recheck before continuing affected work. Failed requirement checks and unresolved findings refuse
 completion. Evaluator outages retain their actual diagnostics without inventing a defect.
-Other `SystemOneController` stage packs for intake, claim check, duplicate
-logic, patch review and drift remain callable for tests/hooks.
+The objective loop sends no postflight steering requests of its own after a step: the step's System One
+postflight and the next route evaluation judge it.
 
 ## Worker supervision
 
@@ -225,8 +227,8 @@ heuristic.
 | Decision | Program | Where |
 |---|---|---|
 | Is this operation harmful or off-request | `JEV-OPERATION-EFFECT` | shell-command gate |
-| Which route next | `JEV-004`, `objective-route-v2` | objective loop |
-| Is the goal complete, is each claim shown | `JEV-024..026`, completion account | goal completion |
+| Which route next | `JEV-004` | objective loop |
+| Is the goal complete, is each claim shown | `JEV-024`, completion transaction (`JEV-025`/`JEV-026` without one), completion account | goal completion |
 | Does the answer's claim stand | claim check | after every answer |
 | Does new code duplicate existing code | `system-one:code_duplicate` | edit review |
 | Which tool results to keep when compacting | `retention_eval_v2` | compaction |

@@ -19,13 +19,9 @@ import {
 	evaluateCharterAuthority,
 } from "../autonomy/execution-charter.ts";
 import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from "../autonomy/human-edge.ts";
-import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import { resolveEffectiveCompletionProfile } from "../decision/completion-profile.ts";
-import type { DecisionEngineRouter } from "../decision/engine-router.ts";
-import { booleanAnswer } from "../decision/evaluation.ts";
 import { settledAnswer } from "../decision/noul.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
-import { createDecisionProgram } from "../decision/program.ts";
 import type { ResponsibilityStatement, SemanticResponsibilityController } from "../dedup/index.ts";
 import type {
 	ExpertBinding,
@@ -151,8 +147,6 @@ export interface ObjectiveExecutionControllerDeps {
 		noteControlDirective?(directive: SystemOneControlDirective): void;
 	};
 	repoRoot?: string;
-	decisions?: DecisionEngineRouter;
-	actionPolicy?: DecisionActionPolicy;
 	authorityEnvelope?: AuthorityEnvelope;
 	humanEdgeLedger?: DurableHumanEdgeLedger;
 	completionProfile?: CompletionAssuranceProfile;
@@ -292,124 +286,6 @@ export interface ObjectiveExecutionControllerDeps {
 		}>;
 	};
 }
-
-export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
-	id: "objective-route-v2",
-	version: "2.1.0",
-	decisions: [
-		{
-			kind: "choice",
-			id: "task_kind",
-			instruction: "Which task class best describes the current objective?",
-			options: {
-				bug_fix: { description: "Investigate and correct wrong behavior" },
-				feature: { description: "Add a new capability or outcome" },
-				refactor: { description: "Restructure code without changing behavior" },
-				exploration: { description: "Investigate code, documentation, the machine or a service" },
-			},
-		},
-		{
-			kind: "boolean",
-			id: "work_remaining",
-			instruction: "Does required work or required proof remain unsatisfied?",
-		},
-		{
-			kind: "choice",
-			id: "missing_work_class",
-			instruction: "What primary canonical class of work remains to advance the objective?",
-			options: {
-				retrieve: {
-					description:
-						"Retrieve the code, docs, outputs, or machine and service state the open requirements depend on",
-					notFor: "Required context and files are already loaded and verified",
-				},
-				investigate: {
-					description: "Inspect what the objective concerns, trace the cause, explore hypotheses",
-					notFor: "Root cause is understood and exact code changes are planned",
-				},
-				implement: {
-					description: "Make the next change the objective needs: code, configuration, machine state or a service",
-					notFor: "Root cause or necessary evidence is still unresolved",
-				},
-				deterministic_test: {
-					description: "Run deterministic tests, checks or observations",
-					notFor: "No test or check commands are available or needed",
-				},
-				verify: {
-					description: "Verify behavior against required criteria",
-					notFor: "Implementation has not yet changed",
-				},
-				review: {
-					description: "Review the changes (a diff, configuration or machine state) against the requirements",
-					notFor: "Significant implementation work is still incomplete",
-				},
-				replan: {
-					description: "Strategy failed, scope changed, or replanning required",
-					notFor: "Current strategy is progressing smoothly",
-				},
-				none: {
-					description: "All required criteria verified and complete",
-					notFor: "Acceptance criteria or mechanical checks remain incomplete",
-				},
-				insufficient_evidence: {
-					description: "Insufficient evidence to determine the next action",
-					notFor: "Clear path forward is established with available evidence",
-				},
-			},
-		},
-		{
-			kind: "boolean",
-			id: "current_worker_can_continue",
-			instruction: "Can the current worker continue without resetting context or changing role?",
-		},
-		{
-			kind: "boolean",
-			id: "independent_worker_required",
-			instruction: "Does the current stage require a fresh or independent worker context?",
-		},
-		{
-			kind: "boolean",
-			id: "capability_escalation_required",
-			instruction: "Does the remaining work require escalated tools or reasoning models?",
-		},
-		{
-			kind: "boolean",
-			id: "external_blocker_present",
-			instruction: "Is progress blocked by external service, permissions, or missing user action?",
-		},
-		{
-			kind: "score",
-			id: "semantic_progress",
-			instruction: "Score the verified semantic progress made towards the objective",
-			levels: [
-				{ value: 0, description: "No verified progress" },
-				{ value: 1, description: "Useful evidence only" },
-				{ value: 2, description: "Acceptance advanced" },
-				{ value: 3, description: "Major uncertainty or required behavior resolved" },
-			],
-		},
-		{
-			kind: "boolean",
-			id: "context_stale",
-			instruction: "Has the worker context become stale relative to recent file or runtime changes?",
-		},
-		{
-			kind: "boolean",
-			id: "strategy_repetition",
-			instruction: "Is the execution repeating a failed strategy without acquiring new evidence?",
-		},
-		{
-			kind: "boolean",
-			id: "completion_plausible",
-			instruction: "Is the objective plausibly ready for formal completion verification?",
-		},
-		{
-			kind: "boolean",
-			id: "evidence_sufficient",
-			instruction: "Is the available evidence sufficient to substantiate the current state?",
-		},
-	],
-});
 
 function routeStateProjection(
 	deps: ObjectiveExecutionControllerDeps,
@@ -726,66 +602,7 @@ export class ObjectiveExecutionController {
 		let routeCertificateId: string | undefined;
 		const verificationPending = isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.());
 
-		if (!verificationPending && this.deps.decisions) {
-			try {
-				// FIN-034: Use bounded combined state projection
-				const stateProjection = routeStateProjection(
-					this.deps,
-					objectiveId,
-					runtime,
-					stall,
-					history,
-					initialDigest,
-					routeSnapshot,
-					(await captureOptionalSnapshot(this.deps.repoRoot))?.digest ?? "unknown",
-				);
-
-				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
-					signal: options?.signal,
-					consequence: "medium",
-				});
-
-				// FIN-035: Pass evaluation through DecisionActionPolicy
-				const policy = this.deps.actionPolicy ?? new DecisionActionPolicy();
-				const mwc = evaluation.results.missing_work_class;
-				let missingWorkClass: SemanticRouteJudgments["missingWorkClass"] =
-					mwc?.kind === "choice" ? (mwc.selected as SemanticRouteJudgments["missingWorkClass"]) : undefined;
-
-				if (mwc && mwc.kind === "choice") {
-					const disposition = policy.evaluateChoice(mwc, "medium");
-					if (disposition.action !== "accept") {
-						// Low confidence or unaccepted provenance routes to retrieve or insufficient_evidence
-						missingWorkClass = "insufficient_evidence";
-					}
-				}
-
-				const wr = evaluation.results.work_remaining;
-				const cwcc = evaluation.results.current_worker_can_continue;
-				const iwr = evaluation.results.independent_worker_required;
-				const cer =
-					evaluation.results.capability_escalation_required ?? evaluation.results.capability_escalation_needed;
-				const ebp = evaluation.results.external_blocker_present ?? evaluation.results.external_blocker;
-				const sp = evaluation.results.semantic_progress;
-				const cs = evaluation.results.context_stale;
-				const sr = evaluation.results.strategy_repetition;
-
-				// An ambiguous band reads as undefined here, exactly like a missing answer: the route
-				// must not treat "I cannot tell whether work remains" as "work remains".
-				semantic = {
-					workRemaining: booleanAnswer(wr),
-					missingWorkClass,
-					currentWorkerCanContinue: booleanAnswer(cwcc),
-					independentWorkerRequired: booleanAnswer(iwr),
-					capabilityEscalationRequired: booleanAnswer(cer),
-					externalBlockerPresent: booleanAnswer(ebp),
-					semanticProgress: sp?.kind === "score" ? sp.value : undefined,
-					contextStale: booleanAnswer(cs),
-					strategyRepetition: booleanAnswer(sr),
-				};
-			} catch (err) {
-				this.throwIfRequiredSemantic(err);
-			}
-		} else if (!verificationPending && this.deps.steeringPlane) {
+		if (!verificationPending && this.deps.steeringPlane) {
 			try {
 				const stateProjection = routeStateProjection(
 					this.deps,
@@ -1399,7 +1216,6 @@ export class ObjectiveExecutionController {
 					if (failure) return failure;
 
 					this.acknowledgeRouteRequests(route);
-					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
 
@@ -1416,7 +1232,6 @@ export class ObjectiveExecutionController {
 					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
 					this.assertExecutionCurrent(objectiveId);
 					this.acknowledgeRouteRequests(route);
-					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 
 				case "escalate_capability": {
@@ -1478,7 +1293,6 @@ export class ObjectiveExecutionController {
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, true, signal);
 					if (failure) return failure;
 					this.acknowledgeRouteRequests(route);
-					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
 
@@ -1721,14 +1535,17 @@ export class ObjectiveExecutionController {
 					}
 
 					if (evalResult.verdict === "complete") {
-						// JEV-025/JEV-026 read the same completion view the goal tool's completion judges: the
-						// outcome evidence per criterion, the diff only when the repository changed.
-						const completion = await this.deps.systemOne?.completionView?.(signal);
+						// A completion transaction that returned a verdict already asked the completion and challenge
+						// packs on the completion view, and evalResult carries it. JEV-025/JEV-026 ask those packs only
+						// when no transaction verdict exists: a mechanical or reviewer profile, or an evaluator exception
+						// the coordinator fell back from.
+						const completion =
+							completionFinding === undefined ? await this.deps.systemOne?.completionView?.(signal) : undefined;
 						const completionEvidence = completion
 							? { ...completion.view, repository_outcome: completion.repositoryOutcome }
 							: {};
-						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
-						if (this.deps.steeringPlane) {
+						if (completionFinding === undefined && this.deps.steeringPlane) {
+							// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 							const j25 = await judgeTransition(
 								this.deps.steeringPlane,
 								"JEV-025",
@@ -1750,10 +1567,8 @@ export class ObjectiveExecutionController {
 									...(j25.certificate.failed_semantic_predicates ?? []),
 								]);
 							}
-						}
 
-						// 4. PH-153, FC-064, FC-073: JEV-026 cold adversarial challenge (cold proof-bearing)
-						if (this.deps.steeringPlane) {
+							// 4. PH-153, FC-064, FC-073: JEV-026 cold adversarial challenge (cold proof-bearing)
 							const coldProofState = {
 								objectiveId,
 								acceptanceCriteria: canonicalProofState.acceptanceCriteria,
@@ -2259,172 +2074,6 @@ export class ObjectiveExecutionController {
 			}
 		}
 		return undefined;
-	}
-
-	async enforcePostflightCertificates(
-		first: string | ObjectiveRoute | { route: string },
-		second?: string | ObjectiveRoute | { route: string },
-		signal?: AbortSignal,
-	): Promise<void> {
-		let objectiveId: string;
-		let route: ObjectiveRoute;
-		if (typeof first === "string") {
-			objectiveId = first;
-			route = typeof second === "string" ? ({ route: second } as ObjectiveRoute) : (second as ObjectiveRoute);
-		} else {
-			route = first as ObjectiveRoute;
-			objectiveId = second as string;
-		}
-		const rawRuntime = this.deps.runtime as any;
-		const runtime: TaskRuntimeProjection =
-			rawRuntime?.objectives && rawRuntime?.tasks
-				? (rawRuntime as TaskRuntimeProjection)
-				: await this.deps.runtime.reconcileObjective(objectiveId);
-		await this._runObjectivePostflight(objectiveId, route, runtime, signal);
-	}
-
-	private async _runObjectivePostflight(
-		objectiveId: string,
-		route: ObjectiveRoute,
-		runtime: TaskRuntimeProjection,
-		signal?: AbortSignal,
-	): Promise<void> {
-		if (!this.deps.steeringPlane) return;
-
-		const { evidenceRevision, artifacts, verificationMatrix } = await this._resolveCanonicalEvidenceState(
-			objectiveId,
-			runtime,
-		);
-		const taskId = `${objectiveId}-${route.route}-${this.cycleCounter}`;
-		const changedFiles = artifacts.map((a) => a.path);
-		const objRecord = runtime?.objectives?.[objectiveId];
-		const steeringPlane = this.deps.steeringPlane;
-		const requirePostflightCertificate = async (
-			...args: Parameters<SystemOneSteeringPlane["requireCertificate"]>
-		): Promise<void> => {
-			this.assertExecutionCurrent(objectiveId);
-			try {
-				await steeringPlane.requireCertificate(...args);
-			} catch (error) {
-				if (!isReversibleDoubtOrOutage(error) && steeringPlane.policy.mode === "system_one_required") {
-					throw error;
-				}
-			}
-			this.assertExecutionCurrent(objectiveId);
-		};
-
-		// FC-050: JEV-017 worker claim support
-		await requirePostflightCertificate(
-			"JEV-017",
-			{
-				objectiveId,
-				taskId,
-				route: route.route,
-				workerRole: this._lastBinding?.role ?? "implementer",
-				claims: ["work_completed", "progress_reported"],
-			},
-			{ objectiveId, taskId, evidenceRevision, signal },
-		);
-
-		// PRC-050, PRC-051: JEV-018 raw proof state (no asserted patchFit: true)
-		if (route.route === "implement") {
-			await requirePostflightCertificate(
-				"JEV-018",
-				{
-					objectiveId,
-					taskId,
-					changedFiles,
-					artifacts,
-					requirements:
-						objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
-				},
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		}
-
-		// PRC-050, PRC-051: JEV-019 raw proof state (no asserted causalityVerified: true)
-		const isBugFix = requestsBugFix(objectiveId, objRecord?.objective?.description);
-		if (isBugFix) {
-			await requirePostflightCertificate(
-				"JEV-019",
-				{
-					objectiveId,
-					taskId,
-					bugFix: true,
-					changedFiles,
-					reproducerResults: (objRecord?.evidence ?? []).filter((e) => e.kind === "test"),
-					verificationMatrix,
-				},
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		}
-
-		// PRC-050, PRC-051: JEV-020 raw proof state (no asserted architectureFit: true)
-		const isArchitectureChange = Boolean(
-			route.route === "implement" &&
-				(objectiveId.toLowerCase().includes("refactor") ||
-					changedFiles.some((f) => f.includes("architecture") || f.includes("core"))),
-		);
-		if (isArchitectureChange) {
-			await requirePostflightCertificate(
-				"JEV-020",
-				{
-					objectiveId,
-					taskId,
-					changedFiles,
-					modulesAffected: changedFiles.map((f) => f.split("/")[0] || f),
-					boundaries: ["core", "orchestration", "adaptive", "steering"],
-				},
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		}
-
-		// PRC-050, PRC-051: JEV-022 raw proof state (no asserted verificationRelevance: true)
-		if (route.route === "verify") {
-			await requirePostflightCertificate(
-				"JEV-022",
-				{
-					objectiveId,
-					taskId,
-					verificationMatrix,
-					acceptanceCriteria:
-						objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
-				},
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		}
-
-		// PRC-050, PRC-051: JEV-023 raw proof state (no asserted repairAdequate: true)
-		const isRepair = Boolean(
-			route.route === "replan" || Object.keys(runtime.tasks).some((tid) => tid.includes("repair")),
-		);
-		if (isRepair) {
-			await requirePostflightCertificate(
-				"JEV-023",
-				{
-					objectiveId,
-					taskId,
-					repairWork: Object.keys(runtime.tasks).filter((tid) => tid.includes("repair")),
-					changedFiles,
-					failedGates: (objRecord as any)?.failedGates ?? [],
-				},
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		}
-
-		// FC-056: JEV-005 semantic progress
-		await requirePostflightCertificate(
-			"JEV-005",
-			{ objectiveId, cycleCount: this.cycleCounter },
-			{ objectiveId, taskId, evidenceRevision, signal },
-		);
-
-		// FC-057: JEV-006 repetition
-		await requirePostflightCertificate(
-			"JEV-006",
-			{ objectiveId, strategy: route.route },
-			{ objectiveId, taskId, evidenceRevision, signal },
-		);
 	}
 
 	private async _recordCompletionOutcomes(

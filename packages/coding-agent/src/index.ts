@@ -487,10 +487,6 @@ export {
 	PolicyPackValidationError,
 	resolveVerifiedPolicyPack,
 } from "./core/system-one/policy-pack.ts";
-export {
-	DefaultSemanticValidator,
-	type DefaultSemanticValidatorOptions,
-} from "./core/system-one/public-validator.ts";
 export { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "./core/tool-capability-policy.ts";
 export {
 	type AskQuestion,

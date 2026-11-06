@@ -14,5 +14,4 @@ export * from "./policy.ts";
 export * from "./policy-pack.ts";
 export * from "./projector.ts";
 export * from "./provider-driver.ts";
-export * from "./public-validator.ts";
 export * from "./types.ts";

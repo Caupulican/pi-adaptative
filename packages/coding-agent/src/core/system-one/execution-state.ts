@@ -521,18 +521,6 @@ export class ExecutionStore {
 		return claim;
 	}
 
-	updateClaimStatus(claimId: string, status: ClaimStatus, decisionId?: string): void {
-		const claim = this.state.claims.find((c) => c.id === claimId);
-		if (!claim) {
-			throw new Error(`Claim not found: ${claimId}`);
-		}
-		claim.status = status;
-		if (decisionId && !claim.decision_ids?.includes(decisionId)) {
-			claim.decision_ids = [...(claim.decision_ids ?? []), decisionId];
-		}
-		this.state.updated_at = new Date().toISOString();
-	}
-
 	/**
 	 * Record or update a competing causal/design hypothesis.
 	 * R-016: Bug hunts MUST preserve competing hypotheses until evidence rejects or supports them.

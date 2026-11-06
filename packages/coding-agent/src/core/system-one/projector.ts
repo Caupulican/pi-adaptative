@@ -1,5 +1,5 @@
 import type { OutcomeEvidenceRow } from "./completion-evidence-gaps.ts";
-import type { ExecutionState, ToolImpact } from "./types.ts";
+import type { ExecutionState } from "./types.ts";
 import { hasRepositoryOutcome, WORK_DIFF_PATCH_LIMIT, type WorkDiff } from "./work-diff.ts";
 
 /**
@@ -105,32 +105,6 @@ export class StateProjector {
 	}
 
 	/**
-	 * Intake projection: objective clarity, task kind, external blockers.
-	 */
-	intake(state: ExecutionState): Record<string, unknown> {
-		return {
-			objective: {
-				request: this.redactText(state.objective.request),
-				normalized_goal: this.redactText(state.objective.normalized_goal),
-				acceptance_criteria: state.objective.acceptance_criteria.map((ac) => ({
-					id: ac.id,
-					text: this.redactText(ac.text),
-					required: ac.required,
-				})),
-				constraints: this.constraints(state),
-				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
-			},
-			repo: {
-				root: this.redactText(state.repo.root),
-				baseline_revision: this.redactText(state.repo.baseline_revision),
-				...(state.repo.languages !== undefined
-					? { languages: state.repo.languages.map((language) => this.redactText(language)) }
-					: {}),
-			},
-		};
-	}
-
-	/**
 	 * Preflight projection: step relevance, evidence sufficiency, unsupported assumptions, next route.
 	 */
 	preflight(state: ExecutionState, stepId: string): Record<string, unknown> {
@@ -184,64 +158,6 @@ export class StateProjector {
 	}
 
 	/**
-	 * Tool-gate projection: tool relevance, semantic scope risk, prompt injection detection.
-	 */
-	toolGate(
-		state: ExecutionState,
-		toolRequest: { tool: string; intent: string; impact: ToolImpact; args?: unknown },
-	): Record<string, unknown> {
-		// A plain session has no objective (empty normalized goal) and no plan step; asking whether a
-		// call is relevant to nothing yields "not relevant" for every call. Relevance is evaluable
-		// only against a real step or a real goal, and the projection says so by omitting the step.
-		const activeStep = state.plan.steps.find((s) => s.status === "active");
-		const stepGoal = activeStep?.goal ?? state.objective.normalized_goal;
-		const currentStep = stepGoal.trim().length > 0 ? { goal: this.redactText(stepGoal) } : undefined;
-
-		const untrustedText = toolRequest.args ? this.redactText(JSON.stringify(toolRequest.args)) : "";
-
-		return {
-			...(currentStep ? { current_step: currentStep } : {}),
-			tool_request: {
-				tool: this.redactText(toolRequest.tool),
-				intent: this.redactText(toolRequest.intent),
-				impact: toolRequest.impact,
-			},
-			untrusted_text: untrustedText,
-		};
-	}
-
-	/**
-	 * Evidence-check projection: relationship between cited evidence and claim.
-	 */
-	evidenceCheck(state: ExecutionState, claimId: string, evidenceId: string): Record<string, unknown> {
-		const claim = state.claims.find((c) => c.id === claimId) || {
-			id: claimId,
-			text: "Unknown claim",
-			materiality: "material",
-		};
-		const obs = state.observations.find((o) => o.id === evidenceId) || {
-			id: evidenceId,
-			text: "Unknown observation",
-			source: { locator: "none", content_hash: "none", trust: "authoritative" },
-		};
-
-		return {
-			claim: {
-				id: claim.id,
-				text: this.redactText(claim.text),
-				materiality: claim.materiality,
-			},
-			evidence: {
-				id: obs.id,
-				text: this.redactText(obs.text),
-				locator: this.redactText(obs.source.locator),
-				content_hash: obs.source.content_hash,
-				trust: obs.source.trust,
-			},
-		};
-	}
-
-	/**
 	 * Postflight projection: step accomplishment, claim support, scope violation, next status.
 	 */
 	postflight(state: ExecutionState, stepId: string): Record<string, unknown> {
@@ -283,39 +199,6 @@ export class StateProjector {
 			new_evidence: recentObservations,
 			worker_claims: workerClaims,
 			diff_view: diffSummary,
-		};
-	}
-
-	/**
-	 * Drift-loop projection: goal drift, repeated strategy, stale context, semantic progress.
-	 */
-	driftCheck(state: ExecutionState): Record<string, unknown> {
-		const recentActions = state.tool_events.slice(-8).map((te) => ({
-			tool: this.redactText(te.tool),
-			intent: this.redactText(te.intent),
-			status: te.status,
-		}));
-
-		return {
-			objective: {
-				normalized_goal: this.redactText(state.objective.normalized_goal),
-				acceptance_criteria: state.objective.acceptance_criteria.map((ac) => ({
-					id: ac.id,
-					status: ac.status,
-				})),
-			},
-			recent_action_sequence: recentActions,
-			stale_observations_count: state.observations.filter((o) => o.freshness === "stale").length,
-		};
-	}
-
-	/**
-	 * Duplicate logic projection: candidate existing vs proposed logic semantic responsibility.
-	 */
-	duplicateLogic(candidateExisting: string, proposedLogic: string): Record<string, unknown> {
-		return {
-			candidate_existing_logic: wrapUntrustedText(candidateExisting, "repository", this.userKeys),
-			proposed_logic: this.redactText(proposedLogic),
 		};
 	}
 

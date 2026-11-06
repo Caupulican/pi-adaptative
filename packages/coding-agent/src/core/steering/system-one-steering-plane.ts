@@ -480,16 +480,6 @@ export class SystemOneSteeringPlane {
 				break;
 			}
 
-			case "JEV-005": {
-				if (
-					(this.scoreMass(answers.semantic_progress, (level) => level <= 0) ?? 0) >= STEERING_CUTS.scoreAdverseMass
-				) {
-					failed.push("semantic_progress_positive");
-					outcome = "replan";
-				}
-				break;
-			}
-
 			case "JEV-006": {
 				if (this.isTruthy(answers.strategy_repetition, undefined, "strategy_repetition")) {
 					failed.push("no_strategy_repetition");
@@ -587,70 +577,6 @@ export class SystemOneSteeringPlane {
 					failed.push("regression_absent");
 				if (!this.isTruthy(answers.commit_approved, undefined, "commit_approved")) failed.push("commit_approved");
 				if (failed.length > 0) outcome = "fail";
-				break;
-			}
-
-			case "JEV-017": {
-				if (!this.isTruthy(answers.claim_supported, undefined, "claim_supported")) failed.push("claim_supported");
-				if (!this.isTruthy(answers.evidence_sufficient, undefined, "evidence_sufficient"))
-					failed.push("evidence_sufficient");
-				if (failed.length > 0) outcome = "fail";
-				break;
-			}
-
-			case "JEV-018": {
-				if (!this.isTruthy(answers.patch_matches_requirements, undefined, "patch_matches_requirements"))
-					failed.push("patch_matches_requirements");
-				if (!this.isTruthy(answers.side_effects_acceptable, undefined, "side_effects_acceptable"))
-					failed.push("side_effects_acceptable");
-				if (failed.length > 0) outcome = "repair";
-				break;
-			}
-
-			case "JEV-019": {
-				if (!this.isTruthy(answers.bug_reproduced, undefined, "bug_reproduced")) failed.push("bug_reproduced");
-				if (!this.isTruthy(answers.fix_verified, undefined, "fix_verified")) failed.push("fix_verified");
-				if (!this.isTruthy(answers.causal_link_proven, undefined, "causal_link_proven"))
-					failed.push("causal_link_proven");
-				if (failed.length > 0) outcome = "repair";
-				break;
-			}
-
-			case "JEV-020": {
-				if (!this.isTruthy(answers.boundaries_respected, undefined, "boundaries_respected"))
-					failed.push("boundaries_respected");
-				if (!this.isTruthy(answers.invariants_held, undefined, "invariants_held")) failed.push("invariants_held");
-				if (failed.length > 0) outcome = "block";
-				break;
-			}
-
-			case "JEV-021": {
-				if (!this.isTruthy(answers.test_coverage_sufficient, undefined, "test_coverage_sufficient"))
-					failed.push("test_coverage_sufficient");
-				if (
-					answers.negative_tests_present !== undefined &&
-					!this.isTruthy(answers.negative_tests_present, undefined, "negative_tests_present")
-				) {
-					failed.push("negative_tests_present");
-				}
-				if (failed.length > 0) outcome = "repair";
-				break;
-			}
-
-			case "JEV-022": {
-				if (!this.isTruthy(answers.checks_relevant, undefined, "checks_relevant")) failed.push("checks_relevant");
-				if (!this.isTruthy(answers.criteria_covered, undefined, "criteria_covered"))
-					failed.push("criteria_covered");
-				if (failed.length > 0) outcome = "repair";
-				break;
-			}
-
-			case "JEV-023": {
-				if (!this.isTruthy(answers.repairs_sufficient, undefined, "repairs_sufficient"))
-					failed.push("repairs_sufficient");
-				if (!this.isTruthy(answers.root_cause_addressed, undefined, "root_cause_addressed"))
-					failed.push("root_cause_addressed");
-				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 

@@ -1,7 +1,7 @@
 /**
  * Specialist Synthesis Controller.
  * Synthesizes and materializes task-scoped specialists using H-MoE and TaskProfileWriter.
- * Implements S1A-177..S1A-199, JEV-031..JEV-039, PH-040..PH-051.
+ * Implements S1A-177..S1A-199, JEV-031..JEV-036, PH-040..PH-051.
  */
 
 import { randomUUID } from "node:crypto";
@@ -15,7 +15,6 @@ import type { SpecialistCatalog, SpecialistCatalogEntry } from "./specialist-cat
 import type {
 	MaterializedSpecialist,
 	SpecialistCognitiveRequirements,
-	SpecialistLifetime,
 	SpecialistRecord,
 	SpecialistSpec,
 } from "./types.ts";
@@ -454,82 +453,5 @@ export class SpecialistSynthesisController {
 		}
 		// The advisory family's pass (0.7): retaining a specialist is reversible work.
 		return missionFulfilled === "hard_pass";
-	}
-
-	/**
-	 * Evaluates retention and lifecycle for a synthesized specialist.
-	 * S1A-190, S1A-191, PH-050: no lifecycle semantic defaults.
-	 */
-	async evaluateRetention(
-		specialist: MaterializedSpecialist,
-		effective: boolean,
-		options: { objectiveId: string; taskId: string; evidenceRevision?: number } = {
-			objectiveId: "obj",
-			taskId: "task",
-		},
-	): Promise<SpecialistLifetime | "discard"> {
-		const cert = await this.steering.requireCertificate(
-			"JEV-038",
-			{
-				specialist: specialist.spec,
-				effective,
-			},
-			{
-				objectiveId: options.objectiveId,
-				taskId: options.taskId,
-				evidenceRevision: options.evidenceRevision ?? 1,
-			},
-		);
-
-		const actionChoice =
-			(cert.answers.lifecycle_choice as { choice?: string } | undefined)?.choice ??
-			(cert.answers.lifecycle_action as { choice?: string } | undefined)?.choice;
-
-		if (!actionChoice) {
-			throw new SpecialistMaterializationError("Missing specialist lifecycle choice in JEV-038");
-		}
-
-		if (actionChoice === "promote_project" || actionChoice === "project" || actionChoice === "global") {
-			const scope = actionChoice === "global" ? "global" : "project";
-			await this.steering.requireCertificate(
-				"JEV-039",
-				{
-					specialist: specialist.spec,
-					targetScope: scope,
-				},
-				{
-					objectiveId: options.objectiveId,
-					taskId: options.taskId,
-					evidenceRevision: options.evidenceRevision ?? 1,
-				},
-			);
-
-			const updatedSpec: SpecialistSpec = {
-				...specialist.spec,
-				lifetime: scope === "global" ? "global" : "project",
-			};
-			const record: SpecialistRecord = {
-				schema_version: "1.0",
-				specialist_id: updatedSpec.specialist_id,
-				spec_version: updatedSpec.version,
-				state: scope === "global" ? "retained_global" : "retained_project",
-				profile_ids: [specialist.profileId],
-				certificate_refs: [cert.certificate_id],
-				success_count: 1,
-				created_at: new Date().toISOString(),
-			};
-			this.catalog.registerSpecialist(updatedSpec, record);
-			return updatedSpec.lifetime;
-		}
-
-		if (actionChoice === "retain_session" || actionChoice === "session") {
-			return "session";
-		}
-
-		if (actionChoice === "retain_one_task" || actionChoice === "task" || actionChoice === "one_task") {
-			return "one_task";
-		}
-
-		return "discard";
 	}
 }
