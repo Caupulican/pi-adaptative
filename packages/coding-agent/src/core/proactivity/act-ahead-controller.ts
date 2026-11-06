@@ -190,7 +190,10 @@ export class ActAheadController {
 			return;
 		}
 		this.again = false;
-		this.running = this.pass()
+		// The pass starts past this stack: its synchronous prefix commits to the worker ledger (acknowledging a worker's
+		// notification), whose listeners call back here, and they must find this pass running instead of starting another.
+		this.running = Promise.resolve()
+			.then(() => this.pass())
 			.catch((error: unknown) => {
 				if (!this.abort.signal.aborted)
 					this.deps.warn(`Acting ahead stopped a step: ${error instanceof Error ? error.message : String(error)}`);
@@ -222,7 +225,8 @@ export class ActAheadController {
 
 	private async pass(): Promise<void> {
 		const manager = this.deps.getSessionManager();
-		if (this.deps.isDisposed() || !manager.isPersisted() || !manager.getSessionFile()) return;
+		if (this.abort.signal.aborted || this.deps.isDisposed() || !manager.isPersisted() || !manager.getSessionFile())
+			return;
 		const episodes = this.episodes();
 		// One episode at a time: an unfinished one is carried forward before anything new starts.
 		for (const episode of episodes.values()) {
@@ -427,7 +431,11 @@ export class ActAheadController {
 			basis === "reproduced"
 				? `CI failed on ${sha}, reproduced locally: a fix is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`
 				: `CI failed on ${sha}: a fix diagnosed from the CI log (the failing step is not re-run locally) is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`;
-		this.deps.observeNotice("act-ahead", () => ({ scope: base.episode, state: { reason: "ready", text } }));
+		// A notice's id is its session, kind and reason (not its scope): the episode in the reason makes each fix its own.
+		this.deps.observeNotice("act-ahead", () => ({
+			scope: base.episode,
+			state: { reason: `ready:${base.episode}`, text },
+		}));
 		return undefined;
 	}
 
