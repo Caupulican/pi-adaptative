@@ -225,6 +225,12 @@ interface JudgedAnswer {
 	readonly confidence: number;
 }
 
+/**
+ * The retained judgment's shape, part of its work key: a judgment kept in an earlier shape (a Choice without its
+ * probability) is asked again instead of being read as an answer it does not hold.
+ */
+const KNOWLEDGE_JUDGMENT_FORMAT = 2;
+
 /** What one judgment answered, reduced to what admission reads. Content-free, so it is retained and reused. */
 interface KnowledgeJudgment {
 	readonly calibrated: boolean;
@@ -798,7 +804,12 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			occupancy: "background" as const,
 		};
 		if (!engine.capabilities().requestLifecycle) return judgmentOf(await engine.evaluate(program, state, options));
-		const key = canonicalDigest({ program, state, engine: [engine.id, engine.model] });
+		const key = canonicalDigest({
+			program,
+			state,
+			engine: [engine.id, engine.model],
+			format: KNOWLEDGE_JUDGMENT_FORMAT,
+		});
 		const retained = store.work.read(key);
 		if (retained !== undefined) return retainedJudgment(retained);
 		let begun = false;
