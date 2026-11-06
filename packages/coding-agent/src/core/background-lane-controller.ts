@@ -1695,15 +1695,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
 			subscribeForegroundActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
 			settings: () => this.deps.getSettingsManager().getActAheadSettings(),
-			hostEvents: this._hostEventFeed(),
+			// Acting ahead never builds the worker ledger to look for a failure: host events exist only once a host-event
+			// session built it, and an unfinished episode builds it through `workers` to finish.
+			hostEvents: {
+				feed: () => (this._workerLifecycle ? this._hostEventFeed().feed() : { events: [], replayGaps: "" }),
+				subscribe: this._hostEventFeed().subscribe,
+			},
 			workers: {
 				contextForDirectory: (cwd, signal) => this._getWorkerController().contextForDirectory(cwd, signal),
 				start: (request, signal) => this.startWorkerDelegation(request, signal),
 				snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
-				subscribe: (listener) => {
-					this._getWorkerLifecycle();
-					return this.subscribeOrchestrationStore(listener);
-				},
+				// Before the ledger exists this follows lane-record changes, which its store's commits raise once it does.
+				subscribe: (listener) => this.subscribeOrchestrationStore(listener),
 				terminalNotification: (attemptId) => this._getWorkerLifecycle().getAttemptTerminalNotification(attemptId),
 				acknowledge: (notificationIds) => this._getWorkerLifecycle().markNotificationsDelivered(notificationIds),
 			},

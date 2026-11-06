@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { harnessPath, projectPath } from "../session-fixture.ts";
+import { runJourney3ActAheadPhase } from "./journey-3-act-ahead.ts";
 import { runJourney3ContinuousChatPhase } from "./journey-3-continuous-chat.ts";
 import { runJourney3WorktreeAndGatesPhase } from "./journey-3-worktree-and-gates.ts";
 /**
@@ -42,6 +43,7 @@ export async function runJourney3(): Promise<void> {
 		async (world) => {
 			await runJourney3WorktreeAndGatesPhase(world);
 			await runJourney3ContinuousChatPhase(world);
+			await runJourney3ActAheadPhase(world);
 		},
 	);
 }

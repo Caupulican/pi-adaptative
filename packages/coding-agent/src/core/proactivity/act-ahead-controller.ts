@@ -15,7 +15,6 @@ import { join, relative } from "node:path";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { ExecutionContext } from "../../kernel/utils/paths.ts";
-import { getShellConfig, getShellEnv } from "../../utils/shell.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { isSecretEnvironmentName } from "../autonomy/worker-run-environment.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
@@ -23,7 +22,6 @@ import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import { projectWorkerLaneRecord } from "../delegation/worker-lane-projection.ts";
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
-import { execCommand } from "../exec.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { RoutineHostEventFeed } from "../routines/routine-contract.ts";
@@ -139,6 +137,8 @@ export class ActAheadController {
 	private started = false;
 	/** Worker replay identities of this session's episodes, for notification ownership. */
 	private readonly ownedMessageIds = new Set<string>();
+	/** Failed attempts this session saw in a checkout acting ahead cannot work in; they are not looked at again. */
+	private readonly unworkable = new Set<string>();
 
 	constructor(deps: ActAheadControllerDeps) {
 		this.deps = deps;
@@ -231,7 +231,7 @@ export class ActAheadController {
 			if (last.phase === "settled" || last.phase === "capped" || (last.phase === "abandoned" && !admitted)) continue;
 			if (admitted && (last.phase === "ready" || last.phase === "abandoned")) {
 				// A restart came between the episode's end and its settlement: the charge stands as its spend.
-				this.settleEpisode(last, laneOf(episode), admitted.chargeUsd ?? 0, admitted.chargeUsd ?? 0);
+				await this.settleEpisode(last, laneOf(episode), admitted.chargeUsd ?? 0, admitted.chargeUsd ?? 0);
 				continue;
 			}
 			await this.resume(episode, last);
@@ -251,7 +251,8 @@ export class ActAheadController {
 					fact.event.kind === "ci-attempt-terminal" &&
 					(fact.event.conclusion === "failure" || fact.event.conclusion === "timed_out") &&
 					now - Date.parse(fact.event.observedAt) <= MAX_EVENT_AGE_MS &&
-					!handled.has(fact.event.eventId),
+					!handled.has(fact.event.eventId) &&
+					!this.unworkable.has(fact.event.eventId),
 			)
 			.sort((a, b) => b.acceptedOrdinal - a.acceptedOrdinal)[0];
 		if (candidate?.event.kind !== "ci-attempt-terminal") return;
@@ -268,10 +269,14 @@ export class ActAheadController {
 	): Promise<void> {
 		const signal = this.abort.signal;
 		const base = { episode: actAheadEpisodeId(event.eventId), eventId: event.eventId, headSha: event.headSha };
+		// A checkout acting ahead cannot work in (worktree-sync off, not a git repository) has no episode: nothing is
+		// recorded, and the attempt is not considered again in this session.
 		const engine = this.deps.engineDeps(this.deps.cwd());
-		if (!engine) return this.append({ ...base, phase: "abandoned", reason: "worktree_sync_off" });
-		const context = await resolveRepoContext(engine);
-		if ("code" in context) return this.append({ ...base, phase: "abandoned", reason: `repository_${context.code}` });
+		const context = engine ? await resolveRepoContext(engine) : undefined;
+		if (!engine || !context || "code" in context) {
+			this.unworkable.add(event.eventId);
+			return;
+		}
 		const head = await engine.exec("git", ["rev-parse", "HEAD"], {
 			cwd: context.topLevel,
 			timeout: GIT_TIMEOUT_MS,
@@ -299,13 +304,17 @@ export class ActAheadController {
 		if (seen) return this.append({ ...base, phase: "abandoned", failureKey, reason: "duplicate" });
 		const check = await this.checkCommand(settings, engine, context.topLevel, event.headSha);
 		if (!check) return this.append({ ...base, phase: "abandoned", failureKey, reason: "no_check" });
-		const created = await createLane(engine, { requirementId: workerReplayKey(base.episode), base: event.headSha });
+		const created = await createLane(engine, {
+			laneKey: `act-ahead-${base.episode.slice(3, 15)}`,
+			requirementId: workerReplayKey(base.episode),
+			base: event.headSha,
+		});
 		if (created.code !== "ok")
 			return this.append({ ...base, phase: "abandoned", failureKey, reason: `lane_${created.code}` });
 		const lane = { laneKey: created.lane.laneKey, lanePath: created.lane.worktreePath };
 		this.append({ ...base, phase: "armed", failureKey, ...lane });
 		linkDependencies(context.topLevel, lane.lanePath);
-		const first = await runCheck(check, lane.lanePath, settings, signal);
+		const first = await runCheck(engine, check, lane.lanePath, settings, signal);
 		const namesFailure = evidence?.jobs.some((job) => job.failedSteps.length > 0) === true;
 		if (first.passed && !namesFailure) return this.end(base, lane, "abandoned", "not_reproduced");
 		const basis: ActAheadBasis = first.passed ? "ci-log" : "reproduced";
@@ -372,7 +381,7 @@ export class ActAheadController {
 			? await this.validate(base, lane, admitted)
 			: `worker_${record.status}`;
 		if (outcome) this.append({ ...base, phase: "abandoned", reason: outcome });
-		this.settleEpisode(base, lane, charge, spent);
+		await this.settleEpisode(base, lane, charge, spent);
 	}
 
 	/** Validates the worker's change in its lane; returns why it is not a fix, or undefined once it is saved and told. */
@@ -389,7 +398,7 @@ export class ActAheadController {
 		if (!changed.ok) return "git_error";
 		if (changed.files.length === 0) return "no_change";
 		if (changed.files.some((file) => GUARDED_PATH.test(file))) return "guarded_path";
-		const second = await runCheck(check, lane.lanePath, settings, signal);
+		const second = await runCheck(engine, check, lane.lanePath, settings, signal);
 		if (!second.passed) return "check_failed";
 		// The check may format files: the patch is what the lane holds once it passed.
 		const final = await stagedChange(engine, lane.lanePath, base.headSha, signal);
@@ -422,14 +431,24 @@ export class ActAheadController {
 	}
 
 	/** Ends an episode before admission (nothing charged): one record, its lane released. */
-	private end(base: EpisodeBase, lane: EpisodeLane, phase: "abandoned" | "capped", reason: string): void {
+	private async end(
+		base: EpisodeBase,
+		lane: EpisodeLane,
+		phase: "abandoned" | "capped",
+		reason: string,
+	): Promise<void> {
 		this.append({ ...base, phase, reason });
-		this.releaseLane(lane);
+		await this.releaseLane(lane);
 	}
 
 	/** Closes an admitted episode: its lane is released and the day's account moves from the charge to the spend. */
-	private settleEpisode(base: EpisodeBase, lane: EpisodeLane, chargeUsd: number, spentUsd: number): void {
-		this.releaseLane(lane);
+	private async settleEpisode(
+		base: EpisodeBase,
+		lane: EpisodeLane,
+		chargeUsd: number,
+		spentUsd: number,
+	): Promise<void> {
+		await this.releaseLane(lane);
 		this.append({
 			episode: base.episode,
 			eventId: base.eventId,
@@ -440,21 +459,21 @@ export class ActAheadController {
 		});
 	}
 
-	private releaseLane(lane: EpisodeLane): void {
+	/** Discards the episode's lane; a release that fails is reported, and the lane stays for worktree-sync to show. */
+	private async releaseLane(lane: EpisodeLane): Promise<void> {
 		if (!lane.laneKey) return;
 		const engine = this.deps.engineDeps(this.deps.cwd());
 		if (!engine) return;
 		const laneKey = lane.laneKey;
-		void releaseLane(engine, { laneKey, confirm: "yes-discard-lane" }).then(
-			(released) => {
-				if (released.code !== "released" && released.code !== "lane_not_found")
-					this.deps.warn(`Acting-ahead lane '${laneKey}' was not released: [${released.code}]`);
-			},
-			(error: unknown) =>
-				this.deps.warn(
-					`Acting-ahead lane '${laneKey}' was not released: ${error instanceof Error ? error.message : String(error)}`,
-				),
-		);
+		try {
+			const released = await releaseLane(engine, { laneKey, confirm: "yes-discard-lane" });
+			if (released.code !== "released" && released.code !== "lane_not_found")
+				this.deps.warn(`Acting-ahead lane '${laneKey}' was not released: [${released.code}]`);
+		} catch (error) {
+			this.deps.warn(
+				`Acting-ahead lane '${laneKey}' was not released: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private async overDayBound(settings: ResolvedActAheadSettings): Promise<boolean> {
@@ -555,18 +574,23 @@ async function stagedChange(
 	};
 }
 
-/** Runs the validation command in the lane through the platform shell, without any credential in its environment. */
+/**
+ * Runs the validation command in the lane through the worktree engine's process port, the same `sh -c` / `cmd /c` path
+ * as the worktree-sync land gate, without any credential in its environment.
+ */
 async function runCheck(
+	engine: WorktreeSyncEngineDeps,
 	command: string,
 	lanePath: string,
 	settings: ResolvedActAheadSettings,
 	signal: AbortSignal,
 ): Promise<CheckRun> {
-	const shell = getShellConfig();
 	const env = Object.fromEntries(
-		Object.entries(getShellEnv()).filter(([name]) => !isSecretEnvironmentName(name)),
+		Object.entries(process.env).filter(([name]) => !isSecretEnvironmentName(name)),
 	) as NodeJS.ProcessEnv;
-	const result = await execCommand(shell.shell, [...shell.args, command], lanePath, {
+	const windows = process.platform === "win32";
+	const result = await engine.exec(windows ? "cmd" : "sh", [windows ? "/c" : "-c", command], {
+		cwd: lanePath,
 		env,
 		signal,
 		timeout: settings.maxMinutesPerAttempt * 60_000,

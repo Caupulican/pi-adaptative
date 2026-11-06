@@ -1424,12 +1424,55 @@ export class VirtualGit {
 	private addCommand(args: readonly string[], cwd: string): GitOutcome {
 		const worktree = this.worktreeFor(cwd);
 		if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
+		if (args[0] === "-A") return this.addAllCommand(args.slice(1), cwd, worktree);
 		for (const path of args.filter((arg) => arg !== "--")) {
 			const rel = gitRelative(worktree.path, resolve(cwd, path));
 			const working = this.readWorking(worktree, rel);
 			if (working === undefined) worktree.index.delete(rel);
 			else worktree.index.set(rel, working);
 			worktree.unmerged.delete(rel);
+		}
+		return { code: 0, stdout: "", stderr: "" };
+	}
+
+	/**
+	 * `add -A -- <pathspec>...`: stages every change (new, modified, deleted) under the literal pathspecs, except paths an
+	 * `:(exclude,glob)<name>` pathspec names, at the top or (with a `**` prefix) at any depth. Any other pathspec magic is unscripted.
+	 */
+	private addAllCommand(args: readonly string[], cwd: string, worktree: GitWorktree): GitOutcome {
+		if (args[0] !== "--") throw new Error(`Unscripted add -A: ${args.join(" ")}`);
+		const includes: string[] = [];
+		const excludes: { readonly name: string; readonly nested: boolean }[] = [];
+		for (const spec of args.slice(1)) {
+			if (spec.startsWith(":(exclude,glob)")) {
+				const pattern = spec.slice(":(exclude,glob)".length);
+				const nested = pattern.startsWith("**/");
+				const name = nested ? pattern.slice(3) : pattern;
+				if (!name || /[*?[\]]/.test(name)) throw new Error(`Unscripted add -A exclude: ${spec}`);
+				excludes.push({ name, nested });
+			} else if (spec.startsWith(":")) throw new Error(`Unscripted add -A pathspec: ${spec}`);
+			else includes.push(gitRelative(worktree.path, resolve(cwd, spec)));
+		}
+		const excluded = (path: string): boolean =>
+			excludes.some(({ name, nested }) => {
+				const segments = path.split("/");
+				return nested
+					? segments.slice(0, -1).includes(name) || segments.at(-1) === name
+					: path === name || path.startsWith(`${name}/`);
+			});
+		const included = (path: string): boolean =>
+			includes.some((spec) => spec === "" || path === spec || path.startsWith(`${spec}/`));
+		const candidates = new Set([
+			...this.workingFiles(worktree),
+			...worktree.index.keys(),
+			...this.treeOf(this.headSha(worktree)).keys(),
+		]);
+		for (const path of candidates) {
+			if (!included(path) || excluded(path)) continue;
+			const working = this.readWorking(worktree, path);
+			if (working === undefined) worktree.index.delete(path);
+			else worktree.index.set(path, working);
+			worktree.unmerged.delete(path);
 		}
 		return { code: 0, stdout: "", stderr: "" };
 	}
@@ -1511,13 +1554,30 @@ export class VirtualGit {
 		return this.renderDiff(before, after, args, cwd);
 	}
 
-	/** `show <commit> -- <literal paths>` displays that commit's change, including files absent from the worktree. */
+	/**
+	 * `show <commit> -- <literal paths>` displays that commit's change, including files absent from the worktree;
+	 * `show <commit>:<path>` prints one committed file.
+	 */
 	private showCommand(args: readonly string[], cwd: string): GitOutcome {
 		const separator = args.indexOf("--");
 		const options = args.slice(0, separator < 0 ? args.length : separator);
 		const operands = options.filter((arg) => !arg.startsWith("-"));
 		if (operands.length !== 1) throw new Error(`Unscripted show: ${args.join(" ")}`);
 		const revision = operands[0] ?? "";
+		const blob = revision.indexOf(":");
+		if (blob > 0) {
+			if (args.length !== 1) throw new Error(`Unscripted show: ${args.join(" ")}`);
+			const sha = this.resolveCommit(revision.slice(0, blob), cwd);
+			if (sha === undefined) return { code: 128, stdout: "", stderr: `fatal: invalid object name '${revision}'\n` };
+			const content = this.treeOf(sha).get(revision.slice(blob + 1));
+			if (content === undefined)
+				return {
+					code: 128,
+					stdout: "",
+					stderr: `fatal: path '${revision.slice(blob + 1)}' does not exist in '${revision.slice(0, blob)}'\n`,
+				};
+			return { code: 0, stdout: content, stderr: "" };
+		}
 		const commit = this.commits.get(this.resolveCommit(revision, cwd) ?? "");
 		if (commit === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${revision}'\n` };
 		const change = this.renderDiff(this.treeOf(commit.parent), commit.tree, args, cwd);
