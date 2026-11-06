@@ -270,8 +270,27 @@ export class ChannelJournal {
 		});
 	}
 
-	/** A read under the same lock; nothing is written unless the file had to be reset. */
-	read(now: number): ChannelJournalUpdate<ChannelJournalState> {
-		return this.update(now, (state) => structuredClone(state));
+	/**
+	 * A read that writes nothing and takes no lock: every write replaces the file atomically, so a reader sees one whole
+	 * journal. An unreadable file reads as an empty journal with `reset` set; the next update moves it aside and
+	 * records the gap.
+	 */
+	read(): ChannelJournalUpdate<ChannelJournalState> {
+		const text = readOptionalBoundedTextFileSync(this.path, MAX_JOURNAL_BYTES, "channel journal");
+		if (text === undefined) return { result: emptyState(), reset: false };
+		try {
+			return { result: parseState(text), reset: false };
+		} catch {
+			return { result: emptyState(), reset: true };
+		}
 	}
+}
+
+/** The turns delivered in the last 24 hours and what they cost: the figures a channel's daily bounds are read against. */
+export function channelDayUsage(
+	state: Pick<ChannelJournalState, "batches">,
+	now: number,
+): { readonly wakes: number; readonly usd: number } {
+	const recent = state.batches.filter((batch) => now - batch.acceptedAt < DAY_MS);
+	return { wakes: recent.length, usd: recent.reduce((sum, batch) => sum + (batch.usd ?? 0), 0) };
 }

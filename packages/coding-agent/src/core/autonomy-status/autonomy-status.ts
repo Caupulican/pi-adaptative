@@ -11,7 +11,7 @@ import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import { outwardDraftStates } from "../agent-session-edge.ts";
 import type { EdgeClass, EdgeGrantSource, EdgeGrantView } from "../autonomy/edge-policy.ts";
-import type { ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
+import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
@@ -20,7 +20,12 @@ import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessN
 import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import type { MemoryController } from "../memory-controller.ts";
 import { type ActAheadPhase, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
-import { type ProactivityDailyState, parentTurnWakes } from "../proactivity/proactivity-controller.ts";
+import {
+	type ProactivityDailyState,
+	type ProactivityFeedbackView,
+	parentTurnWakes,
+} from "../proactivity/proactivity-controller.ts";
+import type { AwayServiceInspection } from "../routines/away-service.ts";
 import { type RoutineDefinitionView, routineAwaySpendRoom, routineEnded } from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
@@ -92,6 +97,8 @@ export interface AwayDaemonStatusView {
 	};
 	readonly spentUsd: number;
 	readonly hostedParents: StatusSection<number>;
+	/** The opt-in always-on service that starts the daemon at login, read from the filesystem. */
+	readonly service: StatusSection<AwayServiceInspection>;
 }
 
 export interface HostEventConnectionStatus {
@@ -143,6 +150,8 @@ export interface ProactiveReviewStatus {
 	readonly reviewSpend: DayCount;
 	readonly lastSkipReason?: string;
 	readonly daily: ProactivityDailyState;
+	/** Topics the owner's replies set aside, each with when it ends: a set-aside topic starts no review. */
+	readonly setAside: BoundedList<{ readonly topic: string; readonly label: string; readonly until: number }>;
 }
 
 export interface ChannelsStatus {
@@ -151,8 +160,8 @@ export interface ChannelsStatus {
 		readonly state: ChannelRuntimeState;
 		readonly detail?: string;
 	}>;
-	/** Wakes, spend and drafts per channel. */
-	readonly journal: StatusSection<never>;
+	/** Wakes and spend against the daily bounds, and what waits undelivered, per channel with a policy. */
+	readonly journal: StatusSection<BoundedList<ChannelJournalSummary>>;
 }
 
 export interface OutwardDraftsStatus {
@@ -246,8 +255,15 @@ export interface AutonomyStatusSources {
 	readonly routineIntake: RoutineIntakeStatus | undefined;
 	/** The worker ledger's projection; undefined while the ledger is not loaded. */
 	readonly hostEventLedger: HostEventProjection | undefined;
-	readonly proactivity: { readonly daily: ProactivityDailyState; readonly lastSkipReason?: string };
+	readonly proactivity: {
+		readonly daily: ProactivityDailyState;
+		readonly lastSkipReason?: string;
+		readonly setAside: () => ProactivityFeedbackView["suppressed"];
+	};
 	channelStates(): readonly ChannelStateView[];
+	channelJournals(): readonly ChannelJournalSummary[];
+	/** The always-on service's filesystem read; undefined while the routine store it reads is not loaded. */
+	readonly awayService: (() => AwayServiceInspection) | undefined;
 	readonly harnessNotices: Pick<HarnessNoticeController, "observedStates">;
 	readonly memory: Pick<MemoryController, "getKnowledgeCollectionStatus">;
 	/** The standing grants (`/edge allow` and `edge.thirdPartyAllow`); undefined where the session supplies none. */
@@ -353,8 +369,12 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				...(sources.routineIntake ? { intake: sources.routineIntake } : {}),
 			});
 		}),
-		section<AwayDaemonStatusView>(() => {
+		section<AwayDaemonStatusView>(async () => {
 			if (!store) return unavailable(NO_STORE);
+			const awayService = sources.awayService;
+			const service = awayService
+				? await section(() => available(awayService()))
+				: unavailable("the routine store is not loaded, so the service is not read");
 			const daemon = store.getDaemonStatus(nowMs);
 			const away = settings.getRoutineAwaySettings();
 			const spend = routineAwaySpendRoom(store.listRoutineOccurrences(), away, nowMs);
@@ -385,6 +405,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				},
 				spentUsd: spend.chargedMicros / 1_000_000,
 				hostedParents: unavailable("the away daemon does not record the parents it hosts"),
+				service,
 			});
 		}),
 		section<HostEventsStatus>(() => {
@@ -458,12 +479,19 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				reviewSpend: { used: window.proactivityCost, max: configured.maxUsdPerDay },
 				...(skip ? { lastSkipReason: skip } : {}),
 				daily: sources.proactivity.daily,
+				setAside: bounded(
+					sources.proactivity.setAside().map((topic) => ({
+						topic: text(topic.topic) ?? "",
+						label: text(topic.label) ?? "",
+						until: topic.until,
+					})),
+				),
 			});
 		}),
 	]);
 
 	const [channels, outwardDrafts, harnessNotices, knowledgeCollection, authority, runs] = await Promise.all([
-		section<ChannelsStatus>(() =>
+		section<ChannelsStatus>(async () =>
 			available({
 				channels: bounded(
 					sources.channelStates().map((channel) => ({
@@ -472,9 +500,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 						...(channel.detail ? { detail: text(channel.detail) } : {}),
 					})),
 				),
-				journal: unavailable(
-					"reading a channel journal rewrites it today, so its wakes, spend and drafts are not read",
-				),
+				journal: await section(() => available(bounded(sources.channelJournals()))),
 			}),
 		),
 		section<OutwardDraftsStatus>(() => {

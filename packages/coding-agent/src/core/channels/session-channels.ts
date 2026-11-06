@@ -30,6 +30,7 @@ import {
 	ChannelJournal,
 	type ChannelJournalState,
 	type ChannelPendingMessage,
+	channelDayUsage,
 	DAY_MS,
 	digest,
 	MAX_PENDING_MESSAGES,
@@ -69,6 +70,20 @@ export interface ChannelStateView {
 	readonly name: string;
 	readonly state: ChannelRuntimeState;
 	readonly detail?: string;
+}
+
+/** One channel's daily bounds used, and what its journal holds undelivered. */
+export interface ChannelJournalSummary {
+	readonly name: string;
+	/** Turns delivered in the last 24 hours against `maxWakesPerDay`. */
+	readonly wakes: { readonly used: number; readonly max: number };
+	/** Dollars the channel's turns cost in the last 24 hours against `maxUsdPerDay`. */
+	readonly spendUsd: { readonly used: number; readonly max: number };
+	readonly pendingMessages: number;
+	readonly pendingDrafts: number;
+	/** Messages held back (unverified, not allowlisted, or a burst) since the journal began. */
+	readonly heldTotal: number;
+	readonly gaps: number;
 }
 
 /** One reply draft as the owner's release tool lists it. */
@@ -538,12 +553,11 @@ export class SessionChannels {
 		state: ChannelJournalState,
 		now: number,
 	): string | undefined {
-		const recent = state.batches.filter((batch) => now - batch.acceptedAt < DAY_MS);
-		if (recent.length >= policy.maxWakesPerDay)
+		const { wakes, usd } = channelDayUsage(state, now);
+		if (wakes >= policy.maxWakesPerDay)
 			return `its bound of ${policy.maxWakesPerDay} turn(s) in 24 hours is reached (channels.${name}.maxWakesPerDay)`;
-		const spent = recent.reduce((sum, batch) => sum + (batch.usd ?? 0), 0);
-		if (spent >= policy.maxUsdPerDay)
-			return `$${spent.toFixed(2)} spent in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
+		if (usd >= policy.maxUsdPerDay)
+			return `$${usd.toFixed(2)} spent in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
 		if (state.drafts.filter((draft) => draft.state === "pending").length >= MAX_PENDING_DRAFTS)
 			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
 		return undefined;
@@ -806,25 +820,51 @@ export class SessionChannels {
 		}));
 	}
 
+	/** The channels with an explicit policy and a valid name, with the policy each runs under. */
+	private explicitChannels(): [string, ResolvedChannelPolicy][] {
+		const channels: [string, ResolvedChannelPolicy][] = [];
+		for (const [name, resolution] of this.deps.getChannelPolicies())
+			if (resolution.kind === "policy" && resolution.policy.mode === "explicit" && isValidChannelName(name))
+				channels.push([name, resolution.policy]);
+		return channels;
+	}
+
 	/** The pending reply drafts of every channel with an explicit policy. */
 	listDrafts(): ChannelDraftView[] {
 		const views: ChannelDraftView[] = [];
-		for (const [name, resolution] of this.deps.getChannelPolicies()) {
-			if (resolution.kind !== "policy" || resolution.policy.mode !== "explicit" || !isValidChannelName(name))
-				continue;
-			const { result: drafts } = this.journal(name).update(this.now(), (state) =>
-				state.drafts.filter((draft) => draft.state === "pending").map((draft) => ({ ...draft })),
-			);
-			for (const draft of drafts)
-				views.push({
-					id: draft.id,
-					channel: name,
-					reason: draft.reason,
-					createdAt: new Date(draft.createdAt).toISOString(),
-					text: draft.text,
-				});
+		for (const [name] of this.explicitChannels()) {
+			for (const draft of this.journal(name).read().result.drafts)
+				if (draft.state === "pending")
+					views.push({
+						id: draft.id,
+						channel: name,
+						reason: draft.reason,
+						createdAt: new Date(draft.createdAt).toISOString(),
+						text: draft.text,
+					});
 		}
 		return views;
+	}
+
+	/**
+	 * What each channel with an explicit policy has used of its daily bounds and holds undelivered, from its journal.
+	 * Reads only, and carries no third party's text.
+	 */
+	readJournalSummaries(): ChannelJournalSummary[] {
+		const now = this.now();
+		return this.explicitChannels().map(([name, policy]) => {
+			const state = this.journal(name).read().result;
+			const usage = channelDayUsage(state, now);
+			return {
+				name,
+				wakes: { used: usage.wakes, max: policy.maxWakesPerDay },
+				spendUsd: { used: usage.usd, max: policy.maxUsdPerDay },
+				pendingMessages: state.pending.length,
+				pendingDrafts: state.drafts.filter((draft) => draft.state === "pending").length,
+				heldTotal: state.heldTotal,
+				gaps: state.gaps.length,
+			};
+		});
 	}
 
 	/** Send a pending draft to the address its conversation came from, or dismiss it. Throws a plain reason. */

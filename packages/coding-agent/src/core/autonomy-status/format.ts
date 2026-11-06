@@ -1,5 +1,6 @@
 /** The `/status` text of a {@link SessionAutonomyStatus}: one block per section, an unavailable one with its reason. */
 
+import { describeAwayServiceInspection } from "../routines/away-service.ts";
 import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
 import type { ToolDecision } from "./tool-manifest.ts";
 
@@ -43,6 +44,9 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			`${value.running ? "running" : "not running"}${value.pid !== undefined ? ` (pid ${value.pid})` : ""}, heartbeat ${at(value.lastHeartbeatAt)}, ${value.activeRoutines} active, ${value.dueRoutines} due`,
 			`away ${value.settings.enabled ? "on" : "off"}: spent $${value.spentUsd.toFixed(2)} of $${value.settings.maxUsdPerDay.toFixed(2)} (24 h), $${value.settings.maxUsdPerRun.toFixed(2)} per run, ${value.settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
 			`parents hosted: ${value.hostedParents.status === "available" ? value.hostedParents.value : `unavailable: ${value.hostedParents.reason}`}`,
+			value.service.status === "available"
+				? describeAwayServiceInspection(value.service.value)
+				: `always-on service: unavailable: ${value.service.reason}`,
 			...(value.lastEnd
 				? [`last end: ${value.lastEnd.reason}${value.lastEnd.detail ? `: ${value.lastEnd.detail}` : ""}`]
 				: []),
@@ -70,6 +74,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 		]),
 		...block("Proactive review", status.proactiveReview, (value) => [
 			`${value.enabled ? "on" : "off"} (${value.delivery}): turn wakes ${count(value.turnWakes)}, review spend ${count(value.reviewSpend, true)} (24 h)${value.lastSkipReason ? `, last skip: ${value.lastSkipReason}` : ""}`,
+			...list(value.setAside, (topic) => `set aside until ${at(topic.until)}: ${topic.label}`),
 		]),
 		...block("Channels", status.channels, (value) => [
 			...list(
@@ -78,7 +83,11 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			),
 			...(value.journal.status === "unavailable"
 				? [`wakes, spend, drafts: unavailable: ${value.journal.reason}`]
-				: []),
+				: list(
+						value.journal.value,
+						(channel) =>
+							`${channel.name}: wakes ${count(channel.wakes)}, spend ${count(channel.spendUsd, true)} (24 h), ${channel.pendingMessages} waiting, ${channel.pendingDrafts} draft(s), ${channel.heldTotal} held, ${channel.gaps} gap(s)`,
+					)),
 		]),
 		...block("Outward drafts", status.outwardDrafts, (value) => [
 			`${value.pending.items.length + (value.pending.omitted ?? 0)} pending, ${value.released} released, ${value.dismissed} dismissed`,
