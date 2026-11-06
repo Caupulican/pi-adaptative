@@ -36,7 +36,12 @@ import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
-import { type BotDaemonLeaseClaim, claimBotDaemonLease, launchDetachedBotDaemon } from "./bot-daemon-launch.ts";
+import {
+	type BotDaemonLeaseClaim,
+	claimBotDaemonLease,
+	launchDetachedBotDaemon,
+	previousDaemonFailureReport,
+} from "./bot-daemon-launch.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
@@ -226,10 +231,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	} catch (error) {
 		fail(error);
 	}
-	if (input.previousEnd?.reason === "failed")
-		report(
-			`The previous daemon stopped on an error${input.previousEnd.detail ? `: ${input.previousEnd.detail}` : ""}.`,
-		);
+	if (input.previousEnd?.reason === "failed") report(previousDaemonFailureReport(input.previousEnd));
 	tick();
 	return { exited, stop: (end = { reason: "signal" }) => stop(end) };
 }
@@ -272,6 +274,19 @@ async function runServiceBotDaemon(
 			if (!launch.started) {
 				writeDiagnostic(launch.detail);
 				return 1;
+			}
+			// The claim replaced the failed end, and the daemon launched with a token gets no previous end: the failure
+			// becomes its first report, as on POSIX.
+			if (launch.token !== undefined && launch.previousEnd?.reason === "failed") {
+				try {
+					store.recordDaemonReports(launch.token, [
+						{ at: clock.now(), message: previousDaemonFailureReport(launch.previousEnd) },
+					]);
+				} catch (error) {
+					writeDiagnostic(
+						`The previous daemon's failure was not recorded: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
 			}
 			// This process exits once it returns: the daemon must have spawned (a failed spawn releases its claim first)
 			// and hold its stdin handover before then.

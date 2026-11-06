@@ -42,6 +42,11 @@ export function claimBotDaemonLease(store: PersistentBotTeamStore, clock: TimerP
 	return { claimed: true, token, ...(previousEnd ? { previousEnd } : {}), legacy };
 }
 
+/** The first report of a daemon whose predecessor ended on an error. */
+export function previousDaemonFailureReport(end: BotDaemonEnd): string {
+	return `The previous daemon stopped on an error${end.detail ? `: ${end.detail}` : ""}.`;
+}
+
 export interface BotDaemonLaunch {
 	readonly store: PersistentBotTeamStore;
 	readonly clock: TimerPort;
@@ -57,6 +62,9 @@ export interface BotDaemonLaunchResult {
 	readonly held?: boolean;
 	readonly pid?: number;
 	readonly detail: string;
+	/** A started launch: the lease token the daemon runs with, and how the daemon it replaces ended. */
+	readonly token?: string;
+	readonly previousEnd?: BotDaemonEnd;
 	/**
 	 * A started launch: settles once the daemon process spawned (true) or failed to, its claim then released (false),
 	 * and its stdin has the gh handover. A starter that exits right after the launch waits for it.
@@ -150,6 +158,8 @@ export function launchDetachedBotDaemon(input: BotDaemonLaunch): BotDaemonLaunch
 	store.recordDaemonLaunchPid(token, pid);
 	return {
 		started: true,
+		token,
+		...(previousEnd ? { previousEnd } : {}),
 		handedOver: Promise.all([spawned, flushed]).then(([ok]) => ok),
 		pid,
 		detail: withLegacy(
