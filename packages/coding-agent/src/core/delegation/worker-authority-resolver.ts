@@ -635,6 +635,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	// readOnly is the caller's promise that this worker edits nothing. It is not a permission check,
 	// so YOLO keeps it: the parent may be relying on it to run workers side by side.
 	const readOnly = input.authority?.readOnly === true || input.base?.profile.readOnly === true;
+	// A read-only shell beside the write tools: the shell keeps `readOnly`'s rules, the file tools stay.
+	const shellReadOnly =
+		!readOnly && (input.authority?.shellReadOnly === true || input.base?.profile.shellReadOnly === true);
 	if (readOnly) {
 		for (const capability of capabilities) {
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
@@ -692,6 +695,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		baseProfileId: input.base?.profile.profileId ?? null,
 		role,
 		readOnly,
+		...(shellReadOnly ? { shellReadOnly } : {}),
 		binding: resolvedModel.binding,
 		fallbacks,
 		capabilities: [...capabilities],
@@ -721,6 +725,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		capabilityCeiling: [...capabilities],
 		toolNames,
 		...(readOnly ? { readOnly: true } : {}),
+		...(shellReadOnly ? { shellReadOnly: true } : {}),
 		...(workspacePath ? { workspacePath } : {}),
 		...(writePaths.length > 0 ? { writePaths } : {}),
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],

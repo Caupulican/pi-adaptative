@@ -30,6 +30,7 @@ import {
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "./http-dispatcher.ts";
 import { compileWorkerModelPinPolicy, type WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts";
+import { resolveActAheadSettings } from "./proactivity/proactivity-settings.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import { normalizeSteStrictness } from "./provider-prompt-contracts.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
@@ -192,6 +193,7 @@ import type {
 	ProfilePersistenceScope,
 	ReasoningSettings,
 	ResearchLaneSettings,
+	ResolvedActAheadSettings,
 	ResolvedBackgroundToolSettings,
 	ResolvedEdgeSettings,
 	ResolvedLearningPolicySettings,
@@ -3581,16 +3583,33 @@ export class SettingsManager {
 		return resolved;
 	}
 
+	/**
+	 * Acting-ahead bounds, read like standing grants: only from the layers the owner writes under the agent directory
+	 * (directory profile first, then global), never the project's own settings. Any settings load error turns it off.
+	 */
+	getActAheadSettings(): ResolvedActAheadSettings {
+		const resolved = resolveActAheadSettings([
+			this.directoryProfileSettings.proactivity?.actAhead,
+			this.globalSettings.proactivity?.actAhead,
+		]);
+		const loadError =
+			this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError;
+		return loadError ? { ...resolved, enabled: false } : resolved;
+	}
+
+	/** Replaces the layer's proactivity settings; the layer's `actAhead` stays unless `settings` sets one. */
 	setProactivitySettings(settings: ProactivitySettings, scope: SettingsScope = "global"): void {
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.proactivity = { ...settings };
+			const kept = settings.actAhead ?? projectSettings.proactivity?.actAhead;
+			projectSettings.proactivity = { ...settings, ...(kept ? { actAhead: kept } : {}) };
 			this.markProjectModified("proactivity");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
 
-		this.globalSettings.proactivity = { ...settings };
+		const kept = settings.actAhead ?? this.globalSettings.proactivity?.actAhead;
+		this.globalSettings.proactivity = { ...settings, ...(kept ? { actAhead: kept } : {}) };
 		this.markModified("proactivity");
 		this.save();
 	}

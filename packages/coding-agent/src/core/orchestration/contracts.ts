@@ -254,6 +254,8 @@ export interface OrchestrationProfile {
 	 * and no write, interpreter, script or network tool is granted. Absent means an ordinary grant.
 	 */
 	readOnly?: boolean;
+	/** The worker keeps its write tools, and its shell follows `readOnly`'s shell rules. Absent means an ordinary shell. */
+	shellReadOnly?: boolean;
 	/** Optional worker cwd and symmetric filesystem focus. Omitted means host-level machine scope. */
 	workspacePath?: string;
 	/**

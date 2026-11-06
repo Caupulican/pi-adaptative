@@ -365,6 +365,8 @@ export interface CreateLaneArgs {
 	laneKey?: string;
 	goalId?: string;
 	requirementId?: string;
+	/** The commit the lane starts from (a full sha); unset starts it from the main branch. */
+	base?: string;
 }
 
 export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneArgs = {}): Promise<CreateLaneResult> {
@@ -415,7 +417,11 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 
 		const branch = laneBranch(laneKey);
 		const worktreePath = join(deps.worktreesBaseDir, ctx.slug, laneKey);
-		const add = await runGit(deps, ctx.topLevel, ["worktree", "add", "-b", branch, worktreePath, ctx.mainBranch]);
+		if (args.base !== undefined && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(args.base)) {
+			return { code: "git_error", message: `lane base '${args.base}' is not a full commit sha` };
+		}
+		const base = args.base ?? ctx.mainBranch;
+		const add = await runGit(deps, ctx.topLevel, ["worktree", "add", "-b", branch, worktreePath, base]);
 		if (add.code !== 0) return gitError(`git worktree add failed for lane '${laneKey}'`, add);
 
 		const at = nowIso(deps);
@@ -432,7 +438,11 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
 		};
 		await writeLane(ctx.paths, lane, ctx.write);
-		await appendAuditEvent(ctx.paths, { event: "lane_created", laneKey, branch, baseSha: ctx.mainSha }, at);
+		await appendAuditEvent(
+			ctx.paths,
+			{ event: "lane_created", laneKey, branch, baseSha: args.base ?? ctx.mainSha },
+			at,
+		);
 		return { code: "ok", lane };
 	});
 }

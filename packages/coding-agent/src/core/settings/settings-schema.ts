@@ -295,7 +295,24 @@ export interface ProactivitySettings {
 	delivery?: "note" | "turn"; // default: "turn" — wakes the parent; explicit "note" waits for the owner's next turn
 	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)
 	ciEvents?: boolean; // default: true — CI results of the checkout become host events (git reads, `gh` calls); false stops that discovery
+	actAhead?: ActAheadSettings; // read only from the global and directory-profile layers
 }
+
+/**
+ * Acting ahead on the owner's own failing CI (`proactivity.actAhead`): a worker in a throwaway lane drafts a fix the static
+ * check validates. Read only from the global and directory-profile layers; the project's own settings never configure it.
+ */
+export interface ActAheadSettings {
+	enabled?: boolean; // default: true — false starts no attempt
+	validate?: "static" | "command"; // default: "static" — the project's declared static check; "command" runs `command`
+	command?: string; // the validation command when `validate` is "command" (run in the lane through the shell)
+	maxAttemptsPerDay?: number; // default: 3 (0..20) — attempts started over a rolling 24 h across the agent dir's sessions
+	maxUsdPerDay?: number; // default: 0.50 (0..20) — worker spend over a rolling 24 h; charged at admission
+	maxUsdPerAttempt?: number; // default: 0.25 (0..5) — spend bound of one worker
+	maxMinutesPerAttempt?: number; // default: 20 (1..120) — wall-clock bound of one worker
+}
+
+export type ResolvedActAheadSettings = Required<Omit<ActAheadSettings, "command">> & Pick<ActAheadSettings, "command">;
 
 /**
  * One registered channel's admission policy (`channels.<name>`). Read only from the global and directory-profile layers;
@@ -311,7 +328,7 @@ export interface ChannelPolicySettings {
 	replyMode?: "draft" | "auto"; // default: "draft" — the answer waits for the owner; "auto" sends it to the same address
 }
 
-export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model">> &
+export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead">> &
 	Pick<ProactivitySettings, "model">;
 
 /** Routines of a session nobody has open, run by the background daemon (away). */

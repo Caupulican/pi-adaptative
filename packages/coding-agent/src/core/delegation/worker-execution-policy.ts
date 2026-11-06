@@ -291,7 +291,7 @@ export function buildWorkerExecutionPlan(args: {
 		writeEnabled,
 		processEnabled,
 		readOnly,
-		shellReadOnly: processEnabled && readOnly,
+		shellReadOnly: processEnabled && (readOnly || args.profile.shellReadOnly === true),
 		budget,
 	};
 }

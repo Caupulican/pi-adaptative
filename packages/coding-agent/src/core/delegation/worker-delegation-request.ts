@@ -54,6 +54,11 @@ export interface WorkerDelegationAuthorityRequest {
 	toolNames?: readonly string[];
 	/** Narrow direct tools to reads while retaining the host-provided worker shell. */
 	readOnly?: boolean;
+	/**
+	 * Host-only: keep the write tools but give the worker the read-only shell (`readOnly`'s shell rules: no edit of an
+	 * existing file, no network, no test or type-check run). The delegate tool schema never sets it.
+	 */
+	shellReadOnly?: boolean;
 	/** One model-selectable workspace focus. The host derives cwd plus symmetric read/write scope. */
 	path?: string;
 	/**
@@ -92,6 +97,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 			"capabilities",
 			"toolNames",
 			"readOnly",
+			"shellReadOnly",
 			"path",
 			"writePaths",
 			"budget",
@@ -101,6 +107,9 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	}
 	if (value.readOnly !== undefined && typeof value.readOnly !== "boolean") {
 		throw new WorkerDelegationRequestError("Delegation authority readOnly must be a boolean.");
+	}
+	if (value.shellReadOnly !== undefined && typeof value.shellReadOnly !== "boolean") {
+		throw new WorkerDelegationRequestError("Delegation authority shellReadOnly must be a boolean.");
 	}
 	if (value.role !== undefined && !WORKER_ROLES.includes(value.role as WorkerRole)) {
 		throw new WorkerDelegationRequestError("Delegation authority role is invalid.");
@@ -172,6 +181,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		...(capabilities ? { capabilities } : {}),
 		...(toolNames ? { toolNames } : {}),
 		...(value.readOnly !== undefined ? { readOnly: value.readOnly } : {}),
+		...(value.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		...(workspacePath ? { path: workspacePath } : {}),
 		...(writePaths && writePaths.length > 0 ? { writePaths } : {}),
 		...(budget ? { budget } : {}),

@@ -597,13 +597,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.shellSessionKey !== undefined ||
 		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
 		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
-	// A read-only lane without `network.http` reaches no network through git's implicit paths either.
+	// A lane with a read-only shell and no `network.http` reaches no network through git's implicit paths either.
 	const networkGranted = options.grant?.capabilities.includes("network.http") === true;
+	const offline = (options.readOnly === true || options.shellReadOnly === true) && !networkGranted;
 	const runEnvironment = runsProcesses
 		? createWorkerRunEnvironment(
 				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
 				options.onWorkerProcessesReaped,
-				{ offline: options.readOnly === true && !networkGranted, readOnly: options.readOnly === true },
+				{ offline, readOnly: options.readOnly === true },
 			)
 		: undefined;
 	const shellReadRoots = options.shellReadRoots?.flatMap((entry) => {
@@ -671,18 +672,17 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				},
 			}
 		: options.sharedToolOptions;
-	// A read-only lane without `network.http` never makes the host download software for it: its shell, grep and find
-	// resolve a managed tool (ripgrep, fd) only when it is already installed.
+	// A lane with a read-only shell and no `network.http` never makes the host download software for it: its shell, grep
+	// and find resolve a managed tool (ripgrep, fd) only when it is already installed.
 	const installedToolsOnly = { managedToolResolver: resolveInstalledManagedTool };
-	const sharedToolOptions: SharedLaneToolOptions | undefined =
-		options.readOnly === true && !networkGranted
-			? {
-					...processToolOptions,
-					bash: { ...processToolOptions?.bash, ...installedToolsOnly },
-					grep: { ...processToolOptions?.grep, ...installedToolsOnly },
-					find: { ...processToolOptions?.find, ...installedToolsOnly },
-				}
-			: processToolOptions;
+	const sharedToolOptions: SharedLaneToolOptions | undefined = offline
+		? {
+				...processToolOptions,
+				bash: { ...processToolOptions?.bash, ...installedToolsOnly },
+				grep: { ...processToolOptions?.grep, ...installedToolsOnly },
+				find: { ...processToolOptions?.find, ...installedToolsOnly },
+			}
+		: processToolOptions;
 	const rawTools = createLaneTools(
 		options.cwd,
 		allowedTools,

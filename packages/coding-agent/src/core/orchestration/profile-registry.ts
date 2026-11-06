@@ -333,6 +333,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"capabilityCeiling",
 			"toolNames",
 			"readOnly",
+			"shellReadOnly",
 			"workspacePath",
 			"writePaths",
 			"resourceProfileNames",
@@ -412,6 +413,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		) ||
 		!isStringArray(value.toolNames) ||
 		(value.readOnly !== undefined && typeof value.readOnly !== "boolean") ||
+		(value.shellReadOnly !== undefined && typeof value.shellReadOnly !== "boolean") ||
 		(value.workspacePath !== undefined &&
 			(typeof value.workspacePath !== "string" ||
 				!value.workspacePath.trim() ||
@@ -453,6 +455,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		capabilityCeiling: value.capabilityCeiling as OrchestrationProfile["capabilityCeiling"],
 		toolNames: value.toolNames,
 		...(value.readOnly === true ? { readOnly: true } : {}),
+		...(value.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		...(typeof value.workspacePath === "string" ? { workspacePath: value.workspacePath } : {}),
 		...(Array.isArray(value.writePaths) && value.writePaths.length > 0 ? { writePaths: value.writePaths } : {}),
 		resourceProfileNames: value.resourceProfileNames,
