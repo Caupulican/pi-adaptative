@@ -7,7 +7,13 @@ import { digest } from "../../../../src/core/channels/channel-journal.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { type Barrier, calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import {
+	HARNESS_PROJECT_CWD,
+	type HarnessWorld,
+	NATIVE_PLATFORM_SHELL_BY_DEFAULT,
+	projectPath,
+	withDeadline,
+} from "../session-fixture.ts";
 import { expectOwnerMemory, noticeSaved, notices, OWNER_MEMORY } from "./journey-4-channels.ts";
 import { icmLatestResult, latestBatchResults } from "./shared.ts";
 
@@ -608,8 +614,17 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 				reply: { content: [{ type: "text", text: "Both pushes wait for your approval." }] },
 			},
 		);
+		// A push leaves the session where the platform sends it: the world's shell, or (with the platform's own engine) git
+		// spawned by the bash tool's git filter. Both boundaries are read as the commands that reached them.
 		const shellBefore = world.shell.requests.length;
-		const shellCommands = () => world.shell.requests.slice(shellBefore).map((request) => request.command);
+		const gitBefore = world.processes.gitCalls.length;
+		const pushesRun = () =>
+			NATIVE_PLATFORM_SHELL_BY_DEFAULT
+				? world.processes.gitCalls
+						.slice(gitBefore)
+						.filter((call) => call.args.includes("push"))
+						.map((call) => `git ${call.args.join(" ")}`)
+				: world.shell.requests.slice(shellBefore).map((request) => request.command);
 		api.expectDropped(4);
 		api.deliver(
 			ownerLegUpdate(3, OWNER_ID, forwardedWords, {
@@ -642,7 +657,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 		expect(seen(3), "the forward was journaled").toBe(1);
 		expect(seen(4), "the group-chat update is never admitted").toBe(0);
 		expect(seen(5)).toBe(1);
-		expect(shellCommands(), "a held push never reaches the shell").toEqual([]);
+		expect(pushesRun(), "a held push never leaves the session").toEqual([]);
 		const main = pushDraft("main");
 		const release = pushDraft("release");
 		expect(main?.state, "the main push waits for the owner").toBe("pending");
@@ -672,7 +687,18 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 
 		// `approve` opens one turn that performs exactly the approved call once and releases its draft.
 		const approved = createBarrier();
-		world.shell.enqueue({ name: "tg-approved-push", command: pushCommands[0], output: "", exitCode: 0 });
+		// The git filter's push runs in a repository: the project becomes one here, as a checkout the owner pushes from is.
+		world.git.initialize("main", { "src/limits.ts": "export const MAX_RETRIES = 3;\n" });
+		if (NATIVE_PLATFORM_SHELL_BY_DEFAULT)
+			world.git.enqueueTransport({
+				name: "tg-approved-push",
+				args: ["push", "origin", "main"],
+				cwd: HARNESS_PROJECT_CWD,
+				code: 0,
+				stdout: "",
+				stderr: "Everything up-to-date\n",
+			});
+		else world.shell.enqueue({ name: "tg-approved-push", command: pushCommands[0], output: "", exitCode: 0 });
 		world.provider.enqueue(
 			"root",
 			{
@@ -701,8 +727,11 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 		expect(api.texts().slice(4).sort(), "the approval is acknowledged and its turn answers").toEqual(
 			[`Approved draft ${mainId}; a turn performs it now.`, "The main branch push ran once."].sort(),
 		);
-		expect(world.shell.reached, "the approved call ran").toContain("tg-approved-push");
-		expect(shellCommands(), "exactly once, and only the approved one").toEqual([pushCommands[0]]);
+		expect(
+			NATIVE_PLATFORM_SHELL_BY_DEFAULT ? world.git.reached : world.shell.reached,
+			"the approved call reaches the push's external boundary",
+		).toContain("tg-approved-push");
+		expect(pushesRun(), "exactly once, and only the approved one").toEqual([pushCommands[0]]);
 		expect(pushDraft("main")?.state, "its draft is released").toBe("released");
 		expect(pushDraft("release")?.state, "the other push still waits").toBe("pending");
 		trace.mark("root", "telegram-owner.approved");
@@ -726,7 +755,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 		);
 		expect(seen(6), "the replayed update is journaled once").toBe(1);
 		expect(pushDraft("release")?.state, "the denied push is ended").toBe("denied");
-		expect(shellCommands(), "the denied push never runs, and the released one not again").toEqual([pushCommands[0]]);
+		expect(pushesRun(), "the denied push never runs, and the released one not again").toEqual([pushCommands[0]]);
 		trace.mark("root", "telegram-owner.decided");
 
 		// From the phone, a standing grant, a harness settings write and a routine are refused outright, nothing is held.
