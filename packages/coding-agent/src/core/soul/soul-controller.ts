@@ -33,8 +33,10 @@ export interface SoulControllerDeps {
 	readonly agentDir: string;
 	/** The session's semantic plane. */
 	readonly systemOne: {
-		/** The recorded System One engine (every evaluation lands on the semantic evaluation ledger); absent while System One is not configured. */
+		/** The recorded System One engine (every evaluation lands on the semantic evaluation ledger); absent while System One is off or no engine is bound. */
 		recordingSemanticEngine(): SemanticDecisionEngine | undefined;
+		/** System One is on and was given a controller or a steering plane; true with no engine bound is a configuration fault. */
+		readonly configured: boolean;
 		/** Every settled System One evaluation of the session; returns the unsubscribe. */
 		onSemanticEvaluation(listener: (record: SemanticEvaluationRecord) => void): () => void;
 	};
@@ -85,7 +87,7 @@ interface HeldWrite {
 	readonly ownerMark: number;
 	failures: number;
 	/**
-	 * The review allowed it (or no engine is bound any more) and only the write is left: the soul lock refused it. Kept so
+	 * The review allowed it (or System One is no longer configured) and only the write is left: the soul lock refused it. Kept so
 	 * a later attempt pays for no second review; bounded like a deferred verdict.
 	 */
 	allowed?: { readonly reviewer: SoulReviewer; readonly at: number; lockRefusals: number };
@@ -116,6 +118,8 @@ const HELD_RETRY_SPACING_MS = 2 * 60 * 1000;
  * review keeps failing (its 20 s budget at high consequence), and those answers must not spend the failures in seconds.
  */
 const HELD_RETRY_MIN_SPACING_MS = 30 * 1000;
+/** Why no agent soul review can run while System One is configured but no engine is bound: a fault, never "off". */
+const NO_ENGINE_BOUND = "System One is configured for this session but no decision engine was supplied";
 const CLOSE_LOCK_WARNING =
 	"The soul.md change no review settled could not be reverted at close because the soul lock is held elsewhere; it stays on disk unreviewed.";
 
@@ -312,6 +316,8 @@ export class SoulController {
 		const current = this.read();
 		if (current === undefined) return { kind: "missing", path: this.path };
 		const engine = this.deps.systemOne.recordingSemanticEngine();
+		if (!engine && this.deps.systemOne.configured)
+			return { kind: "reviewed", outcome: { kind: "unsupported", error: NO_ENGINE_BOUND } };
 		if (!engine) return { kind: "unavailable" };
 		return {
 			kind: "reviewed",
@@ -357,8 +363,10 @@ export class SoulController {
 	 * answer blocks with its codes; an unsettled answer blocks with "simplify the text" and the same text gets one retry;
 	 * an evaluation that fails or times out blocks the call, holds the text (replacing an older held one) and tells the
 	 * owner once per episode: the harness reviews it again when System One answers and writes it itself if the review
-	 * allows it. A review the call's own abort cancelled blocks and holds nothing. An engine that can never run the review
-	 * refuses the write and tells the owner it is a configuration fault. After close no soul.md write is taken.
+	 * allows it. A review the call's own abort cancelled blocks and holds nothing. An engine that can never run the review,
+	 * or System One configured with no engine bound, refuses the write and tells the owner it is a configuration fault.
+	 * Only while System One is not configured (turned off, or never set up) is the write taken unreviewed. After close no
+	 * soul.md write is taken.
 	 *
 	 * `registerCleanup` is the invocation's end: it runs when the call is refused (by this gate or a later one), abandoned
 	 * or finalized. A call that never reaches settlement leaves {@link running} there, so it cannot hold changes off as
@@ -398,7 +406,9 @@ export class SoulController {
 		}
 
 		const engine = this.deps.systemOne.recordingSemanticEngine();
-		if (!engine || screened.soul === undefined) return this.hold(call, candidate.text, current, "unreviewed", false);
+		if (screened.soul === undefined || (!engine && !this.deps.systemOne.configured))
+			return this.hold(call, candidate.text, current, "unreviewed", false);
+		if (!engine) return this.refuseUnsupported(candidate.text, NO_ENGINE_BOUND);
 
 		const identity = soulSha256(candidate.text);
 		if ((this.evaluations.get(identity) ?? 0) >= UNSETTLED_EVALUATIONS_PER_CANDIDATE) {
@@ -422,15 +432,7 @@ export class SoulController {
 			if (signal?.aborted) return block("The soul.md review was cancelled with the call; nothing was written.");
 			return this.holdWrite(`${screened.soul}\n`, current, outcome.error);
 		}
-		if (outcome.kind === "unsupported") {
-			this.record(candidate.text, "block");
-			this.tell(
-				"write",
-				"write-unsupported",
-				`The agent's soul.md writes are refused: ${outcome.error}. Configure a System One engine that can run it.`,
-			);
-			return block(`soul.md write refused: ${outcome.error}.`);
-		}
+		if (outcome.kind === "unsupported") return this.refuseUnsupported(candidate.text, outcome.error);
 		if (outcome.kind === "allow") {
 			this.evaluations.delete(identity);
 			const held = this.heldWrite;
@@ -450,6 +452,20 @@ export class SoulController {
 		return block(
 			`System One blocked the soul.md write: ${adverse.map((finding) => `${finding.id} (${finding.adverse})`).join("; ")}. Rewrite it as a plain description of who you are and how you work.`,
 		);
+	}
+
+	/**
+	 * No review can ever run on the agent's write (the engine cannot run the program, or System One is configured with no
+	 * engine bound): a configuration fault, not an outage. The write is refused and recorded `block`; nothing is held.
+	 */
+	private refuseUnsupported(text: string, error: string): BeforeToolCallResult {
+		this.record(text, "block");
+		this.tell(
+			"write",
+			"write-unsupported",
+			`The agent's soul.md writes are refused: ${error}. Configure a System One engine that can run the soul review.`,
+		);
+		return block(`soul.md write refused: ${error}.`);
 	}
 
 	/**
@@ -760,7 +776,9 @@ export class SoulController {
 					{ proposedText: held.bytes, currentSoul: held.basedOn ?? "" },
 					this.closing.signal,
 				)
-			: "unbound";
+			: this.deps.systemOne.configured
+				? ({ kind: "unsupported", error: NO_ENGINE_BOUND } as const)
+				: "unbound";
 		await this.serialized(() => this.finishHeld(held, outcome));
 	}
 
@@ -831,7 +849,7 @@ export class SoulController {
 			this.tell(
 				"change",
 				"change-reverted",
-				`System One rejected the held soul.md change (${verdict.reason}); it was reverted.`,
+				`The held soul.md change was not accepted (${verdict.reason}); it was reverted.`,
 			);
 		} else {
 			this.tell(
@@ -1028,7 +1046,7 @@ export class SoulController {
 		}
 	}
 
-	/** The verdict at close, where no review runs: the screen, then withheld while System One is configured. */
+	/** The verdict at close, where no review runs: the screen, then withheld while System One is configured (bound or not). */
 	private closingAction(text: string | undefined, restoreTo: string | undefined): () => string | undefined {
 		if (text === undefined) return this.deletionAction(restoreTo);
 		const screened = checkSoulText(text);
@@ -1036,7 +1054,7 @@ export class SoulController {
 		if (!screened.ok) {
 			return this.verdictAction(text, standing, restoreTo, { kind: "reject", reason: screened.reason });
 		}
-		if (this.deps.systemOne.recordingSemanticEngine() && screened.soul !== undefined) {
+		if (this.deps.systemOne.configured && screened.soul !== undefined) {
 			return () => this.withhold(text, restoreTo);
 		}
 		return this.verdictAction(text, standing, restoreTo, { kind: "accept", reviewer: "unreviewed" });
@@ -1157,14 +1175,17 @@ export class SoulController {
 
 	/**
 	 * The deterministic screen, then the soul review while System One is configured, on a document already on disk. After
-	 * close no review starts, and one in flight is aborted: either is `unavailable`.
+	 * close no review starts, and one in flight is aborted: either is `unavailable`. Configured with no engine bound, no
+	 * review can run: rejected (reverted), like an engine that cannot run the program.
 	 */
 	private async verdict(text: string, current: string | undefined): Promise<SoulVerdict> {
 		const screened = checkSoulText(text);
 		if (!screened.ok) return { kind: "reject", reason: screened.reason };
 		const engine = this.deps.systemOne.recordingSemanticEngine();
-		if (!engine || screened.soul === undefined) return { kind: "accept", reviewer: "unreviewed" };
+		if (screened.soul === undefined || (!engine && !this.deps.systemOne.configured))
+			return { kind: "accept", reviewer: "unreviewed" };
 		if (this.closed) return { kind: "unavailable", error: "the session closed" };
+		if (!engine) return { kind: "reject", reason: NO_ENGINE_BOUND };
 		const outcome = await reviewSoulText(
 			engine,
 			{ proposedText: text, currentSoul: current ?? "" },

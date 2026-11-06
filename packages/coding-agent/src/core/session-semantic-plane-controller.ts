@@ -76,6 +76,15 @@ export class SessionSemanticPlaneController {
 		return isSystemOneEnabled(this.deps, { enabled: this.deps.systemOneEnabled });
 	}
 
+	/**
+	 * System One is on and the session was given a way to reach it (a controller or a steering plane). It differs from
+	 * {@link recordingSemanticEngine} being defined only when neither supplied a decision engine, a configuration fault
+	 * (an SDK session given `adaptiveReadiness` without a `steeringPlane` never binds the controller's plane).
+	 */
+	get configured(): boolean {
+		return this.enabled && (this.configuredController !== undefined || this.configuredSteeringPlane !== undefined);
+	}
+
 	get controller(): SystemOneController | undefined {
 		return this.enabled ? this.configuredController : undefined;
 	}
