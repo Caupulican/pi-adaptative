@@ -479,7 +479,9 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		await withDeadline(trace, `${label}: the run that starts the reader`, opened);
 		await withDeadline(trace, `${label}: the reader runs`, reported.promise);
 		await withDeadline(trace, `${label}: the report wakes C`, woken.promise);
-		await sessionC.agent.waitForIdle();
+		// The wake run holds C's foreground past its agent loop (its cleanup, then the lease its delivery releases after
+		// the turn): the owner's next prompt is admitted only once the foreground is idle, not when the loop ends.
+		await withDeadline(trace, `${label}: C's foreground settles`, sessionC.waitForForegroundIdle());
 		const origins = completionOrigins();
 		expect(origins.length, `${label}: one report is delivered`).toBe(before + 1);
 		const started = attemptsOfC().filter((attempt) => !attemptsBefore.has(attempt.attemptId));
