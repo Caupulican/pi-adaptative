@@ -117,6 +117,11 @@ interface AgentSession {
   // Abort current operation
   abort(): Promise<void>;
 
+  // Chat or mail transports a deployment wrapper connects; each starts only under the owner's
+  // channels.<name> policy (see channels.md)
+  registerChannelProvider(provider: ChannelProvider): void;
+  channels: SessionChannelsView; // registerChannel, registerScheduler, getStates
+
   // Cleanup
   dispose(): void;
 }

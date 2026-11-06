@@ -481,6 +481,31 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 
 A value outside its range is replaced by the default. The daemon reads `routines.away` from the global settings file only, and applies a change from its next renewal (every 10 seconds).
 
+### Channels
+
+Admission policy for each chat or mail channel a deployment wrapper registers on a session (see [Channels](channels.md)). Read from the global settings and the directory profile only, never from a repository's `.pi/settings.json`; the first of the two that names a channel decides its whole policy. When the session's settings change or are reloaded, its channels start or stop to match.
+
+```json
+{
+  "channels": {
+    "mail": { "mode": "explicit", "allowedSenders": ["alice@example.com"] },
+    "chat": { "mode": "explicit", "allowedSenders": ["U024BE7LH"], "replyMode": "auto", "maxWakesPerDay": 5 }
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `channels.<name>.mode` | `"ignore"` | `"explicit"` starts the channel; `"ignore"` keeps it stopped. A channel with no entry is not started. |
+| `channels.<name>.allowedSenders` | `[]` | Sender ids (as the provider reports them, at most 50) whose verified messages may start a turn. Any other sender, and an unverified one, is held and starts nothing. |
+| `channels.<name>.replyMode` | `"draft"` | `"draft"` keeps each answer for the owner to send with the `channel_reply` tool; `"auto"` sends it to the conversation's address. |
+| `channels.<name>.maxWakesPerDay` | `10` | Turns the channel may start over the last 24 hours (0 to 200). |
+| `channels.<name>.maxUsdPerDay` | `0.5` | Spend of those turns over the last 24 hours (0 to 100). |
+| `channels.<name>.maxBatch` | `10` | Messages of one conversation delivered as one turn (1 to 25). |
+| `channels.<name>.maxPendingPerConversation` | `25` | Messages one conversation may have waiting (1 to 100); further ones are held. |
+
+Unlike other settings, a value outside its range is not replaced: the whole policy of that channel is rejected, the channel is not started, and the owner is told why.
+
 ### Cost Guard
 
 | Setting | Type | Default | Description |
