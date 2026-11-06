@@ -188,8 +188,20 @@ export function renderOwnerRulesForMission(policies: readonly OwnerRulePolicy[])
 	return ["MANDATORY OWNER DEVELOPMENT RULES", ...lines].join("\n");
 }
 
+/**
+ * The transitions an owner policy is judged at. It names a process (what runs after an edit), which a diff cannot show:
+ * it is judged on the evidence a task postflight and a completion carry, never on a single mutation.
+ */
+export const OWNER_RULE_JUDGED_PHASES = [
+	"task_postflight",
+	"completion",
+] as const satisfies readonly SemanticRule["phase"][];
+
 /** Projects a policy into the semantic rule registry so violations block a transition. */
-export function ownerRuleToSemanticRule(policy: OwnerRulePolicy, phase: SemanticRule["phase"]): SemanticRule {
+export function ownerRuleToSemanticRule(
+	policy: OwnerRulePolicy,
+	phase: (typeof OWNER_RULE_JUDGED_PHASES)[number],
+): SemanticRule {
 	return {
 		schema_version: "1.0",
 		rule_id: `${policy.id}:${phase}`,
@@ -198,7 +210,7 @@ export function ownerRuleToSemanticRule(policy: OwnerRulePolicy, phase: Semantic
 		scope: ["**/*"],
 		phase,
 		consequence: policy.consequence,
-		owner: "jev",
+		owner: "semantic",
 		enabled: true,
 	};
 }

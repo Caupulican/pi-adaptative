@@ -2346,8 +2346,8 @@ export class AgentSession {
 			getSystemOneController: () => this._semanticPlane.controller,
 			reviewNewCode: ({ toolName, args, cwd }) => this._unsettledLadder.codeDuplicates.review(toolName, args, cwd),
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
-			validateMutationAcceptance: ({ changedFiles }) =>
-				this._projectRules.acceptMutation(changedFiles, this._edgeIntent.ruleAuthority),
+			validateMutationAcceptance: (input) =>
+				this._projectRules.acceptMutation(input, this._edgeIntent.ruleAuthority),
 			checkSoulWrite: (call, args, cwd, signal) => this.soul.checkWrite(call, args, cwd, signal),
 			settleSoulWrite: (call, succeeded) => this.soul.settleWrite(call, succeeded),
 			noteOwnedWrites: (paths, cwd) => {

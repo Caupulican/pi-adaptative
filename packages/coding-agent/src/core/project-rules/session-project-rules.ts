@@ -15,7 +15,7 @@ import { createRetentionDecisionEngine } from "../compaction/retention-decision-
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { RULE_CONFLICT_NOTE } from "../objective-execution/local-commit-delivery.ts";
 import type { OwnerRulePolicy } from "./durable-owner-rules.ts";
-import { ownerRuleToSemanticRule } from "./durable-owner-rules.ts";
+import { OWNER_RULE_JUDGED_PHASES, ownerRuleToSemanticRule } from "./durable-owner-rules.ts";
 import { compileRulesFromText, SemanticProjectRuleController } from "./semantic-project-rule-controller.ts";
 import type { RulePhase, RuleRepairWork, RuleValidationResult, SemanticRule } from "./types.ts";
 import { blocksRuleTransition } from "./types.ts";
@@ -30,7 +30,7 @@ export interface SessionProjectRulesDeps {
 	readonly cwd: string;
 	/** Instruction files the active profile admitted. Untrusted repository text is never a source. */
 	getTrustedRuleSources(): readonly TrustedRuleSource[];
-	/** Durable owner policies, which are rules at every phase. */
+	/** Durable owner policies: process rules, judged at task postflight and completion (no single edit shows them). */
 	getOwnerRulePolicies(): readonly OwnerRulePolicy[];
 	/** The session's semantic engine; absent means only deterministic rules can be evaluated. */
 	getDecisionEngine(): SemanticDecisionEngine | undefined;
@@ -41,6 +41,8 @@ export interface SessionProjectRulesDeps {
 }
 
 const MAX_RULE_FILE_EVIDENCE_BYTES = 32 * 1024;
+/** Shared bound on the change a mutation's judged rules see. */
+const MAX_RULE_CHANGE_CHARS = 24 * 1024;
 
 /** Session custom-entry type carrying durable RepairWork queued by a rule violation. */
 export const PROJECT_RULE_REPAIR_CUSTOM_TYPE = "project-rule-repair-work";
@@ -88,15 +90,18 @@ export class SessionProjectRules {
 			rules.push(...compileRulesFromText(source.content, source.path));
 		}
 		for (const policy of policies) {
-			for (const phase of ["mutation", "task_postflight", "completion"] as const) {
+			for (const phase of OWNER_RULE_JUDGED_PHASES) {
 				rules.push(ownerRuleToSemanticRule(policy, phase));
 			}
 		}
 
-		const engine = this.deps.getDecisionEngine();
 		this.controller = new SemanticProjectRuleController({
 			initialRules: rules,
-			...(engine ? { decisionEngine: createRetentionDecisionEngine(engine) } : {}),
+			// The session's engine at the moment a rule is judged, not the one bound when the rules compiled.
+			getDecisionEngine: () => {
+				const engine = this.deps.getDecisionEngine();
+				return engine ? createRetentionDecisionEngine(engine) : undefined;
+			},
 		});
 		this.compiledSignature = signature;
 		return this.controller;
@@ -108,7 +113,8 @@ export class SessionProjectRules {
 	}
 
 	private consume(result: RuleValidationResult): RuleValidationResult {
-		if (result.passed) return result;
+		// A kept mutation still reports an evaluator outage as an operator diagnostic.
+		if (result.passed && !result.advisory) return result;
 		if (result.repairWork) {
 			this.queuedRepairs.push(result.repairWork);
 			this.deps.recordRepairWork(result.repairWork);
@@ -120,15 +126,24 @@ export class SessionProjectRules {
 	/**
 	 * The tool gate's verdict on a mutation under the owner's rule authority: `user` accepts without checking, `ask`
 	 * blocks a violation with the conflict note and records nothing, any other authority blocks it with the violation and
-	 * the RepairWork it queued.
+	 * the RepairWork it queued. A rule System One left unsettled never blocks: the kept result names it to check.
 	 */
 	async acceptMutation(
-		changedFiles: readonly string[],
+		input: { toolName: string; changedFiles: readonly string[]; patch?: string },
 		authority: "unset" | "ask" | "user" | "written",
-	): Promise<{ blocked: boolean; explanation?: string; repairId?: string }> {
+	): Promise<{ blocked: boolean; explanation?: string; repairId?: string; note?: string }> {
 		if (authority === "user") return { blocked: false };
-		const result = await this.validateMutation({ changedFiles }, { record: authority !== "ask" });
-		if (!SessionProjectRules.blocks(result)) return { blocked: false };
+		const result = await this.validateMutation(input, { record: authority !== "ask" });
+		if (!SessionProjectRules.blocks(result)) {
+			const doubts = result.doubts ?? [];
+			if (doubts.length === 0) return { blocked: false };
+			return {
+				blocked: false,
+				note: `[project rules] System One did not settle whether this change follows ${doubts.length === 1 ? "this rule" : "these rules"}; check the change against ${doubts.length === 1 ? "it" : "them"} before relying on it:\n${doubts
+					.map((doubt) => `- ${doubt.text}`)
+					.join("\n")}`,
+			};
+		}
 		if (authority === "ask") return { blocked: true, explanation: RULE_CONFLICT_NOTE };
 		return {
 			blocked: true,
@@ -137,22 +152,28 @@ export class SessionProjectRules {
 		};
 	}
 
-	/** RCG-041: mutation acceptance. */
+	/**
+	 * RCG-041: mutation acceptance. The judged change is the edit's own patch, the whole content of a file the write
+	 * tool created (it only creates), or else each changed file as it now stands; bounded, with truncation flagged.
+	 */
 	async validateMutation(
 		input: {
 			objectiveId?: string;
 			taskId?: string;
+			toolName?: string;
 			changedFiles: readonly string[];
+			patch?: string;
 			diffContent?: string;
 			signal?: AbortSignal;
 		},
 		options?: { record?: boolean },
 	): Promise<RuleValidationResult> {
+		const { toolName, patch, ...ruleInput } = input;
 		const fileContents = this.readChangedFiles(input.changedFiles);
 		const result = await this.getController().validateMutation({
-			...input,
+			...ruleInput,
 			fileContents,
-			boundedDiffEvidence: input.diffContent ?? summarizeFileEvidence(fileContents),
+			boundedDiffEvidence: boundedChange(patch ?? input.diffContent, fileContents, toolName === "write"),
 		});
 		return options?.record === false ? result : this.consume(result);
 	}
@@ -201,10 +222,25 @@ export class SessionProjectRules {
 	}
 }
 
-function summarizeFileEvidence(fileContents: Record<string, string>): string {
-	return Object.entries(fileContents)
-		.map(([path, content]) => `${path} (${content.length} bytes)`)
-		.join("\n");
+/** The change a mutation rule is judged against, within one shared bound. */
+function boundedChange(
+	patch: string | undefined,
+	fileContents: Record<string, string>,
+	created: boolean,
+): Record<string, unknown> {
+	if (patch !== undefined) {
+		return { patch: patch.slice(0, MAX_RULE_CHANGE_CHARS), truncated: patch.length > MAX_RULE_CHANGE_CHARS };
+	}
+	let remaining = MAX_RULE_CHANGE_CHARS;
+	let truncated = false;
+	const files: { path: string; content: string }[] = [];
+	for (const [path, content] of Object.entries(fileContents)) {
+		const kept = content.slice(0, Math.max(0, remaining));
+		if (kept.length < content.length) truncated = true;
+		remaining -= kept.length;
+		files.push({ path, content: kept });
+	}
+	return { [created ? "createdFiles" : "filesAfterChange"]: files, truncated };
 }
 
 export type { RulePhase, RuleValidationResult };

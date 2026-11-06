@@ -177,12 +177,15 @@ export interface ToolGateControllerDeps {
 	reviewPlan?(input: { toolName: string; args: unknown }): Promise<string | undefined>;
 	/**
 	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
-	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
+	 * error carrying the violation, so the transition does not proceed on an accepted mutation; a rule
+	 * left unsettled keeps the result and appends the note naming what to check.
 	 */
 	validateMutationAcceptance?(input: {
 		toolName: string;
 		changedFiles: readonly string[];
-	}): Promise<{ blocked: boolean; explanation?: string; repairId?: string } | undefined>;
+		/** The edit's own unified patch, when the tool produced one. */
+		patch?: string;
+	}): Promise<{ blocked: boolean; explanation?: string; repairId?: string; note?: string } | undefined>;
 	/** Successful typed edit/write paths, hashed by the session ledger. */
 	noteOwnedWrites?(paths: readonly string[], cwd: string): void;
 	/** Bash or run_process changed the checkout, or that fingerprint could not be read. */
@@ -642,9 +645,11 @@ export class ToolGateController {
 			if (!resolvedIsError) {
 				const changedFiles = collectMutatedPaths(toolCall.name, args);
 				if (changedFiles.length > 0 && this.deps.validateMutationAcceptance) {
+					const patch = (details as { patch?: unknown } | undefined)?.patch;
 					const verdict = await this.deps.validateMutationAcceptance({
 						toolName: toolCall.name,
 						changedFiles,
+						...(typeof patch === "string" ? { patch } : {}),
 					});
 					if (verdict?.blocked) {
 						const repair = verdict.repairId ? ` RepairWork ${verdict.repairId} is queued.` : "";
@@ -661,6 +666,7 @@ export class ToolGateController {
 							terminate,
 						};
 					}
+					if (verdict?.note) content = [...content, { type: "text", text: verdict.note }];
 				}
 				const planSteer = await this.deps.reviewPlan?.({ toolName: toolCall.name, args });
 				if (planSteer) content = [...content, { type: "text", text: planSteer }];

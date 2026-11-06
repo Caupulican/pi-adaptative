@@ -657,10 +657,21 @@ operator, or is refused for a worker; an established outward effect the request 
 confidence here (`confidenceGate`; `choiceGate` reads a Choice on P(chosen option) instead); a Noul's
 probability is its certainty (see Thresholds and readings).
 
-Project-rule candidates across mutation, postflight and completion require the receiving agent to
-verify them. Current verification receipts reach the recheck. An evaluator outage reports its
-diagnostic without inventing a critical violation or queuing repair tasks. Deterministic instruction
-violations retain their corrective work and transition checks.
+Semantic project-rule judgment is opt-in per rule. System One judges an instruction-file bullet only when
+the bullet carries the marker `<!-- system-one: phase=<mutation|task_postflight|completion> consequence=<low|medium|high|critical> -->`
+(both fields optional; the defaults are `mutation` and `medium`). The marker is removed from the rule text, and the
+rule's phase and consequence come from the marker alone. Bullets naming one of the mechanical checks (such as inline
+imports) stay code checks. Every other bullet is guidance: the model reads it, and nothing judges a change against it.
+Durable owner policies are process rules, so they are judged at task postflight and completion, never on a single edit.
+Each phase sends one request (`rule_program_v2`) with one `violate::<rule id>` question per judged rule. The rules are
+named state (`rules[i].text`) and so is the change (`change`): the edit's own unified patch, the content of a file the
+write tool created, or the proof state at postflight and completion, bounded to 24 KiB with truncation flagged.
+A settled "violates" is a candidate the receiving agent verifies. An undecided answer, a missing answer, an evaluator
+outage or a session with no engine leave the rule in doubt, and every doubt gets the same handling. A mutation is kept
+and its tool result names the rules to check (an outage also reports its operator diagnostic). At postflight and
+completion the doubt is a verification obligation in the receiving lane, like a settled candidate. Current
+verification receipts reach the recheck. Neither a doubt nor a candidate queues repair tasks.
+Deterministic instruction violations retain their corrective work and transition checks.
 
 The completion evaluation requires planted gaps to refuse completion and reports diagnostic notices separately.
 An incomplete semantic assessment or evaluator error never counts as detecting a planted gap.

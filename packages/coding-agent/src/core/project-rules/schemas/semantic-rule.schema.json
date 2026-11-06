@@ -72,7 +72,8 @@
     "owner": {
       "enum": [
         "deterministic",
-        "jev"
+        "semantic",
+        "guidance"
       ]
     },
     "enabled": {

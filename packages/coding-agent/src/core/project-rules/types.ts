@@ -2,7 +2,11 @@ import type { RepairWork } from "../objective-execution/objective-repair-work.ts
 
 export type RulePhase = "mutation" | "task_postflight" | "completion";
 export type RuleConsequence = "low" | "medium" | "high" | "critical";
-export type RuleOwner = "deterministic" | "jev";
+/**
+ * Who checks a rule: code (`deterministic`), System One on the evidence of its phase (`semantic`, only a rule its source
+ * marks as checkable), or nobody (`guidance`: standing text the model already reads, which no change can be judged against).
+ */
+export type RuleOwner = "deterministic" | "semantic" | "guidance";
 
 export interface RuleSource {
 	readonly path: string;
@@ -51,10 +55,19 @@ export interface RuleRepairWork extends RepairWork {
 	};
 }
 
+/** A semantic rule System One did not settle either way (an undecided answer, no answer, or no evaluation). */
+export interface RuleDoubt {
+	readonly ruleId: string;
+	readonly text: string;
+	readonly cause: "undecided" | "unavailable";
+}
+
 export interface RuleValidationResult {
 	readonly passed: boolean;
 	/** Evaluator unavailability is diagnostic and cannot manufacture repair work. */
 	readonly advisory?: boolean;
+	/** Rules a mutation stands against unsettled: the change is kept and the receiving agent checks them. */
+	readonly doubts?: readonly RuleDoubt[];
 	/** An answered concern must be verified in the receiving lane before affected work continues. */
 	readonly verificationRequired?: boolean;
 	readonly violations: readonly RuleViolation[];

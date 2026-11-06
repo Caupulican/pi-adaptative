@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { noulFromAnswer, settledNoul } from "../system-one/policy.ts";
+import { isNoulProbability, noulBand } from "../decision/noul.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
 	RuleConsequence,
+	RuleDoubt,
+	RuleOwner,
 	RulePhase,
 	RuleRepairWork,
 	RuleValidationResult,
@@ -24,18 +26,23 @@ export interface DecisionEngine {
 		program: DecisionEngineProgram,
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
-	): Promise<{
-		answers?: Record<string, { type?: string; boolean?: boolean; choice?: string; value?: boolean | number }>;
-		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
-	}>;
+	): Promise<{ answers?: Record<string, unknown> }>;
 }
 
-export interface SteeringPlane {
-	requireCertificate(
-		checkpoint: string,
-		payload: unknown,
-		context?: { objectiveId?: string; taskId?: string; signal?: AbortSignal },
-	): Promise<{ certificate_id: string; answers?: Record<string, unknown> }>;
+/** The semantic rule program: one question per rule, each pointing at its named rule and the named change. */
+export const PROJECT_RULE_PROGRAM_ID = "rule_program_v2";
+
+/**
+ * The source marker that makes an instruction bullet a rule System One judges, with the transition it is judged at and
+ * what a violation costs: `<!-- system-one: phase=mutation consequence=high -->` (both fields optional).
+ */
+const SEMANTIC_RULE_MARKER = /<!--\s*system-one:?([^>]*?)-->/i;
+const RULE_PHASES: readonly RulePhase[] = ["mutation", "task_postflight", "completion"];
+const RULE_CONSEQUENCES: readonly RuleConsequence[] = ["low", "medium", "high", "critical"];
+
+function markerField<T extends string>(fields: string, name: string, allowed: readonly T[]): T | undefined {
+	const value = new RegExp(`\\b${name}\\s*=\\s*([a-z_]+)`, "i").exec(fields)?.[1]?.toLowerCase();
+	return allowed.find((candidate) => candidate === value);
 }
 
 export class SemanticRuleRegistry {
@@ -83,8 +90,10 @@ export class SemanticRuleRegistry {
 }
 
 /**
- * Compiles SemanticRule entries from Markdown source text (e.g. AGENTS.md).
- * FR-041, FR-042.
+ * Compiles SemanticRule entries from Markdown source text (e.g. AGENTS.md). Every bullet is a rule. A bullet carrying
+ * the `system-one` marker is judged by System One at the phase and consequence the marker names; a bullet naming one of
+ * the mechanical checks below is checked by code; every other bullet is standing guidance that no transition judges
+ * (style, process and conversation rules cannot be settled from a change). FR-041, FR-042.
  */
 export function compileRulesFromText(text: string, sourcePath: string): SemanticRule[] {
 	const digest = createHash("sha256").update(text).digest("hex");
@@ -95,7 +104,9 @@ export function compileRulesFromText(text: string, sourcePath: string): Semantic
 	let consequence: RuleConsequence = "medium";
 
 	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]!.trim();
+		const marker = SEMANTIC_RULE_MARKER.exec(lines[i]!);
+		// The marker's own words (`phase=completion`) never move the section heuristic below.
+		const line = lines[i]!.replace(SEMANTIC_RULE_MARKER, "").trim();
 		if (!line) continue;
 
 		if (line.toLowerCase().includes("postflight")) {
@@ -128,6 +139,7 @@ export function compileRulesFromText(text: string, sourcePath: string): Semantic
 				ruleText.toLowerCase().includes("never") || ruleText.toLowerCase().includes("mandatory")
 					? "critical"
 					: "medium";
+			const owner: RuleOwner = marker ? "semantic" : isDeterministic ? "deterministic" : "guidance";
 
 			rules.push({
 				schema_version: "1.0",
@@ -139,9 +151,12 @@ export function compileRulesFromText(text: string, sourcePath: string): Semantic
 				},
 				text: ruleText,
 				scope: ["**/*"],
-				phase: currentPhase,
-				consequence,
-				owner: isDeterministic ? "deterministic" : "jev",
+				// A judged rule takes its phase and consequence from its own marker, never from nearby words.
+				phase: marker ? (markerField(marker[1] ?? "", "phase", RULE_PHASES) ?? "mutation") : currentPhase,
+				consequence: marker
+					? (markerField(marker[1] ?? "", "consequence", RULE_CONSEQUENCES) ?? "medium")
+					: consequence,
+				owner,
 				enabled: true,
 			});
 		}
@@ -157,58 +172,94 @@ function maxConsequence(rules: readonly SemanticRule[]): RuleConsequence {
 	return "low";
 }
 
-function ruleViolationAnswer(answer: unknown): number | boolean {
-	const fields = answer && typeof answer === "object" ? (answer as { probabilityTrue?: unknown }) : undefined;
-	const probability =
-		typeof fields?.probabilityTrue === "number" ? fields.probabilityTrue : noulFromAnswer(answer, true);
-	return typeof probability === "number" && (!Number.isFinite(probability) || probability < 0 || probability > 1)
-		? true
-		: probability;
+/** One judged rule per question, the rule and the change named in state instead of spliced into the question. */
+function semanticRuleProgram(rules: readonly SemanticRule[], phase: RulePhase): DecisionEngineProgram {
+	return {
+		schema_version: "2.0",
+		program_id: PROJECT_RULE_PROGRAM_ID,
+		description: `Whether the ${phase} change violates each judged project rule.`,
+		decisions: rules.map((rule, index) => ({
+			id: `violate::${rule.rule_id}`,
+			kind: "boolean",
+			type: "noul",
+			instruction: `Does \`change\` violate the project rule in \`rules[${index}].text\`?`,
+			criteria: {
+				true: "Something the change does is forbidden by the rule, or the change leaves out something the rule requires of it.",
+				false: "Nothing in the change goes against the rule, or the rule does not apply to what the change does.",
+			},
+		})),
+	};
 }
 
-function semanticRuleFindings(
+/** P(the change violates the rule), or undefined when the answer carries no probability (never read as a verdict). */
+function violationProbability(answer: unknown): number | undefined {
+	if (!answer || typeof answer !== "object") return undefined;
+	const fields = answer as { noul?: unknown; probabilityTrue?: unknown };
+	const probability = fields.probabilityTrue ?? fields.noul;
+	return isNoulProbability(probability) ? probability : undefined;
+}
+
+/**
+ * A settled "violates" is a finding the receiving agent verifies; a settled "does not" passes; anything else (an
+ * undecided band or no answer) is a doubt, the same outcome an evaluator outage has.
+ */
+function readSemanticRules(
 	rules: readonly SemanticRule[],
 	phase: RulePhase,
 	answers: Record<string, unknown> | undefined,
-	certificateId?: string,
-): RuleViolation[] {
+): { findings: RuleViolation[]; doubts: RuleDoubt[] } {
 	const findings: RuleViolation[] = [];
+	const doubts: RuleDoubt[] = [];
 	for (const rule of rules) {
-		if (settledNoul(ruleViolationAnswer(answers?.[`violate::${rule.rule_id}`]), "required_false", true) === false)
+		const probability = violationProbability(answers?.[`violate::${rule.rule_id}`]);
+		const band = probability === undefined ? "ambiguous" : noulBand(probability, "required_false");
+		if (band === "hard_pass" || band === "soft_pass") continue;
+		if (band === "ambiguous") {
+			doubts.push({ ruleId: rule.rule_id, text: rule.text, cause: "undecided" });
 			continue;
+		}
 		findings.push({
 			ruleId: rule.rule_id,
 			phase,
 			consequence: rule.consequence,
-			explanation: `Verify project rule finding ${rule.rule_id}${certificateId ? ` from certificate ${certificateId}` : ""}: ${rule.text}`,
+			explanation: `Verify project rule finding ${rule.rule_id}: ${rule.text}`,
 			suggestedFix: `Reproduce the finding, revise confirmed failures, and recheck compliance with: ${rule.text}`,
 		});
 	}
-	return findings;
+	return { findings, doubts };
+}
+
+/** A doubt at a postflight or completion is a verification obligation, worded as one. */
+function doubtObligation(doubt: RuleDoubt, phase: RulePhase, consequence: RuleConsequence): RuleViolation {
+	return {
+		ruleId: doubt.ruleId,
+		phase,
+		consequence,
+		explanation: `Verify project rule ${doubt.ruleId}, which System One ${doubt.cause === "unavailable" ? "could not judge" : "did not settle"}: ${doubt.text}`,
+		suggestedFix: `Check the change against the rule, revise what does not comply, and recheck: ${doubt.text}`,
+	};
 }
 
 /**
  * SemanticProjectRuleController:
  * Evaluates repository-specific semantic rules across mutation, task_postflight, and completion phases.
- * Enforces deterministic vs Jev ownership split, prevents authority expansion,
+ * Enforces the deterministic / semantic / guidance ownership split, prevents authority expansion,
  * emits RepairWork for deterministic violations, and asks the receiving agent to verify semantic candidates.
  * Implements FR-040..FR-050.
  */
 export class SemanticProjectRuleController {
 	readonly registry: SemanticRuleRegistry;
-	private readonly decisionEngine?: DecisionEngine;
-	private readonly steering?: SteeringPlane;
+	/** Resolved at every evaluation: an engine bound after the rules compiled is the one that judges them. */
+	private readonly getDecisionEngine: () => DecisionEngine | undefined;
 	private readonly repairLog: Array<{ ruleId: string; summary: string; timestamp: string }> = [];
 
 	constructor(deps: {
 		registry?: SemanticRuleRegistry;
-		decisionEngine?: DecisionEngine;
-		steering?: SteeringPlane;
+		getDecisionEngine?: () => DecisionEngine | undefined;
 		initialRules?: readonly SemanticRule[];
 	}) {
 		this.registry = deps.registry ?? new SemanticRuleRegistry();
-		this.decisionEngine = deps.decisionEngine;
-		this.steering = deps.steering;
+		this.getDecisionEngine = deps.getDecisionEngine ?? (() => undefined);
 
 		if (deps.initialRules) {
 			this.registry.registerAll(deps.initialRules);
@@ -275,7 +326,7 @@ export class SemanticProjectRuleController {
 		}
 
 		const deterministic = applicable.filter((r) => r.owner === "deterministic");
-		const semantic = applicable.filter((r) => r.owner === "jev");
+		const semantic = applicable.filter((r) => r.owner === "semantic");
 		const violations: RuleViolation[] = [];
 		const evidence =
 			input.boundedDiffEvidence ??
@@ -342,85 +393,64 @@ export class SemanticProjectRuleController {
 			return this.toValidationResult(violations, applicable.length, input.objectiveId, input.taskId);
 		}
 
-		// 2. Semantic Jev Evaluation
-		if (semantic.length > 0) {
-			if (this.decisionEngine) {
-				const program: DecisionEngineProgram = {
-					schema_version: "2.0",
-					program_id: `rule_program_${Date.now()}`,
-					description: `Evaluate semantic project rules for phase ${phase}`,
-					decisions: semantic.map((r) => ({
-						id: `violate::${r.rule_id}`,
-						kind: "boolean",
-						type: "noul",
-						instruction: `Does the change violate the following project rule? Rule: "${r.text}"`,
-					})),
-				};
+		if (semantic.length === 0) return this.toValidationResult([], applicable.length);
 
-				try {
-					const evaluation = await this.decisionEngine.evaluate(
-						program,
-						{
-							changedFiles: input.changedFiles,
-							evidence,
-						},
-						{ consequence: maxConsequence(semantic), signal: input.signal },
-					);
-
-					violations.push(
-						...semanticRuleFindings(semantic, phase, { ...evaluation.answers, ...evaluation.results }),
-					);
-				} catch (error) {
-					input.signal?.throwIfAborted();
-					violations.push({
-						ruleId: "semantic_rule_eval_unavailable",
-						phase,
-						consequence: maxConsequence(semantic),
-						explanation: `Semantic project-rule evaluation unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
-					});
-					return this.toValidationResult(
-						violations,
-						applicable.length,
-						input.objectiveId,
-						input.taskId,
-						"advisory",
-					);
-				}
-			} else if (this.steering) {
-				// Require certificate JEV-PROJECT-RULE
-				try {
-					const cert = await this.steering.requireCertificate(
-						"JEV-PROJECT-RULE",
-						{
-							phase,
-							rules: semantic.map((r) => ({ id: r.rule_id, text: r.text })),
-							changedFiles: input.changedFiles,
-							evidence,
-						},
-						{ objectiveId: input.objectiveId, taskId: input.taskId, signal: input.signal },
-					);
-
-					violations.push(...semanticRuleFindings(semantic, phase, cert.answers, cert.certificate_id));
-				} catch (error) {
-					input.signal?.throwIfAborted();
-					violations.push({
-						ruleId: "semantic_rule_certificate_unavailable",
-						phase,
-						consequence: maxConsequence(semantic),
-						explanation: `Semantic project-rule certificate unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
-					});
-					return this.toValidationResult(
-						violations,
-						applicable.length,
-						input.objectiveId,
-						input.taskId,
-						"advisory",
-					);
-				}
-			}
+		// 2. System One judgment of the rules their source marked as checkable.
+		const judged = await this.judgeSemanticRules(semantic, phase, input.changedFiles, evidence, input.signal);
+		const consequenceOf = new Map(semantic.map((rule) => [rule.rule_id, rule.consequence]));
+		const obligations = judged.doubts.map((doubt) =>
+			doubtObligation(doubt, phase, consequenceOf.get(doubt.ruleId) ?? "medium"),
+		);
+		const unavailable = judged.unavailable
+			? `Project rule diagnostic: System One could not judge ${semantic.length} project rule(s): ${judged.unavailable}`
+			: undefined;
+		// A mutation is kept on a doubt: its tool result names the rules to check. A postflight or a completion turns
+		// the doubt into the same verification obligation a settled finding opens.
+		if (phase === "mutation" && judged.findings.length === 0 && judged.doubts.length > 0) {
+			return {
+				passed: true,
+				violations: [],
+				checkedRules: applicable.length,
+				doubts: judged.doubts,
+				...(unavailable ? { advisory: true, summaryEvent: unavailable } : {}),
+			};
 		}
+		const result = this.toValidationResult(
+			phase === "mutation" ? judged.findings : [...judged.findings, ...obligations],
+			applicable.length,
+			input.objectiveId,
+			input.taskId,
+			"verification",
+		);
+		return judged.doubts.length > 0 ? { ...result, doubts: judged.doubts } : result;
+	}
 
-		return this.toValidationResult(violations, applicable.length, input.objectiveId, input.taskId, "verification");
+	/** One request per phase, the engine resolved now; an evaluation that does not answer leaves every rule in doubt. */
+	private async judgeSemanticRules(
+		rules: readonly SemanticRule[],
+		phase: RulePhase,
+		changedFiles: readonly string[],
+		change: unknown,
+		signal: AbortSignal | undefined,
+	): Promise<{ findings: RuleViolation[]; doubts: RuleDoubt[]; unavailable?: string }> {
+		const unjudged = (reason: string) => ({
+			findings: [],
+			doubts: rules.map((rule) => ({ ruleId: rule.rule_id, text: rule.text, cause: "unavailable" as const })),
+			unavailable: reason.slice(0, 500),
+		});
+		const engine = this.getDecisionEngine();
+		if (!engine) return unjudged("no System One engine is configured for this session");
+		try {
+			const evaluation = await engine.evaluate(
+				semanticRuleProgram(rules, phase),
+				{ phase, rules: rules.map((rule) => ({ id: rule.rule_id, text: rule.text })), changedFiles, change },
+				{ consequence: maxConsequence(rules), signal },
+			);
+			return readSemanticRules(rules, phase, evaluation.answers);
+		} catch (error) {
+			signal?.throwIfAborted();
+			return unjudged(String(error instanceof Error ? error.message : error));
+		}
 	}
 
 	private toValidationResult(
