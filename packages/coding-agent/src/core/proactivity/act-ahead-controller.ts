@@ -58,7 +58,7 @@ const DEPENDENCY_DIRECTORIES = ["node_modules", ".venv", "venv"] as const;
  * lockfiles, tool configuration, CI, scripts, hooks, harness settings). The worker's output is untrusted data.
  */
 const GUARDED_PATH =
-	/(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|requirements[^/]*\.txt|setup\.py|setup\.cfg|Makefile|tsconfig[^/]*\.json|biome\.jsonc?|[^/]*\.config\.[cm]?[jt]s|\.eslintrc[^/]*|\.npmrc|\.gitignore|\.gitattributes|\.gitmodules)$|(?:^|\/)(?:\.github|\.husky|\.pi|scripts|\.git)\//;
+	/(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|requirements[^/]*\.txt|setup\.py|setup\.cfg|Makefile|tsconfig[^/]*\.json|biome\.jsonc?|[^/]*\.config\.[^/]+|\.eslintrc[^/]*|\.npmrc|\.gitignore|\.gitattributes|\.gitmodules)$|(?:^|\/)(?:\.github|\.husky|\.pi|scripts|\.git)\//;
 /** The words of a CI host event: third-party-authorable text. */
 const HOST_EVENT_ORIGIN: TurnOriginRecord = { v: 1, k: "host-event", thirdParty: true };
 
