@@ -93,7 +93,7 @@ objective, or unresolved verification.
 
 Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024 and the
 completion transaction for objective-loop completion (JEV-025/026 ask the same packs only when no
-transaction verdict exists: a mechanical or reviewer profile, or an evaluator exception), JEV-041.. for semantic dedup. The goal tool first proves its
+transaction verdict exists: a mechanical or reviewer profile, an evaluator exception, or a plane without a completion transaction), JEV-041.. for semantic dedup. The goal tool first proves its
 deterministic requirements and checks, then asks `SystemOneController` to evaluate the same canonical
 completion view without persisting a terminal state. Every completion request reruns current proof;
 a previous rejection never latches an owner question. Received completion findings take priority in

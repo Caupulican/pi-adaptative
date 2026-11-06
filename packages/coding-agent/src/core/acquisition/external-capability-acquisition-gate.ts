@@ -495,10 +495,6 @@ export class ExternalCapabilityAcquisitionGate {
 		return findings;
 	}
 
-	/**
-	 * Turns a route label into something the caller can actually carry out. A label with no command
-	 * and no manual step is not a resolved route, and the gate treats that as a denial.
-	 */
 	/** The request replaced by its safer route, recorded as such. */
 	private safeRouteDecision(
 		request: AcquisitionRequest,
@@ -520,6 +516,10 @@ export class ExternalCapabilityAcquisitionGate {
 		};
 	}
 
+	/**
+	 * Turns a route label into something the caller can actually carry out. A label with no command
+	 * and no manual step is not a resolved route, and the gate treats that as a denial.
+	 */
 	private resolveRoute(route: string, request: AcquisitionRequest): ResolvedSafeRoute {
 		if (this.resolveRouteFn) return this.resolveRouteFn(route, request);
 		return resolveDefaultSafeRoute(route, request);

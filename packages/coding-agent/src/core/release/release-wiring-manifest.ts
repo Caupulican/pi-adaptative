@@ -421,7 +421,7 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		triggerSymbol: "executeCompletionTransaction",
 		consumerFile: "packages/coding-agent/src/core/system-one/policy.ts",
 		consumerSymbol: "challengeAnswers",
-		failClosed: "a failed cold challenge queues repair work instead of completing",
+		failClosed: "a failed cold challenge rejects the completion and sets a same-lane verification directive",
 		provenance: "production-live",
 	},
 	{

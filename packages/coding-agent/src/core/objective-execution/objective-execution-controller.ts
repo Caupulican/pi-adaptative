@@ -1537,8 +1537,8 @@ export class ObjectiveExecutionController {
 					if (evalResult.verdict === "complete") {
 						// A completion transaction that returned a verdict already asked the completion and challenge
 						// packs on the completion view, and evalResult carries it. JEV-025/JEV-026 ask those packs only
-						// when no transaction verdict exists: a mechanical or reviewer profile, or an evaluator exception
-						// the coordinator fell back from.
+						// when no transaction verdict exists: a mechanical or reviewer profile, an evaluator exception
+						// the coordinator fell back from, or a steering plane without a completion transaction.
 						const completion =
 							completionFinding === undefined ? await this.deps.systemOne?.completionView?.(signal) : undefined;
 						const completionEvidence = completion
