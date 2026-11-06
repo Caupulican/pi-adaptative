@@ -350,9 +350,17 @@ export interface RoutineAwaySettings {
 	maxUsdPerRun?: number; // default: 0.25 — spend bound of one run away
 	maxUsdPerDay?: number; // default: 1.00 — spend of runs away over any rolling 24 h across the agent dir; a due run past it waits for its session
 	maxParentHosts?: number; // default: 4 — sessions the daemon runs routines for at once
+	autostart?: RoutineAwayAutostart; // default: "notify" — read from the owner's global and directory settings only
 }
 
-export type ResolvedRoutineAwaySettings = Required<RoutineAwaySettings>;
+/**
+ * Whether the daemon starts with the owner's login: `on` installs the user service (systemd --user, launchd, Task
+ * Scheduler) at the next session start or routine save, `notify` tells the owner once how to enable it and installs
+ * nothing, `off` says nothing.
+ */
+export type RoutineAwayAutostart = "off" | "notify" | "on";
+
+export type ResolvedRoutineAwaySettings = Required<Omit<RoutineAwaySettings, "autostart">>;
 
 export interface RoutinesSettings {
 	automaticIntake?: boolean; // default: true — after an owner turn settles, explicit recurring, scheduled or conditional requests in the owner's own words become read-only routines; false leaves routine creation to the routine tool

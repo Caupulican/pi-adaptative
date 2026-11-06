@@ -194,6 +194,13 @@ function ownerConfigReferencedNames(configFiles: readonly string[]): Set<string>
 	return names;
 }
 
+/** Every API key variable `findEnvKeys` reports for a known provider, upper-cased. */
+function providerKeyNames(): string[] {
+	return getProviders()
+		.flatMap((provider) => findEnvKeys(provider) ?? [])
+		.map((name) => name.toUpperCase());
+}
+
 /**
  * PATH without the entries inside `projectDir`: a virtualenv or `node_modules/.bin` belongs to that project. A
  * directory holding the owner's home (the home itself, or above it) is no project: its entries are the owner's tools.
@@ -207,6 +214,37 @@ function machinePath(value: string, projectDir: string): string {
 }
 
 /**
+ * The variables a user service definition names for the daemon it starts at login (see `away-service.ts`). A unit,
+ * plist or task file is plain text any process of the user can read, so it names no secret: only PATH without the
+ * installing session's project entries, and gh's configuration location and host. Provider keys, secret-manager
+ * sessions and gh tokens stay out; such a daemon reads its credentials from the owner's `auth.json`, gh's own stored
+ * sign-in, or the service manager's own environment.
+ */
+export function daemonServiceEnvironment(source: NodeJS.ProcessEnv, projectDir: string): Record<string, string> {
+	const environment: Record<string, string> = {};
+	for (const [name, value] of Object.entries(source)) {
+		if (!value) continue;
+		const upper = name.toUpperCase();
+		if (upper === "PATH") environment.PATH = machinePath(value, projectDir);
+		else if (upper === "GH_CONFIG_DIR" || upper === "GH_HOST") environment[upper] = value;
+	}
+	return environment;
+}
+
+/**
+ * Names (never values) of the provider credentials `source` holds that a daemon started by a user service does not
+ * get from its definition: every provider API key variable and every variable the owner's `auth.json`/`models.json`
+ * reference, set in `source`.
+ */
+export function environmentOnlyCredentialNames(source: NodeJS.ProcessEnv, configFiles: readonly string[]): string[] {
+	const wanted = new Set([...providerKeyNames(), ...ownerConfigReferencedNames(configFiles)]);
+	return Object.entries(source)
+		.filter(([name, value]) => Boolean(value) && wanted.has(name.toUpperCase()))
+		.map(([name]) => name)
+		.sort();
+}
+
+/**
  * The daemon's baseline environment from `source` (the starting process's environment). `projectDir` is the starting
  * session's directory; `configFiles` are the owner's global `auth.json` and `models.json`.
  */
@@ -215,11 +253,7 @@ export function daemonBaselineEnvironment(
 	projectDir: string,
 	configFiles: readonly string[],
 ): NodeJS.ProcessEnv {
-	const providerKeys = new Set(
-		getProviders()
-			.flatMap((provider) => findEnvKeys(provider) ?? [])
-			.map((name) => name.toUpperCase()),
-	);
+	const providerKeys = new Set(providerKeyNames());
 	const referenced = ownerConfigReferencedNames(configFiles);
 	const environment: NodeJS.ProcessEnv = {};
 	for (const [name, value] of Object.entries(source)) {

@@ -19,6 +19,7 @@ import {
 } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
+import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -52,6 +53,8 @@ export interface BotTeamChatSessionPort {
 	getPersistentBotDaemonStatus?(): PersistentBotDaemonStatus;
 	startPersistentBotDaemon?(): { started: boolean; pid?: number; detail: string };
 	stopPersistentBotDaemon?(): { stopped: boolean; detail: string };
+	/** The session's background lanes: the always-on service of its agent directory. */
+	readonly backgroundLanes?: { getAwayService(): AwayService };
 }
 
 export interface BotTeamChatHost {
@@ -413,7 +416,7 @@ export class BotTeamChatController {
 					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick] | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -1058,7 +1061,7 @@ export class BotTeamChatController {
 	}
 
 	private async handleBotDaemonCommand(rest: string, port: BotTeamChatSessionPort): Promise<void> {
-		const [sub] = splitHead(rest);
+		const [sub, subRest] = splitHead(rest);
 		switch (sub) {
 			case "":
 			case "status": {
@@ -1084,7 +1087,29 @@ export class BotTeamChatController {
 					),
 					...status.reports.slice(-5).map((report) => `${new Date(report.at).toISOString()} ${report.message}`),
 				];
+				const awayService = port.backgroundLanes?.getAwayService();
+				if (awayService) lines.push(describeAwayServiceInspection(awayService.inspect()));
 				this.host.showStatus(lines.join("\n"));
+				return;
+			}
+			case "service": {
+				const awayService = port.backgroundLanes?.getAwayService();
+				if (!awayService) {
+					this.host.showWarning("The always-on service is unavailable in this session.");
+					return;
+				}
+				const [action] = splitHead(subRest);
+				if (action === "" || action === "status") {
+					this.host.showStatus((await awayService.status()).join("\n"));
+					return;
+				}
+				if (action === "install" || action === "uninstall") {
+					const outcome = action === "install" ? await awayService.install() : await awayService.uninstall();
+					if (outcome.ok) this.host.showStatus(outcome.detail);
+					else this.host.showWarning(outcome.detail);
+					return;
+				}
+				this.host.showWarning("Usage: /bot daemon service [status | install | uninstall]");
 				return;
 			}
 			case "start": {
@@ -1117,7 +1142,9 @@ export class BotTeamChatController {
 				return;
 			}
 			default:
-				this.host.showWarning("Usage: /bot daemon [status | start | stop | tick]");
+				this.host.showWarning(
+					"Usage: /bot daemon [status | start | stop | tick | service [status | install | uninstall]]",
+				);
 		}
 	}
 }

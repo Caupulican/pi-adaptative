@@ -2246,6 +2246,10 @@ export class HarnessProcesses {
 	}> = [];
 	/** Every detached `pi --bot-daemon` a session launched, in launch order: its exact argv and environment. */
 	readonly botDaemonLaunches: HarnessBotDaemonLaunch[] = [];
+	/** Every user service manager command production ran with a scripted answer, in order. */
+	readonly serviceManagerCalls: Array<{ readonly file: string; readonly args: readonly string[] }> = [];
+	private readonly serviceManagerAnswers: HarnessServiceManagerAnswer[] = [];
+	private serviceManagerDrained: (() => void) | undefined;
 	private readonly settling = new Set<Promise<void>>();
 	/** Child causes retained after their spawn leaves `settling`, so every later drain still reports them. */
 	private readonly causes: unknown[] = [];
@@ -2286,8 +2290,63 @@ export class HarnessProcesses {
 		return new Promise((resolve) => this.botDaemonWaiters.push({ options, resolve }));
 	}
 
+	/**
+	 * Scripts the user service manager (systemctl, launchctl, schtasks): each answer is for the next command production
+	 * runs, which must be exactly its file and argv, in order. A service manager command with no answer is unscripted and
+	 * fails the world, and an answer left unused fails its drain. Resolves once each scripted command has exited.
+	 */
+	scriptServiceManager(answers: readonly HarnessServiceManagerAnswer[]): Promise<void> {
+		if (this.serviceManagerAnswers.length > 0) throw new Error("Service manager answers are already scripted");
+		this.serviceManagerAnswers.push(...answers);
+		return new Promise((resolve) => {
+			this.serviceManagerDrained = resolve;
+		});
+	}
+
+	private answerServiceManager(answer: HarnessServiceManagerAnswer, argv: unknown): VirtualGitChild {
+		const args = Array.isArray(argv) && argv.every((arg): arg is string => typeof arg === "string") ? argv : [];
+		if (JSON.stringify(args) !== JSON.stringify(answer.args)) {
+			this.unscripted.push(`spawn ${answer.file} ${JSON.stringify(argv)} (scripted ${JSON.stringify(answer.args)})`);
+			throw new Error(`Unscripted service manager command: ${answer.file} ${JSON.stringify(argv)}`);
+		}
+		this.serviceManagerAnswers.shift();
+		this.serviceManagerCalls.push(Object.freeze({ file: answer.file, args: Object.freeze([...args]) }));
+		const child = new VirtualGitChild();
+		child.stdout.on("data", () => undefined);
+		child.stderr.on("data", () => undefined);
+		const closed = Promise.all([
+			new Promise<void>((resolve) => child.stdout.once("close", () => resolve())),
+			new Promise<void>((resolve) => child.stderr.once("close", () => resolve())),
+		]).then(() => {
+			child.emit("close", answer.code, null);
+			if (this.serviceManagerAnswers.length > 0) return;
+			const drained = this.serviceManagerDrained;
+			this.serviceManagerDrained = undefined;
+			drained?.();
+		});
+		const settled = closed.then(
+			() => undefined,
+			(error: unknown) => {
+				this.causes.push(error);
+			},
+		);
+		this.settling.add(settled);
+		void settled.then(() => this.settling.delete(settled));
+		// Ended once the caller has attached its listeners, as a finished child is.
+		setImmediate(() => child.finish({ code: answer.code, stdout: answer.stdout ?? "", stderr: answer.stderr ?? "" }));
+		return child;
+	}
+
 	/** Joins every spawned child: its stdio has closed and its close has fired. Failures are aggregated, never dropped. */
 	async drain(): Promise<void> {
+		if (this.serviceManagerAnswers.length > 0) {
+			this.causes.push(
+				new Error(
+					`Scripted service manager commands never ran: ${this.serviceManagerAnswers.map((answer) => `${answer.file} ${answer.args.join(" ")}`).join("; ")}`,
+				),
+			);
+			this.serviceManagerAnswers.length = 0;
+		}
 		// A daemon a journey left running is stopped as its process would be at shutdown, and joined.
 		for (const daemon of [...this.runningBotDaemons]) await daemon.stop();
 		await Promise.allSettled([...this.settling]);
@@ -2300,6 +2359,9 @@ export class HarnessProcesses {
 		const windowsResult = this.windows.tryRun(operation, args);
 		if (windowsResult?.handled) return windowsResult.value;
 		const [file, argv, options] = args;
+		const serviceAnswer = this.serviceManagerAnswers[0];
+		if (operation === "spawn" && serviceAnswer !== undefined && file === serviceAnswer.file)
+			return this.answerServiceManager(serviceAnswer, argv);
 		if (operation === "spawn" && Array.isArray(argv) && argv.includes(BOT_DAEMON_COMMAND))
 			return this.launchBotDaemon(String(file), argv, options);
 		const isGit = file === "git" || file === "git.exe" || file === this.git.executable;
@@ -2499,6 +2561,15 @@ export class HarnessProcesses {
 		waiter.resolve(daemon);
 		return child;
 	}
+}
+
+/** The answer of one user service manager command: the exact command it is for, and how that command exits. */
+export interface HarnessServiceManagerAnswer {
+	readonly file: string;
+	readonly args: readonly string[];
+	readonly code: number;
+	readonly stdout?: string;
+	readonly stderr?: string;
 }
 
 /** One detached `pi --bot-daemon` launch a session made. */
@@ -2864,6 +2935,11 @@ export class HarnessWorld {
 				// The journeys drive the root's own tool calls; the delegation gate (root orchestrates, workers execute) is off here.
 				orchestrator: { delegationGate: false },
 				...options.settings,
+				// No journey installs a user service unless it asks for one: the hands-off default (`notify`) is its own witness.
+				routines: {
+					...options.settings?.routines,
+					away: { autostart: "off", ...options.settings?.routines?.away },
+				},
 				systemOne: { ...options.settings?.systemOne, enabled: options.systemOneEnabled },
 			};
 			this.settingsManager = SettingsManager.inMemory(this.baseSettings);
@@ -3007,6 +3083,11 @@ export class HarnessWorld {
 				: SettingsManager.inMemory({
 						...this.baseSettings,
 						...options.settings,
+						routines: {
+							...this.baseSettings?.routines,
+							...options.settings?.routines,
+							away: { ...this.baseSettings?.routines?.away, ...options.settings?.routines?.away },
+						},
 						systemOne: {
 							...this.baseSettings?.systemOne,
 							...options.settings?.systemOne,

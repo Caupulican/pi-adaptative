@@ -50,6 +50,7 @@ import {
 } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, SCRIPTED_TRACKS, withDeadline } from "../session-fixture.ts";
+import { runJourney1AwayService } from "./journey-1-away-service.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, knowledgeJudgment, latestBatchResults } from "./shared.ts";
 
 /** Saved intent, native execution, daemon due-time ownership and one durable parent delivery. */
@@ -1556,6 +1557,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		await world.provider.waitForProducers();
 		for (const track of tracks) world.provider.retireOptional(track);
 	}
+	await runJourney1AwayService(world, profile);
 	await runJourney1RoutineIntake(world, profile);
 }
 

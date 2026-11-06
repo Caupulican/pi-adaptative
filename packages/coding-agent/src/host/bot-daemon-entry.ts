@@ -28,5 +28,9 @@ async function readCredentialHandover(): Promise<AwayCiCredentials> {
 }
 
 export function runBotDaemonEntry(args: readonly string[]): Promise<number> {
-	return runBotDaemonCommand(args, { eventSources: createCiAwayEventSources(readCredentialHandover()) });
+	// The user service's form (`--bot-daemon <agentDir>`) has no starting session and so no handover: gh runs with its
+	// own stored sign-in, and without one the CI source reports why it cannot follow CI.
+	const handover: Promise<AwayCiCredentials> =
+		args.length === 1 ? Promise.resolve({ credentials: {} }) : readCredentialHandover();
+	return runBotDaemonCommand(args, { eventSources: createCiAwayEventSources(handover) });
 }

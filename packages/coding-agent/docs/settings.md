@@ -475,7 +475,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
   "routines": {
     "automaticIntake": true,
     "maxResultWakesPerDay": 10,
-    "away": { "enabled": true, "maxUsdPerRun": 0.25, "maxUsdPerDay": 1, "maxParentHosts": 4 }
+    "away": { "enabled": true, "maxUsdPerRun": 0.25, "maxUsdPerDay": 1, "maxParentHosts": 4, "autostart": "notify" }
   }
 }
 ```
@@ -488,6 +488,7 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | `away.maxUsdPerRun` | `0.25` | Spend bound of one run away (0.01 to 5); a run is charged this from its admission until it finishes, then its settled spend (read from its ledger usage and saved on the run) for 24 hours. Each provider request of the run has its output capped to what is left of the bound; a request the rest cannot pay for, or one on a model without declared prices, ends the run failed, and a routine whose pinned model has no declared prices is not admitted away. |
 | `away.maxUsdPerDay` | `1.00` | Spend of runs away over any rolling 24 hours across the agent directory (0 to 50), counted in whole micro-dollars. A due run that would pass it waits for its session or for charged spend to leave the window; `0` runs nothing away. |
 | `away.maxParentHosts` | `4` | Sessions the daemon holds open away at once (1 to 16). |
+| `away.autostart` | `"notify"` | Always-on: a user service of the operating system that starts the daemon at login, so routines of closed sessions keep running after a reboot (see [Always-on](proactivity.md#scheduled-work)). `"notify"` installs nothing and tells the owner once per agent directory how to turn it on; `"on"` installs it at the next session start or routine save while an enabled routine exists; `"off"` does neither. Read from the global settings and the directory overlay under the agent directory only; a settings file that cannot be read gives `"notify"`, and any other value reads as `"notify"`. |
 
 A value outside its range is replaced by the default. The daemon reads `routines.away` from the global settings file only, and applies a change from its next renewal (every 10 seconds).
 

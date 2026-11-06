@@ -25,6 +25,7 @@ export type HarnessNoticeKind =
 	| "routine-result-wakes"
 	| "routine-paused"
 	| "routine-unschedulable"
+	| "routine-away-service"
 	| "host-event-gap"
 	| "host-event-source"
 	| "outward-action-prepared"

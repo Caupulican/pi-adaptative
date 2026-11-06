@@ -2979,6 +2979,11 @@ export class PersistentBotTeamStore {
 		return this.filePath;
 	}
 
+	/** The agent directory this store serves: the daemon's and its user service's one argument. */
+	getAgentDir(): string {
+		return this.agentDir;
+	}
+
 	getDaemonStatus(nowMs = Date.now()): PersistentBotDaemonStatus {
 		return readDaemonLeaseStatus(this.filePath, this.routines.values(), nowMs);
 	}

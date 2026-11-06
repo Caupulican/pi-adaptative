@@ -4,7 +4,9 @@
  *
  * A session claims the daemon lease with a fresh token, then launches `pi --bot-daemon <agentDir> <token>` through
  * the stable self-launch target. Sessions do this by themselves: on start while an enabled routine exists, and when a
- * routine is saved (see `BackgroundLaneController`). The daemon renews that lease while it is still its own and stops
+ * routine is saved (see `BackgroundLaneController`). The owner's user service runs `pi --bot-daemon <agentDir>` at
+ * login (see `away-service.ts`): that form claims the lease itself, and exits at once while another daemon holds it.
+ * The daemon renews that lease while it is still its own and stops
  * as soon as it is not: released by `/bot daemon stop`, or claimed by a later start after this daemon's lease went
  * stale. Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
  * Each renewal records the daemon's own process identity (pid, start time, host); the pid the starter recorded at spawn
@@ -34,6 +36,7 @@ import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
+import { type BotDaemonLeaseClaim, claimBotDaemonLease, launchDetachedBotDaemon } from "./bot-daemon-launch.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
@@ -80,6 +83,8 @@ export interface BotDaemonInput {
 	readonly modelRegistry?: ModelRegistry;
 	/** The event sources a closed parent's checkout has away (the CI source); without them event routines wait. */
 	readonly eventSources?: AwayEventSourceFactory;
+	/** How the daemon this one replaces ended, when its own start claimed the lease: a failure is its first report. */
+	readonly previousEnd?: BotDaemonEnd;
 }
 
 export interface BotDaemonRun {
@@ -221,6 +226,10 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	} catch (error) {
 		fail(error);
 	}
+	if (input.previousEnd?.reason === "failed")
+		report(
+			`The previous daemon stopped on an error${input.previousEnd.detail ? `: ${input.previousEnd.detail}` : ""}.`,
+		);
 	tick();
 	return { exited, stop: (end = { reason: "signal" }) => stop(end) };
 }
@@ -228,14 +237,67 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 /**
  * Runs the daemon for `pi --bot-daemon <agentDir> <token>`; resolves with the process exit code once it stops. The
  * process entry supplies the event sources (core builds no host source).
+ *
+ * `pi --bot-daemon <agentDir>` is the user service's form (see `away-service.ts`): no session started it, so it claims
+ * the lease itself through the claim a session's start uses, and exits 0 at once while a live daemon holds it. On
+ * POSIX it then runs the daemon in this process, which the service manager supervises. On Windows it launches the
+ * daemon detached and hidden exactly as a session does and exits: the scheduled task's console process would
+ * otherwise keep a console window open for the daemon's whole life.
  */
 export function runBotDaemonCommand(
 	args: readonly string[],
 	options: { readonly eventSources?: AwayEventSourceFactory } = {},
 ): Promise<number> {
 	const [agentDir, token] = args;
+	if (args.length === 1 && agentDir && isAbsolute(agentDir)) return runServiceBotDaemon(agentDir, options);
 	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
 		return Promise.resolve(2);
+	return runClaimedBotDaemon(agentDir, token, options);
+}
+
+function writeDiagnostic(message: string): void {
+	process.stderr.write(`${message}\n`);
+}
+
+async function runServiceBotDaemon(
+	agentDir: string,
+	options: { readonly eventSources?: AwayEventSourceFactory },
+): Promise<number> {
+	const clock = SYSTEM_TIMER_SOURCE.port("routines");
+	const store = new PersistentBotTeamStore(agentDir, writeDiagnostic);
+	if (process.platform === "win32") {
+		try {
+			const launch = launchDetachedBotDaemon({ store, clock, cwd: agentDir, warn: writeDiagnostic });
+			if (launch.held) return 0;
+			if (!launch.started) {
+				writeDiagnostic(launch.detail);
+				return 1;
+			}
+			// This process exits once it returns: the daemon must have spawned (a failed spawn releases its claim first)
+			// and hold its stdin handover before then.
+			return (await launch.handedOver) === false ? 1 : 0;
+		} finally {
+			store.dispose();
+		}
+	}
+	let claim: BotDaemonLeaseClaim;
+	try {
+		claim = claimBotDaemonLease(store, clock);
+	} finally {
+		store.dispose();
+	}
+	if (!claim.claimed) return 0;
+	return runClaimedBotDaemon(agentDir, claim.token, {
+		...options,
+		...(claim.previousEnd ? { previousEnd: claim.previousEnd } : {}),
+	});
+}
+
+function runClaimedBotDaemon(
+	agentDir: string,
+	token: string,
+	options: { readonly eventSources?: AwayEventSourceFactory; readonly previousEnd?: BotDaemonEnd },
+): Promise<number> {
 	// One credential owner for the whole process: every parent hosted away shares this store and registry.
 	const authStorage = AuthStorage.create(configFile(agentDir, "auth.json"));
 	const modelRegistry = ModelRegistry.create(authStorage, configFile(agentDir, "models.json"));
@@ -247,6 +309,7 @@ export function runBotDaemonCommand(
 		authStorage,
 		modelRegistry,
 		...(options.eventSources ? { eventSources: options.eventSources } : {}),
+		...(options.previousEnd ? { previousEnd: options.previousEnd } : {}),
 	});
 	process.once("SIGTERM", () => void run.stop());
 	process.once("SIGINT", () => void run.stop());

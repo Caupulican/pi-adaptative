@@ -211,6 +211,7 @@ import type {
 	ResourceProfileFilterSettings,
 	ResourceProfileKind,
 	ResourceProfileSettings,
+	RoutineAwayAutostart,
 	RoutinesSettings,
 	ScoutSettings,
 	SelfModificationSettings,
@@ -3666,6 +3667,21 @@ export class SettingsManager {
 				MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
 			),
 		};
+	}
+
+	/**
+	 * Whether the daemon starts with the owner's login (see `away-service.ts`). It installs a service on this machine,
+	 * so it is read like a standing grant: only from the layers the owner writes under the agent directory (directory
+	 * profile first, then global), never the project's own settings. Any settings load error reads as `notify`, which
+	 * installs nothing.
+	 */
+	getRoutineAwayAutostart(): RoutineAwayAutostart {
+		if (this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError)
+			return "notify";
+		const written = [this.directoryProfileSettings.routines, this.globalSettings.routines]
+			.map((layer) => (isPlainRecord(layer) && isPlainRecord(layer.away) ? layer.away.autostart : undefined))
+			.find((value) => value !== undefined);
+		return written === "off" || written === "on" ? written : "notify";
 	}
 
 	getResearchLaneSettings(): ResolvedResearchLaneSettings {

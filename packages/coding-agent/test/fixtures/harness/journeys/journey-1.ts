@@ -39,6 +39,8 @@ export async function runJourney1(): Promise<void> {
 			// The long-path turn meets an unavailable evaluator on purpose: its owner intent stays unresolved, and only that
 			// classified-as-unavailable warning is allowed.
 			warningAllowances: [
+				// The always-on witness: `on` with no service manager on the machine is refused once, with the platform's exact reason.
+				/^Routines away cannot start at login: (?:systemd is not this machine's service manager \(\/run\/systemd\/system is absent\), so no user service can be installed|Task Scheduler's schtasks\.exe is missing at [A-Za-z]:\\[^\n]+\\System32\\schtasks\.exe)\.$/,
 				// The immediate proactivity cancellation asserts exactly one unresolved physical response before releasing it.
 				/^Provider request [0-9a-f-]{36} ended locally with usage still unknown; its original accounting identity is retained in the session journal\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
