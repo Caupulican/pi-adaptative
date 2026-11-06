@@ -412,12 +412,18 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 						entry.message.customType === "background-worker-completion"),
 			)
 			.map((entry) => entryTurnOrigin(entry));
-	/** One delegation of the reader: the run starts it and answers, the worker reports, and its report wakes C once. */
+	const attemptsOfC = () => Object.values(sessionC.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {});
+	/**
+	 * One delegation of the reader: the run starts it and answers, the worker reports, and its report wakes C once. The
+	 * attempt is the one the leg started: its dispatch names the profile the host compiled (the preset with the host's own
+	 * additions, under a derived id), not the preset id the call selected.
+	 */
 	const readerLeg = async (label: string, open: () => Promise<unknown>, offeredMemory: boolean) => {
 		const answered = createBarrier();
 		const reported = createBarrier();
 		const woken = createBarrier();
 		const before = completionOrigins().length;
+		const attemptsBefore = new Set(attemptsOfC().map((attempt) => attempt.attemptId));
 		world.provider.enqueue(
 			"root",
 			calls(`${label}-start`, [
@@ -476,7 +482,12 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		await sessionC.agent.waitForIdle();
 		const origins = completionOrigins();
 		expect(origins.length, `${label}: one report is delivered`).toBe(before + 1);
-		return origins.at(-1);
+		const started = attemptsOfC().filter((attempt) => !attemptsBefore.has(attempt.attemptId));
+		expect(
+			started.length,
+			`${label}: the run starts one reader attempt: ${JSON.stringify(started.map(({ attemptId, dispatch }) => ({ attemptId, profileId: dispatch.profileId, turnOrigin: dispatch.turnOrigin })))}`,
+		).toBe(1);
+		return { completion: origins.at(-1), dispatch: started[0]?.dispatch };
 	};
 	const peerReader = await readerLeg(
 		"pi-chat-peer-reader",
@@ -493,15 +504,12 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			),
 		false,
 	);
-	const peerAttempt = Object.values(sessionC.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
-		(attempt) => attempt.dispatch.profileId === READER_PROFILE_ID,
-	);
-	expect(peerAttempt?.dispatch.turnOrigin, "the peer's run hands its origin to the worker it starts").toMatchObject({
+	expect(peerReader.dispatch?.turnOrigin, "the peer's run hands its origin to the worker it starts").toMatchObject({
 		k: "peer-agent",
 		channel: "pi-chat",
 		thirdParty: true,
 	});
-	expect(peerReader, "the report of a peer's worker opens a third-party run").toEqual({
+	expect(peerReader.completion, "the report of a peer's worker opens a third-party run").toEqual({
 		v: 1,
 		k: "worker-result",
 		thirdParty: true,
@@ -511,7 +519,11 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		() => sessionC.prompt("Have a reader look at the notes."),
 		true,
 	);
-	expect(ownerReader, "the owner's worker's report is the owner's automation").toEqual({ v: 1, k: "worker-result" });
+	expect(ownerReader.dispatch?.turnOrigin, "the owner's own run hands no origin to its worker").toBeUndefined();
+	expect(ownerReader.completion, "the owner's worker's report is the owner's automation").toEqual({
+		v: 1,
+		k: "worker-result",
+	});
 	trace.mark("root", "pi-chat.reader-origins");
 
 	// Control: the owner's own turn pushes under the default grant. A peer message arriving during that run is queued as a
