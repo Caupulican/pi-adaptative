@@ -43,11 +43,20 @@ export interface ChannelPendingMessage {
 	readonly admittedAt: number;
 	/** The session a turn holding this message is being offered to: no other session delivers it meanwhile. */
 	offeredTo?: string;
+	/** That session's process, when it was offered (absent in a journal written before it was recorded). */
+	offeredPid?: number;
+	offeredAt?: number;
+	/** The batch the offer delivers: one offer of several messages is one batch. */
+	offeredBatch?: string;
+	/** Offered by the daemon while no session was open: the offer charges the away spend bound until accepted. */
+	offeredAway?: true;
 }
 
 export interface ChannelBatchRecord {
 	readonly id: string;
 	readonly sessionId: string;
+	/** The accepting session's process (absent in a journal written before it was recorded). */
+	readonly pid?: number;
 	readonly conversationKey: string;
 	readonly address: string;
 	readonly eventDigests: readonly string[];
@@ -134,7 +143,11 @@ function isPending(value: unknown): value is ChannelPendingMessage {
 		isString(value.text) &&
 		isTime(value.receivedAt) &&
 		isTime(value.admittedAt) &&
-		(value.offeredTo === undefined || isString(value.offeredTo))
+		(value.offeredTo === undefined || isString(value.offeredTo)) &&
+		(value.offeredPid === undefined || isCount(value.offeredPid)) &&
+		(value.offeredAt === undefined || isTime(value.offeredAt)) &&
+		(value.offeredBatch === undefined || isString(value.offeredBatch)) &&
+		(value.offeredAway === undefined || value.offeredAway === true)
 	);
 }
 
@@ -143,6 +156,7 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 		isPlainRecord(value) &&
 		isString(value.id) &&
 		isString(value.sessionId) &&
+		(value.pid === undefined || isCount(value.pid)) &&
 		isString(value.conversationKey) &&
 		isString(value.address) &&
 		Array.isArray(value.eventDigests) &&
@@ -280,7 +294,8 @@ export class ChannelJournal {
 
 	/**
 	 * Read, change and write the journal under its lock. An unreadable file is moved aside (kept for inspection), a
-	 * fresh journal starts with one `reset` gap, and the update reports it. A throw in `change` writes nothing.
+	 * fresh journal starts with one `reset` gap, and the update reports it. A throw in `change` writes nothing, and so
+	 * does an update that leaves the file's text as it was: every write wakes the watchers of the directory.
 	 */
 	update<T>(now: number, change: (state: ChannelJournalState) => T): ChannelJournalUpdate<T> {
 		return withFileLockSync(this.path, () => {
@@ -305,7 +320,8 @@ export class ChannelJournal {
 			}
 			const result = change(state);
 			prune(state, now);
-			writeFileAtomicSync(this.path, `${JSON.stringify(state)}\n`);
+			const next = `${JSON.stringify(state)}\n`;
+			if (next !== text) writeFileAtomicSync(this.path, next);
 			return { result, reset };
 		});
 	}

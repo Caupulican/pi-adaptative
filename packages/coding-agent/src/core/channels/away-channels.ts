@@ -5,11 +5,17 @@
  */
 
 import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { channelsDir } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-contract.ts";
 import type { SettingsManager } from "../settings-manager.ts";
-import { type ChannelBatchRecord, ChannelJournal, type ChannelJournalState, DAY_MS } from "./channel-journal.ts";
+import {
+	type ChannelBatchRecord,
+	ChannelJournal,
+	type ChannelJournalState,
+	type ChannelPendingMessage,
+	DAY_MS,
+} from "./channel-journal.ts";
 import { isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
 
 /** Why the daemon delivers no channel turn now for lack of room under the away spend bound. */
@@ -38,9 +44,10 @@ export function awayChannels(
 }
 
 /**
- * What one channel turn the daemon delivered charges the away spend bound: its full per-run bound while it runs, its
- * recorded spend once answered, and the full bound when it ended without an answer (its spend is not read); each for
- * 24 hours after it was accepted.
+ * What one channel turn the daemon delivered charges the away spend bound, for 24 hours after it was accepted: its
+ * recorded spend once answered, and the larger of its full per-run bound and its recorded spend while it runs or when
+ * it ended without an answer (a turn is stopped only after a message took it past the bound, and a turn settled by
+ * another session has no recorded spend).
  */
 function channelAwayCharge(
 	batch: ChannelBatchRecord,
@@ -48,18 +55,39 @@ function channelAwayCharge(
 	nowMs: number,
 ): RoutineAwayCharge | undefined {
 	if (batch.away !== true) return undefined;
-	if (batch.state === "accepted") return { micros: awaySpendMicros(maxUsdPerRun) };
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= nowMs) return undefined;
-	const usd = batch.state === "unanswered" ? maxUsdPerRun : (batch.usd ?? 0);
-	return { micros: awaySpendMicros(usd), until };
+	const usd = batch.usd ?? 0;
+	const charged = batch.state === "accepted" || batch.state === "unanswered" ? Math.max(maxUsdPerRun, usd) : usd;
+	return { micros: awaySpendMicros(charged), until };
 }
 
-/** The charges of every channel journal of the agent directory (a channel no longer configured included). */
+/**
+ * What the daemon's offers not yet accepted charge: each offered batch its full per-run bound, from the offer on, so
+ * no other claim takes the room the turn is about to use. An offer that is accepted becomes its batch's charge.
+ */
+function offerAwayCharges(pending: readonly ChannelPendingMessage[], maxUsdPerRun: number, nowMs: number) {
+	const offers = new Map<string, number>();
+	for (const entry of pending) {
+		if (entry.offeredAway !== true || entry.offeredTo === undefined || entry.offeredAt === undefined) continue;
+		offers.set(entry.offeredBatch ?? entry.offeredTo, entry.offeredAt);
+	}
+	const charges: RoutineAwayCharge[] = [];
+	for (const offeredAt of offers.values()) {
+		const until = offeredAt + DAY_MS;
+		if (until > nowMs) charges.push({ micros: awaySpendMicros(maxUsdPerRun), until });
+	}
+	return charges;
+}
+
+/**
+ * The charges of every channel journal of the agent directory, a channel no longer configured included: what a turn
+ * spent in the last 24 hours counts against the day's bound whether or not its channel is still served away.
+ */
 export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, nowMs: number): RoutineAwayCharge[] {
 	let files: string[];
 	try {
-		files = readdirSync(join(agentDir, "channels"));
+		files = readdirSync(channelsDir(agentDir));
 	} catch {
 		return [];
 	}
@@ -67,10 +95,12 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 	for (const file of files) {
 		const name = file.endsWith(".json") ? file.slice(0, -".json".length) : "";
 		if (!isValidChannelName(name)) continue;
-		for (const batch of new ChannelJournal(agentDir, name).read().result.batches) {
+		const state = new ChannelJournal(agentDir, name).read().result;
+		for (const batch of state.batches) {
 			const charge = channelAwayCharge(batch, maxUsdPerRun, nowMs);
 			if (charge) charges.push(charge);
 		}
+		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
 	return charges;
 }

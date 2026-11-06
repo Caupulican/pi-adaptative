@@ -1,6 +1,7 @@
 /**
- * The daemon's channels while no session is open: one headless session per `channels.<name>.awayCwd` the owner wrote in
- * the global settings, serving those channels through the same `SessionChannels` an open session runs.
+ * The daemon's channels while no session is open: one headless session per channel whose global policy names
+ * `channels.<name>.awayCwd`, in that directory, serving the channel through the same `SessionChannels` an open session
+ * runs. One session per channel keeps each channel's turns, spend and stop its own.
  *
  * The session reads and reports, as every run away does: it is a child session (no memory, no routines, no proactive
  * work, no owner decisions), System One is off, and its tools are read-only and reach only its working directory, never
@@ -11,15 +12,20 @@
  * An open session takes a channel over at once (`SessionChannels.takeHold`); this host stops its provider, and a turn
  * it was running ends as a draft. When the session gives the channel up, the journal's change wakes this host
  * (a watch on the journal directory, and the daemon's tick for a session whose process ended), which takes it back.
+ * Closing a host (the daemon stops, or the channel's settings no longer name it or name another directory) stops its
+ * turn first, then settles the turns it accepted: an answer becomes a draft, any other outcome is unanswered with
+ * what the turn spent.
  *
  * Every turn is bounded twice: by the channel's own daily bounds and by the away spend bound the daemon's routines run
  * under (`routines.away.maxUsdPerRun` per turn, `routines.away.maxUsdPerDay` across both). A host that cannot serve
- * (no priced model, no provider, routines away off) leaves the messages with their transport.
+ * (no priced model, no provider) leaves the messages with their transport; it is tried again after a backoff from one
+ * minute to one hour, and at once when the owner's credentials or the directory's model settings change.
  */
 
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
+import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
@@ -37,11 +43,20 @@ import { SessionChannels } from "./session-channels.ts";
 
 /** The tools a channel turn away may call: it reads the working directory and answers. */
 const AWAY_CHANNEL_TOOLS = ["read", "grep", "find", "ls"];
+/** The first wait before a refused host is opened again; each refusal doubles it up to `REFUSAL_RETRY_MAX_MS`. */
+const REFUSAL_RETRY_MIN_MS = 60 * 1000;
+const REFUSAL_RETRY_MAX_MS = 60 * 60 * 1000;
+/** Notice states a host remembers so it reports each once; past it the oldest is forgotten. */
+const MAX_HOST_NOTICES = 256;
 
 /** Whether `child` is `parent` or inside it. */
 function isWithin(parent: string, child: string): boolean {
 	const rel = relative(resolve(parent), resolve(child));
 	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /** The transport of a channel the daemon serves; undefined when it has none for that name. */
@@ -61,29 +76,43 @@ export interface AwayChannelHostsInput {
 	routineOccurrences(): Iterable<RoutineOccurrence>;
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
-	/** Diagnostics, once per cause. */
+	/** Diagnostics; this host reports each cause once until it clears. */
 	report(message: string): void;
 }
 
-/** One working directory's headless session and the channels it serves. */
+/** One channel's headless session. */
 interface AwayChannelHost {
+	readonly name: string;
 	readonly cwd: string;
 	readonly session: AgentSession;
 	readonly channels: SessionChannels;
-	readonly registered: Set<string>;
+	/** Whether the channel's transport is registered with the session. */
+	registered: boolean;
 	readonly unsubscribe: () => void;
-	/** Who held each served channel when last read: a change is what starts or stops a provider. */
-	holders: string;
+	/** Who held the channel when last read: a change is what starts or stops its provider. */
+	holder: string;
+}
+
+/** Why a channel's host was refused, what it was refused under, and when it is tried again regardless. */
+interface Refusal {
+	readonly stamp: string;
+	readonly retryAt: number;
+	readonly delayMs: number;
 }
 
 export class AwayChannelHosts {
 	private readonly input: AwayChannelHostsInput;
+	/** By channel name. */
 	private readonly hosts = new Map<string, AwayChannelHost>();
-	/** Working directories whose host is being opened, so a sync during the open opens none twice; a close joins them. */
+	/** Channels whose host is being opened, so a sync during the open opens none twice; a close joins them. */
 	private readonly opening = new Map<string, Promise<void>>();
-	/** Why a directory's host was refused, with the model setting that refusal was for. */
-	private readonly refused = new Map<string, { readonly model: string; readonly reason: string }>();
-	private readonly reported = new Set<string>();
+	/** Channels whose previous host is still closing: the next one opens once it gave the channel back. */
+	private readonly closing = new Map<string, Promise<void>>();
+	private readonly refused = new Map<string, Refusal>();
+	/** The message last reported per cause; a cause that clears is reported again when it recurs. */
+	private readonly reported = new Map<string, string>();
+	/** The owner's credential files as the daemon last read them: a change is worth opening a refused host again. */
+	private credentialStamp = "";
 	private watcher: FSWatcher | undefined;
 	private closed = false;
 
@@ -91,9 +120,13 @@ export class AwayChannelHosts {
 		this.input = input;
 	}
 
-	private report(message: string): void {
-		if (this.reported.has(message)) return;
-		this.reported.add(message);
+	private now(): number {
+		return this.input.timers.port("routines").now();
+	}
+
+	private report(cause: string, message: string): void {
+		if (this.reported.get(cause) === message) return;
+		this.reported.set(cause, message);
 		this.input.report(message);
 	}
 
@@ -112,118 +145,134 @@ export class AwayChannelHosts {
 		return room.fits(0) ? undefined : AWAY_CHANNEL_SPEND_REFUSAL;
 	}
 
-	/** The configured model a refusal is for: a change of it is worth another open. */
-	private modelSetting(): string {
-		return `${this.input.settings.getDefaultProvider() ?? ""}/${this.input.settings.getDefaultModel() ?? ""}`;
+	/**
+	 * What a refusal of the channel's host depends on: the credential files, the directory, and the model its own
+	 * owner-written layers configure. A change of any is worth another open.
+	 */
+	private refusalStamp(cwd: string): string {
+		const settings = SettingsManager.create(cwd, this.input.agentDir, { projectTrusted: false });
+		return `${this.credentialStamp}|${cwd}|${settings.getDefaultProvider() ?? ""}/${settings.getDefaultModel() ?? ""}`;
 	}
 
 	/**
-	 * Follow the settings and the journals: open a host for each configured directory, close one no channel names any
-	 * more, register providers for newly named channels, and re-read holders that changed. Called at start and on each
-	 * daemon tick after the settings reload.
+	 * Follow the settings and the journals: open a host for each channel served away, close one whose channel is no
+	 * longer served away or moved to another directory, and re-read holders that changed. Called on each daemon tick
+	 * after the settings reload, with the stamp of the owner's credential files.
 	 */
-	sync(): void {
+	sync(credentialStamp: string): void {
 		if (this.closed) return;
-		const wanted = new Map<string, AwayChannel[]>();
-		for (const channel of awayChannels(this.input.settings)) {
-			const group = wanted.get(channel.cwd) ?? [];
-			group.push(channel);
-			wanted.set(channel.cwd, group);
-		}
+		this.credentialStamp = credentialStamp;
+		const wanted = new Map(awayChannels(this.input.settings).map((channel) => [channel.name, channel]));
 		if (wanted.size > 0) this.ensureWatch();
-		for (const [cwd, host] of this.hosts)
-			if (!wanted.has(cwd)) {
-				this.hosts.delete(cwd);
-				this.closeHost(host).catch((error: unknown) =>
-					this.input.report(
-						`Channels away in ${cwd}: the session did not close cleanly (${error instanceof Error ? error.message : String(error)}).`,
-					),
-				);
-			}
-		for (const [cwd, channels] of wanted) {
-			const host = this.hosts.get(cwd);
+		for (const [name, host] of this.hosts) {
+			const channel = wanted.get(name);
+			if (channel && channel.cwd === host.cwd) continue;
+			this.hosts.delete(name);
+			const closing = this.closeHost(host)
+				.catch((error: unknown) =>
+					this.input.report(`Channel ${name} away: its session did not close cleanly (${errorText(error)}).`),
+				)
+				.finally(() => {
+					if (this.closing.get(name) === closing) this.closing.delete(name);
+				});
+			this.closing.set(name, closing);
+		}
+		for (const name of this.refused.keys()) if (!wanted.has(name)) this.refused.delete(name);
+		const now = this.now();
+		for (const [name, channel] of wanted) {
+			const host = this.hosts.get(name);
 			if (host) {
-				this.registerProviders(host, channels);
-				this.refreshHolders(host);
+				this.registerProvider(host, channel);
+				this.refreshHolder(host);
 				continue;
 			}
-			const refusal = this.refused.get(cwd);
-			if (refusal && refusal.model === this.modelSetting()) continue;
-			if (!this.opening.has(cwd))
-				this.opening.set(
-					cwd,
-					this.openHost(cwd, channels).finally(() => this.opening.delete(cwd)),
-				);
+			if (this.opening.has(name)) continue;
+			const refusal = this.refused.get(name);
+			if (refusal && now < refusal.retryAt && refusal.stamp === this.refusalStamp(channel.cwd)) continue;
+			this.opening.set(
+				name,
+				this.openHost(channel, refusal).finally(() => this.opening.delete(name)),
+			);
 		}
 	}
 
-	/** Who holds each of the host's channels now; a holder's process ending counts as a change. */
+	/** Who holds the host's channel now; a holder's process ending counts as a change. */
 	private holderKey(host: AwayChannelHost): string {
-		return [...host.registered]
-			.map((name) => {
-				const holder = new ChannelJournal(this.input.agentDir, name).read().result.holder;
-				return holder ? `${name}=${holder.sessionId}:${holder.pid}:${isProcessAlive(holder.pid)}` : `${name}=`;
-			})
-			.join(",");
+		const holder = new ChannelJournal(this.input.agentDir, host.name).read().result.holder;
+		return holder ? `${holder.sessionId}:${holder.pid}:${isProcessAlive(holder.pid)}` : "";
 	}
 
-	private refreshHolders(host: AwayChannelHost): void {
+	private refreshHolder(host: AwayChannelHost): void {
 		const key = this.holderKey(host);
-		if (key === host.holders) return;
-		host.holders = key;
+		if (key === host.holder) return;
+		host.holder = key;
 		host.channels.refresh();
 	}
 
 	private ensureWatch(): void {
 		if (this.watcher || this.closed) return;
-		const dir = join(this.input.agentDir, "channels");
+		const dir = channelsDir(this.input.agentDir);
 		try {
 			mkdirSync(dir, { recursive: true });
-			this.watcher = watch(dir, { persistent: false }, () => {
-				for (const host of this.hosts.values()) this.refreshHolders(host);
+			const watcher = watch(dir, { persistent: false }, (_event, filename) => {
+				// A journal is replaced by a rename onto `<name>.json`; its lock and temporary files change nothing.
+				if (this.watcher !== watcher || (filename !== null && !String(filename).endsWith(".json"))) return;
+				for (const host of this.hosts.values()) this.refreshHolder(host);
 			});
 			// A watch that fails later leaves the daemon's tick, which re-reads the holders within one interval.
-			this.watcher.on("error", () => {
-				this.watcher?.close();
+			watcher.on("error", () => {
+				if (this.watcher !== watcher) return;
+				watcher.close();
 				this.watcher = undefined;
 			});
+			this.watcher = watcher;
+			this.reported.delete("watch");
 		} catch (error) {
 			this.report(
-				`Channels away: the journal directory cannot be watched (${error instanceof Error ? error.message : String(error)}); a session closing is seen at the next daemon tick.`,
+				"watch",
+				`Channels away: the journal directory cannot be watched (${errorText(error)}); a session closing is seen at the next daemon tick.`,
 			);
 		}
 	}
 
-	private registerProviders(host: AwayChannelHost, channels: readonly AwayChannel[]): void {
-		for (const { name, policy } of channels) {
-			if (host.registered.has(name)) continue;
-			let provider: ChannelProvider | undefined;
-			try {
-				provider = this.input.providers(name, policy, {
-					agentDir: this.input.agentDir,
-					warn: (message) => this.input.report(`Channel ${name}: ${message}`),
-				});
-			} catch (error) {
-				this.report(
-					`Channel ${name} is not served while no session is open: its transport could not be built (${error instanceof Error ? error.message : String(error)}).`,
-				);
-				continue;
-			}
-			if (!provider) {
-				this.report(
-					`Channel ${name} is not served while no session is open: the daemon has no transport for it; its messages wait for an open session.`,
-				);
-				continue;
-			}
-			host.registered.add(name);
-			host.channels.registerChannel(provider);
+	private registerProvider(host: AwayChannelHost, { name, policy }: AwayChannel): void {
+		if (host.registered) return;
+		let provider: ChannelProvider | undefined;
+		try {
+			provider = this.input.providers(name, policy, {
+				agentDir: this.input.agentDir,
+				warn: (message) => this.input.report(`Channel ${name}: ${message}`),
+			});
+		} catch (error) {
+			this.report(
+				`transport:${name}`,
+				`Channel ${name} is not served while no session is open: its transport could not be built (${errorText(error)}).`,
+			);
+			return;
 		}
+		if (!provider) {
+			this.report(
+				`transport:${name}`,
+				`Channel ${name} is not served while no session is open: the daemon has no transport for it; its messages wait for an open session.`,
+			);
+			return;
+		}
+		this.reported.delete(`transport:${name}`);
+		host.registered = true;
+		host.channels.registerChannel(provider);
 	}
 
-	/** Never rejects: a failure is reported and refused until the model setting changes. */
-	private async openHost(cwd: string, channels: readonly AwayChannel[]): Promise<void> {
+	/** Never rejects: a failure is reported and refused until its retry time or a change of what it depends on. */
+	private async openHost(channel: AwayChannel, previous: Refusal | undefined): Promise<void> {
 		const { agentDir, timers } = this.input;
-		const model = this.modelSetting();
+		const { name, cwd } = channel;
+		await this.closing.get(name);
+		if (this.closed) return;
+		const refuse = (reason: string, message: string) => {
+			const delayMs = previous ? Math.min(previous.delayMs * 2, REFUSAL_RETRY_MAX_MS) : REFUSAL_RETRY_MIN_MS;
+			this.refused.set(name, { stamp: this.refusalStamp(cwd), retryAt: this.now() + delayMs, delayMs });
+			this.report(`open:${name}`, message.replace("{reason}", reason));
+		};
 		let session: AgentSession | undefined;
 		const sessionManager = SessionManager.inMemory(cwd);
 		try {
@@ -261,7 +310,7 @@ export class AwayChannelHosts {
 					},
 					timers,
 					onClosingWarnings: (warnings) => {
-						for (const warning of warnings) this.input.report(`Channels away: ${warning}`);
+						for (const warning of warnings) this.input.report(`Channel ${name} away: ${warning}`);
 					},
 				})
 			).session;
@@ -273,32 +322,28 @@ export class AwayChannelHosts {
 					: undefined;
 			if (refusal || this.closed) {
 				await session.disposeAndWait();
-				if (refusal) {
-					this.refused.set(cwd, { model, reason: refusal });
-					this.report(
-						`Channels ${channels.map((channel) => channel.name).join(", ")} are not served while no session is open: ${refusal}. Their messages wait for an open session.`,
+				if (refusal)
+					refuse(
+						refusal,
+						`Channel ${name} is not served while no session is open: {reason}. Its messages wait for an open session.`,
 					);
-				}
 				return;
 			}
-			this.refused.delete(cwd);
-			this.hosts.set(cwd, this.startHost(cwd, session, sessionManager, channels));
+			this.refused.delete(name);
+			this.reported.delete(`open:${name}`);
+			this.hosts.set(name, this.startHost(channel, session, sessionManager));
 		} catch (error) {
 			if (session) await session.disposeAndWait().catch(() => undefined);
-			this.refused.set(cwd, { model, reason: error instanceof Error ? error.message : String(error) });
-			this.report(
-				`Channels away in ${cwd} could not open a session (${error instanceof Error ? error.message : String(error)}); their messages wait for an open session.`,
+			refuse(
+				errorText(error),
+				`Channel ${name} away in ${cwd} could not open a session ({reason}); its messages wait for an open session.`,
 			);
 		}
 	}
 
-	private startHost(
-		cwd: string,
-		session: AgentSession,
-		sessionManager: SessionManager,
-		channels: readonly AwayChannel[],
-	): AwayChannelHost {
+	private startHost(channel: AwayChannel, session: AgentSession, sessionManager: SessionManager): AwayChannelHost {
 		const { agentDir, settings } = this.input;
+		const { name, cwd } = channel;
 		const activity = new Set<() => void>();
 		let turnUsd = 0;
 		const unsubscribe = session.subscribe((event) => {
@@ -311,17 +356,15 @@ export class AwayChannelHosts {
 					void session.abort(`a channel turn away spent past routines.away.maxUsdPerRun ($${perRun.toFixed(2)})`);
 			} else if (event.type === "agent_end") for (const listener of activity) listener();
 		});
+		// The reason each notice was last reported in; a cleared notice is reported again when it returns.
 		const notices = new Map<string, string>();
 		const channelsHost = new SessionChannels({
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
 			getChannelPolicies: () => {
-				const served = new Set(
-					awayChannels(settings)
-						.filter((channel) => channel.cwd === cwd)
-						.map((channel) => channel.name),
-				);
-				return new Map([...settings.getAwayChannelPolicies()].filter(([name]) => served.has(name)));
+				const served = awayChannels(settings).some((entry) => entry.name === name && entry.cwd === cwd);
+				const resolution = served ? settings.getAwayChannelPolicies().get(name) : undefined;
+				return new Map(resolution ? [[name, resolution]] : []);
 			},
 			subscribeSettings: (listener) => settings.subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => {
@@ -332,12 +375,23 @@ export class AwayChannelHosts {
 			// No owner reads this session: what it would tell them goes to the daemon's reports, once per state.
 			observeNotice: (kind, read) => {
 				const observation = read();
-				if (!observation || observation === "clear") return;
-				const scoped = "scope" in observation ? observation : { scope: "", state: observation };
-				if (scoped.state === "clear") return;
+				if (!observation) return;
+				const scoped =
+					typeof observation === "object" && "scope" in observation
+						? observation
+						: { scope: "", state: observation };
 				const key = `${kind}:${scoped.scope}`;
+				if (scoped.state === "clear") {
+					notices.delete(key);
+					return;
+				}
 				if (notices.get(key) === scoped.state.reason) return;
+				notices.delete(key);
 				notices.set(key, scoped.state.reason);
+				if (notices.size > MAX_HOST_NOTICES) {
+					const oldest = notices.keys().next().value;
+					if (oldest !== undefined) notices.delete(oldest);
+				}
 				this.input.report(scoped.state.text);
 			},
 			warn: (message) => this.input.report(message),
@@ -346,21 +400,27 @@ export class AwayChannelHosts {
 			away: { capReason: (nowMs) => this.capReason(nowMs) },
 		});
 		const host: AwayChannelHost = {
+			name,
 			cwd,
 			session,
 			channels: channelsHost,
-			registered: new Set(),
+			registered: false,
 			unsubscribe,
-			holders: "",
+			holder: "",
 		};
-		this.registerProviders(host, channels);
+		this.registerProvider(host, channel);
 		channelsHost.start();
-		host.holders = this.holderKey(host);
+		host.holder = this.holderKey(host);
 		return host;
 	}
 
+	/**
+	 * Stop the host's turn and wait until its session is idle, so the batches it accepted settle on what the turn did;
+	 * then stop the provider, settle and give the channel back, and close the session.
+	 */
 	private async closeHost(host: AwayChannelHost): Promise<void> {
 		try {
+			await host.session.abort("channel host closing");
 			await host.channels.stop();
 		} finally {
 			host.unsubscribe();
@@ -375,6 +435,7 @@ export class AwayChannelHosts {
 		this.watcher?.close();
 		this.watcher = undefined;
 		await Promise.all(this.opening.values());
+		await Promise.all(this.closing.values());
 		const hosts = [...this.hosts.values()];
 		this.hosts.clear();
 		const failures: unknown[] = [];

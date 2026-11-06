@@ -238,7 +238,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			.then(() => {
 				if (stopping) return;
 				supervisor.wake();
-				channelHosts?.sync();
+				channelHosts?.sync(credentialStamp);
 			}, fail)
 			.finally(() => {
 				reloading = undefined;

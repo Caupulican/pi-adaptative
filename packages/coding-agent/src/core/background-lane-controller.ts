@@ -259,6 +259,13 @@ export type RunningAttemptWaitOutcome =
 	/** The session was disposed first; nothing about the attempts is implied or observed. */
 	| { readonly kind: "disposed" };
 
+/** The channels served away, by name and directory: what the daemon's start depends on besides the routines. */
+function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
+	return awayChannels(settings)
+		.map((channel) => `${channel.name}:${channel.cwd}`)
+		.join(",");
+}
+
 export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
 	private readonly _laneTracker = new LaneTracker({ onChange: () => this._laneRecordsChanged() });
@@ -300,6 +307,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _daemonRevision: number | undefined;
 	/** The last reason the daemon could not be started by itself, reported once until it changes. */
 	private _daemonStartFailure: string | undefined;
+	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
+	private _awayChannelsKey: string | undefined;
+	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
 	private _awayService: AwayService | undefined;
 	private readonly botBindings: BotRuntimeBindings;
 	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
@@ -939,6 +949,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("stop the always-on install", () => {
 			awayServiceShutdown = this._awayService?.close() ?? Promise.resolve();
 		});
+		const unsubscribeAwayChannelSettings = this._unsubscribeAwayChannelSettings;
+		this._unsubscribeAwayChannelSettings = undefined;
+		this._runTeardownStep("unsubscribe away channel settings", () => unsubscribeAwayChannelSettings?.());
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -1761,6 +1774,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._routines?.scheduler.start();
 		this._routines?.intake.start();
 		this._ensureBotDaemon();
+		this._unsubscribeAwayChannelSettings ??= this.deps.getSettingsManager().subscribeChanges(() => {
+			if (awayChannelsKey(this.deps.getSettingsManager()) !== this._awayChannelsKey) this._ensureBotDaemon();
+		});
 	}
 
 	/**
@@ -1779,6 +1795,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		let awayWork = 0;
 		try {
 			const status = store.getDaemonStatus(this.deps.getTimers().port("routines").now());
+			this._awayChannelsKey = awayChannelsKey(this.deps.getSettingsManager());
 			awayWork = status.activeRoutines + awayChannels(this.deps.getSettingsManager()).length;
 			if (!status.running && awayWork > 0) {
 				const started = this.startPersistentBotDaemon();
