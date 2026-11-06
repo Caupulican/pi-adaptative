@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { noulProbability, readNoul } from "../decision/noul.ts";
+import type { SemanticDecisionTrace, SemanticTraceJudgment } from "../system-one/semantic-evaluation-ledger.ts";
+import { noteDecisionTrace } from "./retention-decision-engine.ts";
 
 export type RetentionDisposition = "keep_exact" | "keep_call_truncate_result" | "drop_pair";
 
@@ -62,7 +64,13 @@ export interface DecisionEngine {
 		/** The model that answered, when the engine reports it. */
 		model?: string;
 		answers?: Record<string, RetentionAnswer>;
+		/** The session ledger's id for this evaluation, when the engine records evaluations. */
+		evaluationId?: string;
+		/** The judgments as the trace states them, when the engine records evaluations. */
+		judgments?: readonly SemanticTraceJudgment[];
 	}>;
+	/** Attaches the decision a consumer made from an evaluation to its ledger row; absent when nothing records traces. */
+	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;
 }
 
 export interface ArtifactStore {
@@ -349,6 +357,22 @@ export class EvidenceRetentionPlanner {
 			);
 			evaluatedDecisions = outcome.decisions;
 			artifactRefsCount = outcome.artifactRefsCreated;
+			// Each request's ledger row gets what was decided from it; the let-go answers drove it.
+			const byCall = new Map(outcome.decisions.map((decision) => [decision.callId, decision.disposition]));
+			requests.forEach((request, index) => {
+				const counts = { keep_exact: 0, keep_call_truncate_result: 0, drop_pair: 0 };
+				const drove: string[] = [];
+				for (const pair of request.pairs) {
+					const disposition = byCall.get(pair.callId) ?? "keep_exact";
+					counts[disposition]++;
+					if (disposition !== "keep_exact") drove.push(`keep_result::${pair.callId}`);
+					if (disposition === "drop_pair") drove.push(`keep_call::${pair.callId}`);
+				}
+				noteDecisionTrace(engine, evaluations[index] ?? {}, {
+					decision: `kept ${counts.keep_exact}, truncated ${counts.keep_call_truncate_result}, dropped ${counts.drop_pair}`,
+					drove,
+				});
+			});
 		} catch (error) {
 			// A System One failure never causes deletion (FR-028)
 			failureReason = error instanceof Error ? error.message : String(error);

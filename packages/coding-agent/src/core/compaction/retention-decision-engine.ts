@@ -4,11 +4,20 @@
  * The planner speaks a minimal batched question program; the session owns a `SemanticDecisionEngine`.
  * Retention questions are boolean by construction ("is this still useful?"), so the engine's
  * probability of true is the planner's keep probability — no judgment is invented in between.
+ *
+ * Every consumer of this shape (retention, the operation gate, plan review, project rules) gets the
+ * evaluation's ledger id and its judgments back, and attaches the decision it made from them through
+ * `noteTrace`, which reaches the session's evaluation recorder when one is given.
  */
 
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import {
+	type SemanticDecisionTrace,
+	type SemanticTraceJudgment,
+	traceJudgmentsFromEvaluation,
+} from "../system-one/semantic-evaluation-ledger.ts";
 import type { DecisionEngine, DecisionEngineProgram } from "./evidence-retention-planner.ts";
 
 interface RetentionQuestion {
@@ -18,9 +27,38 @@ interface RetentionQuestion {
 	readonly criteria?: { readonly true?: string; readonly false?: string };
 }
 
-export function createRetentionDecisionEngine(engine: SemanticDecisionEngine): DecisionEngine {
+/** Where a consumer's decision trace goes: the session's evaluation recorder. */
+export interface RetentionTraceObserver {
+	noteTrace(evaluationId: string, trace: SemanticDecisionTrace): void;
+}
+
+/**
+ * The trace a consumer attaches: the judgments the evaluation returned, those named in `drove` marked as
+ * having driven the result. A no-op when the engine records no traces or the evaluation has no ledger id.
+ */
+export function noteDecisionTrace(
+	engine: Pick<DecisionEngine, "noteTrace"> | undefined,
+	result: { readonly evaluationId?: string; readonly judgments?: readonly SemanticTraceJudgment[] },
+	trace: { readonly decision: string; readonly drove?: readonly string[]; readonly facts?: readonly string[] },
+): void {
+	if (!engine?.noteTrace || result.evaluationId === undefined) return;
+	const drove = new Set(trace.drove ?? []);
+	engine.noteTrace(result.evaluationId, {
+		decision: trace.decision,
+		judgments: (result.judgments ?? []).map((judgment) =>
+			drove.has(judgment.id) ? { ...judgment, drove: true } : judgment,
+		),
+		...(trace.facts?.length ? { facts: trace.facts } : {}),
+	});
+}
+
+export function createRetentionDecisionEngine(
+	engine: SemanticDecisionEngine,
+	observer?: RetentionTraceObserver,
+): DecisionEngine {
 	return {
 		model: engine.model,
+		...(observer ? { noteTrace: (evaluationId, trace) => observer.noteTrace(evaluationId, trace) } : {}),
 		async evaluate(program: DecisionEngineProgram, state, options) {
 			const decisions = (program.decisions as readonly RetentionQuestion[])
 				.filter((decision): decision is RetentionQuestion & { id: string; instruction: string } =>
@@ -48,7 +86,14 @@ export function createRetentionDecisionEngine(engine: SemanticDecisionEngine): D
 				if (result.kind !== "boolean") continue;
 				answers[id] = { type: "noul", noul: result.probabilityTrue };
 			}
-			return { answers, model: evaluation.engine.model };
+			const evaluationId = evaluation.audit?.evaluationId;
+			return {
+				answers,
+				model: evaluation.engine.model,
+				...(evaluationId !== undefined
+					? { evaluationId, judgments: traceJudgmentsFromEvaluation(evaluation) }
+					: {}),
+			};
 		},
 	};
 }
