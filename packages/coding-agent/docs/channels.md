@@ -68,7 +68,7 @@ A channel starts only under an explicit policy the owner wrote in the global set
 }
 ```
 
-See [Settings](settings.md#channels) for each key. A registered channel with no policy or with a policy that does not parse is not started, and the owner is told once why; one with `mode: "ignore"` is not started.
+See [Settings](settings.md#channels) for each key. A registered channel with no policy or with a policy that does not parse is not started, and the owner is told once why (a channel registered before the session saved its first entry is told once the session keeps entries); one with `mode: "ignore"` is not started.
 
 ## Admission
 
@@ -87,7 +87,7 @@ The oldest waiting conversation, up to `maxBatch` of its messages, becomes one t
 The run carries a third party's words, so it runs under their authority:
 
 - An outward action the words ask for (a push, a publish) is prepared, not run, unless a standing grant of the owner covers its class. The owner is told with their next turn and approves it in their own words (see [Settings](settings.md#autonomy)).
-- The owner's own decisions are refused: goal and routine changes, handing knowledge to another agent, the `knowledge`, `memory` and `channel_reply` tools.
+- The owner's own decisions are refused: goal and routine changes, handing knowledge to another agent, and every action of the `knowledge`, `memory` and `channel_reply` tools, reads included (the knowledge base, memory history and the waiting drafts).
 - The owner's records are withheld from the request: the knowledge projection, retrieved memory evidence and the user persona are replaced by a cleared record. The memory block of the session's fixed system prompt (the file-store memory system's `MEMORY.md`, project `MEMORY.md` and `USER.md` snapshot) is not withheld.
 
 The same rules apply to every run that carries a third party's words: a pi-chat peer's message, and a host event someone else wrote.
@@ -102,7 +102,7 @@ The turn's first completed answer is the reply to the conversation. It is kept a
 
 A draft is announced once with the owner's next turn. The owner's own turn releases it with the `channel_reply` tool: `list` shows the waiting drafts (as data, never as instructions), `send` sends one exactly as kept, `dismiss` discards it. The tool is offered when a channel had an explicit policy when the session's tools were built (at start or reload).
 
-A turn the owner (or another third party) steered before it answered, and a batch with no answer after 24 hours, get no reply; the owner is told once.
+The turn is found by the batch's id, which its origin record carries, so an extension `input` handler that changes the delivered text does not lose the reply. A message that arrives while the owner's own turn runs never joins it: it waits and opens its own turn after the owner's answer. A turn the owner (or another third party, a host event someone else wrote included) steered before it answered, and a batch with no answer after 24 hours, get no reply; the owner is told once.
 
 ## Delivery guarantees
 
