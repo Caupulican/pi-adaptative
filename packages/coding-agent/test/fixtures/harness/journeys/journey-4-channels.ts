@@ -9,7 +9,7 @@ import type {
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { type Barrier, calls, createBarrier } from "../scripted-provider.ts";
+import { type Barrier, calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmLatestResult } from "./shared.ts";
 
@@ -96,6 +96,14 @@ function notices(manager: SessionManager, kind: string): { readonly reason: stri
 		deliveries.set(`${reason}#${generation}`, { reason, text: JSON.stringify(entry.content) });
 	}
 	return [...deliveries.values()];
+}
+
+/** Everything the request carries after its last assistant message: the latest batch's results and their records. */
+function latestBatchText(request: ScriptedRequest): string {
+	const messages = request.context.messages;
+	let start = messages.length;
+	while (start > 0 && messages[start - 1]?.role !== "assistant") start--;
+	return JSON.stringify(messages.slice(start));
 }
 
 function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string): Promise<void> {
@@ -202,13 +210,16 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 		{
 			name: "channels-mail-answer",
 			check: (request) => {
-				const push = icmLatestResult(request, "bash").text;
-				expect(push, "the push is prepared, not run").toContain(`Prepared, not run: ${pushCommand} (git.publish`);
-				expect(push, "the result names the channel").toContain("the mail channel");
-				expect(icmLatestResult(request, "channel_reply").text, "the release tool is the owner's").toContain(
+				// The refusals' own words name their tools; the batch's results carry them however the loop records them.
+				const results = latestBatchText(request);
+				expect(results, "the push is prepared, not run").toContain(
+					`Prepared, not run: ${pushCommand} (git.publish`,
+				);
+				expect(results, "the result names the channel").toContain("asked by the mail channel");
+				expect(results, "the release tool is the owner's").toContain(
 					"Refused: channel_reply releases or discards the owner's channel replies",
 				);
-				expect(icmLatestResult(request, "memory").text, "the owner's records stay out of the run").toContain(
+				expect(results, "the owner's records stay out of the run").toContain(
 					"Refused: memory reads and changes the owner's private records",
 				);
 				mailTurn.release();
