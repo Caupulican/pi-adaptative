@@ -161,7 +161,8 @@ interface EntryText {
 	readonly text: string;
 }
 
-function messageText(content: unknown): string {
+/** The text parts of a message's content, joined by newlines. */
+export function messageText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content

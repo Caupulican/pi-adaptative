@@ -1,8 +1,10 @@
 import { sanitizeIntegerSetting, sanitizeNumberSetting } from "../settings/settings-rules.ts";
 import type {
 	ActAheadSettings,
+	ProactivityFeedbackSettings,
 	ProactivitySettings,
 	ResolvedActAheadSettings,
+	ResolvedProactivityFeedbackSettings,
 	ResolvedProactivitySettings,
 } from "../settings/settings-schema.ts";
 
@@ -25,6 +27,31 @@ export function withProactivityChange(
 		ciEvents: settings.ciEvents,
 		...(settings.model === undefined ? {} : { model: settings.model }),
 		...change,
+	};
+}
+
+/**
+ * Note-feedback settings from the owner's layers, first layer first (directory profile, then global): each field comes
+ * from the first layer that sets it validly; an invalid value is ignored.
+ */
+export function resolveProactivityFeedbackSettings(
+	layers: readonly (ProactivityFeedbackSettings | undefined)[],
+): ResolvedProactivityFeedbackSettings {
+	const integer = (key: "suppressAfter" | "baseSuppressDays", fallback: number, min: number, max: number) => {
+		for (const layer of layers) {
+			if (layer === null || typeof layer !== "object") continue;
+			const value = layer[key];
+			if (typeof value === "number" && Number.isInteger(value) && value >= min && value <= max) return value;
+		}
+		return fallback;
+	};
+	const enabled = layers.find(
+		(layer) => layer !== null && typeof layer === "object" && typeof layer.enabled === "boolean",
+	)?.enabled;
+	return {
+		enabled: enabled ?? true,
+		suppressAfter: integer("suppressAfter", 2, 1, 10),
+		baseSuppressDays: integer("baseSuppressDays", 7, 1, 28),
 	};
 }
 

@@ -157,6 +157,7 @@ import {
 	ProactivityController,
 	type ProactivityControllerDeps,
 	type ProactivityDailyState,
+	type ProactivityFeedbackView,
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
@@ -1013,6 +1014,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getLastProactivitySkipReason(): string | undefined {
 		return this._proactivity.getLastSkipReason();
+	}
+
+	/** The proactive topics the owner's replies set aside, each with when it ends; read-only. */
+	getProactivityFeedbackState(): ProactivityFeedbackView {
+		return this._proactivity.getFeedbackState();
 	}
 
 	getProactivityDailyState(): ProactivityDailyState {

@@ -1,11 +1,13 @@
 import { isDeepStrictEqual } from "node:util";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { ParentInputMode } from "../../kernel/session/parent-input-ledger.ts";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "../cost/daily-usage.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { HarnessNotice, HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
@@ -15,9 +17,20 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-resolver.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
-import type { ResolvedProactivitySettings } from "../settings/settings-schema.ts";
+import type { ResolvedProactivityFeedbackSettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import {
+	decideNoteFeedback,
+	foldFeedback,
+	isSubjectTopicKey,
+	isTopicSuppressed,
+	type NoteTopic,
+	noteTopics,
+	PROACTIVITY_FEEDBACK_CUSTOM_TYPE,
+	subjectTopic,
+	subjectTopicKey,
+} from "./proactivity-feedback.ts";
 import { ProactivityInvestigation } from "./proactivity-investigation.ts";
 import type { ProactivityInvestigationHost } from "./proactivity-read-authority.ts";
 import {
@@ -36,6 +49,7 @@ import {
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ProactivityControllerSettingsSource {
 	getProactivitySettings(): ResolvedProactivitySettings;
+	getProactivityFeedbackSettings(): ResolvedProactivityFeedbackSettings;
 	subscribeChanges(listener: () => void): () => void;
 }
 
@@ -118,6 +132,11 @@ export interface ProactivityDailyState {
 	readonly lastEventDelivery?: ParentWakeDelivery;
 }
 
+/** The topics the owner's replies to proactive notes set aside now, each with when it ends. */
+export interface ProactivityFeedbackView {
+	readonly suppressed: readonly { readonly topic: string; readonly label: string; readonly until: number }[];
+}
+
 export interface ProactivityControllerDeps extends ProactivityInvestigationHost {
 	isDisposed(): boolean;
 	isChildSession(): boolean;
@@ -127,6 +146,8 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	getSessionManager(): SessionManager;
 	getSettingsManager(): ProactivityControllerSettingsSource;
 	getGoalStateSnapshot(): GoalState | undefined;
+	/** The session's bound System One engine, if any: it judges what the owner did with a delivered note. */
+	getSystemOneEngine(): SemanticDecisionEngine | undefined;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
@@ -164,6 +185,19 @@ function goalSummary(goal: GoalState): string {
 			? ["Still open:", ...open.map((requirement) => `- ${truncateWithEllipsis(requirement.text, 300)}`)]
 			: []),
 	].join("\n");
+}
+
+/** The review's own subject (the goal while one exists, otherwise the conversation) and the inputs it stands on. */
+function reviewSubject(
+	settings: Pick<ResolvedProactivitySettings, "preferences">,
+	goal: GoalState | undefined,
+	ownerProfile: string,
+): NoteTopic {
+	return subjectTopic({
+		preferences: settings.preferences,
+		ownerProfile,
+		...(goal ? { goal: { goalId: goal.goalId, userGoal: goal.userGoal, summary: goalSummary(goal) } } : {}),
+	});
 }
 
 /**
@@ -256,7 +290,46 @@ export class ProactivityController {
 		const shipment = this.models.resolveShipment(settings, "no_proactivity_model");
 		if (!shipment.ok) return shipment.skipReason;
 		if (!this.models.capabilityProfile(shipment.model).backgroundLanesEnabled) return "model_proactivity_unsupported";
+		if (this.isSubjectSuppressed(entries, settings)) return "topic_suppressed";
 		return undefined;
+	}
+
+	/**
+	 * True while the owner's replies set the review's own subject aside and the inputs it stands on are unchanged: such a
+	 * review starts nothing for itself, silently. Changed inputs (preferences, owner knowledge, the goal) lift it.
+	 */
+	private isSubjectSuppressed(entries: readonly SessionEntry[], settings: ResolvedProactivitySettings): boolean {
+		const feedback = this.deps.getSettingsManager().getProactivityFeedbackSettings();
+		if (!feedback.enabled) return false;
+		const now = Date.now();
+		const state = foldFeedback(entries, feedback, now);
+		const goal = this.deps.getGoalStateSnapshot();
+		// The owner knowledge read is only paid for a subject that is set aside at all.
+		if (state.topics.get(subjectTopicKey(goal?.goalId))?.suppressed === undefined) return false;
+		const profile = this.deps.captureReviewContext(MAX_REVIEW_PROFILE_CHARS).text;
+		return isTopicSuppressed(state, reviewSubject(settings, goal, profile), now);
+	}
+
+	/** The topics the owner's replies set aside now, with when each ends; read-only. */
+	getFeedbackState(): ProactivityFeedbackView {
+		const feedback = this.deps.getSettingsManager().getProactivityFeedbackSettings();
+		if (!feedback.enabled) return { suppressed: [] };
+		const entries = getActiveSessionBranchEntries(this.deps.getSessionManager());
+		const now = Date.now();
+		const state = foldFeedback(entries, feedback, now);
+		const settings = this.deps.getSettingsManager().getProactivitySettings();
+		const goal = this.deps.getGoalStateSnapshot();
+		let subject: NoteTopic | undefined;
+		const suppressed = [...state.topics.values()].flatMap(({ topic, label, suppressed }) => {
+			if (suppressed === undefined || suppressed.until <= now) return [];
+			if (isSubjectTopicKey(topic)) {
+				// A subject topic holds only for the current subject with unchanged inputs; a finished goal's no longer applies.
+				subject ??= reviewSubject(settings, goal, this.deps.captureReviewContext(MAX_REVIEW_PROFILE_CHARS).text);
+				if (topic !== subject.topic || suppressed.fingerprint !== subject.fingerprint) return [];
+			}
+			return [{ topic, label, until: suppressed.until }];
+		});
+		return { suppressed };
 	}
 
 	private noticeSkip(skipReason: string, settings: Pick<ResolvedProactivitySettings, "model">): void {
@@ -355,8 +428,29 @@ export class ProactivityController {
 		let investigation: ProactivityInvestigation | undefined;
 		let deregisterInFlight: (() => void) | undefined;
 		let started = false;
+		const subject = reviewSubject(settings, goal, memory.text);
+		const feedback = settingsSource.getProactivityFeedbackSettings();
 		try {
 			assertCurrent();
+			// What the owner did with earlier notes is judged only when a review would otherwise run, before it spends.
+			const engine = this.deps.getSystemOneEngine();
+			if (feedback.enabled && engine !== undefined) {
+				const records = await decideNoteFeedback({
+					entries: getActiveSessionBranchEntries(manager),
+					settings: feedback,
+					engine,
+					signal,
+					now: Date.now(),
+				});
+				assertCurrent();
+				for (const record of records) manager.appendCustomEntry(PROACTIVITY_FEEDBACK_CUSTOM_TYPE, record);
+				const now = Date.now();
+				if (isTopicSuppressed(foldFeedback(getActiveSessionBranchEntries(manager), feedback, now), subject, now)) {
+					this._lastSkipReason = "topic_suppressed";
+					this.noticeSkip("topic_suppressed", settings);
+					return { started: false, skipReason: "topic_suppressed", delivered: [] };
+				}
+			}
 			// The daily bounds count every session of this owner over the last rolling day, measured once at admission: a
 			// session runs one review at a time, so only another session admitting concurrently can pass the same measurement.
 			const atMs = Date.now();
@@ -438,11 +532,17 @@ export class ProactivityController {
 			assertCurrent();
 			if (completion.stopReason === "error" || completion.stopReason === "aborted")
 				throw new Error(completion.errorMessage ?? `Proactive review ${completion.stopReason}.`);
-			const notes = selectNotesToDeliver(
-				capture.raised,
-				priorNotes(getActiveSessionBranchEntries(this.deps.getSessionManager())).digests,
-				settings.maxNotesPerRun,
+			const evidence = reviewInvestigation.evidenceDetails();
+			const branch = getActiveSessionBranchEntries(this.deps.getSessionManager());
+			const now = Date.now();
+			const feedbackState = feedback.enabled ? foldFeedback(branch, feedback, now) : undefined;
+			// A note on a topic the owner's replies set aside is not offered while its sources stand where they stood.
+			const offered = capture.raised.filter(
+				(note) =>
+					feedbackState === undefined ||
+					!noteTopics([note], evidence, subject).some((topic) => isTopicSuppressed(feedbackState, topic, now)),
 			);
+			const notes = selectNotesToDeliver(offered, priorNotes(branch).digests, settings.maxNotesPerRun);
 			if (notes.length === 0) {
 				this.deps.emit({ type: "proactive_review", outcome: "quiet", noteCount: 0 });
 				return { started: true, delivered: [] };
@@ -455,7 +555,7 @@ export class ProactivityController {
 				customType: PROACTIVE_NOTE_CUSTOM_TYPE,
 				content: renderNoteMessage(notes),
 				display: true,
-				details: { notes, evidence: reviewInvestigation.evidenceDetails() },
+				details: { notes, evidence, topics: noteTopics(notes, evidence, subject) },
 			};
 			const mode: ParentInputMode =
 				settings.delivery === "turn" && deliveryHold === undefined ? "turn" : "next-owner-turn";

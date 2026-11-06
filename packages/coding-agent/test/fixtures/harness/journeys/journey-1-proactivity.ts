@@ -6,11 +6,13 @@ import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
+import { feedbackRecordOf, foldFeedback } from "../../../../src/core/proactivity/proactivity-feedback.ts";
+import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
 import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { formatProactivityStatus } from "../../../../src/modes/interactive/proactivity-commands.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { type HarnessWorld, type ScriptedJudgment, withDeadline } from "../session-fixture.ts";
 import { runJourney1ProactivityDurability } from "./journey-1-proactivity-durability.ts";
 import { runJourney1ProactivityInvestigation } from "./journey-1-proactivity-investigation.ts";
 import { runJourney1ProactivityMemory } from "./journey-1-proactivity-memory.ts";
@@ -34,6 +36,12 @@ const OWNER_POLICY_JUDGMENTS = {
 const PREVIOUS_TURN_JUDGMENTS = {
 	carries_0: { kind: "noul", probability: 0.02 },
 	...OWNER_POLICY_JUDGMENTS,
+} as const;
+
+/** What the owner's reply did with the one delivered note System One is asked about: neither took it up nor declined it. */
+const NOTE_IGNORED_JUDGMENTS = {
+	acts_on_note_0: { kind: "noul", probability: 0.1 },
+	declines_note_0: { kind: "noul", probability: 0.1 },
 } as const;
 
 /**
@@ -92,7 +100,11 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 
 	const ownerRequests: string[] = [];
 	let turns = 0;
-	const ownerTurn = async (label: string, prompt: string): Promise<void> => {
+	const ownerTurn = async (
+		label: string,
+		prompt: string,
+		judgments: Readonly<Record<string, ScriptedJudgment>> = {},
+	): Promise<void> => {
 		world.provider.enqueue("root", {
 			name: `${label}-reply`,
 			check: (request) => {
@@ -101,7 +113,7 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 			reply: { content: [{ type: "text", text: "Understood." }] },
 		});
 		// A turn's words are judged when the next turn is prepared, so only the later turns have judgments to answer.
-		world.systemOne.enterPhase(label, turns === 0 ? {} : PREVIOUS_TURN_JUDGMENTS);
+		world.systemOne.enterPhase(label, { ...(turns === 0 ? {} : PREVIOUS_TURN_JUDGMENTS), ...judgments });
 		turns += 1;
 		await withDeadline(trace, `${label} owner turn`, session.prompt(prompt));
 	};
@@ -199,12 +211,17 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		text("proactivity-review-2-done", "none"),
 	]);
 	expect(repeat, "a repeated note leaves the review quiet").toBe("quiet");
-	await ownerTurn("proactivity-3", "Still thinking.");
+	// The owner's first reply after the note was shown is judged at the next review's admission: it does not engage it.
+	await ownerTurn("proactivity-3", "Still thinking.", NOTE_IGNORED_JUDGMENTS);
 	expect(noteCount(ownerRequests.at(-1) ?? ""), "a repeated note is not delivered again").toBe(1);
 
 	// Review 3 raises nothing: the default is quiet.
 	const nothing = await review("proactivity-review-3", [text("proactivity-review-3-none", "none")]);
 	expect(nothing, "a review with nothing to raise is quiet").toBe("quiet");
+	expect(
+		feedbackOutcomes(created.sessionManager),
+		"the note's outcome is recorded once; without System One nothing is judged or recorded",
+	).toEqual(world.systemOne.enabled ? [["ignored"]] : []);
 	await ownerTurn("proactivity-4", "Carry on.");
 	expect(noteCount(ownerRequests.at(-1) ?? ""), "a review with nothing to raise delivers nothing").toBe(1);
 	expect(displayedNotes, "later turns do not redisplay an already shown note").toEqual([
@@ -485,6 +502,8 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	expect(await world.disposeSessionInBody(unknown.session)).toBeUndefined();
 
 	await runRollingDayBounds(world);
+	// Judging a reply needs System One; without it the main session above showed that nothing is asked or recorded.
+	if (world.systemOne.enabled) await runNoteFeedback(world);
 
 	// The owner can turn it off: no timer, no review request.
 	const offDir = `${world.agentDir}-proactivity-off`;
@@ -607,6 +626,179 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	await runJourney1ProactivityInvestigation(world);
 	await runJourney1ProactivityMemory(world);
 	await runJourney1ProactivityDurability(world);
+}
+
+/** Each recorded note message's outcomes, in branch order. */
+function feedbackOutcomes(manager: SessionManager): string[][] {
+	return manager.getEntries().flatMap((entry) => {
+		const record = feedbackRecordOf(entry);
+		return record ? [record.notes.map((note) => note.outcome)] : [];
+	});
+}
+
+/**
+ * What the owner does with delivered notes. System One judges only the owner's first typed reply after a note was shown,
+ * at the next review's admission; code counts. A reply in the middle band counts nothing; two notes on the same topic
+ * left unanswered in a row set the topic aside, silently: the next review starts nothing and asks nothing. Changed
+ * standing inputs lift it, and a note the owner takes up clears the count.
+ */
+async function runNoteFeedback(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-proactivity-feedback`;
+	const root = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: {
+			memorySystem: "okf",
+			autoLearn: { enabled: false },
+			proactivity: {
+				enabled: true,
+				minOwnerTurnsBetweenRuns: 1,
+				maxRunsPerSession: 12,
+				maxNotesPerRun: 2,
+				delivery: "note",
+				preferences: "Raise only open release work.",
+			},
+		},
+	});
+	const lanes = root.session.backgroundLanes;
+	const noteA = "The release plan still names no owner for the rollback step.";
+	const noteB = "The release plan still has no freeze date.";
+	const noteC = "The rollback step in the release plan still has no owner.";
+	const noteD = "The release plan could name who signs off the freeze.";
+	let turns = 0;
+	const ownerTurn = async (
+		label: string,
+		prompt: string,
+		judgments: Readonly<Record<string, ScriptedJudgment>> = {},
+		...carries: string[]
+	): Promise<void> => {
+		world.provider.enqueue("root", {
+			...text(`${label}-reply`, "Understood."),
+			check: (request) => {
+				const messages = JSON.stringify(request.context.messages);
+				for (const note of carries) expect(messages, `${label}: the note rides this owner turn`).toContain(note);
+			},
+		});
+		world.systemOne.enterPhase(label, { ...(turns++ === 0 ? {} : PREVIOUS_TURN_JUDGMENTS), ...judgments });
+		await withDeadline(trace, label, root.session.prompt(prompt));
+		root.session.backgroundLanes.clearResearchLaneTimer();
+	};
+	const review = (label: string, notes: readonly string[]) => {
+		world.provider.enqueue(
+			"root",
+			...(notes.length === 0
+				? [text(`${label}-none`, "none")]
+				: [
+						calls(
+							`${label}-raise`,
+							notes.map((note, index) => ({
+								id: `${label}-${index}`,
+								name: "raise_note",
+								arguments: { kind: "follow_up", text: note, why: "The owner asked for the release plan." },
+							})),
+						),
+						text(`${label}-done`, "none"),
+					]),
+		);
+		return withDeadline(trace, label, lanes.runProactiveReviewOnce());
+	};
+	const status = () => formatProactivityStatus({ settingsManager: root.settingsManager, session: root.session });
+	const conversation = () =>
+		foldFeedback(
+			root.sessionManager.getEntries(),
+			root.settingsManager.getProactivityFeedbackSettings(),
+			Date.now(),
+		).topics.get("conversation");
+	const feedbackRequests = (phase: string) =>
+		world.systemOne.decoded.filter((request) => request.phase === phase && "acts_on_note_0" in request.questions);
+
+	await ownerTurn("feedback-1", "Draft the release plan with a rollback step.");
+	// Sibling raise_note calls run as one parallel group, so the witness does not depend on their order.
+	expect((await review("feedback-review-1", [noteA, noteB])).delivered.map((note) => note.text).sort()).toEqual(
+		[noteA, noteB].sort(),
+	);
+	// The turn that carries the notes was typed before they were shown: only the reply after it is read.
+	await ownerTurn("feedback-2", "Noted.", {}, noteA, noteB);
+	const reply = "Let us outline the plan sections first.";
+	await ownerTurn("feedback-3", reply, {
+		acts_on_note_0: { kind: "noul", probability: 0.5 },
+		declines_note_0: { kind: "noul", probability: 0.1 },
+		acts_on_note_1: { kind: "noul", probability: 0.1 },
+		declines_note_1: { kind: "noul", probability: 0.1 },
+	});
+	expect((await review("feedback-review-2", [noteC])).delivered.map((note) => note.text)).toEqual([noteC]);
+	expect(
+		feedbackRequests("feedback-3"),
+		"one System One request judges both notes on the reply's typed words",
+	).toHaveLength(1);
+	expect(feedbackRequests("feedback-3")[0]?.state).toMatchObject({
+		notes: expect.arrayContaining([
+			{ kind: "follow_up", text: noteA, ownerReply: expect.stringContaining(reply) },
+			{ kind: "follow_up", text: noteB, ownerReply: expect.stringContaining(reply) },
+		]),
+	});
+	expect(feedbackOutcomes(root.sessionManager), "an undecided reply counts nothing").toEqual([["unknown", "ignored"]]);
+	expect(conversation(), "one unanswered note in a row sets nothing aside").toMatchObject({
+		missedInARow: 1,
+		level: 0,
+	});
+
+	await ownerTurn("feedback-4", "Noted.", {}, noteC);
+	await ownerTurn("feedback-5", "Go on with the plan sections.", NOTE_IGNORED_JUDGMENTS);
+	const beforeSuppressed = world.provider.requests.length;
+	expect(
+		await withDeadline(trace, "feedback set aside", lanes.runProactiveReviewOnce()),
+		"the second unanswered note in a row sets the topic aside",
+	).toEqual({ started: false, skipReason: "topic_suppressed", delivered: [] });
+	expect(world.provider.requests.length - beforeSuppressed, "a set-aside topic spends no review").toBe(0);
+	expect(lanes.getLastProactivitySkipReason()).toBe("topic_suppressed");
+	expect(feedbackOutcomes(root.sessionManager)).toEqual([["unknown", "ignored"], ["ignored"]]);
+	expect(conversation()?.suppressed?.until, "the first set-aside lasts seven days").toBeGreaterThan(
+		Date.now() + 6 * 24 * 60 * 60 * 1000,
+	);
+	expect(status(), "status shows the set-aside topic and its end").toContain(
+		"Set aside after unanswered or declined notes: conversation, until ",
+	);
+	expect(
+		root.sessionManager.getEntries().filter((entry) => {
+			const details = parentInputOriginalDetails(entry);
+			return (
+				entry.type === "custom_message" &&
+				entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+				isPlainRecord(details) &&
+				details.kind === "proactive-review"
+			);
+		}),
+		"setting a topic aside sends no notice",
+	).toEqual([]);
+	const judgedBefore = world.systemOne.decoded.length;
+	expect((await withDeadline(trace, "feedback set aside again", lanes.runProactiveReviewOnce())).skipReason).toBe(
+		"topic_suppressed",
+	);
+	expect(world.systemOne.decoded.length - judgedBefore, "a set-aside topic asks System One nothing").toBe(0);
+	expect(world.provider.requests.length - beforeSuppressed).toBe(0);
+
+	// Changed standing inputs lift it; a note the owner then takes up clears the count.
+	root.settingsManager.setProactivitySettings({
+		...root.settingsManager.getProactivitySettings(),
+		preferences: "Raise open release work, including sign-off.",
+	});
+	expect(status(), "changed inputs lift the set-aside topic").not.toContain("Set aside");
+	expect((await review("feedback-review-4", [noteD])).delivered.map((note) => note.text)).toEqual([noteD]);
+	await ownerTurn("feedback-6", "Noted.", {}, noteD);
+	await ownerTurn("feedback-7", "Yes, name the sign-off owner in the plan.", {
+		acts_on_note_0: { kind: "noul", probability: 0.95 },
+		declines_note_0: { kind: "noul", probability: 0.05 },
+	});
+	expect((await review("feedback-review-5", [])).started, "the review runs after the owner took a note up").toBe(true);
+	expect(feedbackOutcomes(root.sessionManager).at(-1)).toEqual(["acted"]);
+	expect(conversation(), "a taken-up note clears the count and the set-aside").toMatchObject({
+		missedInARow: 0,
+		level: 0,
+	});
+	expect(conversation()?.suppressed).toBeUndefined();
+	expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 }
 
 /**

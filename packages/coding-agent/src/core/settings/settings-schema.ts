@@ -296,7 +296,20 @@ export interface ProactivitySettings {
 	preferences?: string; // the owner's standing words about what to raise, how often and in what tone (bounded)
 	ciEvents?: boolean; // default: true — CI results of the checkout become host events (git reads, `gh` calls); false stops that discovery
 	actAhead?: ActAheadSettings; // read only from the global and directory-profile layers
+	feedback?: ProactivityFeedbackSettings; // read only from the global and directory-profile layers
 }
+
+/**
+ * What the owner does with delivered notes (`proactivity.feedback`): a topic whose notes go unanswered or are declined
+ * `suppressAfter` times in a row is set aside. Read only from the global and directory-profile layers.
+ */
+export interface ProactivityFeedbackSettings {
+	enabled?: boolean; // default: true — false judges no reply and sets no topic aside
+	suppressAfter?: number; // default: 2 (1..10) — unanswered or declined notes in a row that set a topic aside
+	baseSuppressDays?: number; // default: 7 (1..28) — the first set-aside length; each repeat doubles it, up to four times this
+}
+
+export type ResolvedProactivityFeedbackSettings = Required<ProactivityFeedbackSettings>;
 
 /**
  * Acting ahead on the owner's own failing CI (`proactivity.actAhead`): a worker in a throwaway lane drafts a fix the static
@@ -328,7 +341,7 @@ export interface ChannelPolicySettings {
 	replyMode?: "draft" | "auto"; // default: "draft" — the answer waits for the owner; "auto" sends it to the same address
 }
 
-export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead">> &
+export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead" | "feedback">> &
 	Pick<ProactivitySettings, "model">;
 
 /** Routines of a session nobody has open, run by the background daemon (away). */

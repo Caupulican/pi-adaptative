@@ -14,7 +14,7 @@ A review retains the conversation branch, settings, goal and memory revision it 
 
 ## Owner controls
 
-- `/proactivity status` shows the resolved settings, the last rolling-day measurement, the last reason a review did not start, and how the last accepted notes were delivered.
+- `/proactivity status` shows the resolved settings, the last rolling-day measurement, the topics set aside after unanswered or declined notes (see [Note feedback](#note-feedback)), the last reason a review did not start, and how the last accepted notes were delivered.
 - `/proactivity off` disables idle reviews; `/proactivity on` enables them.
 - `/proactivity prefs <text>` replaces the standing preferences.
 - `/proactivity prefs clear` removes the standing preferences.
@@ -27,6 +27,18 @@ The owner does not need `/proactivity status` to learn that reviews stopped for 
 The root agent also has a `proactivity` tool with `view`, `set_preferences`, `clear_preferences`, `turn_on` and `turn_off` actions. It can use this when the owner asks to change the tone or frequency of what gets raised. A request to be told when something happens, or to have something checked on a schedule, is a routine (see below). Each change displays the exact proposal and requires owner confirmation in the host UI. Without a UI, on cancellation or after a conflicting edit during confirmation, it changes nothing. An unrelated setting changed during confirmation is preserved. Workers cannot receive this tool, including through explicit grants.
 
 Preferences are a whole document, limited to 2000 characters. The agent reads the existing document before proposing a replacement. An example is: `Raise unfinished work I asked for; avoid repeated reminders.`
+
+## Note feedback
+
+When System One is bound, the host learns from what the owner does with delivered notes. Each delivered note keeps a topic that code derives: a note that cites evidence from the review's reads is about the cited sources, whatever their revision; any other note is about the review's subject, the active goal or else the conversation.
+
+A note's outcome is decided when the next review is admitted, before it spends anything. The reply read is the first message the owner typed after the note reached them; the turn that carried the note was typed before the note was shown and is not read, and text the owner pasted does not count. Code settles some notes without a question: no reply within 24 hours of the note reaching the owner, a reply later than that, or a reply with no typed letter or digit leaves the outcome unknown. For the rest, one System One request, covering up to four note messages, asks two things about each note: whether the reply acts on or takes up the note, and whether it explicitly declines it. Only settled answers count: taken up and not declined is acted, declined and not taken up is dismissed, neither is ignored, and anything else is unknown. When System One cannot answer, the outcome is unknown and the question is not asked again; a cancelled review records nothing. Each decision is saved in the session with the judgments it read.
+
+Code counts the outcomes per topic over the last 30 days, for at most 64 topics; the least recently updated topic leaves first. `suppressAfter` ignored or dismissed notes in a row (default 2) set the topic aside. Each set-aside raises the topic's level by one, up to three, and lasts `baseSuppressDays` (default 7) at level one, doubled per level above it: 7, 14 and then 28 days by default. A note the owner takes up clears the count and the set-aside and lowers the level by one. An unknown outcome counts nothing.
+
+While the review's subject is set aside, no review starts: the gate reads `topic_suppressed`, and no provider or System One request is made and no notice is sent. A raised note whose topic is set aside is not delivered. A set-aside ends at its end time, or when what its topic stood on changes: for the review's subject, the standing preferences, the owner knowledge the review reads, or the goal's status; for sources, the revision of a cited source, as a later review reads it. The count starts again after a set-aside ends. `/proactivity status` lists each topic set aside with its end, as `Set aside after unanswered or declined notes: <topic>, until <time>`; a source topic stays listed until its end, since only a later review's reads show its sources changed.
+
+Without System One nothing is asked or recorded, and topics already set aside stay aside until they lift. `proactivity.feedback.enabled: false` stops it completely: nothing is asked, recorded or set aside. See the [settings reference](settings.md#proactivity).
 
 ## Scheduled work
 

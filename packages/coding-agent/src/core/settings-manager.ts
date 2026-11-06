@@ -30,7 +30,7 @@ import {
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "./http-dispatcher.ts";
 import { compileWorkerModelPinPolicy, type WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts";
-import { resolveActAheadSettings } from "./proactivity/proactivity-settings.ts";
+import { resolveActAheadSettings, resolveProactivityFeedbackSettings } from "./proactivity/proactivity-settings.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import { normalizeSteStrictness } from "./provider-prompt-contracts.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
@@ -197,6 +197,7 @@ import type {
 	ResolvedBackgroundToolSettings,
 	ResolvedEdgeSettings,
 	ResolvedLearningPolicySettings,
+	ResolvedProactivityFeedbackSettings,
 	ResolvedProactivitySettings,
 	ResolvedProcessMatrixSettings,
 	ResolvedProviderAdmissionSettings,
@@ -3597,19 +3598,33 @@ export class SettingsManager {
 		return loadError ? { ...resolved, enabled: false } : resolved;
 	}
 
-	/** Replaces the layer's proactivity settings; the layer's `actAhead` stays unless `settings` sets one. */
+	/**
+	 * What delivered notes teach the review, read like acting ahead: only from the layers the owner writes under the
+	 * agent directory (directory profile first, then global), never the project's own settings.
+	 */
+	getProactivityFeedbackSettings(): ResolvedProactivityFeedbackSettings {
+		return resolveProactivityFeedbackSettings([
+			this.directoryProfileSettings.proactivity?.feedback,
+			this.globalSettings.proactivity?.feedback,
+		]);
+	}
+
+	/** Replaces the layer's proactivity settings; the layer's `actAhead` and `feedback` stay unless `settings` sets them. */
 	setProactivitySettings(settings: ProactivitySettings, scope: SettingsScope = "global"): void {
+		const keep = (layer: ProactivitySettings | undefined): ProactivitySettings => {
+			const actAhead = settings.actAhead ?? layer?.actAhead;
+			const feedback = settings.feedback ?? layer?.feedback;
+			return { ...settings, ...(actAhead ? { actAhead } : {}), ...(feedback ? { feedback } : {}) };
+		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			const kept = settings.actAhead ?? projectSettings.proactivity?.actAhead;
-			projectSettings.proactivity = { ...settings, ...(kept ? { actAhead: kept } : {}) };
+			projectSettings.proactivity = keep(projectSettings.proactivity);
 			this.markProjectModified("proactivity");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
 
-		const kept = settings.actAhead ?? this.globalSettings.proactivity?.actAhead;
-		this.globalSettings.proactivity = { ...settings, ...(kept ? { actAhead: kept } : {}) };
+		this.globalSettings.proactivity = keep(this.globalSettings.proactivity);
 		this.markModified("proactivity");
 		this.save();
 	}

@@ -33,6 +33,7 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 	const skip = lanes.getLastProactivitySkipReason();
 	const { measured, lastDelivery, lastEventDelivery } = lanes.getProactivityDailyState();
 	const intake = lanes.getRoutineIntakeStatus();
+	const { suppressed } = lanes.getProactivityFeedbackState();
 	const delivered = (delivery: ParentWakeDelivery) =>
 		delivery.mode === "turn"
 			? "woke a parent turn"
@@ -54,6 +55,10 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 			: [
 					`Last measured: $${measured.reviewUsd.toFixed(4)} review spend, ${measured.turnWakes} parent-turn wake(s) (${measured.eventWakes} by CI events) in the rolling 24 h`,
 				]),
+		...suppressed.map(
+			(topic) =>
+				`Set aside after unanswered or declined notes: ${topic.label}, until ${new Date(topic.until).toISOString()}`,
+		),
 		...(skip === undefined ? [] : [`Last gate: ${skip}`]),
 		...(lastDelivery === undefined ? [] : [`Last note delivery: ${delivered(lastDelivery)}`]),
 		...(lastEventDelivery === undefined ? [] : [`Last CI event delivery: ${delivered(lastEventDelivery)}`]),
