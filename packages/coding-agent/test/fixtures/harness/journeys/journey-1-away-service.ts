@@ -8,6 +8,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import {
 	type AwayServiceSpec,
 	awayServiceName,
+	awayServiceRecordPath,
 	processAwayServiceHost,
 	renderAwayServiceDefinition,
 	resolveAwayServiceSpec,
@@ -113,7 +114,7 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 		expect(JSON.stringify(notices()[0]), "the notice says how to enable always-on").toContain(
 			JSON.stringify(noticeText).slice(1, -1),
 		);
-		const record = () => JSON.parse(world.io.peekFile(join(notifyDir, "away-service.json")) ?? "{}");
+		const record = () => JSON.parse(world.io.peekFile(awayServiceRecordPath(notifyDir)) ?? "{}");
 		expect(record().noticeToldAt, "the notice is marked for the agent directory").toEqual(expect.any(Number));
 		expect(record().install, "notify installs nothing").toBeUndefined();
 		await save(told.session, "away-service-notified-again");
@@ -141,7 +142,7 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 						{ file: "systemctl", args: ["--user", "restart", `${spec.name}.service`], code: 0 },
 					];
 		const answered = world.processes.scriptServiceManager(expected);
-		const recordPath = join(onDir, "away-service.json");
+		const recordPath = awayServiceRecordPath(onDir);
 		const installed = world.io.waitForMutation(() => world.io.peekFile(recordPath)?.includes('"install"') === true);
 		const installer = await open(onDir, "on");
 		await withDeadline(world.trace, "the manager ran every install command", answered);

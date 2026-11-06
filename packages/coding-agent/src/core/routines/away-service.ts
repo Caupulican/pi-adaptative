@@ -18,7 +18,7 @@
  * keys set only in a shell environment are absent too; `status` names them.
  *
  * Installing changes the machine, so it happens only under `routines.away.autostart: "on"` or the explicit command.
- * The hands-off check reads the filesystem only: the install record (`away-service.json` in the agent directory) holds
+ * The hands-off check reads the filesystem only: the install record (`state/away-service/record.json` in the agent directory) holds
  * the digest of the definition's identity (its command, path and principal), and a current record with its definition
  * file present means nothing is run. Only an install, an uninstall and the explicit `status` run the service manager.
  */
@@ -27,7 +27,7 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch, wri
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { APP_NAME } from "../../config.ts";
-import { configFile } from "../agent-paths.ts";
+import { configFile, stateFile } from "../agent-paths.ts";
 import { daemonServiceEnvironment, environmentOnlyCredentialNames } from "../daemon-environment.ts";
 import { BOT_DAEMON_COMMAND } from "../delegation/bot-daemon-command.ts";
 import { daemonLeasePath, type PersistentBotDaemonStatus } from "../delegation/bot-team-routine-helpers.ts";
@@ -364,8 +364,9 @@ export interface AwayServiceRecord {
 	};
 }
 
-function recordPath(agentDir: string): string {
-	return configFile(agentDir, "away-service.json");
+/** The install record: machine-written state, so it lives under `state/` (the agent root holds only user-authored files). */
+export function awayServiceRecordPath(agentDir: string): string {
+	return stateFile(agentDir, "away-service", "record.json");
 }
 
 /**
@@ -375,7 +376,7 @@ function recordPath(agentDir: string): string {
 export function readAwayServiceRecord(agentDir: string): AwayServiceRecord | undefined {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(readFileSync(recordPath(agentDir), "utf8"));
+		parsed = JSON.parse(readFileSync(awayServiceRecordPath(agentDir), "utf8"));
 	} catch {
 		return undefined;
 	}
@@ -407,7 +408,7 @@ export function readAwayServiceRecord(agentDir: string): AwayServiceRecord | und
 }
 
 function writeAwayServiceRecord(agentDir: string, record: AwayServiceRecord): void {
-	writeFileAtomicSync(recordPath(agentDir), `${JSON.stringify(record, null, 2)}\n`);
+	writeFileAtomicSync(awayServiceRecordPath(agentDir), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 export function isAwayServiceCurrent(record: AwayServiceRecord | undefined, spec: AwayServiceSpec): boolean {
