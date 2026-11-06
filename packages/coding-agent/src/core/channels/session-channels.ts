@@ -508,13 +508,18 @@ export class SessionChannels {
 	}
 
 	/** Why the channel delivers nothing now, or undefined. Reads the journal state it is given. */
-	private capReason(policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number): string | undefined {
+	private capReason(
+		name: string,
+		policy: ResolvedChannelPolicy,
+		state: ChannelJournalState,
+		now: number,
+	): string | undefined {
 		const recent = state.batches.filter((batch) => now - batch.acceptedAt < DAY_MS);
 		if (recent.length >= policy.maxWakesPerDay)
-			return `${policy.maxWakesPerDay} turns in the last 24 hours (channels.<name>.maxWakesPerDay)`;
+			return `its bound of ${policy.maxWakesPerDay} turn(s) in 24 hours is reached (channels.${name}.maxWakesPerDay)`;
 		const spent = recent.reduce((sum, batch) => sum + (batch.usd ?? 0), 0);
 		if (spent >= policy.maxUsdPerDay)
-			return `$${spent.toFixed(2)} spent in the last 24 hours (channels.<name>.maxUsdPerDay)`;
+			return `$${spent.toFixed(2)} spent in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
 		if (state.drafts.filter((draft) => draft.state === "pending").length >= MAX_PENDING_DRAFTS)
 			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
 		return undefined;
@@ -544,10 +549,11 @@ export class SessionChannels {
 			// One turn per channel at a time: its reply is routed before the next batch is offered.
 			if (state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === sessionId))
 				return { kind: "busy" as const, state: structuredClone(state) };
-			const cap = this.capReason(policy, state, now);
-			if (cap) return { kind: "capped" as const, cap, state: structuredClone(state) };
+			// A bound holds messages; with none waiting there is nothing to hold and nothing to tell.
 			const first = state.pending.find((entry) => entry.kind === "message");
 			if (!first) return { kind: "idle" as const, state: structuredClone(state) };
+			const cap = this.capReason(name, policy, state, now);
+			if (cap) return { kind: "capped" as const, cap, state: structuredClone(state) };
 			const batch = state.pending
 				.filter((entry) => entry.conversationKey === first.conversationKey)
 				.slice(0, policy.maxBatch);
