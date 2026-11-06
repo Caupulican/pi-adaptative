@@ -93,7 +93,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				: list(
 						value.journal.value,
 						(channel) =>
-							`${channel.name}: served by ${channel.servedBy}, wakes ${count(channel.wakes)}, spend ${count(channel.spendUsd, true)} (24 h), ${channel.pendingMessages} waiting, ${channel.pendingDrafts} draft(s) (${channel.awayDrafts} written while no session was open), ${channel.heldTotal} held, ${channel.gaps} gap(s)`,
+							`${channel.name}: served by ${channel.servedBy}, wakes ${count(channel.wakes)}, spend ${count(channel.spendUsd, true)} (24 h), ${channel.ownerSpendUsd ? `owner spend ${count(channel.ownerSpendUsd, true)} (24 h), ` : ""}${channel.pendingMessages} waiting, ${channel.pendingDrafts} draft(s) (${channel.awayDrafts} written while no session was open), ${channel.heldTotal} held, ${channel.gaps} gap(s)`,
 					)),
 		]),
 		...block("Outward drafts", status.outwardDrafts, (value) => [

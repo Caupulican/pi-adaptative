@@ -38,6 +38,16 @@ export interface ChannelMessage {
 	kind?: ChannelMessageKind;
 	/** When the provider received the event, epoch milliseconds; defaults to admission time. */
 	receivedAt?: number;
+	/**
+	 * Inbound: the platform says this is a one-to-one chat between the sender and the bot. Read only from a shipped
+	 * transport (owner admission, `channels/owner-channel.ts`); absent means not established.
+	 */
+	privateChat?: boolean;
+	/**
+	 * Inbound: the message relays words the sender did not write here (a forward, a share, an attachment). Read only from
+	 * a shipped transport; such a message is never the owner's words. Absent means not established.
+	 */
+	forwarded?: boolean;
 }
 
 /** What the transport accepts outbound; replies are split and formatted to it. */

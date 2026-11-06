@@ -23,6 +23,10 @@ const MAX_BATCHES = 64;
 const MAX_DRAFTS = 32;
 const MAX_GAPS = 32;
 const MAX_ONBOARDING = 16;
+/** The owner's private chats a channel pushes to. */
+export const MAX_OWNER_CONVERSATIONS = 8;
+/** Push records kept for dedupe and the hourly rate (a week of them at the highest rate is fewer). */
+const MAX_OWNER_PUSHES = 512;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 /** A waiting message is delivered within a day or becomes a gap. */
 export const PENDING_EXPIRY_MS = DAY_MS;
@@ -50,6 +54,11 @@ export interface ChannelPendingMessage {
 	offeredBatch?: string;
 	/** Offered by the daemon while no session was open: the offer charges the away spend bound until accepted. */
 	offeredAway?: true;
+	/**
+	 * Admitted as the owner's words (`ownerAdmission`): offered only as an owner turn, never in a third party's batch; one
+	 * whose authority lapsed waits and expires. An earlier build ignores the field and delivers it as a third party's.
+	 */
+	readonly owner?: true;
 }
 
 export interface ChannelBatchRecord {
@@ -67,6 +76,27 @@ export interface ChannelBatchRecord {
 	usd?: number;
 	/** Delivered by the daemon while no session was open: it charges the away spend bound (`away-channels.ts`). */
 	readonly away?: true;
+	/** An owner turn: it charges the channel's owner pool, never the away bound or the channel's third-party bounds. */
+	readonly owner?: true;
+	/** The owner sender's digest (`ownerSenderDigest`): the answer goes back only while that sender is still listed. */
+	readonly senderDigest?: string;
+	/** The held draft this owner turn performs, approved from the owner's chat: at most one turn per draft. */
+	readonly approval?: string;
+}
+
+/** A private chat an owner message was admitted from: where the owner's updates are pushed. */
+export interface ChannelOwnerConversation {
+	readonly conversationKey: string;
+	readonly address: string;
+	readonly senderDigest: string;
+	readonly at: number;
+}
+
+/** One push to the owner's chat, recorded before it is sent: `k` is `push:<key>`, `c` the one conversation it went to. */
+export interface ChannelOwnerPushRecord {
+	readonly k: string;
+	readonly at: number;
+	readonly c?: string;
 }
 
 export interface ChannelDraftRecord {
@@ -123,6 +153,12 @@ export interface ChannelJournalState {
 	 * sender's own id when the sender chose it, kept for the owner's `channel_reply` `list` instead of the notice.
 	 */
 	onboarding: { sender: string; at: number; id?: string }[];
+	/** The owner's private chats, newest last, at most `MAX_OWNER_CONVERSATIONS`; absent while there is none. */
+	ownerConversations?: ChannelOwnerConversation[];
+	/** Pushes to the owner's chats of the last week, oldest first; absent while there is none. */
+	ownerPushes?: ChannelOwnerPushRecord[];
+	/** Updates the push rate bound kept from the owner's chat since `status` last reported them; absent at zero. */
+	ownerPushSuppressed?: number;
 }
 
 export function digest(value: string): string {
@@ -130,7 +166,7 @@ export function digest(value: string): string {
 }
 
 /**
- * A fresh journal. `holder` and `awayHeld` keep their key positions while unset (`JSON.stringify` omits them), so a
+ * A fresh journal. `holder`, `awayHeld` and the owner fields keep their key positions while unset (`JSON.stringify` omits them), so a
  * first value is written where `parseState` puts it and the next update that changes nothing writes nothing.
  */
 function emptyState(): ChannelJournalState {
@@ -148,6 +184,9 @@ function emptyState(): ChannelJournalState {
 		drafts: [],
 		gaps: [],
 		onboarding: [],
+		ownerConversations: undefined,
+		ownerPushes: undefined,
+		ownerPushSuppressed: undefined,
 	};
 }
 
@@ -173,7 +212,8 @@ function isPending(value: unknown): value is ChannelPendingMessage {
 		(value.offeredPid === undefined || isCount(value.offeredPid)) &&
 		(value.offeredAt === undefined || isTime(value.offeredAt)) &&
 		(value.offeredBatch === undefined || isString(value.offeredBatch)) &&
-		(value.offeredAway === undefined || value.offeredAway === true)
+		(value.offeredAway === undefined || value.offeredAway === true) &&
+		(value.owner === undefined || value.owner === true)
 	);
 }
 
@@ -194,8 +234,25 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 			value.state === "drafted" ||
 			value.state === "unanswered") &&
 		(value.usd === undefined || isTime(value.usd)) &&
-		(value.away === undefined || value.away === true)
+		(value.away === undefined || value.away === true) &&
+		(value.owner === undefined || value.owner === true) &&
+		(value.senderDigest === undefined || isString(value.senderDigest)) &&
+		(value.approval === undefined || isString(value.approval))
 	);
+}
+
+function isOwnerConversation(value: unknown): value is ChannelOwnerConversation {
+	return (
+		isPlainRecord(value) &&
+		isString(value.conversationKey) &&
+		isString(value.address) &&
+		isString(value.senderDigest) &&
+		isTime(value.at)
+	);
+}
+
+function isOwnerPush(value: unknown): value is ChannelOwnerPushRecord {
+	return isPlainRecord(value) && isString(value.k) && isTime(value.at) && (value.c === undefined || isString(value.c));
 }
 
 function isDraft(value: unknown): value is ChannelDraftRecord {
@@ -253,6 +310,8 @@ function parseState(text: string): ChannelJournalState {
 		throw new Error("malformed holder");
 	if (value.awayHeld !== undefined && !isHeldCounts(value.awayHeld)) throw new Error("malformed held counts");
 	if (value.toldFlags !== undefined && value.toldFlags !== true) throw new Error("malformed told marker");
+	if (value.ownerPushSuppressed !== undefined && !isCount(value.ownerPushSuppressed))
+		throw new Error("malformed push count");
 	const list = <T>(field: unknown, check: (item: unknown) => item is T): T[] => {
 		if (!Array.isArray(field) || !field.every(check)) throw new Error("malformed journal list");
 		return field;
@@ -306,6 +365,11 @@ function parseState(text: string): ChannelJournalState {
 							isTime(item.at) &&
 							(item.id === undefined || isString(item.id)),
 					),
+		// Absent in a journal written before owner channels, and while each is empty.
+		ownerConversations:
+			value.ownerConversations === undefined ? undefined : list(value.ownerConversations, isOwnerConversation),
+		ownerPushes: value.ownerPushes === undefined ? undefined : list(value.ownerPushes, isOwnerPush),
+		ownerPushSuppressed: value.ownerPushSuppressed as number | undefined,
 	};
 }
 
@@ -326,6 +390,11 @@ function prune(state: ChannelJournalState, now: number): void {
 	const dropGaps = new Set(toldGaps.slice(0, Math.max(0, state.gaps.length - MAX_GAPS)));
 	state.gaps = state.gaps.filter((gap) => !dropGaps.has(gap)).slice(-MAX_GAPS);
 	state.onboarding = state.onboarding.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_ONBOARDING);
+	const pushes = state.ownerPushes?.filter((entry) => now - entry.at < SEEN_RETENTION_MS).slice(-MAX_OWNER_PUSHES);
+	state.ownerPushes = pushes && pushes.length > 0 ? pushes : undefined;
+	const conversations = state.ownerConversations?.slice(-MAX_OWNER_CONVERSATIONS);
+	state.ownerConversations = conversations && conversations.length > 0 ? conversations : undefined;
+	if (state.ownerPushSuppressed === 0) state.ownerPushSuppressed = undefined;
 }
 
 /** What a journal update observed besides its own result: the file was unreadable and was replaced. */
@@ -465,11 +534,30 @@ export function markTold(state: ChannelJournalState, untold: ChannelUntold, told
 	state.awayHeld = heldCount(next) > 0 ? next : undefined;
 }
 
-/** The turns delivered in the last 24 hours and what they cost: the figures a channel's daily bounds are read against. */
+/**
+ * The third parties' turns delivered in the last 24 hours and what they cost: the figures a channel's daily bounds are
+ * read against. Owner turns charge the owner pool alone (`ownerChannelCharges`, `owner-channel.ts`).
+ */
 export function channelDayUsage(
 	state: Pick<ChannelJournalState, "batches">,
 	now: number,
 ): { readonly wakes: number; readonly usd: number } {
-	const recent = state.batches.filter((batch) => now - batch.acceptedAt < DAY_MS);
+	const recent = state.batches.filter((batch) => batch.owner !== true && now - batch.acceptedAt < DAY_MS);
 	return { wakes: recent.length, usd: recent.reduce((sum, batch) => sum + (batch.usd ?? 0), 0) };
+}
+
+/**
+ * When each offer not yet accepted was made, once per offered batch, among the pending entries `counts` picks: the
+ * reservations a spend pool charges from the offer on.
+ */
+export function pendingOfferTimes(
+	pending: readonly ChannelPendingMessage[],
+	counts: (entry: ChannelPendingMessage) => boolean,
+): number[] {
+	const offers = new Map<string, number>();
+	for (const entry of pending) {
+		if (!counts(entry) || entry.offeredTo === undefined || entry.offeredAt === undefined) continue;
+		offers.set(entry.offeredBatch ?? entry.offeredTo, entry.offeredAt);
+	}
+	return [...offers.values()];
 }

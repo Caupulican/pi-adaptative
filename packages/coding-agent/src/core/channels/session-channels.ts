@@ -8,6 +8,13 @@
  * and it arrives as a third party's words (`sendUserMessage` with an origin): the origin gate treats the run as theirs.
  * The answer goes back to the same address only when the owner set `replyMode: "auto"`; otherwise it waits as a draft
  * the owner releases with the `channel_reply` tool.
+ *
+ * The owner channel (`ownerSenders`, `owner-channel.ts`) is the one exception, and only while the session wiring hands
+ * in its three owner dependencies: a message `ownerAdmission` admits is the owner's words. A control word among them
+ * (`owner-control.ts`) is answered here and never becomes a turn; any other is delivered as an owner turn through
+ * `ownerDelivery`, under the channel's owner spend pool and a `live` closure, and its answer goes back to that private
+ * chat. Without `ownerSenders` or without the wiring, every path is the third-party one above. The owner's chat is
+ * pushed only what concerns its own turns (`owner-push.ts`): held drafts, the bounds, stops and held answers.
  */
 
 import { type FSWatcher, watch } from "node:fs";
@@ -49,6 +56,7 @@ import {
 	digest,
 	heldCount,
 	isUntoldEmpty,
+	MAX_OWNER_CONVERSATIONS,
 	MAX_PENDING_MESSAGES,
 	markTold,
 	PENDING_EXPIRY_MS,
@@ -57,14 +65,43 @@ import {
 } from "./channel-journal.ts";
 import {
 	composeChannelBatch,
+	composeOwnerBatch,
 	formatChannelReply,
+	type InboundChannelEvent,
 	isAdmittedKind,
 	MAX_REPLY_CHARS,
 	parseInboundChannelEvent,
 	plainLabel,
 } from "./channel-message.ts";
 import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
-import type { SessionChannelsOwnerDeps } from "./owner-channel-types.ts";
+import {
+	listedOwnerDigests,
+	ownerAdmission,
+	ownerAuthority,
+	ownerLiveCheck,
+	ownerRoom,
+	ownerSenderDigest,
+	policyFingerprint,
+	senderListed,
+} from "./owner-channel.ts";
+import type {
+	OwnerChannelControl,
+	OwnerChannelOrigin,
+	OwnerControl,
+	OwnerDecisionBy,
+	OwnerDraftView,
+	SessionChannelsOwnerDeps,
+} from "./owner-channel-types.ts";
+import {
+	approvalTurnText,
+	classLabels,
+	decideOwnerDraft,
+	draftInScope,
+	draftPresentation,
+	MAX_STATUS_DRAFTS,
+	parseOwnerControl,
+} from "./owner-control.ts";
+import { OwnerPush } from "./owner-push.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
 const MAX_NAMED_AWAY_DRAFTS = 3;
@@ -146,7 +183,25 @@ function clearOffer(entry: ChannelPendingMessage): void {
 type DeliveryPick =
 	| { readonly kind: "not_holder" | "busy" | "idle" }
 	| { readonly kind: "capped"; readonly cap: string }
-	| { readonly kind: "deliver"; readonly batch: readonly ChannelPendingMessage[]; readonly batchId: string };
+	| {
+			readonly kind: "deliver";
+			readonly batch: readonly ChannelPendingMessage[];
+			readonly batchId: string;
+			readonly owner: boolean;
+	  };
+/** Not-yet-shown drafts one `status` presents again. */
+const MAX_STATUS_PRESENTATIONS = 3;
+/** The longest control reply: a status lists at most `MAX_STATUS_DRAFTS` drafts by id and class. */
+const MAX_CONTROL_REPLY_CHARS = 1500;
+
+/** An owner turn this session offered or runs: its `live` closure, its spend observer, whether it was stopped. */
+interface OwnerRun {
+	readonly name: string;
+	readonly live: () => boolean;
+	accepted: boolean;
+	stopped: boolean;
+	unobserve?: () => void;
+}
 
 export type ChannelRuntimeState =
 	| "not_configured"
@@ -182,6 +237,11 @@ export interface ChannelJournalSummary {
 	readonly servedBy: ChannelServedBy;
 	/** Reply drafts the daemon wrote while no session was open that still wait for the owner. */
 	readonly awayDrafts: number;
+	/**
+	 * Dollars the channel's owner pool holds over the last 24 hours against `ownerMaxUsdPerDay` (`owner-channel.ts`);
+	 * only while the policy lists owner senders.
+	 */
+	readonly ownerSpendUsd?: { readonly used: number; readonly max: number };
 }
 
 /** One reply draft as the owner's release tool lists it. */
@@ -292,9 +352,24 @@ export class SessionChannels {
 	 */
 	private dirWatcher: FSWatcher | undefined;
 	private dirWatchFailure: string | undefined;
+	/** Updates to the owner's chats (`owner-push.ts`); pushes nothing without owner authority and the wiring. */
+	readonly ownerPush: OwnerPush;
+	/** Owner turns this session offered or runs, by batch id (`ref`). */
+	private readonly ownerRuns = new Map<string, OwnerRun>();
+	/** The held-draft subscription and the control handle it is on. */
+	private draftSubscription: { readonly control: OwnerChannelControl; readonly unsubscribe: () => void } | undefined;
+	/** The owner-authority notice each channel shows now (`ownerNotice`), so an unchanged state observes nothing. */
+	private readonly ownerNotices = new Map<string, string>();
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
+		this.ownerPush = new OwnerPush({
+			journal: (name) => this.journal(name),
+			provider: (name) => this.registry.getChannel(name),
+			ownerPolicy: (name) => this.ownerPolicy(name),
+			now: () => this.now(),
+			warn: (message) => deps.warn(message),
+		});
 		this.registry = new GatewayRegistry({
 			onDiagnostic: (message) => deps.warn(message),
 			admitChannel: (name) => this.admit(name),
@@ -333,6 +408,57 @@ export class SessionChannels {
 	private policy(name: string): ResolvedChannelPolicy | undefined {
 		const resolution = this.deps.getChannelPolicies().get(name);
 		return resolution?.kind === "policy" && resolution.policy.mode === "explicit" ? resolution.policy : undefined;
+	}
+
+	/** The session wiring handed in all three owner dependencies; an absent one fails closed (third-party path). */
+	private ownerWired(): boolean {
+		return (
+			this.deps.ownerDelivery !== undefined &&
+			this.deps.ownerControl !== undefined &&
+			this.deps.isEmergencyStopEngaged !== undefined
+		);
+	}
+
+	/** The channel's policy while it carries owner authority in this session: wired, shipped, platform ids, listed. */
+	private ownerPolicy(name: string): ResolvedChannelPolicy | undefined {
+		if (!this.started || !this.ownerWired()) return undefined;
+		const policy = this.policy(name);
+		return policy && ownerAuthority(this.registry.getChannel(name), policy) ? policy : undefined;
+	}
+
+	/** Engaged, or not known (no probe, or the probe failed): no owner turn starts. */
+	private emergencyStopEngaged(): boolean {
+		try {
+			return this.deps.isEmergencyStopEngaged?.() ?? true;
+		} catch {
+			return true;
+		}
+	}
+
+	/** Why no owner turn of the channel may start now; undefined when one may. Reads the journal state it is given. */
+	private ownerTurnRefusal(name: string, policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number) {
+		if (!this.ownerPolicy(name)) return "owner authority is off for this channel in this session";
+		if (this.emergencyStopEngaged()) return "the emergency stop is engaged";
+		if (policy.ownerMaxUsdPerDay === 0) return `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`;
+		const room = ownerRoom(name, state, policy, now);
+		return room.fits
+			? undefined
+			: `$${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours`;
+	}
+
+	/** The closure an owner turn's every guarded call asks (`ownerLiveCheck`). */
+	private ownerLive(name: string, senderDigest: string, policy: ResolvedChannelPolicy): () => boolean {
+		return ownerLiveCheck({
+			channel: name,
+			senderDigest,
+			fingerprint: policyFingerprint(policy),
+			getPolicy: () => this.deps.getChannelPolicies().get(name),
+			getProvider: () => this.registry.getChannel(name),
+			...(this.deps.isEmergencyStopEngaged
+				? { isEmergencyStopEngaged: () => this.deps.isEmergencyStopEngaged?.() ?? true }
+				: {}),
+			isServing: () => this.started && !this.deps.isDisposed() && this.ownerWired(),
+		});
 	}
 
 	/** Register a deployment-supplied channel. It starts only under its policy, now or once the session starts. */
@@ -419,6 +545,7 @@ export class SessionChannels {
 			this.deps.subscribeSettings(() => this.onSettingsChanged()),
 			this.deps.subscribeForegroundActivity(() => this.onActivity()),
 		);
+		this.syncOwnerSubscription();
 		this.syncBuiltIns();
 		void this.registry.start((name, message) => this.receive(name, message));
 	}
@@ -434,6 +561,10 @@ export class SessionChannels {
 		this.started = false;
 		startedSessions.delete(this);
 		for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
+		this.draftSubscription?.unsubscribe();
+		this.draftSubscription = undefined;
+		// Their `live` closures answer false from here on (`isServing`); the runs themselves are aborted.
+		for (const [ref, run] of this.ownerRuns) this.stopOwnerRun(ref, run, undefined);
 		this.transcriptWait?.();
 		this.transcriptWait = undefined;
 		this.followed.clear();
@@ -576,6 +707,7 @@ export class SessionChannels {
 	}
 
 	private dropHold(name: string): false {
+		this.ownerNotice(name, undefined);
 		const runtime = this.runtime(name);
 		runtime.connection = undefined;
 		if (runtime.holding) this.releaseHold(name);
@@ -1019,10 +1151,16 @@ export class SessionChannels {
 		try {
 			// A follow ends here too, so a directory watch that failed or saw nothing withholds no summary.
 			for (const [name, preempted] of this.followed) this.followStep(name, preempted);
+			// The owner kill switches: a turn whose authority lapsed (policy changed or gone, sender unlisted, transport
+			// replaced, emergency stop engaged) is aborted at the first pass that sees it.
+			this.syncOwnerSubscription();
+			for (const [ref, run] of this.ownerRuns)
+				if (!run.stopped && !run.live()) this.stopOwnerRun(ref, run, "authority");
 			for (const [name, runtime] of this.runtimes) {
 				if (!runtime.holding && !runtime.draining) continue;
 				// A channel whose policy went mid-turn still routes that turn: its answer becomes a draft.
 				const policy = this.policy(name);
+				if (runtime.holding) this.ownerNotice(name, policy);
 				const waiting = await this.routeReplies(name, policy);
 				if (!runtime.holding || !policy) {
 					if (!waiting && !runtime.offering) runtime.draining = false;
@@ -1063,13 +1201,31 @@ export class SessionChannels {
 		}
 		const event = parsed.event;
 		const eventDigest = digest(event.eventId);
-		const senderIds = this.registry.getChannel(name)?.senderIds;
-		const normalize = senderIds?.normalize ?? ((id: string) => id);
-		const senderId = normalize(event.senderId);
-		const allowlisted = policy.allowedSenders.some((entry) => normalize(entry) === senderId);
+		const provider = this.registry.getChannel(name);
+		const senderIds = provider?.senderIds;
+		// The owner's ids are implied in the allowlist: without owner authority their messages are a third party's.
+		const allowlisted = senderListed([...policy.allowedSenders, ...policy.ownerSenders], event.senderId, provider);
+		const owner = this.ownerWired() && ownerAdmission(provider, event, policy);
+		const control = owner ? parseOwnerControl(event.text) : undefined;
+		const senderDigest = owner ? ownerSenderDigest(name, event.senderId, provider) : undefined;
 		const namedId = nameableSenderId(name, event.senderId, senderIds);
 		const update = journal.update(now, (state) => {
 			if (state.seen.some((entry) => entry.d === eventDigest)) return "duplicate" as const;
+			// Where the owner's updates go: each private chat an owner message came from, the latest kept.
+			if (senderDigest !== undefined) {
+				const others = (state.ownerConversations ?? []).filter(
+					(conversation) => conversation.conversationKey !== event.conversationKey,
+				);
+				state.ownerConversations = [
+					...others,
+					{ conversationKey: event.conversationKey, address: event.address, senderDigest, at: now },
+				].slice(-MAX_OWNER_CONVERSATIONS);
+			}
+			// A control word is answered by the harness and never waits for a turn; the seen record keeps it once.
+			if (control) {
+				state.seen.push({ d: eventDigest, at: now, outcome: "delivered" });
+				return "control" as const;
+			}
 			const held = (reason: "unverified" | "not_allowed" | "burst") => {
 				state.held.push({ sender: digest(event.senderId).slice(0, 16), kind: event.kind, reason, at: now });
 				state.heldTotal++;
@@ -1111,6 +1267,7 @@ export class SessionChannels {
 				text: event.text,
 				receivedAt: event.receivedAt,
 				admittedAt: now,
+				...(owner ? { owner: true as const } : {}),
 			};
 			state.pending.push(pending);
 			state.seen.push({ d: eventDigest, at: now, outcome: "pending" });
@@ -1129,6 +1286,9 @@ export class SessionChannels {
 		}
 		if (update.result === "pending") this.scheduleWork();
 		if (update.result === "tell_owner") this.noticeSender(name, event.senderId, namedId, now);
+		// Answered past the provider's handler, which resolves once the journal holds the event.
+		if (update.result === "control" && control && senderDigest !== undefined)
+			queueMicrotask(() => void this.runOwnerControl(name, event, eventDigest, senderDigest, control));
 	}
 
 	/** Name at most a platform-assigned id and the key: never the sender's label, words or an id they chose. */
@@ -1203,12 +1363,38 @@ export class SessionChannels {
 			state.pending.filter((entry) => entry.offeredTo !== undefined).map((entry) => entry.conversationKey),
 		);
 		// A bound holds messages; with none waiting there is nothing to hold and nothing to tell.
-		const first = state.pending.find((entry) => entry.kind === "message" && !elsewhere.has(entry.conversationKey));
-		if (!first) return { kind: "idle" };
-		const cap = this.capReason(name, policy, state, now) ?? this.deps.away?.capReason(now);
-		if (cap) return { kind: "capped", cap };
+		const waiting = state.pending.filter(
+			(entry) => entry.kind === "message" && !elsewhere.has(entry.conversationKey),
+		);
+		if (waiting.length === 0) return { kind: "idle" };
+		// Two pools: the third parties' bounds (and the away bound) never hold an owner message, the owner pool never a
+		// third party's. An owner message whose sender is no longer listed waits and expires; it is never a third party's.
+		const provider = this.registry.getChannel(name);
+		const thirdPartyCap = waiting.some((entry) => entry.owner !== true)
+			? (this.capReason(name, policy, state, now) ?? this.deps.away?.capReason(now))
+			: undefined;
+		const ownerWaiting = waiting.filter((entry) => entry.owner === true);
+		const ownerCap = ownerWaiting.length > 0 ? this.ownerTurnRefusal(name, policy, state, now) : undefined;
+		const ownerListed = (entry: ChannelPendingMessage) => senderListed(policy.ownerSenders, entry.senderId, provider);
+		const first = waiting.find((entry) =>
+			entry.owner === true ? ownerCap === undefined && ownerListed(entry) : thirdPartyCap === undefined,
+		);
+		if (!first) {
+			const cap =
+				thirdPartyCap ??
+				ownerCap ??
+				`owner messages wait: their sender is no longer in channels.${name}.ownerSenders`;
+			return { kind: "capped", cap };
+		}
+		const owner = first.owner === true;
+		// One batch is one conversation and one authority: a forward from the owner's chat is never in an owner batch.
 		const batch = state.pending
-			.filter((entry) => entry.conversationKey === first.conversationKey)
+			.filter(
+				(entry) =>
+					entry.conversationKey === first.conversationKey &&
+					(entry.owner === true) === owner &&
+					(!owner || ownerListed(entry)),
+			)
 			.slice(0, policy.maxBatch);
 		// The batch's id rides on the turn's origin record, so routing finds the turn whatever became of its text.
 		const batchId = digest(`${name}:${batch.map((entry) => entry.eventDigest).join(",")}`).slice(0, 24);
@@ -1219,7 +1405,7 @@ export class SessionChannels {
 			entry.offeredBatch = batchId;
 			entry.offeredAway = this.deps.away ? true : undefined;
 		}
-		return { kind: "deliver", batch: structuredClone(batch), batchId };
+		return { kind: "deliver", batch: structuredClone(batch), batchId, owner };
 	}
 
 	/**
@@ -1251,30 +1437,89 @@ export class SessionChannels {
 			this.lostHold(name);
 			return;
 		}
+		this.pushOwnerBound(name, policy, state, now);
 		if (pick.kind === "capped") {
 			if (runtime.state !== "capped" || runtime.detail !== pick.cap) this.setState(name, "capped", pick.cap);
 			return;
 		}
 		if (runtime.state === "capped") this.setState(name, "armed");
 		if (pick.kind !== "deliver") return;
-		this.offer(name, pick.batch, pick.batchId);
+		if (pick.owner) this.offerOwner(name, policy, pick.batch, pick.batchId);
+		else this.offer(name, pick.batch, pick.batchId);
+	}
+
+	/**
+	 * Tell the owner's chat, once per oldest charge, that owner messages wait at the owner pool's daily bound and when
+	 * room returns; nothing while no owner message waits.
+	 */
+	private pushOwnerBound(name: string, policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number): void {
+		if (!this.ownerPolicy(name) || !state.pending.some((entry) => entry.owner === true && entry.kind === "message"))
+			return;
+		const room = ownerRoom(name, state, policy, now);
+		if (room.fits) return;
+		const text =
+			policy.ownerMaxUsdPerDay === 0
+				? `Owner turns are off: channels.${name}.ownerMaxUsdPerDay is 0. Your messages wait up to 24 hours; approve needs a turn, deny, status and stop still answer.`
+				: `Owner turns paused: $${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours; the oldest charge leaves the window at ${room.oldestUntil !== undefined ? new Date(room.oldestUntil).toISOString() : "its 24 hours' end"}. Your messages wait up to 24 hours; deny, status and stop still answer.`;
+		void this.ownerPush.push(name, `bound:${room.oldestUntil ?? "off"}`, text);
+	}
+
+	/** Free the offer marks of a batch this session did not deliver. */
+	private unmarkOffer(name: string, batchId: string, sessionId: string): void {
+		try {
+			this.journal(name).update(this.now(), (state) => {
+				for (const entry of state.pending)
+					if (entry.offeredBatch === batchId && entry.offeredTo === sessionId) clearOffer(entry);
+			});
+		} catch {
+			// Left marked: the next delivery pass of the channel's holder frees it.
+		}
+	}
+
+	/** The record of a batch this session's turn accepted; the answer goes to `latest`'s address. */
+	private acceptedBatch(
+		batchId: string,
+		latest: Pick<ChannelPendingMessage, "conversationKey" | "address">,
+		eventDigests: readonly string[],
+		allowlisted: boolean,
+		now: number,
+	): ChannelBatchRecord {
+		return {
+			id: batchId,
+			sessionId: this.sessionId(),
+			pid: process.pid,
+			conversationKey: latest.conversationKey,
+			address: latest.address,
+			eventDigests: [...eventDigests],
+			allowlisted,
+			acceptedAt: now,
+			state: "accepted",
+			...(this.deps.away ? { away: true as const } : {}),
+		};
+	}
+
+	/** Record an accepted batch: its messages leave the pending list as delivered, the batch is kept once. */
+	private recordAccepted(name: string, batch: ChannelBatchRecord, now: number): void {
+		const delivered = new Set(batch.eventDigests);
+		try {
+			this.journal(name).update(now, (state) => {
+				state.pending = state.pending.filter((entry) => !delivered.has(entry.eventDigest));
+				for (const entry of state.seen) if (delivered.has(entry.d)) entry.outcome = "delivered";
+				if (!state.batches.some((existing) => existing.id === batch.id)) state.batches.push(batch);
+			});
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: a delivered batch was not recorded (${error instanceof Error ? error.message : String(error)}); it may be delivered again.`,
+			);
+		}
 	}
 
 	/** Hand the batch the journal marked offered to this session to the session; record it once accepted. */
 	private offer(name: string, messages: readonly ChannelPendingMessage[], batchId: string): void {
 		const runtime = this.runtime(name);
 		const sessionId = this.sessionId();
-		const delivered = new Set(messages.map((message) => message.eventDigest));
-		const unmark = () => {
-			try {
-				this.journal(name).update(this.now(), (state) => {
-					for (const entry of state.pending)
-						if (entry.offeredBatch === batchId && entry.offeredTo === sessionId) clearOffer(entry);
-				});
-			} catch {
-				// Left marked: the next delivery pass of the channel's holder frees it.
-			}
-		};
+		const delivered = messages.map((message) => message.eventDigest);
+		const unmark = () => this.unmarkOffer(name, batchId, sessionId);
 		const composed = composeChannelBatch(name, messages);
 		const latest = messages[messages.length - 1];
 		if (!latest || !isValidChannelName(name)) {
@@ -1294,29 +1539,7 @@ export class SessionChannels {
 				return;
 			}
 			const now = this.now();
-			const batch: ChannelBatchRecord = {
-				id: batchId,
-				sessionId,
-				pid: process.pid,
-				conversationKey: latest.conversationKey,
-				address: latest.address,
-				eventDigests: [...delivered],
-				allowlisted: composed.verified,
-				acceptedAt: now,
-				state: "accepted",
-				...(this.deps.away ? { away: true as const } : {}),
-			};
-			try {
-				this.journal(name).update(now, (state) => {
-					state.pending = state.pending.filter((entry) => !delivered.has(entry.eventDigest));
-					for (const entry of state.seen) if (delivered.has(entry.d)) entry.outcome = "delivered";
-					if (!state.batches.some((existing) => existing.id === batch.id)) state.batches.push(batch);
-				});
-			} catch (error) {
-				this.deps.warn(
-					`Channel ${name}: a delivered batch was not recorded (${error instanceof Error ? error.message : String(error)}); it may be delivered again.`,
-				);
-			}
+			this.recordAccepted(name, this.acceptedBatch(batchId, latest, delivered, composed.verified, now), now);
 		};
 		void this.deps
 			.sendUserMessage(composed.text, {
@@ -1338,6 +1561,149 @@ export class SessionChannels {
 	}
 
 	/**
+	 * Hand an owner batch the journal marked offered to this session to the owner delivery: one header line and the
+	 * owner's words, the owner-channel origin, and the `live` closure. Recorded once accepted, with its spend observed.
+	 */
+	private offerOwner(
+		name: string,
+		policy: ResolvedChannelPolicy,
+		messages: readonly ChannelPendingMessage[],
+		batchId: string,
+	): void {
+		const runtime = this.runtime(name);
+		const sessionId = this.sessionId();
+		const delivery = this.deps.ownerDelivery;
+		const latest = messages[messages.length - 1];
+		if (!delivery || !latest || !isValidChannelName(name)) {
+			this.unmarkOffer(name, batchId, sessionId);
+			return;
+		}
+		const provider = this.registry.getChannel(name);
+		const senderDigest = ownerSenderDigest(name, latest.senderId, provider);
+		const delivered = messages.map((message) => message.eventDigest);
+		runtime.offering = true;
+		this.deliverOwnerTurn(
+			name,
+			{ channel: name, senderDigest, ref: batchId },
+			composeOwnerBatch(name, messages),
+			this.ownerLive(name, senderDigest, policy),
+			false,
+			(accepted) => {
+				runtime.offering = false;
+				if (!accepted) {
+					this.unmarkOffer(name, batchId, sessionId);
+					this.deps.warn(
+						`Channel ${name}: the session did not accept an owner message; it is offered again later.`,
+					);
+					return false;
+				}
+				const now = this.now();
+				const base = this.acceptedBatch(batchId, latest, delivered, true, now);
+				this.recordAccepted(name, { ...base, owner: true, senderDigest }, now);
+				return true;
+			},
+		);
+	}
+
+	/**
+	 * Deliver one owner turn (the owner's words, or an approval) and keep its run: `live` and the spend observer while
+	 * it runs. `onAccepted` records it; its answer is routed like any batch's. A turn whose `live` already answers false
+	 * when accepted is aborted at once.
+	 */
+	private deliverOwnerTurn(
+		name: string,
+		origin: OwnerChannelOrigin,
+		text: string,
+		live: () => boolean,
+		approval: boolean,
+		onAccepted: (accepted: boolean) => boolean,
+	): void {
+		const delivery = this.deps.ownerDelivery;
+		if (!delivery) {
+			onAccepted(false);
+			return;
+		}
+		const run: OwnerRun = { name, live, accepted: false, stopped: false };
+		this.ownerRuns.set(origin.ref, run);
+		let answered = false;
+		const accept = (accepted: boolean) => {
+			if (answered) return;
+			answered = true;
+			if (!onAccepted(accepted)) {
+				this.ownerRuns.delete(origin.ref);
+				return;
+			}
+			run.accepted = true;
+			try {
+				run.unobserve = delivery.observeRunUsage(origin.ref, (usd) => this.onOwnerUsage(origin.ref, usd));
+			} catch (error) {
+				// Without its spend observer the turn has no per-turn bound: it is stopped.
+				this.deps.warn(
+					`Channel ${name}: an owner turn's spend cannot be observed (${error instanceof Error ? error.message : String(error)}); it is stopped.`,
+				);
+				this.stopOwnerRun(origin.ref, run, undefined);
+				return;
+			}
+			if (!run.live()) this.stopOwnerRun(origin.ref, run, "authority");
+			this.scheduleWork();
+		};
+		try {
+			if (approval) delivery.deliverApproval(text, origin, live, accept);
+			else delivery.deliver(text, origin, live, accept);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: an owner turn was not delivered (${error instanceof Error ? error.message : String(error)}).`,
+			);
+			accept(false);
+		}
+	}
+
+	/** The spend of an owner turn grew: past the per-turn bound, or with its authority gone, it is stopped. */
+	private onOwnerUsage(ref: string, usd: number): void {
+		const run = this.ownerRuns.get(ref);
+		if (!run || run.stopped) return;
+		const policy = this.policy(run.name);
+		if (!policy || usd >= policy.ownerMaxUsdPerTurn) this.stopOwnerRun(ref, run, "bound");
+		else if (!run.live()) this.stopOwnerRun(ref, run, "authority");
+	}
+
+	/**
+	 * Abort an owner turn (or the run its offer would open) and stop observing it; the aborted turn settles unanswered
+	 * with its spend when its outcome is routed. The owner's chat is told why, when it still holds owner authority.
+	 */
+	private stopOwnerRun(ref: string, run: OwnerRun, why: "bound" | "authority" | "owner" | undefined): void {
+		run.stopped = true;
+		try {
+			this.deps.ownerDelivery?.abortRun(ref);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${run.name}: an owner turn could not be aborted (${error instanceof Error ? error.message : String(error)}).`,
+			);
+		}
+		run.unobserve?.();
+		run.unobserve = undefined;
+		if (!this.started) this.ownerRuns.delete(ref);
+		const policy = this.policy(run.name);
+		if (why === "bound" && policy)
+			void this.ownerPush.push(
+				run.name,
+				`stopped:${ref}`,
+				`Stopped: this turn reached its bound (channels.${run.name}.ownerMaxUsdPerTurn, $${policy.ownerMaxUsdPerTurn.toFixed(2)}).`,
+			);
+		if (why === "authority" && this.emergencyStopEngaged())
+			void this.ownerPush.push(run.name, `stopped:${ref}`, "Stopped: the emergency stop is engaged.");
+		this.scheduleWork();
+	}
+
+	/** The owner turn of `ref` was settled: it is no longer kept. */
+	private endOwnerRun(ref: string): void {
+		const run = this.ownerRuns.get(ref);
+		if (!run) return;
+		run.unobserve?.();
+		this.ownerRuns.delete(ref);
+	}
+
+	/**
 	 * How a batch's turn ended, with what its assistant messages cost so far. Its user entry is the one whose origin
 	 * record names this channel and the batch's id (`ref`). The answer is the first completed assistant answer after it;
 	 * a decisive entry before that (the owner's words, or another third party's, a host event someone else wrote
@@ -1349,7 +1715,12 @@ export class SessionChannels {
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			const origin = entry === undefined ? undefined : entryTurnOrigin(entry);
-			if (origin?.k === "inbound-channel" && origin.channel === name && origin.ref === batch.id) {
+			// An owner batch's turn is stamped `owner-channel`, a third party's `inbound-channel`; both carry the batch id.
+			if (
+				(origin?.k === "inbound-channel" || origin?.k === "owner-channel") &&
+				origin.channel === name &&
+				origin.ref === batch.id
+			) {
 				index = i;
 				break;
 			}
@@ -1398,6 +1769,10 @@ export class SessionChannels {
 				waiting = true;
 				continue;
 			}
+			if (batch.owner === true) {
+				await this.routeOwnerReply(name, policy, batch, outcome);
+				continue;
+			}
 			if (outcome.kind === "unanswered") {
 				if (!this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined)) continue;
 				this.deps.observeNotice("channel-reply", () => ({
@@ -1421,34 +1796,97 @@ export class SessionChannels {
 							: !provider || (this.runtime(name).state !== "armed" && this.runtime(name).state !== "capped")
 								? "the channel is not running"
 								: undefined;
-			const formatted = formatChannelReply(outcome.text, provider?.capabilities);
-			const reason =
-				draftReason ?? (formatted.ok ? undefined : `the reply is ${formatted.reason.replaceAll("_", " ")}`);
-			if (reason || !formatted.ok || !provider) {
-				this.keepDraft(name, batch, outcome.text, reason ?? "the channel is not running", outcome.usd);
-				continue;
-			}
-			// Recorded before sending: a crash mid-send loses the reply rather than sending it twice.
-			if (!this.settleBatch(name, batch.id, "replied", outcome.usd, undefined)) continue;
-			try {
-				await this.sendParts(provider, batch, formatted.parts);
-			} catch (error) {
-				// Only a shipped transport's error is kept: its text is Pi's own words. A wrapper's may carry remote text,
-				// and the reason reaches the owner's notices unfenced.
-				const said = isShippedChannelProvider(provider)
-					? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
-					: undefined;
-				this.keepDraft(
-					name,
-					batch,
-					outcome.text,
-					said ? `sending failed: ${said}` : "sending failed",
-					0,
-					"replied",
-				);
-			}
+			await this.deliverReply(name, batch, outcome.text, outcome.usd, provider, draftReason);
 		}
 		return waiting;
+	}
+
+	/**
+	 * Keep a turn's answer as a draft for `draftReason`, or when it cannot be sent as is; otherwise mark the batch replied
+	 * and send it, keeping it as a draft when sending fails. Whether it was kept as a draft without being sent.
+	 */
+	private async deliverReply(
+		name: string,
+		batch: ChannelBatchRecord,
+		text: string,
+		usd: number,
+		provider: ChannelProvider | undefined,
+		draftReason: string | undefined,
+	): Promise<boolean> {
+		const formatted = formatChannelReply(text, provider?.capabilities);
+		const reason =
+			draftReason ?? (formatted.ok ? undefined : `the reply is ${formatted.reason.replaceAll("_", " ")}`);
+		if (reason || !formatted.ok || !provider) {
+			this.keepDraft(name, batch, text, reason ?? "the channel is not running", usd);
+			return true;
+		}
+		// Recorded before sending: a crash mid-send loses the reply rather than sending it twice.
+		if (!this.settleBatch(name, batch.id, "replied", usd, undefined)) return false;
+		try {
+			await this.sendParts(provider, batch, formatted.parts);
+		} catch (error) {
+			// Only a shipped transport's error is kept: its text is Pi's own words. A wrapper's may carry remote text,
+			// and the reason reaches the owner's notices unfenced.
+			const said = isShippedChannelProvider(provider)
+				? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
+				: undefined;
+			this.keepDraft(name, batch, text, said ? `sending failed: ${said}` : "sending failed", 0, "replied");
+		}
+		return false;
+	}
+
+	/**
+	 * Settle an owner turn that ended. Its answer goes back to the owner's private chat whatever `replyMode` says, while
+	 * the channel still holds owner authority for that sender; it waits as a draft when the policy went, the authority
+	 * lapsed, the channel is not running or it cannot be sent as is, and when it looks like it holds a secret (the chat is
+	 * told it waits). Marked replied before it is sent, as every reply is.
+	 */
+	private async routeOwnerReply(
+		name: string,
+		policy: ResolvedChannelPolicy | undefined,
+		batch: ChannelBatchRecord,
+		outcome: Exclude<BatchOutcome, { readonly kind: "waiting" }>,
+	): Promise<void> {
+		this.endOwnerRun(batch.id);
+		if (outcome.kind === "unanswered") {
+			if (!this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined)) return;
+			this.deps.observeNotice("channel-reply", () => ({
+				scope: `${name}:${batch.id}`,
+				state: {
+					reason: `unanswered:${name}:${batch.id}`,
+					text: `Channel ${name}: an owner message got no reply (${outcome.reason.replaceAll("_", " ")}).`,
+				},
+			}));
+			// An aborted turn was stopped by its bound, a kill switch or `stop`: each tells the chat itself.
+			if (outcome.reason !== "aborted")
+				void this.ownerPush.push(
+					name,
+					`unanswered:${batch.id}`,
+					`Your message got no answer (${outcome.reason.replaceAll("_", " ")}).`,
+				);
+			return;
+		}
+		const provider = this.registry.getChannel(name);
+		const ownerPolicy = this.ownerPolicy(name);
+		const secret = hasMaskableSecretText(outcome.text);
+		const draftReason = !policy
+			? "the channel's policy was removed"
+			: !ownerPolicy ||
+					batch.senderDigest === undefined ||
+					!listedOwnerDigests(name, ownerPolicy, provider).has(batch.senderDigest)
+				? "the owner authority of the channel is off"
+				: secret
+					? "the reply contains a secret-shaped value"
+					: !provider || (this.runtime(name).state !== "armed" && this.runtime(name).state !== "capped")
+						? "the channel is not running"
+						: undefined;
+		const drafted = await this.deliverReply(name, batch, outcome.text, outcome.usd, provider, draftReason);
+		if (drafted && secret)
+			void this.ownerPush.push(
+				name,
+				`held:${batch.id}`,
+				"Answer held: it looks like it contains a secret; read it at the terminal (channel_reply).",
+			);
 	}
 
 	private async sendParts(
@@ -1528,6 +1966,268 @@ export class SessionChannels {
 		}));
 	}
 
+	/**
+	 * Tell the owner once that listed owner senders hold no authority: the transport cannot verify them (not the shipped
+	 * Telegram or Slack one), or this session cannot host owner turns (the wiring is absent). Cleared when either is fixed
+	 * or the list is emptied; an unchanged state observes nothing.
+	 */
+	private ownerNotice(name: string, policy: ResolvedChannelPolicy | undefined): void {
+		const text =
+			policy === undefined || policy.ownerSenders.length === 0
+				? undefined
+				: !ownerAuthority(this.registry.getChannel(name), policy)
+					? `Channel ${name}: owner senders listed but the transport cannot verify them; owner authority is off.`
+					: !this.ownerWired()
+						? `Channel ${name}: owner senders listed but this session cannot host owner turns; owner authority is off.`
+						: undefined;
+		if ((this.ownerNotices.get(name) ?? "") === (text ?? "")) return;
+		if (text) this.ownerNotices.set(name, text);
+		else this.ownerNotices.delete(name);
+		this.deps.observeNotice("channel-state", () => ({
+			scope: `${name}:owner`,
+			state: text ? { reason: `${name}:owner:${text}`, text } : "clear",
+		}));
+	}
+
+	/** Hear the drafts the hosting session holds through its current control handle; re-subscribe when it changes. */
+	private syncOwnerSubscription(): void {
+		let control: OwnerChannelControl | undefined;
+		try {
+			control = this.started && this.ownerWired() ? this.deps.ownerControl?.() : undefined;
+		} catch {
+			control = undefined;
+		}
+		if (this.draftSubscription?.control === control) return;
+		this.draftSubscription?.unsubscribe();
+		this.draftSubscription = undefined;
+		if (!control) return;
+		try {
+			const unsubscribe = control.onDraftHeld((view) => {
+				queueMicrotask(() => void this.presentDraft(view));
+			});
+			this.draftSubscription = { control, unsubscribe };
+		} catch (error) {
+			this.deps.warn(
+				`Channels: held drafts cannot be shown on the owner's chat (${error instanceof Error ? error.message : String(error)}).`,
+			);
+		}
+	}
+
+	/** Show a draft an owner turn of a channel this session serves held, to the chat that turn came from. */
+	private async presentDraft(view: OwnerDraftView): Promise<void> {
+		const ref = view.origin.ref;
+		if (!this.started || ref === undefined) return;
+		for (const [name, runtime] of this.runtimes) {
+			if (!runtime.holding || !draftInScope(view, name)) continue;
+			const policy = this.ownerPolicy(name);
+			const batch = policy
+				? this.journal(name)
+						.read()
+						.result.batches.find((entry) => entry.id === ref && entry.owner === true)
+				: undefined;
+			if (!policy || !batch) continue;
+			await this.ownerPush.present(
+				name,
+				view.id,
+				draftPresentation(view, policy.ownerTerminalOnlyClasses),
+				batch.conversationKey,
+				true,
+			);
+		}
+	}
+
+	/** Answer one owner control word; it never becomes a turn. Replies go to the chat it came from. */
+	private async runOwnerControl(
+		name: string,
+		event: InboundChannelEvent,
+		eventDigest: string,
+		senderDigest: string,
+		control: OwnerControl,
+	): Promise<void> {
+		const policy = this.started ? this.policy(name) : undefined;
+		const provider = this.registry.getChannel(name);
+		if (!policy || !provider) return;
+		const reply = (text: string, key: string) => this.sendControlReply(name, provider, event, key, text);
+		try {
+			if (control.kind === "status") {
+				const status = this.ownerStatus(name, policy, event.conversationKey);
+				await reply(status.reply, eventDigest);
+				for (const view of status.present)
+					await this.ownerPush.present(
+						name,
+						view.id,
+						draftPresentation(view, policy.ownerTerminalOnlyClasses),
+						event.conversationKey,
+						false,
+					);
+				return;
+			}
+			if (control.kind !== "approve" && control.kind !== "deny") {
+				await reply(this.stopOwnerTurns(name), eventDigest);
+				return;
+			}
+			// The approval turn's ref is fixed before the decision: the gate binds the approval to it.
+			const ref = digest(`${name}:approval:${control.draftId}:${eventDigest}`).slice(0, 24);
+			const by: OwnerDecisionBy = { channel: name, senderDigest, ref, eventDigest };
+			let handle: OwnerChannelControl | undefined;
+			try {
+				handle = this.deps.ownerControl?.();
+			} catch {
+				handle = undefined;
+			}
+			const result = decideOwnerDraft(control, {
+				channel: name,
+				control: handle,
+				by,
+				terminalOnlyClasses: policy.ownerTerminalOnlyClasses,
+				presentedAt: (draftId) => this.ownerPush.presentedAt(name, draftId, event.conversationKey),
+				receivedAt: event.receivedAt,
+				turnRefusal: () => this.ownerTurnRefusal(name, policy, this.journal(name).read().result, this.now()),
+				approvalDelivered: (draftId) =>
+					this.journal(name)
+						.read()
+						.result.batches.some((batch) => batch.approval === draftId),
+			});
+			await reply(result.reply, eventDigest);
+			if (result.approved) this.deliverOwnerApproval(name, policy, result.approved, by, event, eventDigest);
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: an owner control word was not carried out (${error instanceof Error ? error.message : String(error)}).`,
+			);
+		}
+	}
+
+	/** The approval turn of one draft: its own owner batch, recorded once accepted; a refusal lapses the approval. */
+	private deliverOwnerApproval(
+		name: string,
+		policy: ResolvedChannelPolicy,
+		view: OwnerDraftView,
+		by: OwnerDecisionBy,
+		event: InboundChannelEvent,
+		eventDigest: string,
+	): void {
+		const provider = this.registry.getChannel(name);
+		const origin: OwnerChannelOrigin = { channel: by.channel, senderDigest: by.senderDigest, ref: by.ref };
+		this.deliverOwnerTurn(
+			name,
+			origin,
+			approvalTurnText(name, view),
+			this.ownerLive(name, by.senderDigest, policy),
+			true,
+			(accepted) => {
+				if (!accepted) {
+					if (provider)
+						void this.sendControlReply(
+							name,
+							provider,
+							event,
+							`${eventDigest}:lapsed`,
+							`No turn started for draft ${view.id}; the approval lapsed and the draft is held again. Send approve ${view.id} to try once more.`,
+						);
+					return false;
+				}
+				const now = this.now();
+				const batch: ChannelBatchRecord = {
+					...this.acceptedBatch(by.ref, event, [eventDigest], true, now),
+					owner: true,
+					senderDigest: by.senderDigest,
+					approval: view.id,
+				};
+				try {
+					this.journal(name).update(now, (state) => {
+						if (!state.batches.some((existing) => existing.id === batch.id)) state.batches.push(batch);
+					});
+				} catch (error) {
+					this.deps.warn(
+						`Channel ${name}: an approval turn was not recorded (${error instanceof Error ? error.message : String(error)}); its answer is not routed.`,
+					);
+				}
+				return true;
+			},
+		);
+	}
+
+	/** The `status` reply, and the held drafts not yet shown to this chat that it presents again. */
+	private ownerStatus(
+		name: string,
+		policy: ResolvedChannelPolicy,
+		conversationKey: string,
+	): { readonly reply: string; readonly present: readonly OwnerDraftView[] } {
+		const now = this.now();
+		const state = this.journal(name).read().result;
+		const room = ownerRoom(name, state, policy, now);
+		const refusal = this.ownerTurnRefusal(name, policy, state, now);
+		const waiting = state.pending.filter(
+			(entry) => entry.owner === true && entry.conversationKey === conversationKey,
+		);
+		const running = [...this.ownerRuns.values()].some((run) => run.name === name && run.accepted && !run.stopped);
+		let drafts: readonly OwnerDraftView[] = [];
+		try {
+			drafts = (this.deps.ownerControl?.()?.drafts() ?? []).filter(
+				(view) => view.state === "pending" && draftInScope(view, name),
+			);
+		} catch {
+			drafts = [];
+		}
+		const shown = (view: OwnerDraftView) => this.ownerPush.presentedAt(name, view.id, conversationKey) !== undefined;
+		const listed = drafts
+			.slice(0, MAX_STATUS_DRAFTS)
+			.map((view) => `${view.id} (${classLabels(view)}${shown(view) ? "" : ", not shown yet"})`);
+		const more = drafts.length - listed.length;
+		const suppressed = this.ownerPush.takeSuppressed(name);
+		const lines = [
+			`Owner spend: $${room.usedUsd.toFixed(2)} of $${policy.ownerMaxUsdPerDay.toFixed(2)} in 24 hours, $${policy.ownerMaxUsdPerTurn.toFixed(2)} per turn${refusal ? `; no new turn: ${refusal}` : ""}.`,
+			`${running ? "A turn is running." : "No turn is running."} ${waiting.length} message(s) wait.`,
+			listed.length > 0
+				? `Held: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`
+				: "No held action from this chat.",
+			...(suppressed > 0
+				? [`${suppressed} update(s) were not pushed under channels.${name}.ownerPushPerHour.`]
+				: []),
+		];
+		return {
+			reply: lines.join("\n"),
+			present: drafts.filter((view) => !shown(view)).slice(0, MAX_STATUS_PRESENTATIONS),
+		};
+	}
+
+	/** `stop`: abort the channel's running owner turns. */
+	private stopOwnerTurns(name: string): string {
+		let stopped = 0;
+		for (const [ref, run] of this.ownerRuns)
+			if (run.name === name && run.accepted && !run.stopped) {
+				this.stopOwnerRun(ref, run, "owner");
+				stopped++;
+			}
+		return stopped > 0 ? "Stopped the running turn." : "No turn is running.";
+	}
+
+	/** A control reply: Pi's own words, bounded, to the chat the control came from; never one that looks like a secret. */
+	private async sendControlReply(
+		name: string,
+		provider: ChannelProvider,
+		event: InboundChannelEvent,
+		key: string,
+		text: string,
+	): Promise<void> {
+		if (!text || hasMaskableSecretText(text)) return;
+		const bounded = text.length > MAX_CONTROL_REPLY_CHARS ? `${text.slice(0, MAX_CONTROL_REPLY_CHARS - 1)}…` : text;
+		try {
+			await provider.send({
+				conversationKey: event.conversationKey,
+				address: event.address,
+				text: bounded,
+				kind: "message",
+				eventId: `control:${digest(key).slice(0, 16)}`,
+			});
+		} catch (error) {
+			const said = isShippedChannelProvider(provider)
+				? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
+				: undefined;
+			this.deps.warn(`Channel ${name}: a reply to an owner control word was not sent${said ? ` (${said})` : ""}.`);
+		}
+	}
+
 	/** The channels with an explicit policy and a valid name, with the policy each runs under. */
 	private explicitChannels(): [string, ResolvedChannelPolicy][] {
 		const channels: [string, ResolvedChannelPolicy][] = [];
@@ -1560,7 +2260,7 @@ export class SessionChannels {
 		const views: ChannelHeldSenderView[] = [];
 		for (const [name, policy] of this.explicitChannels()) {
 			const normalize = this.registry.getChannel(name)?.senderIds?.normalize ?? ((id: string) => id);
-			const allowed = new Set(policy.allowedSenders.map(normalize));
+			const allowed = new Set([...policy.allowedSenders, ...policy.ownerSenders].map(normalize));
 			// A sender the owner has added since is no longer held.
 			for (const entry of this.journal(name).read().result.onboarding)
 				if (entry.id !== undefined && now - entry.at < DAY_MS && !allowed.has(normalize(entry.id)))
@@ -1589,6 +2289,9 @@ export class SessionChannels {
 				gaps: state.gaps.length,
 				servedBy: channelServedBy(state.holder, sessionId),
 				awayDrafts: state.drafts.filter((draft) => draft.away === true && draft.state === "pending").length,
+				...(policy.ownerSenders.length > 0
+					? { ownerSpendUsd: { used: ownerRoom(name, state, policy, now).usedUsd, max: policy.ownerMaxUsdPerDay } }
+					: {}),
 			};
 		});
 	}

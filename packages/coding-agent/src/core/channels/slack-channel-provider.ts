@@ -110,7 +110,25 @@ function readFrame(data: unknown): Record<string, unknown> | undefined {
 	}
 }
 
-/** The direct message a person wrote the app, from an `events_api` envelope's payload; undefined for anything else. */
+/** Whether the message relays words its sender did not write here: a shared or unfurled message, or any file. */
+function relaysOthersWords(event: Record<string, unknown>): boolean {
+	if (event.files !== undefined) return true;
+	const attachments = event.attachments;
+	return (
+		Array.isArray(attachments) &&
+		attachments.some(
+			(attachment) =>
+				isPlainRecord(attachment) && (attachment.is_share !== undefined || attachment.is_msg_unfurl !== undefined),
+		)
+	);
+}
+
+/**
+ * The direct message a person wrote the app, from an `events_api` envelope's payload; undefined for anything else.
+ * Only `event.text` enters a turn: attachments, shared messages, files and blocks never do. `privateChat` holds when the
+ * sender belongs to the workspace the envelope came from (`user_team` absent or that `team_id`); `forwarded` when the
+ * message shares or unfurls another message or carries a file. Both are owner-admission facts (`owner-channel.ts`).
+ */
 function readDirectMessage(payload: unknown): ChannelMessage | undefined {
 	if (!isPlainRecord(payload) || payload.type !== "event_callback") return undefined;
 	const eventId = payload.event_id;
@@ -134,6 +152,9 @@ function readDirectMessage(payload: unknown): ChannelMessage | undefined {
 		kind: "message",
 		sender: { id: user, verified: true },
 		...(receivedAt > 0 ? { receivedAt } : {}),
+		privateChat:
+			event.user_team === undefined || (typeof payload.team_id === "string" && event.user_team === payload.team_id),
+		forwarded: relaysOthersWords(event),
 	};
 }
 

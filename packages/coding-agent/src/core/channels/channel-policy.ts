@@ -5,12 +5,26 @@
  */
 
 import { isAbsolute } from "node:path";
+import { type EdgeClass, isEdgeClass } from "../autonomy/edge-policy.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const MAX_ALLOWED_SENDERS = 50;
 export const MAX_CHANNEL_BATCH = 25;
 const MAX_SENDER_ID_CHARS = 256;
 const MAX_AWAY_CWD_CHARS = 4096;
+export const MAX_OWNER_SENDERS = 10;
+/**
+ * The channels whose shipped transport can prove an owner's identity and a private chat, with the shape of the
+ * platform-assigned id each lists: a Telegram user number, a Slack user id.
+ */
+const OWNER_SENDER_ID: Readonly<Record<string, RegExp>> = {
+	telegram: /^[1-9][0-9]{0,15}$/,
+	slack: /^[UW][A-Z0-9]{2,30}$/,
+};
+
+export function isOwnerChannelName(name: string): boolean {
+	return Object.hasOwn(OWNER_SENDER_ID, name);
+}
 
 /** A channel name the harness admits: it becomes the turn origin's channel, so it is short, plain and never `pi-chat`. */
 const CHANNEL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -35,6 +49,19 @@ export interface ResolvedChannelPolicy {
 	 * honors it only from the global layer; an open session ignores it.
 	 */
 	readonly awayCwd?: string;
+	/**
+	 * Platform-assigned ids of the owner's own accounts (`owner-channel.ts`): a verified message from one of them in a
+	 * private chat of a shipped Telegram or Slack transport is the owner's words. Empty: no owner authority.
+	 */
+	readonly ownerSenders: readonly string[];
+	/** The owner pool's spend over a rolling 24 hours; 0 starts no owner turn (control words still answer). */
+	readonly ownerMaxUsdPerDay: number;
+	/** One owner turn's spend; the turn is stopped once a message takes it there, and an offer reserves it. */
+	readonly ownerMaxUsdPerTurn: number;
+	/** Updates pushed to the owner's chat per rolling hour; past it one line says how many more wait. */
+	readonly ownerPushPerHour: number;
+	/** Classes of held action the owner releases only at the terminal, never by `approve` from the phone. */
+	readonly ownerTerminalOnlyClasses: readonly EdgeClass[];
 }
 
 /** A channel's policy as read: usable, or present but unreadable (which starts nothing). */
@@ -47,6 +74,43 @@ function integerIn(value: unknown, fallback: number, min: number, max: number, k
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max)
 		throw new Error(`${key} must be an integer from ${min} to ${max}`);
 	return value;
+}
+
+function numberIn(value: unknown, fallback: number, min: number, max: number, key: string): number {
+	if (value === undefined) return fallback;
+	if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max)
+		throw new Error(`${key} must be a number from ${min} to ${max}`);
+	return value;
+}
+
+/** The owner's ids: platform-assigned, of the channel's shape, at most `MAX_OWNER_SENDERS`, each once. */
+function parseOwnerSenders(name: string, value: unknown, key: string): string[] {
+	if (value === undefined) return [];
+	const listed = Array.isArray(value)
+		? value.map((id: unknown) => (typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id) : id))
+		: value;
+	if (!Array.isArray(listed) || listed.length > MAX_OWNER_SENDERS || listed.some((id) => typeof id !== "string"))
+		throw new Error(`${key}.ownerSenders must list at most ${MAX_OWNER_SENDERS} sender ids`);
+	if (listed.length === 0) return [];
+	const shape = OWNER_SENDER_ID[name];
+	if (!shape)
+		throw new Error(
+			`${key}.ownerSenders is only read on the telegram and slack channels, whose shipped transports verify the sender and a private chat`,
+		);
+	const ids = listed as string[];
+	if (ids.some((id) => !shape.test(id)))
+		throw new Error(
+			`${key}.ownerSenders must list ${name === "telegram" ? "Telegram user numbers" : "Slack user ids (U or W, then capitals and digits)"}`,
+		);
+	if (new Set(ids).size !== ids.length) throw new Error(`${key}.ownerSenders lists a sender twice`);
+	return ids;
+}
+
+function parseTerminalOnlyClasses(value: unknown, key: string): EdgeClass[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || !value.every(isEdgeClass))
+		throw new Error(`${key}.ownerTerminalOnlyClasses must list edge class names`);
+	return [...new Set(value)];
 }
 
 function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
@@ -93,6 +157,11 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 		),
 		replyMode,
 		...(awayCwd === undefined ? {} : { awayCwd }),
+		ownerSenders: parseOwnerSenders(name, value.ownerSenders, key),
+		ownerMaxUsdPerDay: numberIn(value.ownerMaxUsdPerDay, 5, 0, 100, `${key}.ownerMaxUsdPerDay`),
+		ownerMaxUsdPerTurn: numberIn(value.ownerMaxUsdPerTurn, 1, 0.05, 20, `${key}.ownerMaxUsdPerTurn`),
+		ownerPushPerHour: integerIn(value.ownerPushPerHour, 12, 0, 60, `${key}.ownerPushPerHour`),
+		ownerTerminalOnlyClasses: parseTerminalOnlyClasses(value.ownerTerminalOnlyClasses, key),
 	};
 }
 

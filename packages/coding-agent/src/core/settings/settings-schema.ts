@@ -340,6 +340,11 @@ export interface ChannelPolicySettings {
 	maxPendingPerConversation?: number; // default: 25 (1..100) — waiting messages per conversation; more are held
 	replyMode?: "draft" | "auto"; // default: "draft" — the answer waits for the owner; "auto" sends it to the same address
 	awayCwd?: string; // absolute path; global layer only — the daemon serves the channel there while no session is open
+	ownerSenders?: (string | number)[]; // telegram and slack only: the owner's platform ids (at most 10); their verified private-chat messages are the owner's words
+	ownerMaxUsdPerDay?: number; // default: 5 (0..100) — owner turns' spend over a rolling 24 h; 0 starts none (control words still answer)
+	ownerMaxUsdPerTurn?: number; // default: 1 (0.05..20) — one owner turn's spend; reserved at the offer, the turn is stopped past it
+	ownerPushPerHour?: number; // default: 12 (0..60) — updates pushed to the owner's chat per rolling hour
+	ownerTerminalOnlyClasses?: EdgeClass[]; // default: [] — edge classes a phone `approve` never releases
 }
 
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead" | "feedback">> &

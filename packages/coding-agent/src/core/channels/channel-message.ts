@@ -30,6 +30,10 @@ export interface InboundChannelEvent {
 	readonly kind: string;
 	readonly text: string;
 	readonly receivedAt: number;
+	/** The provider's private-chat fact; read for owner admission only from a shipped transport. */
+	readonly privateChat?: boolean;
+	/** The provider's relayed-words fact; read for owner admission only from a shipped transport. */
+	readonly forwarded?: boolean;
 }
 
 export type InboundChannelParse =
@@ -91,6 +95,8 @@ export function parseInboundChannelEvent(value: unknown, now: number): InboundCh
 			kind: typeof value.kind === "string" ? value.kind : "message",
 			text: boundedText(value.text),
 			receivedAt,
+			...(typeof value.privateChat === "boolean" ? { privateChat: value.privateChat } : {}),
+			...(typeof value.forwarded === "boolean" ? { forwarded: value.forwarded } : {}),
 		},
 	};
 }
@@ -135,6 +141,20 @@ export function composeChannelBatch(channel: string, messages: readonly ChannelP
 		senderLabel: senderLabel || "unknown sender",
 		verified: messages.every((message) => message.verified),
 	};
+}
+
+/**
+ * The one message an owner batch becomes: one header line of harness facts, then the owner's own words unfenced (they
+ * are the owner's, admitted by `ownerAdmission`). The owner-input plane reads everything after the first line as the
+ * owner's words, so the header never holds a line break and the words are never prefixed.
+ */
+export function composeOwnerBatch(channel: string, messages: readonly ChannelPendingMessage[]): string {
+	const latest = messages.reduce((max, message) => Math.max(max, message.receivedAt), 0);
+	const count = messages.length;
+	const header =
+		`Owner message on channel ${channel} (verified private chat, ${count} ${count === 1 ? "message" : "messages"}, ` +
+		`latest at ${new Date(latest).toISOString()}). Your final answer in this turn is sent back to that chat.`;
+	return `${header}\n${messages.map((message) => message.text).join("\n")}`;
 }
 
 /** Markdown a plain-text transport would show literally, reduced to its text. */

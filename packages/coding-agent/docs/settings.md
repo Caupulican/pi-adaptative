@@ -515,6 +515,11 @@ Admission policy for each chat or mail channel: the shipped `telegram`, `slack` 
 | `channels.<name>.maxBatch` | `10` | Messages of one conversation delivered as one turn (1 to 25). |
 | `channels.<name>.maxPendingPerConversation` | `25` | Messages one conversation may have waiting (1 to 100); further ones are held. |
 | `channels.<name>.awayCwd` | unset | Absolute directory where the background bot daemon serves the channel while no session is open (see [Channels](channels.md#while-no-session-is-open)). Read from the global settings only; a relative path rejects the policy. |
+| `channels.<name>.ownerSenders` | `[]` | The owner's own platform ids (at most 10, each once), read only on the `telegram` (user numbers, may be written unquoted) and `slack` (user ids such as `"U0123ABCDEF"`) channels; a non-empty list on another channel or an id of the wrong shape rejects the policy. Their verified private-chat messages run as owner turns (see [Channels](channels.md#the-owners-own-chat)). |
+| `channels.<name>.ownerMaxUsdPerDay` | `5` | Spend of owner turns over the last 24 hours (0 to 100); `0` starts no owner turn, control words still answer. |
+| `channels.<name>.ownerMaxUsdPerTurn` | `1` | Spend of one owner turn (0.05 to 20): reserved from its offer, the turn is stopped when it reaches it. |
+| `channels.<name>.ownerPushPerHour` | `12` | Updates pushed to the owner's chats per rolling hour (0 to 60); past it one line an hour says how many more wait. |
+| `channels.<name>.ownerTerminalOnlyClasses` | `[]` | Edge classes of held actions that `approve` from the owner's chat never releases; they are released at the terminal. |
 
 Unlike other settings, a value outside its range is not replaced: the whole policy of that channel is rejected, the channel is not started, and the owner is told why.
 

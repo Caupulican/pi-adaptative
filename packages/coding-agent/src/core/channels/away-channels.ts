@@ -15,6 +15,7 @@ import {
 	type ChannelJournalState,
 	type ChannelPendingMessage,
 	DAY_MS,
+	pendingOfferTimes,
 } from "./channel-journal.ts";
 import { isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
 
@@ -54,7 +55,8 @@ function channelAwayCharge(
 	maxUsdPerRun: number,
 	nowMs: number,
 ): RoutineAwayCharge | undefined {
-	if (batch.away !== true) return undefined;
+	// An owner turn charges its channel's owner pool alone (`owner-channel.ts`), wherever it ran.
+	if (batch.away !== true || batch.owner === true) return undefined;
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= nowMs) return undefined;
 	const usd = batch.usd ?? 0;
@@ -67,13 +69,8 @@ function channelAwayCharge(
  * no other claim takes the room the turn is about to use. An offer that is accepted becomes its batch's charge.
  */
 function offerAwayCharges(pending: readonly ChannelPendingMessage[], maxUsdPerRun: number, nowMs: number) {
-	const offers = new Map<string, number>();
-	for (const entry of pending) {
-		if (entry.offeredAway !== true || entry.offeredTo === undefined || entry.offeredAt === undefined) continue;
-		offers.set(entry.offeredBatch ?? entry.offeredTo, entry.offeredAt);
-	}
 	const charges: RoutineAwayCharge[] = [];
-	for (const offeredAt of offers.values()) {
+	for (const offeredAt of pendingOfferTimes(pending, (entry) => entry.offeredAway === true && entry.owner !== true)) {
 		const until = offeredAt + DAY_MS;
 		if (until > nowMs) charges.push({ micros: awaySpendMicros(maxUsdPerRun), until });
 	}

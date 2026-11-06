@@ -57,7 +57,23 @@ const TOKEN_BACKOFF: Backoff = { baseMs: 60_000, maxMs: 30 * 60_000 };
 
 const safeInteger = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value);
 
-/** One update as the core sees it: its id, and the message a person wrote the bot in a private chat (if it is one). */
+/** Fields Telegram sets on a message relaying words the sender did not write in this chat. */
+const RELAYED_FIELDS = [
+	"forward_origin",
+	"forward_from",
+	"forward_from_chat",
+	"forward_sender_name",
+	"forward_date",
+	"is_automatic_forward",
+	"via_bot",
+] as const;
+
+/**
+ * One update as the core sees it: its id, and the message a person wrote the bot in a private chat (if it is one).
+ * Only `message.text` enters a turn: a replied-to message, a quote or a caption never does. `privateChat` holds when
+ * the chat is the sender's own one-to-one chat with the bot and no channel or group speaks as the sender; `forwarded`
+ * when any relay field is present. Both are owner-admission facts (`owner-channel.ts`).
+ */
 function readUpdate(update: unknown): { readonly id: number; readonly message?: ChannelMessage } | undefined {
 	if (!isPlainRecord(update) || !safeInteger(update.update_id) || update.update_id < 0) return undefined;
 	const id = update.update_id;
@@ -80,6 +96,8 @@ function readUpdate(update: unknown): { readonly id: number; readonly message?: 
 			kind: "message",
 			sender: { id: String(from.id), verified: true, ...(label ? { label } : {}) },
 			...(safeInteger(message.date) && message.date > 0 ? { receivedAt: message.date * 1000 } : {}),
+			privateChat: chat.id === from.id && message.sender_chat === undefined,
+			forwarded: RELAYED_FIELDS.some((field) => message[field] !== undefined),
 		},
 	};
 }
