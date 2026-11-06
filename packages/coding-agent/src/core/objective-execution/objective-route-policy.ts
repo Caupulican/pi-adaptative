@@ -3,7 +3,7 @@
  * Implements deterministic route composition precedence per JEV_ROUTING_CONTRACT.md.
  */
 
-import { isObjectiveWorkClass, type ObjectiveWorkClass } from "../steering/programs.ts";
+import { readObjectiveWorkClass } from "../steering/programs.ts";
 import { isSameLaneVerificationDirective } from "../system-one/control-directive.ts";
 import {
 	OBJECTIVE_ROUTE_SCHEMA_VERSION,
@@ -17,36 +17,15 @@ export const INDEPENDENT_VERIFICATION_REASON_CODE = "independent_verification_re
 export const SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE = "same_lane_verification_repeated_without_new_evidence";
 
 /**
- * P(chosen option) the route needs before it acts on the work class the route checkpoint chose: 0.7
- * for reversible work, 0.9 for a class that commits expensive work (synthesizing a capability) or
- * moves toward closing the goal. These are the vendor's starting floors, not measured here.
- */
-const WORK_CLASS_ACT_FLOOR = { reversible: 0.7, consequential: 0.9 } as const;
-const CONSEQUENTIAL_WORK_CLASSES: ReadonlySet<ObjectiveWorkClass> = new Set([
-	"resolve_capability",
-	"completion_candidate",
-]);
-
-/**
  * The work class the route acts on, read from the route checkpoint's `missing_work_class` Choice by
- * the probability of the chosen option. A choice below its floor, or one that carries no
- * probability, is unsure and gathers evidence (`insufficient_evidence` routes to retrieve) instead of
+ * the probability of the chosen option at the class's risk (`readObjectiveWorkClass`). A choice it may
+ * not act on is unsure and gathers evidence (`insufficient_evidence` routes to retrieve) instead of
  * implementing on a guess. A missing answer is undefined: no judgment, so deterministic facts route.
  */
 export function workClassFromRouteChoice(answer: unknown): RouteWorkClass | undefined {
-	if (!answer || typeof answer !== "object") return undefined;
-	const { choice, probabilities } = answer as { choice?: unknown; probabilities?: unknown };
-	if (!isObjectiveWorkClass(choice)) return "insufficient_evidence";
-	const probability =
-		probabilities && typeof probabilities === "object"
-			? (probabilities as Record<string, unknown>)[choice]
-			: undefined;
-	const floor = CONSEQUENTIAL_WORK_CLASSES.has(choice)
-		? WORK_CLASS_ACT_FLOOR.consequential
-		: WORK_CLASS_ACT_FLOOR.reversible;
-	return typeof probability === "number" && Number.isFinite(probability) && probability >= floor
-		? choice
-		: "insufficient_evidence";
+	const read = readObjectiveWorkClass(answer);
+	if (!read) return undefined;
+	return read.reading === "act" && read.workClass ? read.workClass : "insufficient_evidence";
 }
 
 export interface RouteCompositionInput {

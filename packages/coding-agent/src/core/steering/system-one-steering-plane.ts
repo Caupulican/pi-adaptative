@@ -9,28 +9,32 @@ import type { SemanticDecisionEngine, SemanticEvaluationOccupancy } from "../dec
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
+import { noulProbability, readNoul } from "../decision/noul.ts";
 import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
+import { CONSEQUENCE_MIN_CONFIDENCE, choiceProbability, STEERING_CUTS } from "../decision/thresholds.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
-import { completionPackFailures, evaluateNoul, isAdverseAnswer, noulFromAnswer } from "../system-one/policy.ts";
+import { completionPackFailures, isAdverseAnswer } from "../system-one/policy.ts";
 import {
+	type SemanticDecisionTrace,
 	type SemanticEvaluationObserver,
+	type SemanticTraceGate,
 	semanticWorkerTaskScope,
+	traceJudgmentsFromEvaluation,
 	verdictFromCertificate,
 } from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
-	CONSEQUENCE_THRESHOLDS,
 	computePolicyDigest,
 	DEFAULT_STEERING_POLICY,
 	PINNED_JEV_MODEL,
 	STEERING_POLICY_ID,
 	type SteeringPolicyConfig,
 } from "./policy.ts";
-import { compileDecisionProgramForCheckpoint } from "./programs.ts";
+import { compileDecisionProgramForCheckpoint, readAdaptationTier, readObjectiveWorkClass } from "./programs.ts";
 import {
 	type SteeringCertificate,
 	type SteeringCheckpointRequest,
@@ -101,6 +105,9 @@ export interface SystemOneSteeringPlaneDeps {
 	readonly persistentPath?: string;
 }
 
+/** Recent certificates whose trace a consumer may still extend; older ones keep the plane's trace only. */
+const CERTIFICATE_TRACE_LIMIT = 64;
+
 /** A completion gate id (`JEV-outcomes_achieved`, `JEV-CHALLENGE-hidden_assumption`) as its predicate name. */
 function completionPredicate(gateId: string): string {
 	return gateId.replace(/^JEV-(?:CHALLENGE-)?/u, "");
@@ -121,6 +128,8 @@ export class SystemOneSteeringPlane {
 	private openDoubts: string[] = [];
 	/** Evidence passes already requested per (objective, task, checkpoint, evidence revision). */
 	private readonly gatherCounts = new Map<string, number>();
+	/** The trace each recent certificate's evaluation carries, so the decision's owner can add its own gates. */
+	private readonly certificateTraces = new Map<string, { evaluationId: string; trace: SemanticDecisionTrace }>();
 
 	constructor(deps: SystemOneSteeringPlaneDeps = {}) {
 		this.certificates = deps.certificates ?? new SteeringCertificateStore(deps.persistentPath);
@@ -152,11 +161,11 @@ export class SystemOneSteeringPlane {
 		const reasonCodes: string[] = [];
 
 		if (checkpointId === "JEV-004") {
-			const completionAns = answers.completion_plausible as { noul?: number } | undefined;
-			const gapAns = answers.capability_gap_suspected as { noul?: number } | undefined;
-			const missingWorkAns = answers.missing_work_class as { choice?: string } | undefined;
+			const completionPlausible = noulProbability(answers.completion_plausible);
+			const gapSuspected = noulProbability(answers.capability_gap_suspected);
+			const workClass = readObjectiveWorkClass(answers.missing_work_class);
 
-			if (completionAns?.noul == null || gapAns?.noul == null || !missingWorkAns?.choice) {
+			if (completionPlausible === undefined || gapSuspected === undefined || !workClass?.chosen) {
 				throw new SteeringProtocolError(
 					`Checkpoint ${checkpointId} missing required answers for directive composition`,
 					checkpointId,
@@ -164,14 +173,18 @@ export class SystemOneSteeringPlane {
 				);
 			}
 
-			const completionPlausible = completionAns.noul;
-			const gapSuspected = gapAns.noul;
-			const missingWork = missingWorkAns.choice;
-
-			if (completionPlausible >= 0.8) {
+			if (completionPlausible >= STEERING_CUTS.routeCompletionPlausible) {
 				return { action: "completion_candidate", reasonCodes: ["completion_plausible"] };
 			}
-			if (gapSuspected >= 0.7 || missingWork === "resolve_capability") {
+			if (gapSuspected >= STEERING_CUTS.routeCapabilityGap) {
+				return { action: "resolve_capability", reasonCodes: ["capability_gap_suspected"] };
+			}
+			// The work class is acted on only at its risk's floor; an unsure one gathers evidence, as the route does.
+			if (workClass.reading !== "act") {
+				return { action: "retrieve_more", reasonCodes: ["insufficient_evidence"] };
+			}
+			const missingWork = workClass.workClass;
+			if (missingWork === "resolve_capability") {
 				return { action: "resolve_capability", reasonCodes: ["capability_gap_suspected"] };
 			}
 			if (missingWork === "investigate") {
@@ -190,20 +203,18 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-007" || checkpointId === "JEV-008") {
-			const needsCapAns = answers.needs_capability as { noul?: number } | undefined;
-			const gapRemainsAns = answers.gap_remains as { noul?: number } | undefined;
+			const needsCap = noulProbability(answers.needs_capability);
+			const gapRemains = noulProbability(answers.gap_remains);
 
-			if (checkpointId === "JEV-007" && needsCapAns?.noul == null) {
+			if (checkpointId === "JEV-007" && needsCap === undefined) {
 				throw new SteeringProtocolError("Checkpoint JEV-007 missing needs_capability answer", checkpointId);
 			}
-			if (checkpointId === "JEV-008" && gapRemainsAns?.noul == null) {
+			if (checkpointId === "JEV-008" && gapRemains === undefined) {
 				throw new SteeringProtocolError("Checkpoint JEV-008 missing gap_remains answer", checkpointId);
 			}
 
-			const needsCap = needsCapAns?.noul ?? 0;
-			const gapRemains = gapRemainsAns?.noul ?? 0;
-
-			if (needsCap >= 0.6 || gapRemains >= 0.6) {
+			// Each checkpoint asks only its own question; the other is not asked and proves nothing.
+			if ([needsCap, gapRemains].some((p) => p !== undefined && p >= STEERING_CUTS.capabilityNeed)) {
 				return { action: "synthesize_capability", reasonCodes: ["capability_gap_proven"] };
 			}
 			return { action: "continue_current_work", reasonCodes: ["existing_capability_adequate"] };
@@ -222,38 +233,38 @@ export class SystemOneSteeringPlane {
 			};
 		}
 
-		if (checkpointId === "JEV-013" || checkpointId === "JEV-014") {
-			const fulfilledAns = answers.spec_fulfilled as { noul?: number } | undefined;
-			if (checkpointId === "JEV-013" && fulfilledAns?.noul == null) {
+		// JEV-014 asks scope and rollback questions, not spec_fulfilled: its outcome is its verdict.
+		if (checkpointId === "JEV-013") {
+			const fulfilled = noulProbability(answers.spec_fulfilled);
+			if (fulfilled === undefined) {
 				throw new SteeringProtocolError("Checkpoint JEV-013 missing spec_fulfilled answer", checkpointId);
 			}
-			const fulfilled = fulfilledAns?.noul ?? 0;
-			if (fulfilled >= 0.7) {
+			if (fulfilled >= STEERING_CUTS.specFulfilled) {
 				return { action: "activate_capability", reasonCodes: ["pre_activation_verified"] };
 			}
 			return { action: "repair_capability", reasonCodes: ["spec_not_fulfilled"] };
 		}
 
 		if (checkpointId === "JEV-024") {
-			const completionAns = answers.completion_plausible as { noul?: number } | undefined;
-			if (completionAns?.noul == null) {
+			const completionPlausible = noulProbability(answers.completion_plausible);
+			if (completionPlausible === undefined) {
 				throw new SteeringProtocolError("Checkpoint JEV-024 missing completion_plausible answer", checkpointId);
 			}
-			if (completionAns.noul >= 0.75) {
+			if (completionPlausible >= STEERING_CUTS.transitionDirective) {
 				return { action: "completion_candidate", reasonCodes: ["completion_plausible"] };
 			}
 			return { action: "continue_current_work", reasonCodes: ["work_remaining"] };
 		}
 
 		if (checkpointId === "JEV-040") {
-			const lowestAns = answers.lowest_adequate_adaptation as { choice?: string } | undefined;
-			if (!lowestAns?.choice) {
+			const adaptation = readAdaptationTier(answers.lowest_adequate_adaptation);
+			if (!adaptation?.chosen) {
 				throw new SteeringProtocolError(
 					"Checkpoint JEV-040 missing lowest_adequate_adaptation answer",
 					checkpointId,
 				);
 			}
-			const lowest = lowestAns.choice;
+			const lowest = adaptation.tier;
 			if (lowest === "expert_reroute") {
 				return { action: "reroute_expert", reasonCodes: ["expert_reroute_selected"] };
 			}
@@ -278,7 +289,10 @@ export class SystemOneSteeringPlane {
 					metadata: { dimension: "runtime" },
 				};
 			}
-			return { action: "replan", reasonCodes: ["strategy_adaptation_selected"] };
+			return {
+				action: "replan",
+				reasonCodes: [adaptation.reading === "act" ? "strategy_adaptation_selected" : "adaptation_tier_unsure"],
+			};
 		}
 
 		if (checkpointId === "JEV-041" || checkpointId === "JEV-042") {
@@ -323,18 +337,22 @@ export class SystemOneSteeringPlane {
 	 * `evaluateSemanticOutcome` turns a checkpoint whose only problem is doubt into `gather_more`,
 	 * which looks again rather than rejecting the work.
 	 *
-	 * A `threshold` is a deliberate per-checkpoint calibration (JEV-004's 0.75, JEV-013's 0.7) and
-	 * reads the probability directly, as the doctrine requires. There is no 0.5 default: a coin flip
-	 * is ignorance, and it used to pass here.
+	 * A `threshold` is a deliberate per-checkpoint cut from `STEERING_CUTS` (JEV-004/JEV-024's
+	 * `outcomeCompletionPlausible`, JEV-013's `specFulfilled`) and reads the probability directly, as
+	 * the doctrine requires. There is no 0.5 default: a coin flip is ignorance, and it used to pass here.
+	 *
+	 * Every asked question has a result (`certify` rejects a program result that is missing), so an
+	 * answer without a probability is malformed, not undecided: it is a no, as it always was.
 	 */
 	private isTruthy(ans: unknown, threshold?: number, predicate?: string): boolean {
 		if (ans == null) return false;
 		if (typeof threshold === "number") {
-			const probability = noulFromAnswer(ans, false);
-			return typeof probability === "number" ? probability >= threshold : probability === true;
+			const probability = noulProbability(ans);
+			return probability !== undefined && probability >= threshold;
 		}
 		if (typeof ans === "object") {
-			const band = evaluateNoul(noulFromAnswer(ans, false), "required_true");
+			const band = readNoul(ans, "required_true");
+			if (band === "unasked") return false;
 			if (band === "ambiguous") {
 				if (predicate) this.openDoubts.push(predicate);
 				return false;
@@ -409,9 +427,7 @@ export class SystemOneSteeringPlane {
 				}
 				// Only a decisively incoherent objective ends admission. Ambiguity and missing information
 				// are answered by gathering evidence or asking the owner, never by refusing the objective.
-				const incoherent =
-					answers.objective_coherent != null &&
-					evaluateNoul(noulFromAnswer(answers.objective_coherent, false), "required_true") === "hard_fail";
+				const incoherent = readNoul(answers.objective_coherent, "required_true") === "hard_fail";
 				if (failed.length > 0) outcome = incoherent ? "fail" : "gather_more";
 				break;
 			}
@@ -437,7 +453,13 @@ export class SystemOneSteeringPlane {
 
 			case "JEV-004": {
 				if (directive.action === "completion_candidate") {
-					if (!this.isTruthy(answers.completion_plausible, 0.65, "completion_plausible")) {
+					if (
+						!this.isTruthy(
+							answers.completion_plausible,
+							STEERING_CUTS.outcomeCompletionPlausible,
+							"completion_plausible",
+						)
+					) {
 						failed.push("completion_plausible");
 						outcome = "fail";
 					}
@@ -502,7 +524,8 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-013": {
-				if (!this.isTruthy(answers.spec_fulfilled, 0.7, "spec_fulfilled")) failed.push("spec_fulfilled");
+				if (!this.isTruthy(answers.spec_fulfilled, STEERING_CUTS.specFulfilled, "spec_fulfilled"))
+					failed.push("spec_fulfilled");
 				// Not asked when code already verified the candidate (see `unlessSettledByCode`).
 				if (answers.tests_valid !== undefined && !this.isTruthy(answers.tests_valid, undefined, "tests_valid"))
 					failed.push("tests_valid");
@@ -617,7 +640,13 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-024": {
-				if (!this.isTruthy(answers.completion_plausible, 0.65, "completion_plausible")) {
+				if (
+					!this.isTruthy(
+						answers.completion_plausible,
+						STEERING_CUTS.outcomeCompletionPlausible,
+						"completion_plausible",
+					)
+				) {
 					failed.push("completion_plausible");
 					outcome = "fail";
 				}
@@ -1050,21 +1079,19 @@ export class SystemOneSteeringPlane {
 			objectiveId,
 			evidenceRevision,
 		} = bound;
-		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
+		const floor = CONSEQUENCE_MIN_CONFIDENCE[consequence];
 
 		// Map normalized results to answers. Raw answers are kept only for this program's own questions
 		// (a set decision's members are `<id>__<member>`), so a request shared with other checkpoints
 		// never leaks their answers into this certificate.
 		const answers: Record<string, unknown> = {};
-		const rawAnswers = (evaluation as unknown as Record<string, unknown>).rawAnswers;
-		if (rawAnswers && typeof rawAnswers === "object") {
-			const own = new Set(program.decisions.map((decision) => decision.id));
-			for (const [id, answer] of Object.entries(rawAnswers)) {
-				if (own.has(id) || own.has(id.split("__")[0] ?? id)) answers[id] = answer;
-			}
+		const own = new Set(program.decisions.map((decision) => decision.id));
+		for (const [id, answer] of Object.entries(evaluation.rawAnswers ?? {})) {
+			if (own.has(id) || own.has(id.split("__")[0] ?? id)) answers[id] = answer;
 		}
-		// Confidence belongs to Choice, Score and Set answers only. A Noul has none (TypeSafe docs): its
-		// probability is the certainty, and its band already says whether it settled anything.
+		// A Noul has no confidence (TypeSafe docs): its probability is the certainty, and its band already
+		// says whether it settled anything. A Choice is read on P(chosen option), never on its confidence;
+		// a Score or Set on its confidence.
 		const confidences: number[] = [];
 		const lowConfidence: string[] = [];
 
@@ -1112,8 +1139,9 @@ export class SystemOneSteeringPlane {
 				};
 			}
 			if (result.kind === "choice" || result.kind === "score" || result.kind === "set") {
-				confidences.push(result.confidence.value);
-				if (result.confidence.value < thresholds.minimumConfidence) lowConfidence.push(d.id);
+				const settled = result.kind === "choice" ? (choiceProbability(result) ?? 0) : result.confidence.value;
+				confidences.push(settled);
+				if (settled < floor) lowConfidence.push(d.id);
 			}
 		}
 
@@ -1172,8 +1200,66 @@ export class SystemOneSteeringPlane {
 		if (evaluationId !== undefined) {
 			const { verdict, reasons, questionStates } = verdictFromCertificate(certificate);
 			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons, questionStates);
+			// How code reached the verdict: the directive and outcome gates, the floor that turned a pass
+			// into a doubt, and this checkpoint's own judgments (a shared request carries other checkpoints').
+			const unsettled = new Set([...failed_semantic_predicates, ...unsure_semantic_predicates]);
+			const gates: SemanticTraceGate[] = [
+				{ id: "directive", result: directive.action, decided: true },
+				{ id: "semantic_outcome", result: judged.semantic_outcome, decided: judged.semantic_outcome !== "pass" },
+			];
+			if (lowConfidence.length > 0)
+				gates.push({
+					id: `${consequence}_floor_${floor}`,
+					result: lowConfidence.join(","),
+					decided: judged.semantic_outcome === "pass",
+				});
+			const trace = {
+				decision: `${request.checkpointId} ${semantic_outcome}: ${directive.action}`,
+				gates,
+				judgments: traceJudgmentsFromEvaluation(
+					{
+						...evaluation,
+						results: Object.fromEntries(program.decisions.map((d) => [d.id, evaluation.results[d.id]])),
+					},
+					program.decisions.map((d) => d.id).filter((id) => unsettled.has(id)),
+				),
+				facts: directive.reasonCodes,
+			};
+			this.evaluationObserver?.noteTrace?.(evaluationId, trace);
+			this.rememberTrace(certificate.certificate_id, evaluationId, trace);
 		}
 		return { certificate, directive };
+	}
+
+	private rememberTrace(certificateId: string, evaluationId: string, trace: SemanticDecisionTrace): void {
+		this.certificateTraces.set(certificateId, { evaluationId, trace });
+		if (this.certificateTraces.size > CERTIFICATE_TRACE_LIMIT) {
+			const oldest = this.certificateTraces.keys().next().value;
+			if (oldest !== undefined) this.certificateTraces.delete(oldest);
+		}
+	}
+
+	/**
+	 * Adds the gates a certificate's consumer applied after the plane (the route policy after JEV-004,
+	 * a transition after its checkpoint) to that evaluation's trace, and names the final decision. A
+	 * certificate from the cache, or one no longer remembered, has no evaluation to trace.
+	 */
+	noteDecision(
+		certificateId: string,
+		decision: string,
+		gates: readonly SemanticTraceGate[],
+		facts: readonly string[] = [],
+	): void {
+		const remembered = this.certificateTraces.get(certificateId);
+		if (!remembered) return;
+		const trace: SemanticDecisionTrace = {
+			...remembered.trace,
+			decision,
+			gates: [...gates, ...(remembered.trace.gates ?? [])],
+			facts: [...facts, ...(remembered.trace.facts ?? [])],
+		};
+		remembered.trace = trace;
+		this.evaluationObserver?.noteTrace?.(remembered.evaluationId, trace);
 	}
 
 	/**

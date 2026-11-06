@@ -723,6 +723,7 @@ export class ObjectiveExecutionController {
 
 		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
+		let routeCertificateId: string | undefined;
 		const verificationPending = isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.());
 
 		if (!verificationPending && this.deps.decisions) {
@@ -801,6 +802,7 @@ export class ObjectiveExecutionController {
 					signal: options?.signal,
 				});
 
+				routeCertificateId = cert.certificate_id;
 				const spAns = cert.answers.semantic_progress as { level?: number; score?: number } | undefined;
 
 				// Certificate answers carry the band; an ambiguous one settles nothing and reads as undefined.
@@ -923,6 +925,20 @@ export class ObjectiveExecutionController {
 		if (route.route === "wait_for_worker") {
 			this.routeWaitAttempts.set(route, completionFence.length > 0 ? completionFence : activeAttempts);
 		}
+		// The route checkpoint's trace ends at the route the policy composed from its judgments and the facts.
+		if (routeCertificateId !== undefined)
+			this.deps.steeringPlane?.noteDecision(
+				routeCertificateId,
+				`route ${route.route}`,
+				[
+					{ id: "work_class", result: String(semantic.missingWorkClass ?? "unjudged"), decided: false },
+					{ id: "route_policy", result: route.route, decided: true },
+					...(completionFence.length > 0
+						? [{ id: "completion_fence", result: `${completionFence.length} running`, decided: true }]
+						: []),
+				],
+				route.reason_codes,
+			);
 		let adoptedSupervisionSignalId: string | undefined;
 		if (supervisionAction && pendingSupervision) {
 			const adopted =

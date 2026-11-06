@@ -6,6 +6,7 @@
 
 import type { ChoiceOption, DecisionDefinition, ScoreLevel } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
+import { type ChoiceActReading, type ChoiceRisk, choiceAct } from "../decision/thresholds.ts";
 import { getQuestionPack } from "../system-one/catalog.ts";
 import type { ValidationStage } from "../system-one/types.ts";
 import { canonicalDigest } from "./canonical.ts";
@@ -57,6 +58,69 @@ const OBJECTIVE_WORK_CLASS_OPTIONS = {
 
 export function isObjectiveWorkClass(value: unknown): value is ObjectiveWorkClass {
 	return typeof value === "string" && Object.hasOwn(OBJECTIVE_WORK_CLASS_OPTIONS, value);
+}
+
+/**
+ * What acting on a work class risks: synthesizing a capability or moving toward closing the goal
+ * commits more than reversible work, so it needs the consequential floor.
+ */
+const OBJECTIVE_WORK_CLASS_RISK = {
+	investigate: "reversible",
+	implement: "reversible",
+	deterministic_verify: "reversible",
+	independent_review: "reversible",
+	replan: "reversible",
+	resolve_capability: "consequential",
+	completion_candidate: "consequential",
+} as const satisfies Record<ObjectiveWorkClass, ChoiceRisk>;
+
+/**
+ * The route checkpoint's `missing_work_class` Choice as code may act on it: the chosen class and its
+ * act reading at the class's risk (P(chosen option), never confidence). A choice outside the options
+ * reads `not_this`; a missing answer is undefined.
+ */
+export function readObjectiveWorkClass(answer: unknown):
+	| {
+			readonly chosen: string | undefined;
+			readonly workClass?: ObjectiveWorkClass;
+			readonly reading: ChoiceActReading;
+	  }
+	| undefined {
+	if (!answer || typeof answer !== "object") return undefined;
+	const chosen = (answer as { choice?: unknown }).choice;
+	if (!isObjectiveWorkClass(chosen))
+		return { chosen: typeof chosen === "string" ? chosen : undefined, reading: "not_this" };
+	return { chosen, workClass: chosen, reading: choiceAct(answer, chosen, OBJECTIVE_WORK_CLASS_RISK[chosen]) };
+}
+
+/** JEV-040's adaptation tiers, cheapest first. */
+export type AdaptationTier = "strategy" | "expert_reroute" | "specialist" | "capability" | "runtime";
+
+const ADAPTATION_TIER_RISK = {
+	strategy: "reversible",
+	expert_reroute: "reversible",
+	specialist: "reversible",
+	capability: "reversible",
+	// Modifies the core runtime: rollback protects it, but it is not reversible work.
+	runtime: "consequential",
+} as const satisfies Record<AdaptationTier, ChoiceRisk>;
+
+/**
+ * The tier JEV-040's `lowest_adequate_adaptation` Choice lets code act on: the chosen tier at its
+ * risk's floor on P(chosen option). An unsure choice adapts the strategy, the lowest tier, which
+ * synthesizes nothing; a missing answer is undefined.
+ */
+export function readAdaptationTier(
+	answer: unknown,
+):
+	| { readonly tier: AdaptationTier; readonly chosen: string | undefined; readonly reading: ChoiceActReading }
+	| undefined {
+	if (!answer || typeof answer !== "object") return undefined;
+	const chosen = (answer as { choice?: unknown }).choice;
+	if (typeof chosen !== "string" || !Object.hasOwn(ADAPTATION_TIER_RISK, chosen))
+		return { tier: "strategy", chosen: typeof chosen === "string" ? chosen : undefined, reading: "not_this" };
+	const reading = choiceAct(answer, chosen, ADAPTATION_TIER_RISK[chosen as AdaptationTier]);
+	return { tier: reading === "act" ? (chosen as AdaptationTier) : "strategy", chosen, reading };
 }
 
 export function computeQuestionPackDigest(pack: SteeringQuestionPack | DecisionProgram): string {
@@ -774,7 +838,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 						specialist: { description: "Synthesize specialized worker role and profile" },
 						capability: { description: "Synthesize new tool, script, skill, or adapter" },
 						runtime: { description: "Modify core runtime code with rollback protection" },
-					},
+					} satisfies Record<AdaptationTier, ChoiceOption>,
 				},
 				{
 					kind: "choice",

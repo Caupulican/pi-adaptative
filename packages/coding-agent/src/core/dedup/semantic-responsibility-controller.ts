@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { noulProbability, readNoul } from "../decision/noul.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
 import { noulHolds } from "../system-one/policy.ts";
@@ -176,13 +177,9 @@ export class SemanticResponsibilityController {
 			);
 
 			// PH-141: JEV-045 must include a positive waiver_valid judgment
-			const waiverValidAns = waiverCert.answers.waiver_valid as { boolean?: boolean; noul?: number } | undefined;
-			// A waiver lets duplicated responsibility through, so it takes a decisive yes: an undecided
-			// probability is not a waiver.
-			const isWaiverValid =
-				typeof waiverValidAns?.boolean === "boolean"
-					? waiverValidAns.boolean
-					: noulHolds(waiverValidAns?.noul, "required_true");
+			// A waiver lets duplicated responsibility through, so it takes a settled yes: an undecided or
+			// unasked answer is not a waiver.
+			const isWaiverValid = noulHolds(waiverCert.answers.waiver_valid, "required_true");
 
 			if (!isWaiverValid) {
 				throw new SteeringProtocolError("JEV-045 evaluated waiver as invalid (PH-141)", "JEV-045");
@@ -193,8 +190,8 @@ export class SemanticResponsibilityController {
 
 		// S1A-211: separate_required must be evidence-backed or waived
 		if (outcome === "separate_required" && !waiverId) {
-			const sameResp = (dispCert.answers.same_responsibility as { noul?: number })?.noul ?? 0;
-			if (sameResp >= 0.7) {
+			// The advisory family's pass (0.7); an unasked answer establishes no competing responsibility.
+			if (readNoul(dispCert.answers.same_responsibility, "required_true", "advisory") === "hard_pass") {
 				// Competing duplicate responsibility without waiver
 				throw new SemanticDuplicateResponsibilityError({
 					reason: `Competing responsibility requires reuse/extend/extract or explicit waiver. Cannot separate without architectural authorization.`,
@@ -274,24 +271,19 @@ export class SemanticResponsibilityController {
 			},
 		);
 
-		const dupAns = cert.answers.duplicate_responsibility_introduced as
-			| { noul?: number; boolean?: boolean }
-			| undefined;
-		if (dupAns === undefined || (dupAns.noul === undefined && dupAns.boolean === undefined)) {
+		const duplicateIntroduced = noulProbability(cert.answers.duplicate_responsibility_introduced);
+		if (duplicateIntroduced === undefined) {
 			throw new SteeringProtocolError(
 				"Missing duplicate_responsibility_introduced answer in JEV-043 certificate",
 				"JEV-043",
 			);
 		}
-		const duplicateIntroduced =
-			typeof dupAns.boolean === "boolean" ? (dupAns.boolean ? 1.0 : 0.0) : (dupAns.noul ?? 0.0);
-		const intentionalWaiverApplies = (cert.answers.intentional_waiver_applies as { noul?: number })?.noul ?? 0;
 
 		const waiver = this.waivers.findValidWaiver(input.objectiveId, input.responsibility, input.mutatedFile);
 
 		// The waiver has to earn its exemption: it applies when the answer settles on a yes, and an
-		// undecided probability leaves the duplicate unwaived rather than excusing it at a coin flip.
-		const waiverApplies = waiver !== undefined && noulHolds(intentionalWaiverApplies, "required_true");
+		// undecided or unasked answer leaves the duplicate unwaived rather than excusing it at a coin flip.
+		const waiverApplies = waiver !== undefined && noulHolds(cert.answers.intentional_waiver_applies, "required_true");
 		const isUnintentionalDuplicate = duplicateIntroduced >= 0.6 && !waiverApplies;
 
 		const verdict: PostMutationDedupVerdict = {
@@ -353,13 +345,10 @@ export class SemanticResponsibilityController {
 				"JEV-044",
 			);
 		}
-		const duplicateRemaining =
-			typeof dupRemAns.boolean === "boolean" ? (dupRemAns.boolean ? 1.0 : 0.0) : (dupRemAns.noul ?? 0.0);
-
 		// S1A-220, S1A-221: Completion cannot pass semantic duplicate even if tests pass.
 		// The claim being made here is "a duplicate is still present", and blocking completion on it
 		// takes a decisive yes -- the same bar every other adverse judgment answers to.
-		if (noulHolds(duplicateRemaining, "required_true")) {
+		if (noulHolds(dupRemAns, "required_true")) {
 			throw new SemanticDuplicateResponsibilityError({
 				reason:
 					"Cold semantic dedup sweep detected remaining unintentional duplicate responsibilities in repository.",

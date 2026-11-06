@@ -6,6 +6,7 @@
  */
 
 import { SteeringJudgmentUnavailableError } from "../steering/system-one-steering-plane.ts";
+import type { SemanticTraceGate } from "../system-one/semantic-evaluation-ledger.ts";
 
 export interface TransitionCertificate {
 	readonly certificate_id: string;
@@ -19,6 +20,8 @@ export interface TransitionCertifier<C extends TransitionCertificate> {
 		state: unknown,
 		options: { objectiveId: string; evidenceRevision: number; signal?: AbortSignal; requirePass?: boolean },
 	): Promise<C>;
+	/** Ends the certificate's evaluation trace at the transition's decision (`SystemOneSteeringPlane.noteDecision`). */
+	noteDecision?(certificateId: string, decision: string, gates: readonly SemanticTraceGate[]): void;
 }
 
 export type TransitionJudgment<C extends TransitionCertificate> =
@@ -48,6 +51,12 @@ export async function judgeTransition<C extends TransitionCertificate>(
 			requirePass: false,
 		});
 		judgment = { kind: "judged", certificate };
+		const proceeds = certificate.semantic_outcome === "pass";
+		plane.noteDecision?.(
+			certificate.certificate_id,
+			`${checkpointId} transition ${proceeds ? "proceeds" : "stops"}`,
+			[{ id: "transition", result: certificate.semantic_outcome ?? "fail", decided: true }],
+		);
 	} catch (error) {
 		options.signal?.throwIfAborted();
 		if (error instanceof SteeringJudgmentUnavailableError) {

@@ -5,14 +5,15 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { type AdaptationTier, readAdaptationTier } from "../steering/programs.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
-import { settledNoul } from "../system-one/policy.ts";
 import { AdaptationGraph } from "./adaptation-graph.ts";
 import type { CapabilityNeed } from "./capability-resolution.ts";
 import type { SpecialistNeed } from "./specialist-synthesis-controller.ts";
 import type { AdaptationNode, AdaptationNodeKind } from "./types.ts";
 
-export type AdaptiveDimension = "strategy" | "expert_reroute" | "specialist" | "capability" | "runtime";
+/** The dimension an adaptation resolves along: JEV-040's tiers. */
+export type AdaptiveDimension = AdaptationTier;
 
 export interface AdaptiveResolutionInput {
 	readonly objectiveId: string;
@@ -90,42 +91,14 @@ export class AdaptiveResolutionController {
 
 		// Interpret lowest adequate adaptation dimension from typed Jev (ERC-050)
 		const answers = cert.answers;
-		const lowestChoice = (answers.lowest_adequate_adaptation as { choice?: string })?.choice;
-		const requiredSpecialtyChoice =
-			(answers.required_specialty as { choice?: string })?.choice ??
-			(typeof answers.required_specialty === "string" ? answers.required_specialty : undefined);
-		const specialistDomainChoice =
-			requiredSpecialtyChoice ??
-			(answers.specialist_domain as { choice?: string })?.choice ??
-			(answers.domain as string) ??
-			(answers.specialty as string);
+		const specialistDomainChoice = (answers.specialist_domain as { choice?: string } | undefined)?.choice;
 		const reqText =
 			`${input.request ?? ""} ${(input as any).prompt ?? ""} ${input.objectiveDescription ?? ""} ${JSON.stringify(input.recentEvidence ?? "")}`.toLowerCase();
 		const isUiRegex = /\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText);
-		const isCapNeed = /\b(tool|script|capability|extension|patch|missing)\b/i.test(reqText);
 
-		// Jev owns dimension; regex is only a secondary fallback hint (ERC-050, ERC-051)
-		let dimension: AdaptiveDimension = "strategy";
-		if (lowestChoice === "expert_reroute") {
-			dimension = "expert_reroute";
-		} else if (lowestChoice === "specialist" || requiredSpecialtyChoice) {
-			dimension = "specialist";
-		} else if (lowestChoice === "capability") {
-			dimension = "capability";
-		} else if (lowestChoice === "runtime") {
-			dimension = "runtime";
-		} else if (cert.directive === "synthesize_capability") {
-			dimension = "runtime";
-		} else if (cert.directive === "resolve_capability") {
-			dimension = cert.answers.specialist_gap_present ? "specialist" : "capability";
-		} else {
-			// Fallback hints when typed Jev does not specify lowestChoice
-			if (isUiRegex && !isCapNeed) {
-				dimension = "specialist";
-			} else if (isCapNeed) {
-				dimension = "capability";
-			}
-		}
+		// System One owns the dimension (ERC-050, ERC-051): the tier its Choice lets code act on. An unsure
+		// choice adapts the strategy, the lowest tier; words in the request never pick a costlier one.
+		const dimension: AdaptiveDimension = readAdaptationTier(answers.lowest_adequate_adaptation)?.tier ?? "strategy";
 
 		const kindMap: Record<AdaptiveDimension, AdaptationNodeKind> = {
 			strategy: "strategy_change",
@@ -153,17 +126,9 @@ export class AdaptiveResolutionController {
 
 		if (dimension === "specialist") {
 			const domain = specialistDomainChoice || (isUiRegex ? "ui_ux" : "architecture");
+			// JEV-040 asks no vision question: the chosen domain is what says the specialist is visual.
 			const isVisual =
-				domain === "ui_ux" ||
-				domain.toLowerCase().includes("ui") ||
-				domain.toLowerCase().includes("visual") ||
-				Boolean(
-					typeof (answers.vision_required as { noul?: number })?.noul === "number"
-						? // Routing to a visual specialist on an undecided answer is a wrong route, not a
-							// cautious one: it takes a settled yes.
-							settledNoul((answers.vision_required as { noul?: number }).noul, "required_true", false) === true
-						: answers.vision_required === true,
-				);
+				domain === "ui_ux" || domain.toLowerCase().includes("ui") || domain.toLowerCase().includes("visual");
 
 			const specialties = Array.isArray((answers.specialties as any)?.list)
 				? (answers.specialties as any).list

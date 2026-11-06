@@ -3,8 +3,10 @@
  * Implements S1A-060..S1A-066, JEV-007, and JEV-008.
  */
 
+import { noulProbability, readNoul, settledFromBand } from "../decision/noul.ts";
+import { choiceAct } from "../decision/thresholds.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
-import { noulHolds, settledNoul } from "../system-one/policy.ts";
+import { noulHolds } from "../system-one/policy.ts";
 import type { CapabilityCatalog, CapabilityCatalogEntry } from "./capability-catalog.ts";
 import type { CapabilityKind, EstablishedCapability } from "./types.ts";
 
@@ -78,9 +80,6 @@ export class CapabilityResolver {
 			},
 		);
 
-		const needsCapAns = cert.answers.needs_capability as { noul?: number; boolean?: boolean } | undefined;
-		const needsCap =
-			typeof needsCapAns?.boolean === "boolean" ? (needsCapAns.boolean ? 1.0 : 0.0) : (needsCapAns?.noul ?? 0.8);
 		const whichCandidateAns = cert.answers.which_candidate as
 			| {
 					choice?: string;
@@ -104,9 +103,9 @@ export class CapabilityResolver {
 		return {
 			need,
 			rankedCandidates,
-			// A decisive yes, not a coin flip: synthesising a capability on ignorance is expensive work
-			// nobody asked for.
-			needsCapability: noulHolds(needsCap, "required_true"),
+			// A settled yes, not a coin flip and not an unasked question: synthesising a capability on
+			// ignorance is expensive work nobody asked for.
+			needsCapability: noulHolds(cert.answers.needs_capability, "required_true"),
 			certificateId: cert.certificate_id,
 		};
 	}
@@ -154,32 +153,37 @@ export class CapabilityResolver {
 		);
 
 		const answers = cert.answers;
+		// A candidate's absolute fit is only what System One answered: an unanswered fit is absent, never 0.
 		const absoluteFits: Record<string, number> = {};
 		for (const candidate of shortlistedCandidates) {
-			const fitKey = `fits::${candidate.capabilityId}`;
-			const fitAns = answers[fitKey] as { noul?: number; boolean?: boolean } | undefined;
-			const fitVal = typeof fitAns?.boolean === "boolean" ? (fitAns.boolean ? 1.0 : 0.0) : (fitAns?.noul ?? 0.0);
-			absoluteFits[candidate.capabilityId] = fitVal;
+			const fit = noulProbability(answers[`fits::${candidate.capabilityId}`]);
+			if (fit !== undefined) absoluteFits[candidate.capabilityId] = fit;
 		}
 
-		const whichAns = answers.which_candidate as { choice?: string } | undefined;
-		const bestFitId = whichAns?.choice;
-		const bestFitScore = bestFitId ? (absoluteFits[bestFitId] ?? 0) : 0;
-		const gapAns = answers.gap_remains as { noul?: number; boolean?: boolean } | undefined;
-		// gap_remains asks whether a gap is still present; the required end is "no gap". `settledNoul`
-		// returns the truth of the proposition (a gap is present), or undefined when the band settled
-		// nothing; a missing or undecided answer falls back to the measured fit score rather than
-		// inventing a verdict from a probability that settled nothing.
-		const gapSettled =
-			typeof gapAns?.boolean === "boolean"
-				? gapAns.boolean
-				: gapAns?.noul !== undefined
-					? settledNoul(gapAns.noul, "required_false", false)
-					: undefined;
-		const gapRemains = gapSettled ?? bestFitScore < 0.7;
+		// The pick is acted on at the reversible floor on P(chosen option); its absolute fit must settle a
+		// yes on the advisory family (pass at 0.7).
+		const pick = choiceAct(answers.which_candidate, undefined, "reversible");
+		const bestFitId =
+			pick === "act" ? (answers.which_candidate as { choice?: string } | undefined)?.choice : undefined;
+		const bestFit = bestFitId ? readNoul(answers[`fits::${bestFitId}`], "required_true", "advisory") : "unasked";
+		// gap_remains asks whether a gap is still present; the required end is "no gap". The band gives the
+		// truth of the proposition (a gap is present); an unasked or undecided answer falls back to the
+		// best fit rather than inventing a verdict from a probability that settled nothing.
+		const gapReading = readNoul(answers.gap_remains, "required_false");
+		const gapSettled = gapReading === "unasked" ? undefined : settledFromBand(gapReading, "required_false");
+		const gapRemains = gapSettled ?? bestFit !== "hard_pass";
+		this.steering.noteDecision(
+			cert.certificate_id,
+			`capability ${gapRemains ? "gap remains" : `fits ${bestFitId}`}`,
+			[
+				{ id: "which_candidate", result: `${pick}${bestFitId ? ` ${bestFitId}` : ""}`, decided: pick !== "act" },
+				{ id: "best_fit", result: bestFit, decided: gapSettled === undefined },
+				{ id: "gap_remains", result: gapReading, decided: gapSettled !== undefined },
+			],
+		);
 
 		// S1A-065: Shortlist can reject all if below absolute fit threshold
-		if (!gapRemains && bestFitId && bestFitScore >= 0.7) {
+		if (!gapRemains && bestFitId && bestFit === "hard_pass") {
 			const entry = this.catalog.get(bestFitId);
 			// PH-071: Catalog entry becomes established only with current:
 			// - CapabilitySpec
