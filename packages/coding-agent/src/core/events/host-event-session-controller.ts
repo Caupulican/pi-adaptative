@@ -51,8 +51,8 @@ export interface HostEventSessionControllerDeps {
 	/** The session's owner notices: history this session never observed is told once, with the owner's next turn. */
 	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	warn(message: string): void;
-	/** Called once when the binding is fenced (its signal aborts) or closed. */
-	retired?(): void;
+	/** Called once when the binding is fenced (its signal aborts) or closed, also for one whose construction threw. */
+	retired?(controller: HostEventSessionController): void;
 }
 
 const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
@@ -155,7 +155,7 @@ export class HostEventSessionController {
 			"abort",
 			() => {
 				events.closeSourceLifetime(lifetime);
-				deps.retired?.();
+				deps.retired?.(this);
 			},
 			{ once: true },
 		);

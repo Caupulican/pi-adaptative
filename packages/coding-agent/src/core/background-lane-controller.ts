@@ -802,7 +802,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				throw new Error("Host events belong to a retired session.");
 		};
 		assertCurrent();
-		const controller: HostEventSessionController = new HostEventSessionController({
+		const controller = new HostEventSessionController({
 			runtime: this._getWorkerLifecycle().ledger.runtime,
 			agentDir: this.deps.getAgentDir(),
 			sessionId,
@@ -839,7 +839,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 			warn: (message) => this._safeWarn(message),
-			retired: () => this._hostEventSessions.delete(controller),
+			retired: (retired) => this._hostEventSessions.delete(retired),
 		});
 		this._hostEventSessions.add(controller);
 		return controller;
