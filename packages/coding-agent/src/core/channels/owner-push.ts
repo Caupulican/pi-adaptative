@@ -34,6 +34,8 @@ interface PushOptions {
 	readonly rated: boolean;
 	/** The one conversation it goes to (a draft presentation); every listed owner chat otherwise. */
 	readonly to?: string;
+	/** With `to`: the sender digest that conversation must have been learned from. */
+	readonly from?: string;
 	/** Exempt from `MAX_OWNER_PUSH_CHARS` (a draft presentation). */
 	readonly long?: boolean;
 }
@@ -63,13 +65,21 @@ export class OwnerPush {
 	}
 
 	/**
-	 * A held draft's presentation to one chat (the one whose turn held it, or the one asking `status`, then unrated); once
-	 * per draft and chat.
+	 * A held draft's presentation to one chat of `senderDigest` (the one whose turn held it, or the one asking `status`,
+	 * then unrated). It counts as shown only once the send resolved; `status` sends again one recorded but never shown.
 	 */
-	present(channel: string, draftId: string, text: string, conversationKey: string, rated: boolean): Promise<boolean> {
+	present(
+		channel: string,
+		draftId: string,
+		text: string,
+		conversationKey: string,
+		senderDigest: string,
+		rated: boolean,
+	): Promise<boolean> {
 		return this.send(channel, presentationKey(draftId, conversationKey), text, {
 			rated,
 			to: conversationKey,
+			from: senderDigest,
 			long: true,
 		});
 	}
@@ -104,11 +114,15 @@ export class OwnerPush {
 		try {
 			plan = this.host.journal(channel).update(now, (state): PushPlan => {
 				const pushes = state.ownerPushes ?? [];
-				if (pushes.some((entry) => entry.k === k)) return { kind: "skip" };
+				// A presentation recorded but never shown (its send failed or the process ended) is sent again by `status`.
+				const existing = pushes.find((entry) => entry.k === k);
+				if (existing && (options.to === undefined || options.rated || existing.c !== undefined))
+					return { kind: "skip" };
 				const targets = (state.ownerConversations ?? []).filter(
 					(conversation) =>
 						listed.has(conversation.senderDigest) &&
-						(options.to === undefined || conversation.conversationKey === options.to),
+						(options.to === undefined || conversation.conversationKey === options.to) &&
+						(options.from === undefined || conversation.senderDigest === options.from),
 				);
 				if (targets.length === 0) return { kind: "skip" };
 				if (options.rated) {
@@ -127,7 +141,7 @@ export class OwnerPush {
 						};
 					}
 				}
-				state.ownerPushes = [...pushes, { k, at: now, ...(options.to !== undefined ? { c: options.to } : {}) }];
+				if (!existing) state.ownerPushes = [...pushes, { k, at: now }];
 				return { kind: "send", targets, text };
 			}).result;
 		} catch (error) {
@@ -156,6 +170,23 @@ export class OwnerPush {
 				this.host.warn(`Channel ${channel}: an update for the owner was not sent${said ? ` (${said})` : ""}.`);
 			}
 		}
+		if (sent && options.to !== undefined) this.markShown(channel, k, options.to);
 		return sent;
+	}
+
+	/** A presentation's send resolved: from now on it counts as shown to `conversationKey`, at this time. */
+	private markShown(channel: string, k: string, conversationKey: string): void {
+		try {
+			this.host.journal(channel).update(this.host.now(), (state) => {
+				const entry = state.ownerPushes?.find((push) => push.k === k);
+				if (!entry) return;
+				entry.c = conversationKey;
+				entry.at = this.host.now();
+			});
+		} catch (error) {
+			this.host.warn(
+				`Channel ${channel}: a shown held action was not recorded (${error instanceof Error ? error.message : String(error)}); status shows it again.`,
+			);
+		}
 	}
 }

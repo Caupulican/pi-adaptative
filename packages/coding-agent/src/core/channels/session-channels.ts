@@ -1375,7 +1375,8 @@ export class SessionChannels {
 			: undefined;
 		const ownerWaiting = waiting.filter((entry) => entry.owner === true);
 		const ownerCap = ownerWaiting.length > 0 ? this.ownerTurnRefusal(name, policy, state, now) : undefined;
-		const ownerListed = (entry: ChannelPendingMessage) => senderListed(policy.ownerSenders, entry.senderId, provider);
+		const ownerListed = (entry: ChannelPendingMessage) =>
+			entry.verified === true && senderListed(policy.ownerSenders, entry.senderId, provider);
 		const first = waiting.find((entry) =>
 			entry.owner === true ? ownerCap === undefined && ownerListed(entry) : thirdPartyCap === undefined,
 		);
@@ -1383,7 +1384,7 @@ export class SessionChannels {
 			const cap =
 				thirdPartyCap ??
 				ownerCap ??
-				`owner messages wait: their sender is no longer in channels.${name}.ownerSenders`;
+				`owner messages wait: their sender is not verified or no longer in channels.${name}.ownerSenders`;
 			return { kind: "capped", cap };
 		}
 		const owner = first.owner === true;
@@ -1453,8 +1454,11 @@ export class SessionChannels {
 	 * room returns; nothing while no owner message waits.
 	 */
 	private pushOwnerBound(name: string, policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number): void {
-		if (!this.ownerPolicy(name) || !state.pending.some((entry) => entry.owner === true && entry.kind === "message"))
-			return;
+		// An offered message is already a turn's: only messages the bound holds back count.
+		const held = state.pending.some(
+			(entry) => entry.owner === true && entry.kind === "message" && entry.offeredTo === undefined,
+		);
+		if (!this.ownerPolicy(name) || !held) return;
 		const room = ownerRoom(name, state, policy, now);
 		if (room.fits) return;
 		const text =
@@ -1649,7 +1653,12 @@ export class SessionChannels {
 				this.stopOwnerRun(origin.ref, run, undefined);
 				return;
 			}
-			if (!run.live()) this.stopOwnerRun(origin.ref, run, "authority");
+			// Stopped before its run existed: the earlier abort found nothing to end, so the run is ended now.
+			if (run.stopped) {
+				this.abortOwnerRun(origin.ref, name);
+				// A stopped core routes nothing more: nothing would settle the batch that ends the observation.
+				if (!this.started) run.unobserve?.();
+			} else if (!run.live()) this.stopOwnerRun(origin.ref, run, "authority");
 			this.scheduleWork();
 		};
 		try {
@@ -1663,31 +1672,44 @@ export class SessionChannels {
 		}
 	}
 
-	/** The spend of an owner turn grew: past the per-turn bound, or with its authority gone, it is stopped. */
+	/**
+	 * The spend of an owner turn grew: past the per-turn bound, or with its authority gone, it is stopped. A stopped
+	 * turn that still spends is aborted again: spend after the stop means the abort did not end it.
+	 */
 	private onOwnerUsage(ref: string, usd: number): void {
 		const run = this.ownerRuns.get(ref);
-		if (!run || run.stopped) return;
+		if (!run) return;
+		if (run.stopped) {
+			this.abortOwnerRun(ref, run.name);
+			return;
+		}
 		const policy = this.policy(run.name);
 		if (!policy || usd >= policy.ownerMaxUsdPerTurn) this.stopOwnerRun(ref, run, "bound");
 		else if (!run.live()) this.stopOwnerRun(ref, run, "authority");
 	}
 
-	/**
-	 * Abort an owner turn (or the run its offer would open) and stop observing it; the aborted turn settles unanswered
-	 * with its spend when its outcome is routed. The owner's chat is told why, when it still holds owner authority.
-	 */
-	private stopOwnerRun(ref: string, run: OwnerRun, why: "bound" | "authority" | "owner" | undefined): void {
-		run.stopped = true;
+	private abortOwnerRun(ref: string, name: string): void {
 		try {
 			this.deps.ownerDelivery?.abortRun(ref);
 		} catch (error) {
 			this.deps.warn(
-				`Channel ${run.name}: an owner turn could not be aborted (${error instanceof Error ? error.message : String(error)}).`,
+				`Channel ${name}: an owner turn could not be aborted (${error instanceof Error ? error.message : String(error)}).`,
 			);
 		}
-		run.unobserve?.();
-		run.unobserve = undefined;
-		if (!this.started) this.ownerRuns.delete(ref);
+	}
+
+	/**
+	 * Abort an owner turn (or the run its offer would open). Its spend stays observed until its batch settles, so a run
+	 * the abort missed is aborted again; the aborted turn settles unanswered with its spend when its outcome is routed.
+	 * The owner's chat is told why, when it still holds owner authority.
+	 */
+	private stopOwnerRun(ref: string, run: OwnerRun, why: "bound" | "authority" | "owner" | undefined): void {
+		run.stopped = true;
+		this.abortOwnerRun(ref, run.name);
+		if (!this.started) {
+			run.unobserve?.();
+			this.ownerRuns.delete(ref);
+		}
 		const policy = this.policy(run.name);
 		if (why === "bound" && policy)
 			void this.ownerPush.push(
@@ -2023,22 +2045,30 @@ export class SessionChannels {
 		const ref = view.origin.ref;
 		if (!this.started || ref === undefined) return;
 		for (const [name, runtime] of this.runtimes) {
-			if (!runtime.holding || !draftInScope(view, name)) continue;
+			if (!runtime.holding || view.origin.k !== "owner-channel" || view.origin.channel !== name) continue;
 			const policy = this.ownerPolicy(name);
 			const batch = policy
 				? this.journal(name)
 						.read()
 						.result.batches.find((entry) => entry.id === ref && entry.owner === true)
 				: undefined;
-			if (!policy || !batch) continue;
+			// Shown only to the identity whose message opened the run, in the chat that message came from.
+			if (!policy || batch?.senderDigest === undefined) continue;
 			await this.ownerPush.present(
 				name,
 				view.id,
 				draftPresentation(view, policy.ownerTerminalOnlyClasses),
 				batch.conversationKey,
+				batch.senderDigest,
 				true,
 			);
 		}
+	}
+
+	/** The sender digest of each owner batch of the channel by its id (the ref of the turn it opened). */
+	private ownerOpeners(name: string): (ref: string) => string | undefined {
+		const batches = this.journal(name).read().result.batches;
+		return (ref) => batches.find((batch) => batch.id === ref && batch.owner === true)?.senderDigest;
 	}
 
 	/** Answer one owner control word; it never becomes a turn. Replies go to the chat it came from. */
@@ -2055,7 +2085,7 @@ export class SessionChannels {
 		const reply = (text: string, key: string) => this.sendControlReply(name, provider, event, key, text);
 		try {
 			if (control.kind === "status") {
-				const status = this.ownerStatus(name, policy, event.conversationKey);
+				const status = this.ownerStatus(name, policy, event.conversationKey, senderDigest);
 				await reply(status.reply, eventDigest);
 				for (const view of status.present)
 					await this.ownerPush.present(
@@ -2063,6 +2093,7 @@ export class SessionChannels {
 						view.id,
 						draftPresentation(view, policy.ownerTerminalOnlyClasses),
 						event.conversationKey,
+						senderDigest,
 						false,
 					);
 				return;
@@ -2085,6 +2116,7 @@ export class SessionChannels {
 				control: handle,
 				by,
 				terminalOnlyClasses: policy.ownerTerminalOnlyClasses,
+				openerOf: this.ownerOpeners(name),
 				presentedAt: (draftId) => this.ownerPush.presentedAt(name, draftId, event.conversationKey),
 				receivedAt: event.receivedAt,
 				turnRefusal: () => this.ownerTurnRefusal(name, policy, this.journal(name).read().result, this.now()),
@@ -2093,8 +2125,10 @@ export class SessionChannels {
 						.read()
 						.result.batches.some((batch) => batch.approval === draftId),
 			});
-			await reply(result.reply, eventDigest);
-			if (result.approved) this.deliverOwnerApproval(name, policy, result.approved, by, event, eventDigest);
+			// An approval's reply waits for its turn: the delivery is started first and answers whether a turn runs it.
+			if (result.approved)
+				this.deliverOwnerApproval(name, policy, result.approved, by, event, eventDigest, result.reply);
+			else await reply(result.reply, eventDigest);
 		} catch (error) {
 			this.deps.warn(
 				`Channel ${name}: an owner control word was not carried out (${error instanceof Error ? error.message : String(error)}).`,
@@ -2102,7 +2136,10 @@ export class SessionChannels {
 		}
 	}
 
-	/** The approval turn of one draft: its own owner batch, recorded once accepted; a refusal lapses the approval. */
+	/**
+	 * The approval turn of one draft: its own owner batch, recorded once accepted, and then `approvedReply` to the chat;
+	 * a refusal lapses the approval and the chat is told so instead.
+	 */
 	private deliverOwnerApproval(
 		name: string,
 		policy: ResolvedChannelPolicy,
@@ -2110,9 +2147,13 @@ export class SessionChannels {
 		by: OwnerDecisionBy,
 		event: InboundChannelEvent,
 		eventDigest: string,
+		approvedReply: string,
 	): void {
 		const provider = this.registry.getChannel(name);
 		const origin: OwnerChannelOrigin = { channel: by.channel, senderDigest: by.senderDigest, ref: by.ref };
+		const reply = (text: string) => {
+			if (provider) void this.sendControlReply(name, provider, event, eventDigest, text);
+		};
 		this.deliverOwnerTurn(
 			name,
 			origin,
@@ -2121,14 +2162,9 @@ export class SessionChannels {
 			true,
 			(accepted) => {
 				if (!accepted) {
-					if (provider)
-						void this.sendControlReply(
-							name,
-							provider,
-							event,
-							`${eventDigest}:lapsed`,
-							`No turn started for draft ${view.id}; the approval lapsed and the draft is held again. Send approve ${view.id} to try once more.`,
-						);
+					reply(
+						`No turn started for draft ${view.id}; the approval lapsed. Send approve ${view.id} to try once more while it is held.`,
+					);
 					return false;
 				}
 				const now = this.now();
@@ -2147,6 +2183,7 @@ export class SessionChannels {
 						`Channel ${name}: an approval turn was not recorded (${error instanceof Error ? error.message : String(error)}); its answer is not routed.`,
 					);
 				}
+				reply(approvedReply);
 				return true;
 			},
 		);
@@ -2157,6 +2194,7 @@ export class SessionChannels {
 		name: string,
 		policy: ResolvedChannelPolicy,
 		conversationKey: string,
+		senderDigest: string,
 	): { readonly reply: string; readonly present: readonly OwnerDraftView[] } {
 		const now = this.now();
 		const state = this.journal(name).read().result;
@@ -2167,9 +2205,10 @@ export class SessionChannels {
 		);
 		const running = [...this.ownerRuns.values()].some((run) => run.name === name && run.accepted && !run.stopped);
 		let drafts: readonly OwnerDraftView[] = [];
+		const openerOf = this.ownerOpeners(name);
 		try {
 			drafts = (this.deps.ownerControl?.()?.drafts() ?? []).filter(
-				(view) => view.state === "pending" && draftInScope(view, name),
+				(view) => view.state === "pending" && draftInScope(view, name, senderDigest, openerOf),
 			);
 		} catch {
 			drafts = [];

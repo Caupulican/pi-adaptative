@@ -86,8 +86,11 @@ function numberIn(value: unknown, fallback: number, min: number, max: number, ke
 /** The owner's ids: platform-assigned, of the channel's shape, at most `MAX_OWNER_SENDERS`, each once. */
 function parseOwnerSenders(name: string, value: unknown, key: string): string[] {
 	if (value === undefined) return [];
+	// A number past the safe integers was already rounded when the settings were read: it fails the id shape below.
 	const listed = Array.isArray(value)
-		? value.map((id: unknown) => (typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id) : id))
+		? value.map((id: unknown) =>
+				typeof id === "number" ? (Number.isSafeInteger(id) && id > 0 ? String(id) : "") : id,
+			)
 		: value;
 	if (!Array.isArray(listed) || listed.length > MAX_OWNER_SENDERS || listed.some((id) => typeof id !== "string"))
 		throw new Error(`${key}.ownerSenders must list at most ${MAX_OWNER_SENDERS} sender ids`);

@@ -6,6 +6,7 @@
  */
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { digest } from "./channel-journal.ts";
 import type { OwnerChannelControl, OwnerControl, OwnerDecisionBy, OwnerDraftView } from "./owner-channel-types.ts";
@@ -25,14 +26,46 @@ export function parseOwnerControl(text: string): OwnerControl | undefined {
 	return undefined;
 }
 
-/** Whether the held draft came from an owner turn on this channel: the only drafts its phone may decide or see. */
-export function draftInScope(view: OwnerDraftView, channel: string): boolean {
-	return view.origin.k === "owner-channel" && view.origin.channel === channel;
+/**
+ * Whether the held draft came from an owner turn on this channel opened by `senderDigest`'s message: the only drafts
+ * that identity may decide or see. `openerOf` names the sender digest of the owner batch a turn's ref recorded.
+ */
+export function draftInScope(
+	view: OwnerDraftView,
+	channel: string,
+	senderDigest: string,
+	openerOf: (ref: string) => string | undefined,
+): boolean {
+	const ref = view.origin.ref;
+	return (
+		view.origin.k === "owner-channel" &&
+		view.origin.channel === channel &&
+		ref !== undefined &&
+		openerOf(ref) === senderDigest
+	);
 }
 
-/** Whether the owner keeps any of the draft's classes for the terminal, or the call has no complete rendering. */
+function headLine(view: OwnerDraftView): string {
+	return `Held for your decision: ${view.toolName} (${classLabels(view)}), draft ${view.id}.`;
+}
+
+/** The phone presentation with the complete call fenced; undefined when the call has no complete rendering. */
+function fencedPresentation(view: OwnerDraftView): string | undefined {
+	if (view.rendering === undefined) return undefined;
+	return `${headLine(view)}\n${wrapUntrustedText(view.rendering, `held-call:${view.id}`, { nonce: digest(`${view.id}:${view.rendering}`).slice(0, 32) })}\nReply approve ${view.id} or deny ${view.id}.`;
+}
+
+/**
+ * Whether the draft is released only at the terminal: a class the owner keeps there, no complete rendering, or a
+ * rendering a push would refuse because it looks like it holds a secret (the phone never sees that call).
+ */
 export function terminalOnly(view: OwnerDraftView, terminalOnlyClasses: readonly EdgeClass[]): boolean {
-	return view.rendering === undefined || view.classes.some((edgeClass) => terminalOnlyClasses.includes(edgeClass));
+	const fenced = fencedPresentation(view);
+	return (
+		fenced === undefined ||
+		hasMaskableSecretText(fenced) ||
+		view.classes.some((edgeClass) => terminalOnlyClasses.includes(edgeClass))
+	);
 }
 
 /** The class labels a phone message names: the closed class names themselves. */
@@ -45,10 +78,15 @@ export function classLabels(view: Pick<OwnerDraftView, "classes">): string {
  * decide it; or, when the rendering is missing or a class is terminal-only, that it is released at the terminal.
  */
 export function draftPresentation(view: OwnerDraftView, terminalOnlyClasses: readonly EdgeClass[]): string {
-	const head = `Held for your decision: ${view.toolName} (${classLabels(view)}), draft ${view.id}.`;
-	if (terminalOnly(view, terminalOnlyClasses) || view.rendering === undefined)
-		return `${head} It must be released at the terminal: ${view.rendering === undefined ? "the complete call does not fit a phone message" : "its class is kept for the terminal"}.`;
-	return `${head}\n${wrapUntrustedText(view.rendering, `held-call:${view.id}`, { nonce: digest(`${view.id}:${view.rendering}`).slice(0, 32) })}\nReply approve ${view.id} or deny ${view.id}.`;
+	const fenced = fencedPresentation(view);
+	if (fenced !== undefined && !terminalOnly(view, terminalOnlyClasses)) return fenced;
+	const why =
+		fenced === undefined
+			? "the complete call does not fit a phone message"
+			: hasMaskableSecretText(fenced)
+				? "the call looks like it holds a secret"
+				: "its class is kept for the terminal";
+	return `${headLine(view)} Release it at the terminal: ${why}.`;
 }
 
 /**
@@ -70,6 +108,8 @@ export interface OwnerDecisionFacts {
 	readonly control: OwnerChannelControl | undefined;
 	readonly by: OwnerDecisionBy;
 	readonly terminalOnlyClasses: readonly EdgeClass[];
+	/** The sender digest of the owner batch a turn's ref recorded (`draftInScope`). */
+	openerOf(ref: string): string | undefined;
 	/** When the draft's presentation was sent to the conversation this decision came from; undefined if never. */
 	presentedAt(draftId: string): number | undefined;
 	/** When the deciding message was received (the platform's time, never later than admission). */
@@ -112,7 +152,8 @@ export function decideOwnerDraft(control: OwnerControl, facts: OwnerDecisionFact
 	const handle = facts.control;
 	if (!handle) return { reply: "This session cannot take decisions now; decide it at the terminal." };
 	const view = handle.drafts().find((draft) => draft.id === id);
-	if (!view || !draftInScope(view, facts.channel)) return { reply: stateReply(id, "absent") };
+	if (!view || !draftInScope(view, facts.channel, facts.by.senderDigest, facts.openerOf))
+		return { reply: stateReply(id, "absent") };
 	if (control.kind === "deny") {
 		if (view.state !== "pending") return { reply: stateReply(id, view.state) };
 		const result = handle.deny(id, facts.by);

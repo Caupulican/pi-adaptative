@@ -25,7 +25,11 @@ const MAX_GAPS = 32;
 const MAX_ONBOARDING = 16;
 /** The owner's private chats a channel pushes to. */
 export const MAX_OWNER_CONVERSATIONS = 8;
-/** Push records kept for dedupe and the hourly rate (a week of them at the highest rate is fewer). */
+/**
+ * Push records kept for dedupe and the hourly rate: the latest ones of the last week. A week at a high rate holds
+ * more, and the oldest go first; the hourly rate reads only the last hour, which always fits, while a key whose record
+ * went may be pushed again.
+ */
 const MAX_OWNER_PUSHES = 512;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 /** A waiting message is delivered within a day or becomes a gap. */
@@ -92,11 +96,14 @@ export interface ChannelOwnerConversation {
 	readonly at: number;
 }
 
-/** One push to the owner's chat, recorded before it is sent: `k` is `push:<key>`, `c` the one conversation it went to. */
+/**
+ * One push to the owner's chat, recorded before it is sent: `k` is `push:<key>`. A held action's presentation gets
+ * `c`, the conversation it was shown to, and `at` again, once its send resolved.
+ */
 export interface ChannelOwnerPushRecord {
 	readonly k: string;
-	readonly at: number;
-	readonly c?: string;
+	at: number;
+	c?: string;
 }
 
 export interface ChannelDraftRecord {
