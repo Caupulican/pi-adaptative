@@ -1805,9 +1805,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._actAhead;
 	}
 
-	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy. */
+	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy and this session serves its channels. */
 	createChannelReplyToolDefinition(): ToolDefinition | undefined {
-		return !this.deps.isChildSession() && this.channels.hasExplicitPolicy()
+		return !this.deps.isChildSession() && !this._channelsHostedByDaemon && this.channels.hasExplicitPolicy()
 			? createChannelReplyToolDefinition(this.channels)
 			: undefined;
 	}
