@@ -93,6 +93,8 @@ class FakeGmail {
 	tokenRequests = 0;
 	historyId = "1000";
 	gapNext = false;
+	/** The mail whose next read loses its connection halfway through the answer. */
+	cutNext: string | undefined;
 	private readonly records: { readonly id: string; readonly mail: Mail; readonly kept: boolean }[] = [];
 	private listWaiter: { readonly start: string; readonly barrier: Barrier } | undefined;
 	private sendWaiter: Barrier | undefined;
@@ -125,6 +127,17 @@ class FakeGmail {
 		if (!found || searchParams.get("format") !== "full")
 			return Promise.resolve(Response.json({ error: { code: 404, status: "NOT_FOUND" } }, { status: 404 }));
 		this.fetched.push(found.mail.id);
+		if (this.cutNext === found.mail.id) {
+			this.cutNext = undefined;
+			// The connection drops while the answer arrives: a network fault, never an unreadable mail.
+			const cut = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode(`{"id":"${found.mail.id}",`));
+					controller.error(new TypeError("terminated"));
+				},
+			});
+			return Promise.resolve(new Response(cut, { headers: { "content-type": "application/json" } }));
+		}
 		return Promise.resolve(Response.json(found.mail));
 	}
 
@@ -197,12 +210,15 @@ interface GmailJournal {
 /**
  * The shipped Gmail transport starts by itself under an owner-written `channels.gmail` policy, with its OAuth client and
  * refresh token in `<agentDir>/channels/gmail.credentials` (mode 600). Its first read only sets the read position. Of
- * six new mails, the owner's (DKIM and SPF passing for the From domain in the header Gmail wrote) becomes one turn
- * without its quoted history, once its first journal write failed and the read was made again from the same position;
- * a mail claiming the owner's address that fails authentication is held unverified and starts nothing; a verified
- * stranger is held and the owner is told the address once; an automatic reply, the mailbox's own mail and an HTML-only
- * mail never reach the journal. The owner's `channel_reply send` posts the draft into the same thread as a reply to
- * that Message-ID. History Gmail no longer keeps is said once and reading goes on. Closing the session arms no poll,
+ * eight new mails, the owner's (DKIM and SPF passing for the From domain in the header Gmail wrote, its address
+ * allowlisted in another case) becomes one turn with the words written below its quote and without the quote, once its
+ * first journal write failed and the read was made again from the same position; an answer cut off while it arrives is
+ * retried after a backoff from the position past the journaled mail, never skipped; a mail claiming the owner's address
+ * that fails authentication is held unverified and starts nothing; a verified stranger is held and the owner is told
+ * once that a sender waits, never the address the sender chose; automatic replies (Auto-Submitted, Precedence), a
+ * bounce, the mailbox's own mail and an HTML-only mail never reach the journal. The owner's `channel_reply list` shows
+ * the held address fenced as data, and `send` posts the draft into the same thread as an auto-replied reply to that
+ * Message-ID. History Gmail no longer keeps is said once and reading goes on. Closing the session arms no poll,
  * and no secret appears in a URL, file, warning, entry, notice or draft.
  */
 export async function runJourney4GmailPhase(world: HarnessWorld): Promise<void> {
@@ -387,8 +403,21 @@ export async function runJourney4GmailPhase(world: HarnessWorld): Promise<void> 
 			account: digest(ACCOUNT.toLowerCase()),
 			historyId: "1000",
 		});
-		const quiet = timers.nextArmed("channel-poll");
+		// The read made again delivers the owner's mail, then the connection drops while the next mail's answer arrives:
+		// a network fault, retried after a backoff from the position past the journaled mail, never a skipped mail.
+		gmail.cutNext = "m2";
+		const cutBackoff = timers.nextArmed("channel-poll");
 		expect(timers.advance("channel-poll", backoffMs), "the backoff ends").toBe(1);
+		const cutBackoffMs = await withDeadline(trace, "the backoff after the cut answer", cutBackoff);
+		expect(cutBackoffMs, "a lost answer is retried, not waited out as a quiet mailbox").toBeLessThan(
+			GMAIL_POLL_INTERVAL_MS,
+		);
+		expect(cursor(), "the read position moved past the journaled mail only").toEqual({
+			account: digest(ACCOUNT.toLowerCase()),
+			historyId: "1001",
+		});
+		const quiet = timers.nextArmed("channel-poll");
+		expect(timers.advance("channel-poll", cutBackoffMs), "the backoff after the cut answer ends").toBe(1);
 		expect(await withDeadline(trace, "the pause after the eight mails", quiet)).toBe(GMAIL_POLL_INTERVAL_MS);
 		await withDeadline(trace, "the Gmail message's turn", ownerTurn.promise);
 		await session.agent.waitForIdle();
@@ -420,7 +449,7 @@ export async function runJourney4GmailPhase(world: HarnessWorld): Promise<void> 
 		);
 		expect(senderNotices.length, "only the verified stranger is told, once").toBe(1);
 		expect(senderNotices[0]?.text).toContain(
-			"Channel gmail held a message from a verified sender who is not in channels.gmail.allowedSenders. The channel_reply tool's list action shows the sender's id to add to that list.",
+			"Channel gmail held a verified sender not in channels.gmail.allowedSenders; the channel_reply list action shows its id.",
 		);
 		expect(senderNotices[0]?.text, "the unfenced notice never carries the address the sender chose").not.toContain(
 			STRANGER,
@@ -444,8 +473,9 @@ export async function runJourney4GmailPhase(world: HarnessWorld): Promise<void> 
 				check: (request) => {
 					const listed = icmLatestResult(request, "channel_reply").text;
 					expect(listed, "the waiting draft is listed").toContain(`${draftId} on gmail`);
-					expect(listed, "the held address is shown as data").toContain('source="channel-sender:gmail"');
-					expect(listed).toContain(`>\n${STRANGER}\n</`);
+					expect(listed, "the held address is shown inside its own fence, as data").toMatch(
+						new RegExp(`source="channel-sender:gmail"[^>]*>\\n${STRANGER.replaceAll(".", "\\.")}\\n</`),
+					);
 					expect(listed, "the allowlisted and the unverified sender are not listed").not.toContain(OWNER);
 				},
 			},
@@ -506,12 +536,14 @@ export async function runJourney4GmailPhase(world: HarnessWorld): Promise<void> 
 			"1000",
 			"1000",
 			"1000",
+			"1001",
 			"1008",
 			"2000",
 		]);
-		expect(gmail.fetched, "each new mail is read, the refused one twice").toEqual([
+		expect(gmail.fetched, "each new mail is read, the refused one and the cut one twice").toEqual([
 			"m1",
 			"m1",
+			"m2",
 			"m2",
 			"m3",
 			"m4",

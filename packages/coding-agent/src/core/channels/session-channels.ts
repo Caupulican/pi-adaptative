@@ -19,6 +19,7 @@ import {
 	type ChannelMessage,
 	type ChannelProvider,
 	type ChannelProviderStatus,
+	type ChannelSenderIds,
 	GatewayRegistry,
 	type JobSchedulerProvider,
 	type LifecycleOutcome,
@@ -70,18 +71,25 @@ const MAX_NAMED_AWAY_DRAFTS = 3;
 const MAX_PENDING_DRAFTS = 32;
 /**
  * A sender id the owner is told verbatim: one the platform assigned (`ChannelSenderIds`), plain and short, never prose
- * (a notice enters the owner's turn unfenced). It is told only when the whole notice fits its one line.
+ * (a notice enters the owner's turn unfenced). It is named only when the whole notice fits its one bounded line.
  */
 const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
 
 /**
- * The one line that tells the owner of a held sender and the key to add them to: with the id only when the platform
- * assigned it; an id the sender chose is read through `channel_reply` `list`, fenced as data.
+ * The one line that tells the owner of a held sender and the key to add them to: with the id only when the notice may
+ * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
+ * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
  */
-function senderNoticeText(name: string, platformId: string | undefined): string {
-	return platformId !== undefined
-		? `Channel ${name} held a message from sender ${platformId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${platformId}" to that list.`
-		: `Channel ${name} held a message from a verified sender who is not in channels.${name}.allowedSenders. The channel_reply tool's list action shows the sender's id to add to that list.`;
+function senderNoticeText(name: string, namedId: string | undefined): string {
+	return namedId !== undefined
+		? `Channel ${name} held a message from sender ${namedId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${namedId}" to that list.`
+		: `Channel ${name} held a verified sender not in channels.${name}.allowedSenders; the channel_reply list action shows its id.`;
+}
+
+/** The id a held-sender notice names: a plain platform-assigned id whose notice fits its line, else none. */
+function nameableSenderId(name: string, senderId: string, senderIds: ChannelSenderIds | undefined): string | undefined {
+	if (senderIds?.assignedBy !== "platform" || !PLAIN_SENDER_ID.test(senderId)) return undefined;
+	return senderNoticeText(name, senderId).length <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
 }
 /** New senders per channel the owner is told about in 24 hours, each once. */
 const MAX_SENDER_NOTICES_PER_DAY = 3;
@@ -1058,7 +1066,7 @@ export class SessionChannels {
 		const normalize = senderIds?.normalize ?? ((id: string) => id);
 		const senderId = normalize(event.senderId);
 		const allowlisted = policy.allowedSenders.some((entry) => normalize(entry) === senderId);
-		const platformId = senderIds?.assignedBy === "platform" ? event.senderId : undefined;
+		const namedId = nameableSenderId(name, event.senderId, senderIds);
 		const update = journal.update(now, (state) => {
 			if (state.seen.some((entry) => entry.d === eventDigest)) return "duplicate" as const;
 			const held = (reason: "unverified" | "not_allowed" | "burst") => {
@@ -1081,14 +1089,10 @@ export class SessionChannels {
 				// The owner learns of a verified sender from the harness, at most once a day per sender, a few a day.
 				const sender = digest(event.senderId).slice(0, 16);
 				const recent = state.onboarding.filter((entry) => now - entry.at < DAY_MS);
-				const tell =
-					(platformId === undefined || PLAIN_SENDER_ID.test(platformId)) &&
-					senderNoticeText(name, platformId).length <= MAX_RETAINED_DIAGNOSTIC_CHARS &&
-					!recent.some((entry) => entry.sender === sender) &&
-					recent.length < MAX_SENDER_NOTICES_PER_DAY;
-				// An id the notice cannot name is kept for the owner's `channel_reply` `list` until the entry ages out.
+				const tell = !recent.some((entry) => entry.sender === sender) && recent.length < MAX_SENDER_NOTICES_PER_DAY;
+				// An id the notice does not name is kept for the owner's `channel_reply` `list` until the entry ages out.
 				if (tell)
-					state.onboarding.push({ sender, at: now, ...(platformId === undefined ? { id: event.senderId } : {}) });
+					state.onboarding.push({ sender, at: now, ...(namedId === undefined ? { id: event.senderId } : {}) });
 				held("not_allowed");
 				return tell ? ("tell_owner" as const) : ("held" as const);
 			}
@@ -1123,17 +1127,17 @@ export class SessionChannels {
 			throw new Error(`Channel ${name} journal is full.`);
 		}
 		if (update.result === "pending") this.scheduleWork();
-		if (update.result === "tell_owner") this.noticeSender(name, event.senderId, platformId, now);
+		if (update.result === "tell_owner") this.noticeSender(name, event.senderId, namedId, now);
 	}
 
 	/** Name at most a platform-assigned id and the key: never the sender's label, words or an id they chose. */
-	private noticeSender(name: string, senderId: string, platformId: string | undefined, at: number): void {
+	private noticeSender(name: string, senderId: string, namedId: string | undefined, at: number): void {
 		const sender = digest(senderId).slice(0, 16);
 		this.deps.observeNotice("channel-sender", () => ({
 			scope: `${name}:${sender}`,
 			state: {
 				reason: `sender:${name}:${sender}:${at}`,
-				text: senderNoticeText(name, platformId),
+				text: senderNoticeText(name, namedId),
 			},
 		}));
 	}
@@ -1553,10 +1557,14 @@ export class SessionChannels {
 	listHeldSenders(): ChannelHeldSenderView[] {
 		const now = this.now();
 		const views: ChannelHeldSenderView[] = [];
-		for (const [name] of this.explicitChannels())
+		for (const [name, policy] of this.explicitChannels()) {
+			const normalize = this.registry.getChannel(name)?.senderIds?.normalize ?? ((id: string) => id);
+			const allowed = new Set(policy.allowedSenders.map(normalize));
+			// A sender the owner has added since is no longer held.
 			for (const entry of this.journal(name).read().result.onboarding)
-				if (entry.id !== undefined && now - entry.at < DAY_MS)
+				if (entry.id !== undefined && now - entry.at < DAY_MS && !allowed.has(normalize(entry.id)))
 					views.push({ channel: name, id: entry.id, heldAt: new Date(entry.at).toISOString() });
+		}
 		return views;
 	}
 

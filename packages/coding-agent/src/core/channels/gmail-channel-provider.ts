@@ -938,7 +938,7 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 	/**
 	 * One read of a mail (`messages.get`, or its text part's `attachments.get`): the answer, or how the mail ends. A mail
 	 * deleted since it arrived is skipped silently; one whose whole answer is too large or not a mail, or that Gmail keeps
-	 * refusing with the same client error, is skipped and said; anything else (no answer, a cut answer, a server error)
+	 * refusing with a client error three times, is skipped and said; anything else (no answer, a cut answer, a server error)
 	 * ends the pass, so the same mail is read again.
 	 */
 	private async readMailPart(
