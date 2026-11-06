@@ -101,6 +101,9 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			}
 		}
 
+		// Digested before the paid call, so a state the digest cannot read fails before anything is spent.
+		const programDigest = canonicalDigest(questions);
+		const stateDigest = canonicalDigest(state);
 		const startTime = Date.now();
 		const response = await this.adapter.evaluate(
 			{
@@ -349,8 +352,8 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				model: response.model || this.model,
 				programId: program.id,
 				programVersion: program.version,
-				programDigest: canonicalDigest(questions),
-				stateDigest: canonicalDigest(state),
+				programDigest,
+				stateDigest,
 				confidenceProvenance: "native_calibrated",
 				latencyMs,
 				...(options?.consequence ? { consequence: options.consequence } : {}),
