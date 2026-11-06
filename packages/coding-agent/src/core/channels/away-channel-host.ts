@@ -19,7 +19,8 @@
  * Every turn is bounded twice: by the channel's own daily bounds and by the away spend bound the daemon's routines run
  * under (`routines.away.maxUsdPerRun` per turn, `routines.away.maxUsdPerDay` across both). A host that cannot serve
  * (no priced model, no provider) leaves the messages with their transport; it is tried again after a backoff from one
- * minute to one hour, and at once when the owner's credentials or the directory's model settings change.
+ * minute to one hour, and at the daemon's next tick after the owner's credentials or the directory's model settings
+ * change.
  */
 
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
