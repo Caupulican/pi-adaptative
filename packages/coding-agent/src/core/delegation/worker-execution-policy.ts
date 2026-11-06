@@ -4,6 +4,7 @@ import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
+	WORKER_MEMORY_BROKER_TOOL_NAME_SET,
 	WORKER_MEMORY_BROKER_TOOL_NAMES,
 	WORKER_MEMORY_READ_TOOL_NAME,
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
@@ -98,6 +99,22 @@ export function workerPlanReadsKnowledge(plan: WorkerExecutionPlan): boolean {
 		plan.requiredCapabilities.includes("memory.query") &&
 		plan.toolManifests.some((tool) => tool.toolName === WORKER_MEMORY_READ_TOOL_NAME)
 	);
+}
+
+/**
+ * The plan of a worker that serves a third party's words: none of the owner's memory. Its memory broker tools leave the
+ * plan with the capabilities only they required, so the grant compiled from it names no tool the lane cannot hold.
+ */
+export function withoutOwnerMemory(plan: WorkerExecutionPlan): WorkerExecutionPlan {
+	const toolManifests = plan.toolManifests.filter(
+		(manifest) => !WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(manifest.toolName),
+	);
+	return {
+		...plan,
+		toolManifests,
+		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
+		readMemory: false,
+	};
 }
 
 export function workerExecutionAuthorityFromPlan(plan: WorkerExecutionPlan): WorkerExecutionAuthorityContract {

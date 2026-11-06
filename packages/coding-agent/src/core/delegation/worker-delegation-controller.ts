@@ -215,6 +215,7 @@ import {
 	compileWorkerExecutionGrant,
 	narrowWorkerExecutionPlan,
 	type WorkerExecutionPlan,
+	withoutOwnerMemory,
 	workerExecutionAuthorityFromPlan,
 	workerPlanReadsKnowledge,
 } from "./worker-execution-policy.ts";
@@ -5108,8 +5109,13 @@ export class WorkerDelegationController {
 		let retentionPolicy = buildRetentionPolicy(model);
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
 		onPrepared(prepared.record);
-		const { executionPlan, lifecycle } = prepared;
+		const { lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
+		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
+		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool.
+		const executionPlan = this.carriesThirdPartyWords(prepared.attempt.attemptId)
+			? withoutOwnerMemory(prepared.executionPlan)
+			: prepared.executionPlan;
 		if (prepared.attempt.status === "queued") {
 			const readiness = lifecycle.getAttemptDispatchReadiness(prepared.attempt.attemptId);
 			if (readiness.state === "blocked") {
@@ -5427,24 +5433,22 @@ export class WorkerDelegationController {
 				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
 			});
 		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
-		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
-		// reads none: no broker when the attempt starts tainted, and no selected facts once a steer taints it.
-		const memoryBroker =
-			executionPlan.readMemory && !this.carriesThirdPartyWords(durableHandle.attemptId)
-				? this.deps.createLaneMemoryBroker(
-						() => laneMemoryCapacity.source(),
-						() => {
-							const current = lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId];
-							return current &&
-								(current.status === "running" || current.status === "leased") &&
-								current.lease?.leaseId === durableHandle.leaseId &&
-								current.lease?.fencingToken === durableHandle.fencingToken &&
-								!this.carriesThirdPartyWords(durableHandle.attemptId)
-								? (current.dispatch.knowledgeReferences ?? [])
-								: [];
-						},
-					)
-				: undefined;
+		// A tainted start plans no memory (above); a steer that taints the attempt later leaves it no selected facts.
+		const memoryBroker = executionPlan.readMemory
+			? this.deps.createLaneMemoryBroker(
+					() => laneMemoryCapacity.source(),
+					() => {
+						const current = lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId];
+						return current &&
+							(current.status === "running" || current.status === "leased") &&
+							current.lease?.leaseId === durableHandle.leaseId &&
+							current.lease?.fencingToken === durableHandle.fencingToken &&
+							!this.carriesThirdPartyWords(durableHandle.attemptId)
+							? (current.dispatch.knowledgeReferences ?? [])
+							: [];
+					},
+				)
+			: undefined;
 		const toolSurface = createLaneToolSurface({
 			workerLabel: agentId,
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
