@@ -20,7 +20,12 @@ import type { CiGitPaths } from "../../../../src/host/ci/ci-status-record.ts";
 import { GithubThreadProvider } from "../../../../src/host/ci/github-thread-provider.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import {
+	HARNESS_PROJECT_CWD,
+	type HarnessWorld,
+	NATIVE_PLATFORM_SHELL_BY_DEFAULT,
+	withDeadline,
+} from "../session-fixture.ts";
 import { latestBatchResults } from "./shared.ts";
 
 const ROUTINE_ID = "github-own-pr-discussion";
@@ -117,6 +122,8 @@ export async function runJourney1GithubRoutinesPhase(
 	const modelRequests = (modelId: string) =>
 		world.provider.requests.filter((request) => request.model.id === modelId).length;
 	const shellBefore = world.shell.requests.length;
+	const gitBefore = world.processes.gitCalls.length;
+	const pushCalls = () => world.processes.gitCalls.slice(gitBefore).filter((call) => call.args.includes("push"));
 	const diagnostics: string[] = [];
 	const ghPaths: string[] = [];
 	const unscripted: string[] = [];
@@ -477,10 +484,22 @@ export async function runJourney1GithubRoutinesPhase(
 			world.shell.requests.slice(shellBefore).map((request) => request.command),
 			"neither the worker nor the third party's parent run reaches the shell with the push",
 		).not.toContain(PUSH);
+		expect(pushCalls(), "neither of them spawns git with the push either").toEqual([]);
 		expect(modelRequests("root") - rootBefore).toBe(2);
 
-		// Control: the owner's own turn runs the same push under the default grant, which releases the draft.
-		world.shell.enqueue({ name: "github-owner-push", command: PUSH, output: "", exitCode: 0 });
+		// Control: the owner's own turn runs the same push under the default grant, which releases the draft. It leaves the
+		// session where the platform sends it: the world's shell, or (with the platform's own engine) git spawned by the
+		// bash tool's git filter, whose remote exchange is the step below.
+		if (NATIVE_PLATFORM_SHELL_BY_DEFAULT)
+			world.git.enqueueTransport({
+				name: "github-owner-push",
+				args: ["push", "origin", "main"],
+				cwd: HARNESS_PROJECT_CWD,
+				code: 0,
+				stdout: "",
+				stderr: "Everything up-to-date\n",
+			});
+		else world.shell.enqueue({ name: "github-owner-push", command: PUSH, output: "", exitCode: 0 });
 		world.provider.enqueue(
 			"root",
 			calls("github-owner-push-call", [{ id: "github-owner-push", name: "bash", arguments: { command: PUSH } }]),
@@ -497,7 +516,14 @@ export async function runJourney1GithubRoutinesPhase(
 		await withDeadline(world.trace, "the owner's own push", prompt);
 		prompt = undefined;
 		await owner.session.agent.waitForIdle();
-		expect(world.shell.reached, "the owner's own run reaches the shell").toContain("github-owner-push");
+		expect(
+			NATIVE_PLATFORM_SHELL_BY_DEFAULT ? world.git.reached : world.shell.reached,
+			"the owner's own run reaches the push's external boundary",
+		).toContain("github-owner-push");
+		expect(
+			pushCalls().map((call) => call.args),
+			"only the owner's own run spawns git with the push, and only through the git filter",
+		).toEqual(NATIVE_PLATFORM_SHELL_BY_DEFAULT ? [["push", "origin", "main"]] : []);
 		expect(
 			outwardDraftStates(owner.sessionManager.getBranch(), false).map(({ state }) => state),
 			"the owner's own push releases the held one",

@@ -115,6 +115,13 @@ export function harnessPath(...segments: string[]): string {
 
 export const HARNESS_PROJECT_CWD = harnessPath("project");
 
+/**
+ * Whether a session runs the platform's own shell engine by default: on win32 the world's POSIX shell is not the platform
+ * shell, so the session omits the world's shell operations. Without them the bash tool's git filter spawns an eligible git
+ * command itself, so that command reaches the virtual repository instead of the world's shell.
+ */
+export const NATIVE_PLATFORM_SHELL_BY_DEFAULT = process.platform === "win32";
+
 /** A native path under the project root: the composition owner for project-relative fixture and test paths. */
 export function projectPath(...segments: string[]): string {
 	return resolve(HARNESS_PROJECT_CWD, ...segments);
@@ -662,6 +669,16 @@ interface GitOutcome {
 	readonly stderr: string;
 }
 
+/**
+ * One exchange with a remote, which the virtual repository cannot perform itself: the exact arguments after the global
+ * options, the directory it runs in, and git's answer. The remote's side is outside the world, so the step is its answer.
+ */
+export interface GitTransportStep extends GitOutcome {
+	readonly name: string;
+	readonly args: readonly string[];
+	readonly cwd: string;
+}
+
 const NOT_A_REPOSITORY = "fatal: not a git repository (or any of the parent directories): .git\n";
 
 /** Whether `target` is `directory` or lies beneath it, judged by native relative paths rather than a textual prefix. */
@@ -683,6 +700,8 @@ function gitRelative(from: string, to: string): string {
  */
 export class VirtualGit {
 	readonly unscripted: string[] = [];
+	/** Names of the transport steps the production code reached, in order. */
+	readonly reached: string[] = [];
 	/** One installed executable, discovered through the same PATH metadata reads as a native tool. */
 	readonly executable: string;
 	private readonly io: VirtualFileSystem;
@@ -696,6 +715,7 @@ export class VirtualGit {
 	private readonly blobs = new Map<string, string>();
 	private readonly trees = new Map<string, ReadonlyMap<string, string>>();
 	private readonly indexFiles = new Map<string, Map<string, GitIndexEntry>>();
+	private readonly transportSteps: GitTransportStep[] = [];
 
 	constructor(io: VirtualFileSystem, root: string) {
 		this.io = io;
@@ -731,6 +751,23 @@ export class VirtualGit {
 	/** The commit a ref names in the virtual repository, or undefined when the ref does not exist. */
 	refSha(ref: string): string | undefined {
 		return this.refs.get(ref);
+	}
+
+	/** Scripts the next remote exchanges, consumed in order by exact arguments and directory; any other one is unscripted. */
+	enqueueTransport(...steps: GitTransportStep[]): void {
+		for (const step of steps) {
+			if (!Number.isSafeInteger(step.code)) throw new Error("Git exit code must be a finite integer");
+			if (!isAbsolute(step.cwd)) throw new Error("A git transport step needs an absolute directory");
+		}
+		this.transportSteps.push(...steps);
+	}
+
+	/** Every scripted remote exchange was reached. */
+	assertTransportDrained(): void {
+		if (this.transportSteps.length > 0)
+			throw new Error(
+				`Git transport not settled: pending=${this.transportSteps.map((step) => step.name).join(",")}`,
+			);
 	}
 
 	/** Process exec port for the worktree-sync engine: asynchronous, results from the same state. */
@@ -844,10 +881,22 @@ export class VirtualGit {
 				if (rest[0] === "get-url" && rest[1] === "origin")
 					return { code: 2, stdout: "", stderr: "error: No such remote 'origin'\n" };
 				throw new Error(`Unscripted remote: ${rest.join(" ")}`);
+			case "push":
+				return this.transport(args, cwd);
 			default:
 				this.unscripted.push(`git ${args.join(" ")} @ ${cwd}`);
 				throw new Error(`Unscripted git command: ${command}`);
 		}
+	}
+
+	/** A remote exchange answers only as the next scripted step, with its exact arguments and directory. */
+	private transport(args: readonly string[], cwd: string): GitOutcome {
+		const step = this.transportSteps[0];
+		if (step === undefined || !isDeepStrictEqual(args, step.args) || resolve(step.cwd) !== resolve(cwd))
+			throw new Error(`Unscripted git transport: ${args.join(" ")}`);
+		this.transportSteps.shift();
+		this.reached.push(step.name);
+		return { code: step.code, stdout: step.stdout, stderr: step.stderr };
 	}
 
 	private commit(tree: ReadonlyMap<string, string>, parent: string | undefined, subject: string): string {
@@ -2226,6 +2275,14 @@ export class HarnessProcesses {
 			]).then(() => {
 				child.emit("close", exitCode, null);
 			});
+			// A refused command or a failing finish still ends the process: both streams close, so the stdio joins and the child
+			// close are not skipped and the caller's wait settles now, never at its timeout; the close never reports success.
+			const abandon = (error: unknown, reject: (reason: unknown) => void) => {
+				exitCode = 1;
+				child.stdout.destroy();
+				child.stderr.destroy();
+				reject(error);
+			};
 			const finished = stdinPipe
 				? new Promise<void>((resolve, reject) => {
 						const chunks: Buffer[] = [];
@@ -2245,9 +2302,7 @@ export class HarnessProcesses {
 									child.finish(outcome);
 									resolve();
 								} catch (error) {
-									child.stdout.destroy();
-									child.stderr.destroy();
-									reject(error);
+									abandon(error, reject);
 								}
 							});
 						};
@@ -2259,7 +2314,14 @@ export class HarnessProcesses {
 					})
 				: new Promise<void>((resolve, reject) => {
 						// The state is read at spawn time, as git reads its repository when it starts.
-						const outcome = this.git.run(argv as string[], spawnOptions.cwd ?? "", spawnOptions.env ?? {});
+						let outcome: GitOutcome;
+						try {
+							outcome = this.git.run(argv as string[], spawnOptions.cwd ?? "", spawnOptions.env ?? {});
+						} catch (error) {
+							// Ended once the caller has attached its listeners, as a finished child is.
+							setImmediate(() => abandon(error, reject));
+							return;
+						}
 						exitCode = outcome.code;
 						child.stdin.end();
 						setImmediate(() => {
@@ -2267,10 +2329,7 @@ export class HarnessProcesses {
 								child.finish(outcome);
 								resolve();
 							} catch (error) {
-								// A failing finish still closes both streams, so the stdio joins and the child close are not skipped.
-								child.stdout.destroy();
-								child.stderr.destroy();
-								reject(error);
+								abandon(error, reject);
 							}
 						});
 					});
@@ -2880,7 +2939,7 @@ export class HarnessWorld {
 		if (model === undefined && options.orchestrationProfile === undefined)
 			throw new Error(`The supplied harness registry has no ${HARNESS_PROVIDER}/${modelId} model`);
 		const systemOneEnabled = options.systemOneEnabled ?? this.systemOne.enabled;
-		const omitShellOperations = options.omitShellOperations ?? process.platform === "win32";
+		const omitShellOperations = options.omitShellOperations ?? NATIVE_PLATFORM_SHELL_BY_DEFAULT;
 		// A session that selects the other mode or its own settings gets its own settings clone; every other setting is the world's.
 		const settingsManager =
 			systemOneEnabled === this.systemOne.enabled && options.settings === undefined
@@ -3269,6 +3328,7 @@ export class HarnessWorld {
 					if (this.git.unscripted.length)
 						throw new Error(`Unscripted git commands: ${this.git.unscripted.join("; ")}`);
 				},
+				() => this.git.assertTransportDrained(),
 				() => {
 					const unclassified = this.warnings.filter(
 						(message) => !this.warningAllowances.some((pattern) => pattern.test(message)),
