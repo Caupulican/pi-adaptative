@@ -16,14 +16,16 @@ import type { SendUserMessageOptions } from "../extensions/types.ts";
 import {
 	type ChannelMessage,
 	type ChannelProvider,
+	type ChannelProviderStatus,
 	GatewayRegistry,
 	type JobSchedulerProvider,
 	type LifecycleOutcome,
 } from "../gateways/channel-provider.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import { isProcessAlive } from "../process-liveness.ts";
-import { hasMaskableSecretText } from "../security/secret-text.ts";
+import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
+import { createBuiltInChannelProvider, isBuiltInChannel } from "./built-in-providers.ts";
 import {
 	type ChannelBatchRecord,
 	type ChannelDraftRecord,
@@ -48,6 +50,10 @@ import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelP
 
 /** Pending drafts per channel; past it the channel delivers nothing new until the owner sends or dismisses some. */
 const MAX_PENDING_DRAFTS = 32;
+/** A sender id the owner is told verbatim: plain, short, never prose (a notice enters the owner's turn unfenced). */
+const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
+/** New senders per channel the owner is told about in 24 hours, each once. */
+const MAX_SENDER_NOTICES_PER_DAY = 3;
 
 /** Sessions of this process that serve a channel: a holder with this process's pid is live only while listed here. */
 const liveHolders = new Map<string, string>();
@@ -121,6 +127,8 @@ interface ChannelRuntime {
 	holding: boolean;
 	/** A batch handed to `sendUserMessage` whose acceptance is not known yet. */
 	offering: boolean;
+	/** Why the started provider reported it receives nothing, until it reports it is connected again. */
+	connection?: string;
 }
 
 function messageText(message: AgentMessage): string | undefined {
@@ -152,13 +160,18 @@ export class SessionChannels {
 	private drainQueued = false;
 	/** Whether a channel had an explicit policy when the tools were last built for it. */
 	private toolsOfferRelease = false;
+	/** Shipped transports this session registered, by channel name. */
+	private readonly builtIns = new Map<string, ChannelProvider>();
+	/** Names a deployment wrapper registered: its provider wins over a shipped one. */
+	private readonly wrapperNames = new Set<string>();
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
 		this.registry = new GatewayRegistry({
 			onDiagnostic: (message) => deps.warn(message),
 			admitChannel: (name) => this.admit(name),
-			onChannelStart: (name, outcome) => this.onChannelStart(name, outcome),
+			onChannelStart: (name, outcome, reason) => this.onChannelStart(name, outcome, reason),
+			onChannelStatus: (name, status) => this.onChannelStatus(name, status),
 		});
 	}
 
@@ -191,6 +204,12 @@ export class SessionChannels {
 
 	/** Register a deployment-supplied channel. It starts only under its policy, now or once the session starts. */
 	registerChannel(provider: ChannelProvider): void {
+		this.wrapperNames.add(provider.name);
+		// The registry stops the shipped provider it replaces; that provider's last report is not the wrapper's.
+		if (this.builtIns.delete(provider.name)) {
+			const runtime = this.runtimes.get(provider.name);
+			if (runtime) runtime.connection = undefined;
+		}
 		this.registry.registerChannel(provider);
 	}
 
@@ -198,9 +217,46 @@ export class SessionChannels {
 		this.registry.registerScheduler(provider);
 	}
 
-	/** Every registered channel and what it is doing; read-only. */
+	/**
+	 * Register the shipped transport of each built-in channel under an explicit policy that no wrapper serves, and retire
+	 * it when that policy is gone. An unreadable policy for a built-in channel is told to the owner like a wrapper's.
+	 */
+	private syncBuiltIns(): void {
+		const policies = this.deps.getChannelPolicies();
+		for (const name of new Set([...policies.keys(), ...this.builtIns.keys(), ...this.runtimes.keys()])) {
+			if (!isBuiltInChannel(name) || this.wrapperNames.has(name)) continue;
+			const resolution = policies.get(name);
+			const policy =
+				resolution?.kind === "policy" && resolution.policy.mode === "explicit" ? resolution.policy : undefined;
+			if (policy) {
+				if (this.builtIns.has(name)) continue;
+				const provider = createBuiltInChannelProvider(name, policy, {
+					agentDir: this.deps.getAgentDir(),
+					warn: (message) => this.deps.warn(message),
+				});
+				if (!provider) continue;
+				this.builtIns.set(name, provider);
+				this.registry.registerChannel(provider);
+				continue;
+			}
+			if (this.builtIns.delete(name)) void this.registry.unregisterChannel(name);
+			if (this.runtimes.has(name)) this.dropHold(name);
+			if (resolution?.kind === "invalid") {
+				const runtime = this.runtime(name);
+				if (runtime.state !== "invalid" || runtime.detail !== resolution.reason)
+					this.setState(name, "invalid", resolution.reason);
+			} else if (this.runtimes.delete(name)) {
+				this.deps.observeNotice("channel-state", () => ({ scope: name, state: "clear" }));
+			}
+		}
+	}
+
+	/** Every registered channel and what it is doing, and a built-in one whose policy cannot be read; read-only. */
 	getStates(): ChannelStateView[] {
-		return this.registry.channelNames.map((name) => {
+		const names = new Set(this.registry.channelNames);
+		for (const [name, runtime] of this.runtimes)
+			if (runtime.state === "invalid" && isBuiltInChannel(name)) names.add(name);
+		return [...names].map((name) => {
 			const runtime = this.runtimes.get(name);
 			return {
 				name,
@@ -228,6 +284,7 @@ export class SessionChannels {
 			this.deps.subscribeSettings(() => this.onSettingsChanged()),
 			this.deps.subscribeForegroundActivity(() => this.onActivity()),
 		);
+		this.syncBuiltIns();
 		void this.registry.start((name, message) => this.receive(name, message));
 	}
 
@@ -242,6 +299,7 @@ export class SessionChannels {
 		for (const [name, runtime] of this.runtimes) {
 			if (runtime.holding) this.releaseHold(name);
 			runtime.state = "stopped";
+			runtime.connection = undefined;
 		}
 	}
 
@@ -269,9 +327,14 @@ export class SessionChannels {
 					text: `Channel ${name} is not started in this session: another open session serves it.`,
 				};
 			case "suspended":
+				if (detail !== undefined && this.runtimes.get(name)?.connection === detail)
+					return {
+						reason,
+						text: `Channel ${name} is not receiving messages: ${detail}.`,
+					};
 				return {
 					reason,
-					text: `Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or the provider registers again.`,
+					text: `Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${this.builtIns.has(name) ? "a session starts" : "the provider registers again"}.`,
 				};
 			case "capped":
 				return {
@@ -321,13 +384,17 @@ export class SessionChannels {
 				return false;
 			}
 		}
-		if (runtime.state !== "armed" && runtime.state !== "capped" && runtime.state !== "starting")
+		// A started provider that reported a lost connection stays suspended until it reports it is back.
+		const reported = runtime.state === "suspended" && runtime.connection !== undefined;
+		if (runtime.state !== "armed" && runtime.state !== "capped" && runtime.state !== "starting" && !reported)
 			this.setState(name, "starting");
 		return true;
 	}
 
 	private dropHold(name: string): false {
-		if (this.runtime(name).holding) this.releaseHold(name);
+		const runtime = this.runtime(name);
+		runtime.connection = undefined;
+		if (runtime.holding) this.releaseHold(name);
 		return false;
 	}
 
@@ -393,18 +460,49 @@ export class SessionChannels {
 			if (other !== this) queueMicrotask(() => void other.registry.refreshChannels());
 	}
 
-	private onChannelStart(name: string, outcome: LifecycleOutcome): void {
+	private onChannelStart(name: string, outcome: LifecycleOutcome, reason: string | undefined): void {
 		if (!this.started) return;
+		const runtime = this.runtime(name);
 		if (outcome === "fulfilled") {
-			this.setState(name, "armed");
+			// A provider may report a lost connection before its start settles.
+			if (runtime.connection !== undefined) this.setState(name, "suspended", runtime.connection);
+			else this.setState(name, "armed");
 			this.scheduleWork();
 			return;
 		}
-		this.setState(name, "suspended", outcome === "timed_out" ? "its start timed out" : "its start failed");
+		runtime.connection = undefined;
+		this.setState(
+			name,
+			"suspended",
+			outcome === "timed_out"
+				? "its start timed out"
+				: ((reason === undefined ? undefined : boundedRedactedDiagnosticText(reason)) ?? "its start failed"),
+		);
+	}
+
+	/** The started provider lost or regained what it receives on; messages it already handed over are unaffected. */
+	private onChannelStatus(name: string, status: ChannelProviderStatus): void {
+		if (!this.started) return;
+		const runtime = this.runtime(name);
+		if (status.state === "connected") {
+			if (runtime.connection === undefined) return;
+			runtime.connection = undefined;
+			if (runtime.state === "suspended") {
+				this.setState(name, "armed");
+				this.scheduleWork();
+			}
+			return;
+		}
+		const reason = boundedRedactedDiagnosticText(status.reason) ?? "the provider gave no reason";
+		if (runtime.connection === reason && runtime.state === "suspended") return;
+		runtime.connection = reason;
+		// While its start is pending the start's outcome decides; it reads the reason recorded here.
+		if (runtime.state !== "starting") this.setState(name, "suspended", reason);
 	}
 
 	private onSettingsChanged(): void {
 		if (!this.started) return;
+		this.syncBuiltIns();
 		void this.registry.refreshChannels();
 		this.scheduleWork();
 		const offerRelease = this.hasExplicitPolicy();
@@ -512,7 +610,18 @@ export class SessionChannels {
 				return "ignored" as const;
 			}
 			if (!event.verified) return held("unverified");
-			if (!policy.allowedSenders.includes(event.senderId)) return held("not_allowed");
+			if (!policy.allowedSenders.includes(event.senderId)) {
+				// The owner learns a verified sender's id from the harness, at most once a day per sender, a few a day.
+				const sender = digest(event.senderId).slice(0, 16);
+				const recent = state.onboarding.filter((entry) => now - entry.at < DAY_MS);
+				const tell =
+					PLAIN_SENDER_ID.test(event.senderId) &&
+					!recent.some((entry) => entry.sender === sender) &&
+					recent.length < MAX_SENDER_NOTICES_PER_DAY;
+				if (tell) state.onboarding.push({ sender, at: now });
+				held("not_allowed");
+				return tell ? ("tell_owner" as const) : ("held" as const);
+			}
 			const inConversation = state.pending.filter((entry) => entry.conversationKey === event.conversationKey).length;
 			if (inConversation >= policy.maxPendingPerConversation) return held("burst");
 			if (state.pending.length >= MAX_PENDING_MESSAGES) return "full" as const;
@@ -544,6 +653,19 @@ export class SessionChannels {
 			throw new Error(`Channel ${name} journal is full.`);
 		}
 		if (update.result === "pending") this.scheduleWork();
+		if (update.result === "tell_owner") this.noticeSender(name, event.senderId, now);
+	}
+
+	/** Name only the plain id and the exact key: never the sender's label or words, which the sender chose. */
+	private noticeSender(name: string, senderId: string, at: number): void {
+		const sender = digest(senderId).slice(0, 16);
+		this.deps.observeNotice("channel-sender", () => ({
+			scope: `${name}:${sender}`,
+			state: {
+				reason: `sender:${name}:${sender}:${at}`,
+				text: `Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`,
+			},
+		}));
 	}
 
 	/** Why the channel delivers nothing now, or undefined. Reads the journal state it is given. */

@@ -49,13 +49,19 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 	if (mode !== "ignore" && mode !== "explicit") throw new Error(`${key}.mode must be "ignore" or "explicit"`);
 	const replyMode = value.replyMode ?? "draft";
 	if (replyMode !== "draft" && replyMode !== "auto") throw new Error(`${key}.replyMode must be "draft" or "auto"`);
-	const senders = value.allowedSenders ?? [];
+	const listed = value.allowedSenders ?? [];
+	// A numeric id (a Telegram user id) may be written unquoted; it is compared as the provider's string id.
+	const senders = Array.isArray(listed)
+		? listed.map((id: unknown) => (typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? String(id) : id))
+		: listed;
 	if (
 		!Array.isArray(senders) ||
 		senders.length > MAX_ALLOWED_SENDERS ||
 		senders.some((id) => typeof id !== "string" || id.length === 0 || id.length > MAX_SENDER_ID_CHARS)
 	)
-		throw new Error(`${key}.allowedSenders must list at most ${MAX_ALLOWED_SENDERS} sender ids`);
+		throw new Error(
+			`${key}.allowedSenders must list at most ${MAX_ALLOWED_SENDERS} sender ids (strings or whole numbers)`,
+		);
 	const maxUsdPerDay = value.maxUsdPerDay ?? 0.5;
 	if (typeof maxUsdPerDay !== "number" || !Number.isFinite(maxUsdPerDay) || maxUsdPerDay < 0 || maxUsdPerDay > 100)
 		throw new Error(`${key}.maxUsdPerDay must be a number from 0 to 100`);

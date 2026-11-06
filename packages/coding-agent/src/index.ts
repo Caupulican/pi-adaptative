@@ -205,7 +205,9 @@ export type {
 	ChannelMessage,
 	ChannelMessageKind,
 	ChannelProvider,
+	ChannelProviderStatus,
 	ChannelSender,
+	ChannelStatusReporter,
 	JobSchedulerProvider,
 	ScheduledJob,
 } from "./core/gateways/channel-provider.ts";

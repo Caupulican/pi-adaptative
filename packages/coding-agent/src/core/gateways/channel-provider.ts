@@ -1,11 +1,10 @@
 /**
  * Interface-driven gateways & scheduling (adaptive-agent design R8).
  *
- * pi does NOT bake transports (Slack/Discord/email/webhooks) or a cron tick loop into the core — that
- * would bloat the agent and couple it to deployment concerns. Instead it exposes two provider contracts
- * that a deployment wrapper (server, headless runner) implements and registers; the core only manages
- * their lifecycle. This keeps the CLI/agent transport- and schedule-agnostic while still offering a
- * first-class, uniform extension point.
+ * pi ships one transport (Telegram, `core/channels/built-in-providers.ts`) and no cron tick loop; every
+ * other transport (Slack/Discord/email/webhooks) comes from a deployment wrapper (server, headless
+ * runner) that implements these provider contracts and registers them; the core only manages their
+ * lifecycle. The shipped transport implements the same contract, so the core treats both alike.
  */
 
 /** What an inbound event is. Any other kind a provider reports is journaled and ignored. */
@@ -54,16 +53,27 @@ export interface ChannelCapabilities {
 /** Handler the core supplies to a channel for inbound messages. It resolves once the event is held; a rejection means "redeliver". */
 export type ChannelInboundHandler = (message: ChannelMessage) => void | Promise<void>;
 
+/** Whether a started channel receives messages: a transport that lost its connection reports why, in its own words. */
+export type ChannelProviderStatus =
+	| { readonly state: "connected" }
+	| { readonly state: "suspended"; readonly reason: string };
+
+/** Optional: a provider that never calls it is taken as connected while started. */
+export type ChannelStatusReporter = (status: ChannelProviderStatus) => void;
+
 /**
- * A transport channel (Telegram/Slack/email/webhook/...). Implemented by a deployment wrapper and
- * registered via {@link GatewayRegistry}. The core starts it (handing it an inbound handler) and stops
- * it on shutdown; it never imports any transport SDK itself.
+ * A transport channel (Telegram/Slack/email/webhook/...). Implemented by a deployment wrapper (or shipped, see
+ * `core/channels/built-in-providers.ts`) and registered via {@link GatewayRegistry}. The core starts it (handing it an
+ * inbound handler) and stops it on shutdown; it never imports any transport SDK itself.
  */
 export interface ChannelProvider {
 	readonly name: string;
 	readonly capabilities?: ChannelCapabilities;
-	/** Begin listening; deliver inbound messages to `onInbound`. */
-	start(onInbound: ChannelInboundHandler): void | Promise<void>;
+	/**
+	 * Begin listening; deliver inbound messages to `onInbound`. A rejection's message is shown to the owner (redacted),
+	 * so it names what to fix and never a credential. `report` tells a later loss or return of the connection.
+	 */
+	start(onInbound: ChannelInboundHandler, report?: ChannelStatusReporter): void | Promise<void>;
 	/** Send an outbound message on this channel: a reply carries the inbound `address` and a reply `eventId`. */
 	send(message: ChannelMessage): void | Promise<void>;
 	/** Stop listening and release resources. */
@@ -99,8 +109,10 @@ export interface GatewayRegistryOptions {
 	onDiagnostic?: (message: string) => void;
 	/** Whether a registered channel may start; one it does not admit is never started. Defaults to every channel. */
 	admitChannel?: (name: string) => boolean;
-	/** How each channel start ended: a rejected or timed-out start is stopped again. */
-	onChannelStart?: (name: string, outcome: LifecycleOutcome) => void;
+	/** How each channel start ended: a rejected or timed-out start is stopped again. `reason` is a rejection's own text, unredacted. */
+	onChannelStart?: (name: string, outcome: LifecycleOutcome, reason?: string) => void;
+	/** A status the current started provider of `name` reported; reports of a replaced or stopped provider are dropped. */
+	onChannelStatus?: (name: string, status: ChannelProviderStatus) => void;
 }
 
 export const DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS = 30_000;
@@ -137,6 +149,8 @@ interface ProviderLifecycleState {
 	lastStartAttemptId?: number;
 	startAttempt?: ProviderStartAttempt;
 	stopAttempt?: ProviderStopAttempt;
+	/** The text the last rejected channel start threw. */
+	startFailure?: string;
 }
 
 /**
@@ -155,7 +169,8 @@ export class GatewayRegistry {
 	private readonly lifecycleTimeoutMs: number;
 	private readonly onDiagnostic: (message: string) => void;
 	private readonly admitChannel: (name: string) => boolean;
-	private readonly onChannelStart: (name: string, outcome: LifecycleOutcome) => void;
+	private readonly onChannelStart: (name: string, outcome: LifecycleOutcome, reason?: string) => void;
+	private readonly onChannelStatus: (name: string, status: ChannelProviderStatus) => void;
 
 	constructor(options: GatewayRegistryOptions = {}) {
 		this.lifecycleTimeoutMs = options.lifecycleTimeoutMs ?? DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS;
@@ -165,22 +180,48 @@ export class GatewayRegistry {
 		this.onDiagnostic = options.onDiagnostic ?? (() => {});
 		this.admitChannel = options.admitChannel ?? (() => true);
 		this.onChannelStart = options.onChannelStart ?? (() => {});
+		this.onChannelStatus = options.onChannelStatus ?? (() => {});
 	}
 
 	/** A channel start bound to the provider's own name, admitted only while `admitChannel` holds and it is the registered one. */
 	private requestChannelStart(channel: ChannelProvider): Promise<void> {
 		if (!this.admitChannel(channel.name)) return Promise.resolve();
+		const state = this.stateFor(channel);
 		return this.requestProviderStart(
 			channel,
-			() => channel.start((message) => this.inboundHandler(channel.name, message)),
+			async () => {
+				state.startFailure = undefined;
+				try {
+					await channel.start(
+						(message) => this.inboundHandler(channel.name, message),
+						(status) => this.reportChannelStatus(channel, state, status),
+					);
+				} catch (error) {
+					state.startFailure = error instanceof Error ? error.message : String(error);
+					throw error;
+				}
+			},
 			() => this.channels.get(channel.name) === channel && this.admitChannel(channel.name),
 		);
 	}
 
 	private reportChannelStart(provider: LifecycleProvider, outcome: LifecycleOutcome): void {
 		if (this.channels.get(provider.name) !== provider) return;
+		const reason = outcome === "rejected" ? this.providerLifecycle.get(provider)?.startFailure : undefined;
 		try {
-			this.onChannelStart(provider.name, outcome);
+			this.onChannelStart(provider.name, outcome, reason);
+		} catch {}
+	}
+
+	/** Only the registered provider, while its start is still wanted, speaks for its channel. */
+	private reportChannelStatus(
+		channel: ChannelProvider,
+		state: ProviderLifecycleState,
+		status: ChannelProviderStatus,
+	): void {
+		if (!this.started || this.channels.get(channel.name) !== channel || state.desiredStart === undefined) return;
+		try {
+			this.onChannelStatus(channel.name, status);
 		} catch {}
 	}
 
@@ -390,6 +431,14 @@ export class GatewayRegistry {
 		if (existing) void this.requestProviderStop(existing);
 		this.channels.set(provider.name, provider);
 		if (this.started) void this.requestChannelStart(provider);
+	}
+
+	/** Forget the channel registered under `name` and stop it; resolves once its bounded stop settled. */
+	unregisterChannel(name: string): Promise<void> {
+		const existing = this.channels.get(name);
+		if (!existing) return Promise.resolve();
+		this.channels.delete(name);
+		return this.requestProviderStop(existing);
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {

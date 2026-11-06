@@ -1,8 +1,19 @@
 # Channels
 
-A channel connects a chat or mail transport to an open root session. Pi ships no transport: a deployment wrapper (a server, a bot runner, an SDK host) implements the provider and registers it. The core decides everything with a cost or a consequence: whether the channel starts, which messages may start a turn, how many turns a day it may start, and whether an answer is sent or kept for the owner.
+A channel connects a chat or mail transport to an open root session. Pi ships Telegram (below); other transports still come from a deployment wrapper (a server, a bot runner, an SDK host) that implements the provider and registers it. The core decides everything with a cost or a consequence: whether the channel starts, which messages may start a turn, how many turns a day it may start, and whether an answer is sent or kept for the owner.
 
 Channels run only while a session is open. Messages that arrive while no session serves the channel stay with the transport; Pi does not run channel turns in the background bot daemon.
+
+## Telegram
+
+Pi ships a Telegram transport: one bot, private chats, text messages, over the Bot API's long polling (no webhook, no listening port). It starts by itself when `channels.telegram` has an explicit policy and no wrapper registered a provider named `telegram` (a wrapper's provider wins). Setup:
+
+1. Create a bot with Telegram's @BotFather and copy its token.
+2. Write the token to `~/.pi/agent/channels/telegram.token`, readable by you only: `(umask 077; mkdir -p ~/.pi/agent/channels; cat > ~/.pi/agent/channels/telegram.token)`, paste, Ctrl-D. On Windows the profile folder's own permissions protect it.
+3. Add `"channels": { "telegram": { "mode": "explicit" } }` to `~/.pi/agent/settings.json`, open Pi and message your bot. Pi holds the message and tells you your numeric id; add it: `"allowedSenders": [123456789]`.
+4. From then on your messages start turns; their answers wait as drafts unless `replyMode` is `"auto"`.
+
+The token is read when the channel starts and never written anywhere else; a missing token, a file other users can read, or a token Telegram rejects shows as `suspended` with the reason in the channel's state and one notice. A failed start is tried again when settings change or a session starts. Telegram allows one poller per bot: a second program polling the same bot (or a webhook set for it) shows as `suspended` with HTTP 409 until it stops. Group chats, edited messages, other bots' messages and media are not admitted. Replies are plain text, up to 4096 characters a message, about one message a second per chat.
 
 ## Registering a provider
 
@@ -39,6 +50,8 @@ session.channels.getStates(); // [{ name: "mail", state: "armed" }]
 
 Registering does not start the provider. The session starts it under the owner's `channels.<name>` policy, now or once the session starts, and stops it when the session closes or the policy is removed. `session.channels` exposes `registerChannel`, `registerScheduler` and `getStates`; a wrapper cannot start a provider or send through it itself. A worker or other child session runs no channels.
 
+A `start` that rejects shows its error message (redacted, first line) as the channel's `suspended` reason, so it should name what the owner has to fix and never a credential. `start` also receives an optional second argument, `report`: a provider that later loses its connection calls `report({ state: "suspended", reason })` and the channel shows `suspended` with that reason until the provider calls `report({ state: "connected" })`. A provider that never reports is taken as connected while it runs.
+
 A channel name is lowercase letters, digits, `.`, `_` and `-`, at most 64 characters, starting with a letter or digit. `pi-chat` is reserved for the [pi-chat](pi-chat.md) mesh.
 
 ### Inbound events
@@ -74,7 +87,7 @@ See [Settings](settings.md#channels) for each key. A registered channel with no 
 
 Each inbound event is recorded in the channel's journal (`<agent dir>/channels/<name>.json`) before the provider's handler resolves. Then:
 
-- **Held, never woken.** A sender the provider did not verify, or one `allowedSenders` does not list, is held: the journal counts it with a digest of the sender id and no text, and no turn starts. A conversation with `maxPendingPerConversation` messages already waiting holds further ones the same way.
+- **Held, never woken.** A sender the provider did not verify, or one `allowedSenders` does not list, is held: the journal counts it with a digest of the sender id and no text, and no turn starts. For a verified sender with a plain id (letters, digits, `.`, `_`, `@`, `+`, `-`, at most 64 characters) the owner is told that id and the `allowedSenders` key to add it to, never the sender's label or words: once per sender a day, at most three senders a channel a day. A conversation with `maxPendingPerConversation` messages already waiting holds further ones the same way.
 - **Refused for redelivery.** With 128 messages waiting in the channel, the handler rejects so the provider delivers the event again later, and the owner is told once.
 - **Waiting.** A verified, allowlisted sender's message waits for a turn, at most 24 hours. Messages that wait longer are dropped and the owner is told how many.
 

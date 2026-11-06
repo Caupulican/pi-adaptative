@@ -22,6 +22,7 @@ const MAX_HELD = 64;
 const MAX_BATCHES = 64;
 const MAX_DRAFTS = 32;
 const MAX_GAPS = 32;
+const MAX_ONBOARDING = 16;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 /** A waiting message is delivered within a day or becomes a gap. */
 export const PENDING_EXPIRY_MS = DAY_MS;
@@ -85,6 +86,8 @@ export interface ChannelJournalState {
 	batches: ChannelBatchRecord[];
 	drafts: ChannelDraftRecord[];
 	gaps: ChannelGapRecord[];
+	/** Senders the owner was told how to allowlist (sender digest prefix), so each is told at most once a day. */
+	onboarding: { sender: string; at: number }[];
 }
 
 export function digest(value: string): string {
@@ -102,6 +105,7 @@ function emptyState(): ChannelJournalState {
 		batches: [],
 		drafts: [],
 		gaps: [],
+		onboarding: [],
 	};
 }
 
@@ -207,6 +211,15 @@ function parseState(text: string): ChannelJournalState {
 		batches: list(value.batches, isBatch),
 		drafts: list(value.drafts, isDraft),
 		gaps: list(value.gaps, isGap),
+		// Absent in a journal written before onboarding notices existed.
+		onboarding:
+			value.onboarding === undefined
+				? []
+				: list(
+						value.onboarding,
+						(item): item is ChannelJournalState["onboarding"][number] =>
+							isPlainRecord(item) && isString(item.sender) && isTime(item.at),
+					),
 	};
 }
 
@@ -223,6 +236,7 @@ function prune(state: ChannelJournalState, now: number): void {
 	const dropDrafts = new Set(settledDrafts.slice(0, Math.max(0, state.drafts.length - MAX_DRAFTS)));
 	state.drafts = state.drafts.filter((draft) => !dropDrafts.has(draft));
 	state.gaps = state.gaps.slice(-MAX_GAPS);
+	state.onboarding = state.onboarding.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_ONBOARDING);
 }
 
 /** What a journal update observed besides its own result: the file was unreadable and was replaced. */

@@ -494,7 +494,7 @@ A value outside its range is replaced by the default. The daemon reads `routines
 
 ### Channels
 
-Admission policy for each chat or mail channel a deployment wrapper registers on a session (see [Channels](channels.md)). Read from the global settings and the directory profile only, never from a repository's `.pi/settings.json`; the first of the two that names a channel decides its whole policy. When the session's settings change or are reloaded, its channels start or stop to match.
+Admission policy for each chat or mail channel: the shipped `telegram` transport, which starts by itself under an explicit policy, and any channel a deployment wrapper registers on a session (see [Channels](channels.md)). Read from the global settings and the directory profile only, never from a repository's `.pi/settings.json`; the first of the two that names a channel decides its whole policy. When the session's settings change or are reloaded, its channels start or stop to match.
 
 ```json
 {
@@ -508,7 +508,7 @@ Admission policy for each chat or mail channel a deployment wrapper registers on
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `channels.<name>.mode` | `"ignore"` | `"explicit"` starts the channel; `"ignore"` keeps it stopped. A channel with no entry is not started. |
-| `channels.<name>.allowedSenders` | `[]` | Sender ids (as the provider reports them, at most 50) whose verified messages may start a turn. Any other sender, and an unverified one, is held and starts nothing. |
+| `channels.<name>.allowedSenders` | `[]` | Sender ids (as the provider reports them, at most 50) whose verified messages may start a turn; a whole number (a Telegram user id) may be written unquoted. Any other sender, and an unverified one, is held and starts nothing; the owner is told a held verified sender's id once a day. |
 | `channels.<name>.replyMode` | `"draft"` | `"draft"` keeps each answer for the owner to send with the `channel_reply` tool; `"auto"` sends it to the conversation's address. |
 | `channels.<name>.maxWakesPerDay` | `10` | Turns the channel may start over the last 24 hours (0 to 200). |
 | `channels.<name>.maxUsdPerDay` | `0.5` | Spend of those turns over the last 24 hours (0 to 100). |

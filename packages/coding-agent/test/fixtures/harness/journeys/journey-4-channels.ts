@@ -88,7 +88,7 @@ interface JournalView {
 }
 
 /** The harness notices of `kind` the session saved for its owner: one per delivery (reason and generation). */
-function notices(manager: SessionManager, kind: string): { readonly reason: string; readonly text: string }[] {
+export function notices(manager: SessionManager, kind: string): { readonly reason: string; readonly text: string }[] {
 	const deliveries = new Map<string, { readonly reason: string; readonly text: string }>();
 	for (const entry of manager.getEntries()) {
 		if (entry.type !== "custom_message" || entry.customType !== HARNESS_NOTICE_CUSTOM_TYPE) continue;
@@ -123,7 +123,7 @@ function expectOwnerMemory(request: ScriptedRequest, carried: boolean): void {
 	expect(systemPrompt, "the run reads that the memory is withheld").toContain(THIRD_PARTY_MEMORY_WITHHELD);
 }
 
-function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string, count = 1): Promise<void> {
+export function noticeSaved(manager: SessionManager, kind: string, reasonPrefix: string, count = 1): Promise<void> {
 	return new Promise<void>((resolve) => {
 		const check = () => {
 			if (notices(manager, kind).filter((notice) => notice.reason.startsWith(reasonPrefix)).length < count) return;

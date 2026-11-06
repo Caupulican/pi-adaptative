@@ -32,6 +32,7 @@ export type HarnessNoticeKind =
 	| "channel-state"
 	| "channel-gap"
 	| "channel-reply"
+	| "channel-sender"
 	| "act-ahead";
 
 /** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */

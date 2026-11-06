@@ -333,7 +333,7 @@ export type ResolvedActAheadSettings = Required<Omit<ActAheadSettings, "command"
  */
 export interface ChannelPolicySettings {
 	mode?: "ignore" | "explicit"; // default: "ignore" — "explicit" starts the provider and admits only `allowedSenders`
-	allowedSenders?: string[]; // provider sender ids whose verified messages may start a turn (at most 50)
+	allowedSenders?: (string | number)[]; // provider sender ids whose verified messages may start a turn (at most 50); a whole number reads as its digits
 	maxWakesPerDay?: number; // default: 10 (0..200) — batches delivered as turns over a rolling 24 h
 	maxUsdPerDay?: number; // default: 0.50 (0..100) — spend of this channel's turns over a rolling 24 h
 	maxBatch?: number; // default: 10 (1..25) — messages of one conversation delivered in one turn
