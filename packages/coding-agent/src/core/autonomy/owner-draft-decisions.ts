@@ -54,6 +54,8 @@ export function createOwnerDraftDecisions(deps: OwnerDraftDecisionDeps): OwnerDr
 		approve(draftId, by, policy: OwnerApprovalPolicy) {
 			const draft = find(draftId);
 			if (!draft) return "absent";
+			// An approval still active on an expired draft admits nothing (the edge reads `state`): the answer says so.
+			if (draft.unexpiredState === "approved" && draft.state === "expired") return "expired";
 			if (draft.unexpiredState !== "pending") return draft.unexpiredState;
 			const { record } = draft;
 			const remote = record.origin.k === "owner-channel";

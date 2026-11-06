@@ -70,9 +70,14 @@ export interface SessionEdgeDeps {
 	/**
 	 * Keeps operations a run carrying a third party's words may not run as one durable draft for the owner and tells
 	 * the owner once (`keepOutwardDraft`); returns the draft's id (absent when the session's pending drafts are full) and
-	 * whether the owner is actually told (false where no notice can be saved: an unpersisted or child session).
+	 * whether the owner is actually told (false where no notice can be saved: an unpersisted or child session), and the
+	 * state of a draft already held under that id.
 	 */
-	prepareOutward?(draft: OutwardDraftInput): { readonly id?: string; readonly told: boolean };
+	prepareOutward?(draft: OutwardDraftInput): {
+		readonly id?: string;
+		readonly told: boolean;
+		readonly state?: OutwardDraftState;
+	};
 	/**
 	 * Records that the owner's own run performs a pending draft's operations (`releaseOutwardDrafts`); `operations` is
 	 * read only while a draft is pending.
@@ -126,6 +131,8 @@ export interface EdgeGrantDetails {
 	scopeKey?: string;
 	/** The owner typed it (see `EdgeGrantRecord.standing`). */
 	standing?: boolean;
+	/** The owner answered the edge prompt (see `EdgeGrantRecord.prompt`). */
+	prompt?: boolean;
 }
 
 function requireValidEdgeScope(scopeKey: unknown, kind: "grant" | "revoke"): string | undefined {
@@ -178,6 +185,7 @@ export function recordEdgeGrant(
 		...(details.note ? { note: details.note } : {}),
 		...(scopeKey !== undefined ? { scopeKey } : {}),
 		...(details.standing === true ? { standing: true as const } : {}),
+		...(details.prompt === true ? { prompt: true as const } : {}),
 		grantedAt: new Date().toISOString(),
 	};
 	deps.appendCustomEntry(EDGE_GRANT_CUSTOM_TYPE, record);
@@ -197,15 +205,16 @@ function remoteOwnerRunOrigin(deps: Pick<SessionEdgeDeps, "getRunOrigin">): Turn
 
 /**
  * The grants a run opened from an owner channel uses: the owner's standing grants (typed `/edge allow` and
- * `edge.thirdPartyAllow`) and this session's operator grants. Never a grant recorded from instructions, and never the
- * defaulted `edge.allow` classes, which stand for the owner at the terminal.
+ * `edge.thirdPartyAllow`) and the owner's answers to the edge prompt. Never a grant derived from words (one cited from
+ * instructions, or System One's reading of the owner's request), and never the defaulted `edge.allow` classes, which
+ * stand for the owner at the terminal.
  */
 export function remoteOwnerEdgeGrants(
 	deps: Pick<SessionEdgeDeps, "getEdgeRecords" | "getThirdPartySettingsAllow">,
 ): EdgeGrantView[] {
 	const written = deps.getThirdPartySettingsAllow?.() ?? [];
 	return collectEdgeGrants(deps.getEdgeRecords(), written, written).filter(
-		(grant) => grant.standing === true || grant.source === "operator",
+		(grant) => grant.standing === true || (grant.source === "operator" && grant.prompt === true),
 	);
 }
 
@@ -238,6 +247,14 @@ export const MAX_OUTWARD_DRAFTS = 64;
  * without it); or expired (a draft held on a remote-owner run, unanswered for `OWNER_DRAFT_EXPIRY_MS`).
  */
 export type OutwardDraftState = "pending" | "approved" | "released" | "denied" | "dismissed" | "expired";
+
+/** The states from which a draft is never approved: the same call asked again under the same request stays there. */
+const OWNER_DRAFT_FINAL_STATES: ReadonlySet<OutwardDraftState> = new Set([
+	"released",
+	"denied",
+	"dismissed",
+	"expired",
+]);
 
 /** How long a draft held on a remote-owner run waits for an answer, from `preparedAt`; derived, nothing is written. */
 export const OWNER_DRAFT_EXPIRY_MS = 24 * 60 * 60 * 1000;
@@ -336,13 +353,23 @@ function outwardOperationsDigest(toolName: string, operations: readonly EdgeOper
 		.slice(0, 16);
 }
 
+/** A stored draft the readers can use without throwing: a malformed one is skipped, never read. */
 function isOutwardDraftRecord(data: unknown): data is OutwardDraftRecord {
+	if (typeof data !== "object" || data === null) return false;
+	const origin: unknown = Reflect.get(data, "origin");
+	const operations: unknown = Reflect.get(data, "operations");
 	return (
-		typeof data === "object" &&
-		data !== null &&
 		Reflect.get(data, "version") === 1 &&
 		typeof Reflect.get(data, "id") === "string" &&
-		typeof Reflect.get(data, "operationsDigest") === "string"
+		typeof Reflect.get(data, "operationsDigest") === "string" &&
+		typeof origin === "object" &&
+		origin !== null &&
+		typeof Reflect.get(origin, "k") === "string" &&
+		Array.isArray(operations) &&
+		operations.every(
+			(operation: unknown) =>
+				typeof operation === "object" && operation !== null && typeof Reflect.get(operation, "class") === "string",
+		)
 	);
 }
 
@@ -447,12 +474,12 @@ export function ownerDraftView(view: Pick<OutwardDraftStateView, "record" | "sta
 /**
  * Keeps one durable draft per held action and request on the branch (redacted, bounded), and returns its id with the
  * line the owner is told. `kept` is false when the branch already holds `MAX_OUTWARD_DRAFTS` pending drafts: the owner
- * is still told, and nothing is stored.
+ * is still told, and nothing is stored. `state` is the state of a draft the branch already held under this id.
  */
 export function keepOutwardDraft(
 	manager: Pick<SessionManager, "getBranch" | "appendCustomEntry">,
 	draft: OutwardDraftInput,
-): { id: string; notice: string; kept: boolean; added?: OutwardDraftRecord } {
+): { id: string; notice: string; kept: boolean; added?: OutwardDraftRecord; state?: OutwardDraftState } {
 	const operations = draft.operations.map((operation) => ({
 		class: operation.class,
 		operation: boundedRedactedDiagnosticText(operation.operation) ?? draft.toolName,
@@ -476,7 +503,8 @@ export function keepOutwardDraft(
 		.digest("hex")
 		.slice(0, 16)}`;
 	const states = outwardDraftStates(branch, false);
-	let kept = states.some(({ record }) => record.id === id);
+	const existing = states.find(({ record }) => record.id === id);
+	let kept = existing !== undefined;
 	let added: OutwardDraftRecord | undefined;
 	if (!kept && states.filter(({ state }) => state === "pending" || state === "approved").length < MAX_OUTWARD_DRAFTS) {
 		kept = true;
@@ -503,6 +531,7 @@ export function keepOutwardDraft(
 		id,
 		kept,
 		...(added ? { added } : {}),
+		...(existing ? { state: existing.state } : {}),
 		notice: boundedActionLine(
 			"Held, not run: ",
 			action,
@@ -705,34 +734,39 @@ function holdForOwner(
 		...(ownerSender ? { ownerSender } : {}),
 	});
 	const classes = [...new Set(operations.map((operation) => operation.class))];
+	const final =
+		prepared?.id !== undefined && prepared.state !== undefined && OWNER_DRAFT_FINAL_STATES.has(prepared.state);
 	deps.noteToolRefusal?.({
 		tool: toolName,
 		code: "remote-owner-held",
 		owner: REMOTE_OWNER_GATE,
-		detail: `no grant covers ${classes.join(", ")}`,
+		detail: final ? `draft ${prepared?.state}` : `no grant covers ${classes.join(", ")}`,
 	});
 	return {
 		reason: boundedActionLine(
-			"Held for your approval: ",
+			final ? "Not run: " : "Held for your approval: ",
 			operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`).join("; "),
 			`, asked from ${originLabel(origin)}; no grant of the owner covers ${classes.join(", ")}.`,
 			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 		),
-		correction: [
-			prepared?.id
-				? `It is kept as draft ${prepared.id}: the owner approves it from the owner channel or performs it at the terminal.`
-				: prepared
-					? "No draft was kept: the session's pending drafts are full."
-					: "This session keeps no drafts.",
-			"Report the held action in your answer and continue with the rest; issue the same call again only once the owner approves it.",
-		].join(" "),
+		correction: final
+			? `Draft ${prepared?.id} is already ${prepared?.state} and cannot be approved. Report it in your answer and continue with the rest; the owner asks for it again in a new message or performs it at the terminal.`
+			: [
+					prepared?.id
+						? `It is kept as draft ${prepared.id}: the owner approves it from the owner channel or performs it at the terminal.`
+						: prepared
+							? "No draft was kept: the session's pending drafts are full."
+							: "This session keeps no drafts.",
+					"Report the held action in your answer and continue with the rest; issue the same call again only once the owner approves it.",
+				].join(" "),
 	};
 }
 
 /**
  * The gate of a run opened from an owner channel (the owner's listed identity on a chat platform), in front of every
- * other edge rule (YOLO included: it stands for the owner at the terminal). In order: the live check; the typed-only
- * table and settings authority, refused; the operations the outward classifier names (destructive and conditional
+ * other edge rule (YOLO included: it stands for the owner at the terminal). In order: the live check; the hardline and
+ * `edge.deny` patterns in every mode (a block refused, a confirmation held, never granted); the typed-only table and
+ * settings authority, refused; the operations the outward classifier names (destructive and conditional
  * ones included) and the harness actions it does not classify, each against `remoteOwnerEdgeGrants`; the owner's
  * approval of exactly this call, consumed once; otherwise a held draft. No confirmation handler and no owner follow-up
  * take part, and no model decides.
@@ -747,9 +781,26 @@ async function enforceRemoteOwnerEdge(
 ): Promise<BeforeToolCallResult | undefined> {
 	const ended = remoteOwnerEnded(deps, origin, toolName);
 	if (ended) return { block: true, ...ended };
+	const scopeCwd = deps.getCwd();
+	// The hardline and the owner's `edge.deny` patterns, in every mode: a block is refused, a confirmation is held.
+	const boundary = classifyYoloBoundary({
+		toolName,
+		args,
+		cwd: executionCwd ?? scopeCwd,
+		scopeCwd,
+		denyCommands: deps.getDenyCommands?.(),
+	});
+	if (boundary?.kind === "block") {
+		deps.noteToolRefusal?.({
+			tool: toolName,
+			code: "remote-owner-hardline",
+			owner: REMOTE_OWNER_GATE,
+			detail: boundary.reason,
+		});
+		return { block: true, reason: `Refused: ${boundary.reason}.` };
+	}
 	const typedOnly = remoteOwnerTypedOnlyReason(toolName, args);
 	if (typedOnly) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, typedOnly) };
-	const scopeCwd = deps.getCwd();
 	const classified = classifyOutwardEdgeOperations({
 		toolName,
 		args,
@@ -761,6 +812,14 @@ async function enforceRemoteOwnerEdge(
 	if (settings) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, settings.reason) };
 	const unclassified = remoteOwnerUnclassifiedAction(toolName, args);
 	if (unclassified) classified.push(unclassified);
+	// What YOLO asks the owner about on every call: no grant covers it here either, only the approval of this call.
+	if (boundary?.kind === "confirm")
+		classified.push({
+			class: "destructive.fs",
+			operation: String((args as { command?: unknown })?.command ?? toolName),
+			reason: boundary.reason,
+			ungrantable: true,
+		});
 	if (classified.length === 0) return undefined;
 	const operations = await resolveEdgeConditions(deps, classified, signal);
 	// The condition read may have waited: the owner channel's authority is read again before anything is admitted.
@@ -847,6 +906,7 @@ export async function enforceSessionEdgeOperation(
 		recordEdgeGrant(deps, operation.class, "operator", {
 			scopeKey: operation.scopeKey,
 			note: "allowed at the prompt",
+			prompt: true,
 		});
 	}
 	return { authorized: true, decision };

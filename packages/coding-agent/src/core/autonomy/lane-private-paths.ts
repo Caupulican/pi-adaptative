@@ -125,7 +125,8 @@ export function getHarnessWriteProtectedPaths(cwd: string, agentDir: string): st
 }
 
 /**
- * What a run carrying a third party's words writes only under a grant (the harness write-protected set) or never (the
+ * What a run carrying a third party's words (or opened from an owner channel) writes only under a grant (the harness
+ * write-protected set, plus the project's settings file, whose `edge` keys the merged settings read) or never (the
  * session store: the agent's sessions directory, the session's own directory and the directory of its file), for the
  * session gate and the worker gate alike.
  */
@@ -136,7 +137,7 @@ export function thirdPartyProtectedWritePaths(
 ): ProtectedWritePaths {
 	const sessionFile = session.getSessionFile();
 	return {
-		harness: getHarnessWriteProtectedPaths(cwd, agentDir),
+		harness: [...getHarnessWriteProtectedPaths(cwd, agentDir), path.join(cwd, ".pi", "settings.json")],
 		sessions: [sessionsDir(agentDir), session.getSessionDir(), ...(sessionFile ? [path.dirname(sessionFile)] : [])],
 	};
 }

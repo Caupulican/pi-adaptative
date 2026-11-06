@@ -349,6 +349,7 @@ export class SessionEdgeIntentController {
 	 * The root's own tool calls are checked here: the delegation gate (steers, so YOLO does not skip it) and the operation
 	 * gate, which YOLO skips only on the owner's own terminal runs (`runsOutsideOwnerTerminal`). A run opened from an owner
 	 * channel is checked by its own operation gate; a call its edge admitted on the owner's approval is admitted here too.
+	 * On such a run YOLO skips no gate at all (`runsRemoteOwner`).
 	 */
 	rootCallChecks() {
 		return {
@@ -368,6 +369,7 @@ export class SessionEdgeIntentController {
 				);
 			},
 			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
+			runsRemoteOwner: () => this.runsRemoteOwner(),
 		};
 	}
 
@@ -549,7 +551,7 @@ export class SessionEdgeIntentController {
 				// A draft held on a remote-owner run is also shown on the owner's phone, once, when it is first kept.
 				if (held.added && isRemoteOwnerOrigin(draft.origin))
 					this.deps.ownerChannel?.presentOwnerDraft?.(ownerDraftView({ record: held.added, state: "pending" }));
-				return { ...(held.kept ? { id: held.id } : {}), told };
+				return { ...(held.kept ? { id: held.id } : {}), ...(held.state ? { state: held.state } : {}), told };
 			},
 			releaseOutward: (toolName, operations) =>
 				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),

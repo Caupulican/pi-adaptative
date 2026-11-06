@@ -18,8 +18,9 @@ export function ownerCallDigest(toolName: string, args: unknown): string {
 }
 
 const VISIBLE_SYMBOLS: Readonly<Record<string, string>> = { "\n": "\u23ce", "\r": "\u240d", "\t": "\u2409" };
-/** C0 and C1 controls, DEL, the bidirectional marks, embeddings, overrides and isolates, zero-width characters, line and paragraph separators. */
-const HIDDEN_CHARACTERS = /[\p{Cc}\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/gu;
+/** Every control, format character (bidirectional marks, zero-width characters), lone surrogate, line and paragraph
+ * separator, and variation selector (`Variation_Selector`: U+FE00-FE0F, U+E0100-E01EF and the Mongolian ones). */
+const HIDDEN_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Variation_Selector}]/gu;
 
 function visible(text: string): string {
 	return text.replace(

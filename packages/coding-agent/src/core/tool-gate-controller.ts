@@ -121,6 +121,11 @@ export interface ToolGateControllerDeps {
 	 */
 	runsOutsideOwnerTerminal?(): boolean;
 	/**
+	 * Whether the run in progress was opened from an owner channel: YOLO stands for the owner at the terminal, so on such a
+	 * run it skips no gate (envelope, acquisition screening, extension blocks, direct-script gate, System One hooks).
+	 */
+	runsRemoteOwner?(): boolean;
+	/**
 	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
 	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
 	 */
@@ -318,7 +323,7 @@ export class ToolGateController {
 		signal?.throwIfAborted();
 		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
-		const yolo = this.deps.getExecutionMode?.() === "yolo";
+		const yolo = this.deps.getExecutionMode?.() === "yolo" && this.deps.runsRemoteOwner?.() !== true;
 		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
 		if (selfCompactionBlock) return selfCompactionBlock;
 		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);

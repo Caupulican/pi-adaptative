@@ -37,6 +37,8 @@ export type ToolDecisionCode =
 	| "remote-owner-ended"
 	/** The remote-owner gate's typed-only table and settings authority (`remoteOwnerTypedOnlyReason`): refused, never held. */
 	| "remote-owner-typed-only"
+	/** The hardline or an `edge.deny` pattern refused a call of a run opened from an owner channel, in every mode. */
+	| "remote-owner-hardline"
 	/** The remote-owner gate kept the call as a draft for the owner's approval of exactly that call. */
 	| "remote-owner-held";
 

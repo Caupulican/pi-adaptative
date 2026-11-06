@@ -790,17 +790,17 @@ export function remoteOwnerTypedOnlyOperation(operations: readonly EdgeOperation
  * An action of a harness action tool that a run opened from an owner channel holds for the owner's approval: every
  * action outside the read-only table, the owner's private records and the delegation launches (which the outward
  * classifier holds as `agent.delegate`). Such an action changes state the edge does not classify (a measured command,
- * a step or event write), so the phone owner approves the exact call.
+ * a step or event write), so the phone owner approves the exact call. A call of such a tool without a string `action`
+ * is held too, as a run carrying a third party's words is refused it.
  */
 export function remoteOwnerUnclassifiedAction(toolName: string, args: unknown): EdgeOperation | undefined {
 	const action = toolAction(args);
-	if (action === undefined || REMOTE_OWNER_RECORD_TOOLS.has(toolName)) return undefined;
+	if (REMOTE_OWNER_RECORD_TOOLS.has(toolName) || !isKnownActionTool(toolName)) return undefined;
 	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
 	if (THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName)?.has(action)) return undefined;
-	if (!isKnownActionTool(toolName)) return undefined;
 	return {
 		class: "operation.irreversible",
-		operation: `${toolName} ${action}`,
+		operation: `${toolName} ${action ?? "without an action"}`,
 		reason: "changes state the edge does not classify",
 	};
 }
@@ -940,6 +940,11 @@ export interface EdgeGrantRecord {
 	 * owner's words.
 	 */
 	standing?: true;
+	/**
+	 * The owner answered the edge prompt ("allow for the session"). An operator grant without it, and without `standing`,
+	 * is System One's reading of the owner's words, which never covers a run opened from an owner channel.
+	 */
+	prompt?: true;
 	grantedAt: string;
 }
 
@@ -961,6 +966,8 @@ export interface EdgeGrantView {
 	messageEntryId?: string;
 	/** Settings grants from `edge.thirdPartyAllow` and grants the owner typed (see `EdgeGrantRecord.standing`). */
 	standing?: true;
+	/** The latest record of this class and scope answered the edge prompt (see `EdgeGrantRecord.prompt`). */
+	prompt?: true;
 }
 
 export interface ToolkitScriptScopeInput {
@@ -1103,6 +1110,7 @@ function grantRecord(data: unknown): EdgeGrantRecord | undefined {
 		...(typeof record.note === "string" ? { note: record.note } : {}),
 		...(scope.narrow ? { scopeKey: scope.scopeKey } : {}),
 		...(record.standing === true ? { standing: true as const } : {}),
+		...(record.prompt === true ? { prompt: true as const } : {}),
 		grantedAt: typeof record.grantedAt === "string" ? record.grantedAt : "",
 	};
 }
@@ -1161,6 +1169,7 @@ export function collectEdgeGrants(
 				...(record.scopeKey !== undefined ? { scopeKey: record.scopeKey } : {}),
 				...(record.messageEntryId ? { messageEntryId: record.messageEntryId } : {}),
 				...(standing ? { standing: true as const } : {}),
+				...(record.prompt ? { prompt: true as const } : {}),
 				grantedAt: record.grantedAt,
 			});
 		} else if (custom.customType === EDGE_REVOKE_CUSTOM_TYPE) {
