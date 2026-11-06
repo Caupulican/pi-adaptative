@@ -58,7 +58,7 @@ import {
 	type KnowledgeGrantReference,
 	parseKnowledgeGrantReferences,
 } from "../memory/knowledge-grant.ts";
-import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { WORKER_MEMORY_BROKER_TOOL_NAME_SET, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import {
 	deriveModelCapabilityProfile,
 	type ModelCapabilityProfile,
@@ -71,6 +71,7 @@ import {
 } from "../objective-execution/current-objective-execution.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
+import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
 import {
 	EMPTY_ATTEMPT_USAGE,
 	projectAttemptUsage,
@@ -795,6 +796,7 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
 			captureReceiptOrigin: () => this.deps.captureReceiptOrigin(),
+			getRunTurnOrigin: () => this.deps.getRunTurnOrigin?.(),
 			noteAttemptOwnerEpoch: (attemptId, ownerEpoch) =>
 				this.notifications.noteAttemptOwnerEpoch(attemptId, ownerEpoch),
 		});
@@ -2197,10 +2199,11 @@ export class WorkerDelegationController {
 						...artifacts,
 						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
 					];
-		const subject = this.lifecycle.getTaskRuntimeSnapshot().attempts[args.subjectAttemptId]?.dispatch;
-		const receiptOrigin = subject?.receiptOrigin;
+		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
+		const subject = attempts[args.subjectAttemptId];
+		const receiptOrigin = subject?.dispatch.receiptOrigin;
 		// The verifier reads the subject's words and work, so it carries the subject's origin.
-		const turnOrigin = subject?.turnOrigin;
+		const turnOrigin = subject ? conversationTurnOrigin(attempts, subject) : undefined;
 		return {
 			profileId: args.verifierProfileId,
 			...(receiptOrigin ? { receiptOrigin } : {}),
@@ -3711,9 +3714,11 @@ export class WorkerDelegationController {
 		return record ? { kind: "replay", record } : { kind: "conflict", skipReason: "orchestration_projection_missing" };
 	}
 
-	/** Whether the attempt's durable dispatch carries a third party's words. */
+	/** Whether the attempt's conversation carries a third party's words: dispatched with them, or admitted while running. */
 	private carriesThirdPartyWords(attemptId: string): boolean {
-		return this.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin?.thirdParty === true;
+		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
+		const attempt = attempts[attemptId];
+		return attempt !== undefined && conversationTurnOrigin(attempts, attempt)?.thirdParty === true;
 	}
 
 	/**
@@ -4594,15 +4599,22 @@ export class WorkerDelegationController {
 		} else if (request.parentAgentId) {
 			const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
 			const parentAttemptId = snapshot.agents[request.parentAgentId]?.activeAttemptId;
-			const parentDispatch = parentAttemptId ? snapshot.attempts[parentAttemptId]?.dispatch : undefined;
-			capturedRequest.receiptOrigin = parentDispatch?.receiptOrigin;
-			capturedRequest.turnOrigin ??= parentDispatch?.turnOrigin;
+			const parentAttempt = parentAttemptId ? snapshot.attempts[parentAttemptId] : undefined;
+			capturedRequest.receiptOrigin = parentAttempt?.dispatch.receiptOrigin;
+			capturedRequest.turnOrigin ??= parentAttempt
+				? conversationTurnOrigin(snapshot.attempts, parentAttempt)
+				: undefined;
 		} else {
 			assertReceiptAdmission?.();
 			capturedRequest.receiptOrigin ??= this.deps.captureReceiptOrigin(
 				assertReceiptAdmission,
 				request.receiptOriginAnchor,
 			);
+			// A root start carries the run it is made in: a run with a third party's words taints the worker it starts. A
+			// saved intent's occurrence and a verifier are the runtime's starts and carry their own origin.
+			const runOrigin =
+				request.savedIntent || request.verificationOfTaskId ? undefined : this.deps.getRunTurnOrigin?.();
+			if (runOrigin?.thirdParty) capturedRequest.turnOrigin ??= runOrigin;
 		}
 		return capturedRequest;
 	}
@@ -5401,20 +5413,24 @@ export class WorkerDelegationController {
 				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
 			});
 		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
-		const memoryBroker = executionPlan.readMemory
-			? this.deps.createLaneMemoryBroker(
-					() => laneMemoryCapacity.source(),
-					() => {
-						const current = lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId];
-						return current &&
-							(current.status === "running" || current.status === "leased") &&
-							current.lease?.leaseId === durableHandle.leaseId &&
-							current.lease?.fencingToken === durableHandle.fencingToken
-							? (current.dispatch.knowledgeReferences ?? [])
-							: [];
-					},
-				)
-			: undefined;
+		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
+		// reads none: no broker when the attempt starts tainted, and no selected facts once a steer taints it.
+		const memoryBroker =
+			executionPlan.readMemory && !this.carriesThirdPartyWords(durableHandle.attemptId)
+				? this.deps.createLaneMemoryBroker(
+						() => laneMemoryCapacity.source(),
+						() => {
+							const current = lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId];
+							return current &&
+								(current.status === "running" || current.status === "leased") &&
+								current.lease?.leaseId === durableHandle.leaseId &&
+								current.lease?.fencingToken === durableHandle.fencingToken &&
+								!this.carriesThirdPartyWords(durableHandle.attemptId)
+								? (current.dispatch.knowledgeReferences ?? [])
+								: [];
+						},
+					)
+				: undefined;
 		const toolSurface = createLaneToolSurface({
 			workerLabel: agentId,
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
@@ -5463,6 +5479,12 @@ export class WorkerDelegationController {
 				// the session gate's outward classification (`enforceThirdPartyEdge`), refused instead of prepared. The
 				// session's closed table of reading actions is not applied: it names the parent's tools, not a worker's.
 				if (this.carriesThirdPartyWords(durableHandle.attemptId)) {
+					// The broker granted before a steer tainted the attempt reads the owner's memory: refused from then on.
+					if (WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName))
+						return {
+							block: true,
+							reason: `${toolName} is refused: this worker carries a third party's words, and the owner's memory is not read for them.`,
+						};
 					const standing = this.deps.getEdgeGrants?.(true) ?? [];
 					const ungranted = classifyOutwardEdgeOperations({
 						toolName,
@@ -5476,7 +5498,7 @@ export class WorkerDelegationController {
 						),
 					}).filter((operation) => !isEdgeOperationGranted(operation, standing));
 					if (ungranted.length > 0) return { block: true, ...thirdPartyEdgeRefusal(ungranted) };
-					return this.deps.checkOperation?.(toolName, args, executionCwd);
+					return this.deps.checkOperation?.(toolName, args, executionCwd, true);
 				}
 				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
 				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
@@ -5487,7 +5509,7 @@ export class WorkerDelegationController {
 					scopeCwd: this.deps.getCwd(),
 				}).find((candidate) => !isEdgeOperationGranted(candidate, parentGrants));
 				if (operation) return { block: true, reason: edgeBlockReason(operation, false) };
-				return this.deps.checkOperation?.(toolName, args, executionCwd);
+				return this.deps.checkOperation?.(toolName, args, executionCwd, false);
 			},
 			initialUsage,
 			sharedBudget,

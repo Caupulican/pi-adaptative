@@ -3,7 +3,9 @@
  * about every operation {@link triageOperation} sends to it and applies the verdict: the operator's standing
  * grant of `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
  * is refused, since only the root can reach the owner. The owner's standing grant is authoritative for
- * either actor, so a granted operation is not judged by System One.
+ * either actor, so a granted operation is not judged by System One. Each call names its own authority
+ * ({@link OperationCaller}): a call carrying a third party's words, the root's or a worker's, is asked
+ * against no owner request and is authorized only by a standing grant.
  *
  * What an operation does is remembered ({@link OperationEffectCache}); only whether the owner's request asks
  * for it is asked fresh, and only when the remembered effects are not nil. A call whose arguments are
@@ -55,20 +57,29 @@ export interface OperationGateDecisionRecord {
 	readonly durationMs: number;
 }
 
+/**
+ * Who makes the call and whose words it serves. A call made with a third party's words (`thirdParty`) reads no owner
+ * request, so a request can never make its operation proceed, and only the owner's standing grants authorize it.
+ */
+export interface OperationCaller {
+	readonly actor: "root" | "worker";
+	readonly thirdParty: boolean;
+}
+
 export interface OperationGateDeps {
 	getEngine(): OperationEffectEngine | undefined;
-	/**
-	 * The owner's request this turn serves; undefined on a run that carries a third party's words, where no owner request
-	 * is read, so a request can never make an operation proceed.
-	 */
+	/** The owner's latest request; read only for a call that carries no third party's words. */
 	getRequest(): string | undefined;
 	getScopeCwd(): string;
 	/** Identity of the current user turn and its authority; a new one forgets cached verdicts. */
 	getTurnKey(): string;
 	/** The owner's words are classified lazily; they are settled before the standing authority is read. */
 	settleOwnerPolicy?(signal?: AbortSignal): Promise<void>;
-	/** Whether the operator granted `operation.irreversible` (standing authority). */
-	isGranted(): boolean;
+	/**
+	 * Whether the operator granted `operation.irreversible`; with `standingOnly`, among the owner's standing grants
+	 * alone, which alone cover a call carrying a third party's words.
+	 */
+	isGranted(standingOnly: boolean): boolean;
 	/** Ask the operator at the edge; never used for a worker, which is refused instead. */
 	askOperator?(
 		operation: EdgeOperation,
@@ -115,13 +126,14 @@ export class OperationGate {
 		toolName: string,
 		args: unknown,
 		cwd: string,
-		actor: "root" | "worker",
+		caller: OperationCaller,
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string; correction?: string } | undefined> {
+		const { actor, thirdParty } = caller;
 		signal?.throwIfAborted();
 		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
-		if (this.deps.isGranted()) return undefined;
+		if (this.deps.isGranted(thirdParty)) return undefined;
 		// No semantic engine means deterministic gates own the call. Avoid filesystem identity work
 		// on this hot path; System One is an optional quality plane, never an execution dependency.
 		const engine = this.deps.getEngine();
@@ -130,14 +142,16 @@ export class OperationGate {
 		const triage = triageOperation({ toolName, args, cwd, scopeCwd, tempDir: tmpdir() });
 		if (triage.kind === "decided") return undefined;
 		this.rollTurn();
-		const key = this.verdictKey(actor, toolName, args, triage);
+		const key = this.verdictKey(caller, toolName, args, triage);
 		let verdict = this.verdicts.get(key);
 		if (!verdict) {
 			const warmed = this.pending.get(key);
 			this.pending.delete(key);
 			const decided = warmed ? await warmed : undefined;
 			signal?.throwIfAborted();
-			verdict = decided?.verdict ?? (await this.decide(engine, toolName, triage, actor, signal)).verdict;
+			verdict =
+				decided?.verdict ??
+				(await this.decide(engine, toolName, triage, actor, this.requestFor(thirdParty), signal)).verdict;
 			this.verdicts.set(key, verdict);
 		}
 		const shown = triage.operation.replace(/\s+/g, " ").trim();
@@ -146,7 +160,7 @@ export class OperationGate {
 			if (verdict.notable) this.deps.notify(`System One: ${subject}: ${verdict.finding}; it runs.`);
 			return undefined;
 		}
-		if (this.deps.isGranted()) {
+		if (this.deps.isGranted(thirdParty)) {
 			this.deps.notify(
 				`System One: ${subject}: ${verdict.finding}; it runs under your operation.irreversible grant.`,
 			);
@@ -174,8 +188,8 @@ export class OperationGate {
 	 * judged as `check` would; several share one request. Nothing here can block or refuse: a failed or
 	 * cancelled pre-warm leaves `check` to judge the call itself.
 	 */
-	prewarm(calls: readonly PrewarmCall[], signal?: AbortSignal): void {
-		if (signal?.aborted || this.deps.isGranted()) return;
+	prewarm(calls: readonly PrewarmCall[], caller: OperationCaller, signal?: AbortSignal): void {
+		if (signal?.aborted || this.deps.isGranted(caller.thirdParty)) return;
 		const engine = this.deps.getEngine();
 		if (!engine) return;
 		const scopeCwd = this.deps.getScopeCwd();
@@ -197,7 +211,7 @@ export class OperationGate {
 				continue;
 			}
 			if (triage.kind === "decided") continue;
-			const key = this.verdictKey("root", call.toolName, call.args, triage);
+			const key = this.verdictKey(caller, call.toolName, call.args, triage);
 			if (this.verdicts.has(key) || this.pending.has(key)) continue;
 			const effectKey = this.effectKey(engine, call.toolName, triage);
 			if (effectKey && this.cache.get(effectKey)) continue;
@@ -205,11 +219,14 @@ export class OperationGate {
 		}
 		if (todo.length === 0) return;
 		const never = () => undefined;
-		const request = this.deps.getRequest();
+		const request = this.requestFor(caller.thirdParty);
 		// The batch asks every call against the owner's request; with none to read, each call is judged on its effects.
 		if (todo.length === 1 || request === undefined) {
 			for (const entry of todo)
-				this.pending.set(entry.key, this.decide(engine, entry.toolName, entry.triage, "root", signal).catch(never));
+				this.pending.set(
+					entry.key,
+					this.decide(engine, entry.toolName, entry.triage, caller.actor, request, signal).catch(never),
+				);
 			return;
 		}
 		const started = this.now();
@@ -230,7 +247,7 @@ export class OperationGate {
 						const answers = all[index] ?? {};
 						const effects = readOperationEffects(answers);
 						this.remember(engine, entry.toolName, entry.triage, effects);
-						const verdict = verdictFromReadings(effects, readOperationRequest(answers), "root");
+						const verdict = verdictFromReadings(effects, readOperationRequest(answers), caller.actor);
 						this.record(entry.toolName, entry.triage, "jev", verdict, started);
 						return { verdict };
 					})
@@ -247,8 +264,15 @@ export class OperationGate {
 		this.turnKey = turnKey;
 	}
 
-	private verdictKey(actor: string, toolName: string, args: unknown, triage: JudgedTriage): string {
-		return `${actor}\u0000${getToolExecutionKey(toolName, args)}\u0000${JSON.stringify(triage.identity)}`;
+	/** The owner's request a call is asked against; none for a call carrying a third party's words. */
+	private requestFor(thirdParty: boolean): string | undefined {
+		return thirdParty ? undefined : this.deps.getRequest();
+	}
+
+	/** A verdict is kept per caller and authority: the same call made with a third party's words is judged apart. */
+	private verdictKey(caller: OperationCaller, toolName: string, args: unknown, triage: JudgedTriage): string {
+		const authority = caller.thirdParty ? "third-party" : "owner";
+		return `${caller.actor}\u0000${authority}\u0000${getToolExecutionKey(toolName, args)}\u0000${JSON.stringify(triage.identity)}`;
 	}
 
 	private effectKey(engine: OperationEffectEngine, toolName: string, triage: JudgedTriage): string | undefined {
@@ -315,10 +339,10 @@ export class OperationGate {
 		toolName: string,
 		triage: JudgedTriage,
 		actor: "root" | "worker",
+		request: string | undefined,
 		signal?: AbortSignal,
 	): Promise<Decided> {
 		const started = this.now();
-		const request = this.deps.getRequest();
 		const effectKey = this.effectKey(engine, toolName, triage);
 		const remembered = effectKey ? this.cache.get(effectKey) : undefined;
 		const ask = (questions: readonly (typeof OPERATION_REQUEST_ID | (typeof OPERATION_EFFECT_IDS)[number])[]) =>

@@ -12,7 +12,7 @@ import {
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
-import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
+import { conversationTurnOrigin, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
@@ -86,6 +86,8 @@ export interface PrepareManagedDelegationInput {
 	worktreeLanePath?: string;
 	/** Exact granted knowledge versions of this turn's task; never their values. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
+	/** A third party's words the run that dispatched this turn carried; an earlier tainted turn of the lane taints it too. */
+	turnOrigin?: OrchestrationDispatchRequest["turnOrigin"];
 }
 
 export interface StartedDelegationAttempt {
@@ -244,6 +246,15 @@ export class DelegationOrchestrationLedger {
 			throw new DurableTaskRuntimeError("Managed dispatch sequence must be a positive integer.");
 		}
 		const taskId = `${input.laneId}:turn:${input.dispatchSequence}`;
+		// The external process keeps every word an earlier turn read, so a turn after a tainted one carries the taint.
+		const turnOrigin = input.turnOrigin?.thirdParty
+			? input.turnOrigin
+			: Object.values(this.runtime.getSnapshot().attempts).find(
+					(attempt) =>
+						attempt.dispatch.executionKind === "managed-process" &&
+						attempt.dispatch.logicalLaneId === input.laneId &&
+						attempt.dispatch.turnOrigin?.thirdParty,
+				)?.dispatch.turnOrigin;
 		return this.prepareNormalized({
 			laneId: taskId,
 			instructions: input.instructions,
@@ -261,7 +272,7 @@ export class DelegationOrchestrationLedger {
 				authorizationId: input.authorizationId,
 				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
 				...(input.worktreeLanePath ? { worktreeLanePath: input.worktreeLanePath } : {}),
-				...dispatchEvidence({ knowledgeReferences: input.knowledgeReferences }),
+				...dispatchEvidence({ knowledgeReferences: input.knowledgeReferences, turnOrigin }),
 			},
 		});
 	}
@@ -321,6 +332,7 @@ export class DelegationOrchestrationLedger {
 			? (input.taskContext?.resourcePointerIds ?? [])
 			: prior.dispatch.resourcePointerIds;
 		const evidence = dispatchEvidence(input);
+		const priorTurnOrigin = conversationTurnOrigin(snapshot.attempts, prior);
 		const dependencyTaskIds = validateTaskDependencyIds(
 			snapshot.tasks,
 			existingTask?.objectiveId ?? objectiveId,
@@ -403,9 +415,7 @@ export class DelegationOrchestrationLedger {
 					...evidence,
 					// The conversation keeps every word an earlier turn read, so a turn after one that carried a third
 					// party's words carries them too.
-					...(evidence.turnOrigin === undefined && prior.dispatch.turnOrigin
-						? { turnOrigin: prior.dispatch.turnOrigin }
-						: {}),
+					...(evidence.turnOrigin === undefined && priorTurnOrigin ? { turnOrigin: priorTurnOrigin } : {}),
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
 					...(controlMessageId ? { controlMessageId } : {}),

@@ -590,6 +590,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"attempt.started",
 	"attempt.lease_renewed",
 	"attempt.model_moved",
+	"attempt.third_party_admitted",
 	"attempt.checkpointed",
 	"attempt.usage_registered",
 	"attempt.usage_recorded",

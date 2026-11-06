@@ -49,17 +49,37 @@ export interface AuthorTaskAutomationInput {
 	readonly danger?: boolean;
 }
 
+/** A script the host authorized for one validation or execution, detached from later edits of its definition. */
+interface AuthorizedAutomationExecution {
+	readonly authorized: true;
+	readonly opCtx: AutomationOperationContext;
+	readonly detachedScript: ToolkitScript;
+	readonly detachedArgs: readonly string[];
+	readonly initialGeneration: number;
+	readonly initialToken: string | undefined;
+	readonly initialState: TaskAutomationDefinition["state"];
+}
+
+/** The host policy refused a script before it ran; `correction` is the policy's own next action, when it gave one. */
+export interface TaskAutomationPolicyRefusal {
+	readonly correction?: string;
+}
+
 export interface ValidateTaskAutomationResult {
 	readonly success: boolean;
 	readonly state: TaskAutomationDefinition["state"];
 	readonly reason?: string;
 	readonly evidence?: TaskAutomationEvidence;
+	/** Set when the host policy refused the script under validation before it ran. */
+	readonly policy?: TaskAutomationPolicyRefusal;
 }
 
 export interface RunTaskAutomationResult {
 	readonly outcome: "succeeded" | "failed";
 	readonly execution?: ScriptExecution;
 	readonly error?: string;
+	/** Set when the host policy refused the script before it ran. */
+	readonly policy?: TaskAutomationPolicyRefusal;
 }
 
 export interface TaskAutomationControllerDeps {
@@ -594,24 +614,34 @@ export class TaskAutomationController {
 		return true;
 	}
 
+	/** Whether the authorized automation and its scope are still the ones authorized, in `expectedState`. */
+	private isAuthorizedExecutionCurrent(
+		prepared: AuthorizedAutomationExecution,
+		expectedState: TaskAutomationDefinition["state"],
+	): boolean {
+		return this.isPreClaimScopeAndIdentityCurrent(
+			prepared.opCtx.name,
+			prepared.initialGeneration,
+			prepared.initialToken,
+			prepared.opCtx.cwd,
+			prepared.opCtx.sessionId,
+			prepared.opCtx.branchId,
+			expectedState,
+		);
+	}
+
 	private async prepareAuthorizedExecution(
 		automation: TaskAutomationDefinition,
 		args: readonly string[],
 		actionLabel: "Validation" | "Execution",
 		signal?: AbortSignal,
 	): Promise<
-		| {
-				readonly authorized: true;
-				readonly opCtx: AutomationOperationContext;
-				readonly detachedScript: ToolkitScript;
-				readonly detachedArgs: readonly string[];
-				readonly initialGeneration: number;
-				readonly initialToken: string | undefined;
-				readonly initialState: TaskAutomationDefinition["state"];
-		  }
+		| AuthorizedAutomationExecution
 		| {
 				readonly authorized: false;
 				readonly reason: string;
+				/** Set when the host policy refused the script before anything ran, with its own next action. */
+				readonly policy?: TaskAutomationPolicyRefusal;
 		  }
 	> {
 		const cwd = this.contextPort.getCwd();
@@ -640,6 +670,7 @@ export class TaskAutomationController {
 					authorized: false,
 					reason:
 						authDecision.reason ?? `${actionLabel} of script "${automation.name}" denied by host authorizer.`,
+					policy: authDecision.correction ? { correction: authDecision.correction } : {},
 				};
 			}
 		}
@@ -743,20 +774,11 @@ export class TaskAutomationController {
 				success: false,
 				state: "failed",
 				reason: prepared.reason,
+				...(prepared.policy ? { policy: prepared.policy } : {}),
 			};
 		}
 
-		if (
-			!this.isPreClaimScopeAndIdentityCurrent(
-				automation.name,
-				prepared.initialGeneration,
-				prepared.initialToken,
-				prepared.opCtx.cwd,
-				prepared.opCtx.sessionId,
-				prepared.opCtx.branchId,
-				prepared.initialState,
-			)
-		) {
+		if (!this.isAuthorizedExecutionCurrent(prepared, prepared.initialState)) {
 			return {
 				success: false,
 				state: "failed",
@@ -861,9 +883,10 @@ export class TaskAutomationController {
 						};
 					}
 					if (!authDecision.authorized) {
-						const reason =
+						const refusal =
 							authDecision.reason ??
 							`Host policy refused negative control fixture for "${control.description}".`;
+						const reason = authDecision.correction ? `${refusal} ${authDecision.correction}` : refusal;
 						return this.failValidation(opCtx, reason);
 					}
 				}
@@ -1045,20 +1068,11 @@ export class TaskAutomationController {
 			return {
 				outcome: "failed",
 				error: prepared.reason,
+				...(prepared.policy ? { policy: prepared.policy } : {}),
 			};
 		}
 
-		if (
-			!this.isPreClaimScopeAndIdentityCurrent(
-				automation.name,
-				prepared.initialGeneration,
-				prepared.initialToken,
-				prepared.opCtx.cwd,
-				prepared.opCtx.sessionId,
-				prepared.opCtx.branchId,
-				"ready",
-			)
-		) {
+		if (!this.isAuthorizedExecutionCurrent(prepared, "ready")) {
 			return {
 				outcome: "failed",
 				error: "Automation was modified during authorization. Execution aborted.",

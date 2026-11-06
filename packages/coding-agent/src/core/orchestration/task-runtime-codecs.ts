@@ -247,6 +247,13 @@ function dispatchTurnOrigin(value: unknown, label: string): TurnOriginRecord {
 	return origin;
 }
 
+/** The third-party origin a running attempt admitted (see `AttemptRuntimeState.admittedTurnOrigin`). */
+export function admittedTurnOriginFromValue(value: unknown, label: string): TurnOriginRecord {
+	const origin = parseTurnOriginRecord(value);
+	if (!origin?.thirdParty) throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	return origin;
+}
+
 export function dispatchIdentifier(value: unknown, label: string): string {
 	const identifier = string(value, label);
 	if (identifier.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
@@ -917,6 +924,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"lease",
 		"retry",
 		"runningModel",
+		"admittedTurnOrigin",
 		"checkpointIds",
 		"usageAccounting",
 		"usageReceipts",
@@ -978,6 +986,14 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		...(attempt.runningModel === undefined
 			? {}
 			: { runningModel: runningModelFromValue(attempt.runningModel, `${label}.runningModel`) }),
+		...(attempt.admittedTurnOrigin === undefined
+			? {}
+			: {
+					admittedTurnOrigin: admittedTurnOriginFromValue(
+						attempt.admittedTurnOrigin,
+						`${label}.admittedTurnOrigin`,
+					),
+				}),
 		...(attempt.usageAccounting === undefined
 			? {}
 			: { usageAccounting: usageAccountingFromValue(attempt.usageAccounting, `${label}.usageAccounting`) }),

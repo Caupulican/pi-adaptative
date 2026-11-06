@@ -11,13 +11,18 @@ import { emitSessionShutdownEvent } from "../../../../src/core/extensions/runner
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { MessageInbox } from "../../../../src/core/messaging/inbox.ts";
+import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
+import { entryTurnOrigin } from "../../../../src/core/turn-origin.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { latestBatchResults } from "./shared.ts";
 
 const TOOL_TIMEOUT_MS = 10_000;
+const READER_PROFILE_ID = "pi-chat-reader";
 
 async function callTool(session: AgentSession, name: string, params: Record<string, unknown>) {
 	const definition = session.getToolDefinition(name);
@@ -42,7 +47,9 @@ async function callTool(session: AgentSession, name: string, params: Record<stri
  * with the sender's standing attested; a later send of the same messageId is acknowledged without a second turn; mail
  * forged into the inbox arrives as an unverified peer; a push a verified peer asks a third session for is prepared for that
  * session's owner (one draft, one notice, no shell request) while the same push runs on the owner's own turn and,
- * after the owner's own grant, in the peer's run; and no message body is stored once its message is settled or written
+ * after the owner's own grant, in the peer's run; a worker a peer's run delegates carries the peer's origin, is offered
+ * none of the owner's memory and reports into a third-party run, while the owner's own worker keeps its memory tool and
+ * reports as the owner's automation; and no message body is stored once its message is settled or written
  * to the audit log.
  */
 export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void> {
@@ -245,6 +252,31 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	// the owner's own turn, and in a peer's run once the owner grants git.publish themselves.
 	const agentDirC = `${world.agentDir}-pi-chat-c`;
 	const managerC = world.createSessionManager(agentDirC);
+	// A read-only reader with the owner's memory tool, for the delegation witness below.
+	new OrchestrationProfileStore({ agentDir: agentDirC, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
+		{
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: READER_PROFILE_ID,
+			description: "Read-only project notes reader.",
+			role: "explorer",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["filesystem.read", "memory.query"],
+			readOnly: true,
+			toolNames: ["read", "memory_read"],
+			resourceProfileNames: [],
+			dispatchProfileIds: [],
+			budget: {},
+			maxConcurrent: 1,
+			leaseTtlMs: 60_000,
+			requireIndependentVerification: false,
+			createdAt: "2026-11-05T00:00:00.000Z",
+			updatedAt: "2026-11-05T00:00:00.000Z",
+		},
+		"global",
+	);
 	const sessionC = await open(managerC, agentDirC, { settings: { edge: {} }, systemOneEnabled: false });
 	const meshIdC = sessionMeshId(managerC.getSessionId());
 	expect((await callTool(sessionA, "list_peers", {})).text, "A sees C on the mesh before it writes to it").toContain(
@@ -363,6 +395,124 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 	).not.toContain(pushCommand);
 	expect(drafts().length, "the wake's attempt is the same held request").toBe(1);
 	expect(heldNotices().length, "the owner is still told once").toBe(1);
+
+	// The taint travels with a delegation: once the owner lets peers' runs delegate (their edge command), a worker the
+	// peer's run starts carries the peer's origin in its dispatch, is offered none of the owner's memory, and its report
+	// opens a third-party run. Normal order: the same reader started on the owner's own turn keeps its memory tool, and
+	// its report is the owner's automation.
+	sessionC.grantEdge("agent.delegate", "operator", { note: "the owner's edge command" });
+	const completionOrigins = () =>
+		managerC
+			.getEntries()
+			.filter(
+				(entry) =>
+					(entry.type === "custom_message" && entry.customType === "background-worker-completion") ||
+					(entry.type === "message" &&
+						entry.message.role === "custom" &&
+						entry.message.customType === "background-worker-completion"),
+			)
+			.map((entry) => entryTurnOrigin(entry));
+	/** One delegation of the reader: the run starts it and answers, the worker reports, and its report wakes C once. */
+	const readerLeg = async (label: string, open: () => Promise<unknown>, offeredMemory: boolean) => {
+		const answered = createBarrier();
+		const reported = createBarrier();
+		const woken = createBarrier();
+		const before = completionOrigins().length;
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-start`, [
+				{
+					id: `${label}-start`,
+					name: "delegate",
+					arguments: {
+						action: "start",
+						profileId: READER_PROFILE_ID,
+						instructions: "Read the project notes and report.",
+					},
+				},
+			]),
+			{
+				name: `${label}-started`,
+				check: (request) => {
+					const started = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(started?.isError, started?.text).toBe(false);
+					answered.release();
+				},
+				reply: { content: [{ type: "text", text: "A reader is started." }] },
+			},
+			{
+				name: `${label}-woken`,
+				check: () => woken.release(),
+				reply: { content: [{ type: "text", text: "Read the reader's report." }] },
+			},
+		);
+		world.provider.enqueue("worker-a", {
+			name: `${label}-reader`,
+			// Held until the parent's answer is requested: the report then either joins that run after its answer or opens the
+			// next one, one more parent request either way.
+			gate: answered.promise,
+			check: (request) => {
+				const tools = request.context.tools?.map((tool) => tool.name) ?? [];
+				if (offeredMemory)
+					expect(tools, `${label}: the owner's reader keeps its memory tool`).toContain("memory_read");
+				else
+					expect(tools, `${label}: a reader for a peer's words reads none of the owner's memory`).not.toContain(
+						"memory_read",
+					);
+				reported.release();
+			},
+			reply: calls(`${label}-report`, [
+				{
+					id: `${label}-report`,
+					name: "submit_report",
+					arguments: { status: "completed", summary: "Read the project notes." },
+				},
+			]).reply,
+		});
+		const opened = open();
+		await withDeadline(trace, `${label}: the run that starts the reader`, opened);
+		await withDeadline(trace, `${label}: the reader runs`, reported.promise);
+		await withDeadline(trace, `${label}: the report wakes C`, woken.promise);
+		await sessionC.agent.waitForIdle();
+		const origins = completionOrigins();
+		expect(origins.length, `${label}: one report is delivered`).toBe(before + 1);
+		return origins.at(-1);
+	};
+	const peerReader = await readerLeg(
+		"pi-chat-peer-reader",
+		async () =>
+			expectStatus(
+				await callTool(sessionA, "agent_send", {
+					to: meshIdC,
+					message: "have a reader look at the notes",
+					messageId: "leg-reader-1",
+					timeoutMs: TOOL_TIMEOUT_MS,
+				}),
+				"received",
+				"the peer's delegation request is received",
+			),
+		false,
+	);
+	const peerAttempt = Object.values(sessionC.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
+		(attempt) => attempt.dispatch.profileId === READER_PROFILE_ID,
+	);
+	expect(peerAttempt?.dispatch.turnOrigin, "the peer's run hands its origin to the worker it starts").toMatchObject({
+		k: "peer-agent",
+		channel: "pi-chat",
+		thirdParty: true,
+	});
+	expect(peerReader, "the report of a peer's worker opens a third-party run").toEqual({
+		v: 1,
+		k: "worker-result",
+		thirdParty: true,
+	});
+	const ownerReader = await readerLeg(
+		"pi-chat-owner-reader",
+		() => sessionC.prompt("Have a reader look at the notes."),
+		true,
+	);
+	expect(ownerReader, "the owner's worker's report is the owner's automation").toEqual({ v: 1, k: "worker-result" });
+	trace.mark("root", "pi-chat.reader-origins");
 
 	// Control: the owner's own turn pushes under the default grant. A peer message arriving during that run is queued as a
 	// follow-up: it never joins the owner's run, which keeps its authority, and opens its own run once the owner's ends.

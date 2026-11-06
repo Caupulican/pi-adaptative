@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest } from "../../kernel/index.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { stampWorkerControl, workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
@@ -20,6 +21,7 @@ import {
 import { assertHostEventWorkerScope } from "../events/host-event-reducer.ts";
 import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
@@ -186,6 +188,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
 	captureReceiptOrigin?(): WorkerReceiptOrigin;
+	/** The origin of the root's run in progress: a message the root writes now carries its third party's words. */
+	getRunTurnOrigin?(): TurnOriginRecord | undefined;
 	/** Mirrors `WorkerNotificationCoordinator.noteAttemptOwnerEpoch` -- called only when
 	 * `prepareAgentTurn` reports `created: true`, never for a replayed control message returning an
 	 * attempt that may predate the current process. */
@@ -332,6 +336,8 @@ export interface WorkerMailboxConversationMessage {
 	messageId: string;
 	instructions: string;
 	message: UserMessage;
+	/** The third party's words the sender carried (`WorkerAgentMessage.turnOrigin`); admission records them. */
+	turnOrigin?: TurnOriginRecord;
 }
 
 /**
@@ -450,9 +456,21 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const accepted = events.filter(({ message }) =>
 			this.hostEventTransport.consume(agentId, execution, conversation, message),
 		);
-		return accepted.length
+		const admitted = accepted.length
 			? accepted
 			: candidates.filter(({ message }) => workerControlOf(message)?.k !== "host_event");
+		// A steer or follow-up carrying a third party's words taints the running attempt before the model reads it.
+		const thirdParty = admitted.find((candidate) => candidate.turnOrigin?.thirdParty)?.turnOrigin;
+		if (thirdParty)
+			this.options
+				.getLifecycle()
+				.ledger.runtime.recordAttemptThirdPartyWords(
+					execution.attemptId,
+					execution.leaseId,
+					execution.fencingToken,
+					thirdParty,
+				);
+		return admitted;
 	}
 
 	getProcessOwnerId(): string {
@@ -1203,6 +1221,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			};
 		}
 		const targetMailbox = this.getMailbox(target.agentId);
+		const turnOrigin = this.senderTurnOrigin(sourceAgentId);
 		let queued: QueuedPeerMessage;
 		try {
 			queued = targetMailbox.enqueueWithReceipt({
@@ -1211,6 +1230,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				senderAgentId: sourceAgentId,
 				replyToMessageId: request.messageId,
 				...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
+				...(turnOrigin ? { turnOrigin } : {}),
 				...(request.threadId ? { threadId: request.threadId } : {}),
 				idempotencyKey,
 				task: { kind: "agent_turn" },
@@ -2131,6 +2151,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				messageId: message.messageId,
 				instructions: message.content,
 				message: this.mailboxMessage(message),
+				...(message.turnOrigin ? { turnOrigin: message.turnOrigin } : {}),
 			}));
 	}
 
@@ -2376,6 +2397,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 		const receiptOrigin = this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[args.terminalAttemptId]
 			?.dispatch.receiptOrigin;
+		const turnOrigin = this.senderTurnOrigin(args.childAgentId, args.terminalAttemptId);
 		const queued = this.getMailbox(parent.agentId).enqueueWithReceipt({
 			kind: active ? "steer" : "follow_up",
 			content,
@@ -2383,6 +2405,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			idempotencyKey,
 			task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
 			...(receiptOrigin ? { receiptOrigin } : {}),
+			...(turnOrigin ? { turnOrigin } : {}),
 		});
 		if (queued.status === "completed_replay") {
 			this.notifyStateChangedBestEffort();
@@ -2496,12 +2519,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					try {
 						this.enableAttemptAccountingForNextTask(agent);
 						const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
-						// A worker that read a third party's words passes them on in what it sends.
+						// A sender that carried a third party's words passes them on in what it sends: the message names them
+						// since it was written; one written before it did is read from the worker sender's latest attempt.
 						const sender =
 							message.senderAgentId && message.senderAgentId !== this.sessionRootAddress
 								? this.options.getLifecycle().getAgent(message.senderAgentId)
 								: undefined;
-						const senderOrigin = sender ? this.latestAgentAttempt(sender)?.dispatch.turnOrigin : undefined;
+						const senderOrigin =
+							message.turnOrigin ?? (sender ? this.senderTurnOrigin(sender.agentId) : undefined);
 						const prepared = this.options.getLifecycle().prepareAgentTurn({
 							agentId: agent.agentId,
 							instructions: message.content,
@@ -2787,6 +2812,29 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		throw new Error(`Logical worker agent '${target.agentId}' is outside its control subtree.`);
 	}
 
+	/**
+	 * The third party's words a sender carries as it writes: the root's run in progress, or the worker's own attempt
+	 * (`attemptId` when the caller names it, else its active or latest one). `undefined` when only the owner's words
+	 * reached the sender.
+	 */
+	private senderTurnOrigin(senderAgentId: string | undefined, attemptId?: string): TurnOriginRecord | undefined {
+		let origin: TurnOriginRecord | undefined;
+		if (!senderAgentId || senderAgentId === this.sessionRootAddress) origin = this.options.getRunTurnOrigin?.();
+		else {
+			const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+			const agent = snapshot.agents[senderAgentId];
+			const namedAttemptId = attemptId ?? agent?.activeAttemptId;
+			const attempt =
+				namedAttemptId !== undefined
+					? snapshot.attempts[namedAttemptId]
+					: agent
+						? this.latestAgentAttempt(agent)
+						: undefined;
+			origin = attempt ? conversationTurnOrigin(snapshot.attempts, attempt) : undefined;
+		}
+		return origin?.thirdParty ? origin : undefined;
+	}
+
 	private latestAgentAttempt(agent: AgentBindingContract): AttemptRuntimeState | undefined {
 		const lifecycle = this.options.getLifecycle();
 		const latest = lifecycle.getLatestAgentAttempt?.(agent.agentId);
@@ -2983,6 +3031,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						? snapshot.attempts[activeSender]?.dispatch.receiptOrigin
 						: undefined
 					: this.options.captureReceiptOrigin?.()));
+		// The sender's third party's words travel with what it writes; a replay keeps the stored message's.
+		const turnOrigin = replay ? undefined : this.senderTurnOrigin(sender);
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
 			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.
@@ -2991,6 +3041,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				content,
 				...options,
 				...(receiptOrigin ? { receiptOrigin } : {}),
+				...(turnOrigin ? { turnOrigin } : {}),
 				...(task ? { task } : {}),
 				...(onAdmitted ? { onAdmitted } : {}),
 			});

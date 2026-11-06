@@ -79,11 +79,13 @@ export function sendUserMessageOriginError(origin: unknown): string | undefined 
 /**
  * The origin a custom message names, read from its own details: a delivered parent input keeps them under the ledger's
  * wrapper (`{ parentInput, originalDetails }`, `parentInputMessage`), on the live message and its entry alike, so the
- * wrapper is opened first. Its type names it, and two delivered
+ * wrapper is opened first. Its type names it, and three delivered
  * kinds also say when a third party's words decided them: a host event whose delivery marks who wrote the content
  * (`details.hostEvent.authorship`, written by `hostEventParentInput` for a third-party-authored kind; any mark counts as
- * another's), and a routine's result from a run a third party's words decided (`details.thirdParty: true`, written by
- * `routineParentInput` when `routineTurnOrigin` names one). A type nobody registered here is the owner's installed code.
+ * another's), a routine's result from a run a third party's words decided (`details.thirdParty: true`, written by
+ * `routineParentInput` when `routineTurnOrigin` names one), and a background completion that reports work a third
+ * party's words reached (`details.thirdParty: true`, written by the terminal handoff for a tainted worker attempt). A
+ * type nobody registered here is the owner's installed code.
  */
 function customTurnOrigin(customType: string, wrapped: unknown): TurnOriginRecord {
 	const details = isPlainRecord(wrapped) && "parentInput" in wrapped ? wrapped.originalDetails : wrapped;
@@ -109,9 +111,11 @@ function customTurnOrigin(customType: string, wrapped: unknown): TurnOriginRecor
 		case HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE:
 			return { v: 1, k: "worker-result" };
 		default:
-			return (HOST_TURN_CUSTOM_TYPES as readonly string[]).includes(customType)
-				? { v: 1, k: "worker-result" }
-				: { v: 1, k: "extension-message" };
+			if (!(HOST_TURN_CUSTOM_TYPES as readonly string[]).includes(customType))
+				return { v: 1, k: "extension-message" };
+			return details && typeof details === "object" && Reflect.get(details, "thirdParty") === true
+				? { v: 1, k: "worker-result", thirdParty: true }
+				: { v: 1, k: "worker-result" };
 	}
 }
 

@@ -15,6 +15,7 @@ import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/p
 import type { AgentContextPlan, AgentContextWire, AgentMessage, AgentTool } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -231,8 +232,17 @@ export interface ParentExecutionPolicy {
 	getEdgeGrants?(standingOnly?: boolean): readonly EdgeGrantView[];
 	/** Settles the owner's queued words before a worker call reads the parent's grants or delivery limit. */
 	settleOwnerPolicy?(): Promise<void>;
-	/** System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted). */
-	checkOperation?(toolName: string, args: unknown, cwd: string): Promise<{ block: true; reason: string } | undefined>;
+	/**
+	 * System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted).
+	 * `thirdParty` is the worker's own authority: its attempt carries a third party's words, so no owner request is read
+	 * and only the owner's standing grants authorize the call.
+	 */
+	checkOperation?(
+		toolName: string,
+		args: unknown,
+		cwd: string,
+		thirdParty: boolean,
+	): Promise<{ block: true; reason: string } | undefined>;
 	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
 	localCommitBranch?(): string | undefined;
 	/**
@@ -315,6 +325,8 @@ export interface ForegroundStateReaders {
 	 * turn's when none runs. Undefined while no ICM chat runs.
 	 */
 	getContinuousChatBirthView?(): { view: string; timestamp: number } | undefined;
+	/** The origin of the run in progress (`RunTurnOrigin`): a worker the root starts or writes to now carries its taint. */
+	getRunTurnOrigin?(): TurnOriginRecord | undefined;
 }
 
 /** What worker execution reads from the parent transcript; every write goes through {@link ParentWritePort}. */

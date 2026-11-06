@@ -33,6 +33,7 @@ import {
 import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
+import { conversationTurnOrigin } from "./orchestration/attempt-agent-identity.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
 import type { CommsStateCode } from "./provider-prompt-contracts.ts";
@@ -557,6 +558,16 @@ export class ForegroundTerminalHandoffController {
 		});
 		const included = prepared.slice(0, 8).map(({ summaryItem: _summaryItem, ...record }) => record);
 		const wake = this.resolveWake(unread);
+		// A report of work a third party's words reached opens a third-party run (`customTurnOrigin`).
+		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
+		const thirdParty =
+			snapshot !== undefined &&
+			Object.values(snapshot.attempts).some(
+				(attempt) =>
+					unread.some((record) =>
+						record.attemptId ? attempt.attemptId === record.attemptId : attempt.taskId === record.laneId,
+					) && conversationTurnOrigin(snapshot.attempts, attempt)?.thirdParty === true,
+			);
 		return {
 			message: {
 				customType: "background-worker-completion",
@@ -572,6 +583,7 @@ export class ForegroundTerminalHandoffController {
 						"agent",
 						prepared.map((entry) => entry.summaryItem),
 					),
+					...(thirdParty ? { thirdParty: true } : {}),
 				},
 			},
 			...wake,

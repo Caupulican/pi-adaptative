@@ -1,5 +1,6 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest } from "../autonomy/contracts.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
@@ -79,6 +80,8 @@ export interface ManagedLaneControllerDeps {
 	 * dispatch-phase lane creation in `record()`, to stamp the new lane's owner epoch via
 	 * `noteAttemptOwnerEpoch` -- mirrors `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
+	/** The origin of the run in progress; a dispatch reported while it carries a third party's words carries them. */
+	getRunTurnOrigin?(): TurnOriginRecord | undefined;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): void;
 	/**
@@ -218,6 +221,7 @@ export class ManagedLaneController {
 			let runtimeLease: RuntimeWorkLease | undefined;
 			// The delegated lanes' grant parser: a malformed or oversized claim is refused before any durable state.
 			const knowledgeReferences = parseKnowledgeGrantReferences(event.dispatch.knowledgeReferences ?? []);
+			const runOrigin = this.deps.getRunTurnOrigin?.();
 			try {
 				const prepared = this.lifecycle.prepareManaged(
 					{
@@ -237,6 +241,7 @@ export class ManagedLaneController {
 							? { worktreeLanePath: event.worktreeLanePath }
 							: {}),
 						...(knowledgeReferences.length ? { knowledgeReferences } : {}),
+						...(runOrigin?.thirdParty ? { turnOrigin: runOrigin } : {}),
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());

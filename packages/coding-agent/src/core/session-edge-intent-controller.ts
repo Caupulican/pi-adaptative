@@ -6,12 +6,12 @@
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { CONFIG_DIR_NAME } from "../config.ts";
+import type { ToolCallStartContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
 	type EdgeGrantDetails,
 	edgeRecordsOnBranch,
-	effectiveEdgeGrants,
 	enforceSessionEdgeOperation,
 	keepOutwardDraft,
 	MAX_OUTWARD_DRAFTS,
@@ -31,6 +31,7 @@ import {
 } from "./autonomy/edge-policy.ts";
 import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
+import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
@@ -72,8 +73,8 @@ import {
 	type UserRequestClassificationOutcome,
 } from "./system-one/controller.ts";
 import { DelegationGate } from "./system-one/delegation-gate.ts";
-import type { OperationGate } from "./system-one/operation-gate.ts";
-import { createSessionOperationGate } from "./system-one/operation-gate-wiring.ts";
+import type { OperationCaller, OperationGate } from "./system-one/operation-gate.ts";
+import { createSessionOperationGate, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type PendingOwnerRequest } from "./system-one/owner-policy-queue.ts";
 import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
 import {
@@ -333,9 +334,32 @@ export class SessionEdgeIntentController {
 			checkDelegation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
 				this.delegationGate.check(tool, args, cwd ?? this.deps.getCwd(), signal),
 			checkOperation: (tool: string, args: unknown, cwd: string | undefined, signal: AbortSignal | undefined) =>
-				this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), "root", signal),
+				this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
 			runsThirdParty: () => this.runsThirdParty(),
 		};
+	}
+
+	/** Judges the root's calls of one assistant message ahead of their gate checks, under the run's authority. */
+	prewarmOperations(calls: readonly ToolCallStartContext[], signal: AbortSignal | undefined): void {
+		prewarmOperationGate(this.operationGate, calls, this.deps.getCwd(), this.rootCaller(), signal);
+	}
+
+	/**
+	 * The worker edge members this controller answers (see `createWorkerEdgePolicy`). A worker's call names its own
+	 * authority to the operation gate, from its attempt's origin, never from the run in progress here.
+	 */
+	workerEdgeSource(): Omit<WorkerEdgeSource, "isAllocatable"> {
+		return {
+			getEdgeGrants: (standingOnly) => this.getEdgeGrants(standingOnly),
+			settleOwnerPolicy: () => this.ownerPolicy.settle("latest"),
+			getOperationGate: () => this.operationGate,
+			localCommitBranch: () => this.localCommitBranch(),
+			getModelPolicy: () => this.modelPolicy,
+		};
+	}
+
+	private rootCaller(): OperationCaller {
+		return { actor: "root", thirdParty: this.runsThirdParty() };
 	}
 
 	/** Whether the run in progress carries a third party's words (`RunTurnOrigin`). */
@@ -367,10 +391,10 @@ export class SessionEdgeIntentController {
 		this.operationGateInstance ??= createSessionOperationGate({
 			settleOwnerPolicy: (signal) => this.ownerPolicy.settle("latest", signal),
 			getEngine: () => this.deps.getSemanticDecisionEngine(),
-			// A run carrying a third party's words reads no owner request: the owner's earlier words never approve its calls.
-			getRequest: () => (this.runsThirdParty() ? undefined : this.deps.getLastUserRequest()),
+			// Read only for a call that carries no third party's words: the owner's words never approve a third party's call.
+			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),
-			getEdgeGrants: () => effectiveEdgeGrants(this.edgeDeps()),
+			getEdgeGrants: (standingOnly) => this.getEdgeGrants(standingOnly),
 			askOperator: async (operation, signal) =>
 				enforceSessionEdgeOperation(this.edgeDeps(), operation, "operation", signal),
 			notify: (message) => {

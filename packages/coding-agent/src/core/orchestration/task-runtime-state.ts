@@ -1,3 +1,4 @@
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
@@ -72,6 +73,12 @@ export interface AttemptRuntimeState {
 	 * ordered-fallback contract moved it after a quota failure. Omitted means the contract's binding.
 	 */
 	runningModel?: OrchestrationModelBinding;
+	/**
+	 * Third-party words a running attempt admitted after its dispatch: a steer or follow-up whose sender carried them.
+	 * Recorded once, under the live lease, before the words reach the model. Absent when the dispatch already carries
+	 * them or no such message arrived. Read through {@link attemptTurnOrigin}.
+	 */
+	admittedTurnOrigin?: TurnOriginRecord;
 	checkpointIds: readonly string[];
 	/** Received charges retain their execution-generation identity after suspension or completion. */
 	usageAccounting?: AttemptUsageAccounting;
@@ -265,4 +272,14 @@ export function missingTrustedCriteria(result: WorkerResultContract, criterionId
 		result.evidence.flatMap((evidence) => (evidence.trusted && evidence.criterionId ? [evidence.criterionId] : [])),
 	);
 	return criterionIds.filter((criterionId) => !proven.has(criterionId));
+}
+
+/**
+ * The origin the attempt's work carries: the third-party origin it admitted while running, else its dispatch's
+ * origin. An admitted origin is recorded only on an attempt whose dispatch carries no third-party words.
+ */
+export function attemptTurnOrigin(
+	attempt: Pick<AttemptRuntimeState, "dispatch" | "admittedTurnOrigin">,
+): TurnOriginRecord | undefined {
+	return attempt.admittedTurnOrigin ?? attempt.dispatch.turnOrigin;
 }

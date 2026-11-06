@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
 import { HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
@@ -721,6 +722,29 @@ export class DurableTaskRuntime {
 			actor: "runtime",
 			idempotencyKey: `attempt-model-moved:${leaseId}:${model.provider}/${model.modelId}`,
 			payload: toJsonObject({ attemptId, leaseId, fencingToken, model }),
+		});
+	}
+
+	/**
+	 * Record, under the attempt's live lease, that it admitted third-party words while running: a steer or follow-up
+	 * whose sender carried them. The first such origin stays, and none is kept when the dispatch already carries one.
+	 */
+	recordAttemptThirdPartyWords(
+		attemptId: string,
+		leaseId: string,
+		fencingToken: number,
+		turnOrigin: TurnOriginRecord,
+	): void {
+		if (!turnOrigin.thirdParty) throw new DurableTaskRuntimeError("Only third-party words taint an attempt.");
+		this.refresh();
+		const attempt = this.requireLiveLease(attemptId, leaseId, fencingToken);
+		if (attempt.admittedTurnOrigin || attempt.dispatch.turnOrigin?.thirdParty) return;
+		this.commit({
+			type: "attempt.third_party_admitted",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-third-party-admitted:${leaseId}`,
+			payload: toJsonObject({ attemptId, leaseId, fencingToken, turnOrigin }),
 		});
 	}
 

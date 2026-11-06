@@ -32,7 +32,8 @@ export function createWorkerEdgePolicy(
 	return {
 		getEdgeGrants: (standingOnly) => source.getEdgeGrants(standingOnly),
 		...(settleOwnerPolicy ? { settleOwnerPolicy: () => settleOwnerPolicy() } : {}),
-		checkOperation: (tool, args, cwd) => source.getOperationGate().check(tool, args, cwd, "worker"),
+		checkOperation: (tool, args, cwd, thirdParty) =>
+			source.getOperationGate().check(tool, args, cwd, { actor: "worker", thirdParty }),
 		localCommitBranch: () => source.localCommitBranch(),
 		isModelAllowed: (model) => source.getModelPolicy().allows(model) && source.isAllocatable(model),
 	};

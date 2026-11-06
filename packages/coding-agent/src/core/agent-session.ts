@@ -318,7 +318,6 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
-import { prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import {
 	appendOwnerFollowUp,
 	type OwnerQuestionConsult,
@@ -1133,12 +1132,9 @@ export class AgentSession {
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
+			getRunTurnOrigin: () => this._foregroundRecovery.turnOrigin.origin(),
 			...createWorkerEdgePolicy({
-				getEdgeGrants: (standingOnly) => this._edgeIntent.getEdgeGrants(standingOnly),
-				settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
-				getOperationGate: () => this._edgeIntent.operationGate,
-				localCommitBranch: () => this._edgeIntent.localCommitBranch(),
-				getModelPolicy: () => this._edgeIntent.modelPolicy,
+				...this._edgeIntent.workerEdgeSource(),
 				isAllocatable: (model) =>
 					!this.settingsManager.getModelRouterSettings().enabled ||
 					isModelInRouterPool(this.getRouterCandidatePool(), model),
@@ -1814,11 +1810,10 @@ export class AgentSession {
 				if (this.settingsManager.getEdgeSettings().mode === "yolo") return undefined;
 				// The first tool call starts the owner-words classification, which then runs while the call's
 				// arguments finish; the gate is pre-warmed once the grants it reads are known.
-				if (this._edgeIntent.ownerPolicy.size === 0)
-					return prewarmOperationGate(this._edgeIntent.operationGate, calls, this._cwd, signal);
+				if (this._edgeIntent.ownerPolicy.size === 0) return this._edgeIntent.prewarmOperations(calls, signal);
 				void this._edgeIntent.ownerPolicy
 					.settle("latest", signal)
-					.then(() => prewarmOperationGate(this._edgeIntent.operationGate, calls, this._cwd, signal))
+					.then(() => this._edgeIntent.prewarmOperations(calls, signal))
 					.catch(() => undefined);
 				return undefined;
 			},

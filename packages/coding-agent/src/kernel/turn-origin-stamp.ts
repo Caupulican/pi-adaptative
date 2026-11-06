@@ -36,7 +36,7 @@ export interface TurnOriginRecord {
 	readonly ref?: string;
 }
 
-const MAX_CHANNEL_CHARS = 128;
+export const MAX_TURN_ORIGIN_CHANNEL_CHARS = 128;
 export const MAX_TURN_ORIGIN_REF_CHARS = 128;
 const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"owner-typed",
@@ -62,7 +62,9 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 	if (record.v !== 1 || !TURN_ORIGIN_KINDS.has(record.k)) return undefined;
 	if (
 		record.channel !== undefined &&
-		(typeof record.channel !== "string" || record.channel.length === 0 || record.channel.length > MAX_CHANNEL_CHARS)
+		(typeof record.channel !== "string" ||
+			record.channel.length === 0 ||
+			record.channel.length > MAX_TURN_ORIGIN_CHANNEL_CHARS)
 	)
 		return undefined;
 	if (record.verified !== undefined && record.verified !== true) return undefined;

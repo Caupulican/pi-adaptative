@@ -1,4 +1,5 @@
 import { type Static, Type } from "typebox";
+import { AgentToolPolicyDeniedError } from "../../kernel/types.ts";
 import {
 	boundedUtf8Excerpt,
 	TaskAutomationBindingSchema,
@@ -162,6 +163,9 @@ export function createTaskAutomationToolDefinition(controller: TaskAutomationCon
 				}
 
 				const validation = await controller.validate(input.name, signal);
+				if (validation.policy) {
+					throw new AgentToolPolicyDeniedError(validation.reason, undefined, validation.policy.correction);
+				}
 				if (!validation.success) {
 					return {
 						content: [
@@ -198,6 +202,9 @@ export function createTaskAutomationToolDefinition(controller: TaskAutomationCon
 				}
 
 				const runResult = await controller.run(input.name, input.args ?? [], signal);
+				if (runResult.policy) {
+					throw new AgentToolPolicyDeniedError(runResult.error, undefined, runResult.policy.correction);
+				}
 				if (runResult.outcome !== "succeeded") {
 					return {
 						content: [

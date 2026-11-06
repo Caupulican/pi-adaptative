@@ -48,6 +48,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import {
+	admittedTurnOriginFromValue,
 	agentFromPayload,
 	approvalFromPayload,
 	approvalResolutionFromPayload,
@@ -1525,6 +1526,25 @@ export function reduceOrchestrationEvent(
 				runningModel: runningModelFromValue(event.payload.model, "attempt.model_moved.model"),
 				updatedAt: event.occurredAt,
 			};
+			break;
+		}
+		case "attempt.third_party_admitted": {
+			const attemptId = string(event.payload.attemptId, "attempt.third_party_admitted.attemptId");
+			assertEventAggregateId(event, attemptId, "Tainted attempt");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			const leaseId = string(event.payload.leaseId, "attempt.third_party_admitted.leaseId");
+			const fencingToken = number(event.payload.fencingToken, "attempt.third_party_admitted.fencingToken");
+			if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
+			}
+			const turnOrigin = admittedTurnOriginFromValue(
+				event.payload.turnOrigin,
+				"attempt.third_party_admitted.turnOrigin",
+			);
+			// The first third-party origin stays; a dispatch that already carries one needs none.
+			if (attempt.admittedTurnOrigin || attempt.dispatch.turnOrigin?.thirdParty) break;
+			attempts[attemptId] = { ...attempt, admittedTurnOrigin: turnOrigin, updatedAt: event.occurredAt };
 			break;
 		}
 		case "attempt.checkpointed": {

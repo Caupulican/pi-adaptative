@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import type {
 	AgentBindingContract,
@@ -217,12 +218,17 @@ export interface WorkerSpecialistReuseInput {
 }
 
 function attemptSpecialization(
+	snapshot: Pick<TaskRuntimeProjection, "attempts">,
 	attempt: AttemptRuntimeState,
 	namespaceKeyOf: (root: string | undefined) => string,
 ): WorkerSpecializationFingerprint | undefined {
 	const contract = attempt.dispatch.executionContract;
-	// A worker that read a third party's words is never reused for later work.
-	if (!contract || attempt.dispatch.executionKind === "managed-process" || attempt.dispatch.turnOrigin?.thirdParty)
+	// A worker that read a third party's words, in its dispatch or in a steer it admitted, is never reused for later work.
+	if (
+		!contract ||
+		attempt.dispatch.executionKind === "managed-process" ||
+		conversationTurnOrigin(snapshot.attempts, attempt)?.thirdParty
+	)
 		return undefined;
 	return describeWorkerSpecialization(
 		contract,
@@ -267,7 +273,7 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 		if (agent && agent.status !== "registered" && agent.status !== "active") continue;
 		const attempt = latestAgentAttemptByDurableOrder(input.snapshot, specialistId);
 		if (!attempt) continue;
-		const specialization = attemptSpecialization(attempt, input.namespaceKeyOf);
+		const specialization = attemptSpecialization(input.snapshot, attempt, input.namespaceKeyOf);
 		if (!specialization) continue;
 		const matches = input.matches ?? sameWorkerSpecialization;
 		if (!matches(specialization, input.candidate, specialistId)) continue;

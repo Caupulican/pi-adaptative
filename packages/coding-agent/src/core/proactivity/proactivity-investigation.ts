@@ -130,7 +130,8 @@ export class ProactivityInvestigation {
 			checkEdge: async (tool, args, cwd) => {
 				await host.settleOwnerPolicy?.();
 				this.assertHealthy();
-				return host.checkOperation?.(tool, args, cwd);
+				// The owner's own review, on read tools only, carries no third party's words of its own.
+				return host.checkOperation?.(tool, args, cwd, false);
 			},
 			bindTool: (tool) =>
 				wrapToolExecution(tool, (executor) => ({

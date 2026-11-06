@@ -2,6 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
 import { parseWorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
+import {
+	MAX_TURN_ORIGIN_CHANNEL_CHARS,
+	MAX_TURN_ORIGIN_REF_CHARS,
+	parseTurnOriginRecord,
+	type TurnOriginRecord,
+} from "../../kernel/turn-origin-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
 	type HostEventDeliveryBinding,
@@ -124,6 +130,14 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 				leafId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
 				sessionFile: "\0".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH),
 			},
+			turnOrigin: {
+				v: 1,
+				k: "goal-continuation",
+				channel: "\0".repeat(MAX_TURN_ORIGIN_CHANNEL_CHARS),
+				verified: true,
+				thirdParty: true,
+				ref: "\0".repeat(MAX_TURN_ORIGIN_REF_CHARS),
+			},
 			createdAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 			deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 		}),
@@ -181,6 +195,11 @@ export type WorkerAgentTaskMetadata =
 export interface WorkerAgentMessage {
 	/** Host-owned lineage captured at acceptance; excluded from replay intent and never recaptured. */
 	receiptOrigin?: WorkerReceiptOrigin;
+	/**
+	 * The third-party origin of the words the sender carried when it wrote this message, captured at acceptance like
+	 * `receiptOrigin` and excluded from replay intent. The attempt that admits the message carries it from then on.
+	 */
+	turnOrigin?: TurnOriginRecord;
 	messageId: string;
 	kind: WorkerAgentMessageKind;
 	/** Present on a message written by a build that knows envelopes; absent on a legacy message. */
@@ -946,6 +965,10 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		}
 		const receiptOrigin =
 			message.receiptOrigin === undefined ? undefined : workerReceiptOriginFromValue(message.receiptOrigin);
+		const turnOrigin = message.turnOrigin === undefined ? undefined : parseTurnOriginRecord(message.turnOrigin);
+		if (message.turnOrigin !== undefined && !turnOrigin?.thirdParty) {
+			throw new Error("Worker agent mailbox message carries an invalid turn origin.");
+		}
 		const createdAt = requiredMailboxTimestamp(message.createdAt, "creation timestamp");
 		const deliveredAt =
 			message.deliveredAt === undefined
@@ -987,6 +1010,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 			...message,
 			...(env ? { env } : {}),
 			...(receiptOrigin ? { receiptOrigin } : {}),
+			...(turnOrigin ? { turnOrigin } : {}),
 			createdAt,
 			...(deliveredAt ? { deliveredAt } : {}),
 			...(repliedAt ? { repliedAt } : {}),
@@ -1620,6 +1644,7 @@ export class WorkerAgentMailbox {
 		expectReply?: boolean;
 		task?: WorkerAgentTaskMetadata;
 		receiptOrigin?: WorkerReceiptOrigin;
+		turnOrigin?: TurnOriginRecord;
 	}): WorkerAgentMessage {
 		const accepted = this.enqueueWithReceipt(input);
 		if (accepted.status !== "retained") throw new Error("Unkeyed worker control unexpectedly resolved as a replay.");
@@ -1644,6 +1669,7 @@ export class WorkerAgentMailbox {
 		expectReply?: boolean;
 		task?: WorkerAgentTaskMetadata;
 		receiptOrigin?: WorkerReceiptOrigin;
+		turnOrigin?: TurnOriginRecord;
 		idempotencyKey?: string;
 		onAdmitted?: () => void;
 	}): WorkerAgentEnqueueReceipt {
@@ -1698,6 +1724,10 @@ export class WorkerAgentMailbox {
 		) {
 			throw new TypeError("Worker control idempotency key is invalid.");
 		}
+		const turnOrigin = input.turnOrigin === undefined ? undefined : parseTurnOriginRecord(input.turnOrigin);
+		if (input.turnOrigin !== undefined && !turnOrigin?.thirdParty) {
+			throw new TypeError("A worker control message carries only a third-party turn origin.");
+		}
 		const message: WorkerAgentMessage = {
 			messageId:
 				hostEvent?.binding.messageId ??
@@ -1713,6 +1743,7 @@ export class WorkerAgentMailbox {
 			...(input.expectReply === true ? { expectReply: true } : {}),
 			...(task ? { task } : {}),
 			...(input.receiptOrigin ? { receiptOrigin: workerReceiptOriginFromValue(input.receiptOrigin) } : {}),
+			...(turnOrigin ? { turnOrigin } : {}),
 			createdAt: new Date().toISOString(),
 		};
 		// A keyed message written now carries version 2; a replay of an older identity is judged under the version its

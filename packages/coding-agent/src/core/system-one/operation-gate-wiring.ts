@@ -7,7 +7,12 @@ import type { ToolCallStartContext } from "../../kernel/index.ts";
 import { type EdgeGrantView, isEdgeOperationGranted } from "../autonomy/edge-policy.ts";
 import type { DecisionLedgerStore } from "../operator-projection/decision-ledger-store.ts";
 import type { OperationEffectDurableStore } from "./operation-effect-cache.ts";
-import { OperationGate, type OperationGateDecisionRecord, type OperationGateDeps } from "./operation-gate.ts";
+import {
+	type OperationCaller,
+	OperationGate,
+	type OperationGateDecisionRecord,
+	type OperationGateDeps,
+} from "./operation-gate.ts";
 
 /**
  * A session's operation gate: standing authority is the branch's `operation.irreversible` grant, and the ledger keeps
@@ -22,7 +27,8 @@ export function createSessionOperationGate(
 		getCwd(): string;
 		getSessionId(): string;
 		getLedger(): DecisionLedgerStore | undefined;
-		getEdgeGrants(): readonly EdgeGrantView[];
+		/** The session's grants, or with `standingOnly` the owner's standing grants alone. */
+		getEdgeGrants(standingOnly: boolean): readonly EdgeGrantView[];
 	},
 ): OperationGate {
 	const { settleOwnerPolicy, askOperator } = input;
@@ -32,8 +38,11 @@ export function createSessionOperationGate(
 		getRequest: () => input.getRequest(),
 		getScopeCwd: () => input.getCwd(),
 		getTurnKey: () => input.getTurnKey(),
-		isGranted: () =>
-			isEdgeOperationGranted({ class: "operation.irreversible", operation: "", reason: "" }, input.getEdgeGrants()),
+		isGranted: (standingOnly) =>
+			isEdgeOperationGranted(
+				{ class: "operation.irreversible", operation: "", reason: "" },
+				input.getEdgeGrants(standingOnly),
+			),
 		...(askOperator ? { askOperator } : {}),
 		notify: (message) => input.notify(message),
 		...operationGateLedgerBindings(input),
@@ -74,6 +83,7 @@ export function prewarmOperationGate(
 	gate: OperationGate,
 	calls: readonly ToolCallStartContext[],
 	defaultCwd: string,
+	caller: OperationCaller,
 	signal?: AbortSignal,
 ): void {
 	gate.prewarm(
@@ -82,6 +92,7 @@ export function prewarmOperationGate(
 			args: call.args,
 			cwd: call.executionContext?.cwd ?? defaultCwd,
 		})),
+		caller,
 		signal,
 	);
 }
