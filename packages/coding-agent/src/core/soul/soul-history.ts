@@ -13,9 +13,10 @@ export type SoulReviewer = "allow" | "block" | "unreviewed";
  * Typed entries for a change the harness reverted: `reverted` (an ungated write that failed the screen or the review
  * was undone) and `removed` (the file was deleted outside the gate and put back); both carry the restored text.
  * `unresolved`: a verdict on a change could not be committed because the soul lock stayed held elsewhere, and the
- * change was adopted without it.
+ * change was adopted without it. `withheld`: an agent write or change System One could not review was not taken in (a
+ * held write that was never written, a held change that was reverted); its text is kept so the owner can restore it.
  */
-export type SoulHistoryEvent = "reverted" | "removed" | "unresolved";
+export type SoulHistoryEvent = "reverted" | "removed" | "unresolved" | "withheld";
 
 /**
  * One write to `soul.md`. `sha256` and `bytes` identify the exact text the write put (or tried to put) in the file;
@@ -54,7 +55,8 @@ function isEntry(value: unknown): value is SoulHistoryEntry {
 		(entry.event === undefined ||
 			entry.event === "reverted" ||
 			entry.event === "removed" ||
-			entry.event === "unresolved")
+			entry.event === "unresolved" ||
+			entry.event === "withheld")
 	);
 }
 

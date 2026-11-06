@@ -114,7 +114,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
 | `/bot [list\|new <id> [--write] [model] [soul]\|soul <id>\|open <id>\|msg <id> <text>\|stop <id>\|retire <id>]` | Manage persistent bots. A bot's soul (threat-scanned, no size limit of its own) opens its worker system prompt on every turn; `/bot soul <id>` edits it in a panel, and a bot with a live worker must be retired first |
-| `/soul [show\|review\|history\|restore <n>]` | Edit the agent's `soul.md` in a panel (owner edits pass the threat scan, skip the System One review, and apply from the next session); `show` prints it, `review` runs the System One soul review on the current text, `history` lists the recorded writes, including changes the harness reverted (the agent's are System One reviewed when System One is available, whatever tool made them) and `restore <n>` writes one back through the same scan. A save or restore is refused when `soul.md` changed after the panel was opened or the command started; history entries can also be typed `reverted`, `removed` or `unresolved` |
+| `/soul [show\|review\|history\|restore <n>]` | Edit the agent's `soul.md` in a panel (owner edits pass the threat scan, skip the System One review, and apply from the next session); `show` prints it, `review` runs the System One soul review on the current text, `history` lists the recorded writes, including changes the harness reverted (the agent's are System One reviewed when System One is available, whatever tool made them) and `restore <n>` writes one back through the same scan. A save or restore is refused when `soul.md` changed after the panel was opened or the command started; history entries can also be typed `reverted`, `removed`, `unresolved` or `withheld` (an agent write or change System One could not review, kept so it can be restored) |
 | `/sysprompt [default\|reset]` | Edit this session's system prompt in a panel; the override is session-only |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
@@ -202,6 +202,7 @@ You say plainly what you know, what you inferred and what you guessed.
 - Keep it stable. Put facts that change in memory, rules in `AGENTS.md`, and permissions in settings: a soul grants no authority.
 - Never put tasks, step lists, commands, credentials or text copied from the web or from tool output in it. The screen replaces a soul that reads like an instruction override with a notice.
 - It can grow as the agent learns who it is; the agent may rewrite it, and you can edit it at any time.
+- With System One configured, the agent's rewrites are reviewed first. When System One cannot answer, the rewrite is held, not written: Pi reviews it again once System One answers and writes it if the review allows it, and you get one notice when it is held and one when it ends. A held rewrite is dropped, its text kept in `/soul history` as `withheld`, if `soul.md` changed meanwhile, after 5 failed reviews, or when Pi exits; it is never applied after a restart.
 
 ## Exporting and Sharing Sessions
 

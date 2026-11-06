@@ -2,8 +2,10 @@ import "../builtin-install.ts";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
 import { expect } from "vitest";
+import { SOUL_FILE_NAME } from "../../../../src/core/agent-identity.ts";
 import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
@@ -12,6 +14,7 @@ import {
 	type ReflectionController,
 } from "../../../../src/core/reflection-controller.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../../../../src/core/secrets/credential-content-mock.ts";
+import { SoulHistory, soulSha256 } from "../../../../src/core/soul/soul-history.ts";
 import {
 	enforceExplicitOptionalToolRequest,
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
@@ -19,8 +22,9 @@ import {
 } from "../../../../src/core/tool-applicability-gate.ts";
 import { localFileMutationIntentOperations } from "../../../../src/core/tools/file-mutation-intent.ts";
 import { routeShellContract } from "../../../../src/core/tools/shell-contract-router.ts";
+import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { calls, createBarrier, text } from "../scripted-provider.ts";
+import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import {
 	branchForClosingReflection,
 	HARNESS_PROJECT_CWD,
@@ -806,7 +810,56 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	const priorIntent = readOptionalToolIntent(
 		created.sessionManager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
 	);
+	// System One on: the agent also rewrites its soul during the outage. The write is held unwritten, then System One
+	// reviews it on recovery (the approval phase) and the harness writes it.
+	const soulPath = resolve(world.agentDir, SOUL_FILE_NAME);
+	const soulText =
+		"---\nname: Pi-Adaptative\n---\nI read the code before I change it and say plainly what I did not run.\n";
+	const soulReview = {
+		override: { kind: "noul", probability: 0.02 },
+		authority: { kind: "noul", probability: 0.02 },
+		covert: { kind: "noul", probability: 0.02 },
+		external: { kind: "noul", probability: 0.02 },
+		identity: { kind: "noul", probability: 0.97 },
+	} as const;
+	const soulNoticeReasons = () =>
+		created.sessionManager.getEntries().flatMap((entry) => {
+			const details = parentInputOriginalDetails(entry) as { kind?: unknown; reason?: unknown } | undefined;
+			return entry.type === "custom_message" &&
+				entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+				details?.kind === "soul-review"
+				? [details.reason]
+				: [];
+		});
+	const soulSteps: ScriptStep[] = world.systemOne.enabled
+		? [
+				{
+					name: "soul-held-reported",
+					check: (request) => {
+						const held = latestBatchResults(request).find((result) => result.toolName === "write");
+						if (
+							!held?.isError ||
+							!held.text.includes("soul.md write held") ||
+							!held.text.includes("Do not write soul.md again")
+						) {
+							throw new Error(
+								`the soul.md write was not held with its correction: ${held?.text ?? "no result"}`,
+							);
+						}
+						if (world.io.existsSync(soulPath)) throw new Error("a held soul.md write reached the file");
+					},
+					reply: { content: [{ type: "text", text: "The soul text waits for System One." }] },
+				},
+			]
+		: [];
 	const longPathJudgments = {
+		// The soul review and the operation gate's questions on the soul write outside the task, answered by the outage.
+		...soulReview,
+		leaves_machine: { kind: "noul", probability: 0.02 },
+		cannot_be_undone: { kind: "noul", probability: 0.02 },
+		touches_outside_task: { kind: "noul", probability: 0.02 },
+		acquires_external_code: { kind: "noul", probability: 0.02 },
+		request_authorizes: { kind: "noul", probability: 0.02 },
 		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
@@ -842,8 +895,21 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 					throw new Error("the read through the minted alias did not return the long file");
 				}
 			},
-			reply: { content: [{ type: "text", text: "The retry configuration was read by its alias." }] },
+			reply: world.systemOne.enabled
+				? {
+						content: [
+							{
+								type: "toolCall",
+								id: "soul-held-1",
+								name: "write",
+								arguments: { path: soulPath, content: soulText },
+							},
+						],
+						stopReason: "toolUse",
+					}
+				: { content: [{ type: "text", text: "The retry configuration was read by its alias." }] },
 		},
+		...soulSteps,
 	);
 	await withDeadline(trace, "long path turn", session.prompt(longRequest));
 	if (longAlias === undefined) throw new Error("no alias was observed for the long path");
@@ -876,6 +942,11 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			return data?.status === "classified" && data.taskRequest === longRequest;
 		});
 		expect(classifiedAsLong, "no classification was fabricated for the unanswered request").toBe(false);
+		expect(world.io.existsSync(soulPath), "the held soul.md write left the file unwritten").toBe(false);
+		expect(
+			new SoulHistory(world.agentDir).list().filter((entry) => entry.sha256 === soulSha256(soulText)),
+			"a held soul.md write records no entry while it waits",
+		).toEqual([]);
 	}
 	// The alias is persisted in the session's SQL alias store, not only in the transcript: read it back through a read-only
 	// connection, then close that connection before the body continues.
@@ -976,8 +1047,32 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
+		// The first settled evaluation of this phase is System One's recovery: the held soul text is reviewed here.
+		...soulReview,
 	});
 	await withDeadline(trace, "approval turn", session.prompt("Remove the .git directory of this project."));
+	if (world.systemOne.enabled) {
+		// Recovery: the harness reviews the held text and writes it through the soul write path, with one notice each way.
+		await withDeadline(
+			trace,
+			"held soul write applied",
+			world.io.waitForMutation(() => world.io.existsSync(soulPath) && soulNoticeReasons().length === 2),
+		);
+		expect(String(world.io.readFileSync(soulPath, "utf8")), "the reviewed held text is the soul").toBe(soulText);
+		const applied = new SoulHistory(world.agentDir).list().at(-1);
+		expect(
+			{ author: applied?.author, reviewer: applied?.reviewer, sha256: applied?.sha256 },
+			"the applied write is an agent write System One allowed",
+		).toEqual({ author: "agent", reviewer: "allow", sha256: soulSha256(soulText) });
+		expect(soulNoticeReasons(), "one notice for the held write, one for its recovery").toEqual([
+			"write-held",
+			"write-applied",
+		]);
+		expect(
+			world.systemOne.decoded.some((request) => request.phase === "approval" && "identity" in request.questions),
+			"the held text was reviewed after System One recovered",
+		).toBe(true);
+	}
 	session.setEdgeConfirmation(undefined);
 	expect(
 		{ ...confirmations, decisionsLeft: decisions.length },

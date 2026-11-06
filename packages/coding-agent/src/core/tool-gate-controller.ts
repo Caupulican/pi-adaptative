@@ -28,6 +28,7 @@ import type {
 } from "./objective-execution/repository-mutation-observer.ts";
 import { detailsWithRuleIds, type RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import type { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
@@ -99,17 +100,11 @@ export interface ToolGateControllerDeps {
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
 	/**
-	 * Soul gate: the screen and System One review of the root agent's write or edit of `<agentDir>/soul.md`
-	 * (see soul/soul-controller.ts). Not a permission check, so YOLO does not skip it.
+	 * Soul gate of a root session: `checkWrite` screens and has System One review the root agent's write or edit of
+	 * `<agentDir>/soul.md`, and `settleWrite` reconciles the file once the call has finished (see
+	 * soul/soul-controller.ts). Not a permission check, so YOLO does not skip it. Absent in a worker session.
 	 */
-	checkSoulWrite?(
-		call: AgentToolCall,
-		args: unknown,
-		cwd: string,
-		signal: AbortSignal | undefined,
-	): Promise<BeforeToolCallResult | undefined>;
-	/** The allowed soul write's call has finished: its history entry is recorded from the file as it now is. */
-	settleSoulWrite?(call: AgentToolCall, succeeded: boolean): Promise<string | undefined>;
+	soulGate?: Pick<SoulController, "checkWrite" | "settleWrite">;
 	/**
 	 * System One's operation gate: an operation the deterministic gates cannot decide is judged, then
 	 * runs, asks the operator, or is refused (see system-one/operation-gate.ts).
@@ -430,7 +425,7 @@ export class ToolGateController {
 					? undefined
 					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (operation) return operation;
-			const soulWrite = await this.deps.checkSoulWrite?.(toolCall, args, effectiveCwd, signal);
+			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal);
 			if (soulWrite) return soulWrite;
 
 			// 5. System One semantic tool gate
@@ -568,7 +563,7 @@ export class ToolGateController {
 		const selection = invocation?.selection;
 		let finishSucceeded = !isError;
 		try {
-			const soulNotice = await this.deps.settleSoulWrite?.(toolCall, !isError);
+			const soulNotice = await this.deps.soulGate?.settleWrite(toolCall, !isError);
 			const runner = this.deps.getExtensionRunner();
 			let content = result.content;
 			let details = result.details;

@@ -976,9 +976,9 @@ export class AgentSession {
 		});
 		this.soul = new SoulController({
 			agentDir: this._agentDir,
-			isRootSession: () => !this._isChildSession,
-			getEngine: () => this._semanticPlane.recordingSemanticEngine(),
+			systemOne: this._semanticPlane,
 			emitWarning: (message) => this._emit({ type: "warning", message }),
+			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -2352,8 +2352,7 @@ export class AgentSession {
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
 			validateMutationAcceptance: (input) =>
 				this._projectRules.acceptMutation(input, this._edgeIntent.ruleAuthority),
-			checkSoulWrite: (call, args, cwd, signal) => this.soul.checkWrite(call, args, cwd, signal),
-			settleSoulWrite: (call, succeeded) => this.soul.settleWrite(call, succeeded),
+			soulGate: this._isChildSession ? undefined : this.soul,
 			noteOwnedWrites: (paths, cwd) => {
 				const objectiveId = this.objectiveMutationId();
 				for (const filePath of paths) this._mutationLedger.recordOwnedWrite(objectiveId, cwd, filePath);
@@ -3947,6 +3946,7 @@ export class AgentSession {
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
 		safely(() => this._unsubscribeIdleOccupancy?.());
 		this._unsubscribeIdleOccupancy = undefined;
+		safely(() => this.soul.close());
 		safely(() => this._harnessNotices.close());
 		safely(() => this._foregroundRecovery.shutdown());
 		safely(() => this._durableCustomMessageTurns.shutdown());

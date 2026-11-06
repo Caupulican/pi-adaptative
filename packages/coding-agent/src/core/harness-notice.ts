@@ -33,7 +33,8 @@ export type HarnessNoticeKind =
 	| "channel-gap"
 	| "channel-reply"
 	| "channel-sender"
-	| "act-ahead";
+	| "act-ahead"
+	| "soul-review";
 
 /** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */
 export interface HarnessNotice {

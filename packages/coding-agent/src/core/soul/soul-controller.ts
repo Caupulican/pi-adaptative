@@ -5,6 +5,8 @@ import { checkSoulText, DEFAULT_AGENT_NAME, SOUL_FILE_NAME } from "../agent-iden
 import { configFile, soulLockFile } from "../agent-paths.ts";
 import { canonicalPathScopeIdentity, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import type { SemanticEvaluationRecord } from "../system-one/semantic-evaluation-ledger.ts";
 import {
 	applyEditMatchPlanToSource,
 	type Edit,
@@ -23,14 +25,23 @@ import {
 import { reviewSoulText, type SoulReviewOutcome } from "./soul-review.ts";
 import { type SoulRevision, SoulWatch } from "./soul-watch.ts";
 
+/**
+ * The controller is wired as the tool gate of root sessions only: a worker cannot write the agent directory, so only the
+ * root agent's writes are reviewed.
+ */
 export interface SoulControllerDeps {
 	readonly agentDir: string;
-	/** Only the root agent's writes are reviewed; a worker cannot write the agent directory. */
-	isRootSession(): boolean;
-	/** The session's recorded System One engine (every evaluation lands on the semantic evaluation ledger); absent while System One is unavailable. */
-	getEngine(): SemanticDecisionEngine | undefined;
-	/** Owner-visible notice. */
+	/** The session's semantic plane. */
+	readonly systemOne: {
+		/** The recorded System One engine (every evaluation lands on the semantic evaluation ledger); absent while System One is not configured. */
+		recordingSemanticEngine(): SemanticDecisionEngine | undefined;
+		/** Every settled System One evaluation of the session; returns the unsubscribe. */
+		onSemanticEvaluation(listener: (record: SemanticEvaluationRecord) => void): () => void;
+	};
+	/** Owner-visible warning. */
 	emitWarning(message: string): void;
+	/** The session's once-per-episode owner notices; false when no notice can be kept (no transcript). */
+	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 }
 
 /** Evaluations one identical candidate gets: the first, and one retry after an unsettled answer. */
@@ -61,6 +72,56 @@ interface DeferredSettlement {
 const MAX_DEFERRED_ATTEMPTS = 5;
 const DEFERRED_TTL_MS = 10 * 60 * 1000;
 const MAX_DEFERRED_AUDIT = 32;
+
+/**
+ * An agent write the gate could not have reviewed because System One failed or timed out: not written, kept for the
+ * harness to review and write itself. `bytes` is exactly what the write path stores; `basedOn` is the file it started from.
+ */
+interface HeldWrite {
+	readonly bytes: string;
+	readonly basedOn: string | undefined;
+	failures: number;
+}
+
+/**
+ * A change found on disk at settlement whose review failed or timed out: not adopted and not recorded as accepted until
+ * a review settles. It owns the exact revision and the accounting it was found against, like a deferred verdict.
+ */
+interface AwaitingReview {
+	readonly observed: SoulRevision;
+	readonly text: string;
+	readonly baselineDigest: string | undefined;
+	/** The accounted text when the change was found: what the review compares against. */
+	readonly standing: string | undefined;
+	/** What a revert writes back. */
+	readonly restoreTo: string | undefined;
+	failures: number;
+}
+
+/** Failed reviews a held write or a held change gets; then the write is dropped and the change reverted, text kept. */
+const MAX_HELD_REVIEW_FAILURES = 5;
+/** A held review is retried at an admitted tool call at most this often; a settled System One answer retries it at once. */
+const HELD_RETRY_SPACING_MS = 2 * 60 * 1000;
+
+type SoulNoticeScope = "write" | "change";
+
+/** The deterministic screen and the soul review of a document already on disk. */
+type SoulVerdict =
+	| { readonly kind: "accept"; readonly reviewer: SoulReviewer }
+	| { readonly kind: "reject"; readonly reason: string }
+	/** System One is bound but its review failed or timed out. */
+	| { readonly kind: "unavailable"; readonly error: string };
+
+/** An owner-path write: refused, or held off by the soul lock (`locked`, worth trying again). */
+type SoulWriteResult = SoulSaveResult | { readonly ok: false; readonly reason: string; readonly locked: true };
+
+function reviewCodes(outcome: SoulReviewOutcome): string {
+	if (outcome.kind !== "adverse") return "System One could not settle it";
+	return outcome.findings
+		.filter((finding) => finding.answer === "adverse")
+		.map((finding) => finding.id)
+		.join(", ");
+}
 
 /** A verdict that went stale because the file moved is made again at most this many times, then the file is adopted. */
 const MAX_REJUDGE_ROUNDS = 3;
@@ -132,7 +193,9 @@ function resultingDocument(
  * One review the root agent's writes, the owner's edit, review and restore, and the history both write into.
  *
  * Every write passes the deterministic screen (`checkSoulText`). Only an agent write is also judged by the soul-review
- * program, and only while System One is available; an owner write is the owner's authority and skips the judgment.
+ * program, and only while System One is configured; an owner write is the owner's authority and skips the judgment.
+ * While System One is configured, an agent write or change is never taken in unreviewed: when its review fails or times
+ * out it is held (a write is not written, a change on disk is not accepted) and reviewed again when System One answers.
  */
 export class SoulController {
 	private readonly deps: SoulControllerDeps;
@@ -154,6 +217,20 @@ export class SoulController {
 	private readonly deferredAudit: DeferredAudit[] = [];
 	/** A notice produced while no call was settling (a deferred revert completing at admission), told at the next settle. */
 	private carriedNotice: string | undefined;
+	/** The agent write held while System One could not review it; one at a time, the newest replaces it. */
+	private heldWrite: HeldWrite | undefined;
+	/** The change on disk whose review failed; while it exists the revision is never adopted and no judgment starts. */
+	private awaitingReview: AwaitingReview | undefined;
+	/** The held review in flight; one at a time. */
+	private retrying: Promise<void> | undefined;
+	private lastRetryAt = 0;
+	/** Gate reviews in flight: a System One answer they receive retries the held review only once the gate has used it. */
+	private gateReviews = 0;
+	/** Subscribed to System One's settled evaluations only while something is held. */
+	private offEvaluations: (() => void) | undefined;
+	/** The last notice reason told per scope: one notice per episode, whichever channel carries it. */
+	private readonly told = new Map<SoulNoticeScope, string>();
+	private closed = false;
 
 	constructor(deps: SoulControllerDeps) {
 		this.deps = deps;
@@ -203,7 +280,7 @@ export class SoulController {
 	async review(signal?: AbortSignal): Promise<SoulReviewReport> {
 		const current = this.read();
 		if (current === undefined) return { kind: "missing", path: this.path };
-		const engine = this.deps.getEngine();
+		const engine = this.deps.systemOne.recordingSemanticEngine();
 		if (!engine) return { kind: "unavailable" };
 		return {
 			kind: "reviewed",
@@ -215,7 +292,9 @@ export class SoulController {
 	 * Admission of a root tool call: the file is reconciled with the accounted revision before the call can touch it. A
 	 * difference with no other call running happened between calls, so it is the owner's (adopted, not judged). While
 	 * another call runs, a difference may be its write and is left to settlement. Entries older than the longest plausible
-	 * call are dropped, so a call blocked after admission (it never settles) cannot hold the check off.
+	 * call are dropped, so a call blocked after admission (it never settles) cannot hold the check off. A held change the
+	 * owner's accounting moved past, or one the file moved off between calls, is dropped first (owner priority); a held
+	 * review is retried here at most every {@link HELD_RETRY_SPACING_MS}, never awaited.
 	 */
 	private admit(call: AgentToolCall): void {
 		const now = Date.now();
@@ -223,17 +302,29 @@ export class SoulController {
 			if (now - admittedAt > MAX_CALL_RUN_MS) this.running.delete(other);
 		}
 		this.carriedNotice = joinNotices(this.carriedNotice, this.resolveDeferred());
+		const awaiting = this.awaitingReview;
+		if (
+			awaiting &&
+			(this.watch.accountedDigest !== awaiting.baselineDigest ||
+				(this.running.size === 0 && this.watch.current().digest !== awaiting.observed.digest))
+		) {
+			this.dropAwaiting();
+		}
 		if (this.deferredAudit.length > 0) this.withLock(() => undefined);
-		// A revision a deferred verdict still owns is not between-call change: it is never adopted as the owner's.
-		if (!this.deferred && this.running.size === 0 && this.watch.reconcile()) this.adoptOwner();
+		// A revision a deferred verdict or a held review still owns is not between-call change: it is never adopted as the owner's.
+		if (!this.deferred && !this.awaitingReview && this.running.size === 0 && this.watch.reconcile())
+			this.adoptOwner();
 		this.running.set(call, now);
+		if (now - this.lastRetryAt >= HELD_RETRY_SPACING_MS) this.retryHeld();
 	}
 
 	/**
 	 * The tool gate for the root agent's `write` and `edit` calls on `soul.md`: the deterministic screen on every such
-	 * write, then the System One judgment while System One is available. Outcomes: all good allows; an adverse answer
-	 * blocks with its codes; an unsettled answer blocks with "simplify the text" and the same text gets one retry; an
-	 * evaluation that fails or times out while System One is available allows and says so.
+	 * write, then the System One judgment while System One is configured. Outcomes: all good allows (and replaces a held
+	 * write); an adverse answer blocks with its codes; an unsettled answer blocks with "simplify the text" and the same
+	 * text gets one retry; an evaluation that fails or times out blocks the call, holds the text (replacing an older held
+	 * one) and tells the owner once per episode: the harness reviews it again when System One answers and writes it
+	 * itself if the review allows it. A review the call's own abort cancelled blocks and holds nothing.
 	 */
 	async checkWrite(
 		call: AgentToolCall,
@@ -241,7 +332,6 @@ export class SoulController {
 		cwd: string,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined> {
-		if (!this.deps.isRootSession()) return undefined;
 		this.admit(call);
 		const toolName = call.name;
 		if (toolName !== "write" && toolName !== "edit") return undefined;
@@ -259,7 +349,7 @@ export class SoulController {
 			return block(`soul.md write refused: ${screened.reason}.`);
 		}
 
-		const engine = this.deps.getEngine();
+		const engine = this.deps.systemOne.recordingSemanticEngine();
 		if (!engine || screened.soul === undefined) return this.hold(call, candidate.text, current, "unreviewed");
 
 		const identity = soulSha256(candidate.text);
@@ -269,31 +359,63 @@ export class SoulController {
 				"System One could not settle this soul.md text twice. Rewrite it materially, as a plain self-description.",
 			);
 		}
-		const outcome = await reviewSoulText(
-			engine,
-			{ proposedText: candidate.text, currentSoul: current ?? "" },
-			signal,
-		);
-		switch (outcome.kind) {
-			case "allow":
-				this.evaluations.delete(identity);
-				return this.hold(call, candidate.text, current, "allow");
-			case "adverse": {
-				this.record(candidate.text, "block");
-				const adverse = outcome.findings.filter((finding) => finding.answer === "adverse");
-				return block(
-					`System One blocked the soul.md write: ${adverse.map((finding) => `${finding.id} (${finding.adverse})`).join("; ")}. Rewrite it as a plain description of who you are and how you work.`,
+		this.gateReviews += 1;
+		let outcome: SoulReviewOutcome;
+		try {
+			outcome = await reviewSoulText(engine, { proposedText: candidate.text, currentSoul: current ?? "" }, signal);
+		} finally {
+			this.gateReviews -= 1;
+		}
+		if (outcome.kind === "failed") {
+			if (signal?.aborted) return block("The soul.md review was cancelled with the call; nothing was written.");
+			return this.holdWrite(`${screened.soul}\n`, current, outcome.error);
+		}
+		if (outcome.kind === "allow") {
+			this.evaluations.delete(identity);
+			const held = this.heldWrite;
+			if (held) {
+				this.endHeld(
+					held,
+					"write-replaced",
+					"The held soul.md write was dropped: a newer soul.md write was reviewed and allowed.",
+					false,
 				);
 			}
-			case "unsettled":
-				if (this.evaluations.size >= MAX_TRACKED_CANDIDATES) this.evaluations.clear();
-				this.evaluations.set(identity, (this.evaluations.get(identity) ?? 0) + 1);
-				this.record(candidate.text, "block");
-				return block("System One could not settle this soul.md text. Simplify the text and write it again.");
-			case "failed":
-				this.deps.emitWarning(`soul written without System One review: ${outcome.error}`);
-				return this.hold(call, candidate.text, current, "unreviewed");
+			return this.hold(call, candidate.text, current, "allow");
 		}
+		// System One answered: a held review can be tried now.
+		this.retryHeld();
+		this.record(candidate.text, "block");
+		if (outcome.kind === "unsettled") {
+			if (this.evaluations.size >= MAX_TRACKED_CANDIDATES) this.evaluations.clear();
+			this.evaluations.set(identity, (this.evaluations.get(identity) ?? 0) + 1);
+			return block("System One could not settle this soul.md text. Simplify the text and write it again.");
+		}
+		const adverse = outcome.findings.filter((finding) => finding.answer === "adverse");
+		return block(
+			`System One blocked the soul.md write: ${adverse.map((finding) => `${finding.id} (${finding.adverse})`).join("; ")}. Rewrite it as a plain description of who you are and how you work.`,
+		);
+	}
+
+	/**
+	 * The gate's review failed or timed out: the call is blocked and the text kept, as the exact bytes the write path
+	 * stores, for the harness to review again and write itself. A newer held text replaces an older one in the same episode.
+	 */
+	private holdWrite(bytes: string, basedOn: string | undefined, error: string): BeforeToolCallResult {
+		this.heldWrite = { bytes, basedOn, failures: 0 };
+		this.lastRetryAt = Date.now();
+		this.syncSubscription();
+		this.tell(
+			"write",
+			"write-held",
+			`System One could not review the agent's soul.md write (${error}). It is held, not written: the harness writes it once System One reviews and allows it.`,
+		);
+		return {
+			block: true,
+			reason: `soul.md write held: System One could not review it (${error})`.slice(0, MAX_BLOCK_REASON_CHARS),
+			correction:
+				"Do not write soul.md again: the harness keeps this text, has System One review it when it is available again, and writes it if the review allows it.",
+		};
 	}
 
 	/**
@@ -318,9 +440,11 @@ export class SoulController {
 	 * while calls were running and is attributed to them: to this call, or to a parallel sibling whose change is seen
 	 * first (whichever settles first reports it). It is judged like a gated write, on the revision observed:
 	 * - an allowed gated write is recorded from the text on disk once its call succeeded;
-	 * - any other change goes through the deterministic screen and, while System One is available, the soul review; if it
-	 *   fails either, the accounted-for text (for a gated write whose text another writer replaced: the reviewed text)
-	 *   is written back, a typed `reverted` entry is recorded, the owner is told and the model gets a notice;
+	 * - any other change goes through the deterministic screen and, while System One is configured, the soul review; if
+	 *   it fails either, the accounted-for text (for a gated write whose text another writer replaced: the reviewed text)
+	 *   is written back, a typed `reverted` entry is recorded, the owner is told and the model gets a notice; a review
+	 *   that fails or times out holds the change (`AwaitingReview`): it stays on disk, is neither adopted nor recorded,
+	 *   and is reviewed again when System One answers;
 	 * - a deletion is put back the same way, as a `removed` entry.
 	 * A verdict holds for one revision only. It is committed under the soul lock after the file is read again; if the
 	 * file moved during the review the verdict is discarded and the new revision is reconciled the same way (a bounded
@@ -328,7 +452,12 @@ export class SoulController {
 	 * The offending text is on disk from its write until it is reverted.
 	 */
 	settleWrite(call: AgentToolCall, succeeded: boolean): Promise<string | undefined> {
-		const run = this.settling.then(() => this.settle(call, succeeded));
+		return this.serialized(() => this.settle(call, succeeded));
+	}
+
+	/** Settlements and held-review commits run one at a time, in order. */
+	private serialized<T>(operation: () => T | Promise<T>): Promise<T> {
+		const run = this.settling.then(operation);
 		this.settling = run.then(
 			() => undefined,
 			() => undefined,
@@ -337,13 +466,18 @@ export class SoulController {
 	}
 
 	private async settle(call: AgentToolCall, succeeded: boolean): Promise<string | undefined> {
-		if (!this.deps.isRootSession()) return undefined;
 		const pending = this.pending.get(call);
 		this.pending.delete(call);
 		this.running.delete(call);
 		const carried = joinNotices(this.carriedNotice, this.resolveDeferred());
 		this.carriedNotice = undefined;
 		if (this.deferred) return carried;
+		const awaiting = this.awaitingReview;
+		if (awaiting) {
+			// A newer revision supersedes the held change; it is judged below like any change found while calls ran.
+			if (this.awaitingStands(awaiting)) return carried;
+			this.dropAwaiting();
+		}
 		const observed = this.watch.reconcile();
 		if (!observed) return carried;
 		return joinNotices(carried, await this.judge(observed, pending && succeeded ? pending : undefined, 0));
@@ -379,40 +513,14 @@ export class SoulController {
 		} else {
 			const text = observed.text;
 			const verdict = await this.verdict(text, known);
-			rejects = !verdict.accept;
-			action = verdict.accept
-				? () => {
-						if (verdict.warning) this.deps.emitWarning(verdict.warning);
-						this.historyStore.record({
-							text,
-							keepText: true,
-							standing: known,
-							author: "agent",
-							reviewer: verdict.reviewer,
-						});
-						return undefined;
-					}
-				: () =>
-						this.revert(
-							restoreTo,
-							"reverted",
-							`soul.md was changed outside the soul gate (${verdict.reason}) and was reverted`,
-						);
+			if (verdict.kind === "unavailable") return this.awaitReview(observed, text, known, restoreTo, verdict.error);
+			rejects = verdict.kind === "reject";
+			action = this.verdictAction(text, known, restoreTo, verdict);
 		}
 		const outcome = this.commit(observed, action);
 		if (outcome.kind === "done") return outcome.notice;
 		if (outcome.kind === "deferred") {
-			this.deferred = {
-				observed,
-				baselineDigest: this.watch.accountedDigest,
-				action,
-				rejects,
-				since: Date.now(),
-				attempts: 0,
-			};
-			this.deps.emitWarning(
-				"soul.md is locked by another session; the verdict on its change is kept and retried at the next tool call, and the change is not adopted meanwhile.",
-			);
+			this.deferCommit(observed, this.watch.accountedDigest, action, rejects);
 			return undefined;
 		}
 		// The file moved while this verdict was being made: it says nothing about the new revision.
@@ -424,6 +532,322 @@ export class SoulController {
 		}
 		this.adoptOwner();
 		return undefined;
+	}
+
+	/** A settled verdict's commit: record an accepted change, or write the restore target back. */
+	private verdictAction(
+		text: string,
+		standing: string | undefined,
+		restoreTo: string | undefined,
+		verdict: Exclude<SoulVerdict, { kind: "unavailable" }>,
+	): () => string | undefined {
+		if (verdict.kind === "reject") {
+			return () =>
+				this.revert(
+					restoreTo,
+					"reverted",
+					`soul.md was changed outside the soul gate (${verdict.reason}) and was reverted`,
+				);
+		}
+		return () => {
+			this.historyStore.record({ text, keepText: true, standing, author: "agent", reviewer: verdict.reviewer });
+			return undefined;
+		};
+	}
+
+	/** The lock refused a verdict's commit: kept as a {@link DeferredSettlement}, retried at the next tool call. */
+	private deferCommit(
+		observed: SoulRevision,
+		baselineDigest: string | undefined,
+		action: () => string | undefined,
+		rejects: boolean,
+	): void {
+		this.deferred = { observed, baselineDigest, action, rejects, since: Date.now(), attempts: 0 };
+		this.deps.emitWarning(
+			"soul.md is locked by another session; the verdict on its change is kept and retried at the next tool call, and the change is not adopted meanwhile.",
+		);
+	}
+
+	/**
+	 * The review of a change on disk failed or timed out: the change is held. It stays on disk, is not adopted or
+	 * recorded, and blocks other judgments until a review settles it, a newer revision or an owner save supersedes it,
+	 * or {@link MAX_HELD_REVIEW_FAILURES} reviews fail (then it is reverted, its text kept as a `withheld` entry).
+	 */
+	private awaitReview(
+		observed: SoulRevision,
+		text: string,
+		standing: string | undefined,
+		restoreTo: string | undefined,
+		error: string,
+	): string {
+		this.awaitingReview = {
+			observed,
+			text,
+			baselineDigest: this.watch.accountedDigest,
+			standing,
+			restoreTo,
+			failures: 0,
+		};
+		this.lastRetryAt = Date.now();
+		this.syncSubscription();
+		this.tell(
+			"change",
+			"change-held",
+			`soul.md was changed during a tool call while System One could not review it (${error}). The change stays on disk but is not accepted until System One reviews it; it is reverted after ${MAX_HELD_REVIEW_FAILURES} failed reviews.`,
+		);
+		return "soul.md changed while System One could not review it: the change is held for review and is reverted if the review rejects it.";
+	}
+
+	private awaitingStands(awaiting: AwaitingReview): boolean {
+		return (
+			this.watch.accountedDigest === awaiting.baselineDigest &&
+			this.watch.current().digest === awaiting.observed.digest
+		);
+	}
+
+	/** A newer revision or an owner save superseded the held change before a review settled it. */
+	private dropAwaiting(): void {
+		this.awaitingReview = undefined;
+		this.syncSubscription();
+		this.tell(
+			"change",
+			"change-replaced",
+			"The soul.md change held for System One review was replaced by a newer change before it was reviewed.",
+		);
+	}
+
+	/**
+	 * Reviews what is held, at most one pass at a time and never on a caller's stack: the held change first, then the
+	 * held write (not while a verdict or a change still owns the file). The reviews run outside the settlement order, so
+	 * no tool result waits for them; their commits run inside it.
+	 */
+	private retryHeld(): void {
+		if (this.closed || this.retrying || (!this.heldWrite && !this.awaitingReview)) return;
+		this.lastRetryAt = Date.now();
+		this.retrying = this.reviewHeld()
+			.catch((error: unknown) => {
+				this.deps.emitWarning(
+					`The held soul.md review could not finish: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			})
+			.finally(() => {
+				this.retrying = undefined;
+				this.syncSubscription();
+			});
+	}
+
+	private async reviewHeld(): Promise<void> {
+		const awaiting = this.awaitingReview;
+		if (awaiting) {
+			const verdict = await this.verdict(awaiting.text, awaiting.standing);
+			await this.serialized(() => this.finishAwaiting(awaiting, verdict));
+		}
+		const held = this.heldWrite;
+		if (!held || this.deferred || this.awaitingReview) return;
+		// A file that moved off the held write's starting text refuses it anyway: no review is paid for.
+		if (this.read() !== held.basedOn) {
+			await this.serialized(() => this.finishHeld(held, "stale"));
+			return;
+		}
+		const engine = this.deps.systemOne.recordingSemanticEngine();
+		const outcome = engine
+			? await reviewSoulText(engine, { proposedText: held.bytes, currentSoul: held.basedOn ?? "" })
+			: "unbound";
+		await this.serialized(() => this.finishHeld(held, outcome));
+	}
+
+	private finishAwaiting(awaiting: AwaitingReview, verdict: SoulVerdict): void {
+		if (this.awaitingReview !== awaiting || this.closed) return;
+		if (verdict.kind === "unavailable") {
+			awaiting.failures += 1;
+			if (awaiting.failures < MAX_HELD_REVIEW_FAILURES) return;
+		}
+		if (!this.awaitingStands(awaiting)) {
+			this.dropAwaiting();
+			return;
+		}
+		this.awaitingReview = undefined;
+		this.syncSubscription();
+		const action =
+			verdict.kind === "unavailable"
+				? () => this.withhold(awaiting)
+				: this.verdictAction(awaiting.text, awaiting.standing, awaiting.restoreTo, verdict);
+		const outcome = this.commit(awaiting.observed, action);
+		if (outcome.kind === "stale") {
+			this.dropAwaiting();
+			return;
+		}
+		if (outcome.kind === "deferred") {
+			this.deferCommit(awaiting.observed, awaiting.baselineDigest, action, verdict.kind !== "accept");
+			return;
+		}
+		this.carriedNotice = joinNotices(this.carriedNotice, outcome.notice);
+		if (verdict.kind === "accept") {
+			this.tell(
+				"change",
+				"change-accepted",
+				verdict.reviewer === "allow"
+					? "System One reviewed and allowed the held soul.md change; it is accepted."
+					: "The held soul.md change was accepted without review: System One is no longer configured.",
+			);
+		} else if (verdict.kind === "reject") {
+			this.tell(
+				"change",
+				"change-reverted",
+				`System One rejected the held soul.md change (${verdict.reason}); it was reverted.`,
+			);
+		} else {
+			this.tell(
+				"change",
+				"change-withheld",
+				`System One could not review the held soul.md change in ${MAX_HELD_REVIEW_FAILURES} attempts; it was reverted and its text is kept in /soul history.`,
+			);
+		}
+	}
+
+	/**
+	 * Reverts a held change no review settled, keeping its text first as a typed `withheld` entry the owner can restore.
+	 * Runs inside the soul lock.
+	 */
+	private withhold(awaiting: AwaitingReview): string {
+		this.historyStore.record({
+			text: awaiting.text,
+			keepText: true,
+			standing: undefined,
+			author: "agent",
+			reviewer: "unreviewed",
+			event: "withheld",
+		});
+		return this.revert(
+			awaiting.restoreTo,
+			"reverted",
+			"soul.md was changed while System One could not review it and was reverted; its text is kept in /soul history",
+		);
+	}
+
+	private finishHeld(held: HeldWrite, outcome: SoulReviewOutcome | "unbound" | "stale"): void {
+		if (this.heldWrite !== held || this.closed) return;
+		const stale =
+			"The held soul.md write was not written: soul.md changed since it was proposed. Its text is kept in /soul history.";
+		if (outcome === "stale") {
+			this.endHeld(held, "write-stale", stale, true);
+			return;
+		}
+		if (outcome !== "unbound" && outcome.kind === "failed") {
+			held.failures += 1;
+			if (held.failures >= MAX_HELD_REVIEW_FAILURES) {
+				this.endHeld(
+					held,
+					"write-withheld",
+					`System One could not review the held soul.md write in ${MAX_HELD_REVIEW_FAILURES} attempts; it was not written and its text is kept in /soul history.`,
+					true,
+				);
+			}
+			return;
+		}
+		if (outcome !== "unbound" && outcome.kind !== "allow") {
+			this.record(held.bytes, "block");
+			this.endHeld(
+				held,
+				"write-rejected",
+				`System One rejected the held soul.md write (${reviewCodes(outcome)}); it was not written.`,
+				false,
+			);
+			return;
+		}
+		// A verdict or a held change owns the file now: the write waits for the next retry.
+		if (this.deferred || this.awaitingReview) return;
+		const reviewer: SoulReviewer = outcome === "unbound" ? "unreviewed" : "allow";
+		const saved = this.write(held.bytes, "agent", reviewer, { text: held.basedOn });
+		if (saved.ok) {
+			this.endHeld(
+				held,
+				"write-applied",
+				reviewer === "allow"
+					? "System One reviewed and allowed the held soul.md write; the harness wrote it."
+					: "The held soul.md write was written without review: System One is no longer configured.",
+				false,
+			);
+			return;
+		}
+		if ("locked" in saved) return;
+		this.endHeld(held, "write-stale", stale, true);
+	}
+
+	/** The held write is done with; a text no review settled is kept as a typed `withheld` entry the owner can restore. */
+	private endHeld(held: HeldWrite, reason: string, text: string, keepText: boolean): void {
+		this.heldWrite = undefined;
+		if (keepText) {
+			this.recordAudit({
+				text: held.bytes,
+				keepText: true,
+				standing: undefined,
+				author: "agent",
+				reviewer: "unreviewed",
+				event: "withheld",
+				now: new Date(),
+			});
+		}
+		this.syncSubscription();
+		this.tell("write", reason, text);
+	}
+
+	/** Listens for System One's settled answers only while something is held; a settled answer retries the held review. */
+	private syncSubscription(): void {
+		const waiting = !this.closed && (this.heldWrite !== undefined || this.awaitingReview !== undefined);
+		if (waiting && !this.offEvaluations) {
+			this.offEvaluations = this.deps.systemOne.onSemanticEvaluation((record) => {
+				// The gate's own review is used by the gate first; it retries once it has its outcome.
+				if (record.outcome === "ok" && this.gateReviews === 0) queueMicrotask(() => this.retryHeld());
+			});
+		} else if (!waiting && this.offEvaluations) {
+			this.offEvaluations();
+			this.offEvaluations = undefined;
+		}
+	}
+
+	/** One owner notice per episode and scope; a session that keeps no notices gets the line as a warning. */
+	private tell(scope: SoulNoticeScope, reason: string, text: string): void {
+		if (this.told.get(scope) === reason) return;
+		this.told.set(scope, reason);
+		if (!this.deps.observeHarnessNotice("soul-review", () => ({ scope, state: { reason, text } }))) {
+			this.deps.emitWarning(text);
+		}
+	}
+
+	/**
+	 * The session ends: nothing held is reviewed after it. A held write is kept as a `withheld` history entry; a held
+	 * change is reverted the same way (its text kept as `withheld`), or stays on disk with a warning when the soul lock is
+	 * held elsewhere. Neither is applied by a later session.
+	 */
+	close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.syncSubscription();
+		const held = this.heldWrite;
+		this.heldWrite = undefined;
+		if (held) {
+			this.recordAudit({
+				text: held.bytes,
+				keepText: true,
+				standing: undefined,
+				author: "agent",
+				reviewer: "unreviewed",
+				event: "withheld",
+				now: new Date(),
+			});
+			this.deps.emitWarning(
+				"The held soul.md write was not reviewed before the session closed; it was not written and its text is kept in /soul history.",
+			);
+		}
+		const awaiting = this.awaitingReview;
+		this.awaitingReview = undefined;
+		if (!awaiting || !this.awaitingStands(awaiting)) return;
+		if (this.commit(awaiting.observed, () => this.withhold(awaiting)).kind === "deferred") {
+			this.deps.emitWarning(
+				`The soul.md change held for System One review could not be reverted at close because the soul lock is held elsewhere; it stays on disk unreviewed. ${this.path}`,
+			);
+		}
 	}
 
 	/**
@@ -540,35 +964,22 @@ export class SoulController {
 		});
 	}
 
-	/** The deterministic screen, then the soul review while System One is available, on a document already on disk. */
-	private async verdict(
-		text: string,
-		current: string | undefined,
-	): Promise<{ accept: true; reviewer: SoulReviewer; warning?: string } | { accept: false; reason: string }> {
+	/** The deterministic screen, then the soul review while System One is configured, on a document already on disk. */
+	private async verdict(text: string, current: string | undefined): Promise<SoulVerdict> {
 		const screened = checkSoulText(text);
-		if (!screened.ok) return { accept: false, reason: screened.reason };
-		const engine = this.deps.getEngine();
-		if (!engine || screened.soul === undefined) return { accept: true, reviewer: "unreviewed" };
+		if (!screened.ok) return { kind: "reject", reason: screened.reason };
+		const engine = this.deps.systemOne.recordingSemanticEngine();
+		if (!engine || screened.soul === undefined) return { kind: "accept", reviewer: "unreviewed" };
 		const outcome = await reviewSoulText(engine, { proposedText: text, currentSoul: current ?? "" });
 		switch (outcome.kind) {
 			case "allow":
-				return { accept: true, reviewer: "allow" };
+				return { kind: "accept", reviewer: "allow" };
 			case "adverse":
-				return {
-					accept: false,
-					reason: `System One: ${outcome.findings
-						.filter((finding) => finding.answer === "adverse")
-						.map((finding) => finding.id)
-						.join(", ")}`,
-				};
+				return { kind: "reject", reason: `System One: ${reviewCodes(outcome)}` };
 			case "unsettled":
-				return { accept: false, reason: "System One could not settle the text" };
+				return { kind: "reject", reason: "System One could not settle the text" };
 			case "failed":
-				return {
-					accept: true,
-					reviewer: "unreviewed",
-					warning: `soul written without System One review: ${outcome.error}`,
-				};
+				return { kind: "unavailable", error: outcome.error };
 		}
 	}
 
@@ -624,17 +1035,18 @@ export class SoulController {
 	}
 
 	/**
-	 * An owner write. `basedOn` is the revision the owner started from (the text the panel was opened on): the write is
-	 * refused when the file is no longer that text, so a competing change is never replaced unseen. The check and the
-	 * replace happen under the soul lock; the text is stored, then the file replaced, then the entry appended, and the
-	 * accounting advances to the bytes actually written.
+	 * An owner write, or the harness writing a reviewed held agent write. `basedOn` is the revision the writer started
+	 * from (the text the panel was opened on, the file a held write was proposed on): the write is refused when the file
+	 * is no longer that text, so a competing change is never replaced unseen. The check and the replace happen under the
+	 * soul lock; the text is stored, then the file replaced, then the entry appended, and the accounting advances to the
+	 * bytes actually written.
 	 */
 	private write(
 		text: string,
 		author: SoulAuthor,
 		reviewer: SoulReviewer,
 		basedOn?: { readonly text: string | undefined },
-	): SoulSaveResult {
+	): SoulWriteResult {
 		const screened = checkSoulText(text);
 		if (!screened.ok) return { ok: false, reason: screened.reason };
 		if (screened.soul === undefined)
@@ -658,7 +1070,9 @@ export class SoulController {
 			this.watch.adopt(written);
 			return { ok: true, bytes: Buffer.byteLength(written.text ?? content, "utf8") };
 		});
-		return result.held ? result.value : { ok: false, reason: "soul.md is locked by another session; try again" };
+		return result.held
+			? result.value
+			: { ok: false, reason: "soul.md is locked by another session; try again", locked: true };
 	}
 
 	/**
