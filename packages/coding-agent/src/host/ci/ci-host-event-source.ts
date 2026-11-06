@@ -23,6 +23,7 @@ import {
 	HOST_EVENT_KINDS,
 	MAX_OWN_PULL_REQUESTS,
 } from "../../core/events/host-event-kinds.ts";
+import type { CiFailureEvidenceReader } from "../../core/proactivity/act-ahead-record.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import type { CiProvider, CiRepository } from "./ci-provider.ts";
@@ -80,6 +81,11 @@ export interface CiHostRuntimeOptions {
 	/** This session's GitHub listeners; collection serves the union of every consumer's recorded ones. */
 	readonly getGithubInterests?: () => readonly GithubThreadInterest[];
 	readonly subscribeGithubInterests?: (listener: () => void) => () => void;
+	/**
+	 * Offers this source's read-only failure evidence (failed jobs and steps, the redacted end of a failed job's log) to
+	 * the session while the source runs; the returned function withdraws it.
+	 */
+	readonly provideFailureEvidence?: (reader: CiFailureEvidenceReader) => () => void;
 	/** Variables only the default provider's gh commands carry (the away host's gh tokens). */
 	readonly commandCredentials?: Readonly<Record<string, string>>;
 	/**
@@ -192,6 +198,8 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	private readonly getGithubInterests: () => readonly GithubThreadInterest[];
 	private readonly subscribeGithubInterests?: (listener: () => void) => () => void;
 	private unsubscribeInterests?: () => void;
+	private readonly provideFailureEvidence?: (reader: CiFailureEvidenceReader) => () => void;
+	private withdrawFailureEvidence?: () => void;
 	/** Last reported text per diagnostic key: a repeating failure is reported once until it changes. */
 	private readonly reported = new Map<string, string>();
 	private watchers: FSWatcher[] = [];
@@ -240,10 +248,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			| "threads"
 			| "getGithubInterests"
 			| "subscribeGithubInterests"
+			| "provideFailureEvidence"
 			| "role"
 			| "onHeld"
 		> = {},
 	) {
+		this.provideFailureEvidence = options.provideFailureEvidence;
 		this.role = options.role;
 		this.onHeld = options.onHeld;
 		this.paths = paths;
@@ -282,6 +292,20 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		};
 		this.unsubscribeSubjects = this.subscribeSubjects?.(onSubscriptions);
 		this.unsubscribeInterests = this.subscribeGithubInterests?.(onSubscriptions);
+		const evidence = this.provider.failureEvidence?.bind(this.provider);
+		if (evidence && this.provideFailureEvidence) {
+			const lifetime = this.signal()!;
+			this.withdrawFailureEvidence = this.provideFailureEvidence(async (event, signal) => {
+				const repository = await this.provider.repository(AbortSignal.any([signal, lifetime]));
+				// Only an attempt of this source's own repository and workflow is read.
+				if (
+					event.identity.repositoryId !== repository.repositoryId ||
+					event.identity.workflowId !== repository.workflowId
+				)
+					return undefined;
+				return evidence(event.identity, AbortSignal.any([signal, lifetime]));
+			});
+		}
 		mkdirSync(this.paths.statusDir, { recursive: true });
 		this.armWatchers();
 		this.request(true);
@@ -304,6 +328,8 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		this.unsubscribeSubjects = undefined;
 		this.unsubscribeInterests?.();
 		this.unsubscribeInterests = undefined;
+		this.withdrawFailureEvidence?.();
+		this.withdrawFailureEvidence = undefined;
 		for (const watcher of this.watchers) closeWatcher(watcher);
 		this.watchers = [];
 		this.watchDirectories = "";

@@ -229,6 +229,9 @@ export async function runJourney1GithubRoutinesPhase(
 			wait: async () => {
 				throw new Error("GitHub thread collection never waits on a command.");
 			},
+			tail: async () => {
+				throw new Error("GitHub thread collection never reads a log.");
+			},
 		};
 		// The checked-out revision has no CI run: the source registers its repository and observes nothing else.
 		const provider: CiProvider = {

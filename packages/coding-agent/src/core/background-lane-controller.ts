@@ -144,6 +144,8 @@ import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
+import { ActAheadController } from "./proactivity/act-ahead-controller.ts";
+import type { CiFailureEvidenceReader } from "./proactivity/act-ahead-record.ts";
 import {
 	MAX_TURN_WAKES_HOLD,
 	type ParentWakeDelivery,
@@ -266,6 +268,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _goalAutoContinue: GoalAutoContinueController;
 	private readonly _research: ResearchLaneController;
 	private readonly _proactivity: ProactivityController;
+	/** Acting ahead on the checkout's failing CI; built on first use, started with the session's inputs. */
+	private _actAhead: ActAheadController | undefined;
+	/** The running CI source's failure-evidence reader, offered by the host. */
+	private _ciFailureEvidence: CiFailureEvidenceReader | undefined;
 	/** How the last CI event for this session reached the parent: a wake or carried past the wake bound. */
 	private _lastEventDelivery: ParentWakeDelivery | undefined;
 	private readonly _fitness: ModelFitnessController;
@@ -551,6 +557,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				const notification = this._getWorkerLifecycle().getTaskRuntimeSnapshot().notifications[notificationId];
 				if (!notification) throw new Error("Worker notification is absent from the durable outbox.");
 				if (notification.status === "delivered") return "acknowledged";
+				// An acting-ahead worker's completion is that episode's own input; it never wakes the owner.
+				if (
+					!this.deps.isChildSession() &&
+					this._getActAhead().ownsNotification(record, this._getWorkerLifecycle().getTaskRuntimeSnapshot())
+				)
+					return "separate";
 				if (this.deps.canRunRoutines?.() === false) return "coordinator";
 				this.getBotTeamStore();
 				if (!this._routines) throw new Error("Routine notification owner is unavailable.");
@@ -905,6 +917,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("stop routine intake", () => {
 			intakeShutdown = this._routines?.intake.stop() ?? Promise.resolve();
 		});
+		let actAheadShutdown = Promise.resolve();
+		this._runTeardownStep("stop acting ahead", () => {
+			actAheadShutdown = this._actAhead?.close() ?? Promise.resolve();
+		});
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -917,7 +933,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they
 		// were told to stop: intake awaits every notice it starts, and stopping aborts a notice still waiting to be saved.
-		return Promise.all([workerShutdown, routineShutdown, intakeShutdown]).then(() => undefined);
+		return Promise.all([workerShutdown, routineShutdown, intakeShutdown, actAheadShutdown]).then(() => undefined);
 	}
 
 	private _runTeardownStep(label: string, step: () => void): void {
@@ -1505,19 +1521,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				),
 			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
 			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
-			hostEvents: {
-				feed: () => {
-					const lifecycle = this._getWorkerLifecycle();
-					const events = lifecycle.ledger.runtime.hostEvents;
-					return routineHostEventFeed(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
-						events.isSourceReady(sourceId),
-					);
-				},
-				subscribe: (listener) => {
-					this._hostEventStateListeners.add(listener);
-					return () => this._hostEventStateListeners.delete(listener);
-				},
-			},
+			hostEvents: this._hostEventFeed(),
 			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
 			delivery: {
 				deliver: async (delivery) => {
@@ -1647,10 +1651,72 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 	}
 
-	/** The hands-off inputs a root session starts once it binds: persistent routines and the registered channels. */
+	/**
+	 * The hands-off inputs a root session starts once it binds: persistent routines, the registered channels and acting
+	 * ahead on the checkout's failing CI.
+	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
 		this.channels.start();
+		if (!this.deps.isDisposed() && !this.deps.isChildSession()) this._getActAhead().start();
+	}
+
+	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
+	provideCiFailureEvidence(reader: CiFailureEvidenceReader): () => void {
+		this._ciFailureEvidence = reader;
+		return () => {
+			if (this._ciFailureEvidence === reader) this._ciFailureEvidence = undefined;
+		};
+	}
+
+	/** Accepted host events as routine facts, and their change signal: what routines and acting ahead follow. */
+	private _hostEventFeed() {
+		return {
+			feed: () => {
+				const lifecycle = this._getWorkerLifecycle();
+				const events = lifecycle.ledger.runtime.hostEvents;
+				return routineHostEventFeed(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
+					events.isSourceReady(sourceId),
+				);
+			},
+			subscribe: (listener: () => void) => {
+				this._hostEventStateListeners.add(listener);
+				return () => this._hostEventStateListeners.delete(listener);
+			},
+		};
+	}
+
+	private _getActAhead(): ActAheadController {
+		this._actAhead ??= new ActAheadController({
+			getSessionManager: () => this.deps.getSessionManager(),
+			isChildSession: () => this.deps.isChildSession(),
+			isDisposed: () => this.deps.isDisposed(),
+			canDispatch: () => this.deps.isDelegateToolActive(),
+			isForegroundBusy: () => this.deps.isForegroundBusy(),
+			subscribeForegroundActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
+			settings: () => this.deps.getSettingsManager().getActAheadSettings(),
+			hostEvents: this._hostEventFeed(),
+			workers: {
+				contextForDirectory: (cwd, signal) => this._getWorkerController().contextForDirectory(cwd, signal),
+				start: (request, signal) => this.startWorkerDelegation(request, signal),
+				snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
+				subscribe: (listener) => {
+					this._getWorkerLifecycle();
+					return this.subscribeOrchestrationStore(listener);
+				},
+				terminalNotification: (attemptId) => this._getWorkerLifecycle().getAttemptTerminalNotification(attemptId),
+				acknowledge: (notificationIds) => this._getWorkerLifecycle().markNotificationsDelivered(notificationIds),
+			},
+			engineDeps: (cwd) => this._worktreeEngineDeps(cwd),
+			cwd: () => this.deps.getCwd(),
+			sessionId: () => this.deps.getSessionId(),
+			aggregateDay: () => this.deps.aggregateUsageWindow(rollingDayWindow(Date.now())),
+			evidence: () => this._ciFailureEvidence,
+			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read) ?? false,
+			warn: (message) => this._safeWarn(message),
+			now: () => Date.now(),
+		});
+		return this._actAhead;
 	}
 
 	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy. */

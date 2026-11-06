@@ -130,11 +130,19 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
-	/** Review spend and parent wakes inside a window across the owner's sessions, from the daily-usage owner. */
+	/** Review spend, parent wakes and acting-ahead accounting inside a window across the owner's sessions. */
 	aggregateUsageWindow(
 		window: DailyUsageWindow,
 	): Promise<
-		Pick<DailyUsageTotals, "proactivityCost" | "proactiveTurnWakes" | "hostEventTurnWakes" | "routineResultTurnWakes">
+		Pick<
+			DailyUsageTotals,
+			| "proactivityCost"
+			| "proactiveTurnWakes"
+			| "hostEventTurnWakes"
+			| "routineResultTurnWakes"
+			| "actAheadAttempts"
+			| "actAheadUsd"
+		>
 	>;
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;

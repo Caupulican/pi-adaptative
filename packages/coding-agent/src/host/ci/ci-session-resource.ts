@@ -41,6 +41,8 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 					// GitHub routines need this same source, so they watch only a checkout with the CI workflow.
 					getGithubInterests: () => session.backgroundLanes.getGithubInterests(),
 					subscribeGithubInterests: (listener) => session.backgroundLanes.subscribeRoutineDefinitions(listener),
+					// Acting ahead reads a failed run's evidence through this source; core never imports the host.
+					provideFailureEvidence: (reader) => session.backgroundLanes.provideCiFailureEvidence(reader),
 				});
 				signal.throwIfAborted();
 				if (!runtime) return [];

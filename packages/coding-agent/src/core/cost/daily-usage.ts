@@ -8,6 +8,7 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "../events/host-event-delivery.ts";
+import { ACT_AHEAD_CUSTOM_TYPE, actAheadAccount, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "../proactivity/proactivity-review.ts";
 import { ROUTINE_COMPLETION_TYPE } from "../routines/routine-parent-input.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
@@ -54,6 +55,10 @@ export type DailyUsageTotals = {
 	hostEventTurnWakes: number;
 	/** Routine results delivered to the parent as a turn without an owner message. */
 	routineResultTurnWakes: number;
+	/** Acting-ahead attempts started (admitted) over the window. */
+	actAheadAttempts: number;
+	/** Acting-ahead spend: each attempt's charge at admission, corrected to its settled spend. Bound accounting only. */
+	actAheadUsd: number;
 	totalCost: number;
 	reportedTotalCost?: number;
 	input: number;
@@ -76,6 +81,8 @@ function createZeroTotals(): DailyUsageTotals {
 		proactiveTurnWakes: 0,
 		hostEventTurnWakes: 0,
 		routineResultTurnWakes: 0,
+		actAheadAttempts: 0,
+		actAheadUsd: 0,
 		totalCost: 0,
 		input: 0,
 		output: 0,
@@ -132,6 +139,12 @@ function addDailyUsageRecord(
 		if (record.wake === "proactive_note") totals.proactiveTurnWakes++;
 		else if (record.wake === "routine_result") totals.routineResultTurnWakes++;
 		else totals.hostEventTurnWakes++;
+		return false;
+	}
+	// The worker's real spend arrives as its own spawned usage; this is the acting-ahead bound's account, not spend.
+	if (record.kind === "act_ahead") {
+		totals.actAheadAttempts += record.attempts;
+		totals.actAheadUsd += record.usd;
 		return false;
 	}
 	const seen = record.kind === "spawned" ? spawned : record.kind === "semantic" ? semantic : undefined;
@@ -240,7 +253,15 @@ interface ParentWakeRecord {
 	timestamp: string;
 }
 
-type DailyUsageRecord = DailyUsageSpendRecord | ParentWakeRecord;
+/** An acting-ahead admission (one attempt and its charge) or settlement (the charge corrected to the spend). */
+interface ActAheadAccountRecord {
+	kind: "act_ahead";
+	attempts: number;
+	usd: number;
+	timestamp: string;
+}
+
+type DailyUsageRecord = DailyUsageSpendRecord | ParentWakeRecord | ActAheadAccountRecord;
 
 /** The wake an accepted parent input of this type counts as, if its mode starts a turn. */
 const PARENT_WAKE_KINDS: ReadonlyMap<string, ParentWakeRecord["wake"]> = new Map([
@@ -280,6 +301,11 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 	if (wake)
 		return parentInputOf(entry)?.metadata.mode === "turn" ? [{ kind: "wake", wake, timestamp: entry.timestamp }] : [];
 	if (entry.type !== "custom") return [];
+	if (entry.customType === ACT_AHEAD_CUSTOM_TYPE) {
+		const record = actAheadRecordOf(entry);
+		const account = record ? actAheadAccount(record) : undefined;
+		return account ? [{ kind: "act_ahead", ...account, timestamp: entry.timestamp }] : [];
+	}
 	if (entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
 		const report = entry.data as SemanticAccountingReport | undefined;
 		return report?.usage && report.reportId ? [semanticUsageRecord(report, entry.timestamp)] : [];
@@ -376,8 +402,8 @@ async function readSessionDirectory(directory: string) {
 	}
 }
 
-/** A wake line carries no usage, so the usage prefilter also admits proactive-note and host-event lines. */
-const PARENT_WAKE_LINES = [...PARENT_WAKE_KINDS.keys()].map((customType) => `"${customType}"`);
+/** Wake and acting-ahead lines carry no usage, so the usage prefilter also admits them. */
+const PARENT_WAKE_LINES = [...PARENT_WAKE_KINDS.keys(), ACT_AHEAD_CUSTOM_TYPE].map((customType) => `"${customType}"`);
 
 /**
  * Entire scan is asynchronous; retained cache entries contain usage only, never conversation payloads. The live session

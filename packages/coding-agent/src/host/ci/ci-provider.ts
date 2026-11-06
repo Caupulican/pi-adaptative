@@ -4,6 +4,7 @@ import type {
 	CiCurrentObservation,
 	CiSubject,
 } from "../../core/events/host-event-contract.ts";
+import type { CiFailureEvidence } from "../../core/proactivity/act-ahead-record.ts";
 
 export interface CiRepository {
 	readonly host: string;
@@ -36,6 +37,8 @@ export interface CiProvider {
 		retiredRuns?: readonly CiRetiredRunRange[],
 	): Promise<CiProviderCollection>;
 	failedJobs(identity: CiAttemptIdentity, signal: AbortSignal): Promise<readonly string[]>;
+	/** Read-only evidence of a failed attempt; an adapter without it gives none (acting ahead then needs reproduction). */
+	failureEvidence?(identity: CiAttemptIdentity, signal: AbortSignal): Promise<CiFailureEvidence>;
 	waitForRun(runId: number, signal: AbortSignal): Promise<void>;
 }
 
@@ -43,4 +46,6 @@ export interface CiCommandPort {
 	run(executable: string, args: readonly string[], signal: AbortSignal): Promise<string>;
 	/** Long-lived commands: output is discarded, only the exit status and a bounded error tail count. */
 	wait(executable: string, args: readonly string[], signal: AbortSignal): Promise<void>;
+	/** Bounded reads: only the last `maxChars` of the output are held, never the whole of it. */
+	tail(executable: string, args: readonly string[], signal: AbortSignal, maxChars: number): Promise<string>;
 }

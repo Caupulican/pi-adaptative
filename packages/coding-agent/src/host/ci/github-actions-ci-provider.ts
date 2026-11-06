@@ -7,6 +7,8 @@ import {
 	type CiSubject,
 	createCiAttemptTerminalEvent,
 } from "../../core/events/host-event-contract.ts";
+import type { CiFailureEvidence } from "../../core/proactivity/act-ahead-record.ts";
+import { redactKnownSecrets } from "../../core/security/secret-text.ts";
 import { bindChildProcessAbort } from "../../utils/child-process.ts";
 import type {
 	CiCommandPort,
@@ -19,6 +21,12 @@ import type {
 const MAX_RUNS = 100;
 const MAX_ATTEMPTS = 128;
 const MAX_JOBS = 100;
+/** Bounds of the CI failure evidence: the log read, what is kept of it, and the jobs and steps named. */
+const CI_LOG_TAIL_READ_CHARS = 256 * 1024;
+const CI_LOG_TAIL_LINES = 80;
+const CI_LOG_TAIL_CHARS = 8 * 1024;
+const CI_LOG_TAIL_TIMEOUT_MS = 60_000;
+const CI_FAILURE_EVIDENCE_MAX_JOBS = 10;
 
 class CiSnapshotChangedError extends Error {}
 
@@ -36,6 +44,85 @@ function positive(value: unknown): number {
 function text(value: unknown, limit = 2048): string {
 	if (typeof value !== "string" || !value || value.length > limit) throw new Error("Invalid GitHub CI text.");
 	return value;
+}
+
+/**
+ * Run a command without buffering its whole output: only the last `stdoutChars` of stdout (none when 0) and a bounded
+ * stderr tail are held, so a long watch or a long log cannot exhaust memory or a buffer bound.
+ */
+function streamCommand(
+	executable: string,
+	args: readonly string[],
+	options: {
+		cwd: string;
+		env: NodeJS.ProcessEnv | undefined;
+		signal: AbortSignal;
+		onDiagnostic: ((message: string) => void) | undefined;
+		stdoutChars: number;
+	},
+): Promise<string> {
+	const { signal, onDiagnostic, stdoutChars } = options;
+	return new Promise<string>((resolve, reject) => {
+		signal.throwIfAborted();
+		let spawned = false;
+		let settled = false;
+		let failure: Error | undefined;
+		let stdout = "";
+		let stderr = "";
+		const settle = (code: number | null, signalCode: NodeJS.Signals | null) => {
+			if (settled) return;
+			settled = true;
+			if (signal.aborted) reject(signal.reason);
+			else if (failure) reject(failure);
+			else if (code === 0) resolve(stdout);
+			else
+				reject(
+					new Error(
+						`${executable} ${args.slice(0, 2).join(" ")} ended with ${code ?? signalCode}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+					),
+				);
+		};
+		const child = spawn(executable, [...args], {
+			cwd: options.cwd,
+			env: options.env,
+			stdio: ["ignore", stdoutChars > 0 ? "pipe" : "ignore", "pipe"],
+			windowsHide: true,
+		});
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdout = `${stdout}${chunk}`.slice(-stdoutChars);
+		});
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderr = `${stderr}${chunk}`.slice(-2048);
+		});
+		child.once("spawn", () => {
+			spawned = true;
+		});
+		child.once("error", (error) => {
+			failure = error;
+			if (!spawned) settle(null, null);
+		});
+		child.once("close", (code, signalCode) => settle(code, signalCode));
+		bindChildProcessAbort(child, signal, onDiagnostic ? { onDiagnostic } : {});
+	});
+}
+
+/**
+ * The end of a job log as evidence: timestamps dropped, the first (possibly cut) line dropped before redaction so a
+ * secret cut at the start cannot survive as an unmatched prefix, then the last lines that fit the bound.
+ */
+function ciLogTail(log: string): string {
+	const lines = log.split(/\r?\n/).slice(1);
+	const redacted = redactKnownSecrets(
+		lines.map((line) => line.replace(/^\uFEFF?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /, "")).join("\n"),
+	)
+		.split("\n")
+		.slice(-CI_LOG_TAIL_LINES)
+		.join("\n");
+	return redacted.length <= CI_LOG_TAIL_CHARS
+		? redacted
+		: redacted.slice(redacted.indexOf("\n", redacted.length - CI_LOG_TAIL_CHARS) + 1);
 }
 
 /** A command that could not start is reported as unavailable, not as a CI outcome. */
@@ -87,46 +174,16 @@ export function createCiCommandPort(
 				});
 				bindChildProcessAbort(child, signal, onDiagnostic ? { onDiagnostic } : {});
 			}),
-		wait: (executable, args, signal) =>
-			new Promise<void>((resolve, reject) => {
-				signal.throwIfAborted();
-				let spawned = false;
-				let settled = false;
-				let failure: Error | undefined;
-				let stderr = "";
-				const settle = (code: number | null, signalCode: NodeJS.Signals | null) => {
-					if (settled) return;
-					settled = true;
-					if (signal.aborted) reject(signal.reason);
-					else if (failure) reject(failure);
-					else if (code === 0) resolve();
-					else
-						reject(
-							new Error(
-								`${executable} ${args.slice(0, 2).join(" ")} ended with ${code ?? signalCode}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
-							),
-						);
-				};
-				// Output is never buffered: a long watch cannot exhaust memory or a buffer bound.
-				const child = spawn(executable, [...args], {
-					cwd,
-					env,
-					stdio: ["ignore", "ignore", "pipe"],
-					windowsHide: true,
-				});
-				child.stderr?.setEncoding("utf8");
-				child.stderr?.on("data", (chunk: string) => {
-					stderr = `${stderr}${chunk}`.slice(-2048);
-				});
-				child.once("spawn", () => {
-					spawned = true;
-				});
-				child.once("error", (error) => {
-					failure = error;
-					if (!spawned) settle(null, null);
-				});
-				child.once("close", (code, signalCode) => settle(code, signalCode));
-				bindChildProcessAbort(child, signal, onDiagnostic ? { onDiagnostic } : {});
+		wait: async (executable, args, signal) => {
+			await streamCommand(executable, args, { cwd, env, signal, onDiagnostic, stdoutChars: 0 });
+		},
+		tail: (executable, args, signal, maxChars) =>
+			streamCommand(executable, args, {
+				cwd,
+				env,
+				signal: AbortSignal.any([signal, AbortSignal.timeout(CI_LOG_TAIL_TIMEOUT_MS)]),
+				onDiagnostic,
+				stdoutChars: maxChars,
 			}),
 	};
 }
@@ -313,7 +370,11 @@ export class GithubActionsCiProvider implements CiProvider {
 		return { subject, events, ...(current ? { current } : {}) };
 	}
 
-	async failedJobs(identity: CiAttemptIdentity, signal: AbortSignal): Promise<readonly string[]> {
+	/** The attempt's failed jobs with their failed steps, from one complete jobs snapshot. */
+	private async failedJobDetails(
+		identity: CiAttemptIdentity,
+		signal: AbortSignal,
+	): Promise<{ repository: CiRepository; jobs: { id: number; name: string; failedSteps: string[] }[] }> {
 		const repository = await this.repository(signal);
 		const result = record(
 			await this.api(
@@ -324,10 +385,48 @@ export class GithubActionsCiProvider implements CiProvider {
 		);
 		if (!Array.isArray(result.jobs) || typeof result.total_count !== "number" || result.total_count > MAX_JOBS)
 			throw new Error("CI job details exceed their complete-snapshot bound.");
-		return result.jobs
+		const jobs = result.jobs
 			.map(record)
 			.filter((job) => job.conclusion === "failure")
-			.map((job) => text(job.name, 512));
+			.map((job) => ({
+				id: positive(job.id),
+				name: text(job.name, 512),
+				failedSteps: (Array.isArray(job.steps) ? job.steps : [])
+					.map(record)
+					.filter((step) => step.conclusion === "failure")
+					.map((step) => text(step.name, 512)),
+			}));
+		return { repository, jobs };
+	}
+
+	async failedJobs(identity: CiAttemptIdentity, signal: AbortSignal): Promise<readonly string[]> {
+		return (await this.failedJobDetails(identity, signal)).jobs.map((job) => job.name);
+	}
+
+	/** The failed jobs and steps, and the redacted end of the first failed job's log (read-only GitHub reads). */
+	async failureEvidence(identity: CiAttemptIdentity, signal: AbortSignal): Promise<CiFailureEvidence> {
+		const { repository, jobs } = await this.failedJobDetails(identity, signal);
+		const first = jobs[0];
+		const log = first
+			? await this.port.tail(
+					"gh",
+					[
+						"api",
+						"--hostname",
+						repository.host,
+						`repos/${repository.nameWithOwner}/actions/jobs/${first.id}/logs`,
+					],
+					signal,
+					CI_LOG_TAIL_READ_CHARS,
+				)
+			: undefined;
+		return {
+			jobs: jobs.slice(0, CI_FAILURE_EVIDENCE_MAX_JOBS).map(({ name, failedSteps }) => ({
+				name,
+				failedSteps: failedSteps.slice(0, CI_FAILURE_EVIDENCE_MAX_JOBS),
+			})),
+			...(first && log !== undefined ? { logJob: first.name, logTail: ciLogTail(log) } : {}),
+		};
 	}
 
 	async waitForRun(runId: number, signal: AbortSignal): Promise<void> {

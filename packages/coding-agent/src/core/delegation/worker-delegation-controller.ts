@@ -3,7 +3,12 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
-import { type AgentContextWire, type AgentMessage, decodeExecutionContext } from "../../kernel/index.ts";
+import {
+	type AgentContextWire,
+	type AgentMessage,
+	decodeExecutionContext,
+	type ExecutionContext,
+} from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
@@ -4674,6 +4679,15 @@ export class WorkerDelegationController {
 				forkTurns: "none",
 			},
 			signal,
+		);
+	}
+
+	/** A validated execution context for a host-chosen worker directory (a lane the host created for the task). */
+	contextForDirectory(cwd: string, signal: AbortSignal): Promise<ExecutionContext> {
+		return this.directories.contextForDirectory(
+			cwd,
+			this.deps.getSessionId(),
+			AbortSignal.any([this.workerAbort.signal, AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS), signal]),
 		);
 	}
 
