@@ -50,6 +50,8 @@ const MAX_PENDING_DRAFTS = 32;
 
 /** Sessions of this process that serve a channel: a holder with this process's pid is live only while listed here. */
 const liveHolders = new Map<string, string>();
+/** Sessions of this process serving channels: a channel one of them gives up is offered to the others at once. */
+const startedSessions = new Set<SessionChannels>();
 
 export type ChannelRuntimeState =
 	| "not_configured"
@@ -92,6 +94,8 @@ export interface SessionChannelsDeps {
 	warn(message: string): void;
 	isDisposed(): boolean;
 	isChildSession(): boolean;
+	/** Rebuild the session's tools: the release tool is offered only while a channel has an explicit policy. */
+	refreshTools?(): void;
 	now?(): number;
 }
 
@@ -131,6 +135,8 @@ export class SessionChannels {
 	private routing = false;
 	private rerun = false;
 	private drainQueued = false;
+	/** Whether a channel had an explicit policy when the tools were last built for it. */
+	private toolsOfferRelease = false;
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
@@ -201,6 +207,8 @@ export class SessionChannels {
 		if (this.started || this.deps.isChildSession() || this.deps.isDisposed()) return;
 		this.started = true;
 		this.startedAt = this.now();
+		this.toolsOfferRelease = this.hasExplicitPolicy();
+		startedSessions.add(this);
 		this.unsubscribes.push(
 			this.deps.subscribeSettings(() => this.onSettingsChanged()),
 			this.deps.subscribeForegroundActivity(() => this.onActivity()),
@@ -212,6 +220,7 @@ export class SessionChannels {
 	async stop(): Promise<void> {
 		const wasStarted = this.started;
 		this.started = false;
+		startedSessions.delete(this);
 		for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
 		await this.registry.stop();
 		if (!wasStarted) return;
@@ -363,6 +372,10 @@ export class SessionChannels {
 				`Channel ${name} could not release its journal: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		// Another session of this process waiting on the channel takes it now, not at its next settings change. Past
+		// this stack, so its journal update never runs inside this one's start gate or stop.
+		for (const other of startedSessions)
+			if (other !== this) queueMicrotask(() => void other.registry.refreshChannels());
 	}
 
 	private onChannelStart(name: string, outcome: LifecycleOutcome): void {
@@ -379,6 +392,17 @@ export class SessionChannels {
 		if (!this.started) return;
 		void this.registry.refreshChannels();
 		this.scheduleWork();
+		const offerRelease = this.hasExplicitPolicy();
+		if (offerRelease === this.toolsOfferRelease || !this.deps.refreshTools) return;
+		try {
+			this.deps.refreshTools();
+			this.toolsOfferRelease = offerRelease;
+		} catch (error) {
+			// Refused while another runtime generation replaces the session's resources: the next settings change retries.
+			this.deps.warn(
+				`The channel release tool could not follow the channel policy yet: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private onActivity(): void {

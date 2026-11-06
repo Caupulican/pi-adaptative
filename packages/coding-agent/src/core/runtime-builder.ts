@@ -1,7 +1,7 @@
 /**
  * Runtime build & reload: the session's tool-registry assembly and the self-modification-safe
  * extension reload path. Owns building the base tool definitions, wrapping them into the live tool
- * registry (`_refreshToolRegistry`), constructing the {@link ExtensionRunner} for a rebuilt runtime
+ * registry (`refreshToolRegistry`), constructing the {@link ExtensionRunner} for a rebuilt runtime
  * (`_buildRuntime`), and the repo's self-modification safety crown jewel: the preflight-guarded
  * `reload()` with its snapshot / doctor / commit-or-rollback sequence, plus the single-extension
  * live load/unload/reconcile operations that rebuild the runtime in place.
@@ -29,8 +29,8 @@
  * host-side and is invoked from {@link buildRuntime} via {@link RuntimeBuilderDeps.bindExtensionCore};
  * it is host identity, not build logic, and moving it would only re-export ~30 host methods through
  * deps to hand them straight back. The host keeps one-line delegations for the public reload /
- * load / unload / reconcile API and for `getAllTools` / `getToolDefinition`, and a private
- * `_refreshToolRegistry` delegation for its internal callers.
+ * load / unload / reconcile API and for `getAllTools` / `getToolDefinition`; its internal callers
+ * call {@link RuntimeBuilder.refreshToolRegistry} directly.
  */
 
 import { existsSync } from "node:fs";
@@ -1101,6 +1101,12 @@ export class RuntimeBuilder {
 		const toolAccess = this._createToolAccessPolicy();
 		const { allowedToolNames, toolProfileFilter } = toolAccess;
 		const isAllowedTool = toolAccess.allows;
+		// The channel release tool exists only while a channel has an explicit policy, which settings change at runtime.
+		if (!this.deps.getBaseToolsOverride()) {
+			const channelReply = isAllowedTool(CHANNEL_REPLY_TOOL_NAME) ? this.deps.getChannelReplyTool?.() : undefined;
+			if (channelReply) this._baseToolDefinitions.set(channelReply.name, channelReply);
+			else this._baseToolDefinitions.delete(CHANNEL_REPLY_TOOL_NAME);
+		}
 
 		const registeredTools = this.deps.getExtensionRunner().getAllRegisteredTools();
 		const allCustomTools = [

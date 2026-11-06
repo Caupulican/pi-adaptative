@@ -231,6 +231,8 @@ export interface BackgroundLaneControllerDeps
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
+	/** Rebuild the session's tool registry: the channel release tool follows the channel policies. */
+	refreshToolRegistry(): void;
 	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
 	getOwnerEvidence(): Pick<
 		OwnerEvidenceLedger,
@@ -337,6 +339,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
 			isChildSession: () => deps.isChildSession(),
+			refreshTools: () => deps.refreshToolRegistry(),
 		});
 		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
 		this._laneModels = new LaneModelResolver(deps);

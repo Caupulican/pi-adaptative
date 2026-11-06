@@ -250,7 +250,9 @@ export class AwayRoutineSupervisor {
 	wake(): void {
 		if (this.disposed) return;
 		this.dirty = true;
-		this.pass ??= this.drain();
+		// The drain starts past this stack: its synchronous prefix writes the store (a scheduler tick), whose listener
+		// calls back here, and it must find this pass in flight instead of starting a second one.
+		this.pass ??= Promise.resolve().then(() => this.drain());
 	}
 
 	/** The parents held open away right now. */

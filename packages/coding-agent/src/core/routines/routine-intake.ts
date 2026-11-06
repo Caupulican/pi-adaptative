@@ -429,10 +429,15 @@ export class RoutineIntake {
 				() => {
 					this.alarm = undefined;
 					if (!this.active || this.deps.isForegroundBusy()) return;
-					this.running = this.run().finally(() => {
-						this.running = undefined;
-						this.schedule();
-					});
+					// The pass starts past this stack, so `running` is set before any of it runs: a spending, evidence or
+					// activity listener its synchronous prefix reaches calls `schedule()`, which must find this pass running
+					// instead of arming an alarm whose callback would start a second one.
+					this.running = Promise.resolve()
+						.then(() => this.run())
+						.finally(() => {
+							this.running = undefined;
+							this.schedule();
+						});
 				},
 				Math.max(IDLE_DELAY_MS, work ? (this.retryAt ?? 0) - this.deps.time.now() : 0),
 			);

@@ -1092,6 +1092,7 @@ export class AgentSession {
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
 		this._backgroundLanes = new BackgroundLaneController({
+			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
 			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
@@ -1241,7 +1242,7 @@ export class AgentSession {
 			getSessionId: () => this.sessionManager.getSessionId(),
 			getSessionFile: () => this.sessionManager.getSessionFile(),
 			isChildSession: () => this._isChildSession,
-			refreshToolRegistry: () => this._refreshToolRegistry(),
+			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
 			getPromptHeadroom: (messages) =>
 				estimatePromptHeadroom({
@@ -2065,7 +2066,7 @@ export class AgentSession {
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getAllTools: () => this.getAllTools(),
 			setActiveToolsByName: (toolNames, assertCurrent) => this._setActiveToolsByName(toolNames, assertCurrent),
-			refreshToolRegistry: () => this._refreshToolRegistry(),
+			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			rebuildSystemPrompt: (toolNames) => this._systemPromptBuilder.rebuildSystemPrompt(toolNames),
 			setBaseSystemPrompt: (prompt) => {
 				this._baseSystemPrompt = prompt;
@@ -4972,7 +4973,7 @@ export class AgentSession {
 			const previousModel = this.model;
 			await this._profileFilter.reapplyActiveProfileModelSettings();
 			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-			this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
+			this._runtimeBuilder.refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
 			if (!modelsAreEqual(previousModel, this.model)) {
 				this._localPrefixWarm.schedule(this.model);
 			}
@@ -5268,10 +5269,6 @@ export class AgentSession {
 	/** Register a deployment-supplied job scheduler (cron). */
 	registerJobScheduler(provider: JobSchedulerProvider): void {
 		this._backgroundLanes.channels.registerScheduler(provider);
-	}
-
-	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
-		this._runtimeBuilder.refreshToolRegistry(options);
 	}
 
 	async reload(): Promise<void> {

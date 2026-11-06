@@ -5112,10 +5112,16 @@ export class WorkerDelegationController {
 		const { lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
 		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
-		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool.
-		const executionPlan = this.carriesThirdPartyWords(prepared.attempt.attemptId)
-			? withoutOwnerMemory(prepared.executionPlan)
-			: prepared.executionPlan;
+		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool. One granted the
+		// broker before a steer tainted it keeps that grant's plan when it is recovered (a durable grant is never
+		// rebound): its broker reads no facts and `checkEdge` refuses the broker tools, as before it was suspended.
+		const grantedMemory =
+			prepared.attempt.grant?.allowedTools.some((toolName) => WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName)) ===
+			true;
+		const executionPlan =
+			this.carriesThirdPartyWords(prepared.attempt.attemptId) && !grantedMemory
+				? withoutOwnerMemory(prepared.executionPlan)
+				: prepared.executionPlan;
 		if (prepared.attempt.status === "queued") {
 			const readiness = lifecycle.getAttemptDispatchReadiness(prepared.attempt.attemptId);
 			if (readiness.state === "blocked") {
