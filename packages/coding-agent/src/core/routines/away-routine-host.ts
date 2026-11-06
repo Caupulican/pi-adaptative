@@ -49,6 +49,7 @@ import {
 	routineEnded,
 	routineJournalRoom,
 	routineJournalShare,
+	routineOpensAt,
 } from "./routine-contract.ts";
 import { RoutineSchedulerController, routineHostEventFeed } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -349,9 +350,11 @@ export class AwayRoutineSupervisor {
 				}
 				continue;
 			}
-			if (routine.nextRunAt > nowMs) {
+			// The claim's own start: a `readyBy` window may open before the slot.
+			const opensAt = routineOpensAt(routine, occurrences);
+			if (opensAt > nowMs) {
 				// A routine due later wakes the supervisor then, to run it or to record why it cannot.
-				next = Math.min(next, routine.nextRunAt);
+				next = Math.min(next, opensAt);
 				continue;
 			}
 			const entry = work(routine.target.parentSessionId);

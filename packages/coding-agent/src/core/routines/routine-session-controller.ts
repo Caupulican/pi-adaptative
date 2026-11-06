@@ -13,6 +13,7 @@ import {
 	type RoutineIntakeRefusalReason,
 	type RoutineScheduleInput,
 	routineScheduleInputOf,
+	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
@@ -59,12 +60,15 @@ function summary(routine: RoutineDefinitionView): RoutineToolSummary {
 		unschedulable === undefined && !routine.conditionMet
 			? nextRoutineAt(routine.schedule, routine.cursor)
 			: undefined;
+	// The window as no unfinished run holds it shut; the summary does not read the run journal.
+	const opensAt = nextRunAt === undefined ? undefined : routineStartWindow(routine, routine.cursor, [])?.opensAt;
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
 		enabled: routine.enabled,
 		schedule: routineScheduleInputOf(routine.schedule),
 		...(nextRunAt === undefined ? {} : { nextRunAt }),
+		...(opensAt === undefined || nextRunAt === undefined || opensAt >= nextRunAt ? {} : { startsFrom: opensAt }),
 		...(routine.lastRunAt === undefined ? {} : { lastRunAt: routine.lastRunAt }),
 		...(routine.lastStatus === undefined ? {} : { lastStatus: routine.lastStatus }),
 		...(unschedulable === undefined ? {} : { unschedulable }),

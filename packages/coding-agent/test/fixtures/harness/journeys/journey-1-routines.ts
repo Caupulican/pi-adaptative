@@ -33,6 +33,7 @@ import {
 	MAX_ROUTINE_INSTANT_MS,
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	type RoutineIntakeBatch,
+	type RoutineOccurrence,
 	routineAwaySpendRoom,
 	routineScheduleInputOf,
 } from "../../../../src/core/routines/routine-contract.ts";
@@ -1473,6 +1474,96 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		await root.session.backgroundLanes.tickPersistentRoutines();
 		expect(failingRuns(), "a paused routine takes no scheduled run").toHaveLength(6);
 		expect(harnessNotices("routine-paused"), "a later pass repeats no notice").toHaveLength(1);
+
+		// A readyBy window starts a slot's run before the slot, and the run still belongs to that slot. A routine without
+		// a window takes nothing at the same instant, and an unfinished run of the windowed routine keeps its next window
+		// shut until that run ends.
+		const readyId = "ready-review";
+		const readyPrompt = "Inspect the ready review task and report its status.";
+		const readyControlId = "ready-review-control";
+		const readyLeadMs = 120_000;
+		await command("routine-ready-create", {
+			action: "create",
+			routineId: readyId,
+			prompt: readyPrompt,
+			schedule: { kind: "interval", intervalMs: 600_000, readyBy: true, readyLeadMs },
+			profileId: profile.profileId,
+		});
+		await command("routine-ready-control-create", {
+			action: "create",
+			routineId: readyControlId,
+			prompt: readyPrompt,
+			schedule: { kind: "interval", intervalMs: 600_000 },
+			profileId: profile.profileId,
+		});
+		const readyRuns = () => store().listRoutineOccurrences({ routineId: readyId });
+		const readyReaches = (test: (runs: readonly RoutineOccurrence[]) => boolean): Promise<void> =>
+			new Promise((resolve) => {
+				const check = () => {
+					if (!test(readyRuns())) return;
+					stop();
+					resolve();
+				};
+				const stop = store().subscribe(check);
+				check();
+			});
+		const firstSlot = store().getRoutine(readyId)!.nextRunAt;
+		expect(store().getRoutine(readyControlId)!.nextRunAt, "both routines share the slot").toBe(firstSlot);
+		const readyGate = createBarrier();
+		world.provider.enqueue(
+			"worker-a",
+			workerReply("routine-ready-early", readyPrompt, readyGate.promise, undefined, "none"),
+		);
+		const earlyRunning = readyReaches((runs) => runs[0]?.phase === "running");
+		world.timers.advance("routines", firstSlot - world.timers.port("routines").now() - 60_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		await withDeadline(world.trace, "the early run is running", earlyRunning);
+		const [early] = readyRuns();
+		expect(early?.trigger, "the early run belongs to the nominal slot").toEqual({
+			kind: "schedule",
+			scheduledAt: firstSlot,
+			missedCount: 0,
+		});
+		expect(early!.createdAt, "it was claimed before the slot").toBeLessThan(firstSlot);
+		expect(firstSlot - early!.createdAt, "and no earlier than its lead").toBeLessThanOrEqual(readyLeadMs);
+		expect(
+			store().listRoutineOccurrences({ routineId: readyControlId }),
+			"a routine without a window does not start before its slot",
+		).toEqual([]);
+		const readyControl = store().getRoutine(readyControlId)!;
+		expect(store().deleteRoutine(readyControlId, readyControl.revision, world.timers.port("routines").now())).toBe(
+			true,
+		);
+		const secondSlot = store().getRoutine(readyId)!.nextRunAt;
+		expect(secondSlot, "the early claim consumed its slot").toBe(firstSlot + 600_000);
+		world.timers.advance("routines", secondSlot - world.timers.port("routines").now() - 90_000);
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(readyRuns(), "an unfinished run keeps the next window shut").toHaveLength(1);
+		world.provider.enqueue("worker-a", workerReply("routine-ready-next", readyPrompt, undefined, undefined, "none"));
+		const nextFinished = readyReaches(
+			(runs) => runs.length === 2 && runs.every((run) => run.result?.delivery === "acknowledged"),
+		);
+		readyGate.release();
+		await withDeadline(world.trace, "the run after the early one starts in its own window", nextFinished);
+		const runs = readyRuns();
+		expect(
+			runs.map((run) => [
+				run.trigger.kind === "schedule" ? run.trigger.scheduledAt : undefined,
+				run.result?.outcome,
+			]),
+			"each run names its own slot",
+		).toEqual([
+			[firstSlot, "succeeded"],
+			[secondSlot, "succeeded"],
+		]);
+		expect(runs[1]!.createdAt, "the next run also started before its slot").toBeLessThan(secondSlot);
+		expect(
+			parentInputs().map((entry) => parentInputOriginalDetails(entry)),
+			"the delivered result names the early run's slot occurrence",
+		).toContainEqual(expect.objectContaining({ routineId: readyId, occurrenceId: early!.occurrenceId }));
+		expect(
+			store().deleteRoutine(readyId, store().getRoutine(readyId)!.revision, world.timers.port("routines").now()),
+		).toBe(true);
 
 		// Past routines.maxResultWakesPerDay a result starts no turn: it is saved for the owner's next turn, with one
 		// notice naming the setting. The bound here is exactly the routine-result turns this session already started.

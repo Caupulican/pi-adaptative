@@ -69,6 +69,14 @@ export const MAX_ROUTINE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$";
 /** Shortest start window: timer and claim latency must never close a window by themselves. */
 export const MIN_ROUTINE_START_WINDOW_MS = 60_000;
 export const MAX_ROUTINE_LATENESS_MS = 366 * 86_400_000;
+/** Longest explicit early-start lead of a `readyBy` schedule. */
+export const MAX_ROUTINE_READY_LEAD_MS = 12 * 3_600_000;
+/** Lead of a `readyBy` schedule without `readyLeadMs` and without a measured run yet. */
+export const ROUTINE_READY_LEAD_DEFAULT_MS = 15 * 60_000;
+/** Bound of a lead derived from measured runs. */
+export const MAX_ROUTINE_DERIVED_READY_LEAD_MS = 2 * 3_600_000;
+/** Measured run times a routine keeps for its derived lead, newest last. */
+export const MAX_ROUTINE_RUN_DURATIONS = 5;
 /** Consumed owner-intake origins kept after their routine is deleted, so a replay never recreates it. */
 export const MAX_ROUTINE_INTAKE_ORIGINS = 2_048;
 /** Routines the harness creates from one session's owner turns within {@link ROUTINE_INTAKE_CAP_WINDOW_MS}. */
@@ -104,11 +112,29 @@ const expiresAtField = Type.Optional(
 	}),
 );
 
+const readyFields = {
+	readyBy: Type.Optional(
+		Type.Literal(true, {
+			description:
+				"Optional: each slot is when the result should be ready, so a run may start before it, by readyLeadMs or, without it, by a lead the host derives from this routine's own measured run times (15 minutes before any run, at most 2 hours). The run still belongs to its slot, never overlaps an unfinished run of the routine, and any late bound counts from the slot.",
+		}),
+	),
+	readyLeadMs: Type.Optional(
+		Type.Integer({
+			minimum: MIN_ROUTINE_START_WINDOW_MS,
+			maximum: MAX_ROUTINE_READY_LEAD_MS,
+			description:
+				"Optional with readyBy: how long before its slot a run may start, one minute to 12 hours; shorter than an interval.",
+		}),
+	),
+};
+
 const intervalSchema = Type.Object(
 	{
 		kind: Type.Literal("interval"),
 		intervalMs: Type.Integer({ minimum: MIN_ROUTINE_INTERVAL_MS, maximum: MAX_ROUTINE_INSTANT_MS }),
 		expiresAt: expiresAtField,
+		...readyFields,
 	},
 	{ additionalProperties: false },
 );
@@ -125,6 +151,7 @@ const onceSchema = Type.Object(
 					"Optional UTC epoch-ms start deadline, at least one minute after at. If the routine has not started by then it is cancelled and reported instead of run late.",
 			}),
 		),
+		...readyFields,
 	},
 	{ additionalProperties: false },
 );
@@ -155,6 +182,7 @@ const calendarSchema = Type.Object(
 			}),
 		),
 		expiresAt: expiresAtField,
+		...readyFields,
 	},
 	{ additionalProperties: false },
 );
@@ -251,14 +279,23 @@ export const routineAuthoringSchema = Type.Object(
 
 export type RoutineScheduleInput = Static<typeof routineScheduleInputSchema>;
 export type RoutineAuthoringInput = Static<typeof routineAuthoringSchema>;
+/**
+ * `consumedAt` (interval and calendar): the claim instant of the slot before the next one, written only when that
+ * slot was claimed early, before its time, by a `readyBy` window. A clock restart reads it instead of the slot.
+ */
 export type RoutineCursor =
-	| { readonly kind: "interval"; readonly nextIndex: number }
+	| { readonly kind: "interval"; readonly nextIndex: number; readonly consumedAt?: number }
 	| { readonly kind: "once"; readonly consumed: boolean }
 	/**
 	 * Next slot computed when the previous one was claimed; null once no slot is representable.
 	 * `skipped` counts slots passed over for lateness since the last run, carried into its missed count.
 	 */
-	| { readonly kind: "calendar"; readonly nextAt: number | null; readonly skipped?: number }
+	| {
+			readonly kind: "calendar";
+			readonly nextAt: number | null;
+			readonly skipped?: number;
+			readonly consumedAt?: number;
+	  }
 	/**
 	 * Host events up to `throughOrdinal` are decided. `replayGaps` is the digest of the sources' last replay gaps
 	 * when last decided; `skipped` counts matching attempts superseded before a decision and `historyGap` records a
@@ -290,18 +327,26 @@ export interface RoutineExecutionSnapshot {
 
 /** Explicit schedule. The cursor is mutable independently of immutable routine revision. */
 export type RoutineSchedule =
-	/** `expiresAt`: no new slot or attempt is taken at or after it; the routine is retired once its runs are delivered. */
-	| { readonly kind: "interval"; readonly intervalMs: number; readonly anchorAt: number; readonly expiresAt?: number }
-	| { readonly kind: "once"; readonly at: number; readonly notAfter?: number }
+	/**
+	 * `expiresAt`: no new slot or attempt is taken at or after it; the routine is retired once its runs are delivered.
+	 * `readyBy`/`readyLeadMs` ({@link RoutineReadyWindow}) let a clock slot start early.
+	 */
+	| ({
+			readonly kind: "interval";
+			readonly intervalMs: number;
+			readonly anchorAt: number;
+			readonly expiresAt?: number;
+	  } & RoutineReadyWindow)
+	| ({ readonly kind: "once"; readonly at: number; readonly notAfter?: number } & RoutineReadyWindow)
 	/** Slots strictly after anchorAt (the authoring instant) in the stored zone. */
-	| {
+	| ({
 			readonly kind: "calendar";
 			readonly cron: string;
 			readonly timeZone: string;
 			readonly anchorAt: number;
 			readonly maxLatenessMs?: number;
 			readonly expiresAt?: number;
-	  }
+	  } & RoutineReadyWindow)
 	/** Root-applicable CI attempts accepted into the session ledger after `anchorOrdinal`. */
 	| {
 			readonly kind: "event";
@@ -318,6 +363,16 @@ export type RoutineSchedule =
 	 * instant the filter was saved, kept while it is unchanged). Kinds are in contract order, authors lowercase.
 	 */
 	| RoutineGithubSchedule;
+
+/**
+ * Early start of a clock slot: with `readyBy` the slot is when the result should be ready, so its run may be claimed
+ * up to the lead before it ({@link routineStartWindow}); `readyLeadMs` fixes the lead, otherwise it is derived from
+ * the routine's measured runs ({@link routineReadyLead}). Neither is part of slot identity ({@link routineSlotRule}).
+ */
+export interface RoutineReadyWindow {
+	readonly readyBy?: true;
+	readonly readyLeadMs?: number;
+}
 
 export interface RoutineGithubSchedule {
 	readonly kind: "event";
@@ -863,6 +918,12 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	 * drops it.
 	 */
 	readonly conditionMet?: RoutineConditionMet;
+	/**
+	 * Measured run times in ms (running to result) of the last succeeded scheduled runs, newest last, at most
+	 * {@link MAX_ROUTINE_RUN_DURATIONS}: kept only for a `readyBy` schedule without `readyLeadMs`, whose lead they
+	 * derive. Run state: it never moves the revision.
+	 */
+	readonly runDurations?: readonly number[];
 }
 
 export interface RoutineConditionMet {
@@ -1120,6 +1181,26 @@ export function parseRoutineAuthoringInput(value: unknown): RoutineAuthoringInpu
 	return { routineId: value.routineId, prompt: value.prompt.trim(), schedule };
 }
 
+/**
+ * The early-start fields of an authored or stored clock schedule, in canonical form: `readyLeadMs` only with `readyBy`,
+ * one minute to {@link MAX_ROUTINE_READY_LEAD_MS}, and shorter than an interval's period.
+ */
+function readyWindowOf(value: Record<string, unknown>, intervalMs?: number): RoutineReadyWindow {
+	if (value.readyBy === undefined && value.readyLeadMs === undefined) return {};
+	if (value.readyBy !== true) throw new TypeError("Routine readyLeadMs needs readyBy: true.");
+	const lead = value.readyLeadMs;
+	if (lead === undefined) return { readyBy: true };
+	if (
+		typeof lead !== "number" ||
+		!Number.isSafeInteger(lead) ||
+		lead < MIN_ROUTINE_START_WINDOW_MS ||
+		lead > MAX_ROUTINE_READY_LEAD_MS ||
+		(intervalMs !== undefined && lead >= intervalMs)
+	)
+		throw new TypeError("Routine readyLeadMs must be one minute to 12 hours and shorter than its interval.");
+	return { readyBy: true, readyLeadMs: lead };
+}
+
 export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput {
 	if (!isPlainRecord(value)) throw new TypeError("Routine schedule is invalid.");
 	if (value.expiresAt !== undefined && (value.kind === "once" || !validInstant(value.expiresAt)))
@@ -1127,21 +1208,34 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 	const expiry = value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt as number };
 	if (
 		value.kind === "interval" &&
-		hasOnlyKeys(value, ["kind", "intervalMs", "expiresAt"]) &&
+		hasOnlyKeys(value, ["kind", "intervalMs", "expiresAt", "readyBy", "readyLeadMs"]) &&
 		Number.isSafeInteger(value.intervalMs) &&
 		(value.intervalMs as number) >= MIN_ROUTINE_INTERVAL_MS &&
 		(value.intervalMs as number) <= MAX_ROUTINE_INSTANT_MS
 	)
-		return { kind: "interval", intervalMs: value.intervalMs as number, ...expiry };
+		return {
+			kind: "interval",
+			intervalMs: value.intervalMs as number,
+			...expiry,
+			...readyWindowOf(value, value.intervalMs as number),
+		};
 	if (
 		value.kind === "once" &&
-		hasOnlyKeys(value, ["kind", "at", "notAfter"]) &&
+		hasOnlyKeys(value, ["kind", "at", "notAfter", "readyBy", "readyLeadMs"]) &&
 		validInstant(value.at) &&
 		(value.notAfter === undefined ||
 			(validInstant(value.notAfter) && value.notAfter >= value.at + MIN_ROUTINE_START_WINDOW_MS))
 	)
-		return { kind: "once", at: value.at, ...(value.notAfter === undefined ? {} : { notAfter: value.notAfter }) };
-	if (value.kind === "calendar" && hasOnlyKeys(value, ["kind", "cron", "timeZone", "maxLatenessMs", "expiresAt"])) {
+		return {
+			kind: "once",
+			at: value.at,
+			...(value.notAfter === undefined ? {} : { notAfter: value.notAfter }),
+			...readyWindowOf(value),
+		};
+	if (
+		value.kind === "calendar" &&
+		hasOnlyKeys(value, ["kind", "cron", "timeZone", "maxLatenessMs", "expiresAt", "readyBy", "readyLeadMs"])
+	) {
 		const cron = canonicalCalendarCron(value.cron);
 		if (
 			value.maxLatenessMs !== undefined &&
@@ -1156,6 +1250,7 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			...(value.timeZone === undefined ? {} : { timeZone: canonicalCalendarTimeZone(value.timeZone) }),
 			...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
 			...expiry,
+			...readyWindowOf(value),
 		};
 	}
 	if (
@@ -1284,14 +1379,22 @@ function canonicalRoutineConclusions(value: unknown): CiTerminalConclusion[] {
 /** Authored form of a stored schedule, without host-owned anchors. */
 export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineScheduleInput {
 	const expiry = schedule.kind === "once" || schedule.expiresAt === undefined ? {} : { expiresAt: schedule.expiresAt };
+	const ready =
+		schedule.kind === "event" || !schedule.readyBy
+			? {}
+			: {
+					readyBy: true as const,
+					...(schedule.readyLeadMs === undefined ? {} : { readyLeadMs: schedule.readyLeadMs }),
+				};
 	switch (schedule.kind) {
 		case "interval":
-			return { kind: "interval", intervalMs: schedule.intervalMs, ...expiry };
+			return { kind: "interval", intervalMs: schedule.intervalMs, ...expiry, ...ready };
 		case "once":
 			return {
 				kind: "once",
 				at: schedule.at,
 				...(schedule.notAfter === undefined ? {} : { notAfter: schedule.notAfter }),
+				...ready,
 			};
 		case "calendar":
 			return {
@@ -1300,6 +1403,7 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				timeZone: schedule.timeZone,
 				...(schedule.maxLatenessMs === undefined ? {} : { maxLatenessMs: schedule.maxLatenessMs }),
 				...expiry,
+				...ready,
 			};
 		case "event":
 			if (schedule.source === "github")
@@ -1334,8 +1438,8 @@ function githubFilterOf(
 }
 
 /**
- * Fields that place slots. Start windows and end times are excluded: changing one must neither replay nor move a slot,
- * so an end time is extended in place.
+ * Fields that place slots. Start windows (the late bounds and the early `readyBy` lead) and end times are excluded:
+ * changing one must neither replay nor move a slot, so an end time is extended in place.
  */
 export function routineSlotRule(schedule: RoutineScheduleInput): RoutineScheduleInput {
 	switch (schedule.kind) {
@@ -1384,6 +1488,73 @@ export function routineStartDeadline(schedule: RoutineSchedule, scheduledAt: num
 	return undefined;
 }
 
+/** The longest lead a schedule's `readyBy` window can take: its explicit lead or the derived bound; 0 without one. */
+export function routineLongestReadyLead(schedule: RoutineSchedule): number {
+	if (schedule.kind === "event" || !schedule.readyBy) return 0;
+	return schedule.readyLeadMs ?? MAX_ROUTINE_DERIVED_READY_LEAD_MS;
+}
+
+/**
+ * How long before its slot a `readyBy` run may start: `readyLeadMs`, otherwise the slowest of the routine's measured
+ * runs (`runDurations`) plus a quarter and one minute, kept between one minute and
+ * {@link MAX_ROUTINE_DERIVED_READY_LEAD_MS}, or {@link ROUTINE_READY_LEAD_DEFAULT_MS} before any measured run.
+ * Undefined without `readyBy`.
+ */
+export function routineReadyLead(
+	routine: Pick<RoutineDefinitionView, "schedule" | "runDurations">,
+): number | undefined {
+	const schedule = routine.schedule;
+	if (schedule.kind === "event" || !schedule.readyBy) return undefined;
+	if (schedule.readyLeadMs !== undefined) return schedule.readyLeadMs;
+	const durations = routine.runDurations ?? [];
+	if (durations.length === 0) return ROUTINE_READY_LEAD_DEFAULT_MS;
+	const derived = Math.ceil(Math.max(...durations) * 1.25) + 60_000;
+	return Math.min(MAX_ROUTINE_DERIVED_READY_LEAD_MS, Math.max(MIN_ROUTINE_START_WINDOW_MS, derived));
+}
+
+/**
+ * When the cursor's next slot may start, the one due computation the live session and the away daemon share: `slot`
+ * is the slot's identity, `opensAt` the earliest instant its run may be claimed. Without `readyBy`, for a slot at or
+ * after `expiresAt`, or while any run of the routine is unfinished (runs never overlap), it opens at the slot.
+ * Otherwise it opens the lead before the slot ({@link routineReadyLead}), never before the routine's last edit and
+ * never earlier than halfway from the previous slot (or the anchor) to it.
+ */
+export function routineStartWindow(
+	routine: RoutineDefinitionView,
+	cursor: RoutineCursor,
+	occurrences: Iterable<RoutineOccurrence>,
+): { readonly slot: number; readonly opensAt: number } | undefined {
+	const schedule = routine.schedule;
+	const slot = nextRoutineAt(schedule, cursor);
+	if (slot === undefined) return undefined;
+	const lead = routineReadyLead(routine);
+	if (
+		lead === undefined ||
+		schedule.kind === "event" ||
+		(schedule.kind !== "once" && schedule.expiresAt !== undefined && slot >= schedule.expiresAt)
+	)
+		return { slot, opensAt: slot };
+	for (const occurrence of occurrences)
+		if (occurrence.routineId === routine.routineId && occurrence.phase !== "terminal") return { slot, opensAt: slot };
+	const previous = schedule.kind === "once" ? undefined : (routinePreviousSlot(schedule, cursor) ?? schedule.anchorAt);
+	const floor = previous === undefined ? slot - lead : previous + Math.ceil((slot - previous) / 2);
+	return { slot, opensAt: Math.min(slot, Math.max(slot - lead, floor, Date.parse(routine.updatedAt))) };
+}
+
+/** When a stored routine's next slot may start ({@link routineStartWindow}); `nextRunAt` when it has no slot. */
+export function routineOpensAt(routine: RoutineDefinitionView, occurrences: Iterable<RoutineOccurrence>): number {
+	return routineStartWindow(routine, routine.cursor, occurrences)?.opensAt ?? routine.nextRunAt;
+}
+
+/** Phases of a run that has not finished: a `readyBy` window does not open early while one exists. */
+export const ROUTINE_UNFINISHED_PHASES: readonly RoutineOccurrencePhase[] = [
+	"pending",
+	"claimed",
+	"dispatching",
+	"running",
+	"uncertain",
+];
+
 /** Cursor of a newly authored or changed schedule; a calendar rule that never matches a representable instant gets null. */
 export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 	switch (schedule.kind) {
@@ -1424,7 +1595,8 @@ export function routinePreviousSlot(schedule: RoutineSchedule, cursor: RoutineCu
  * The cursor then moved past a slot that is still in the future: it was consumed while the clock read later than now
  * (a forward clock fault since corrected, or a step back right after a claim). Without the restart the routine would
  * stay silent until that future slot. A slot that already has its occurrence is not repeated: the claim treats it as
- * consumed. `previousSlot` is `routinePreviousSlot` of the same cursor; undefined when no restart applies.
+ * consumed. `previousSlot` is `routinePreviousSlot` of the same cursor; undefined when no restart applies. A slot an
+ * early `readyBy` window consumed before its time is judged by the claim instant (`consumedAt`), not by the slot.
  */
 export function rebasedRoutineCursor(
 	schedule: RoutineSchedule,
@@ -1432,7 +1604,8 @@ export function rebasedRoutineCursor(
 	nowMs: number,
 	previousSlot: number | undefined,
 ): RoutineCursor | undefined {
-	if (previousSlot === undefined || previousSlot <= nowMs) return undefined;
+	const consumedAt = cursor.kind === "interval" || cursor.kind === "calendar" ? cursor.consumedAt : undefined;
+	if (previousSlot === undefined || (consumedAt ?? previousSlot) <= nowMs) return undefined;
 	if (schedule.kind === "interval")
 		return {
 			kind: "interval",
@@ -1540,6 +1713,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 		failureStreak,
 		failurePause: rawFailurePause,
 		conditionMet: rawConditionMet,
+		runDurations,
 		...rawDefinition
 	} = value;
 	const definition = parseRoutineDefinition(rawDefinition);
@@ -1573,7 +1747,12 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			(lastStatus !== undefined &&
 				(typeof lastStatus !== "string" || !(ROUTINE_LAST_STATUSES as readonly string[]).includes(lastStatus))) ||
 			(lastSummary !== undefined &&
-				(typeof lastSummary !== "string" || lastSummary.length > MAX_ROUTINE_SUMMARY_CHARS))
+				(typeof lastSummary !== "string" || lastSummary.length > MAX_ROUTINE_SUMMARY_CHARS)) ||
+			(runDurations !== undefined &&
+				(!Array.isArray(runDurations) ||
+					runDurations.length === 0 ||
+					runDurations.length > MAX_ROUTINE_RUN_DURATIONS ||
+					!runDurations.every(validInstant)))
 		)
 			return undefined;
 		let awayRefusal: RoutineDefinitionView["awayRefusal"];
@@ -1645,6 +1824,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			...(failureStreak === undefined ? {} : { failureStreak }),
 			...(failurePause ? { failurePause } : {}),
 			...(conditionMet ? { conditionMet } : {}),
+			...(runDurations === undefined ? {} : { runDurations: [...(runDurations as number[])] }),
 		};
 	} catch {
 		return undefined;
@@ -1716,7 +1896,8 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			value.trigger.kind === "schedule" &&
 			hasOnlyKeys(value.trigger, ["kind", "scheduledAt", "missedCount"]) &&
 			validInstant(value.trigger.scheduledAt) &&
-			value.trigger.scheduledAt <= value.createdAt &&
+			// Only a `readyBy` window claims a slot before its time, by at most its schedule's longest lead.
+			value.trigger.scheduledAt - routineLongestReadyLead(definition.schedule) <= value.createdAt &&
 			Number.isSafeInteger(value.trigger.missedCount) &&
 			(value.trigger.missedCount as number) >= 0
 		) {
@@ -2060,7 +2241,16 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 		// zone this runtime cannot use makes that routine unschedulable here (`routineZoneUnsupported`), never the store
 		// unreadable. Saving still refuses an unsupported zone (`parseRoutineScheduleInput`).
 		if (
-			hasOnlyKeys(value, ["kind", "cron", "timeZone", "anchorAt", "maxLatenessMs", "expiresAt"]) &&
+			hasOnlyKeys(value, [
+				"kind",
+				"cron",
+				"timeZone",
+				"anchorAt",
+				"maxLatenessMs",
+				"expiresAt",
+				"readyBy",
+				"readyLeadMs",
+			]) &&
 			typeof value.cron === "string" &&
 			canonicalCalendarCron(value.cron) === value.cron &&
 			isCalendarTimeZoneName(value.timeZone) &&
@@ -2077,6 +2267,7 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 				anchorAt: value.anchorAt,
 				...(value.maxLatenessMs === undefined ? {} : { maxLatenessMs: value.maxLatenessMs as number }),
 				...expiry,
+				...readyWindowOf(value),
 			};
 		throw new TypeError("Persisted calendar schedule requires a canonical rule, a zone name and an anchor.");
 	}
@@ -2147,12 +2338,20 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 		throw new TypeError("Persisted event schedule requires a canonical filter and a ledger anchor.");
 	}
 	const authored = parseRoutineScheduleInput(
-		value.kind === "interval" ? { kind: "interval", intervalMs: value.intervalMs, ...expiry } : value,
+		value.kind === "interval"
+			? {
+					kind: "interval",
+					intervalMs: value.intervalMs,
+					...expiry,
+					...(value.readyBy === undefined ? {} : { readyBy: value.readyBy }),
+					...(value.readyLeadMs === undefined ? {} : { readyLeadMs: value.readyLeadMs }),
+				}
+			: value,
 	);
 	if (authored.kind === "once") return authored;
 	if (
 		authored.kind === "interval" &&
-		hasOnlyKeys(value, ["kind", "intervalMs", "anchorAt", "expiresAt"]) &&
+		hasOnlyKeys(value, ["kind", "intervalMs", "anchorAt", "expiresAt", "readyBy", "readyLeadMs"]) &&
 		validInstant(value.anchorAt) &&
 		validInstant(value.anchorAt + authored.intervalMs)
 	)
@@ -2177,18 +2376,21 @@ export function isRoutineId(value: string): boolean {
 
 export function parseRoutineCursor(value: unknown): RoutineCursor {
 	if (!isPlainRecord(value)) throw new TypeError("Routine cursor is invalid.");
+	if (value.consumedAt !== undefined && !validInstant(value.consumedAt))
+		throw new TypeError("Routine cursor claim instant is invalid.");
+	const consumed = value.consumedAt === undefined ? {} : { consumedAt: value.consumedAt };
 	if (
 		value.kind === "interval" &&
-		hasOnlyKeys(value, ["kind", "nextIndex"]) &&
+		hasOnlyKeys(value, ["kind", "nextIndex", "consumedAt"]) &&
 		Number.isSafeInteger(value.nextIndex) &&
 		(value.nextIndex as number) >= 1
 	)
-		return { kind: "interval", nextIndex: value.nextIndex as number };
+		return { kind: "interval", nextIndex: value.nextIndex as number, ...consumed };
 	if (value.kind === "once" && hasOnlyKeys(value, ["kind", "consumed"]) && typeof value.consumed === "boolean")
 		return { kind: "once", consumed: value.consumed };
 	if (
 		value.kind === "calendar" &&
-		hasOnlyKeys(value, ["kind", "nextAt", "skipped"]) &&
+		hasOnlyKeys(value, ["kind", "nextAt", "skipped", "consumedAt"]) &&
 		(value.nextAt === null || validInstant(value.nextAt)) &&
 		(value.skipped === undefined ||
 			(Number.isSafeInteger(value.skipped) &&
@@ -2199,6 +2401,7 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 			kind: "calendar",
 			nextAt: value.nextAt,
 			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
+			...consumed,
 		};
 	if (
 		value.kind === "event" &&

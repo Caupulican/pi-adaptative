@@ -22,8 +22,8 @@ import {
 	decideRoutineEvents,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_SUMMARY_CHARS,
-	nextRoutineAt,
 	ROUTINE_JOURNAL_SHARE,
+	ROUTINE_UNFINISHED_PHASES,
 	RoutineAdmissionRefused,
 	type RoutineAwayClaimGate,
 	type RoutineDefinitionView,
@@ -39,7 +39,9 @@ import {
 	routineGithubInterest,
 	routineOccurrenceReplayKeys,
 	routineOccurrencesSettled,
+	routineOpensAt,
 	routinePreviousSlot,
+	routineStartWindow,
 	routineTriggerEvents,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
@@ -495,6 +497,14 @@ export class RoutineSchedulerController {
 		});
 	}
 
+	/** Every session's unfinished runs: one of them holds its routine's `readyBy` window shut, as the claim reads it. */
+	private unfinishedOccurrences(): readonly RoutineOccurrence[] {
+		return this.deps.store.listRoutineOccurrences({
+			phases: ROUTINE_UNFINISHED_PHASES,
+			limit: MAX_ROUTINE_OCCURRENCES,
+		});
+	}
+
 	private request(occurrence: RoutineOccurrence): RoutineWorkerRequest {
 		const snapshot = occurrence.definition.executionSnapshot;
 		if (!snapshot || !occurrence.dispatchKey) throw new Error("Routine occurrence has no saved execution identity.");
@@ -657,9 +667,12 @@ export class RoutineSchedulerController {
 		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
 		if (away) {
 			// A due routine this host cannot run is recorded on the routine once, never held silently.
+			const unfinished = this.unfinishedOccurrences();
 			const refusals = routines.flatMap((routine) => {
 				const reason = this.awayUnrunnable(routine);
-				return reason !== undefined && routine.nextRunAt <= nowMs && routine.awayRefusal?.reason !== reason
+				return reason !== undefined &&
+					routineOpensAt(routine, unfinished) <= nowMs &&
+					routine.awayRefusal?.reason !== reason
 					? [{ routineId: routine.routineId, reason }]
 					: [];
 			});
@@ -1115,7 +1128,8 @@ export class RoutineSchedulerController {
 
 	/**
 	 * The earliest instant a routine of this session can be claimed: its next slot after a backward clock step is undone
-	 * (`rebasedRoutineCursor`, as the claim persists it), and never before the routine's last edit. An event routine
+	 * (`rebasedRoutineCursor`, as the claim persists it), or the opening of that slot's `readyBy` window
+	 * (`routineStartWindow`, as the claim reads it), and never before the routine's last edit. An event routine
 	 * contributes only an edit still ahead of the clock. Every routine, paused ones included, contributes its end time
 	 * while that is ahead (not away, where nothing is retired). With `waitingForRoom`, a routine already due is left
 	 * out: the last claim found no journal room for it, and only a store change (which wakes the scheduler) can make
@@ -1125,12 +1139,13 @@ export class RoutineSchedulerController {
 	private nextScheduledAt(nowMs: number, waitingForRoom = false, waiting?: ReadonlySet<string>): number {
 		let next = Number.POSITIVE_INFINITY;
 		const previousSlots = new Map<string, number | undefined>();
+		const unfinished = this.unfinishedOccurrences();
 		for (const routine of this.deps.store.listRoutines()) {
 			if (!this.schedulable(routine)) {
 				// Away, a routine this host cannot run still wakes it once when due, so its refusal is recorded.
 				const reason = this.awayUnrunnable(routine);
 				if (reason !== undefined && routine.awayRefusal?.reason !== reason)
-					next = Math.min(next, routine.nextRunAt);
+					next = Math.min(next, routineOpensAt(routine, unfinished));
 				continue;
 			}
 			if (routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
@@ -1141,7 +1156,7 @@ export class RoutineSchedulerController {
 			if (routineEnded(routine, nowMs) !== undefined) continue;
 			let due: number | undefined;
 			try {
-				due = routine.enabled ? this.routineDueAt(routine, nowMs, previousSlots) : undefined;
+				due = routine.enabled ? this.routineDueAt(routine, nowMs, previousSlots, unfinished) : undefined;
 			} catch (error) {
 				// Only this routine is left out of the alarm; the claim skips and reports it the same way.
 				this.report(
@@ -1201,6 +1216,7 @@ export class RoutineSchedulerController {
 		routine: RoutineDefinitionView,
 		nowMs: number,
 		previousSlots: Map<string, number | undefined>,
+		unfinished: readonly RoutineOccurrence[],
 	): number | undefined {
 		const editedAt = Date.parse(routine.updatedAt);
 		if (routine.schedule.kind === "event") return editedAt > nowMs ? editedAt : undefined;
@@ -1217,8 +1233,8 @@ export class RoutineSchedulerController {
 			: routinePreviousSlot(routine.schedule, routine.cursor);
 		previousSlots.set(key, previousSlot);
 		const cursor = rebasedRoutineCursor(routine.schedule, routine.cursor, nowMs, previousSlot) ?? routine.cursor;
-		const slot = nextRoutineAt(routine.schedule, cursor);
-		return slot === undefined ? undefined : Math.max(slot, editedAt);
+		const window = routineStartWindow(routine, cursor, unfinished);
+		return window === undefined ? undefined : Math.max(window.opensAt, editedAt);
 	}
 
 	private clearAlarm(): void {

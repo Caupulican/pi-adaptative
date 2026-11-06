@@ -29,8 +29,10 @@ import type { AwayServiceInspection } from "../routines/away-service.ts";
 import {
 	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineDefinitionView,
+	type RoutineOccurrence,
 	routineAwaySpendRoom,
 	routineEnded,
+	routineOpensAt,
 } from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
@@ -65,6 +67,8 @@ export interface RoutineStatusItem {
 	readonly schedule: RoutineDefinitionView["schedule"]["kind"];
 	/** Absent for an event routine, an ended one, and a schedule with no slot left. */
 	readonly nextRunAt?: number;
+	/** The start a `readyBy` window gives `nextRunAt`'s run, when earlier than the slot (no earlier run unfinished). */
+	readonly startsFrom?: number;
 	readonly lastRunAt?: number;
 	readonly lastStatus?: RoutineDefinitionView["lastStatus"];
 	readonly awayRefusal?: { readonly reason: string; readonly at: number };
@@ -308,8 +312,13 @@ async function section<T>(read: () => StatusSection<T> | Promise<StatusSection<T
 
 const NO_STORE = "the routine store is not loaded in this session";
 
-function routineItem(routine: RoutineDefinitionView, nowMs: number): RoutineStatusItem {
+function routineItem(
+	routine: RoutineDefinitionView,
+	nowMs: number,
+	occurrences: readonly RoutineOccurrence[],
+): RoutineStatusItem {
 	const ended = routineEnded(routine, nowMs);
+	const opensAt = routineOpensAt(routine, occurrences);
 	const lastError = routine.failurePause ? text(routine.failurePause.lastError) : undefined;
 	const awayReason = routine.awayRefusal ? text(routine.awayRefusal.reason) : undefined;
 	return {
@@ -318,6 +327,7 @@ function routineItem(routine: RoutineDefinitionView, nowMs: number): RoutineStat
 		...(ended ? { ended } : {}),
 		schedule: routine.schedule.kind,
 		...(ended || routine.nextRunAt === ROUTINE_NO_NEXT_RUN_AT ? {} : { nextRunAt: routine.nextRunAt }),
+		...(ended || opensAt >= routine.nextRunAt ? {} : { startsFrom: opensAt }),
 		...(routine.lastRunAt !== undefined ? { lastRunAt: routine.lastRunAt } : {}),
 		...(routine.lastStatus ? { lastStatus: routine.lastStatus } : {}),
 		...(routine.awayRefusal && awayReason ? { awayRefusal: { reason: awayReason, at: routine.awayRefusal.at } } : {}),
@@ -370,7 +380,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			if (!store) return unavailable(sources.childSession ? "routines do not run in a child session" : NO_STORE);
 			const wakes = (await day()).routineResultTurnWakes;
 			return available({
-				routines: bounded(sessionRoutines().map((routine) => routineItem(routine, nowMs))),
+				routines: bounded(
+					sessionRoutines().map((routine) =>
+						routineItem(routine, nowMs, store.listRoutineOccurrences({ routineId: routine.routineId })),
+					),
+				),
 				resultWakes: { used: wakes, max: settings.getRoutinesSettings().maxResultWakesPerDay },
 				...(sources.routineIntake ? { intake: sources.routineIntake } : {}),
 			});

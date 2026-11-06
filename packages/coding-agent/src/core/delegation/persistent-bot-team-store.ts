@@ -31,6 +31,7 @@ import {
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
+	MAX_ROUTINE_RUN_DURATIONS,
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
 	type PersistentRoutineDefinition,
@@ -80,11 +81,13 @@ import {
 	routineOccurrenceId,
 	routineOccurrenceReplayKeys,
 	routineOccurrencesSettled,
+	routineOpensAt,
 	routinePreviousSlot,
 	routineResultDigest,
 	routineScheduleInputOf,
 	routineSlotRule,
 	routineStartDeadline,
+	routineStartWindow,
 	routineTriggerAt,
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
@@ -1092,7 +1095,12 @@ export class PersistentBotTeamStore {
 			let changed = false;
 			for (const { routineId, reason } of input.refusals) {
 				const routine = this.routines.get(routineId);
-				if (!routine?.enabled || (routine.schedule.kind !== "event" && routine.nextRunAt > input.nowMs)) continue;
+				if (
+					!routine?.enabled ||
+					(routine.schedule.kind !== "event" &&
+						routineOpensAt(routine, this.routineOccurrences.values()) > input.nowMs)
+				)
+					continue;
 				const bounded = reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "This routine cannot run away.";
 				if (this.recordAwayRefusal(routineId, bounded, input.nowMs)) changed = true;
 			}
@@ -1744,6 +1752,8 @@ export class PersistentBotTeamStore {
 					intervalMs: scheduleInput.intervalMs,
 					anchorAt,
 					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+					...(scheduleInput.readyBy ? { readyBy: true as const } : {}),
+					...(scheduleInput.readyLeadMs === undefined ? {} : { readyLeadMs: scheduleInput.readyLeadMs }),
 				};
 			else if (scheduleInput.kind === "once") schedule = scheduleInput;
 			else if (scheduleInput.kind === "event") {
@@ -1867,6 +1877,10 @@ export class PersistentBotTeamStore {
 				existing.origin?.endCondition !== undefined &&
 				definition.origin?.endCondition === existing.origin.endCondition
 					? { conditionMet: existing.conditionMet }
+					: {}),
+				// Measured runs derive the lead only while the schedule takes a derived one.
+				...(existing?.runDurations && schedule.kind !== "event" && schedule.readyBy && !schedule.readyLeadMs
+					? { runDurations: existing.runDurations }
 					: {}),
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
@@ -2357,10 +2371,22 @@ export class PersistentBotTeamStore {
 			changed = true;
 		}
 		const dueAt = nextRoutineAt(schedule, routine.cursor);
-		if (dueAt === undefined || dueAt > input.nowMs) return { changed, journalFull: false };
-		const trigger = this.latestDueTrigger(routine, dueAt, input.nowMs);
+		if (dueAt === undefined) return { changed, journalFull: false };
+		// A `readyBy` window may open before the slot; the run still belongs to the slot (its identity and deadline).
+		const early = dueAt > input.nowMs;
+		if (
+			early &&
+			(routineStartWindow(routine, routine.cursor, this.routineOccurrences.values())?.opensAt ?? dueAt) > input.nowMs
+		)
+			return { changed, journalFull: false };
+		const trigger = this.latestDueTrigger(routine, dueAt, Math.max(input.nowMs, dueAt));
 		const occurrenceId = routineOccurrenceId(routine, trigger);
-		const cursorAfter = routineCursorAfter(schedule, trigger.scheduledAt);
+		const after = routineCursorAfter(schedule, trigger.scheduledAt);
+		// A slot consumed before its time records when, so the clock restart does not read it as a clock fault.
+		const cursorAfter: RoutineCursor =
+			early && (after.kind === "interval" || after.kind === "calendar")
+				? { ...after, consumedAt: input.nowMs }
+				: after;
 		const advance = (from: RoutineDefinitionView, cursor: RoutineCursor): { changed: true; journalFull: false } => {
 			this.routines.set(id, {
 				...from,
@@ -2727,8 +2753,8 @@ export class PersistentBotTeamStore {
 		awaySpentUsd?: number;
 	}): void {
 		const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
-		this.updateClaimedOccurrence(input, (item) =>
-			this.withResult(
+		this.updateClaimedOccurrence(input, (item) => {
+			const finished = this.withResult(
 				{
 					...item,
 					phase: input.outcome === "uncertain" ? "uncertain" : "terminal",
@@ -2741,8 +2767,33 @@ export class PersistentBotTeamStore {
 				input.recipient,
 				input.ownerUpdate,
 				input.conditionMet,
-			),
-		);
+			);
+			// Its run time is measured from the running transition, so time waiting for a worker is not counted.
+			if (input.outcome === "succeeded" && item.phase === "running")
+				this.recordRoutineRunDuration(item, input.nowMs - item.updatedAt);
+			return finished;
+		});
+	}
+
+	/**
+	 * Keeps a succeeded scheduled run's measured time, the newest {@link MAX_ROUTINE_RUN_DURATIONS}, on a routine whose
+	 * `readyBy` lead is derived from them (no `readyLeadMs`); nothing for any other routine.
+	 */
+	private recordRoutineRunDuration(occurrence: RoutineOccurrence, ranMs: number): void {
+		const routine = this.routines.get(occurrence.routineId);
+		if (
+			occurrence.trigger.kind !== "schedule" ||
+			routine?.incarnationId !== occurrence.definition.incarnationId ||
+			routine.schedule.kind === "event" ||
+			!routine.schedule.readyBy ||
+			routine.schedule.readyLeadMs !== undefined ||
+			ranMs < 0
+		)
+			return;
+		this.routines.set(routine.routineId, {
+			...routine,
+			runDurations: [...(routine.runDurations ?? []), ranMs].slice(-MAX_ROUTINE_RUN_DURATIONS),
+		});
 	}
 
 	resolveUncertainRoutineOccurrence(input: {
