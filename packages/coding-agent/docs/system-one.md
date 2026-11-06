@@ -229,7 +229,7 @@ heuristic.
 | Is the goal complete, is each claim shown | `JEV-024..026`, completion account | goal completion |
 | Does the answer's claim stand | claim check | after every answer |
 | Does new code duplicate existing code | `system-one:code_duplicate` | edit review |
-| Which tool results to keep when compacting | `retention_eval_*` | compaction |
+| Which tool results to keep when compacting | `retention_eval_v2` | compaction |
 | Which model pool or model | `system-one:route_choice` | model router |
 | Does an owner message grant, limit or hand off | `system-one:intake` | owner words |
 | Which file holds what the model is looking for | `system-one:locate` | `systemone locate` |
