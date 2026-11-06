@@ -1391,7 +1391,13 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	});
 	// Two branch copies of this checkpoint, before the start turn: the closing reflection reopens them after the background flow.
 	const closingCopies = branchForClosingReflection(sessionManager);
+	// The evaluations this start turn settles: the shell gate's verdict on its call is traced on one of them below.
+	const startTurnEvaluations = new Set<string>();
+	const stopCollectingEvaluations = session.onSemanticEvaluation((record) => {
+		startTurnEvaluations.add(record.evaluationId);
+	});
 	await withDeadline(trace, "background start turn", session.prompt("Start the check in the background."));
+	stopCollectingEvaluations();
 	trace.mark("root", "background.started");
 	await withDeadline(trace, "background reflection turn", backgroundReflected.promise, 60_000);
 	backgroundGate.release();
@@ -1401,6 +1407,18 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		world.shell.requests.filter((request) => request.command === "echo background-check"),
 		"the background command physically ran once",
 	).toHaveLength(1);
+	if (world.systemOne.enabled) {
+		// The gate's decision row: the verdict (`proceed: <finding>`, or `c<i>: proceed` for a batch) on the evaluation it read.
+		const gateDecisions = session
+			.getSemanticEvaluations()
+			.filter((record) => startTurnEvaluations.has(record.evaluationId))
+			.map((record) => record.trace?.decision)
+			.filter((decision) => decision !== undefined && /^(?:proceed: |c\d+: proceed\b)/.test(decision));
+		expect(
+			gateDecisions.length,
+			"the shell gate's verdict on the background call is traced on its evaluation",
+		).toBeGreaterThan(0);
+	}
 
 	// Closing reflection timeout: the carried cue buys a reflection on each reopened copy. The held owner quits while that reflection waits
 	// at its input: one disclosure, no provider request after quit, and an unchanged file after release. The normal order discloses nothing.
