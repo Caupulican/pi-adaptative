@@ -8,7 +8,8 @@
  */
 
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
-import type { OperationEffectEngine } from "./operation-classifier.ts";
+import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
+import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 
 /**
  * Each question names one defect. Two ask for the defect itself, which live System One separates far
@@ -107,35 +108,41 @@ export async function reviewPlan(
 	if (input.steps.length === 0) return {};
 	// A session without System One has no judge to consult; its plans are the model's own.
 	if (!engine) return {};
-	let answers: Record<string, unknown>;
+	let evaluation: OperationEvaluation;
 	try {
-		answers =
-			(
-				await engine.evaluate(
-					// A pasted directive is not a part of the request a plan must cover; a plan over unpasted words is asked as probed.
-					programOverOwnerWords(PLAN_REVIEW_PROGRAM, PLAN_REQUEST_QUESTIONS, input.request, ...input.steps),
-					{ request: input.request || "(no request recorded)", steps: input.steps },
-					{ consequence: "medium", signal: input.signal },
-				)
-			).answers ?? {};
+		evaluation = await engine.evaluate(
+			// A pasted directive is not a part of the request a plan must cover; a plan over unpasted words is asked as probed.
+			programOverOwnerWords(PLAN_REVIEW_PROGRAM, PLAN_REQUEST_QUESTIONS, input.request, ...input.steps),
+			{ request: input.request || "(no request recorded)", steps: input.steps },
+			{ consequence: "medium", signal: input.signal },
+		);
 	} catch (error) {
 		input.signal?.throwIfAborted();
 		return {
 			doubt: `System One could not check the plan (${error instanceof Error ? error.message : String(error)})`,
 		};
 	}
+	const answers = evaluation.answers ?? {};
 	const steers: string[] = [];
 	const doubts: string[] = [];
+	const drove: string[] = [];
 	for (const defect of DEFECTS) {
 		const answered = probability(answers[defect.id]);
 		if (answered === undefined) {
 			doubts.push(defect.doubt);
+			drove.push(defect.id);
 			continue;
 		}
 		const defectProbability = defect.positive ? 1 - answered : answered;
 		if (defectProbability >= STEER_AT) steers.push(defect.steer);
 		else if (defectProbability > DOUBT_ABOVE) doubts.push(defect.doubt);
+		else continue;
+		drove.push(defect.id);
 	}
+	noteDecisionTrace(engine, evaluation, {
+		decision: `plan review: ${steers.length} steered, ${doubts.length} doubted`,
+		drove,
+	});
 	return {
 		...(steers.length > 0 ? { steer: `System One checked the plan: ${steers.join("; ")}.` } : {}),
 		...(doubts.length > 0 ? { doubt: `System One doubts ${doubts.join(", and ")}` } : {}),

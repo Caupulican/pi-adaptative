@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readNoul } from "../decision/noul.ts";
+import {
+	noteDecisionTrace,
+	type SemanticDecisionTrace,
+	type SemanticTraceJudgment,
+} from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
@@ -26,7 +31,13 @@ export interface DecisionEngine {
 		program: DecisionEngineProgram,
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
-	): Promise<{ answers?: Record<string, unknown> }>;
+	): Promise<{
+		answers?: Record<string, unknown>;
+		evaluationId?: string;
+		judgments?: readonly SemanticTraceJudgment[];
+	}>;
+	/** Attaches the rule decision to the evaluation's ledger row; absent when nothing records traces. */
+	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;
 }
 
 /** The semantic rule program: one question per rule, each pointing at its named rule and the named change. */
@@ -432,17 +443,23 @@ export class SemanticProjectRuleController {
 		});
 		const engine = this.getDecisionEngine();
 		if (!engine) return unjudged("no System One engine is configured for this session");
+		let evaluation: Awaited<ReturnType<DecisionEngine["evaluate"]>>;
 		try {
-			const evaluation = await engine.evaluate(
+			evaluation = await engine.evaluate(
 				semanticRuleProgram(rules, phase),
 				{ phase, rules: rules.map((rule) => ({ id: rule.rule_id, text: rule.text })), changedFiles, change },
 				{ consequence: maxConsequence(rules), signal },
 			);
-			return readSemanticRules(rules, phase, evaluation.answers);
 		} catch (error) {
 			signal?.throwIfAborted();
 			return unjudged(String(error instanceof Error ? error.message : error));
 		}
+		const read = readSemanticRules(rules, phase, evaluation.answers);
+		noteDecisionTrace(engine, evaluation, {
+			decision: `${phase}: ${read.findings.length} violated, ${read.doubts.length} undecided, ${rules.length - read.findings.length - read.doubts.length} held`,
+			drove: [...read.findings, ...read.doubts].map((entry) => `violate::${entry.ruleId}`),
+		});
+		return read;
 	}
 
 	private toValidationResult(

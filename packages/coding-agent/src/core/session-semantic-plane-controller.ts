@@ -164,7 +164,7 @@ export class SessionSemanticPlaneController {
 	/** The recorded engine in the retention planner's batched-question shape. */
 	semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
 		const engine = this.recordingSemanticEngine();
-		return engine ? createRetentionDecisionEngine(engine) : undefined;
+		return engine ? createRetentionDecisionEngine(engine, this.health) : undefined;
 	}
 
 	/**

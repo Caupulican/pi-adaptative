@@ -20,6 +20,7 @@ import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-po
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
+import type { SemanticDecisionTrace, SemanticTraceJudgment } from "./semantic-evaluation-ledger.ts";
 
 /** Why System One is asked: the operation runs code, or writes outside the task. */
 export type JudgedOperationKind = "shell" | "code" | "write_outside_task";
@@ -289,7 +290,31 @@ export interface OperationEffectEngine {
 		},
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
-	): Promise<{ answers?: Record<string, unknown>; model?: string }>;
+	): Promise<OperationEvaluation>;
+	/** Attaches the decision made from an evaluation to its ledger row; absent when nothing records traces. */
+	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;
+}
+
+/** One evaluation as the engine returns it: answers, and its ledger id and judgments when it records them. */
+export interface OperationEvaluation {
+	readonly answers?: Record<string, unknown>;
+	readonly model?: string;
+	readonly evaluationId?: string;
+	readonly judgments?: readonly SemanticTraceJudgment[];
+}
+
+/**
+ * The questions that drove an operation verdict: every effect not read as absent and, when one is, the owner's
+ * request. `prefix` is a batch entry's id prefix.
+ */
+export function operationDroveIds(effects: OperationEffectReading, requestAsked: boolean, prefix = ""): string[] {
+	const present = OPERATION_EFFECT_IDS.filter((id) => {
+		const value = effects[id];
+		return value === undefined || value > EFFECT_UNSETTLED_ABOVE;
+	});
+	return [...present, ...(present.length > 0 && requestAsked ? [OPERATION_REQUEST_ID] : [])].map(
+		(id) => `${prefix}${id}`,
+	);
 }
 
 export interface OperationVerdict {
@@ -381,6 +406,8 @@ export async function askOperation(
 		readonly onModel?: (model: string) => void;
 		/** Bound on the System One call; running out counts as System One unavailable. */
 		readonly timeoutMs?: number;
+		/** Told the evaluation, so its ledger id and judgments reach the decision's trace. */
+		readonly onEvaluation?: (evaluation: OperationEvaluation) => void;
 	},
 ): Promise<Record<string, unknown>> {
 	const call = operationCall(input);
@@ -396,6 +423,7 @@ export async function askOperation(
 		call.options,
 	);
 	if (evaluation.model) input.onModel?.(evaluation.model);
+	input.onEvaluation?.(evaluation);
 	return evaluation.answers ?? {};
 }
 
@@ -431,6 +459,8 @@ export async function askOperationBatch(
 		readonly timeoutMs?: number;
 		/** Told the model that answered, whenever the engine reports it. */
 		readonly onModel?: (model: string) => void;
+		/** Told the evaluation, so its ledger id and judgments reach the decisions' trace. */
+		readonly onEvaluation?: (evaluation: OperationEvaluation) => void;
 	},
 ): Promise<Record<string, unknown>[]> {
 	const call = operationCall(input);
@@ -446,6 +476,7 @@ export async function askOperationBatch(
 	};
 	const evaluation = await engine.evaluate({ ...call.program, decisions }, state, call.options);
 	if (evaluation.model) input.onModel?.(evaluation.model);
+	input.onEvaluation?.(evaluation);
 	const answers = evaluation.answers ?? {};
 	return input.entries.map((_entry, index) =>
 		Object.fromEntries([...OPERATION_EFFECT_IDS, OPERATION_REQUEST_ID].map((id) => [id, answers[`c${index}_${id}`]])),

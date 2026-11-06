@@ -176,6 +176,26 @@ export function traceJudgmentsFromEvaluation(
 	return judgments;
 }
 
+/**
+ * Attaches a consumer's decision to the evaluation it was made from: the evaluation's judgments, those named in
+ * `drove` marked as having driven it. A no-op when the engine records no traces or the evaluation has no ledger id.
+ */
+export function noteDecisionTrace(
+	engine: { noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void } | undefined,
+	evaluation: { readonly evaluationId?: string; readonly judgments?: readonly SemanticTraceJudgment[] },
+	trace: { readonly decision: string; readonly drove?: readonly string[]; readonly facts?: readonly string[] },
+): void {
+	if (!engine?.noteTrace || evaluation.evaluationId === undefined) return;
+	const drove = new Set(trace.drove ?? []);
+	engine.noteTrace(evaluation.evaluationId, {
+		decision: trace.decision,
+		judgments: (evaluation.judgments ?? []).map((judgment) =>
+			drove.has(judgment.id) ? { ...judgment, drove: true } : judgment,
+		),
+		...(trace.facts?.length ? { facts: trace.facts } : {}),
+	});
+}
+
 /** Unbounded question text and its semantic state, separate from the bounded display preview. */
 export interface SemanticQuestionState {
 	/** Exact identity (result key or certificate predicate), never display-truncated. */

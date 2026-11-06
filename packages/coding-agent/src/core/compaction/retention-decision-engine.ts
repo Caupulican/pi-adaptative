@@ -13,11 +13,7 @@
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import {
-	type SemanticDecisionTrace,
-	type SemanticTraceJudgment,
-	traceJudgmentsFromEvaluation,
-} from "../system-one/semantic-evaluation-ledger.ts";
+import { type SemanticDecisionTrace, traceJudgmentsFromEvaluation } from "../system-one/semantic-evaluation-ledger.ts";
 import type { DecisionEngine, DecisionEngineProgram } from "./evidence-retention-planner.ts";
 
 interface RetentionQuestion {
@@ -30,26 +26,6 @@ interface RetentionQuestion {
 /** Where a consumer's decision trace goes: the session's evaluation recorder. */
 export interface RetentionTraceObserver {
 	noteTrace(evaluationId: string, trace: SemanticDecisionTrace): void;
-}
-
-/**
- * The trace a consumer attaches: the judgments the evaluation returned, those named in `drove` marked as
- * having driven the result. A no-op when the engine records no traces or the evaluation has no ledger id.
- */
-export function noteDecisionTrace(
-	engine: Pick<DecisionEngine, "noteTrace"> | undefined,
-	result: { readonly evaluationId?: string; readonly judgments?: readonly SemanticTraceJudgment[] },
-	trace: { readonly decision: string; readonly drove?: readonly string[]; readonly facts?: readonly string[] },
-): void {
-	if (!engine?.noteTrace || result.evaluationId === undefined) return;
-	const drove = new Set(trace.drove ?? []);
-	engine.noteTrace(result.evaluationId, {
-		decision: trace.decision,
-		judgments: (result.judgments ?? []).map((judgment) =>
-			drove.has(judgment.id) ? { ...judgment, drove: true } : judgment,
-		),
-		...(trace.facts?.length ? { facts: trace.facts } : {}),
-	});
 }
 
 export function createRetentionDecisionEngine(

@@ -758,7 +758,7 @@ export class AgentSession {
 			cwd: config.cwd,
 			resourceLoader: config.resourceLoader,
 			ownerRules: this._ownerRules,
-			getDecisionEngine: () => this._semanticPlane.recordingSemanticEngine(),
+			getDecisionEngine: () => this._semanticDecisionEngine(),
 			sessionManager: config.sessionManager,
 			emit: (event) => this._emit(event),
 			getSystemOneController: () => this._semanticPlane.controller,

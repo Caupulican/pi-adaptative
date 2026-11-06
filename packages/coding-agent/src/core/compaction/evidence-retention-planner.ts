@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { noulProbability, readNoul } from "../decision/noul.ts";
-import type { SemanticDecisionTrace, SemanticTraceJudgment } from "../system-one/semantic-evaluation-ledger.ts";
-import { noteDecisionTrace } from "./retention-decision-engine.ts";
+import {
+	noteDecisionTrace,
+	type SemanticDecisionTrace,
+	type SemanticTraceJudgment,
+} from "../system-one/semantic-evaluation-ledger.ts";
 
 export type RetentionDisposition = "keep_exact" | "keep_call_truncate_result" | "drop_pair";
 

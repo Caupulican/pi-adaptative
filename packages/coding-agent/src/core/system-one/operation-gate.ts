@@ -24,7 +24,9 @@ import {
 	OPERATION_REQUEST_ID,
 	type OperationEffectEngine,
 	type OperationEffectReading,
+	type OperationEvaluation,
 	type OperationVerdict,
+	operationDroveIds,
 	operationHasNoEffect,
 	readOperationEffects,
 	readOperationRequest,
@@ -38,6 +40,7 @@ import {
 	operationEffectKey,
 	operationIdentityHash,
 } from "./operation-effect-cache.ts";
+import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 
 /** p99 of 1,204 recorded calls is under 0.9 s; a call still waiting at 2 s is an outage, not a slow answer. */
 export const OPERATION_JUDGMENT_TIMEOUT_MS = 2_000;
@@ -233,29 +236,39 @@ export class OperationGate {
 			return;
 		}
 		const started = this.now();
-		const batch = askOperationBatch(engine, {
+		let evaluation: OperationEvaluation | undefined;
+		// Every entry is decided from the one batched evaluation, which then gets one trace naming each verdict.
+		const decided = askOperationBatch(engine, {
 			entries: todo.map((entry) => ({ triage: entry.triage, toolName: entry.toolName })),
 			request,
 			signal,
 			onModel: (model) => {
 				this.answeringModel = model;
 			},
+			onEvaluation: (returned) => {
+				evaluation = returned;
+			},
 			timeoutMs: OPERATION_JUDGMENT_TIMEOUT_MS,
+		}).then((all) => {
+			const drove: string[] = [];
+			const verdicts = todo.map((entry, index): Decided => {
+				const answers = all[index] ?? {};
+				const effects = readOperationEffects(answers);
+				this.remember(engine, entry.toolName, entry.triage, effects);
+				const verdict = verdictFromReadings(effects, readOperationRequest(answers), caller.actor);
+				this.record(entry.toolName, entry.triage, "jev", verdict, started);
+				drove.push(...operationDroveIds(effects, true, `c${index}_`));
+				return { verdict };
+			});
+			if (evaluation)
+				noteDecisionTrace(engine, evaluation, {
+					decision: verdicts.map((entry, index) => `c${index}: ${entry.verdict.action}`).join(", "),
+					drove,
+				});
+			return verdicts;
 		});
 		todo.forEach((entry, index) => {
-			this.pending.set(
-				entry.key,
-				batch
-					.then((all): Decided => {
-						const answers = all[index] ?? {};
-						const effects = readOperationEffects(answers);
-						this.remember(engine, entry.toolName, entry.triage, effects);
-						const verdict = verdictFromReadings(effects, readOperationRequest(answers), caller.actor);
-						this.record(entry.toolName, entry.triage, "jev", verdict, started);
-						return { verdict };
-					})
-					.catch(never),
-			);
+			this.pending.set(entry.key, decided.then((verdicts): Decided => verdicts[index]!).catch(never));
 		});
 	}
 
@@ -348,6 +361,7 @@ export class OperationGate {
 		const started = this.now();
 		const effectKey = this.effectKey(engine, toolName, triage);
 		const remembered = effectKey ? this.cache.get(effectKey) : undefined;
+		let evaluation: OperationEvaluation | undefined;
 		const ask = (questions: readonly (typeof OPERATION_REQUEST_ID | (typeof OPERATION_EFFECT_IDS)[number])[]) =>
 			askOperation(engine, {
 				triage,
@@ -359,7 +373,19 @@ export class OperationGate {
 				onModel: (model) => {
 					this.answeringModel = model;
 				},
+				onEvaluation: (returned) => {
+					evaluation = returned;
+				},
 			});
+		// The asked evaluation's row gets the verdict; remembered effects are named as reused.
+		const trace = (verdict: OperationVerdict, effects: OperationEffectReading, cached: boolean) => {
+			if (!evaluation) return;
+			noteDecisionTrace(engine, evaluation, {
+				decision: `${verdict.action}: ${verdict.finding}`,
+				drove: operationDroveIds(effects, request !== undefined),
+				...(cached ? { facts: ["effects reused from the effect cache"] } : {}),
+			});
+		};
 		if (remembered && operationHasNoEffect(remembered)) {
 			const verdict = verdictFromReadings(remembered, undefined, actor);
 			this.record(toolName, triage, "cache", verdict, started);
@@ -379,6 +405,7 @@ export class OperationGate {
 				}
 				const verdict = verdictFromReadings(remembered, asked, actor);
 				this.record(toolName, triage, "cache", verdict, started);
+				trace(verdict, remembered, true);
 				return { verdict };
 			}
 			const answers = await ask(
@@ -392,6 +419,7 @@ export class OperationGate {
 				actor,
 			);
 			this.record(toolName, triage, "jev", verdict, started);
+			trace(verdict, effects, false);
 			return { verdict };
 		} catch (error) {
 			signal?.throwIfAborted();

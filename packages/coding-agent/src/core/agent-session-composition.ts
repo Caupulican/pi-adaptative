@@ -35,7 +35,6 @@ import { CONTEXT_VISIBILITY_LONG_CHARS, CONTEXT_VISIBILITY_SHORT_CHARS } from ".
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { ContextGcResult } from "./context-gc.ts";
 import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
-import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import type { ContextUsage } from "./extensions/index.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
@@ -253,7 +252,7 @@ export interface SessionProjectRulesWiringDeps {
 		getAdmittedAgentsRuleSources?(): readonly TrustedRuleSource[] | undefined;
 	};
 	readonly ownerRules: Pick<DurableOwnerRuleStore, "list">;
-	getDecisionEngine(): SemanticDecisionEngine | undefined;
+	getDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined;
 	readonly sessionManager: Pick<SessionManager, "appendCustomEntry">;
 	emit(event: AgentSessionEvent): void;
 	getSystemOneController(): Pick<SystemOneController, "noteControlDirective"> | undefined;

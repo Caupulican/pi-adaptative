@@ -11,12 +11,14 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import { createRetentionDecisionEngine } from "../compaction/retention-decision-engine.ts";
-import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { RULE_CONFLICT_NOTE } from "../objective-execution/local-commit-delivery.ts";
 import type { OwnerRulePolicy } from "./durable-owner-rules.ts";
 import { OWNER_RULE_JUDGED_PHASES, ownerRuleToSemanticRule } from "./durable-owner-rules.ts";
-import { compileRulesFromText, SemanticProjectRuleController } from "./semantic-project-rule-controller.ts";
+import {
+	compileRulesFromText,
+	type DecisionEngine,
+	SemanticProjectRuleController,
+} from "./semantic-project-rule-controller.ts";
 import type { RulePhase, RuleRepairWork, RuleValidationResult, SemanticRule } from "./types.ts";
 import { blocksRuleTransition } from "./types.ts";
 
@@ -32,8 +34,8 @@ export interface SessionProjectRulesDeps {
 	getTrustedRuleSources(): readonly TrustedRuleSource[];
 	/** Durable owner policies: process rules, judged at task postflight and completion (no single edit shows them). */
 	getOwnerRulePolicies(): readonly OwnerRulePolicy[];
-	/** The session's semantic engine; absent means only deterministic rules can be evaluated. */
-	getDecisionEngine(): SemanticDecisionEngine | undefined;
+	/** The session's semantic engine in its batched shape (traces included); absent means only deterministic rules run. */
+	getDecisionEngine(): DecisionEngine | undefined;
 	/** Durable sink for queued RepairWork. */
 	recordRepairWork(repair: RuleRepairWork): void;
 	/** Bounded operator-visible notice for a violation or semantic advice. */
@@ -98,10 +100,7 @@ export class SessionProjectRules {
 		this.controller = new SemanticProjectRuleController({
 			initialRules: rules,
 			// The session's engine at the moment a rule is judged, not the one bound when the rules compiled.
-			getDecisionEngine: () => {
-				const engine = this.deps.getDecisionEngine();
-				return engine ? createRetentionDecisionEngine(engine) : undefined;
-			},
+			getDecisionEngine: () => this.deps.getDecisionEngine(),
 		});
 		this.compiledSignature = signature;
 		return this.controller;
