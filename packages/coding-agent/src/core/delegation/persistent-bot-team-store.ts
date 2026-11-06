@@ -3038,7 +3038,7 @@ export class PersistentBotTeamStore {
 	}
 
 	getDaemonStatus(nowMs = Date.now()): PersistentBotDaemonStatus {
-		return readDaemonLeaseStatus(this.filePath, this.routines.values(), nowMs);
+		return readDaemonLeaseStatus(this.filePath, this.routines.values(), [...this.routineOccurrences.values()], nowMs);
 	}
 
 	/** Takes the detached daemon's lease for a daemon about to start with `token`; false while another holds it. */
@@ -3109,7 +3109,8 @@ export class PersistentBotTeamStore {
 	 * put and the next session's scheduler claims it (`claimDueRoutinesInMap`), which dispatches it and moves `nextRunAt`
 	 * forward. Advancing it here made that claim skip the routine, so a routine queued by the daemon was never
 	 * dispatched. Session routines are never marked: their occurrence journal is their only run state, and the session
-	 * scheduler that owns them claims them through it. Only run state changes; the admitted definition (`updatedAt`
+	 * scheduler that owns them claims them through it. Bot and team routines are saved as plain intervals (no `readyBy`
+	 * window), so their `nextRunAt` is when their run may be claimed. Only run state changes; the admitted definition (`updatedAt`
 	 * included) is the revision's and every occurrence copies it. A store an older build rewrote in the version-1 shape
 	 * is resealed in the same transaction.
 	 */

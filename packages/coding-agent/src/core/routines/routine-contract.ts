@@ -931,7 +931,7 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	 */
 	readonly conditionMet?: RoutineConditionMet;
 	/**
-	 * Measured run times in ms (running to result) of the last succeeded scheduled runs, newest last, at most
+	 * Measured run times in ms (claim to result) of the last succeeded scheduled runs, newest last, at most
 	 * {@link MAX_ROUTINE_RUN_DURATIONS}: kept only for a `readyBy` schedule without `readyLeadMs`, whose lead they
 	 * derive. Run state: it never moves the revision.
 	 */
@@ -1527,8 +1527,8 @@ export function routineReadyLead(
 /**
  * When the cursor's next slot may start, the one due computation the live session and the away daemon share: `slot`
  * is the slot's identity, `opensAt` the earliest instant its run may be claimed. Without `readyBy`, for a slot at or
- * after `expiresAt`, while any run of the routine is unfinished (a window never opens early over a run that has not
- * finished), or for a calendar zone this runtime cannot place (the previous slot needs the zone), it opens at the slot.
+ * after `expiresAt`, while any run of the routine's incarnation is unfinished (a window never opens early over a run
+ * that has not finished; a run of a deleted routine with the same id does not count), or for a calendar zone this runtime cannot place (the previous slot needs the zone), it opens at the slot.
  * Otherwise it opens the lead before the slot ({@link routineReadyLead}), never before the routine's last edit and
  * never earlier than halfway from the previous slot (or the anchor) to it. It never throws.
  */
@@ -1549,7 +1549,12 @@ export function routineStartWindow(
 	)
 		return { slot, opensAt: slot };
 	for (const occurrence of occurrences)
-		if (occurrence.routineId === routine.routineId && occurrence.phase !== "terminal") return { slot, opensAt: slot };
+		if (
+			occurrence.routineId === routine.routineId &&
+			occurrence.definition.incarnationId === routine.incarnationId &&
+			occurrence.phase !== "terminal"
+		)
+			return { slot, opensAt: slot };
 	const previous = schedule.kind === "once" ? undefined : (routinePreviousSlot(schedule, cursor) ?? schedule.anchorAt);
 	const floor = previous === undefined ? slot - lead : previous + Math.ceil((slot - previous) / 2);
 	return { slot, opensAt: Math.min(slot, Math.max(slot - lead, floor, Date.parse(routine.updatedAt))) };

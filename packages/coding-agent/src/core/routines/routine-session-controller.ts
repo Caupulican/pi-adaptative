@@ -13,6 +13,7 @@ import {
 	RoutineIntakeRefusal,
 	type RoutineIntakeRefusalReason,
 	type RoutineScheduleInput,
+	routineEnded,
 	routineScheduleInputOf,
 	routineStartWindow,
 	routineZoneUnsupported,
@@ -55,15 +56,15 @@ export function routineIntakeRoutineId(origin: RoutineIntakeOrigin): string {
 	return `owner-${origin.key.slice(0, 16)}`;
 }
 
-function summary(routine: RoutineDefinitionView, store: RoutineStorePort): RoutineToolSummary {
+function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolSummary {
 	const unschedulable = routineZoneUnsupported(routine.schedule);
 	const nextRunAt =
 		unschedulable === undefined && !routine.conditionMet
 			? nextRoutineAt(routine.schedule, routine.cursor)
 			: undefined;
-	// The window as the claim reads it: an unfinished run of the routine holds it shut.
+	// The window as the claim reads it: an unfinished run of the routine holds it shut, and an ended routine starts nothing.
 	const opensAt =
-		nextRunAt === undefined
+		nextRunAt === undefined || routineEnded(routine, nowMs) !== undefined
 			? undefined
 			: routineStartWindow(
 					routine,
@@ -85,9 +86,9 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort): Routi
 	};
 }
 
-function view(routine: RoutineDefinitionView, store: RoutineStorePort): RoutineToolView {
+function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
 	return {
-		...summary(routine, store),
+		...summary(routine, store, nowMs),
 		prompt: routine.prompt,
 		...(routine.lastSummary === undefined
 			? {}
@@ -114,7 +115,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			.sort((left, right) => (left.routineId < right.routineId ? -1 : left.routineId === right.routineId ? 0 : 1));
 		const page = entries.slice(0, Math.max(1, Math.min(20, limit)));
 		return {
-			routines: page.map((routine) => summary(routine, this.deps.store)),
+			routines: page.map((routine) => summary(routine, this.deps.store, this.deps.now())),
 			...(entries.length > page.length ? { next: page.at(-1)!.routineId } : {}),
 		};
 	}
@@ -122,7 +123,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	async get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | undefined> {
 		this.check(signal);
 		const routine = this.deps.store.getRoutine(routineId);
-		return routine && this.owns(routine) ? view(routine, this.deps.store) : undefined;
+		return routine && this.owns(routine) ? view(routine, this.deps.store, this.deps.now()) : undefined;
 	}
 
 	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
@@ -158,6 +159,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				nowMs: this.deps.now(),
 			}),
 			this.deps.store,
+			this.deps.now(),
 		);
 	}
 
@@ -303,6 +305,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 			}),
 			this.deps.store,
+			this.deps.now(),
 		);
 	}
 

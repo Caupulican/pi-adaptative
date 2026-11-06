@@ -39,6 +39,7 @@ import {
 } from "../../../../src/core/routines/routine-contract.ts";
 import { ROUTINE_INTAKE_SUBMISSION_TOOL_NAME } from "../../../../src/core/routines/routine-intake-extractor.ts";
 import { ROUTINE_RESULT_WAKES_HOLD } from "../../../../src/core/routines/routine-parent-input.ts";
+import type { RoutineToolSummary } from "../../../../src/core/routines/routine-tool.ts";
 import { type AwayCiCredentials, createCiAwayEventSources } from "../../../../src/host/ci/ci-away-event-sources.ts";
 import { createCiHostRuntime } from "../../../../src/host/ci/ci-host-event-source.ts";
 import type { CiProvider, CiRepository } from "../../../../src/host/ci/ci-provider.ts";
@@ -131,8 +132,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		root.sessionManager
 			.getEntries()
 			.filter((entry) => entry.type === "custom_message" && entry.customType === "routine-completion");
+	/** One owner turn whose model calls the routine tool once; resolves to that call's result text. */
 	const command = async (label: string, input: Record<string, unknown>, error = false, callId = label) => {
 		const classified: string[] = [];
+		let answer = "";
 		world.systemOne.enterPhase(
 			label,
 			label === "routine-forged-target"
@@ -165,6 +168,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			check: (request) => {
 				const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
 				expect(result?.isError, result?.text).toBe(error);
+				answer = result?.text ?? "";
 			},
 		});
 		await withDeadline(world.trace, label, root.session.prompt(`Apply the ${label} routine command.`));
@@ -173,6 +177,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				"Apply the routine-forged-target routine command.",
 				"Apply the routine-invalid-interval routine command.",
 			]);
+		return answer;
 	};
 	const parentSettled = (count: number): Promise<void> =>
 		new Promise((resolve) => {
@@ -1496,11 +1501,11 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			schedule: { kind: "interval", intervalMs: 600_000 },
 			profileId: profile.profileId,
 		});
-		const readyRuns = () => store().listRoutineOccurrences({ routineId: readyId });
-		const readyReaches = (test: (runs: readonly RoutineOccurrence[]) => boolean): Promise<void> =>
+		const readyRuns = (id = readyId) => store().listRoutineOccurrences({ routineId: id });
+		const readyReaches = (test: (runs: readonly RoutineOccurrence[]) => boolean, id = readyId): Promise<void> =>
 			new Promise((resolve) => {
 				const check = () => {
-					if (!test(readyRuns())) return;
+					if (!test(readyRuns(id))) return;
 					stop();
 					resolve();
 				};
@@ -1566,8 +1571,65 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			parentInputs().map((entry) => parentInputOriginalDetails(entry)),
 			"the delivered result names the early run's slot occurrence",
 		).toContainEqual(expect.objectContaining({ routineId: readyId, occurrenceId: early!.occurrenceId }));
+		// Without readyLeadMs the lead is derived: 15 minutes before any measured run, then the slowest measured run (claim
+		// to result) plus a quarter and one minute, kept between one minute and two hours. An explicit lead keeps no run
+		// times and stays as set (a derived one would meet the half-gap floor, 5 minutes); a plain routine keeps none.
+		const readySlot = store().getRoutine(readyId)!.nextRunAt;
+		const readyStatus = (await root.session.autonomyStatus()).routines;
+		expect(
+			readyStatus.status === "available"
+				? readyStatus.value.routines.items.find((item) => item.routineId === readyId)
+				: readyStatus,
+			"an explicit lead stays as set after measured runs",
+		).toMatchObject({ nextRunAt: readySlot, startsFrom: readySlot - readyLeadMs });
+		expect(store().getRoutine(readyId)!.runDurations, "an explicit lead keeps no run times").toBeUndefined();
+		expect(store().getRoutine(routineId)!.runDurations, "a routine without readyBy keeps none").toBeUndefined();
 		expect(
 			store().deleteRoutine(readyId, store().getRoutine(readyId)!.revision, world.timers.port("routines").now()),
+		).toBe(true);
+		const derivedId = "ready-derived";
+		const routineOf = (answer: string) => (JSON.parse(answer) as { routine: RoutineToolSummary }).routine;
+		const derivedCreated = routineOf(
+			await command("routine-ready-derived-create", {
+				action: "create",
+				routineId: derivedId,
+				prompt: readyPrompt,
+				schedule: { kind: "interval", intervalMs: 3_600_000, readyBy: true },
+				profileId: profile.profileId,
+			}),
+		);
+		const derivedSlot = derivedCreated.nextRunAt!;
+		expect(derivedCreated.startsFrom, "before any measured run the lead is 15 minutes").toBe(derivedSlot - 900_000);
+		const derivedGate = createBarrier();
+		world.provider.enqueue(
+			"worker-a",
+			workerReply("routine-ready-derived", readyPrompt, derivedGate.promise, undefined, "none"),
+		);
+		world.timers.advance("routines", derivedSlot - 960_000 - world.timers.port("routines").now());
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		expect(readyRuns(derivedId), "a minute before its lead the window is shut").toEqual([]);
+		const derivedRunning = readyReaches((runs) => runs[0]?.phase === "running", derivedId);
+		world.timers.advance("routines", derivedSlot - 900_000 - world.timers.port("routines").now());
+		await root.session.backgroundLanes.tickPersistentRoutines();
+		await withDeadline(world.trace, "the derived window opens 15 minutes before its slot", derivedRunning);
+		const derivedSpan = 360_000;
+		world.timers.advance("routines", derivedSpan);
+		const derivedDelivered = readyReaches((runs) => runs[0]?.result?.delivery === "acknowledged", derivedId);
+		derivedGate.release();
+		await withDeadline(world.trace, "the derived run is delivered", derivedDelivered);
+		// The routines clock follows the wall clock plus the advance: the measured span is the advance and the real time
+		// of the scripted run, so the expectation is computed from the stored span.
+		const measured = store().getRoutine(derivedId)!.runDurations ?? [];
+		expect(measured, "the succeeded scheduled run is measured once").toHaveLength(1);
+		expect(measured[0], "from its claim to its result").toBeGreaterThanOrEqual(derivedSpan);
+		expect(measured[0], "the rest is the scripted run's real time").toBeLessThan(derivedSpan + 60_000);
+		const derived = routineOf(await command("routine-ready-derived-get", { action: "get", routineId: derivedId }));
+		expect(derived.nextRunAt, "the early claim consumed the first slot").toBe(derivedSlot + 3_600_000);
+		expect(derived.startsFrom, "the next window opens the derived lead before its slot").toBe(
+			derived.nextRunAt! - Math.min(7_200_000, Math.max(60_000, Math.ceil(measured[0]! * 1.25) + 60_000)),
+		);
+		expect(
+			store().deleteRoutine(derivedId, store().getRoutine(derivedId)!.revision, world.timers.port("routines").now()),
 		).toBe(true);
 
 		// Past routines.maxResultWakesPerDay a result starts no turn: it is saved for the owner's next turn, with one

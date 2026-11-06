@@ -6,7 +6,9 @@ import {
 	MIN_ROUTINE_INTERVAL_MS,
 	nextRoutineAt,
 	type RoutineDefinitionView,
+	type RoutineOccurrence,
 	routineEnded,
+	routineOpensAt,
 } from "../routines/routine-contract.ts";
 import {
 	isMissingFileError,
@@ -341,9 +343,15 @@ function legacyDaemonClaimOf(
 	};
 }
 
+/**
+ * The daemon lease's state and the store's routine counts. A clock routine is due once its run may be claimed: at its
+ * slot, or from its `readyBy` window's opening, which the unfinished `occurrences` of the routine hold shut as for the
+ * claim ({@link routineOpensAt}).
+ */
 export function readDaemonLeaseStatus(
 	storeFilePath: string,
 	routines: Iterable<RoutineDefinitionView>,
+	occurrences: readonly RoutineOccurrence[],
 	nowMs = Date.now(),
 ): PersistentBotDaemonStatus {
 	let activeRoutines = 0;
@@ -355,7 +363,7 @@ export function readDaemonLeaseStatus(
 		const next = nextRoutineAt(r.schedule, r.cursor);
 		if (r.schedule.kind === "event" ? routineEnded(r, nowMs) !== undefined : next === undefined) continue;
 		activeRoutines++;
-		if (next !== undefined && next <= nowMs) dueRoutines++;
+		if (next !== undefined && routineOpensAt(r, occurrences) <= nowMs) dueRoutines++;
 		if (r.awayRefusal) awayRefusals.push({ routineId: r.routineId, ...r.awayRefusal });
 	}
 	const legacy = legacyDaemonClaimOf(readLeaseJson(legacyDaemonLeasePath(storeFilePath)), nowMs);
