@@ -425,7 +425,7 @@ export class ToolGateController {
 					? undefined
 					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (operation) return operation;
-			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal);
+			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal, registerCleanup);
 			if (soulWrite) return soulWrite;
 
 			// 5. System One semantic tool gate

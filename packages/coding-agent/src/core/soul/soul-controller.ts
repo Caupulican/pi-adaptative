@@ -322,8 +322,9 @@ export class SoulController {
 	/**
 	 * Admission of a root tool call: the file is reconciled with the accounted revision before the call can touch it. A
 	 * difference with no other call running happened between calls, so it is the owner's (adopted, not judged). While
-	 * another call runs, a difference may be its write and is left to settlement. Entries older than the longest plausible
-	 * call are dropped, so a call blocked after admission (it never settles) cannot hold the check off. A held change the
+	 * another call runs, a difference may be its write and is left to settlement. A call refused after admission leaves at
+	 * its invocation cleanup; entries older than the longest plausible call are dropped as well, for a caller that passes
+	 * no cleanup, so a call that never settles cannot hold the check off. A held change the
 	 * owner's accounting moved past, or one the file moved off between calls, is dropped first (owner priority); a held
 	 * review is retried here at most every {@link HELD_RETRY_SPACING_MS}, never awaited.
 	 */
@@ -358,14 +359,26 @@ export class SoulController {
 	 * owner once per episode: the harness reviews it again when System One answers and writes it itself if the review
 	 * allows it. A review the call's own abort cancelled blocks and holds nothing. An engine that can never run the review
 	 * refuses the write and tells the owner it is a configuration fault. After close no soul.md write is taken.
+	 *
+	 * `registerCleanup` is the invocation's end: it runs when the call is refused (by this gate or a later one), abandoned
+	 * or finalized. A call that never reaches settlement leaves {@link running} there, so it cannot hold changes off as
+	 * its own after it ended.
 	 */
 	async checkWrite(
 		call: AgentToolCall,
 		args: unknown,
 		cwd: string,
 		signal: AbortSignal | undefined,
+		registerCleanup?: (cleanup: () => void) => void,
 	): Promise<BeforeToolCallResult | undefined> {
 		this.admit(call);
+		registerCleanup?.(() => {
+			// A settled call left already; this one never ran, so an allowed write it carried did not land.
+			if (!this.running.delete(call)) return;
+			const gated = this.pending.get(call);
+			this.pending.delete(call);
+			if (gated?.replacesHeld) this.tellReplaced(false);
+		});
 		const toolName = call.name;
 		if (toolName !== "write" && toolName !== "edit") return undefined;
 		if (typeof args !== "object" || args === null) return undefined;
@@ -528,18 +541,21 @@ export class SoulController {
 			this.settlingCalls -= 1;
 		}
 		if (pending?.replacesHeld) {
-			// The notice says what happened to the newer write: told once it is known, which is now.
 			const known = this.watch.known;
-			const landed = succeeded && known !== undefined && sameText(known, pending.reviewedText);
-			this.tell(
-				"write",
-				landed ? "write-replaced" : "write-dropped",
-				landed
-					? "The held soul.md write was dropped: a newer soul.md write was reviewed, allowed and written. Its text is kept in /soul history."
-					: "The held soul.md write was dropped for a newer allowed write that did not complete. Its text is kept in /soul history.",
-			);
+			this.tellReplaced(succeeded && known !== undefined && sameText(known, pending.reviewedText));
 		}
 		return notice;
+	}
+
+	/** The notice for a held write a newer allowed write replaced, told once that write's fate is known. */
+	private tellReplaced(landed: boolean): void {
+		this.tell(
+			"write",
+			landed ? "write-replaced" : "write-dropped",
+			landed
+				? "The held soul.md write was dropped: a newer soul.md write was reviewed, allowed and written. Its text is kept in /soul history."
+				: "The held soul.md write was dropped for a newer allowed write that did not complete. Its text is kept in /soul history.",
+		);
 	}
 
 	private async settleChange(pending: GatedWrite | undefined): Promise<string | undefined> {
