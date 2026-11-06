@@ -422,10 +422,11 @@ export class ActAheadController {
 		const where = shown.startsWith("..") ? patchPath : shown;
 		const command = check.length > 60 ? `${check.slice(0, 59)}…` : check;
 		const sha = base.headSha.slice(0, 10);
+		// A notice keeps its first 240 characters: the basis and the patch path come first, so a long path cuts the tail.
 		const text =
 			basis === "reproduced"
-				? `CI failed on ${sha} (reproduced locally): a fix is ready, ${final.files.length} file(s), and \`${command}\` passes with it. Patch: ${where} (say "apply it" to apply it with git apply).`
-				: `CI failed on ${sha}: a fix diagnosed from the CI log is ready, ${final.files.length} file(s); the failing step is not re-run locally, and \`${command}\` passes with it. Patch: ${where} (say "apply it").`;
+				? `CI failed on ${sha}, reproduced locally: a fix is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`
+				: `CI failed on ${sha}: a fix diagnosed from the CI log (the failing step is not re-run locally) is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`;
 		this.deps.observeNotice("act-ahead", () => ({ scope: base.episode, state: { reason: "ready", text } }));
 		return undefined;
 	}
