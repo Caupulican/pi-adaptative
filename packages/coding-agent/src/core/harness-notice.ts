@@ -372,23 +372,22 @@ export class HarnessNoticeController {
 		if (!transcriptKeepsNotices(manager)) return;
 		this.inFlight.add(notice.deliveryId);
 		void Promise.resolve()
-			.then(async () => {
+			.then<ParentInputReceipt | false>(() => {
 				// A closed runtime or a switched session has no owner left for this episode.
 				if (this.closed || this.deps.getSessionManager() !== manager) return false;
-				await this.deps.deliver({
+				return this.deps.deliver({
 					deliveryId: notice.deliveryId,
 					payloadDigest: notice.payloadDigest,
 					message: notice.message,
 					origin: captureWorkerReceiptOrigin(manager),
 					mode: "next-owner-turn",
 				});
-				return true;
 			})
 			.then(
-				(saved) => {
+				(receipt: ParentInputReceipt | false) => {
 					this.inFlight.delete(notice.deliveryId);
 					this.drop(notice);
-					if (saved) return;
+					if (receipt !== false) return;
 					this.reopen(notice);
 					this.lose(notice);
 				},
