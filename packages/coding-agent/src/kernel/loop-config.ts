@@ -168,6 +168,12 @@ export interface BeforeToolCallContext {
 	 * and idempotent; it never represents an execution outcome.
 	 */
 	registerCleanup?(cleanup: () => void): void;
+	/**
+	 * Run `onStart` synchronously once, when the loop takes ownership of executing this admitted call, right before its
+	 * body starts (never for a call that is refused or dropped before then). A throw stops the body from starting: an
+	 * `AgentToolPolicyDeniedError` becomes the call's policy refusal, before execution.
+	 */
+	registerStart?(onStart: () => void): void;
 	/** Immutable host binding captured before policy admission; absent for context-free tools. */
 	executionContext?: ExecutionContext;
 	/** Live backend filesystem capabilities for an executing backend; not serialized to journal data. */

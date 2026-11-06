@@ -10,6 +10,7 @@ import { CONFIG_DIR_NAME } from "../config.ts";
 import type { ToolCallStartContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import { AgentToolPolicyDeniedError } from "../kernel/types.ts";
 import {
 	appendOutwardDraftReleased,
 	type EdgeCall,
@@ -250,11 +251,14 @@ export class SessionEdgeIntentController {
 	private readonly remoteOwnerCall = new AsyncLocalStorage<EdgeCall>();
 	/**
 	 * Arguments of calls the remote-owner edge admitted on the owner's approval, with the draft each claimed, until the tool
-	 * gate settles the call's admission (`settleApprovedCall`): the operation gate admits them too.
+	 * gate settles the call (`settleApprovedCall`): the operation gate admits them too.
 	 */
 	private readonly approvedCalls = new WeakMap<object, string>();
-	/** The drafts whose approval such a call claimed: a claimed approval admits no other call. */
-	private readonly claimedApprovals = new Set<string>();
+	/**
+	 * The drafts whose approval such a call claimed: a claimed approval admits no other call. `in-use` while the claiming
+	 * call is between admission and its body's start; `unrecorded` when that start could not record the release.
+	 */
+	private readonly claimedApprovals = new Map<string, "in-use" | "unrecorded">();
 	private delegationGateInstance?: DelegationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
 	/** The committed optional-tool judgment in flight (one at a time: the owner-policy queue runs them); its paused entry heads the chain. */
@@ -379,20 +383,32 @@ export class SessionEdgeIntentController {
 			},
 			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
 			runsRemoteOwner: () => this.runsRemoteOwner(),
-			settleApprovedCall: (args: unknown, executed: boolean) => this.settleApprovedCall(args, executed),
+			settleApprovedCall: (args: unknown, started: boolean) => this.settleApprovedCall(args, started),
 		};
 	}
 
 	/**
-	 * Ends the claim a call holds on an owner approval: executed, its draft is released; not run, the approval is free. An
-	 * executed call whose release cannot be written keeps the approval claimed, so it admits no second call.
+	 * Ends the claim a call holds on an owner approval: at the start of its body the draft is released durably; dropped
+	 * unstarted, only the claim is freed. A release that cannot be written keeps the approval claimed (it admits no
+	 * other call in this process) and stops the body from starting.
 	 */
-	private settleApprovedCall(args: unknown, executed: boolean): void {
+	private settleApprovedCall(args: unknown, started: boolean): void {
 		if (typeof args !== "object" || args === null) return;
 		const draftId = this.approvedCalls.get(args);
 		if (draftId === undefined) return;
 		this.approvedCalls.delete(args);
-		if (executed) appendOutwardDraftReleased(this.deps.getSessionManager(), draftId);
+		if (started) {
+			try {
+				appendOutwardDraftReleased(this.deps.getSessionManager(), draftId);
+			} catch (error) {
+				this.claimedApprovals.set(draftId, "unrecorded");
+				throw new AgentToolPolicyDeniedError(
+					`Not run: the use of the owner's approval of this call (draft ${draftId}) could not be recorded (${error instanceof Error ? error.message : String(error)}), so the call did not start.`,
+					undefined,
+					"Report that the approved call did not run; the owner performs it at the terminal.",
+				);
+			}
+		}
 		this.claimedApprovals.delete(draftId);
 	}
 
@@ -590,8 +606,9 @@ export class SessionEdgeIntentController {
 			claimApprovedCall: (draftId, args) => {
 				if (typeof args !== "object" || args === null) return "untracked";
 				if (this.approvedCalls.has(args)) return "claimed";
-				if (this.claimedApprovals.has(draftId)) return "in-use";
-				this.claimedApprovals.add(draftId);
+				const held = this.claimedApprovals.get(draftId);
+				if (held) return held;
+				this.claimedApprovals.set(draftId, "in-use");
 				this.approvedCalls.set(args, draftId);
 				return "claimed";
 			},

@@ -1647,6 +1647,8 @@ type PreparedToolCall = {
 	attachStartReservation(reservation: ToolCallStartReservation, callId: string): void;
 	/** Refund unstarted admission and release the binding through one idempotent owner. */
 	release(): void;
+	/** Runs the hooks `beforeToolCall` registered for the body's start (`registerStart`), once; a throw stops the start. */
+	start(): void;
 	kind: "prepared";
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
@@ -2143,6 +2145,7 @@ async function prepareToolCall(
 	let recoveryReservation: ToolFailureRecoveryReservation | undefined;
 	let startReservation: { lease: ToolCallStartReservation; callId: string } | undefined;
 	const preparationCleanups = new Set<() => void>();
+	const startHooks: (() => void)[] = [];
 	let released = false;
 	const release = () => {
 		if (released) return;
@@ -2238,6 +2241,9 @@ async function prepareToolCall(
 						if (released) cleanup();
 						else preparationCleanups.add(cleanup);
 					},
+					registerStart(onStart) {
+						startHooks.push(onStart);
+					},
 					requestId,
 					assistantMessage,
 					toolCall,
@@ -2274,6 +2280,9 @@ async function prepareToolCall(
 				startReservation = { lease: reservation, callId };
 			},
 			release,
+			start() {
+				for (const onStart of startHooks.splice(0)) onStart();
+			},
 			toolCall,
 			tool,
 			args: validatedArgs,
@@ -2639,6 +2648,8 @@ async function executePreparedToolCall(
 	let executed: ExecutedToolCallOutcome;
 	let rejectedBeforeExecution = false;
 	try {
+		// The body starts now: past this point the call is never dropped unstarted.
+		prepared.start();
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,

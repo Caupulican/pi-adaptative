@@ -106,11 +106,12 @@ export interface SessionEdgeDeps {
 	/**
 	 * Claims the owner's approval of draft `draftId` for the call with these arguments (the same arguments object), which
 	 * the remote-owner edge admits on it: a claimed approval admits no other call, the operation gate admits this call
-	 * instead of holding it again, and `released` is written only once the call executed (the tool gate settles the
+	 * instead of holding it again, and `released` is written when the call's body starts (the tool gate settles the
 	 * claim). `claimed` when this call now holds it (or these arguments already hold a claim); `in-use` when another call
-	 * holds it; `untracked` when the arguments are not an object, so nothing is admitted and the call is held.
+	 * holds it and has not started yet; `unrecorded` when another call's start could not record the release;
+	 * `untracked` when the arguments are not an object, so nothing is admitted and the call is held.
 	 */
-	claimApprovedCall?(draftId: string, args: unknown): "claimed" | "in-use" | "untracked";
+	claimApprovedCall?(draftId: string, args: unknown): "claimed" | "in-use" | "unrecorded" | "untracked";
 	/**
 	 * Whether executing the call reaches the edge again with no call (a dangerous automation's toolkit authorizer), which
 	 * would hold it once more after an approval: on a remote-owner run its draft is then left to the terminal.
@@ -709,16 +710,18 @@ function remoteOwnerTypedOnly(deps: SessionEdgeDeps, toolName: string, why: stri
  * complete call equals an active approval's `callDigest`, the approval's delivery opened and decided the run in
  * progress, and the draft has not expired. The approval is claimed for this call (`claimApprovedCall`) in the same
  * synchronous step as the branch read, so a parallel call with the same arguments finds it claimed (`in-use`) and a
- * repeat after the call ran finds it released; `released` itself is written once the call executed, and a refusal by a
- * later gate or a call the loop never starts frees the approval again. Arguments that cannot be tracked (not an object)
- * admit nothing: the call is held.
+ * repeat after the call started finds it released; `released` itself is written when the call's body starts, and a
+ * refusal by a later gate or a call the loop never starts frees the approval again. Arguments that cannot be tracked
+ * (not an object), and a call whose execution would be held again (`holdsAgainAtExecution`, read now: the automation
+ * may have changed since the hold), admit nothing: the call is held.
  */
 function consumeOwnerApproval(
-	deps: Pick<SessionEdgeDeps, "getBranch" | "getLiveRun" | "claimApprovedCall">,
+	deps: Pick<SessionEdgeDeps, "getBranch" | "getLiveRun" | "claimApprovedCall" | "holdsAgainAtExecution">,
 	origin: TurnOriginRecord,
 	call: EdgeCall,
-): "admitted" | "in-use" | undefined {
+): "admitted" | "in-use" | "unrecorded" | undefined {
 	if (typeof call.args !== "object" || call.args === null || !deps.claimApprovedCall) return undefined;
+	if (deps.holdsAgainAtExecution?.(call) === true) return undefined;
 	const digest = ownerCallDigest(call.toolName, call.args);
 	const liveRun = deps.getLiveRun?.();
 	const approved = outwardDraftStates(deps.getBranch(), false, liveRun ? { liveRun } : {}).filter(
@@ -728,24 +731,35 @@ function consumeOwnerApproval(
 			approval?.callDigest === digest &&
 			approval.by.ref === origin.ref,
 	);
-	let inUse = false;
+	let held: "in-use" | "unrecorded" | undefined;
 	for (const { record } of approved) {
 		const claim = deps.claimApprovedCall(record.id, call.args);
 		if (claim === "claimed") return "admitted";
-		inUse ||= claim === "in-use";
+		if (claim === "unrecorded" || (claim === "in-use" && held === undefined)) held = claim;
 	}
-	return inUse ? "in-use" : undefined;
+	return held;
 }
 
 /** The refusal of a call whose matching approval an identical call admitted earlier still holds. */
-function approvalInUse(deps: SessionEdgeDeps, toolName: string): ThirdPartyRefusal {
-	deps.noteToolRefusal?.({ tool: toolName, code: "remote-owner-approval-in-use", owner: REMOTE_OWNER_GATE });
-	return {
-		reason:
-			"Not run: an identical call admitted earlier holds the owner's approval of this call, and its outcome is not known yet; one approval admits one call.",
-		correction:
-			"Wait for that call's result. If it ran, the approval is spent; if it did not run, the approval admits this call when it is issued again.",
-	};
+function approvalInUse(deps: SessionEdgeDeps, toolName: string, held: "in-use" | "unrecorded"): ThirdPartyRefusal {
+	deps.noteToolRefusal?.({
+		tool: toolName,
+		code: "remote-owner-approval-in-use",
+		owner: REMOTE_OWNER_GATE,
+		...(held === "unrecorded" ? { detail: "release not recorded" } : {}),
+	});
+	return held === "unrecorded"
+		? {
+				reason:
+					"Not run: an identical call earlier on the owner's approval of this call did not start because the use of the approval could not be recorded; the approval stays held in this session.",
+				correction: "Report that the approved call did not run; the owner performs it at the terminal.",
+			}
+		: {
+				reason:
+					"Not run: an identical call admitted earlier holds the owner's approval of this call and has not started yet; one approval admits one call.",
+				correction:
+					"Wait for that call's result. If it started, the approval is spent; if it never started, the approval admits this call when it is issued again.",
+			};
 }
 
 /**
@@ -760,11 +774,9 @@ function holdForOwner(
 	call: EdgeCall | undefined,
 ): ThirdPartyRefusal {
 	const ownerSender = deps.ownerChannelSender?.(origin);
-	// A toolkit script, or a call whose execution reaches the edge again with no call, would be held a second time after
-	// an approval: only the terminal releases it.
-	const terminalOnly =
-		operations.some((operation) => operation.class === "toolkit.script") ||
-		(call !== undefined && deps.holdsAgainAtExecution?.(call) === true);
+	// A call whose execution reaches the edge again with no call would be held a second time after an approval: only the
+	// terminal releases it. (That call-less hold itself has no call digest, so it is terminal-only already.)
+	const terminalOnly = call !== undefined && deps.holdsAgainAtExecution?.(call) === true;
 	const prepared = deps.prepareOutward?.({
 		toolName,
 		operations,
@@ -875,7 +887,7 @@ async function enforceRemoteOwnerEdge(
 	const call: EdgeCall = { toolName, args };
 	const approval = consumeOwnerApproval(deps, origin, call);
 	if (approval === "admitted") return undefined;
-	if (approval === "in-use") return { block: true, ...approvalInUse(deps, toolName) };
+	if (approval) return { block: true, ...approvalInUse(deps, toolName, approval) };
 	return { block: true, ...holdForOwner(deps, origin, toolName, ungranted, call) };
 }
 
@@ -923,7 +935,7 @@ export async function enforceSessionEdgeOperation(
 		if (isEdgeOperationGranted(operation, remoteOwnerEdgeGrants(deps))) return { authorized: true };
 		const approval = call ? consumeOwnerApproval(deps, remote, call) : undefined;
 		if (approval === "admitted") return { authorized: true };
-		if (approval === "in-use") return { authorized: false, ...approvalInUse(deps, call?.toolName ?? toolName) };
+		if (approval) return { authorized: false, ...approvalInUse(deps, call?.toolName ?? toolName, approval) };
 		return { authorized: false, ...holdForOwner(deps, remote, call?.toolName ?? toolName, [operation], call) };
 	}
 	if (deps.getMode?.() === "yolo") return { authorized: true };

@@ -126,12 +126,13 @@ export interface ToolGateControllerDeps {
 	 */
 	runsRemoteOwner?(): boolean;
 	/**
-	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate: `executed` when the
-	 * call ran (its draft is released), false when a later gate refused it, a check threw or the loop dropped the admitted
-	 * call before it started (the approval stays for a call that runs). A call that claimed none, or one already settled,
-	 * is a no-op. Without a preparation cleanup hook the call is settled as executed at admission.
+	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate: `started` when the call's
+	 * body starts (its draft is released durably; a release that cannot be written throws an `AgentToolPolicyDeniedError`
+	 * and the body does not start), false when a later gate refused it, a check threw or the loop dropped the admitted call
+	 * before its body started (only the claim is freed: the approval stays for a call that runs). A call that claimed none,
+	 * or one already settled, is a no-op. Without the loop's start and cleanup hooks the call is settled at admission.
 	 */
-	settleApprovedCall?(args: unknown, executed: boolean): void;
+	settleApprovedCall?(args: unknown, started: boolean): void;
 	/**
 	 * The delegation gate: the root orchestrates, so a call that is task work is refused with the way to delegate it
 	 * (see system-one/delegation-gate.ts). It steers, it does not authorize, so YOLO does not skip it.
@@ -324,7 +325,7 @@ export class ToolGateController {
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
-		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage, registerCleanup },
+		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage, registerCleanup, registerStart },
 		signal,
 	) => {
 		signal?.throwIfAborted();
@@ -554,10 +555,13 @@ export class ToolGateController {
 			return yolo ? undefined : extensionResult;
 		} finally {
 			try {
-				// An admitted call keeps the owner approval it claimed until it executed (`afterToolCall` releases the
-				// draft) or the loop drops it unstarted (its preparation cleanup frees the approval).
-				if (admitted && registerCleanup) registerCleanup(() => this.deps.settleApprovedCall?.(args, false));
-				else this.deps.settleApprovedCall?.(args, admitted);
+				// An admitted call keeps the owner approval it claimed until its body starts (the draft is released then, and
+				// a release that cannot be written stops the start) or the loop drops it unstarted (its preparation cleanup
+				// frees the approval and writes nothing).
+				if (admitted && registerStart && registerCleanup) {
+					registerStart(() => this.deps.settleApprovedCall?.(args, true));
+					registerCleanup(() => this.deps.settleApprovedCall?.(args, false));
+				} else this.deps.settleApprovedCall?.(args, admitted);
 			} finally {
 				if (observation && !observationHandedOff) {
 					for (const token of observation.tokens) {
@@ -736,13 +740,8 @@ export class ToolGateController {
 		} finally {
 			// Result hooks can fail before complete(). A terminal call must retain no pending
 			// observation; a projection failure is not evidence that the tool itself failed.
-			try {
-				if (invocation) selection?.discard(invocation.id);
-				await this.finishObservation(invocation?.repositoryObservation, finishSucceeded);
-			} finally {
-				// The call executed (a call refused before execution has no after-hook): the approval it claimed is spent.
-				this.deps.settleApprovedCall?.(args, true);
-			}
+			if (invocation) selection?.discard(invocation.id);
+			await this.finishObservation(invocation?.repositoryObservation, finishSucceeded);
 		}
 	};
 }
