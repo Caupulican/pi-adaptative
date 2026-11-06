@@ -10,6 +10,7 @@
  * the owner releases with the `channel_reply` tool.
  */
 
+import { createCustomMessage } from "../../kernel/messages.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SendUserMessageOptions } from "../extensions/types.ts";
@@ -661,6 +662,14 @@ export class SessionChannels {
 		let usd = 0;
 		for (let i = index + 1; i < branch.length; i++) {
 			const entry = branch[i];
+			if (entry?.type === "custom_message") {
+				// A host event someone else wrote steers the run as decisively as a user message does.
+				const origin = turnOriginOf(
+					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				);
+				if (origin && isDecisiveOrigin(origin)) return { kind: "unanswered", reason: "mixed" };
+				continue;
+			}
 			if (entry?.type !== "message") continue;
 			const message = entry.message;
 			if (message.role === "user") {
