@@ -3,7 +3,11 @@ import { runJourney4AwayChannelsPhase, runJourney4ChannelsPhase } from "./journe
 import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
-import { runJourney4TelegramOwnerPhase, runJourney4TelegramPhase } from "./journey-4-telegram.ts";
+import {
+	runJourney4TelegramDaemonPhase,
+	runJourney4TelegramOwnerPhase,
+	runJourney4TelegramPhase,
+} from "./journey-4-telegram.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
  * active world's virtual fs through the library's own `fs` option, so no lock directory reaches disk.
@@ -30,6 +34,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4ChannelsPhase(world);
 			await runJourney4TelegramPhase(world);
 			await runJourney4TelegramOwnerPhase(world);
+			await runJourney4TelegramDaemonPhase(world);
 			await runJourney4AwayChannelsPhase(world);
 			await runJourney4SlackPhase(world);
 			await runJourney4GmailPhase(world);

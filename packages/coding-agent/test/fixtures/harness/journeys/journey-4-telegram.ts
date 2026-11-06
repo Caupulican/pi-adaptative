@@ -3,10 +3,15 @@ import { expect } from "vitest";
 import { configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { outwardDraftStates } from "../../../../src/core/agent-session-edge.ts";
+import { createBuiltInChannelProvider } from "../../../../src/core/channels/built-in-providers.ts";
 import { digest } from "../../../../src/core/channels/channel-journal.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
-import { type Barrier, calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
+import {
+	readSessionLeaseHolders,
+	SessionHostedError,
+} from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
+import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
@@ -879,6 +884,263 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			"the owner leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-owner.closed");
+	} finally {
+		world.fetchResponder = undefined;
+	}
+}
+
+interface DaemonLegJournal {
+	readonly holder?: { readonly sessionId: string; readonly away?: true };
+	readonly seen: readonly { readonly d: string }[];
+	readonly batches: readonly { readonly state: string }[];
+	readonly drafts: readonly { readonly address: string; readonly state: string }[];
+	readonly ownerSession?: { readonly sessionId: string; readonly file: string };
+}
+
+/**
+ * The phone with every terminal closed, the primary use. The owner's global `channels.telegram` policy names
+ * `awayCwd` and `ownerSenders`, so a session start brings the daemon up and, once that session closes, the daemon
+ * serves Telegram with the shipped transport (the process entry's channel factory) and hosts the owner's phone session:
+ * a persisted session named `Phone: telegram`, held as `channel-host` and recorded in the journal once its file exists.
+ * The owner's private message runs there as the owner's (under the owner header, unfenced, the owner's memory read) and
+ * its answer goes back to the chat by itself; an allowlisted friend's message still runs in the read-only child session,
+ * fenced, and its answer waits as a draft, and none of the friend's words reach the phone session's file. A terminal
+ * open of that file is refused with the daemon's pid and `/bot daemon stop`, writing nothing to it; once the daemon
+ * stops, the same open succeeds.
+ */
+export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-telegram-daemon`;
+	const channelsDir = join(agentDir, "channels");
+	const tokenPath = join(channelsDir, "telegram.token");
+	const journalPath = join(channelsDir, "telegram.json");
+	const policy = {
+		mode: "explicit" as const,
+		allowedSenders: [FRIEND_ID],
+		ownerSenders: [OWNER_ID],
+		awayCwd: HARNESS_PROJECT_CWD,
+	};
+	const ownerBaseline = {
+		autoLearn: { enabled: false },
+		proactivity: { enabled: false },
+		orchestrator: { delegationGate: false },
+	};
+	// The daemon and the sessions it opens read only the owner's global settings file: it carries the world's baseline
+	// (legacy memory, the user service off), the channel legs' (learning, proactivity and the delegation gate off), System
+	// One off (the world's credential store holds its key) and the channel policy. The terminal sessions read the same
+	// values from their own store.
+	world.io.seed(
+		configFile(agentDir, "settings.json"),
+		JSON.stringify({
+			defaultProvider: HARNESS_PROVIDER,
+			defaultModel: "root",
+			memorySystem: "okf",
+			systemOne: { enabled: false },
+			routines: { away: { autostart: "off" } },
+			...ownerBaseline,
+			channels: { telegram: policy },
+		}),
+	);
+	const settings = {
+		...ownerBaseline,
+		routines: { away: { autostart: "off" as const } },
+		channels: { telegram: policy },
+	};
+	world.io.mkdirSync(channelsDir, { recursive: true });
+	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	world.io.seed(configFile(agentDir, "MEMORY.md"), `${OWNER_MEMORY}\n`);
+	const journal = (): DaemonLegJournal =>
+		world.io.existsSync(journalPath)
+			? (JSON.parse(String(world.io.readFileSync(journalPath))) as DaemonLegJournal)
+			: { seen: [], batches: [], drafts: [] };
+	const journalHolds = (holds: (state: DaemonLegJournal) => boolean) =>
+		world.io.waitForMutation(() => holds(journal()));
+	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
+	world.fetchResponder = (input, init) => api.respond(input, init);
+	const warningsBefore = world.warnings.length;
+	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
+	const fence = 'source=\\"channel:telegram\\"';
+	try {
+		// A session start launches the daemon; while it is open, that session serves the channel itself.
+		const launched = world.processes.runNextBotDaemon({ channelProviders: createBuiltInChannelProvider });
+		const firstPoll = api.nextPoll(undefined);
+		const opener = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
+			systemOneEnabled: false,
+			settings,
+		});
+		const daemon = await withDeadline(trace, "a session start launches the daemon for the phone", launched);
+		await withDeadline(trace, "the channel's first poll", firstPoll);
+		expect(await world.disposeSessionInBody(opener.session), "the opening session closes").toBeUndefined();
+		// Every terminal is closed: the daemon's host takes the channel.
+		await withDeadline(
+			trace,
+			"the daemon serves Telegram",
+			journalHolds((state) => state.holder?.away === true),
+		);
+		trace.mark("root", "telegram-daemon.served");
+
+		// The owner's question runs in the phone session as the owner's; the friend's in the read-only child session.
+		const question = "what do my notes say about the release list";
+		const ownerAnswer = "Your notes say the release list lives in the team wiki.";
+		const friendWords = "which wiki page lists the release steps";
+		const friendAnswer = "The owner will answer that.";
+		const awayTools = ["read", "grep", "find", "ls"];
+		const ownerAnswered = createBarrier();
+		world.provider.enqueue(
+			"root",
+			{
+				...calls("tg-daemon-owner-memory-call", [
+					{ id: "tg-daemon-owner-memory", name: "memory", arguments: { action: "list", target: "user" } },
+				]),
+				check: (request) => {
+					const words = deliveryWith(request, question);
+					expect(words, "the owner's words arrive under the owner header").toContain(ownerHeader);
+					expect(words, "the owner's words are not fenced as a third party's").not.toContain(fence);
+					expectOwnerMemory(request, true);
+				},
+			},
+			{
+				name: "tg-daemon-owner-memory-answer",
+				check: (request) => {
+					const memory = icmLatestResult(request, "memory");
+					expect(memory.isError, memory.text).toBe(false);
+					expect(memory.text, "the phone session reads the owner's records").not.toContain("Refused");
+					ownerAnswered.release();
+				},
+				reply: { content: [{ type: "text", text: ownerAnswer }] },
+			},
+		);
+		const friendAnswered = createBarrier();
+		world.provider.enqueue("root", {
+			name: "tg-daemon-friend-answer",
+			check: (request) => {
+				const words = deliveryWith(request, friendWords);
+				expect(words.split(fence).length - 1, "the friend's words arrive fenced").toBe(1);
+				expect(words, "the frame says who wrote them").toContain("not by the owner");
+				expect(request.context.systemPrompt ?? "", "the friend's run has no owner memory").not.toContain(
+					OWNER_MEMORY,
+				);
+				const tools = (request.context.tools ?? []).map((tool) => tool.name);
+				expect(tools, "the child session reads").toContain("read");
+				expect(
+					tools.filter((name) => !awayTools.includes(name)),
+					"the friend's run has only read-only tools",
+				).toEqual([]);
+				friendAnswered.release();
+			},
+			reply: { content: [{ type: "text", text: friendAnswer }] },
+		});
+		api.deliver(ownerLegUpdate(1, OWNER_ID, question), ownerLegUpdate(2, FRIEND_ID, friendWords));
+		await withDeadline(trace, "the poll acknowledging both updates", api.nextPoll(3));
+		await withDeadline(trace, "the owner's turn in the phone session", ownerAnswered.promise);
+		await withDeadline(trace, "the owner's answer reaches the chat", api.untilSent(1));
+		await withDeadline(trace, "the friend's turn in the child session", friendAnswered.promise);
+		await withDeadline(
+			trace,
+			"both batches are settled",
+			journalHolds((state) => state.batches.length === 2 && state.batches.every((b) => b.state !== "accepted")),
+		);
+		expect(
+			journal().batches.map((batch) => batch.state),
+			"the owner's batch is answered, the friend's drafted",
+		).toEqual(["replied", "drafted"]);
+		expect(
+			api.sent.map((message) => message.body),
+			"the owner's answer is sent by itself and the friend's is not",
+		).toEqual([{ chat_id: String(OWNER_ID), text: ownerAnswer }]);
+		expect(
+			journal().drafts.map((draft) => [draft.address, draft.state]),
+			"the friend's answer waits as a draft",
+		).toEqual([[String(FRIEND_ID), "pending"]]);
+		trace.mark("root", "telegram-daemon.answered");
+
+		// The phone session is a persisted session the daemon holds as `channel-host`, recorded in the journal.
+		await withDeadline(
+			trace,
+			"the phone session is recorded",
+			journalHolds((state) => state.ownerSession !== undefined),
+		);
+		const phone = journal().ownerSession;
+		const file = phone?.file ?? "";
+		const sessionId = phone?.sessionId ?? "";
+		expect(world.io.existsSync(file), "the phone session's file exists").toBe(true);
+		const phoneText = String(world.io.readFileSync(file));
+		const entries = phoneText
+			.split("\n")
+			.filter((line) => line.trim() !== "")
+			.map((line) => JSON.parse(line) as { readonly type: string; readonly id?: string; readonly name?: string });
+		expect(entries[0]?.id, "the journal records the file's own session").toBe(sessionId);
+		expect(
+			entries.filter((entry) => entry.type === "session_info").at(-1)?.name,
+			"the phone session is named for its channel",
+		).toBe("Phone: telegram");
+		expect(phoneText, "the owner's words are in the phone session").toContain(question);
+		expect(phoneText, "a third party's words never reach it").not.toContain(friendWords);
+		const holders = readSessionLeaseHolders(agentDir, sessionId).filter((holder) => holder.standing !== "dead");
+		expect(
+			holders.map((holder) => holder.role),
+			"the daemon's channel host is the phone session's only holder",
+		).toEqual(["channel-host"]);
+		expect(journal().holder?.away, "the daemon's host still serves the channel").toBe(true);
+
+		// A terminal opening the phone session is refused with the daemon's pid and the way to stop it, and writes nothing.
+		const refused = await world
+			.createRootSession("root", {
+				agentDir,
+				sessionManager: world.openSessionManager(file, agentDir),
+				systemOneEnabled: false,
+				settings,
+			})
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		expect(refused, "the open is refused as the hosted phone session").toBeInstanceOf(SessionHostedError);
+		expect((refused as Error).message).toBe(
+			`This is the phone session; the background daemon (pid ${holders[0]?.owner.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
+		);
+		expect(String(world.io.readFileSync(file)), "the refused open writes nothing to the phone session").toBe(
+			phoneText,
+		);
+		expect(
+			readSessionLeaseHolders(agentDir, sessionId).map((holder) => holder.role),
+			"the refused open holds nothing",
+		).toEqual(["channel-host"]);
+		trace.mark("root", "telegram-daemon.refused");
+
+		// Stopping the daemon gives the channel and the phone session up; the terminal then opens the phone session.
+		expect(await withDeadline(trace, "the daemon stops", daemon.stop()), "the daemon exits cleanly").toBe(0);
+		expect(journal().holder, "a stopped daemon serves nothing").toBeUndefined();
+		expect(readSessionLeaseHolders(agentDir, sessionId), "the phone session's hold is released").toEqual([]);
+		expect(api.openPolls, "the daemon's held poll is aborted").toBe(0);
+		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
+		// This terminal serves no channel, so the open is its only effect.
+		const opened = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.openSessionManager(file, agentDir),
+			systemOneEnabled: false,
+			settings: ownerBaseline,
+		});
+		expect(opened.sessionManager.getSessionId(), "the terminal opens the phone session itself").toBe(sessionId);
+		expect(opened.sessionManager.getSessionName()).toBe("Phone: telegram");
+		expect(await world.disposeSessionInBody(opened.session), "the reopened phone session closes").toBeUndefined();
+
+		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
+		// The Telegram legs before this one keep their own token files in their own agent directories.
+		const tokenFiles = new Set([
+			tokenPath,
+			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
+			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
+		]);
+		for (const [path, text] of world.io.fileEntries())
+			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expect(
+			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
+			"the daemon leg ran without a Telegram warning",
+		).toEqual([]);
+		trace.mark("root", "telegram-daemon.closed");
 	} finally {
 		world.fetchResponder = undefined;
 	}
