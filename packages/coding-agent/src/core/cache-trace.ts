@@ -202,12 +202,6 @@ export class PromptPrefixMonitor {
 	/** Per conversation, the system prompt each lineage last sent: each variant of a session's prompt is its own prefix. */
 	private readonly lineageSystems = new Map<string, Map<string, LineageSystem>>();
 	private readonly reports = new Map<string, number>();
-	private readonly viewRewrites = new Map<string, ContinuousChatCacheRewrite>();
-
-	/** Latest bounded, sanctioned ICM rewrite; ordinary append and node-publication changes do not replace it. */
-	lastChatRewrite(sessionId: string | undefined): ContinuousChatCacheRewrite | undefined {
-		return this.viewRewrites.get(sessionId ?? "");
-	}
 
 	/**
 	 * Fingerprint a request, optionally trace it, and describe how it broke its conversation's previous request's
@@ -228,7 +222,6 @@ export class PromptPrefixMonitor {
 			previous?.viewCache && current.viewCache && previous.model === current.model
 				? compareContinuousChatCache(previous.viewCache, current.viewCache)
 				: undefined;
-		if (viewChange?.rewrite) this.viewRewrites.set(key, viewChange.rewrite);
 		this.writeTrace(sessionId, conversationId, current, viewChange?.rewrite);
 		this.previous.delete(key);
 		this.previous.set(key, current);
@@ -237,7 +230,6 @@ export class PromptPrefixMonitor {
 			if (oldest === undefined) break;
 			this.previous.delete(oldest);
 			this.reports.delete(oldest);
-			this.viewRewrites.delete(oldest);
 			this.lineageSystems.delete(oldest);
 		}
 		if (previous === undefined) return undefined;
