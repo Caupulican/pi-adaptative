@@ -29,7 +29,9 @@ const VIEWER = "harness-owner";
 const PUSH = "git push origin main";
 const RELEASE =
 	"It runs only when the owner asks for it in their own turn, or after they type /edge allow git.publish or list the classes in edge.thirdPartyAllow.";
-const WORKER_SUMMARY = "Reviewers asked for git push origin main; it was not run here and waits for the owner.";
+// Scripted answers and report summaries carry no claim vocabulary (`mayContainDeliveryClaims`), so no turn end asks
+// claim questions whichever System One mode the session has.
+const WORKER_SUMMARY = "Reviewers asked to send main to the remote; that was not done here and waits for the owner.";
 
 /** Every text line a request carries, the trailing failure ledger included. */
 function requestLines(request: ScriptedRequest): string[] {
@@ -348,7 +350,7 @@ export async function runJourney1GithubRoutinesPhase(
 					);
 					parentPrepared.release();
 				},
-				reply: { content: [{ type: "text", text: "The push the reviewers asked for is held for the owner." }] },
+				reply: { content: [{ type: "text", text: "What the reviewers asked for is held for the owner." }] },
 			},
 		);
 		const settled = new Promise<void>((resolve) => {
@@ -488,7 +490,7 @@ export async function runJourney1GithubRoutinesPhase(
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "bash");
 					expect(result?.isError, result?.text).toBe(false);
 				},
-				reply: { content: [{ type: "text", text: "Pushed." }] },
+				reply: { content: [{ type: "text", text: "Main is on the remote now." }] },
 			},
 		);
 		prompt = owner.session.prompt("Push main.");
