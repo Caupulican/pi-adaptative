@@ -33,6 +33,7 @@ import type { SessionManager } from "../../../../src/kernel/session/session-mana
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1CiCommandPhase } from "./journey-1-ci-command.ts";
+import { runJourney1GithubRoutinesPhase } from "./journey-1-github-routines.ts";
 import { runJourney1HostEventWorkersPhase } from "./journey-1-host-event-workers.ts";
 import {
 	icmContinuousSettings,
@@ -817,6 +818,8 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		expect(jobDetailReads, "only the red display record reads job details, once; event collection never does").toBe(
 			1,
 		);
+		// GitHub routines run in their own session and source, after every count above is settled.
+		await runJourney1GithubRoutinesPhase(world, { paths, repository });
 	} finally {
 		expectedSeal?.release.release();
 		abort.abort();
