@@ -88,8 +88,7 @@ export interface SessionChannelsDeps {
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
-	/** Whether the owner is told of the observed state (false until the session can keep a notice). */
-	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 	warn(message: string): void;
 	isDisposed(): boolean;
 	isChildSession(): boolean;
@@ -103,11 +102,6 @@ interface ChannelRuntime {
 	holding: boolean;
 	/** A batch handed to `sendUserMessage` whose acceptance is not known yet. */
 	offering: boolean;
-	/**
-	 * The owner is told of the current state, or it needs no notice. False while the session cannot keep one yet (a
-	 * provider registered before the first persisted entry): every work pass observes it again.
-	 */
-	told: boolean;
 }
 
 function messageText(message: AgentMessage): string | undefined {
@@ -163,7 +157,7 @@ export class SessionChannels {
 	private runtime(name: string): ChannelRuntime {
 		let runtime = this.runtimes.get(name);
 		if (!runtime) {
-			runtime = { state: "stopped", holding: false, offering: false, told: true };
+			runtime = { state: "stopped", holding: false, offering: false };
 			this.runtimes.set(name, runtime);
 		}
 		return runtime;
@@ -231,13 +225,8 @@ export class SessionChannels {
 		const runtime = this.runtime(name);
 		runtime.state = state;
 		runtime.detail = detail;
-		this.tellState(name, runtime);
-	}
-
-	private tellState(name: string, runtime: ChannelRuntime): void {
-		const notice = this.stateNotice(name, runtime.state, runtime.detail);
-		const told = this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
-		runtime.told = notice === undefined || told;
+		const notice = this.stateNotice(name, state, detail);
+		this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
 	}
 
 	private stateNotice(name: string, state: ChannelRuntimeState, detail: string | undefined) {
@@ -416,7 +405,6 @@ export class SessionChannels {
 		this.rerun = false;
 		try {
 			for (const [name, runtime] of this.runtimes) {
-				if (!runtime.told) this.tellState(name, runtime);
 				if (!runtime.holding) continue;
 				const policy = this.policy(name);
 				if (!policy) continue;

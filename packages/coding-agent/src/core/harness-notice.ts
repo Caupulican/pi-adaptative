@@ -3,11 +3,16 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
+import { reportSessionObserverFailures } from "./session-observer-failures.ts";
 
 export const HARNESS_NOTICE_CUSTOM_TYPE = "harness-notice";
 
 /** Episodes of one state a session can be told about; past it the state is still visible in its status command. */
 const MAX_NOTICE_GENERATIONS = 32;
+/** Observed notices one runtime keeps until they are saved; each holds one bounded line. */
+const MAX_PENDING_NOTICES = 32;
+/** Failed saves of one notice before it is dropped; the capability's next signal of the state starts a new one. */
+const MAX_NOTICE_SAVE_ATTEMPTS = 3;
 
 /**
  * The automatic capabilities whose owner-actionable inactive states the harness reports by itself. A kind is part of
@@ -55,10 +60,22 @@ export interface HarnessNoticeDeps {
 interface KindState {
 	/** The state this runtime last observed for the kind, or `clear`; absent until the first observation. */
 	observed?: string;
-	/** The reason whose notice is saved, in flight or already carried for the current episode. */
+	/** The reason whose notice is saved, waiting, in flight or already carried for the current episode. */
 	covered?: string;
-	/** The current episode's own notice is not saved (no durable channel yet, or its save failed); retried as a recurrence. */
+	/** The current episode's own notice was not kept (no transcript, or its saves failed); retried as a recurrence. */
 	unsaved?: boolean;
+}
+
+/** One observed episode's notice, frozen at its first observation and kept in memory until it is saved. */
+interface PendingNotice {
+	readonly sessionId: string;
+	readonly kind: HarnessNoticeKind;
+	readonly key: string;
+	readonly reason: string;
+	readonly deliveryId: string;
+	readonly payloadDigest: string;
+	readonly message: ParentInputDelivery["message"];
+	failures: number;
 }
 
 /** The id of one episode's notice: replaying a detection, in this process or after restart, finds the saved input. */
@@ -78,25 +95,38 @@ export function harnessNoticeDeliveryId(
  * never wakes a turn and never calls a model. Each (session, kind, reason) episode has one durable notice: a second
  * detection or a replay finds the saved input and adds nothing. A new notice for the same reason needs this runtime to
  * have observed the state end (clear or another reason) and return, and the previous notice to have reached the owner.
+ * An observed notice is kept in memory until it is saved: a later clear does not drop it, and a session whose first
+ * entry is not saved yet saves it with that entry. It is lost when this runtime ends or changes session before that
+ * entry, when a newer reason of the same state supersedes it, and, with a warning, when it is the oldest one not being
+ * saved past 32 waiting notices or its third save fails.
  */
 export class HarnessNoticeController {
 	private readonly deps: HarnessNoticeDeps;
 	/** State per kind, or per kind and scope. */
 	private readonly kinds = new Map<string, KindState>();
+	/** Unsaved notices per kind, or per kind and scope, oldest first. */
+	private readonly pending = new Map<string, PendingNotice>();
 	private readonly inFlight = new Set<string>();
+	private readonly offObserverFailures: () => void;
+	private offPersisted: (() => void) | undefined;
+	private retryScheduled = false;
 	private sessionId: string | undefined;
 	private closed = false;
 
 	constructor(deps: HarnessNoticeDeps) {
 		this.deps = deps;
+		this.offObserverFailures = reportSessionObserverFailures(deps.getSessionManager(), (message) =>
+			deps.warn(message),
+		);
 	}
 
 	/**
 	 * Called only from a capability's existing detection points with a reader of its current state (undefined: nothing
 	 * the owner is told about). Delivery is deferred past the caller's stack, and a state or notice that cannot be read
 	 * or saved is reported, never thrown into the capability that observed it. Returns whether the owner is told of the
-	 * observed state: its notice is being saved, or one already saved tells it. False where no notice can be kept (a child
-	 * session, a session that is not persisted, a closed runtime), and for a clear.
+	 * observed state: its notice is being saved or waits for the session's next saved entry, or one already saved tells
+	 * it. False where no notice can be kept (a child session, a session that is not persisted, a closed runtime), and
+	 * for a clear.
 	 */
 	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean {
 		if (this.closed || this.deps.isChildSession()) return false;
@@ -111,6 +141,10 @@ export class HarnessNoticeController {
 
 	close(): void {
 		this.closed = true;
+		this.offObserverFailures();
+		this.offPersisted?.();
+		this.offPersisted = undefined;
+		this.pending.clear();
 	}
 
 	private record(kind: HarnessNoticeKind, observed: HarnessNoticeObservation): boolean {
@@ -119,6 +153,7 @@ export class HarnessNoticeController {
 		if (sessionId !== this.sessionId) {
 			this.sessionId = sessionId;
 			this.kinds.clear();
+			for (const notice of [...this.pending.values()]) this.drop(notice);
 		}
 		const scope = typeof observed === "object" && "scope" in observed ? observed.scope : undefined;
 		const observation = typeof observed === "object" && "scope" in observed ? observed.state : observed;
@@ -130,6 +165,7 @@ export class HarnessNoticeController {
 		}
 		const firstObservation = state.observed === undefined;
 		if (observation === "clear") {
+			// The episode ended, but a notice observed in it and not yet saved still tells the owner it happened.
 			state.observed = "clear";
 			state.covered = undefined;
 			state.unsaved = false;
@@ -139,6 +175,9 @@ export class HarnessNoticeController {
 		const recurred = state.unsaved === true || (!firstObservation && state.observed !== reason);
 		state.observed = reason;
 		state.unsaved = false;
+		// A newer state of the same subject supersedes the older one's unsaved notice.
+		const superseded = this.pending.get(key);
+		if (superseded && superseded.reason !== reason) this.drop(superseded);
 		if (state.covered === reason && !recurred) return true;
 		state.covered = undefined;
 		let latest = -1;
@@ -163,61 +202,139 @@ export class HarnessNoticeController {
 			return true;
 		}
 		const text = boundedRedactedDiagnosticText(observation.text);
-		const leafId = manager.getLeafId();
-		// The durable channel is a persisted root transcript with a persisted anchor; until then the next signal retries.
-		if (
-			!text ||
-			!manager.isPersisted() ||
-			!manager.getSessionFile() ||
-			!leafId ||
-			!manager.isEntryPersisted(leafId)
-		) {
+		// A session that keeps no transcript has no channel for a notice: nothing is kept for it.
+		if (!text || !manager.isPersisted()) {
 			state.unsaved = recurred;
 			return false;
 		}
 		const deliveryId = harnessNoticeDeliveryId(sessionId, kind, reason, generation);
 		state.covered = reason;
-		if (this.inFlight.has(deliveryId)) return true;
-		this.inFlight.add(deliveryId);
+		let notice = this.pending.get(key);
+		if (notice?.deliveryId !== deliveryId) {
+			const message = {
+				customType: HARNESS_NOTICE_CUSTOM_TYPE,
+				display: true,
+				content: `Harness notice: ${text}\nThe owner sees this notice directly; mention it only if it bears on what they ask.`,
+				details: { kind, reason, generation },
+			};
+			const payloadDigest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
+			notice = { sessionId, kind, key, reason, deliveryId, payloadDigest, message, failures: 0 };
+			this.keep(notice);
+		}
+		this.save(notice);
+		return true;
+	}
+
+	private keep(notice: PendingNotice): void {
+		this.pending.delete(notice.key);
+		// The oldest one not being saved right now makes room.
+		const oldest =
+			this.pending.size >= MAX_PENDING_NOTICES
+				? [...this.pending.values()].find((waiting) => !this.inFlight.has(waiting.deliveryId))
+				: undefined;
+		if (oldest) {
+			this.pending.delete(oldest.key);
+			this.reopen(oldest);
+			this.report(oldest.kind, `${MAX_PENDING_NOTICES} newer notices wait to be saved`, "it is dropped");
+		}
+		this.pending.set(notice.key, notice);
+		// Retried with the session's next saved entry (the owner's next turn saves one); a notice alone never creates
+		// the session file. Subscribed only while a notice waits.
+		this.offPersisted ??= this.deps.getSessionManager().onEntriesPersisted(() => {
+			if (this.retryScheduled) return;
+			this.retryScheduled = true;
+			// Past the write's stack: the write may run inside its caller's transaction.
+			queueMicrotask(() => {
+				this.retryScheduled = false;
+				for (const waiting of [...this.pending.values()]) {
+					try {
+						this.save(waiting);
+					} catch (error) {
+						this.report(waiting.kind, error, "it is retried with the session's next saved entry");
+					}
+				}
+			});
+		});
+	}
+
+	private drop(notice: PendingNotice): void {
+		if (this.pending.get(notice.key) === notice) this.pending.delete(notice.key);
+		if (this.pending.size === 0) {
+			this.offPersisted?.();
+			this.offPersisted = undefined;
+		}
+	}
+
+	/** A dropped notice whose state is still observed leaves its episode open: the capability's next signal retries it. */
+	private reopen(notice: PendingNotice): void {
+		const state = this.kinds.get(notice.key);
+		if (state?.covered === notice.reason && state.observed === notice.reason) {
+			state.covered = undefined;
+			state.unsaved = true;
+		}
+	}
+
+	private save(notice: PendingNotice): void {
+		if (this.closed || this.inFlight.has(notice.deliveryId)) return;
+		const manager = this.deps.getSessionManager();
+		// Saved already (a replay, or another runtime of this session), or left behind by a session switch.
+		if (manager.getSessionId() !== notice.sessionId || manager.getParentInput(notice.deliveryId)) {
+			this.drop(notice);
+			return;
+		}
+		const leafId = manager.getLeafId();
+		// The durable channel is a persisted root transcript with a persisted anchor; until then the notice waits.
+		if (!manager.getSessionFile() || !leafId || !manager.isEntryPersisted(leafId)) return;
+		this.inFlight.add(notice.deliveryId);
 		void Promise.resolve()
 			.then(() => {
 				// A closed runtime or a switched session has no owner left for this episode.
 				if (this.closed || this.deps.getSessionManager() !== manager) return undefined;
-				const message = {
-					customType: HARNESS_NOTICE_CUSTOM_TYPE,
-					display: true,
-					content: `Harness notice: ${text}\nThe owner sees this notice directly; mention it only if it bears on what they ask.`,
-					details: { kind, reason, generation },
-				};
 				return this.deps.deliver({
-					deliveryId,
-					payloadDigest: createHash("sha256").update(JSON.stringify(message)).digest("hex"),
-					message,
+					deliveryId: notice.deliveryId,
+					payloadDigest: notice.payloadDigest,
+					message: notice.message,
 					origin: captureWorkerReceiptOrigin(manager),
 					mode: "next-owner-turn",
 				});
 			})
 			.then(
-				() => this.inFlight.delete(deliveryId),
+				() => {
+					this.inFlight.delete(notice.deliveryId);
+					this.drop(notice);
+				},
 				(error: unknown) => {
-					this.inFlight.delete(deliveryId);
-					// An unsaved notice leaves its episode open: the capability's next signal tries it again. The attempt's own
-					// foreground release notifies synchronously, while this attempt still covers the reason, so that echo
-					// starts nothing; a branch navigation during a busy turn is the usual cause.
-					if (state.covered === reason && state.observed === reason) {
-						state.covered = undefined;
-						state.unsaved = true;
+					this.inFlight.delete(notice.deliveryId);
+					if (this.closed) return;
+					// The attempt's own foreground release notifies synchronously while the reason is still covered, so that
+					// echo starts nothing; a branch navigation during a busy turn is the usual cause of a failed save.
+					notice.failures++;
+					const current = this.pending.get(notice.key) === notice;
+					const retried = current && notice.failures < MAX_NOTICE_SAVE_ATTEMPTS;
+					if (!retried) {
+						this.drop(notice);
+						this.reopen(notice);
 					}
-					if (!this.closed) this.report(kind, error);
+					this.report(
+						notice.kind,
+						error,
+						retried
+							? "it is retried with the session's next saved entry"
+							: current
+								? `it is dropped after ${notice.failures} failed saves`
+								: "a newer state replaced it",
+					);
 				},
 			);
-		return true;
 	}
 
-	private report(kind: HarnessNoticeKind, error: unknown): void {
+	private report(kind: HarnessNoticeKind, error: unknown, consequence?: string): void {
 		const detail = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
+		const cause = detail ? `: ${detail}` : "";
 		try {
-			this.deps.warn(`A harness notice (${kind}) was not saved${detail ? `: ${detail}` : "."}`);
+			this.deps.warn(
+				`A harness notice (${kind}) was not saved${cause}${consequence ? `; ${consequence}` : cause ? "" : "."}`,
+			);
 		} catch {
 			// A diagnostic never fails the capability that observed the state.
 		}

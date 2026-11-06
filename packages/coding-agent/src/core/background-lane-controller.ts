@@ -326,7 +326,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
 			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
-			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read) ?? false,
+			observeNotice: (kind, read) => deps.observeHarnessNotice?.(kind, read),
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
 			isChildSession: () => deps.isChildSession(),

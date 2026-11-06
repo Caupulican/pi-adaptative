@@ -361,6 +361,9 @@ export interface SessionEntriesPersistedEvent {
 
 export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
 
+/** A persistence observer threw while a committed write was announced; the write stands and the observer is not retried. */
+export type SessionObserverErrorListener = (observer: SessionEntriesPersistedListener, error: unknown) => void;
+
 interface SessionPersistenceResult {
 	readonly event: SessionEntriesPersistedEvent;
 	/** The write was confirmed by readback; its original I/O error must still reach the caller after publication. */
@@ -1765,6 +1768,7 @@ export class SessionManager {
 	private navigationRevision = 0;
 	private inheritedSessionIds = new Set<string>();
 	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
+	private readonly observerErrorListeners = new Set<SessionObserverErrorListener>();
 	private parentInputCache:
 		| { byId: Map<string, SessionEntry>; leafId: string | null; index: ParentInputIndex }
 		| undefined;
@@ -2584,12 +2588,30 @@ export class SessionManager {
 		};
 	}
 
+	/**
+	 * Subscribe to persistence observers that threw. Called synchronously inside the write that announced the entries
+	 * (possibly inside a caller's transaction), so a listener only records the failure and reports it later.
+	 */
+	onObserverError(listener: SessionObserverErrorListener): () => void {
+		this.observerErrorListeners.add(listener);
+		return () => {
+			this.observerErrorListeners.delete(listener);
+		};
+	}
+
 	private _emitEntriesPersisted(event: SessionEntriesPersistedEvent): void {
 		for (const listener of [...this.entriesPersistedListeners]) {
 			try {
 				listener(event);
-			} catch {
-				// A derived-index observer never fails the canonical write it observes.
+			} catch (error) {
+				// A derived-index observer never fails the canonical write it observes; its failure is reported instead.
+				for (const onError of [...this.observerErrorListeners]) {
+					try {
+						onError(listener, error);
+					} catch {
+						// A failure report never fails the write either.
+					}
+				}
 			}
 		}
 	}

@@ -249,7 +249,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 	const awaitParent = (count: number, manager: SessionManager = owner.sessionManager) =>
 		new Promise<void>((resolve) => {
 			const check = () => {
-				if (entries(manager).length !== count || manager.getPendingParentInputs().length !== 0) return;
+				if (entries(manager).length !== count || manager.getPendingParentInputs("turn").length !== 0) return;
 				off();
 				resolve();
 			};
@@ -470,22 +470,88 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			settings: { memorySystem: "okf", autoLearn: { enabled: false }, proactivity: { enabled: true } },
 		});
 		const freshBinding = fresh.session.backgroundLanes.openHostEventSession(abort.signal);
+		let repositoryDown = true;
+		let connected = createBarrier();
+		const freshSink: HostEventSink = {
+			...freshBinding.sink,
+			reportConnection: (source, connection) => {
+				freshBinding.sink.reportConnection(source, connection);
+				connected.release();
+			},
+		};
 		const freshSource = await createCiHostRuntime({
 			cwd: HARNESS_PROJECT_CWD,
 			paths,
-			provider,
+			provider: {
+				...provider,
+				repository: async (signal) => {
+					if (repositoryDown) throw new Error("GitHub did not answer");
+					return provider.repository(signal);
+				},
+			},
 			store: sourceStore,
 			onDiagnostic: (message) => diagnostics.push(message),
 		});
 		if (!freshSource) throw new Error("The fresh CI consumer did not open.");
+		const freshNotices = (kind: string) =>
+			fresh.sessionManager.getEntries().filter((entry) => {
+				const details = parentInputOriginalDetails(entry);
+				return (
+					entry.type === "custom_message" &&
+					entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
+					typeof details === "object" &&
+					details !== null &&
+					"kind" in details &&
+					details.kind === kind
+				);
+			});
+		// A root host-event append persists inside its task-runtime transaction, where the runtime refuses a re-entrant
+		// read (an observer that throws is reported as a warning): the condition is read once that synchronous write returned.
+		const persisted = (done: () => boolean) =>
+			new Promise<void>((resolve, reject) => {
+				const check = () => {
+					try {
+						if (!done()) return;
+					} catch (error) {
+						off();
+						reject(error);
+						return;
+					}
+					off();
+					resolve();
+				};
+				const off = fresh.sessionManager.onEntriesPersisted(() => queueMicrotask(check));
+				check();
+			});
 		try {
+			// GitHub does not answer the first reconcile, before this session saved any entry: the waiting state's notice is
+			// kept in memory and saved once the session saves its first entry, here the retained snapshot.
+			await freshSource.source.start(freshSink);
+			await withDeadline(world.trace, "the fresh consumer waits for GitHub", connected.promise);
+			await freshSource.source.stop();
+			expect(fresh.sessionManager.hasDurableSessionFile(), "the session has saved nothing yet").toBe(false);
+			repositoryDown = false;
 			world.provider.enqueue("root", {
 				...text("host-event-new-session", "The currently red revision is visible in this session too."),
 				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(currentFailure.eventId),
 			});
 			const freshParent = awaitParent(1, fresh.sessionManager);
-			await freshSource.source.start(freshBinding.sink);
-			await withDeadline(world.trace, "new CI consumer receives retained current snapshot", freshParent);
+			const waitingSaved = persisted(() => freshNotices("host-event-source").length > 0);
+			await freshSource.source.start(freshSink);
+			await withDeadline(
+				world.trace,
+				"new CI consumer receives retained current snapshot and the waiting notice",
+				Promise.all([freshParent, waitingSaved]),
+			);
+			expect(
+				freshNotices("host-event-source").map((entry) => [
+					parentInputOf(entry)?.metadata.mode,
+					parentInputOriginalDetails(entry),
+				]),
+				"the state observed before the first entry is told once, for the owner's next turn",
+			).toEqual([
+				["next-owner-turn", { kind: "host-event-source", reason: "waiting:repository-unavailable", generation: 0 }],
+			]);
 			const freshAccepted =
 				fresh.session.backgroundLanes.getTaskRuntimeSnapshot()!.hostEvents[currentFailure.eventId];
 			expect(freshAccepted.envelope).toEqual(accepted.envelope);
@@ -497,6 +563,11 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				check: (request) => expect(JSON.stringify(request.context.messages)).toContain(success.eventId),
 			});
 			const freshCorrection = awaitParent(2, fresh.sessionManager);
+			// An observer that throws on every saved entry fails none of them and is reported once.
+			const warningMark = world.warnings.length;
+			const offThrowing = fresh.sessionManager.onEntriesPersisted(() => {
+				throw new Error("fixture observer failed");
+			});
 			// The pre-push watcher records the finished run; that local write, not an unchanged HEAD, triggers discovery.
 			writeCiStatus(paths, "main", {
 				sha,
@@ -513,6 +584,16 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				"new session retires a result while the original consumer is offline",
 				freshCorrection,
 			);
+			offThrowing();
+			expect(world.warnings.splice(warningMark), "one bounded warning names the failed observer").toEqual([
+				"A session persistence observer failed; the write it observed is kept: fixture observer failed",
+			]);
+			await freshSource.source.stop();
+			// The same state again after its clear: the saved notice still waits for the owner, so nothing is added.
+			repositoryDown = true;
+			connected = createBarrier();
+			await freshSource.source.start(freshSink);
+			await withDeadline(world.trace, "the fresh consumer waits for GitHub again", connected.promise);
 			await freshSource.source.stop();
 			expect(sourceStore.snapshot().retiredThrough, "the offline consumer's unconsumed custody stays retained").toBe(
 				accepted.envelope.sourceSequence,
@@ -568,36 +649,6 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				};
 				return { sealed, sink };
 			};
-			const gapNotices = () =>
-				fresh.sessionManager.getEntries().filter((entry) => {
-					const details = parentInputOriginalDetails(entry);
-					return (
-						entry.type === "custom_message" &&
-						entry.customType === HARNESS_NOTICE_CUSTOM_TYPE &&
-						typeof details === "object" &&
-						details !== null &&
-						"kind" in details &&
-						details.kind === "host-event-gap"
-					);
-				});
-			// A root host-event append persists inside its task-runtime transaction, where the runtime refuses a re-entrant
-			// read and the persistence observer swallows the throw: the condition is read once that synchronous write returned.
-			const persisted = (done: () => boolean) =>
-				new Promise<void>((resolve, reject) => {
-					const check = () => {
-						try {
-							if (!done()) return;
-						} catch (error) {
-							off();
-							reject(error);
-							return;
-						}
-						off();
-						resolve();
-					};
-					const off = fresh.sessionManager.onEntriesPersisted(() => queueMicrotask(check));
-					check();
-				});
 			const heldEvents = () => {
 				const deliveries = fresh.session.backgroundLanes.getTaskRuntimeSnapshot()!.eventDeliveries;
 				return fresh.sessionManager.getPendingParentInputs("next-owner-turn").flatMap((input) => {
@@ -624,7 +675,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				gapClockSkew = CI_PARKED_CONSUMER_TTL_MS + 60_000;
 				gapEvents = [gapAttempt(1), gapAttempt(2)];
 				gapStore.retain(gapEvents);
-				const noticed = persisted(() => gapNotices().length > 0);
+				const noticed = persisted(() => freshNotices("host-event-gap").length > 0);
 				const resumed = gapSealed();
 				await gapSource.source.start(resumed.sink);
 				await withDeadline(
@@ -640,7 +691,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 					afterSequence: 1,
 					throughSequence: 2,
 				});
-				expect(gapNotices(), "one owner notice per gap").toHaveLength(1);
+				expect(freshNotices("host-event-gap"), "one owner notice per gap").toHaveLength(1);
 				expect(fresh.sessionManager.getPendingParentInputs("turn"), "a gap notice never wakes a turn").toEqual([]);
 				expect(gapDiagnostics).toEqual([]);
 
@@ -679,6 +730,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 					expect.objectContaining({ deliveryId: redDelivery?.deliveryId, reason: "source_superseded" }),
 				]);
 				expect(heldEvents(), "only the passing rerun waits for the owner").toEqual([rerun.eventId]);
+				expect(freshNotices("host-event-source"), "a recurrence the saved notice tells adds none").toHaveLength(1);
 				expect(fresh.sessionManager.getPendingParentInputs("turn"), "held results never wake a turn").toEqual([]);
 				expect(gapDiagnostics).toEqual([]);
 			} finally {
