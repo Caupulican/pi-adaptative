@@ -118,8 +118,11 @@ export interface ChannelJournalState {
 	batches: ChannelBatchRecord[];
 	drafts: ChannelDraftRecord[];
 	gaps: ChannelGapRecord[];
-	/** Senders the owner was told how to allowlist (sender digest prefix), so each is told at most once a day. */
-	onboarding: { sender: string; at: number }[];
+	/**
+	 * Senders the owner was told how to allowlist (sender digest prefix), so each is told at most once a day; `id` is the
+	 * sender's own id when the sender chose it, kept for the owner's `channel_reply` `list` instead of the notice.
+	 */
+	onboarding: { sender: string; at: number; id?: string }[];
 }
 
 export function digest(value: string): string {
@@ -298,7 +301,10 @@ function parseState(text: string): ChannelJournalState {
 				: list(
 						value.onboarding,
 						(item): item is ChannelJournalState["onboarding"][number] =>
-							isPlainRecord(item) && isString(item.sender) && isTime(item.at),
+							isPlainRecord(item) &&
+							isString(item.sender) &&
+							isTime(item.at) &&
+							(item.id === undefined || isString(item.id)),
 					),
 	};
 }

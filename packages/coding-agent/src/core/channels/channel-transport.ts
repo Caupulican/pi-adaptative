@@ -123,9 +123,13 @@ async function readBodyWithin(response: Response, maxBytes: number): Promise<str
 /** How a call's answer is read as a success: the Telegram and Slack APIs say `{ "ok": true, ... }`. */
 const okField = (payload: Record<string, unknown>): boolean => payload.ok === true;
 
+/** Why an answer that arrived whole has no payload: longer than the call's bound, or not JSON. */
+type Unreadable = "too_large" | "not_json";
+
 /**
  * How one call of a JSON Web API ended. By default a success is an HTTP 2xx answer `{ "ok": true, ... }` (Telegram,
- * Slack); a call may name its own test (Google's APIs answer a plain object).
+ * Slack); a call may name its own test (Google's APIs answer a plain object). A call whose answer stopped arriving
+ * (connection lost, timed out) is `unreachable`, never a refusal.
  */
 export type ApiOutcome =
 	| { readonly kind: "ok"; readonly payload: Record<string, unknown> }
@@ -135,6 +139,7 @@ export type ApiOutcome =
 			/** The parsed answer, for the provider's own reading of its error fields; never shown. */
 			readonly payload: unknown;
 			readonly retryAfterMs?: number;
+			readonly unreadable?: Unreadable;
 	  }
 	| { readonly kind: "unreachable" }
 	| { readonly kind: "stopped" };
@@ -154,7 +159,7 @@ export interface JsonApiCall {
 	readonly form?: Readonly<Record<string, string>>;
 	/** Whether a 2xx answer's object is a success; defaults to its `ok: true` field. */
 	readonly succeeded?: (payload: Record<string, unknown>) => boolean;
-	/** The longest answer read; a longer one is a refusal with no payload. Unbounded when omitted. */
+	/** The longest answer read; a longer one is a refusal with no payload, `unreadable: "too_large"`. Unbounded when omitted. */
 	readonly maxResponseBytes?: number;
 	readonly signal: AbortSignal;
 	readonly timeoutMs: number;
@@ -183,16 +188,19 @@ export async function postJsonApi(call: JsonApiCall): Promise<ApiOutcome> {
 					: {}),
 			signal: AbortSignal.any([signal, timeout.signal]),
 		});
+		// A body that stops arriving (a reset, the timeout) is a failed call, like no answer: it throws to the catch below.
+		const text =
+			call.maxResponseBytes === undefined
+				? await response.text()
+				: await readBodyWithin(response, call.maxResponseBytes);
 		let payload: unknown;
-		try {
-			const text =
-				call.maxResponseBytes === undefined
-					? await response.text()
-					: await readBodyWithin(response, call.maxResponseBytes);
-			payload = text === undefined ? undefined : JSON.parse(text);
-		} catch {
-			payload = undefined;
-		}
+		let unreadable: Unreadable | undefined = text === undefined ? "too_large" : undefined;
+		if (text !== undefined)
+			try {
+				payload = JSON.parse(text);
+			} catch {
+				unreadable = "not_json";
+			}
 		if (signal.aborted) return { kind: "stopped" };
 		if (response.ok && isPlainRecord(payload) && (call.succeeded ?? okField)(payload)) return { kind: "ok", payload };
 		const retryAfter =
@@ -202,6 +210,7 @@ export async function postJsonApi(call: JsonApiCall): Promise<ApiOutcome> {
 			status: response.status,
 			payload,
 			...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}),
+			...(unreadable !== undefined ? { unreadable } : {}),
 		};
 	} catch {
 		return signal.aborted ? { kind: "stopped" } : { kind: "unreachable" };

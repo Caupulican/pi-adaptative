@@ -10,8 +10,9 @@
  * resolved, so the journal holds it first; a handler rejection reads the same history again after a backoff.
  *
  * A sender is verified only when the `Authentication-Results` header Gmail itself wrote shows DMARC, or DKIM and SPF,
- * passing for the domain of the `From` address. Mail from the mailbox itself, automatic replies, list mail and mail
- * with no plain-text part never reach the core. A reply goes to the `From` address in the same thread, as plain text.
+ * passing for the domain of the `From` address. Mail from the mailbox itself, automatic replies, bounces, list mail and
+ * mail with no plain-text part never reach the core. A reply goes to the `From` address in the same thread, as plain
+ * text marked `Auto-Submitted: auto-replied`. The sender writes the `From` address, so it is a sender-chosen id.
  */
 
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
+	ChannelSenderIds,
 } from "../gateways/channel-provider.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
@@ -79,6 +81,7 @@ const GMAIL_ID = /^[A-Za-z0-9]{1,64}$/;
 const HISTORY_ID = /^(?:0|[1-9]\d{0,19})$/;
 const ACCOUNT_DIGEST = /^[0-9a-f]{64}$/;
 const PAGE_TOKEN = /^[A-Za-z0-9_-]{1,512}$/;
+const ATTACHMENT_ID = /^[A-Za-z0-9_-]{1,1024}$/;
 /** An addr-spec with a dot-atom local part and a host name: what is read from `From` and written to `To`. */
 const MAIL_ADDRESS = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
 /** A Message-ID kept for the reply's threading headers: no quote, backslash, space or angle bracket inside. */
@@ -93,6 +96,12 @@ const API_OFF_REASON =
 const FORBIDDEN_REASON =
 	"Google refused Gmail access (HTTP 403) for these credentials; reading is retried with backoff";
 const UNREACHABLE_REASON = "Gmail cannot be reached; reading is retried with backoff";
+const TOO_LARGE_WARNING = "Gmail delivered a mail larger than 4 MiB; Pi skips it.";
+const UNREADABLE_MAIL_WARNING = "Gmail answered the read of a mail with something that is not a mail; Pi skips it.";
+/** Reads of one mail Gmail refuses in a row with a client error of its own before the mail is skipped. */
+const MAX_MAIL_REFUSALS = 3;
+/** Client errors that say nothing about the mail itself: each has its own handling and never skips a mail. */
+const RETRIED_STATUSES = new Set([401, 403, 404, 408, 429]);
 const GAP_WARNING =
 	"Gmail no longer keeps the mailbox history from Pi's last read position; mail that arrived since then was not read. Reading goes on from now.";
 
@@ -117,6 +126,8 @@ interface Mailbox {
 	readonly account: string;
 	cursor: string;
 	saved: string | undefined;
+	/** Where a pass that read its last allowed page left the listing, so the next pass reads on from there. */
+	resume?: { readonly start: string; readonly pageToken: string };
 }
 
 /** Where a reply goes: the thread, the verified sender, the subject and the Message-ID it answers. */
@@ -127,11 +138,11 @@ interface ReplyTarget {
 	readonly messageId?: string;
 }
 
-/** How the sign-in service answered a token request that did not end in a token. */
+/** How the sign-in service answered a token request that did not end in a token: no Gmail call was made. */
 type TokenFailure =
 	| { readonly kind: "credentials_rejected" }
 	| { readonly kind: "sign_in_refused"; readonly status: number }
-	| { readonly kind: "unreachable" }
+	| { readonly kind: "sign_in_unreachable" }
 	| { readonly kind: "stopped" };
 
 type TokenOutcome = { readonly kind: "ok"; readonly token: string } | TokenFailure;
@@ -147,6 +158,11 @@ interface GmailRequest {
 	/** Whether a 2xx object is the answer asked for; any object by default. */
 	readonly succeeded?: (payload: Record<string, unknown>) => boolean;
 }
+
+/** One read of a mail: its answer, or how the mail ends (`end` undefined: skipped, the pass goes on). */
+type MailPartRead =
+	| { readonly kind: "ok"; readonly payload: Record<string, unknown> }
+	| { readonly kind: "end"; readonly end: PassEnd | undefined };
 
 /** How one pass over the mailbox's history ended. */
 type PassEnd =
@@ -298,19 +314,35 @@ function decodeBody(part: Record<string, unknown>): string | undefined {
 	return decoder.decode(Buffer.from(body.data, "base64url").subarray(0, MAX_BODY_BYTES));
 }
 
-/** The words the sender wrote: quoted lines, and the quoted history after an attribution line, removed. */
+/**
+ * The mail's text without what it quotes: `>` lines, an "On … wrote:" attribution and an "Original Message" separator
+ * with the header lines under it are left out. Every other line is kept, so a reply written below or between quoted
+ * lines keeps its words.
+ */
 function withoutQuotedHistory(body: string): string {
 	const lines = body.replace(/\r\n?/g, "\n").split("\n");
 	const kept: string[] = [];
 	for (let index = 0; index < lines.length; index++) {
 		const line = (lines[index] ?? "").trim();
-		if (/^-{2,}\s*Original Message\s*-{2,}$/i.test(line)) break;
-		// "On <date>, <name> wrote:", which a mail program may wrap over up to three lines.
-		if (/^On\s/.test(line) && lines.slice(index, index + 3).some((next) => /\swrote:$/.test(next.trim()))) break;
 		if (line.startsWith(">")) continue;
+		if (/^-{2,}\s*Original Message\s*-{2,}$/i.test(line)) {
+			while (/^(?:From|Sent|Date|To|Cc|Subject):/i.test((lines[index + 1] ?? "").trim())) index++;
+			continue;
+		}
+		// "On <date>, <name> wrote:", which a mail program may wrap over up to three lines.
+		if (/^On\s/.test(line)) {
+			const end = lines.slice(index, index + 3).findIndex((next) => /(?:^|\s)wrote:$/.test(next.trim()));
+			if (end >= 0) {
+				index += end;
+				continue;
+			}
+		}
 		kept.push(lines[index] ?? "");
 	}
-	return kept.join("\n").trim();
+	return kept
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
 /** The reply address of a mail: an opaque record only {@link readReplyTarget} reads back. */
@@ -360,7 +392,9 @@ function readMail(mail: unknown, account: string): MailReading {
 	// Automatic replies, bounces and list mail: answering them would start a loop or write to a list.
 	const autoSubmitted = first("auto-submitted");
 	if (autoSubmitted !== undefined && autoSubmitted.split(";")[0]?.trim().toLowerCase() !== "no") return IGNORE;
-	if (/^\s*(?:bulk|list|junk)\s*$/i.test(first("precedence") ?? "")) return IGNORE;
+	if (/^\s*(?:bulk|list|junk|auto_reply)\s*$/i.test(first("precedence") ?? "")) return IGNORE;
+	// A null reverse path: a bounce or another message no one may answer (RFC 5321).
+	if (/^\s*<\s*>\s*$/.test(first("return-path") ?? "")) return IGNORE;
 	if (first("list-id") !== undefined || first("x-auto-response-suppress") !== undefined) return IGNORE;
 	const subject = plainLine(first("subject") ?? "")
 		.slice(0, MAX_SUBJECT_CHARS)
@@ -422,6 +456,8 @@ function rawReply(target: ReplyTarget, text: string): string {
 		`To: ${target.to}`,
 		`Subject: ${headerText(subject)}`,
 		...(target.messageId ? [`In-Reply-To: ${target.messageId}`, `References: ${target.messageId}`] : []),
+		// RFC 3834: a reply a program wrote, so the other side's responder answers it with nothing.
+		"Auto-Submitted: auto-replied",
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=UTF-8",
 		"Content-Transfer-Encoding: base64",
@@ -482,6 +518,8 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 	readonly name = GMAIL_CHANNEL;
 	/** One message per reply: the core never cuts a reply longer than this. */
 	readonly capabilities: ChannelCapabilities = { maxMessageChars: 8000, markdown: false };
+	/** A sender id is the `From` address, which the sender writes; addresses compare in lower case. */
+	readonly senderIds: ChannelSenderIds = { assignedBy: "sender", normalize: (id) => id.toLowerCase() };
 	private readonly credentialsPath: string;
 	private readonly cursorPath: string;
 	private readonly warn: (message: string) => void;
@@ -490,6 +528,8 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 	/** The token request in flight, shared by the reading loop and a send. */
 	private refreshing: Promise<TokenOutcome> | undefined;
 	private mailbox: Mailbox | undefined;
+	/** The mail whose reads Gmail refused last, and how many times in a row. */
+	private refusedMail: { readonly id: string; readonly count: number } | undefined;
 	private readonly warned = new Set<string>();
 
 	constructor(options: GmailChannelProviderOptions) {
@@ -504,6 +544,7 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		this.access = undefined;
 		this.refreshing = undefined;
 		this.mailbox = undefined;
+		this.refusedMail = undefined;
 		this.warned.clear();
 	}
 
@@ -511,19 +552,10 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		const target = readReplyTarget(message.address);
 		if (!target) throw new Error("A Gmail reply needs the mail its conversation came from.");
 		const raw = rawReply(target, message.text);
-		const signal = this.signal;
-		if (!signal || signal.aborted) throw new Error("The Gmail channel is not running; nothing was sent.");
-		// The access token first: a token request that fails has sent nothing.
-		const token = await this.accessToken(signal);
-		if (token.kind === "stopped") throw new Error("The Gmail channel stopped before the reply was sent.");
-		if (token.kind === "credentials_rejected")
-			throw new Error("Google rejected the Gmail credentials; the reply was not sent.");
-		if (token.kind !== "ok")
-			throw new Error("Google's sign-in service gave no Gmail access token; the reply was not sent.");
 		await sendPaced({
 			service: "Gmail",
 			destination: target.to,
-			signal,
+			signal: this.signal,
 			timers: this.timers,
 			pacer: this.pacer,
 			call: async (callSignal) => {
@@ -541,9 +573,15 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 						),
 					callSignal,
 				);
-				// The token stopped working (the call was refused with 401) and no new one came: nothing was sent.
-				if (outcome.kind === "credentials_rejected" || outcome.kind === "sign_in_refused")
-					return { kind: "refused", status: 401, payload: undefined };
+				// No access token came (at first, or after Gmail refused the old one with 401): no send was made.
+				if (outcome.kind === "credentials_rejected")
+					throw new Error("Google rejected the Gmail credentials; the reply was not sent.");
+				if (outcome.kind === "sign_in_refused")
+					throw new Error(
+						`Google's sign-in service answered with HTTP ${outcome.status} and gave no Gmail access; the reply was not sent.`,
+					);
+				if (outcome.kind === "sign_in_unreachable")
+					throw new Error("Google's sign-in service cannot be reached; the reply was not sent.");
 				return outcome;
 			},
 			refusal: sendRefusal,
@@ -618,6 +656,7 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		if (outcome.kind === "refused" && (outcome.status === 400 || outcome.status === 401))
 			return { kind: "credentials_rejected" };
 		if (outcome.kind === "refused") return { kind: "sign_in_refused", status: outcome.status };
+		if (outcome.kind === "unreachable") return { kind: "sign_in_unreachable" };
 		if (outcome.kind !== "ok") return outcome;
 		const token = String(outcome.payload.access_token);
 		const seconds = outcome.payload.expires_in;
@@ -718,7 +757,8 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 	private failed(outcome: Exclude<GmailOutcome, { kind: "ok" }>, call: string): PassEnd {
 		if (outcome.kind === "stopped") return { kind: "stopped" };
 		if (outcome.kind === "credentials_rejected") return { kind: "credentials" };
-		if (outcome.kind === "unreachable") return { kind: "transient", reason: UNREACHABLE_REASON };
+		if (outcome.kind === "unreachable" || outcome.kind === "sign_in_unreachable")
+			return { kind: "transient", reason: UNREACHABLE_REASON };
 		if (outcome.kind === "sign_in_refused")
 			return {
 				kind: "transient",
@@ -818,9 +858,12 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 			this.mailbox = { account: profile.account, cursor: saved ?? profile.historyId, saved };
 		}
 		const mailbox = this.mailbox;
-		const start = mailbox.cursor;
+		// Pages a listing leaves for the next pass are read on with their token, not listed again from the same start.
+		const resume = mailbox.resume;
+		mailbox.resume = undefined;
+		const start = resume?.start ?? mailbox.cursor;
 		const handled = new Set<string>();
-		let pageToken: string | undefined;
+		let pageToken = resume?.pageToken;
 		for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
 			const listed = await this.authorized(
 				(token) =>
@@ -878,6 +921,7 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 			return { kind: "done" };
 		}
 		this.saveCursor(mailbox);
+		if (pageToken !== undefined) mailbox.resume = { start, pageToken };
 		return { kind: "more" };
 	}
 
@@ -891,6 +935,47 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		return { kind: "done" };
 	}
 
+	/**
+	 * One read of a mail (`messages.get`, or its text part's `attachments.get`): the answer, or how the mail ends. A mail
+	 * deleted since it arrived is skipped silently; one whose whole answer is too large or not a mail, or that Gmail keeps
+	 * refusing with the same client error, is skipped and said; anything else (no answer, a cut answer, a server error)
+	 * ends the pass, so the same mail is read again.
+	 */
+	private async readMailPart(
+		id: string,
+		call: "messages.get" | "messages.attachments.get",
+		request: Omit<GmailRequest, "maxResponseBytes">,
+		signal: AbortSignal,
+	): Promise<MailPartRead> {
+		const outcome = await this.authorized(
+			(token) => this.api(token, { ...request, maxResponseBytes: MAX_MESSAGE_RESPONSE_BYTES }, signal),
+			signal,
+		);
+		if (outcome.kind === "ok") return outcome;
+		const skip = (warning?: string) => {
+			this.refusedMail = undefined;
+			if (warning) this.warn(warning);
+			return { kind: "end", end: undefined } as const;
+		};
+		if (outcome.kind === "refused" && outcome.status === 404) return skip();
+		if (outcome.kind === "refused" && outcome.status < 300)
+			return skip(outcome.unreadable === "too_large" ? TOO_LARGE_WARNING : UNREADABLE_MAIL_WARNING);
+		if (
+			outcome.kind === "refused" &&
+			outcome.status >= 400 &&
+			outcome.status < 500 &&
+			!RETRIED_STATUSES.has(outcome.status)
+		) {
+			const refusals = this.refusedMail?.id === id ? this.refusedMail.count + 1 : 1;
+			if (refusals >= MAX_MAIL_REFUSALS)
+				return skip(
+					`Gmail refused to give a mail ${refusals} times in a row (HTTP ${outcome.status}); Pi skips it.`,
+				);
+			this.refusedMail = { id, count: refusals };
+		}
+		return { kind: "end", end: this.failed(outcome, call) };
+	}
+
 	/** One new mail: read, then handed to the core unless it is ignored. Returns why the pass ends, or nothing to go on. */
 	private async deliver(
 		id: string,
@@ -898,25 +983,31 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		onInbound: ChannelInboundHandler,
 		signal: AbortSignal,
 	): Promise<PassEnd | undefined> {
-		const fetched = await this.authorized(
-			(token) =>
-				this.api(
-					token,
-					{ path: `messages/${id}`, query: { format: "full" }, maxResponseBytes: MAX_MESSAGE_RESPONSE_BYTES },
-					signal,
-				),
+		const fetched = await this.readMailPart(
+			id,
+			"messages.get",
+			{ path: `messages/${id}`, query: { format: "full" } },
 			signal,
 		);
-		// A mail deleted since it arrived.
-		if (fetched.kind === "refused" && fetched.status === 404) return undefined;
-		if (fetched.kind === "refused" && fetched.status < 300) {
-			this.warnOnce(
-				"oversized",
-				"Gmail delivered a mail Pi cannot read (larger than 4 MiB or unreadable); it is skipped.",
+		if (fetched.kind === "end") return fetched.end;
+		// Gmail answers a large text part by reference: its data is read on its own.
+		const body = isPlainRecord(fetched.payload.payload) ? plainPart(fetched.payload.payload)?.body : undefined;
+		if (
+			isPlainRecord(body) &&
+			typeof body.data !== "string" &&
+			typeof body.attachmentId === "string" &&
+			ATTACHMENT_ID.test(body.attachmentId)
+		) {
+			const attachment = await this.readMailPart(
+				id,
+				"messages.attachments.get",
+				{ path: `messages/${id}/attachments/${body.attachmentId}` },
+				signal,
 			);
-			return undefined;
+			if (attachment.kind === "end") return attachment.end;
+			if (typeof attachment.payload.data === "string") body.data = attachment.payload.data;
 		}
-		if (fetched.kind !== "ok") return this.failed(fetched, "messages.get");
+		this.refusedMail = undefined;
 		const reading = readMail(fetched.payload, account);
 		if (reading.kind === "ignore") return undefined;
 		try {

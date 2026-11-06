@@ -6,6 +6,7 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
+	ChannelSenderIds,
 } from "../../../../src/core/gateways/channel-provider.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { THIRD_PARTY_MEMORY_WITHHELD } from "../../../../src/core/system-prompt-builder.ts";
@@ -23,6 +24,8 @@ import { flushedSessionManager, icmLatestResult, refusalDiagnostic } from "./sha
  */
 class ScriptedChannel implements ChannelProvider {
 	readonly name: string;
+	/** A transport whose platform assigns each sender's id, so a held sender's notice may name it. */
+	readonly senderIds: ChannelSenderIds = { assignedBy: "platform" };
 	readonly sent: ChannelMessage[] = [];
 	starts = 0;
 	stops = 0;

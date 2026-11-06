@@ -17,6 +17,7 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
+	ChannelSenderIds,
 } from "../gateways/channel-provider.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -168,6 +169,8 @@ export function slackTokenPaths(agentDir: string): { readonly app: string; reado
 export class SlackChannelProvider extends ChannelTransport implements ChannelProvider {
 	readonly name = SLACK_CHANNEL;
 	readonly capabilities: ChannelCapabilities = { maxMessageChars: 3000, markdown: false, threads: true };
+	/** A Slack user id (`U…`) is one Slack assigns. */
+	readonly senderIds: ChannelSenderIds = { assignedBy: "platform" };
 	private readonly tokenPaths: { readonly app: string; readonly bot: string };
 	private readonly webSocketOverride: typeof globalThis.WebSocket | undefined;
 	private tokens: SlackTokens | undefined;

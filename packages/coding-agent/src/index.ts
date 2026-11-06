@@ -207,6 +207,7 @@ export type {
 	ChannelProvider,
 	ChannelProviderStatus,
 	ChannelSender,
+	ChannelSenderIds,
 	ChannelStatusReporter,
 	JobSchedulerProvider,
 	ScheduledJob,

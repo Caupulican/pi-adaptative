@@ -10,7 +10,8 @@ const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
 	/\bxapp-[A-Za-z0-9-]{20,}\b/i,
 	// A Google OAuth client secret and a Google access token: neither prefix with 20+ token characters occurs in prose.
 	/\bGOCSPX-[A-Za-z0-9_-]{20,}/,
-	/\bya29\.[A-Za-z0-9_-]{20,}/,
+	// An access token may hold dots, slashes and the like inside (`ya29.c.…`): all of it is masked, a trailing dot is not.
+	/\bya29\.(?=[A-Za-z0-9._~+/-]{20})[A-Za-z0-9_-]*(?:[.~+/]+[A-Za-z0-9_-]+)*=*/,
 	/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
 	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
 	/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/i,

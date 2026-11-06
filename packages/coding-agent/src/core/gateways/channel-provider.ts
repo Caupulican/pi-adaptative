@@ -50,6 +50,18 @@ export interface ChannelCapabilities {
 	threads?: boolean;
 }
 
+/** What a transport's sender ids are: the core reads it to decide where an id may be shown and how ids compare. */
+export interface ChannelSenderIds {
+	/**
+	 * `platform`: the service assigns each sender's id (a Telegram user number, a Slack user id), so the sender cannot
+	 * choose its text and an owner notice may name it. `sender`: the sender picks it (a mail address), so it is text a third
+	 * party wrote and is shown only fenced as data. A provider that does not say is taken as `sender`.
+	 */
+	readonly assignedBy: "platform" | "sender";
+	/** The one form ids compare in; `allowedSenders` entries are put in it before they are matched. Identity when omitted. */
+	readonly normalize?: (id: string) => string;
+}
+
 /** Handler the core supplies to a channel for inbound messages. It resolves once the event is held; a rejection means "redeliver". */
 export type ChannelInboundHandler = (message: ChannelMessage) => void | Promise<void>;
 
@@ -69,6 +81,7 @@ export type ChannelStatusReporter = (status: ChannelProviderStatus) => void;
 export interface ChannelProvider {
 	readonly name: string;
 	readonly capabilities?: ChannelCapabilities;
+	readonly senderIds?: ChannelSenderIds;
 	/**
 	 * Begin listening; deliver inbound messages to `onInbound`. `report` tells a later loss or return of the connection;
 	 * its reason is shown to the owner (redacted), so it is the provider's own words, never remote text or a credential.

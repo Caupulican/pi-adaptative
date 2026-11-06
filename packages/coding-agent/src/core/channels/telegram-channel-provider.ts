@@ -15,6 +15,7 @@ import type {
 	ChannelInboundHandler,
 	ChannelMessage,
 	ChannelProvider,
+	ChannelSenderIds,
 } from "../gateways/channel-provider.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -97,6 +98,8 @@ export function telegramTokenPath(agentDir: string): string {
 export class TelegramChannelProvider extends ChannelTransport implements ChannelProvider {
 	readonly name = TELEGRAM_CHANNEL;
 	readonly capabilities: ChannelCapabilities = { maxMessageChars: 4096, markdown: false };
+	/** A Telegram user id is a number Telegram assigns. */
+	readonly senderIds: ChannelSenderIds = { assignedBy: "platform" };
 	private readonly tokenPath: string;
 	private readonly warn: (message: string) => void;
 	private token: string | undefined;

@@ -508,7 +508,7 @@ Admission policy for each chat or mail channel: the shipped `telegram`, `slack` 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `channels.<name>.mode` | `"ignore"` | `"explicit"` starts the channel; `"ignore"` keeps it stopped. A channel with no entry is not started. |
-| `channels.<name>.allowedSenders` | `[]` | Sender ids (as the provider reports them, at most 50) whose verified messages may start a turn; a whole number (a Telegram user id) may be written unquoted; a Slack user id is written as a string (`"U0123ABCDEF"`); a Gmail sender is its mail address in lower case (`"alice@example.com"`). Any other sender, and an unverified one, is held and starts nothing; the owner is told a held verified sender's id once a day. |
+| `channels.<name>.allowedSenders` | `[]` | Sender ids (as the provider reports them, at most 50) whose verified messages may start a turn; a whole number (a Telegram user id) may be written unquoted; a Slack user id is written as a string (`"U0123ABCDEF"`); a Gmail sender is its mail address (`"alice@example.com"`), compared without regard to case. Any other sender, and an unverified one, is held and starts nothing; the owner is told of a held verified sender once a day, with its id when the platform assigned it (Telegram, Slack), else the `channel_reply` tool's `list` shows the id. |
 | `channels.<name>.replyMode` | `"draft"` | `"draft"` keeps each answer for the owner to send with the `channel_reply` tool; `"auto"` sends it to the conversation's address. |
 | `channels.<name>.maxWakesPerDay` | `10` | Turns the channel may start over the last 24 hours (0 to 200). |
 | `channels.<name>.maxUsdPerDay` | `0.5` | Spend of those turns over the last 24 hours (0 to 100). |
