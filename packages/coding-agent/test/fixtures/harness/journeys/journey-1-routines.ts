@@ -2074,10 +2074,12 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			),
 		).toBe(2_000);
 		expect(world.timers.advance("routine-intake", 2_000)).toBe(1);
-		// The pass armed its deadline as it started; the next alarm it arms is the one it leaves for the next pass.
-		const rearmed = world.timers.nextArmed("routine-intake");
+		let rearmed: Promise<number> | undefined;
 		try {
 			await withDeadline(world.trace, "routine intake judgment held", judgmentReached.promise);
+			// The pass starts past the call that fired its alarm and arms its deadline before it reaches the judgment; the
+			// next alarm it arms after that is the one it leaves for the next pass.
+			rearmed = world.timers.nextArmed("routine-intake");
 			const moved = await withDeadline(
 				world.trace,
 				"routine intake owner moves back",
@@ -2089,7 +2091,11 @@ async function runJourney1RoutineIntake(world: HarnessWorld, profile: Orchestrat
 			judgmentRelease.release();
 		}
 		expect(
-			await withDeadline(world.trace, "routine intake pass left its request undecided", rearmed),
+			await withDeadline(
+				world.trace,
+				"routine intake pass left its request undecided",
+				rearmed ?? Promise.reject(new Error("the pass never reached its judgment")),
+			),
 			"the pass completes and decides the request again on the next idle",
 		).toBe(2_000);
 		expect(
