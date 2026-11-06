@@ -48,10 +48,30 @@ export function isCertificateSemanticallyPassed(cert: SteeringCertificate): bool
 }
 
 export class SystemOneSteeringUnavailableError extends Error {
-	constructor(message: string) {
-		super(message);
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
 		this.name = "SystemOneSteeringUnavailableError";
 	}
+}
+
+/**
+ * The error a failed engine or router call surfaces as. In every steering mode a call that returned no
+ * judgment is an outage, so callers apply the authority line to it instead of meeting an unclassified
+ * error; the original failure stays the cause. A cancellation stays a cancellation.
+ */
+function engineCallFailure(
+	err: unknown,
+	signal: AbortSignal | undefined,
+	checkpointId: string,
+	source: string,
+	required: boolean,
+): unknown {
+	if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) return err;
+	if (err instanceof SystemOneSteeringUnavailableError) return err;
+	return new SystemOneSteeringUnavailableError(
+		`${source} unavailable for ${required ? "mandatory " : ""}checkpoint ${checkpointId}: ${String(err)}`,
+		{ cause: err },
+	);
 }
 
 /**
@@ -894,7 +914,10 @@ export class SystemOneSteeringPlane {
 				if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
 					this.evaluationObserver?.settleCancelled(evaluationId);
 				} else {
-					this.evaluationObserver?.settleFailed(evaluationId, error);
+					// The ledger diagnoses the engine's own failure (its kind and receipt), not the outage wrapper.
+					const cause =
+						error instanceof SystemOneSteeringUnavailableError && error.cause !== undefined ? error.cause : error;
+					this.evaluationObserver?.settleFailed(evaluationId, cause);
 				}
 			}
 			throw error;
@@ -924,6 +947,7 @@ export class SystemOneSteeringPlane {
 		const { stateDigest, programDigest, policyDigest, model, provider, consequence, objectiveId, evidenceRevision } =
 			bound;
 		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
+		const required = this.policy.mode === "system_one_required";
 		let evaluation: DecisionEvaluation;
 
 		if (this.router) {
@@ -933,12 +957,7 @@ export class SystemOneSteeringPlane {
 					occupancy: request.occupancy,
 				});
 			} catch (err) {
-				if (this.policy.mode === "system_one_required") {
-					throw new SystemOneSteeringUnavailableError(
-						`Decision router unavailable for mandatory checkpoint ${request.checkpointId}: ${String(err)}`,
-					);
-				}
-				throw err;
+				throw engineCallFailure(err, request.signal, request.checkpointId, "Decision router", required);
 			}
 		} else if (this.decisionEngine) {
 			try {
@@ -951,15 +970,10 @@ export class SystemOneSteeringPlane {
 					...(request.signal ? { signal: request.signal } : {}),
 				});
 			} catch (err) {
-				if (this.policy.mode === "system_one_required") {
-					throw new SystemOneSteeringUnavailableError(
-						`System One steering engine unavailable for mandatory checkpoint ${request.checkpointId}: ${String(err)}`,
-					);
-				}
-				throw err;
+				throw engineCallFailure(err, request.signal, request.checkpointId, "System One steering engine", required);
 			}
 		} else {
-			if (this.policy.mode === "system_one_required") {
+			if (required) {
 				throw new SystemOneSteeringUnavailableError(
 					`Decision engine missing for mandatory checkpoint ${request.checkpointId} in system_one_required mode.`,
 				);
@@ -969,7 +983,7 @@ export class SystemOneSteeringPlane {
 			);
 		}
 
-		if (this.policy.mode === "system_one_required") {
+		if (required) {
 			const provenance = evaluation.engine.confidence_provenance;
 			if (isForbiddenRequiredProvenance(provenance)) {
 				throw new SystemOneSteeringUnavailableError(

@@ -27,6 +27,38 @@ export interface SteeringQuestionPack {
 	readonly questions: readonly SteeringQuestionDef[];
 }
 
+/**
+ * The classes of remaining work the route checkpoint (JEV-004/005/006/024) offers in
+ * `missing_work_class`. The program's options and the route policy's switch both derive from this
+ * type, so an option the policy does not route is a compile error rather than a silent implement.
+ */
+export type ObjectiveWorkClass =
+	| "investigate"
+	| "implement"
+	| "deterministic_verify"
+	| "independent_review"
+	| "replan"
+	| "resolve_capability"
+	| "completion_candidate";
+
+const OBJECTIVE_WORK_CLASS_OPTIONS = {
+	investigate: {
+		description: "Inspect what the objective concerns (code, machine, service or sources) and trace the cause",
+	},
+	implement: {
+		description: "Make the next change the objective needs: code, configuration, machine state or a service",
+	},
+	deterministic_verify: { description: "Run tests, checks or observations" },
+	independent_review: { description: "Adversarial review" },
+	replan: { description: "Strategy change needed" },
+	resolve_capability: { description: "Synthesize missing capability or specialist" },
+	completion_candidate: { description: "Candidate ready for finalization" },
+} as const satisfies Record<ObjectiveWorkClass, ChoiceOption>;
+
+export function isObjectiveWorkClass(value: unknown): value is ObjectiveWorkClass {
+	return typeof value === "string" && Object.hasOwn(OBJECTIVE_WORK_CLASS_OPTIONS, value);
+}
+
 export function computeQuestionPackDigest(pack: SteeringQuestionPack | DecisionProgram): string {
 	return canonicalDigest(pack);
 }
@@ -171,21 +203,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					kind: "choice",
 					id: "missing_work_class",
 					instruction: "Class of remaining work",
-					options: {
-						investigate: {
-							description:
-								"Inspect what the objective concerns (code, machine, service or sources) and trace the cause",
-						},
-						implement: {
-							description:
-								"Make the next change the objective needs: code, configuration, machine state or a service",
-						},
-						deterministic_verify: { description: "Run tests, checks or observations" },
-						independent_review: { description: "Adversarial review" },
-						replan: { description: "Strategy change needed" },
-						resolve_capability: { description: "Synthesize missing capability or specialist" },
-						completion_candidate: { description: "Candidate ready for finalization" },
-					},
+					options: OBJECTIVE_WORK_CLASS_OPTIONS,
 				},
 				{
 					kind: "boolean",
@@ -1051,15 +1069,7 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 				id: "missing_work_class",
 				kind: "choice",
 				description: "Class of remaining work",
-				options: [
-					"investigate",
-					"implement",
-					"deterministic_verify",
-					"independent_review",
-					"replan",
-					"resolve_capability",
-					"completion_candidate",
-				],
+				options: Object.keys(OBJECTIVE_WORK_CLASS_OPTIONS),
 			},
 			{
 				id: "evidence_sufficient",

@@ -4,21 +4,25 @@
  */
 
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { ObjectiveWorkClass } from "../steering/programs.ts";
 import type { ExecutionState } from "../system-one/types.ts";
+
+/**
+ * Every work class the route policy composes: the route checkpoint's own options, plus the classes
+ * the other route sources name (an unsettled judgment reads as `insufficient_evidence`).
+ */
+export type RouteWorkClass =
+	| ObjectiveWorkClass
+	| "retrieve"
+	| "deterministic_test"
+	| "verify"
+	| "review"
+	| "none"
+	| "insufficient_evidence";
 
 export interface SemanticRouteJudgments {
 	workRemaining?: boolean;
-	missingWorkClass?:
-		| "retrieve"
-		| "investigate"
-		| "implement"
-		| "deterministic_test"
-		| "verify"
-		| "review"
-		| "replan"
-		| "none"
-		| "completion_candidate"
-		| "insufficient_evidence";
+	missingWorkClass?: RouteWorkClass;
 	currentWorkerCanContinue?: boolean;
 	independentWorkerRequired?: boolean;
 	capabilityEscalationRequired?: boolean;

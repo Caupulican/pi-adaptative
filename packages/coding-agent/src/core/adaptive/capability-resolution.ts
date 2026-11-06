@@ -166,14 +166,15 @@ export class CapabilityResolver {
 		const bestFitId = whichAns?.choice;
 		const bestFitScore = bestFitId ? (absoluteFits[bestFitId] ?? 0) : 0;
 		const gapAns = answers.gap_remains as { noul?: number; boolean?: boolean } | undefined;
-		// gap_remains asks whether a gap is still present; the required end is "no gap". A decisive
-		// yes is the adverse answer. An undecided one falls back to the measured fit score rather
-		// than inventing a verdict from a probability that settled nothing.
+		// gap_remains asks whether a gap is still present; the required end is "no gap". `settledNoul`
+		// returns the truth of the proposition (a gap is present), or undefined when the band settled
+		// nothing; a missing or undecided answer falls back to the measured fit score rather than
+		// inventing a verdict from a probability that settled nothing.
 		const gapSettled =
 			typeof gapAns?.boolean === "boolean"
 				? gapAns.boolean
 				: gapAns?.noul !== undefined
-					? settledNoul(gapAns.noul, "required_false", false) === false
+					? settledNoul(gapAns.noul, "required_false", false)
 					: undefined;
 		const gapRemains = gapSettled ?? bestFitScore < 0.7;
 

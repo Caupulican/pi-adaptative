@@ -95,6 +95,7 @@ import {
 	composeObjectiveRoute,
 	INDEPENDENT_VERIFICATION_REASON_CODE,
 	SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE,
+	workClassFromRouteChoice,
 } from "./objective-route-policy.ts";
 import {
 	projectBoundedCombinedState,
@@ -801,16 +802,16 @@ export class ObjectiveExecutionController {
 				});
 
 				const spAns = cert.answers.semantic_progress as { level?: number; score?: number } | undefined;
-				const mwcAns = cert.answers.missing_work_class as { choice?: string } | undefined;
 
 				// Certificate answers carry the band; an ambiguous one settles nothing and reads as undefined.
+				// The work class acts only at its probability floor. The route program asks neither whether
+				// the current worker can continue nor whether an external blocker is present, so neither is
+				// read here: external blockers and worker waits come from deterministic facts.
 				semantic = {
 					workRemaining: settledAnswer(cert.answers.work_remaining),
-					missingWorkClass: mwcAns?.choice as SemanticRouteJudgments["missingWorkClass"],
-					currentWorkerCanContinue: settledAnswer(cert.answers.current_worker_can_continue),
+					missingWorkClass: workClassFromRouteChoice(cert.answers.missing_work_class),
 					independentWorkerRequired: settledAnswer(cert.answers.independent_worker_required),
 					capabilityEscalationRequired: settledAnswer(cert.answers.capability_escalation_required),
-					externalBlockerPresent: settledAnswer(cert.answers.external_blocker_present),
 					semanticProgress: spAns?.level ?? spAns?.score,
 					contextStale: settledAnswer(cert.answers.context_stale),
 					strategyRepetition: settledAnswer(cert.answers.strategy_repetition),
