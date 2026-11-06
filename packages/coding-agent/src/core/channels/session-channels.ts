@@ -1476,9 +1476,10 @@ export class SessionChannels {
 		}
 	}
 
-	/** The record of a batch this session's turn accepted; the answer goes to `latest`'s address. */
+	/** The record of a batch the turn of `sessionId` (the session it was offered to) accepted; it answers `latest`. */
 	private acceptedBatch(
 		batchId: string,
+		sessionId: string,
 		latest: Pick<ChannelPendingMessage, "conversationKey" | "address">,
 		eventDigests: readonly string[],
 		allowlisted: boolean,
@@ -1486,7 +1487,7 @@ export class SessionChannels {
 	): ChannelBatchRecord {
 		return {
 			id: batchId,
-			sessionId: this.sessionId(),
+			sessionId,
 			pid: process.pid,
 			conversationKey: latest.conversationKey,
 			address: latest.address,
@@ -1539,7 +1540,11 @@ export class SessionChannels {
 				return;
 			}
 			const now = this.now();
-			this.recordAccepted(name, this.acceptedBatch(batchId, latest, delivered, composed.verified, now), now);
+			this.recordAccepted(
+				name,
+				this.acceptedBatch(batchId, sessionId, latest, delivered, composed.verified, now),
+				now,
+			);
 		};
 		void this.deps
 			.sendUserMessage(composed.text, {
@@ -1598,7 +1603,7 @@ export class SessionChannels {
 					return false;
 				}
 				const now = this.now();
-				const base = this.acceptedBatch(batchId, latest, delivered, true, now);
+				const base = this.acceptedBatch(batchId, sessionId, latest, delivered, true, now);
 				this.recordAccepted(name, { ...base, owner: true, senderDigest }, now);
 				return true;
 			},
@@ -2128,7 +2133,7 @@ export class SessionChannels {
 				}
 				const now = this.now();
 				const batch: ChannelBatchRecord = {
-					...this.acceptedBatch(by.ref, event, [eventDigest], true, now),
+					...this.acceptedBatch(by.ref, this.sessionId(), event, [eventDigest], true, now),
 					owner: true,
 					senderDigest: by.senderDigest,
 					approval: view.id,
