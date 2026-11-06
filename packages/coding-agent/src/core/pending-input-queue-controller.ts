@@ -2,12 +2,14 @@ import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { stampTurnOrigin } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
+import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
 import type { ForegroundInputPort, ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import {
+	isOwnerSpokenInputId,
 	type OwnerInputEnd,
 	type OwnerInputId,
 	type OwnerInputLedger,
@@ -24,7 +26,7 @@ import {
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff, RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
-import { channelTurnOrigin } from "./turn-origin.ts";
+import { channelTurnOrigin, ownerChannelTurnOrigin, type TurnAuthority } from "./turn-origin.ts";
 import { type SteerDecision, type SteerWake, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 export interface PendingQueueSnapshot {
@@ -80,6 +82,11 @@ interface PendingEntry extends QueuedInput {
 	 * and the owner sees, records and takes back the third party's words under this origin instead.
 	 */
 	readonly origin?: SendUserMessageOrigin;
+	/**
+	 * Set for the owner's words from a verified owner channel (or the turn carrying an approval recorded there): `text` is
+	 * then what the owner's phone sent, and its message is stamped as an owner-channel turn when it is handed on.
+	 */
+	readonly ownerChannel?: OwnerChannelOrigin;
 	readonly abort: AbortController;
 	readonly context?: PendingInputContext;
 	admission?: QueuedInputAdmission;
@@ -110,6 +117,19 @@ function recordableInput(entry: PendingEntry): RecordableQueuedInput {
 				}
 			: {}),
 	};
+}
+
+/** How far a run's authority reaches, lowest first: a third party's, the owner's from a phone, the owner's at the terminal. */
+const AUTHORITY_RANK: Readonly<Record<TurnAuthority, number>> = { "third-party": 0, "remote-owner": 1, owner: 2 };
+
+/**
+ * The authority an entry decides for the run that takes it (`RunTurnOrigin`): a third party's words, the owner's words from
+ * an owner channel, or the owner's typed words. An extension's own message (no origin) decides nothing: `undefined`.
+ */
+function entryAuthority(entry: PendingEntry): TurnAuthority | undefined {
+	if (entry.origin) return "third-party";
+	if (entry.ownerChannel) return "remote-owner";
+	return isOwnerSpokenInputId(entry.inputId) ? "owner" : undefined;
 }
 
 /** Abort reason of a pending input the operator took back, cleared or cancelled before admission. */
@@ -419,12 +439,15 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		);
 	}
 
-	/** The text the owner sees for an input: the third party's words under their sender for a framed message. */
+	/**
+	 * The text the owner sees for an input: the third party's words under their sender for a framed message, and the words
+	 * the owner's phone sent (never the channel's header line) for an owner-channel input.
+	 */
 	private _ownerText(entry: PendingEntry): string {
 		const uncertain = this._isUncertain(entry);
 		const text = entry.origin
 			? ownerVisibleQueuedText(entry.origin.text, entry.origin)
-			: uncertain
+			: uncertain || entry.ownerChannel
 				? entry.original.text
 				: entry.text;
 		return uncertain ? `Write unresolved: ${text}` : text;
@@ -603,11 +626,12 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
 		ownerOriginalText: string | undefined,
 		ownerPasted?: readonly OwnerTextRange[],
+		goalText = text,
 	): AgentMessage {
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
 		stampOwnerInput(message, inputId);
-		if (queuedGoalAuthority) this.deps.goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
+		if (queuedGoalAuthority) this.deps.goals.queueOwnerChatGoal(message, goalText, queuedGoalAuthority);
 		if (ownerOriginalText !== undefined)
 			this.deps.noteOwnerAuthoredMessage?.(message, ownerOriginalText, ownerPasted);
 		return message;
@@ -638,6 +662,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * from here: counted, projected, takeable and clearable. Its place in its kind's order is fixed.
 	 * `inputId` is the identity its submission was accepted under; a queued input accepted here is minted one now. `pasted`
 	 * are the ranges of `text` the owner pasted: taking the input back or restoring it after a restart keeps them.
+	 * `ownerChannel` names the owner channel an owner-channel input came from (`PromptOptions.ownerChannel`).
 	 */
 	register(
 		kind: "steer" | "followUp",
@@ -646,6 +671,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		origin?: SendUserMessageOrigin,
 		inputId?: OwnerInputId,
 		pasted?: readonly OwnerTextRange[],
+		ownerChannel?: OwnerChannelOrigin,
 	): PendingInputHandle {
 		if (inputId !== undefined && this.deps.ownerInputs.stateOf(inputId) === "uncertain")
 			throw new Error("An unresolved owner input cannot be queued again.");
@@ -658,6 +684,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					{ text, images, ...(pasted?.length ? { pasted } : {}) },
 					origin,
 					new AbortController(),
+					undefined,
+					ownerChannel,
 				);
 		this._insertEntry(entry);
 		this._changed();
@@ -677,10 +705,13 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		images: ImageContent[] | undefined,
 		origin: SendUserMessageOrigin | undefined,
 		pasted?: readonly OwnerTextRange[],
+		ownerChannel?: OwnerChannelOrigin,
 	): void {
 		if (this._closed) return;
 		const submitted = { text, images, ...(pasted?.length ? { pasted } : {}) };
-		this._preparing.push(this._newEntry(inputId, kind, submitted, origin, new AbortController()));
+		this._preparing.push(
+			this._newEntry(inputId, kind, submitted, origin, new AbortController(), undefined, ownerChannel),
+		);
 		this.deps.ownerInputs.whenUndelivered(inputId, (end) => this._leavePreparing(inputId, end.state !== "held"));
 		this._ownTurnChanged();
 	}
@@ -817,6 +848,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		origin: SendUserMessageOrigin | undefined,
 		abort: AbortController,
 		held?: true,
+		ownerChannel?: OwnerChannelOrigin,
 	): PendingEntry {
 		const context = this.deps.getInputContext?.();
 		const { text, images } = submitted;
@@ -828,6 +860,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			images,
 			original: { ...submitted },
 			...(origin ? { origin } : {}),
+			...(ownerChannel ? { ownerChannel } : {}),
 			abort,
 			...(held ? { held } : {}),
 			...(context ? { context } : {}),
@@ -1136,16 +1169,46 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		return false;
 	}
 
+	/** The inputs `handOff` would hand on now: each kind's decided, current ones up to the first still awaiting its decision. */
+	private _handableEntries(): PendingEntry[] {
+		const handable: PendingEntry[] = [];
+		for (const entries of [this._steering, this._followUp]) {
+			for (const entry of entries) {
+				if (entry.message || entry.held || this._isUncertain(entry)) continue;
+				if (!entry.admission) break;
+				if (this._contextCurrent(entry)) handable.push(entry);
+			}
+		}
+		return handable;
+	}
+
 	/**
 	 * Enqueue each kind's decided inputs up to the first one still awaiting its decision: a run consumes the agent's queue.
 	 * A third party's words never join a live run the owner decided, typed at the terminal or sent from a verified owner
 	 * channel: they wait, admitted, and the delivery run that starts once that run ends opens with them
-	 * (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words are not held behind them.
+	 * (`ForegroundRecoveryController.serviceWaitingInput`). The owner's own later words are not held behind them. Once the
+	 * owner's words from an owner channel are involved (one waits, or the live run is the remote owner's), words wait by
+	 * rank (`AUTHORITY_RANK`): behind a live run whose authority reaches further than theirs, and, with no live run, behind
+	 * the furthest-reaching words waiting, so the delivery run about to start takes those words only.
 	 */
 	handOff(): void {
 		if (this._closed) return;
-		const ownerRunLive =
-			this._foreground?.hasLiveConsumer === true && this._foreground.turnOrigin.authority() !== "third-party";
+		const foreground = this._foreground;
+		const live = foreground?.hasLiveConsumer === true;
+		const authority = live ? foreground.turnOrigin.authority() : undefined;
+		const handable = authority === "remote-owner" ? [] : this._handableEntries();
+		const ranked = authority === "remote-owner" || handable.some((entry) => entry.ownerChannel !== undefined);
+		let runRank = authority === undefined ? -1 : AUTHORITY_RANK[authority];
+		if (ranked && !live)
+			for (const entry of handable) {
+				const decides = entryAuthority(entry);
+				if (decides !== undefined) runRank = Math.max(runRank, AUTHORITY_RANK[decides]);
+			}
+		const waits = (entry: PendingEntry): boolean => {
+			if (!ranked) return entry.origin !== undefined && live && authority !== "third-party";
+			const decides = entryAuthority(entry);
+			return decides !== undefined && AUTHORITY_RANK[decides] < runRank;
+		};
 		for (const [entries, enqueue] of [
 			[
 				this._steering,
@@ -1160,7 +1223,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				if (entry.message || entry.held || this._isUncertain(entry)) continue;
 				const admission = entry.admission;
 				if (!admission) break;
-				if (entry.origin && ownerRunLive) continue;
+				if (waits(entry)) continue;
 				// The handoff to the agent is the delivery point: the input's context is checked here.
 				if (!this._contextCurrent(entry)) {
 					this._hold(entry, "context_changed");
@@ -1175,10 +1238,15 @@ export class PendingInputQueueController implements ForegroundInputPort {
 					admission.queuedGoalAuthority,
 					admission.ownerOriginalText,
 					admission.ownerPasted,
+					// A goal the phone's words start reads its objective from those words, not the channel's header line.
+					entry.ownerChannel ? admission.ownerOriginalText : undefined,
 				);
 				if (entry.origin) stampTurnOrigin(entry.message, channelTurnOrigin(entry.origin));
+				if (entry.ownerChannel) stampTurnOrigin(entry.message, ownerChannelTurnOrigin(entry.ownerChannel));
 				this.deps.ownerInputs.move(entry.inputId, "handed");
-				if (admission.ownerOriginalText !== undefined) this.deps.authorizeParentNoteOwner(entry.inputId);
+				// Parent notes ride the owner's typed words only (`isParentNoteOwnerId`).
+				if (admission.ownerOriginalText !== undefined && !entry.ownerChannel)
+					this.deps.authorizeParentNoteOwner(entry.inputId);
 				enqueue(entry.message);
 			}
 		}
@@ -1297,8 +1365,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		for (const entry of kind === "steer" ? [...this._steering] : [...this._followUp]) {
 			if (this._isUncertain(entry)) continue;
 			const delivered = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
-			// A framed third-party message returns as what the owner saw, never as the extension's frame.
-			let input = entry.origin ? { ...delivered, text: this._ownerText(entry) } : delivered;
+			// A framed third-party message returns as what the owner saw, never as the extension's frame; an owner-channel
+			// input as the phone's words, never with the channel's header line.
+			let input = entry.origin || entry.ownerChannel ? { ...delivered, text: this._ownerText(entry) } : delivered;
 			if (forReuse && input.preservedImages) {
 				const prepared = this.deps.record?.prepareInputForTake(input);
 				if (!prepared) continue;

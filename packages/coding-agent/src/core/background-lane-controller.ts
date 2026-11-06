@@ -42,6 +42,7 @@ import {
 	readAwayChannelStatus,
 } from "./channels/away-channels.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
+import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
@@ -166,6 +167,7 @@ import {
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
+import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -253,6 +255,8 @@ export interface BackgroundLaneControllerDeps
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
+	/** The session's owner channel: an owner batch enters as the owner's words through it (`OwnerChannelSession`). */
+	readonly ownerChannel?: OwnerChannelDelivery & { control(): OwnerChannelControl | undefined };
 	/** Rebuild the session's tool registry: the channel release tool follows the channel policies. */
 	refreshToolRegistry(): void;
 	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
@@ -372,6 +376,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
 			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
+			...(deps.ownerChannel ? { ownerDelivery: deps.ownerChannel } : {}),
+			ownerControl: () => deps.ownerChannel?.control(),
+			isEmergencyStopEngaged: () => isEmergencyStopEngaged(deps.getAgentDir()),
 			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),

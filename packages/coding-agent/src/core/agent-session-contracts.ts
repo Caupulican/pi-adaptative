@@ -17,6 +17,7 @@ import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readi
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
+import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
@@ -227,6 +228,22 @@ export interface ExtensionBindings {
 	onError?: ExtensionErrorListener;
 }
 
+/**
+ * An owner-channel submission. Its words (`approval` false) are the owner's, though not typed at the terminal: owner
+ * evidence, the request and a goal's start, never owner policy or an owner rule. An approval turn carries the stamp only:
+ * it is accepted on the untrusted path and decides nothing of the owner's.
+ */
+export interface OwnerChannelSubmission {
+	readonly origin: OwnerChannelOrigin;
+	/** The owner's own words within the submitted text (the channel's header line precedes them). */
+	readonly ownerText: string;
+	readonly approval: boolean;
+	/** The input was delivered: its user entry is persisted. */
+	readonly onDelivered?: () => void;
+	/** The input ended without being delivered (withdrawn, held, cancelled or refused). */
+	readonly onUndelivered?: () => void;
+}
+
 export interface PromptOptions {
 	/** Expand file prompt templates and skills. Defaults to true. */
 	expandPromptTemplates?: boolean;
@@ -238,6 +255,11 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Owner-visible form of an extension's framed third-party message (a peer message); see {@link SendUserMessageOrigin}. */
 	origin?: SendUserMessageOrigin;
+	/**
+	 * The owner's words from a verified owner channel, or the turn carrying an approval recorded there; set only by the
+	 * session's `OwnerChannelSession`, never with `origin`, `source`, `internalContextType` or `heldInput`.
+	 */
+	ownerChannel?: OwnerChannelSubmission;
 	/**
 	 * Ranges of `text` (offsets into the text passed to `prompt`, `end` exclusive) the owner pasted rather than typed, as
 	 * the interactive editor recorded them. Stored on the owner evidence and read as shown, never stated, text wherever the

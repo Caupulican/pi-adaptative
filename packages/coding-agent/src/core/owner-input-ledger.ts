@@ -14,8 +14,11 @@ export { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../kernel/ow
  * ends without being delivered (Withdrawn, Held, Cancelled, Refused).
  */
 
-/** Where an input was accepted. An extension's message (a peer's, say) is accepted on its untrusted path. */
-export type OwnerInputSource = "prompt" | "steer" | "followUp" | "extension";
+/**
+ * Where an input was accepted. An extension's message (a peer's, say) is accepted on its untrusted path; the owner's words
+ * from a verified owner channel (a phone) as `channel`: the owner's, though not typed at the terminal.
+ */
+export type OwnerInputSource = "prompt" | "steer" | "followUp" | "channel" | "extension";
 
 /**
  * The one state of an accepted input. `judged`: its words received their judgment. `pending`: admitted, waiting for its
@@ -94,8 +97,9 @@ interface InputRecord {
 }
 
 /**
- * Whether the owner spoke the input an id names: every source but an extension's message (a peer's, say). The id format
- * is minted by `accept` as `<source>:<uuid>`, and only this module reads the source back.
+ * Whether the owner spoke the input an id names: every source but an extension's message (a peer's, say), the owner's
+ * words from an owner channel included. The id format is minted by `accept` as `<source>:<uuid>`, and only this module
+ * reads the source back.
  */
 export function isOwnerSpokenInputId(id: string): boolean {
 	return !id.startsWith("extension:");

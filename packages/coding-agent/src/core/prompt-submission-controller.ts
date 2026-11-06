@@ -64,7 +64,7 @@ import type { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import type { ToolProtocolController } from "./tool-protocol-controller.ts";
-import { channelTurnOrigin, sendUserMessageOriginError } from "./turn-origin.ts";
+import { channelTurnOrigin, ownerChannelTurnOrigin, sendUserMessageOriginError } from "./turn-origin.ts";
 import { boundedLine } from "./util/bounded-line.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
@@ -367,9 +367,23 @@ export class PromptSubmissionController {
 		// A third party's message names its origin; one that cannot is refused here, before it is accepted or queued.
 		const originError = options?.origin === undefined ? undefined : sendUserMessageOriginError(options.origin);
 		if (originError) throw new TypeError(`A message's origin is invalid: ${originError}.`);
+		const ownerChannel = options?.ownerChannel;
+		if (
+			ownerChannel &&
+			(options.origin !== undefined ||
+				options.source !== undefined ||
+				options.internalContextType !== undefined ||
+				options.heldInput !== undefined ||
+				options.pasted !== undefined)
+		)
+			throw new TypeError("An owner-channel submission names no other origin, source, kept input or pasted range.");
+		// The owner's words from an owner channel are the owner's, though not typed at the terminal: never owner policy or an
+		// owner rule (typed only), so they take no submission order. An approval turn is accepted on the untrusted path.
+		const channelWords = ownerChannel !== undefined && !ownerChannel.approval;
+		const untrusted = options?.source === "extension" || ownerChannel?.approval === true;
 		// The owner's submission order, fixed now: every judgment of this submission carries it.
 		const acceptedOrder =
-			options?.internalContextType || options?.source === "extension" ? undefined : ++this.ownerSubmissionOrder;
+			options?.internalContextType || untrusted || channelWords ? undefined : ++this.ownerSubmissionOrder;
 		// Its identity, minted at acceptance for every source (an extension's message on its untrusted path): the message it
 		// becomes carries it, and its persistence delivers it. A hidden internal turn is no one's input and has none. Its
 		// words are judged only where their outcome is read (a fresh turn's at its first tool call), so a queued input judged
@@ -377,8 +391,14 @@ export class PromptSubmissionController {
 		const ownerWords: OwnerWords = { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
 		const input = options?.internalContextType
 			? undefined
-			: this.acceptInput(options?.source === "extension" ? "extension" : "prompt", ownerWords, acceptedOrder);
+			: this.acceptInput(untrusted ? "extension" : channelWords ? "channel" : "prompt", ownerWords, acceptedOrder);
 		const inputId = input?.inputId;
+		if (input && ownerChannel?.onDelivered)
+			this.deps.ownerInputs.whenDelivered(input.inputId, ownerChannel.onDelivered);
+		if (input && ownerChannel?.onUndelivered)
+			this.deps.ownerInputs.whenUndelivered(input.inputId, ownerChannel.onUndelivered);
+		// What the queued record keeps of an owner-channel input: the owner's words, as the owner sees and takes them back.
+		const recordedText = channelWords ? ownerChannel.ownerText : text;
 		const busyAtSubmission = this.deps.getSessionWorkState().busy;
 		const queuedBehavior = options?.internalContextType ? undefined : options?.streamingBehavior;
 		// A queued submission (the owner's, or an extension's such as a peer message) is pending from this
@@ -401,11 +421,12 @@ export class PromptSubmissionController {
 						)
 					: this.deps.pendingQueue.register(
 							queuedBehavior,
-							text,
+							recordedText,
 							options?.images,
 							options?.origin,
 							inputId,
 							options?.pasted,
+							ownerChannel?.origin,
 						)
 				: undefined;
 		// An input that does not queue here runs as its own turn: it is recorded from now until it is delivered or ends, so a
@@ -415,10 +436,11 @@ export class PromptSubmissionController {
 			this.deps.pendingQueue.trackOwnTurn(
 				input.inputId,
 				queuedBehavior ?? "followUp",
-				text,
+				recordedText,
 				options?.images,
 				options?.origin,
 				options?.pasted,
+				ownerChannel?.origin,
 			);
 		const keptTaken = kept !== undefined && !queuedBehavior && this.deps.pendingQueue.takeKept(kept);
 		if (queuedOwnerInput || kept) this.deps.emitQueueUpdate();
@@ -646,8 +668,14 @@ export class PromptSubmissionController {
 		if (submissionSignal?.aborted) return;
 		this.deps.toolProtocol.applyRepairLayerSettings();
 		this.deps.localPrefixWarm.cancel();
-		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
+		const ownerChannel = options?.ownerChannel;
+		// An approval turn carries the owner-channel stamp but none of the owner's words; owner-channel words are the owner's.
+		const approvalTurn = ownerChannel?.approval === true;
+		const channelWords = ownerChannel !== undefined && !approvalTurn;
+		const ownerSpoke = options?.source !== "extension" && !approvalTurn;
+		// An owner-channel delivery is never a command, a skill or a template.
+		const expandPromptTemplates = ownerChannel ? false : (options?.expandPromptTemplates ?? true);
+		const processSlashCommands = ownerChannel ? false : (options?.processSlashCommands ?? expandPromptTemplates);
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 		let routedTurnModel: Model<Api> | undefined;
@@ -671,7 +699,10 @@ export class PromptSubmissionController {
 		const admittedGoalId = options?.goalExecutionId;
 		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
 		// The submitted words with the ranges the owner pasted, carried through an input extension's rewrite and expansion.
-		const submittedWords: OwnerWords = { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
+		// Owner-channel words are the owner's words only, after the channel's header line, which no rewrite changes.
+		const submittedWords: OwnerWords = channelWords
+			? { text: ownerChannel.ownerText }
+			: { text, ...(options?.pasted?.length ? { pasted: options.pasted } : {}) };
 		let userRequest = submittedWords;
 		// The judgment this queued owner input's words already received, if they did: they are never judged again.
 		let ownerJudgment: OwnerRequestClassificationOutcome | undefined;
@@ -717,7 +748,7 @@ export class PromptSubmissionController {
 					.emitInput(
 						currentText,
 						currentImages,
-						options?.source ?? "interactive",
+						ownerChannel ? "extension" : (options?.source ?? "interactive"),
 						this.deps.isStreaming() ? options?.streamingBehavior : undefined,
 					);
 				if (inputResult.action === "handled") {
@@ -738,9 +769,11 @@ export class PromptSubmissionController {
 				expandedText = expandPromptTemplate(expandedText, [...this.deps.getPromptTemplates()]);
 			}
 
-			userRequest = carryOwnerWords(submittedWords, expandedText);
-			// Starting a goal is the owner's call: pasted words and a third party's words never state it.
-			if (!options?.internalContextType && !options?.origin)
+			userRequest = channelWords ? submittedWords : carryOwnerWords(submittedWords, expandedText);
+			// The owner's own text, as a goal reads its objective from it: the whole expanded text, or the owner-channel words.
+			const ownerGoalText = channelWords ? submittedWords.text : expandedText;
+			// Starting a goal is the owner's call: pasted words, a third party's words and an approval turn never state it.
+			if (!options?.internalContextType && !options?.origin && !approvalTurn)
 				goalToolStartAuthority = parseExplicitGoalStartAuthority(ownerTypedText(userRequest));
 
 			// If streaming — or waiting out a retry backoff, which is still an active
@@ -785,7 +818,7 @@ export class PromptSubmissionController {
 				}
 				// Only the owner's words carry owner evidence and are judged as owner intent; an extension's
 				// message (a peer's, say) is held in the same pending queue, but never classified.
-				const ownerOriginalText = options.source !== "extension" ? text : undefined;
+				const ownerOriginalText = ownerSpoke ? submittedWords.text : undefined;
 				// An input that became queued only after prompt() returned to its caller's turn registers
 				// here; one registered at submission keeps its original place.
 				const pending =
@@ -804,7 +837,8 @@ export class PromptSubmissionController {
 				// free: the input then runs as its own turn below instead of entering a queue that no run drains.
 				let ownTurn = false;
 				try {
-					if (ownerOriginalText !== undefined) {
+					// Only words with a submission order are judged as owner intent: owner-channel words are not owner policy.
+					if (ownerOriginalText !== undefined && lifecycle.input?.acceptedOrder !== undefined) {
 						const classified = await (queuedOwnerClassification ??
 							this.deps.judgeQueuedOwnerRequest(
 								submittedWords,
@@ -886,19 +920,19 @@ export class PromptSubmissionController {
 				// user entry persisted), never before: a prompt that ends undelivered changes no goal, and its run works on that
 				// goal only from its delivery. The goal it would own is read now, for the readiness that goal work needs. Only
 				// its typed words start a goal (`goalToolStartAuthority`); the objective is read from the whole text. An
-				// extension's message (a peer agent's, say) neither starts nor resumes a goal, though its turn still runs on one.
-				const ownerWords = options?.source !== "extension";
-				const ownerGoalId = ownerWords
+				// extension's message (a peer agent's, say) or an approval turn neither starts nor resumes a goal, though its turn
+				// still runs on one; the owner's words from an owner channel do.
+				const ownerGoalId = ownerSpoke
 					? this.deps.goals.previewOwnerPromptGoal(
-							expandedText,
+							ownerGoalText,
 							goalToolStartAuthority,
 							this.deps.agent.state.messages,
 						)
 					: undefined;
-				if (ownerWords)
+				if (ownerSpoke)
 					this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, () =>
 						this.deps.goals.applyDeliveredOwnerPrompt(
-							expandedText,
+							ownerGoalText,
 							goalToolStartAuthority,
 							this.deps.agent.state.messages,
 						),
@@ -939,13 +973,15 @@ export class PromptSubmissionController {
 					content: userContent,
 					timestamp: Date.now(),
 				};
-				if (options?.source !== "extension")
-					this.deps.reflection.markOwnerInput(userMessage, text, options?.pasted);
+				// Owner evidence: the owner's words as submitted (owner-channel words without the channel's header line).
+				if (ownerSpoke)
+					this.deps.reflection.markOwnerInput(userMessage, submittedWords.text, submittedWords.pasted);
 				promptMessage = userMessage;
 				// The message carries the input it is: its persistence delivers that input (a queued input its own turn took
 				// included), matched by this identity, never by the turn's end or the message's text.
 				if (lifecycle.input) stampOwnerInput(userMessage, lifecycle.input.inputId);
 				if (options?.origin) stampTurnOrigin(userMessage, channelTurnOrigin(options.origin));
+				if (ownerChannel) stampTurnOrigin(userMessage, ownerChannelTurnOrigin(ownerChannel.origin));
 				this.deps.earlyDisplayedUserMessages.add(userMessage);
 				this.deps.emit({ type: "message_start", message: userMessage });
 			}
@@ -1236,7 +1272,9 @@ export class PromptSubmissionController {
 				// Only the owner's words are the turn's request and owner policy. An extension's message (a peer agent's, say) is
 				// never classified and decides nothing: no grant, handoff, model pool, delivery binding or rule authority, and it
 				// replaces no request the operation, acquisition and plan-review gates judge a tool call against.
-				if (options?.source !== "extension") {
+				// The owner's words from an owner channel are the turn's request, never owner policy (they have no submission order);
+				// an approval turn is neither.
+				if (ownerSpoke) {
 					this.lastUserRequestValue = fenceOwnerPaste(userRequest);
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
@@ -1247,7 +1285,7 @@ export class PromptSubmissionController {
 					// an optional-tool intent covers them: a queued input judged before this turn's first tool call
 					// reads them into its staged judgment.
 					const input = lifecycle.input;
-					if (input)
+					if (input?.acceptedOrder !== undefined)
 						this.deps.ownerInputs.whenDelivered(input.inputId, () =>
 							this.deps.enqueueOwnerWords(submittedWords, input.acceptedOrder, ownerJudgment, submissionSignal),
 						);

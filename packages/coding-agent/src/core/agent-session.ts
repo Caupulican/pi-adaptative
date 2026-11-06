@@ -241,6 +241,7 @@ import {
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
+import { OwnerChannelSession } from "./owner-channel-session.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
 import { createOwnerInputPublicationObserver } from "./owner-input-publication-observer.ts";
 import {
@@ -410,6 +411,13 @@ export class AgentSession {
 	private readonly _pendingQueue: PendingInputQueueController;
 	/** Owner-input identities (minted at acceptance) and the one Delivered point: the input's user entry persisted. */
 	private readonly _ownerInputs = new OwnerInputLedger((message) => this._foregroundLifecycle.warn(message));
+	/** The owner's words from a verified owner channel: their delivery and the held drafts' control (the channels core's). */
+	readonly ownerChannel = new OwnerChannelSession(
+		this,
+		() => this._foregroundRecovery,
+		() => this.sessionManager,
+		() => this._disposed,
+	);
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
@@ -1153,6 +1161,7 @@ export class AgentSession {
 			canRunRoutines: () => !this._isChildSession,
 			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
+			ownerChannel: this.ownerChannel,
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
 			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
