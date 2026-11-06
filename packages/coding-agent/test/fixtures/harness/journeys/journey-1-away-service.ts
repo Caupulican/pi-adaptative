@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { APP_NAME } from "../../../../src/config.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
@@ -14,7 +13,6 @@ import {
 	resolveAwayServiceSpec,
 } from "../../../../src/core/routines/away-service.ts";
 import type { RoutineAwayAutostart } from "../../../../src/core/settings/settings-schema.ts";
-import type { SessionManager } from "../../../../src/kernel/node.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import {
@@ -23,6 +21,7 @@ import {
 	type HarnessWorld,
 	withDeadline,
 } from "../session-fixture.ts";
+import { flushedSessionManager } from "./shared.ts";
 
 const REFUSAL = /^Routines away cannot start at login: /;
 
@@ -166,24 +165,6 @@ export async function runJourney1AwayService(world: HarnessWorld, profile: Orche
 	} finally {
 		world.io.rmSync(managerMarker, { recursive: true, force: true });
 	}
-}
-
-/** A session file that is already written, so a notice is saved when it is observed. */
-function flushedSessionManager(world: HarnessWorld, agentDir: string): SessionManager {
-	const manager = world.createSessionManager(agentDir);
-	const model = world.provider.model("root");
-	manager.appendMessage({ role: "user", content: "Hello.", timestamp: Date.now() });
-	manager.appendMessage({
-		role: "assistant",
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		content: [{ type: "text", text: "Hello." }],
-		usage: createEmptyUsage(),
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
-	return manager;
 }
 
 /** Each platform's definition from explicit inputs: absolute paths with a space, `%` and `$`, quoted for its manager. */

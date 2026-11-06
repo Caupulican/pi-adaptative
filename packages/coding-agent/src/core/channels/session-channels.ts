@@ -23,23 +23,35 @@ import {
 	type JobSchedulerProvider,
 	type LifecycleOutcome,
 } from "../gateways/channel-provider.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, transcriptKeepsNotices } from "../harness-notice.ts";
 import { isProcessAlive } from "../process-liveness.ts";
-import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
+import {
+	boundedRedactedDiagnosticText,
+	hasMaskableSecretText,
+	MAX_RETAINED_DIAGNOSTIC_CHARS,
+} from "../security/secret-text.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel } from "./built-in-providers.ts";
 import {
+	type ChannelAwayUntold,
 	type ChannelBatchRecord,
 	type ChannelDraftRecord,
+	type ChannelGapRecord,
 	ChannelJournal,
 	type ChannelJournalState,
 	type ChannelPendingMessage,
+	type ChannelUntold,
 	channelDayUsage,
 	DAY_MS,
 	digest,
+	heldCount,
+	isUntoldEmpty,
 	MAX_PENDING_MESSAGES,
+	markTold,
 	PENDING_EXPIRY_MS,
+	recordGap,
+	untoldRecords,
 } from "./channel-journal.ts";
 import {
 	composeChannelBatch,
@@ -51,6 +63,8 @@ import {
 } from "./channel-message.ts";
 import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
 
+/** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
+const MAX_NAMED_AWAY_DRAFTS = 3;
 /** Pending drafts per channel; past it the channel delivers nothing new until the owner sends or dismisses some. */
 const MAX_PENDING_DRAFTS = 32;
 /** A sender id the owner is told verbatim: plain, short, never prose (a notice enters the owner's turn unfenced). */
@@ -152,7 +166,8 @@ export interface SessionChannelsDeps {
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
-	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
+	/** Whether the owner is told: the notice is kept for their next turn (`HarnessNoticeController.observe`). */
+	observeNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 	warn(message: string): void;
 	isDisposed(): boolean;
 	isChildSession(): boolean;
@@ -202,8 +217,10 @@ export class SessionChannels {
 	private readonly journals = new Map<string, ChannelJournal>();
 	private readonly unsubscribes: (() => void)[] = [];
 	private started = false;
-	/** When this session started serving: gaps recorded before it were another session's to tell. */
+	/** When the daemon's host started serving: it reports to the daemon the gaps it sees from then on. */
 	private startedAt = 0;
+	/** Set while a record waits to be told until the session's transcript keeps a notice: its next saved entry. */
+	private transcriptWait: (() => void) | undefined;
 	private routing = false;
 	private rerun = false;
 	private drainQueued = false;
@@ -363,6 +380,8 @@ export class SessionChannels {
 		this.started = false;
 		startedSessions.delete(this);
 		for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
+		this.transcriptWait?.();
+		this.transcriptWait = undefined;
 		this.followed.clear();
 		this.syncDirWatch();
 		await this.registry.stop();
@@ -521,8 +540,9 @@ export class SessionChannels {
 
 	/**
 	 * Settle as unanswered the accepted batches of sessions that no longer run (by the process each batch records, or
-	 * the previous holder's for a batch recorded before that); one gap tells them. A batch with no known process is
-	 * kept for the day its turn may still answer in. A live session's batches stay its own, a preempted host's included.
+	 * the previous holder's for a batch recorded before that); one gap tells them, and one more the daemon's among them
+	 * (`away`), whoever settles them. A batch with no known process is kept for the day its turn may still answer in. A
+	 * live session's batches stay its own, a preempted host's included.
 	 */
 	private settleDeadBatches(
 		name: string,
@@ -532,12 +552,14 @@ export class SessionChannels {
 		previousHolder?: ChannelJournalState["holder"],
 	): void {
 		let orphaned = 0;
+		let orphanedAway = 0;
 		for (const batch of state.batches) {
 			if (batch.state !== "accepted" || batch.sessionId === sessionId) continue;
 			const pid = batch.pid ?? (batch.sessionId === previousHolder?.sessionId ? previousHolder.pid : undefined);
 			if (pid === undefined ? now - batch.acceptedAt < DAY_MS : sessionLive(batch.sessionId, pid)) continue;
 			batch.state = "unanswered";
-			orphaned++;
+			if (batch.away) orphanedAway++;
+			else orphaned++;
 		}
 		if (orphaned > 0)
 			state.gaps.push({
@@ -545,6 +567,14 @@ export class SessionChannels {
 				reason: "unanswered",
 				count: orphaned,
 				at: now,
+			});
+		if (orphanedAway > 0)
+			recordGap(state, {
+				id: digest(`${name}:unanswered-away:${sessionId}:${now}`).slice(0, 16),
+				reason: "unanswered",
+				count: orphanedAway,
+				at: now,
+				away: true,
 			});
 	}
 
@@ -568,7 +598,7 @@ export class SessionChannels {
 				holder && holder.sessionId !== sessionId && holderLive(journalPath, holder) ? holder.sessionId : undefined;
 			state.holder = { sessionId, pid: process.pid, ...(away ? { away: true as const } : {}) };
 			this.settleDeadBatches(name, state, sessionId, now, holder);
-			return { preempted, state: structuredClone(state) };
+			return { preempted };
 		});
 		this.afterJournal(name, update.reset);
 		if (!update.result) return false;
@@ -576,50 +606,155 @@ export class SessionChannels {
 		const runtime = this.runtime(name);
 		runtime.holding = true;
 		runtime.draining = false;
-		const { preempted, state } = update.result;
-		if (!away) this.noticeAwayDrafts(name, state);
+		const { preempted } = update.result;
 		if (preempted !== undefined) {
 			// The preempted host of this process yields now; one in the daemon's process wakes on the journal's change.
 			this.offerToOthers();
 			this.followPreempted(name, preempted);
-		}
+		} else if (!away) this.tellUntold(name);
 		return true;
-	}
-
-	/** Tell the owner of the reply drafts the daemon's host wrote for the channel and that still wait; once per set. */
-	private noticeAwayDrafts(name: string, state: ChannelJournalState): void {
-		const ids = state.drafts
-			.filter((draft) => draft.away === true && draft.state === "pending")
-			.map((draft) => draft.id);
-		if (ids.length === 0) return;
-		this.deps.observeNotice("channel-reply", () => ({
-			scope: `${name}:away-drafts`,
-			state: {
-				reason: `away-drafts:${name}:${ids.join(",")}`,
-				text: `Channel ${name}: ${ids.length} reply draft(s) the daemon wrote while no session was open wait for you (${ids.join(", ")}). The channel_reply tool sends or dismisses them.`,
-			},
-		}));
 	}
 
 	/**
 	 * The host this session took the channel from still routes the turns it had accepted or was offering, and their
-	 * answers become drafts: follow the journal (reading only) until none of its turns is left, so each such draft is
-	 * told when written. A turn that host accepts after the preemption is followed too.
+	 * answers become drafts: follow the journal (reading only) until none of its turns is left, then tell what the
+	 * daemon left, so that summary holds those drafts too. A turn that host accepts after the preemption is followed too.
 	 */
 	private followPreempted(name: string, preempted: string): void {
-		if (this.followStep(name, preempted)) this.followed.set(name, preempted);
-		else this.followed.delete(name);
+		this.followed.set(name, preempted);
+		this.followStep(name, preempted);
 		this.syncDirWatch();
 	}
 
-	/** Tell the preempted host's drafts written so far; whether it still has a turn accepted or offered. */
+	/** Whether the preempted host still has a turn accepted or offered; once it has none, what it left is told. */
 	private followStep(name: string, preempted: string): boolean {
 		const state = this.journal(name).read().result;
-		this.noticeAwayDrafts(name, state);
-		return (
+		const busy =
 			state.batches.some((batch) => batch.state === "accepted" && batch.sessionId === preempted) ||
-			state.pending.some((entry) => entry.offeredTo === preempted)
-		);
+			state.pending.some((entry) => entry.offeredTo === preempted);
+		if (!busy) {
+			this.followed.delete(name);
+			this.tellUntold(name);
+		}
+		return busy;
+	}
+
+	/**
+	 * Tell the owner what the channel's journal holds that no session told: each gap of the channel's open sessions (or
+	 * a reset) by itself, and in one summary what the daemon's host left (its gaps, pending drafts and held messages)
+	 * unless this session still follows that host's interrupted turn. Only the session the journal names the holder
+	 * tells, and only while its transcript can keep a notice; until then it waits for the session's next saved entry.
+	 * The same locked journal update that decides to tell the records marks them told, so no session tells one twice,
+	 * and a notice the session did not keep takes its marks back, so the next pass or session tells it.
+	 */
+	private tellUntold(name: string): void {
+		if (!this.started || this.deps.away || this.deps.isDisposed()) return;
+		const sessionId = this.sessionId();
+		const journal = this.journal(name);
+		const withAway = !this.followed.has(name);
+		try {
+			const read = journal.read().result;
+			if (read.holder?.sessionId !== sessionId || isUntoldEmpty(untoldRecords(read, withAway))) return;
+			if (!transcriptKeepsNotices(this.deps.getSessionManager())) {
+				this.awaitTranscript();
+				return;
+			}
+			const now = this.now();
+			const update = journal.update(now, (state) => {
+				if (state.holder?.sessionId !== sessionId) return undefined;
+				const untold = untoldRecords(state, withAway);
+				if (isUntoldEmpty(untold)) return undefined;
+				markTold(state, untold, true);
+				return untold;
+			});
+			this.afterJournal(name, update.reset);
+			const untold = update.result;
+			if (!untold) return;
+			const lostGaps = untold.gaps.filter((gap) => !this.noticeGap(name, gap));
+			const lostAway = untold.away && !this.noticeAway(name, untold.away, sessionId, now) ? untold.away : undefined;
+			if (lostGaps.length === 0 && !lostAway) return;
+			const back: ChannelUntold = { gaps: lostGaps, ...(lostAway ? { away: lostAway } : {}) };
+			journal.update(this.now(), (state) => markTold(state, back, false));
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: what its journal recorded could not be told yet (${error instanceof Error ? error.message : String(error)}); a later pass tells it.`,
+			);
+		}
+	}
+
+	/** Run the work pass again at the session's next saved entry: a notice saved before it would wait unkept. */
+	private awaitTranscript(): void {
+		if (this.transcriptWait) return;
+		this.transcriptWait = this.deps.getSessionManager().onEntriesPersisted(() => {
+			this.transcriptWait?.();
+			this.transcriptWait = undefined;
+			this.scheduleWork();
+		});
+	}
+
+	private noticeGap(name: string, gap: ChannelGapRecord): boolean {
+		const text =
+			gap.reason === "expired"
+				? `Channel ${name}: ${gap.count} message(s) waited more than 24 hours and were dropped undelivered.`
+				: gap.reason === "unanswered"
+					? `Channel ${name}: ${gap.count} delivered conversation(s) got no reply (the turn ended without an answer for them, or the session that served them closed).`
+					: `Channel ${name}: its journal could not be read and was replaced; messages and drafts it held are not delivered.`;
+		return this.deps.observeNotice("channel-gap", () => ({
+			scope: `${name}:${gap.id}`,
+			state: { reason: `gap:${name}:${gap.id}`, text },
+		}));
+	}
+
+	/**
+	 * One notice of what the daemon's host left: its drafts by id and reason, the messages it dropped and the
+	 * conversations it left unanswered, and the messages it held, counted by reason; never a sender's id, label or words.
+	 * As many drafts are named as fit the notice's one bounded line, the rest are counted.
+	 */
+	private noticeAway(name: string, away: ChannelAwayUntold, sessionId: string, now: number): boolean {
+		const summed = (reason: ChannelGapRecord["reason"]) =>
+			away.gaps.filter((gap) => gap.reason === reason).reduce((sum, gap) => sum + gap.count, 0);
+		const expired = summed("expired");
+		const unanswered = summed("unanswered");
+		const held = heldCount(away.held);
+		const heldKinds = (
+			[
+				[away.held.not_allowed, `not in channels.${name}.allowedSenders`],
+				[away.held.unverified, "unverified"],
+				[away.held.burst, `over channels.${name}.maxPendingPerConversation`],
+			] as const
+		).flatMap(([count, kind]) => (count ? [`${count} ${kind}`] : []));
+		if (away.drafts.length === 0 && expired === 0 && unanswered === 0 && held === 0) return true;
+		const compose = (named: number, heldDetail: boolean): string => {
+			const parts: string[] = [];
+			if (away.drafts.length > 0) {
+				const listed = away.drafts.slice(0, named).map((draft) => `${draft.id}: ${draft.reason}`);
+				const more = away.drafts.length - listed.length;
+				if (more > 0 && listed.length > 0) listed.push(`and ${more} more`);
+				parts.push(
+					`${away.drafts.length} reply draft(s) wait for channel_reply${listed.length > 0 ? ` (${listed.join(", ")})` : ""}`,
+				);
+			}
+			if (expired > 0) parts.push(`${expired} message(s) expired after 24 hours`);
+			if (unanswered > 0) parts.push(`${unanswered} delivered conversation(s) got no reply`);
+			if (held > 0) parts.push(`${held} message(s) held${heldDetail ? ` (${heldKinds.join(", ")})` : ""}`);
+			return `While the daemon served channel ${name}: ${parts.join("; ")}.`;
+		};
+		// The most detail that fits; the least is cut at the line's bound by the notice itself.
+		const fitting = () => {
+			for (let named = Math.min(MAX_NAMED_AWAY_DRAFTS, away.drafts.length); named >= 0; named--)
+				for (const heldDetail of [true, false]) {
+					const candidate = compose(named, heldDetail);
+					if (candidate.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return candidate;
+				}
+			return compose(0, false);
+		};
+		const text = fitting();
+		const told = [...away.gaps.map((gap) => gap.id), ...away.drafts.map((draft) => draft.id)].join(",");
+		const id = digest(`${name}:away:${sessionId}:${now}:${told}:${JSON.stringify(away.held)}`).slice(0, 16);
+		return this.deps.observeNotice("channel-gap", () => ({
+			scope: `${name}:away:${id}`,
+			state: { reason: `away:${name}:${id}`, text },
+		}));
 	}
 
 	/** Open the journal directory's watch while this open session follows a host or waits for a channel; else close it. */
@@ -659,7 +794,7 @@ export class SessionChannels {
 	}
 
 	private onJournalDirChange(): void {
-		for (const [name, preempted] of this.followed) if (!this.followStep(name, preempted)) this.followed.delete(name);
+		for (const [name, preempted] of this.followed) this.followStep(name, preempted);
 		// Admission reads the journal before it locks it, so a channel still served elsewhere costs no write here.
 		if ([...this.runtimes.values()].some((runtime) => runtime.state === "served_elsewhere"))
 			void this.registry.refreshChannels();
@@ -803,6 +938,7 @@ export class SessionChannels {
 					continue;
 				}
 				if (runtime.state === "armed" || runtime.state === "capped") this.deliverNext(name, policy);
+				this.tellUntold(name);
 			}
 		} catch (error) {
 			this.deps.warn(`Channel delivery failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -816,22 +952,6 @@ export class SessionChannels {
 	private afterJournal(name: string, reset: boolean): void {
 		if (reset)
 			this.deps.warn(`Channel ${name}: its journal could not be read; it was moved aside and a new one started.`);
-	}
-
-	private noticeGaps(name: string, state: ChannelJournalState, since: number): void {
-		for (const gap of state.gaps) {
-			if (gap.at < since) continue;
-			const text =
-				gap.reason === "expired"
-					? `Channel ${name}: ${gap.count} message(s) waited more than 24 hours and were dropped undelivered.`
-					: gap.reason === "unanswered"
-						? `Channel ${name}: ${gap.count} delivered conversation(s) got no reply (the turn ended without an answer for them, or the session that served them closed).`
-						: `Channel ${name}: its journal could not be read and was replaced; messages and drafts it held are not delivered.`;
-			this.deps.observeNotice("channel-gap", () => ({
-				scope: `${name}:${gap.id}`,
-				state: { reason: `gap:${name}:${gap.id}`, text },
-			}));
-		}
 	}
 
 	/** An inbound event, from the provider's own handler. Resolves once the journal holds it; throws to make it redeliver. */
@@ -858,6 +978,8 @@ export class SessionChannels {
 				state.held.push({ sender: digest(event.senderId).slice(0, 16), kind: event.kind, reason, at: now });
 				state.heldTotal++;
 				state.seen.push({ d: eventDigest, at: now, outcome: "held" });
+				// Counted for the owner's next session, which tells what the daemon's host left (`tellUntold`).
+				if (this.deps.away) state.awayHeld = { ...state.awayHeld, [reason]: (state.awayHeld?.[reason] ?? 0) + 1 };
 				return "held" as const;
 			};
 			if (!isAdmittedKind(event.kind)) {
@@ -866,6 +988,8 @@ export class SessionChannels {
 				return "ignored" as const;
 			}
 			if (!event.verified) return held("unverified");
+			// No owner reads the daemon's host: a sender's one notice a day is left for an open session to give.
+			if (this.deps.away && !policy.allowedSenders.includes(event.senderId)) return held("not_allowed");
 			if (!policy.allowedSenders.includes(event.senderId)) {
 				// The owner learns a verified sender's id from the harness, at most once a day per sender, a few a day.
 				const sender = digest(event.senderId).slice(0, 16);
@@ -965,11 +1089,12 @@ export class SessionChannels {
 			for (const entry of state.seen) if (gone.has(entry.d)) entry.outcome = "expired";
 			const messages = expired.filter((entry) => entry.kind === "message").length;
 			if (messages > 0)
-				state.gaps.push({
+				recordGap(state, {
 					id: digest(`${name}:expired:${[...gone].join(",")}`).slice(0, 16),
 					reason: "expired",
 					count: messages,
 					at: now,
+					...(this.deps.away ? { away: true as const } : {}),
 				});
 		}
 		for (const entry of state.pending) {
@@ -1031,7 +1156,8 @@ export class SessionChannels {
 			pick = update.result.pick;
 			state = update.result.state;
 		}
-		this.noticeGaps(name, state, this.startedAt);
+		// The daemon's host reports the gaps it sees to the daemon; an open session tells them to the owner (`tellUntold`).
+		if (this.deps.away) for (const gap of state.gaps) if (gap.at >= this.startedAt) this.noticeGap(name, gap);
 		if (pick.kind === "not_holder") {
 			this.lostHold(name);
 			return;
@@ -1218,11 +1344,16 @@ export class SessionChannels {
 			try {
 				await this.sendParts(provider, batch, formatted.parts);
 			} catch (error) {
+				// Only a shipped transport's error is kept: its text is Pi's own words. A wrapper's may carry remote text,
+				// and the reason reaches the owner's notices unfenced.
+				const said = this.builtIns.has(name)
+					? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
+					: undefined;
 				this.keepDraft(
 					name,
 					batch,
 					outcome.text,
-					`sending failed: ${error instanceof Error ? error.message : String(error)}`,
+					said ? `sending failed: ${said}` : "sending failed",
 					0,
 					"replied",
 				);
@@ -1249,7 +1380,8 @@ export class SessionChannels {
 
 	/**
 	 * Move one batch from `from` (accepted, or replied for a send that failed) to `state`, adding what its turn spent and
-	 * its draft; whether it moved. A batch another pass already settled is left as it is, so nothing is settled twice.
+	 * its draft; whether it moved. A batch another pass already settled is left as it is, so nothing is settled twice. A
+	 * conversation the daemon's host leaves unanswered is also a gap, for the owner's next session to be told.
 	 */
 	private settleBatch(
 		name: string,
@@ -1259,12 +1391,21 @@ export class SessionChannels {
 		draft: ChannelDraftRecord | undefined,
 		from: ChannelBatchRecord["state"] = "accepted",
 	): boolean {
-		return this.journal(name).update(this.now(), (journal) => {
+		const now = this.now();
+		return this.journal(name).update(now, (journal) => {
 			const batch = journal.batches.find((entry) => entry.id === batchId);
 			if (!batch || batch.state !== from) return false;
 			batch.state = state;
 			if (usd > 0) batch.usd = (batch.usd ?? 0) + usd;
 			if (draft && !journal.drafts.some((entry) => entry.id === draft.id)) journal.drafts.push(draft);
+			if (state === "unanswered" && this.deps.away)
+				recordGap(journal, {
+					id: digest(`${name}:unanswered-away:${batchId}`).slice(0, 16),
+					reason: "unanswered",
+					count: 1,
+					at: now,
+					away: true,
+				});
 			return true;
 		}).result;
 	}

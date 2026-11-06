@@ -7,7 +7,8 @@
  * work, no owner decisions), System One is off, and its tools are read-only and reach only its working directory, never
  * the agent directory or the private paths every lane is denied (`privatePathScope`). A channel's message is a third party's
  * words there exactly as in an open session: the origin gate applies, and the reply waits as a draft unless the owner
- * set `replyMode: "auto"`. Drafts wait for the owner's next session, which is told of them.
+ * set `replyMode: "auto"`. Its drafts, the messages it dropped or held and the conversations it left unanswered wait
+ * in the journal for the first session that takes the channel, which tells the owner of them once.
  *
  * An open session takes a channel over at once (`SessionChannels.takeHold`); this host stops its provider, and a turn
  * it was running ends as a draft. When the session gives the channel up, the journal's change wakes this host
@@ -373,10 +374,11 @@ export class AwayChannelHosts {
 				return () => activity.delete(listener);
 			},
 			sendUserMessage: (text, options) => session.sendUserMessage(text, options),
-			// No owner reads this session: what it would tell them goes to the daemon's reports, once per state.
+			// No owner reads this session: what it would tell them goes to the daemon's reports, once per state, and the
+			// owner is never told here.
 			observeNotice: (kind, read) => {
 				const observation = read();
-				if (!observation) return;
+				if (!observation) return false;
 				const scoped =
 					typeof observation === "object" && "scope" in observation
 						? observation
@@ -384,9 +386,9 @@ export class AwayChannelHosts {
 				const key = `${kind}:${scoped.scope}`;
 				if (scoped.state === "clear") {
 					notices.delete(key);
-					return;
+					return false;
 				}
-				if (notices.get(key) === scoped.state.reason) return;
+				if (notices.get(key) === scoped.state.reason) return false;
 				notices.delete(key);
 				notices.set(key, scoped.state.reason);
 				if (notices.size > MAX_HOST_NOTICES) {
@@ -394,6 +396,7 @@ export class AwayChannelHosts {
 					if (oldest !== undefined) notices.delete(oldest);
 				}
 				this.input.report(scoped.state.text);
+				return false;
 			},
 			warn: (message) => this.input.report(message),
 			isDisposed: () => this.closed,

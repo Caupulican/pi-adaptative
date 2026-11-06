@@ -81,6 +81,8 @@ export interface ChannelDraftRecord {
 	settledAt?: number;
 	/** Written by the daemon while no session was open; the next session that serves the channel is told. */
 	readonly away?: true;
+	/** An open session holding the channel told the owner of this away draft; no session tells it again. */
+	told?: true;
 }
 
 export interface ChannelGapRecord {
@@ -88,7 +90,14 @@ export interface ChannelGapRecord {
 	readonly reason: "expired" | "unanswered" | "reset";
 	readonly count: number;
 	readonly at: number;
+	/** The conversations were the daemon's: the owner is told of it in the summary of what the daemon left. */
+	readonly away?: true;
+	/** An open session holding the channel told the owner of this gap; no session tells it again. */
+	told?: true;
 }
+
+/** Messages the daemon's host held, by reason, that no session told the owner of yet. */
+export type ChannelHeldCounts = Partial<Record<ChannelHeldReason, number>>;
 
 export interface ChannelJournalState {
 	version: number;
@@ -98,6 +107,8 @@ export interface ChannelJournalState {
 	seen: { d: string; at: number; outcome: ChannelSeenOutcome }[];
 	held: { sender: string; kind: string; reason: ChannelHeldReason; at: number }[];
 	heldTotal: number;
+	/** Held while the daemon's host served the channel and not told yet; absent when there is none. */
+	awayHeld?: ChannelHeldCounts;
 	ignoredTotal: number;
 	batches: ChannelBatchRecord[];
 	drafts: ChannelDraftRecord[];
@@ -184,7 +195,8 @@ function isDraft(value: unknown): value is ChannelDraftRecord {
 		isTime(value.createdAt) &&
 		(value.state === "pending" || value.state === "sent" || value.state === "dismissed") &&
 		(value.settledAt === undefined || isTime(value.settledAt)) &&
-		(value.away === undefined || value.away === true)
+		(value.away === undefined || value.away === true) &&
+		(value.told === undefined || value.told === true)
 	);
 }
 
@@ -194,12 +206,20 @@ function isGap(value: unknown): value is ChannelGapRecord {
 		isString(value.id) &&
 		(value.reason === "expired" || value.reason === "unanswered" || value.reason === "reset") &&
 		isCount(value.count) &&
-		isTime(value.at)
+		isTime(value.at) &&
+		(value.away === undefined || value.away === true) &&
+		(value.told === undefined || value.told === true)
 	);
 }
 
 const SEEN_OUTCOMES = new Set<unknown>(["pending", "delivered", "held", "ignored", "expired"]);
 const HELD_REASONS = new Set<unknown>(["unverified", "not_allowed", "burst"]);
+
+function isHeldCounts(value: unknown): value is ChannelHeldCounts {
+	return (
+		isPlainRecord(value) && Object.entries(value).every(([key, count]) => HELD_REASONS.has(key) && isCount(count))
+	);
+}
 
 /** Strict: any field out of shape makes the whole file unreadable, never a partly trusted journal. */
 function parseState(text: string): ChannelJournalState {
@@ -216,6 +236,7 @@ function parseState(text: string): ChannelJournalState {
 		)
 	)
 		throw new Error("malformed holder");
+	if (value.awayHeld !== undefined && !isHeldCounts(value.awayHeld)) throw new Error("malformed held counts");
 	const list = <T>(field: unknown, check: (item: unknown) => item is T): T[] => {
 		if (!Array.isArray(field) || !field.every(check)) throw new Error("malformed journal list");
 		return field;
@@ -247,6 +268,8 @@ function parseState(text: string): ChannelJournalState {
 				isTime(item.at),
 		),
 		heldTotal: isCount(value.heldTotal) ? value.heldTotal : 0,
+		// Absent in a journal written before the daemon's held messages were told.
+		...(value.awayHeld === undefined ? {} : { awayHeld: { ...(value.awayHeld as ChannelHeldCounts) } }),
 		ignoredTotal: isCount(value.ignoredTotal) ? value.ignoredTotal : 0,
 		batches: list(value.batches, isBatch),
 		drafts: list(value.drafts, isDraft),
@@ -275,7 +298,10 @@ function prune(state: ChannelJournalState, now: number): void {
 	const settledDrafts = state.drafts.filter((draft) => draft.state !== "pending");
 	const dropDrafts = new Set(settledDrafts.slice(0, Math.max(0, state.drafts.length - MAX_DRAFTS)));
 	state.drafts = state.drafts.filter((draft) => !dropDrafts.has(draft));
-	state.gaps = state.gaps.slice(-MAX_GAPS);
+	// Told gaps go first, so a long absence keeps what no session told yet.
+	const toldGaps = state.gaps.filter((gap) => gap.told === true);
+	const dropGaps = new Set(toldGaps.slice(0, Math.max(0, state.gaps.length - MAX_GAPS)));
+	state.gaps = state.gaps.filter((gap) => !dropGaps.has(gap)).slice(-MAX_GAPS);
 	state.onboarding = state.onboarding.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_ONBOARDING);
 }
 
@@ -340,6 +366,80 @@ export class ChannelJournal {
 			return { result: emptyState(), reset: true };
 		}
 	}
+}
+
+/** What the daemon's host left that no session told the owner of: its gaps, its pending drafts, its held messages. */
+export interface ChannelAwayUntold {
+	readonly gaps: readonly ChannelGapRecord[];
+	readonly drafts: readonly ChannelDraftRecord[];
+	readonly held: ChannelHeldCounts;
+}
+
+/** What one tell covers: gaps told one by one, and what the daemon's host left when the tell covers it. */
+export interface ChannelUntold {
+	readonly gaps: readonly ChannelGapRecord[];
+	readonly away?: ChannelAwayUntold;
+}
+
+/** Copies of the records no session told the owner of yet; `away` only when `withAway`. Reads only. */
+export function untoldRecords(state: ChannelJournalState, withAway: boolean): ChannelUntold {
+	const gaps = state.gaps.filter((gap) => gap.told !== true && gap.away !== true).map((gap) => ({ ...gap }));
+	if (!withAway) return { gaps };
+	return {
+		gaps,
+		away: {
+			gaps: state.gaps.filter((gap) => gap.told !== true && gap.away === true).map((gap) => ({ ...gap })),
+			drafts: state.drafts
+				.filter((draft) => draft.away === true && draft.state === "pending" && draft.told !== true)
+				.map((draft) => ({ ...draft })),
+			held: { ...state.awayHeld },
+		},
+	};
+}
+
+/**
+ * Record a gap. A gap of the daemon's host joins its untold gap of the same reason, so the bounded list keeps the
+ * count of a long absence; the open sessions' gaps are told one by one and are kept apart.
+ */
+export function recordGap(state: ChannelJournalState, gap: ChannelGapRecord): void {
+	const index =
+		gap.away === true
+			? state.gaps.findIndex((entry) => entry.away === true && entry.told !== true && entry.reason === gap.reason)
+			: -1;
+	const untold = index >= 0 ? state.gaps[index] : undefined;
+	if (untold) state.gaps[index] = { ...untold, count: untold.count + gap.count };
+	else state.gaps.push(gap);
+}
+
+export function heldCount(held: ChannelHeldCounts): number {
+	return (held.unverified ?? 0) + (held.not_allowed ?? 0) + (held.burst ?? 0);
+}
+
+export function isUntoldEmpty(untold: ChannelUntold): boolean {
+	const away = untold.away;
+	return (
+		untold.gaps.length === 0 &&
+		(away === undefined || (away.gaps.length === 0 && away.drafts.length === 0 && heldCount(away.held) === 0))
+	);
+}
+
+/**
+ * Mark `untold` told in `state` (`told: true`), or, with `told: false`, take the mark back from a tell whose notice
+ * was not kept. The held counts are taken off the waiting counts, or given back.
+ */
+export function markTold(state: ChannelJournalState, untold: ChannelUntold, told: boolean): void {
+	const gapIds = new Set([...untold.gaps, ...(untold.away?.gaps ?? [])].map((gap) => gap.id));
+	for (const gap of state.gaps) if (gapIds.has(gap.id)) gap.told = told ? true : undefined;
+	const draftIds = new Set((untold.away?.drafts ?? []).map((draft) => draft.id));
+	for (const draft of state.drafts) if (draftIds.has(draft.id)) draft.told = told ? true : undefined;
+	const held = untold.away?.held;
+	if (!held) return;
+	const next: ChannelHeldCounts = {};
+	for (const reason of ["unverified", "not_allowed", "burst"] as const) {
+		const count = (state.awayHeld?.[reason] ?? 0) + (told ? -1 : 1) * (held[reason] ?? 0);
+		if (count > 0) next[reason] = count;
+	}
+	state.awayHeld = heldCount(next) > 0 ? next : undefined;
 }
 
 /** The turns delivered in the last 24 hours and what they cost: the figures a channel's daily bounds are read against. */

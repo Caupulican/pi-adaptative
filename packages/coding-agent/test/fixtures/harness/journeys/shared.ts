@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
 import { stateFile } from "../../../../src/core/agent-paths.ts";
@@ -199,6 +200,24 @@ export function bundleEntries(entries: ReadonlyMap<string, string>, bundleDir: s
 		selected.push([path, content]);
 	}
 	return selected;
+}
+
+/** A session file that is already written, so a notice is saved when it is observed. */
+export function flushedSessionManager(world: HarnessWorld, agentDir: string): SessionManager {
+	const manager = world.createSessionManager(agentDir);
+	const model = world.provider.model("root");
+	manager.appendMessage({ role: "user", content: "Hello.", timestamp: Date.now() });
+	manager.appendMessage({
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		content: [{ type: "text", text: "Hello." }],
+		usage: createEmptyUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+	return manager;
 }
 
 /** Every message of a failure, including the members of an aggregate, so a wrapped diagnostic is still matched. */

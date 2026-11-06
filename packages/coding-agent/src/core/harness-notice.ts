@@ -97,6 +97,18 @@ export function harnessNoticeDeliveryId(
 }
 
 /**
+ * Whether a notice observed now is saved at once: the durable channel is a persisted root transcript with a persisted
+ * anchor. Before it, a notice waits in memory for the session's next saved entry and is lost if the runtime ends first.
+ */
+export function transcriptKeepsNotices(
+	manager: Pick<SessionManager, "getSessionFile" | "getLeafId" | "isEntryPersisted">,
+): boolean {
+	const leafId = manager.getLeafId();
+	if (!manager.getSessionFile() || !leafId) return false;
+	return manager.isEntryPersisted(leafId);
+}
+
+/**
  * Tells the owner once, with their next turn, that an automatic capability stopped for a reason they can act on. It
  * never wakes a turn and never calls a model. Each (session, kind, reason) episode has one durable notice: a second
  * detection or a replay finds the saved input and adds nothing. A new notice for the same reason needs this runtime to
@@ -316,9 +328,8 @@ export class HarnessNoticeController {
 			this.drop(notice);
 			return;
 		}
-		const leafId = manager.getLeafId();
-		// The durable channel is a persisted root transcript with a persisted anchor; until then the notice waits.
-		if (!manager.getSessionFile() || !leafId || !manager.isEntryPersisted(leafId)) return;
+		// Until the transcript keeps it, the notice waits.
+		if (!transcriptKeepsNotices(manager)) return;
 		this.inFlight.add(notice.deliveryId);
 		void Promise.resolve()
 			.then(() => {

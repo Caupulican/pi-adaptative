@@ -14,7 +14,7 @@ import { parentInputOriginalDetails } from "../../../../src/kernel/session/paren
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { icmLatestResult, refusalDiagnostic } from "./shared.ts";
+import { flushedSessionManager, icmLatestResult, refusalDiagnostic } from "./shared.ts";
 
 /**
  * A deployment's transport as the core sees it: it is started with the core's inbound handler, hands events over and
@@ -107,7 +107,11 @@ interface JournalView {
 		readonly reason: string;
 		readonly text: string;
 		readonly away?: true;
+		readonly told?: true;
 	}[];
+	readonly gaps: readonly { readonly reason: string; readonly away?: true; readonly told?: true }[];
+	readonly awayHeld?: Readonly<Record<string, number>>;
+	readonly onboarding: readonly unknown[];
 }
 
 /** The harness notices of `kind` the session saved for its owner: one per delivery (reason and generation). */
@@ -473,7 +477,10 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
  * starts nothing. Alice's question gets its turn there and its answer goes back to her (`replyMode: "auto"`). A
  * session that opens while the daemon's next turn runs takes the channel over at once: the daemon's transport stops,
  * that turn's answer waits as one draft marked as written away, the session delivers nothing again and its status
- * counts the draft. Closing the session gives the channel back to the daemon, and stopping the daemon gives it up.
+ * counts the draft. Once that turn is settled the session tells its owner, in one notice, what the daemon left: the
+ * draft by id and reason, a message it found past its day and the stranger it held, counted, with none of their words.
+ * Closing the session gives the channel back to the daemon; a second session taking it again tells nothing, and stopping
+ * the daemon gives it up.
  */
 export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -496,10 +503,42 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 		routines: { away: { autostart: "off" as const } },
 		channels: { phone: policy },
 	};
-	const journal = (): JournalView =>
-		JSON.parse(String(world.io.readFileSync(join(agentDir, "channels", "phone.json")))) as JournalView;
+	const journalPath = join(agentDir, "channels", "phone.json");
+	const journal = (): JournalView => JSON.parse(String(world.io.readFileSync(journalPath))) as JournalView;
 	const journalHolds = (holds: (state: JournalView) => boolean) =>
-		world.io.waitForMutation(() => world.io.existsSync(join(agentDir, "channels", "phone.json")) && holds(journal()));
+		world.io.waitForMutation(() => world.io.existsSync(journalPath) && holds(journal()));
+	// A message that has waited past its day when the daemon first serves the channel: the daemon drops it undelivered.
+	const expiredWords = "the lilac harbor ledger";
+	const waitedSince = Date.now() - 25 * 60 * 60 * 1000;
+	const expiredDigest = "seeded-expired-event";
+	world.io.seed(
+		journalPath,
+		JSON.stringify({
+			version: 1,
+			pending: [
+				{
+					eventDigest: expiredDigest,
+					conversationKey: "chat-7",
+					address: "chat-7-address",
+					senderId: "alice",
+					senderLabel: "Alice",
+					verified: true,
+					kind: "message",
+					text: expiredWords,
+					receivedAt: waitedSince,
+					admittedAt: waitedSince,
+				},
+			],
+			seen: [{ d: expiredDigest, at: waitedSince, outcome: "pending" }],
+			held: [],
+			heldTotal: 0,
+			ignoredTotal: 0,
+			batches: [],
+			drafts: [],
+			gaps: [],
+			onboarding: [],
+		}),
+	);
 	const daemonPhone = new ScriptedChannel("phone");
 	const built: string[] = [];
 	const daemonServes = daemonPhone.nextStart();
@@ -520,6 +559,14 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	await withDeadline(trace, "the daemon serves the channel", daemonServes);
 	expect(built, "the daemon builds the configured channel's transport once").toEqual(["phone"]);
 	expect(journal().holder?.away, "the daemon's host holds the channel").toBe(true);
+	await withDeadline(
+		trace,
+		"the daemon drops the message past its day",
+		journalHolds((state) => state.gaps.length === 1),
+	);
+	expect(journal().gaps, "the drop is the daemon's, not told yet").toMatchObject([{ reason: "expired", away: true }]);
+	expect(journal().gaps[0]?.told).toBeUndefined();
+	expect(journal().pending, "the dropped message's words are gone").toEqual([]);
 	trace.mark("root", "away-channels.served");
 
 	// A verified stranger is held: no turn, no request.
@@ -530,6 +577,10 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 		journal().held.map((entry) => entry.reason),
 		"a stranger is held",
 	).toEqual(["not_allowed"]);
+	expect(journal().awayHeld, "the daemon counts the held stranger for the owner's next session").toEqual({
+		not_allowed: 1,
+	});
+	expect(journal().onboarding, "no owner reads the daemon: the sender's onboarding notice is left").toEqual([]);
 	expect(world.provider.requests.length, "a stranger starts no turn").toBe(requestsBefore);
 
 	// Alice's question gets its turn in the headless session, and its answer goes back to her address. Its file tools
@@ -635,7 +686,8 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	await daemonPhone.deliver(event("p-2", "chat-9", alice, "and the schedule"));
 	await withDeadline(trace, "the daemon's second turn starts", turnReached.promise);
 	const daemonYields = daemonPhone.nextStop();
-	const manager = world.createSessionManager(agentDir);
+	// Its transcript is written, so what it tells is saved when it is observed.
+	const manager = flushedSessionManager(world, agentDir);
 	const reopened = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: manager,
@@ -676,13 +728,90 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 	]);
 	trace.mark("root", "away-channels.taken-over");
 
-	// The session closes: the daemon takes the channel back; stopping the daemon gives it up.
+	// With the preempted turn settled, the session tells its owner once what the daemon left: the draft by id and
+	// reason, the dropped message and the held stranger counted, and no sender's id, label or words.
+	await withDeadline(
+		trace,
+		"the owner is told what the daemon left",
+		noticeSaved(manager, "channel-gap", "away:phone:"),
+	);
+	const summaries = notices(manager, "channel-gap");
+	expect(summaries.length, "one summary, and no notice per record").toBe(1);
+	expect(notices(manager, "channel-reply"), "the daemon's draft has no notice of its own").toEqual([]);
+	const summary = summaries[0]?.text ?? "";
+	expect(summary).toContain("While the daemon served channel phone:");
+	expect(summary, "the draft is named by id and reason").toContain(
+		`1 reply draft(s) wait for channel_reply (${preempted.drafts[0]?.id}: the channel is not running)`,
+	);
+	expect(summary).toContain("1 message(s) expired after 24 hours");
+	expect(summary).toContain("1 message(s) held (1 not in channels.phone.allowedSenders)");
+	for (const words of [
+		expiredWords,
+		"alice",
+		"mallory",
+		"hello",
+		"release notes",
+		"schedule",
+		"chat-7",
+		"chat-9",
+		"docs folder",
+	])
+		expect(summary.toLowerCase(), "no third party's text reaches the owner's notice").not.toContain(words);
+	const told = journal();
+	expect(
+		told.gaps.map((gap) => [gap.reason, gap.away, gap.told]),
+		"the dropped message is told",
+	).toEqual([["expired", true, true]]);
+	expect(
+		told.drafts.map((draft) => [draft.state, draft.told]),
+		"the draft is told and still waits",
+	).toEqual([["pending", true]]);
+	expect(told.awayHeld, "the held stranger is told").toBeUndefined();
+	trace.mark("root", "away-channels.told");
+
+	// The session closes: the daemon takes the channel back.
 	const daemonReturns = daemonPhone.nextStart();
 	expect(await world.disposeSessionInBody(reopened.session), "the open session closes").toBeUndefined();
 	await withDeadline(trace, "the daemon takes the channel back", daemonReturns);
 	expect(journal().holder?.away, "the daemon serves the channel again").toBe(true);
+
+	// A second session takes the channel from the daemon again: everything is told already, so it tells nothing.
+	const daemonYieldsAgain = daemonPhone.nextStop();
+	const againManager = flushedSessionManager(world, agentDir);
+	const again = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: againManager,
+		systemOneEnabled: false,
+		settings,
+	});
+	const againPhone = new ScriptedChannel("phone");
+	again.session.registerChannelProvider(againPhone);
+	await withDeadline(trace, "the daemon yields the channel again", daemonYieldsAgain);
+	expect(journal().holder?.sessionId, "the second session holds the channel").toBe(againManager.getSessionId());
+	const againNotices = (await again.session.autonomyStatus()).harnessNotices;
+	if (againNotices.status !== "available") throw new Error(`Harness notices unavailable: ${againNotices.reason}`);
+	expect(
+		againNotices.value.observed.items.filter((item) => item.kind === "channel-gap"),
+		"the second takeover observes nothing to tell",
+	).toEqual([]);
+	expect(notices(againManager, "channel-gap"), "nothing is told twice").toEqual([]);
+	expect(notices(againManager, "channel-reply"), "the told draft is not announced again").toEqual([]);
+	expect(
+		journal().drafts.map((draft) => [draft.state, draft.told]),
+		"the draft still waits, told",
+	).toEqual([["pending", true]]);
+	const daemonReturnsAgain = daemonPhone.nextStart();
+	expect(await world.disposeSessionInBody(again.session), "the second session closes").toBeUndefined();
+	await withDeadline(trace, "the daemon takes the channel back again", daemonReturnsAgain);
+	trace.mark("root", "away-channels.told-once");
+
+	// Stopping the daemon gives the channel up.
 	expect(await withDeadline(trace, "the daemon stops", daemon.stop()), "the daemon exits cleanly").toBe(0);
 	expect(journal().holder, "a stopped daemon serves nothing").toBeUndefined();
-	expect([daemonPhone.starts, daemonPhone.stops, sessionPhone.stops], "every start is stopped").toEqual([2, 2, 1]);
+	expect(
+		[daemonPhone.starts, daemonPhone.stops, sessionPhone.stops, againPhone.stops],
+		"every start is stopped",
+	).toEqual([3, 3, 1, 1]);
+	expect(world.provider.requests.length - requestsBefore, "telling the owner starts no turn").toBe(3);
 	trace.mark("root", "away-channels.closed");
 }
