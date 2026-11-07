@@ -345,6 +345,7 @@ export interface ChannelPolicySettings {
 	ownerMaxUsdPerTurn?: number; // default: 1 (0.05..20) — one owner turn's spend; reserved at the offer, the turn is stopped past it
 	ownerPushPerHour?: number; // default: 12 (0..60) — updates pushed to the owner's chat per rolling hour
 	ownerTerminalOnlyClasses?: EdgeClass[]; // default: [] — edge classes a phone `approve` never releases
+	ownerAuthority?: "guarded" | "full"; // default: "guarded"; "full" (telegram and slack) runs an owner turn with the session's grants and mode
 }
 
 export type ResolvedProactivitySettings = Required<Omit<ProactivitySettings, "model" | "actAhead" | "feedback">> &

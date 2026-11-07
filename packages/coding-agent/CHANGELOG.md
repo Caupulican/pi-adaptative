@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `channels.<name>.ownerAuthority: "full"` on `telegram` and `slack` (default `"guarded"`): the owner's verified phone messages run with the terminal's authority (the session's grants, the terminal's classifier, nothing past the boundary in YOLO, owner rules and operator grants for the owner's words) instead of the guarded phone limits. The live check, hardline and `edge.deny` floor, emergency stop, spend bounds and per-use approvals stay, and any policy edit ends a running full turn. See [Channels](docs/channels.md#the-owners-own-chat).
+
 ## [0.104.35] - 2026-11-06
 
 ### Breaking Changes

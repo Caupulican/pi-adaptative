@@ -95,7 +95,7 @@ export interface ProviderRequestContextControllerDeps {
 	>;
 	/**
 	 * Edge authority grants the run in progress may use (`effectiveEdgeGrants`: the session's on the owner's own runs and
-	 * outside a run, fewer on a fenced or phone run); projected after compaction or whenever active.
+	 * outside a run and on a full-authority phone run, fewer on a fenced or guarded phone run); projected after compaction or whenever active.
 	 */
 	getEdgeGrants?(): readonly EdgeGrantView[];
 	applyPathAliases(messages: AgentMessage[]): {

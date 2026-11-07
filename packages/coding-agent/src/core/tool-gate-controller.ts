@@ -124,7 +124,7 @@ export interface ToolGateControllerDeps {
 	 * Whether the run in progress was opened from an owner channel: YOLO stands for the owner at the terminal, so on such a
 	 * run it skips no gate (envelope, acquisition screening, extension blocks, direct-script gate, System One hooks).
 	 */
-	runsRemoteOwner?(): boolean;
+	runsGuardedRemoteOwner?(): boolean;
 	/**
 	 * Settles the owner's approval a remote-owner call claimed at the edge or the operation gate: `started` when the call's
 	 * body starts (its draft is released durably; a release that cannot be written throws an `AgentToolPolicyDeniedError`
@@ -331,7 +331,7 @@ export class ToolGateController {
 		signal?.throwIfAborted();
 		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
-		const yolo = this.deps.getExecutionMode?.() === "yolo" && this.deps.runsRemoteOwner?.() !== true;
+		const yolo = this.deps.getExecutionMode?.() === "yolo" && this.deps.runsGuardedRemoteOwner?.() !== true;
 		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
 		if (selfCompactionBlock) return selfCompactionBlock;
 		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);

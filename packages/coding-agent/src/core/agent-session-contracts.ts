@@ -230,8 +230,8 @@ export interface ExtensionBindings {
 
 /**
  * An owner-channel submission. Its words (`approval` false) are the owner's, though not typed at the terminal: owner
- * evidence, the request and a goal's start, never owner policy or an owner rule. An approval turn carries the stamp only:
- * it is accepted on the untrusted path and decides nothing of the owner's.
+ * evidence, the request and a goal's start, never owner policy or an owner rule, unless `full` answers true. An approval
+ * turn carries the stamp only: it is accepted on the untrusted path and decides nothing of the owner's.
  */
 export interface OwnerChannelSubmission {
 	readonly origin: OwnerChannelOrigin;
@@ -242,6 +242,11 @@ export interface OwnerChannelSubmission {
 	readonly onDelivered?: () => void;
 	/** The input ended without being delivered (withdrawn, held, cancelled or refused). */
 	readonly onUndelivered?: () => void;
+	/**
+	 * Present on a delivery offered under `ownerAuthority: "full"`: the channel's liveness answer, asked at submission and
+	 * again at delivery. While it answers true the words are also owner policy and owner rules, as typed words are.
+	 */
+	readonly full?: () => boolean;
 }
 
 export interface PromptOptions {

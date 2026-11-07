@@ -242,6 +242,8 @@ export interface ChannelJournalSummary {
 	 * only while the policy lists owner senders.
 	 */
 	readonly ownerSpendUsd?: { readonly used: number; readonly max: number };
+	/** Present while the policy lists owner senders and sets `ownerAuthority: "full"`. */
+	readonly ownerFullAuthority?: true;
 }
 
 /** One reply draft as the owner's release tool lists it. */
@@ -1598,7 +1600,7 @@ export class SessionChannels {
 		runtime.offering = true;
 		this.deliverOwnerTurn(
 			name,
-			{ channel: name, senderDigest, ref: batchId },
+			{ channel: name, senderDigest, ref: batchId, ...(policy.ownerFullAuthority ? { full: true as const } : {}) },
 			composeOwnerBatch(name, messages),
 			this.ownerLive(name, senderDigest, policy),
 			false,
@@ -2169,7 +2171,13 @@ export class SessionChannels {
 		approvedReply: string,
 	): void {
 		const provider = this.registry.getChannel(name);
-		const origin: OwnerChannelOrigin = { channel: by.channel, senderDigest: by.senderDigest, ref: by.ref };
+		// The approval run re-issues the held call, so it runs under the channel's authority mode as the policy reads now.
+		const origin: OwnerChannelOrigin = {
+			channel: by.channel,
+			senderDigest: by.senderDigest,
+			ref: by.ref,
+			...(policy.ownerFullAuthority ? { full: true } : {}),
+		};
 		const reply = (text: string) => {
 			if (provider) void this.sendControlReply(name, provider, event, eventDigest, text);
 		};
@@ -2354,6 +2362,9 @@ export class SessionChannels {
 				awayDrafts: state.drafts.filter((draft) => draft.away === true && draft.state === "pending").length,
 				...(policy.ownerSenders.length > 0
 					? { ownerSpendUsd: { used: ownerRoom(name, state, policy, now).usedUsd, max: policy.ownerMaxUsdPerDay } }
+					: {}),
+				...(policy.ownerSenders.length > 0 && policy.ownerFullAuthority
+					? { ownerFullAuthority: true as const }
 					: {}),
 			};
 		});

@@ -17,6 +17,11 @@ export interface OwnerChannelOrigin {
 	readonly senderDigest: string;
 	/** The channel's batch id for this delivery, so the run it opens finds its turn again. */
 	readonly ref: string;
+	/**
+	 * Set (true) when the channel's policy read `ownerAuthority: "full"` at the offer: the run holds the owner's own
+	 * authority for as long as its `live` answers true. Any policy change ends `live`, so this never outlives the setting.
+	 */
+	readonly full?: true;
 }
 
 /**

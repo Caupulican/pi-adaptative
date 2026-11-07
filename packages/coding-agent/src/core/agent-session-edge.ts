@@ -96,6 +96,11 @@ export interface SessionEdgeDeps {
 	 * such a run; absent means it does not, so a remote-owner run with no answer holds no authority.
 	 */
 	isOwnerChannelLive?(origin: TurnOriginRecord): boolean;
+	/**
+	 * Whether that owner channel holds the owner's full authority (`ownerAuthority: "full"`) and is still live: the run then
+	 * uses the session's grants and the terminal's classification. Absent means guarded.
+	 */
+	isOwnerChannelFull?(origin: TurnOriginRecord): boolean;
 	/** Shows a draft held on a remote-owner run to the owner's phone; the notice in the session is written either way. */
 	presentOwnerDraft?(view: OwnerDraftView): void;
 	/**
@@ -233,14 +238,32 @@ export function remoteOwnerEdgeGrants(
 }
 
 /**
+ * The grants of the remote-owner run `origin` names: the session's, as at the terminal, while its owner channel holds
+ * the owner's full authority; `remoteOwnerEdgeGrants` otherwise.
+ */
+export function remoteOwnerRunGrants(
+	deps: Pick<
+		SessionEdgeDeps,
+		"getEdgeRecords" | "getSettingsAllow" | "getThirdPartySettingsAllow" | "isOwnerChannelFull"
+	>,
+	origin: TurnOriginRecord,
+): EdgeGrantView[] {
+	return deps.isOwnerChannelFull?.(origin) === true ? sessionEdgeGrants(deps) : remoteOwnerEdgeGrants(deps);
+}
+
+/**
  * The grants the run in progress may use: on a run carrying a third party's words, only the owner's standing ones; on
- * a run opened from an owner channel, `remoteOwnerEdgeGrants`.
+ * a run opened from an owner channel, `remoteOwnerRunGrants`.
  */
 export function effectiveEdgeGrants(
-	deps: Pick<SessionEdgeDeps, "getEdgeRecords" | "getSettingsAllow" | "getThirdPartySettingsAllow" | "getRunOrigin">,
+	deps: Pick<
+		SessionEdgeDeps,
+		"getEdgeRecords" | "getSettingsAllow" | "getThirdPartySettingsAllow" | "getRunOrigin" | "isOwnerChannelFull"
+	>,
 ): EdgeGrantView[] {
 	if (thirdPartyRunOrigin(deps)) return standingEdgeGrants(deps);
-	return remoteOwnerRunOrigin(deps) ? remoteOwnerEdgeGrants(deps) : sessionEdgeGrants(deps);
+	const remote = remoteOwnerRunOrigin(deps);
+	return remote ? remoteOwnerRunGrants(deps, remote) : sessionEdgeGrants(deps);
 }
 
 export function originLabel(origin: TurnOriginRecord): string {
@@ -825,7 +848,10 @@ function holdForOwner(
  * settings authority, refused; the operations the outward classifier names (destructive and conditional
  * ones included) and the harness actions it does not classify, each against `remoteOwnerEdgeGrants`; the owner's
  * approval of exactly this call, consumed once; otherwise a held draft. No confirmation handler and no owner follow-up
- * take part, and no model decides.
+ * take part, and no model decides. While the owner channel holds the owner's full authority (`isOwnerChannelFull`) the
+ * typed-only table, settings authority and unclassified actions refuse or hold nothing: the operations are the ones the
+ * terminal classifies (none past the boundary in YOLO), against the session's grants, and the boundary, the approval
+ * and the hold stay as they are.
  */
 async function enforceRemoteOwnerEdge(
 	deps: SessionEdgeDeps,
@@ -855,19 +881,32 @@ async function enforceRemoteOwnerEdge(
 		});
 		return { block: true, reason: `Refused: ${boundary.reason}.` };
 	}
-	const typedOnly = remoteOwnerTypedOnlyReason(toolName, args);
-	if (typedOnly) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, typedOnly) };
-	const classified = classifyOutwardEdgeOperations({
-		toolName,
-		args,
-		cwd: executionCwd ?? scopeCwd,
-		scopeCwd,
-		protectedWrites: deps.getProtectedWritePaths?.(),
-	});
-	const settings = remoteOwnerTypedOnlyOperation(classified);
-	if (settings) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, settings.reason) };
-	const unclassified = remoteOwnerUnclassifiedAction(toolName, args);
-	if (unclassified) classified.push(unclassified);
+	// Full authority classifies as the terminal does: every operation in guarded mode, nothing past the boundary in YOLO.
+	const full = deps.isOwnerChannelFull?.(origin) === true;
+	if (!full) {
+		const typedOnly = remoteOwnerTypedOnlyReason(toolName, args);
+		if (typedOnly) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, typedOnly) };
+	}
+	const classified = !full
+		? classifyOutwardEdgeOperations({
+				toolName,
+				args,
+				cwd: executionCwd ?? scopeCwd,
+				scopeCwd,
+				protectedWrites: deps.getProtectedWritePaths?.(),
+			})
+		: deps.getMode?.() === "yolo"
+			? []
+			: classifyAllEdgeOperations(
+					{ toolName, args, cwd: executionCwd ?? scopeCwd, scopeCwd },
+					{ includeConditional: true },
+				);
+	if (!full) {
+		const settings = remoteOwnerTypedOnlyOperation(classified);
+		if (settings) return { block: true, ...remoteOwnerTypedOnly(deps, toolName, settings.reason) };
+		const unclassified = remoteOwnerUnclassifiedAction(toolName, args);
+		if (unclassified) classified.push(unclassified);
+	}
 	// What YOLO asks the owner about on every call: no grant covers it here either, only the approval of this call.
 	if (boundary?.kind === "confirm")
 		classified.push({
@@ -881,7 +920,7 @@ async function enforceRemoteOwnerEdge(
 	// The condition read may have waited: the owner channel's authority is read again before anything is admitted.
 	const endedMeanwhile = remoteOwnerEnded(deps, origin, toolName);
 	if (endedMeanwhile) return { block: true, ...endedMeanwhile };
-	const grants = remoteOwnerEdgeGrants(deps);
+	const grants = remoteOwnerRunGrants(deps, origin);
 	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
 	if (ungranted.length === 0) return undefined;
 	const call: EdgeCall = { toolName, args };
@@ -911,7 +950,8 @@ export function recordEdgeRevoke(deps: SessionEdgeDeps, edgeClass: EdgeClass, sc
  * Used by run_toolkit_script authorizer, composite child execution and the operation gate's operator question. On a
  * remote-owner run it never asks a handler or writes an owner follow-up: the operation runs under a remote-owner grant
  * or the owner's approval of exactly `call`, and is held as a draft otherwise (with no `call`, a draft only the
- * terminal performs).
+ * terminal performs). Under the owner channel's full authority the typed-only table refuses nothing, YOLO authorizes
+ * as at the terminal, and the grants are the session's.
  */
 export async function enforceSessionEdgeOperation(
 	deps: SessionEdgeDeps,
@@ -930,9 +970,11 @@ export async function enforceSessionEdgeOperation(
 	if (remote) {
 		const ended = remoteOwnerEnded(deps, remote, call?.toolName ?? toolName);
 		if (ended) return { authorized: false, ...ended };
-		if (remoteOwnerTypedOnlyOperation([operation]))
+		const full = deps.isOwnerChannelFull?.(remote) === true;
+		if (!full && remoteOwnerTypedOnlyOperation([operation]))
 			return { authorized: false, ...remoteOwnerTypedOnly(deps, call?.toolName ?? toolName, operation.reason) };
-		if (isEdgeOperationGranted(operation, remoteOwnerEdgeGrants(deps))) return { authorized: true };
+		if (full && deps.getMode?.() === "yolo") return { authorized: true };
+		if (isEdgeOperationGranted(operation, remoteOwnerRunGrants(deps, remote))) return { authorized: true };
 		const approval = call ? consumeOwnerApproval(deps, remote, call) : undefined;
 		if (approval === "admitted") return { authorized: true };
 		if (approval) return { authorized: false, ...approvalInUse(deps, call?.toolName ?? toolName, approval) };

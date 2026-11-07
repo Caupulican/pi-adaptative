@@ -26,6 +26,7 @@ import {
 	recordEdgeRevoke,
 	releaseOutwardDrafts,
 	remoteOwnerEdgeGrants,
+	remoteOwnerRunGrants,
 	type SessionEdgeDeps,
 	sessionEdgeGrants,
 	standingEdgeGrants,
@@ -233,9 +234,13 @@ export interface SessionEdgeIntentControllerDeps {
 	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 	/**
 	 * The owner-channel plane's answers for a run opened from an owner channel: whether the channel still holds the
-	 * owner's authority, the presentation of a held draft, the opener's sender digest. Absent: such a run holds none.
+	 * owner's authority, and its full authority, the presentation of a held draft, the opener's sender digest. Absent: such
+	 * a run holds none.
 	 */
-	readonly ownerChannel?: Pick<SessionEdgeDeps, "isOwnerChannelLive" | "presentOwnerDraft" | "ownerChannelSender">;
+	readonly ownerChannel?: Pick<
+		SessionEdgeDeps,
+		"isOwnerChannelLive" | "isOwnerChannelFull" | "presentOwnerDraft" | "ownerChannelSender"
+	>;
 	/** `SessionEdgeDeps.holdsAgainAtExecution`: whether executing the call reaches the edge again with no call. */
 	holdsAgainAtExecution?(call: EdgeCall): boolean;
 }
@@ -245,7 +250,7 @@ export class SessionEdgeIntentController {
 	readonly ownerPolicy: OwnerPolicyQueue<OwnerRequestClassificationOutcome>;
 	readonly modelPolicy: OwnerModelPolicy;
 	private operationGateInstance?: OperationGate;
-	/** The operation gate of a run opened from an owner channel: its grants are `remoteOwnerEdgeGrants`. */
+	/** The operation gate of a run opened from an owner channel: its grants are `remoteOwnerRunGrants`. */
 	private remoteOwnerOperationGateInstance?: OperationGate;
 	/** The call the remote-owner operation gate is checking, for its operator question (one scope per call). */
 	private readonly remoteOwnerCall = new AsyncLocalStorage<EdgeCall>();
@@ -362,7 +367,8 @@ export class SessionEdgeIntentController {
 	 * The root's own tool calls are checked here: the delegation gate (steers, so YOLO does not skip it) and the operation
 	 * gate, which YOLO skips only on the owner's own terminal runs (`runsOutsideOwnerTerminal`). A run opened from an owner
 	 * channel is checked by its own operation gate; a call its edge admitted on the owner's approval is admitted here too.
-	 * On such a run YOLO skips no gate at all (`runsRemoteOwner`).
+	 * On such a run YOLO skips no gate at all (`runsGuardedRemoteOwner`), unless the channel holds the owner's full
+	 * authority: YOLO then skips what it skips at the terminal.
 	 */
 	rootCallChecks() {
 		return {
@@ -381,8 +387,9 @@ export class SessionEdgeIntentController {
 					this.remoteOwnerOperationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
 				);
 			},
-			runsOutsideOwnerTerminal: () => this.deps.getForegroundRun().turnOrigin.authority() !== "owner",
-			runsRemoteOwner: () => this.runsRemoteOwner(),
+			runsOutsideOwnerTerminal: () =>
+				this.deps.getForegroundRun().turnOrigin.authority() !== "owner" && !this.runsFullOwner(),
+			runsGuardedRemoteOwner: () => this.runsRemoteOwner() && !this.runsFullOwner(),
 			settleApprovedCall: (args: unknown, started: boolean) => this.settleApprovedCall(args, started),
 		};
 	}
@@ -456,6 +463,14 @@ export class SessionEdgeIntentController {
 		return isRemoteOwnerOrigin(this.deps.getForegroundRun().turnOrigin.origin());
 	}
 
+	/** Whether the run in progress was opened from an owner channel that holds the owner's full authority and is live. */
+	private runsFullOwner(): boolean {
+		const origin = this.deps.getForegroundRun().turnOrigin.origin();
+		return (
+			isRemoteOwnerOrigin(origin) && origin !== undefined && this.edgeDeps().isOwnerChannelFull?.(origin) === true
+		);
+	}
+
 	/** The verdict caches' turn: the submission, the run's authority and the owner's request it reads. */
 	private systemOneTurnKey(): string {
 		return `${this.deps.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this.deps.getForegroundRun().turnOrigin.authority()}\u0000${this.deps.getLastUserRequest()}`;
@@ -512,12 +527,17 @@ export class SessionEdgeIntentController {
 	/**
 	 * The operation gate of a run opened from an owner channel. The session gate's grants include the defaulted
 	 * `edge.allow`, which stands for the owner at the terminal and would admit every call; this one reads
-	 * `remoteOwnerEdgeGrants`, and its operator question carries the complete call, so a held operation is bound to it.
+	 * `remoteOwnerRunGrants` (the session's only under the channel's full authority), and its operator question carries
+	 * the complete call, so a held operation is bound to it and approvable from the phone.
 	 */
 	private get remoteOwnerOperationGate(): OperationGate {
 		this.remoteOwnerOperationGateInstance ??= this.rootOperationGate({
-			getEdgeGrants: (standingOnly) =>
-				standingOnly ? standingEdgeGrants(this.edgeDeps()) : remoteOwnerEdgeGrants(this.edgeDeps()),
+			getEdgeGrants: (standingOnly) => {
+				const deps = this.edgeDeps();
+				const origin = this.deps.getForegroundRun().turnOrigin.origin();
+				if (standingOnly) return standingEdgeGrants(deps);
+				return origin ? remoteOwnerRunGrants(deps, origin) : remoteOwnerEdgeGrants(deps);
+			},
 			askOperator: async (operation, signal) => {
 				const call = this.remoteOwnerCall.getStore();
 				return enforceSessionEdgeOperation(this.edgeDeps(), operation, call?.toolName ?? "operation", signal, call);
@@ -601,6 +621,7 @@ export class SessionEdgeIntentController {
 			releaseOutward: (toolName, operations) =>
 				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),
 			isOwnerChannelLive: (origin) => this.deps.ownerChannel?.isOwnerChannelLive?.(origin) === true,
+			isOwnerChannelFull: (origin) => this.deps.ownerChannel?.isOwnerChannelFull?.(origin) === true,
 			ownerChannelSender: (origin) => this.deps.ownerChannel?.ownerChannelSender?.(origin),
 			holdsAgainAtExecution: (call) => this.deps.holdsAgainAtExecution?.(call) === true,
 			claimApprovedCall: (draftId, args) => {
