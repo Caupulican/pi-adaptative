@@ -1682,6 +1682,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
 			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
 			join(`${world.agentDir}-telegram-bounds`, "channels", "telegram.token"),
+			join(`${world.agentDir}-telegram-quota`, "channels", "telegram.token"),
 		]);
 		for (const [path, text] of world.io.fileEntries())
 			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
