@@ -1,11 +1,14 @@
 ## [Unreleased]
 
-## [0.104.40] - 2026-11-07
-
 ### Changed
 
 - Group chats show what each working bot is doing right now: after the last message, one line per working member in that bot's own colour (`◐ scout read mailbox/02.eml`, `◐ idea messages triage`), updated as it works; a bot's colour is the same in its messages, the header and its live line.
 - Matrix theme: a vivid accent green distinct from the success green, a brighter body text, a stronger selection wash, a vivid amber warning, and a pending tool background that no longer equals the custom message background. A bot's group colour now comes from five distinct hues (accent, link, warning, number, type) so two bots no longer share a green.
+
+## [0.104.40] - 2026-11-07
+
+### Changed
+
 - The cost guard treats every subscription login as unmetered while the account has allowance (usage windows below 95%), not only `openai-codex`, and applies again once the provider reports the allowance exhausted, since extra usage and credits are money. A subscription whose usage the provider does not report stays unmetered.
 - `createAgentSession` takes `subscriptionAllowance`, the port the owner channel's dollar bounds and the cost guard read the subscription's allowance through; an embedder with its own usage source supplies it.
 
