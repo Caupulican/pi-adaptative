@@ -560,6 +560,7 @@ export class InteractiveLayout {
 				};
 			},
 			team: () => ({
+				rootStreaming: port.getSession().isStreaming,
 				projection: port.getSession().operatorProjection.getProjection(),
 				health: port.getSession().getSemanticPlaneHealth(),
 				last: port.getSession().getSemanticEvaluations().at(-1),

@@ -8,6 +8,9 @@ import { isAbsolute } from "node:path";
 import { type EdgeClass, isEdgeClass } from "../autonomy/edge-policy.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
+/** The usage percent at which a subscription counts as out of allowance unless a setting says otherwise; the cost guard applies the same rule. */
+export const DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT = 95;
+
 export const MAX_ALLOWED_SENDERS = 50;
 export const MAX_CHANNEL_BATCH = 25;
 const MAX_SENDER_ID_CHARS = 256;
@@ -183,7 +186,13 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 		ownerSenders: parseOwnerSenders(name, value.ownerSenders, key),
 		ownerMaxUsdPerDay: numberIn(value.ownerMaxUsdPerDay, 5, 0, 100, `${key}.ownerMaxUsdPerDay`),
 		ownerMaxUsdPerTurn: numberIn(value.ownerMaxUsdPerTurn, 1, 0.05, 20, `${key}.ownerMaxUsdPerTurn`),
-		ownerQuotaMaxUsedPercent: numberIn(value.ownerQuotaMaxUsedPercent, 95, 0, 100, `${key}.ownerQuotaMaxUsedPercent`),
+		ownerQuotaMaxUsedPercent: numberIn(
+			value.ownerQuotaMaxUsedPercent,
+			DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT,
+			0,
+			100,
+			`${key}.ownerQuotaMaxUsedPercent`,
+		),
 		ownerPushPerHour: integerIn(value.ownerPushPerHour, 12, 0, 60, `${key}.ownerPushPerHour`),
 		ownerTerminalOnlyClasses: parseTerminalOnlyClasses(value.ownerTerminalOnlyClasses, key),
 		...(ownerFullAuthority ? { ownerFullAuthority: true as const } : {}),

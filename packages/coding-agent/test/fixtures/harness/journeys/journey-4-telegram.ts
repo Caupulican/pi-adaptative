@@ -12,7 +12,15 @@ import {
 	readSessionLeaseHolders,
 	SessionHostedError,
 } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
-import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
+import {
+	type Barrier,
+	calls,
+	createBarrier,
+	HARNESS_PROVIDER,
+	type ScriptedReply,
+	type ScriptedRequest,
+	type ScriptStep,
+} from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
@@ -1223,6 +1231,207 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 			"the bounds leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-bounds.closed");
+	} finally {
+		world.fetchResponder = undefined;
+	}
+}
+
+interface QuotaLegJournal {
+	readonly holder?: unknown;
+	readonly seen: readonly { readonly d: string }[];
+	readonly batches: readonly {
+		readonly id: string;
+		readonly state: string;
+		readonly usd?: number;
+		readonly owner?: true;
+		readonly quota?: true;
+	}[];
+}
+
+/**
+ * The subscription's allowance instead of the dollar bounds, and the owner's full authority from the phone. The owner pool
+ * holds `$0.05` per turn and `$0.10` per day; the session reads a scripted subscription usage. While every window is below
+ * `ownerQuotaMaxUsedPercent` a turn that spends $0.06 is not stopped, its answer reaches the chat, it charges the pool
+ * nothing (`quota` batch) and `status` says the dollar bounds do not apply and why. A phone turn that the harness settings
+ * file write would have refused as typed-only runs under `ownerAuthority: "full"` (the same call is refused in the owner leg).
+ * Once the usage is exhausted, the same $0.06 turn is stopped before its tool call and the chat is told which bound did it.
+ */
+export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-telegram-quota`;
+	const channelsDir = join(agentDir, "channels");
+	const tokenPath = join(channelsDir, "telegram.token");
+	const journalPath = join(channelsDir, "telegram.json");
+	world.io.mkdirSync(channelsDir, { recursive: true });
+	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	const journal = (): QuotaLegJournal =>
+		world.io.existsSync(journalPath)
+			? (JSON.parse(String(world.io.readFileSync(journalPath))) as QuotaLegJournal)
+			: { seen: [], batches: [] };
+	const journalHolds = (holds: (state: QuotaLegJournal) => boolean) =>
+		world.io.waitForMutation(() => holds(journal()));
+	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
+	world.fetchResponder = (input, init) => api.respond(input, init);
+	const warningsBefore = world.warnings.length;
+	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
+	let allowance:
+		| { readonly kind: "room"; readonly usedPercent: number }
+		| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string } = {
+		kind: "room",
+		usedPercent: 40,
+	};
+	const costly = (name: string, content: ScriptedReply["content"], words: string, reached?: Barrier): ScriptStep => ({
+		name,
+		check: (request) => {
+			expect(deliveryWith(request, words), "the owner's words open the turn").toContain(ownerHeader);
+			reached?.release();
+		},
+		reply: {
+			content,
+			...(content.some((block) => block.type === "toolCall") ? { stopReason: "toolUse" as const } : {}),
+			usage: {
+				...createEmptyUsage(),
+				output: 100,
+				totalTokens: 100,
+				cost: { ...createEmptyUsage().cost, output: 0.06, total: 0.06 },
+			},
+		},
+	});
+	try {
+		const firstPoll = api.nextPoll(undefined);
+		const manager = world.createSessionManager(agentDir);
+		const created = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: manager,
+			systemOneEnabled: false,
+			subscriptionAllowance: { read: () => allowance },
+			settings: {
+				memorySystem: "okf",
+				autoLearn: { enabled: false },
+				proactivity: { enabled: false },
+				orchestrator: { delegationGate: false },
+				edge: {},
+				channels: {
+					telegram: {
+						mode: "explicit",
+						ownerSenders: [OWNER_ID],
+						ownerAuthority: "full",
+						ownerMaxUsdPerTurn: 0.05,
+						ownerMaxUsdPerDay: 0.1,
+					},
+				},
+			},
+		});
+		const session: AgentSession = created.session;
+		await withDeadline(trace, "the quota leg's first poll", firstPoll);
+		trace.mark("root", "telegram-quota.polling");
+
+		// With room, a turn past its dollar bound is not stopped, and it charges the pool nothing.
+		const roomWords = "summarize the open review threads";
+		const roomAnswer = "The subscription covers this turn.";
+		world.provider.enqueue("root", costly("tg-quota-room", [{ type: "text", text: roomAnswer }], roomWords));
+		api.deliver(ownerLegUpdate(1, OWNER_ID, roomWords));
+		await withDeadline(trace, "the costly turn's answer reaches the chat", api.untilSent(1));
+		expect(api.texts()[0], "the turn past its dollar bound was answered, not stopped").toContain(roomAnswer);
+		await withDeadline(
+			trace,
+			"the costly turn settles",
+			journalHolds((state) => state.batches[0]?.state === "replied"),
+		);
+		expect(journal().batches[0], "the turn was accepted while the subscription had room").toMatchObject({
+			owner: true,
+			quota: true,
+		});
+		api.deliver(ownerLegUpdate(2, OWNER_ID, "status"));
+		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(2));
+		expect(api.texts()[1], "status names the pool and the subscription's decision").toBe(
+			[
+				"Owner spend: $0.00 of $0.10 in 24 hours, $0.05 per turn.",
+				"Subscription usage: 40% of 95% (channels.telegram.ownerQuotaMaxUsedPercent); the dollar bounds do not apply.",
+				"No turn is running. 0 message(s) wait.",
+				"No held action from this chat.",
+			].join("\n"),
+		);
+		trace.mark("root", "telegram-quota.room");
+
+		// Full authority: the harness settings write the guarded phone refuses as typed-only runs from the owner's verified words.
+		const settingsPath = projectPath(".pi", "settings.json");
+		const fullWords = "reset the project settings to their defaults";
+		const written = createBarrier();
+		world.provider.enqueue(
+			"root",
+			{
+				...calls("tg-quota-full-call", [
+					{ id: "tg-quota-full-write", name: "write", arguments: { path: settingsPath, content: "{}\n" } },
+				]),
+				check: (request) => {
+					expect(deliveryWith(request, fullWords), "the owner's words from the phone").toContain(ownerHeader);
+				},
+			},
+			{
+				name: "tg-quota-full-answer",
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "write")?.text ?? "";
+					expect(result, "the settings write is not refused as typed-only").not.toContain("Refused:");
+					written.release();
+				},
+				reply: { content: [{ type: "text", text: "The project settings are reset." }] },
+			},
+		);
+		api.deliver(ownerLegUpdate(3, OWNER_ID, fullWords));
+		await withDeadline(trace, "the full-authority turn's write result reaches the model", written.promise);
+		await session.agent.waitForIdle();
+		await withDeadline(trace, "the full-authority answer reaches the chat", api.untilSent(3));
+		expect(
+			world.io.existsSync(settingsPath) ? String(world.io.readFileSync(settingsPath)) : undefined,
+			"the write ran from the phone under full authority",
+		).toBe("{}\n");
+		trace.mark("root", "telegram-quota.full");
+
+		// Exhausted usage: the same $0.06 turn is stopped before its tool call, naming the subscription.
+		allowance = { kind: "exhausted", usedPercent: 96, reason: "a usage window is at 96%" };
+		const exhaustedWords = "list what my notes hold";
+		const exhaustedReached = createBarrier();
+		world.provider.enqueue(
+			"root",
+			costly(
+				"tg-quota-exhausted",
+				[
+					{
+						type: "toolCall",
+						id: "tg-quota-memory",
+						name: "memory",
+						arguments: { action: "list", target: "user" },
+					},
+				],
+				exhaustedWords,
+				exhaustedReached,
+			),
+		);
+		api.deliver(ownerLegUpdate(4, OWNER_ID, exhaustedWords));
+		await withDeadline(trace, "the costly turn's provider request", exhaustedReached.promise);
+		await withDeadline(trace, "the subscription bound's push reaches the chat", api.untilSent(4));
+		expect(api.texts()[3], "the chat learns the subscription ended the turn").toBe(
+			"Stopped: the subscription's usage reached its bound (a usage window is at 96%; channels.telegram.ownerQuotaMaxUsedPercent 95%).",
+		);
+		await withDeadline(
+			trace,
+			"the stopped turn settles",
+			journalHolds((state) => state.batches[2]?.state === "unanswered"),
+		);
+		await session.agent.waitForIdle();
+		const requestsAtBound = world.provider.requests.length;
+		expect(world.provider.requests.length, "no tool call ran after the stop").toBe(requestsAtBound);
+		trace.mark("root", "telegram-quota.exhausted");
+
+		expect(await world.disposeSessionInBody(session), "the quota leg's session closes").toBeUndefined();
+		expect(api.openPolls, "closing aborts the held poll").toBe(0);
+		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
+		expect(
+			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
+			"the quota leg ran without a Telegram warning",
+		).toEqual([]);
+		trace.mark("root", "telegram-quota.closed");
 	} finally {
 		world.fetchResponder = undefined;
 	}

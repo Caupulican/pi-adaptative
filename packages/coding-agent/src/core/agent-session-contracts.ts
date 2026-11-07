@@ -48,6 +48,7 @@ import type { SessionBundleLease } from "./orchestration/session-bundle-lifecycl
 import type { OwnerInputEnd } from "./owner-input-ledger.ts";
 import type { PendingInputHandle } from "./pending-input-queue-controller.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
+import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -199,6 +200,8 @@ export interface AgentSessionConfig {
 	systemOneEnabled?: boolean;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;
+	/** The subscription usage source of the owner channel's dollar bounds and the cost guard; absent reads the provider's usage endpoint. */
+	subscriptionAllowance?: SubscriptionAllowancePort;
 	/** Bound of the background tool-task terminal cache; absent keeps the controller default. */
 	maxRetainedTerminalTasks?: number;
 	/** What the owner's provider accounts offer, checked with the providers; absent skips the check. */

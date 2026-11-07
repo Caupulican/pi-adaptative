@@ -120,6 +120,8 @@ export interface WorkbenchSectionSources {
 
 /** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
 export interface WorkbenchTeamFacts {
+	/** Whether the root is mid-turn now (the roster's own source): the projection names the root an actor even while the session stands by. */
+	readonly rootStreaming: boolean;
 	readonly projection: OperatorProjection;
 	readonly health: SemanticPlaneHealth;
 	readonly last?: SemanticEvaluationRecord;
@@ -777,6 +779,7 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 function renderRootRow(facts: WorkbenchTeamFacts): string {
 	const { projection, route } = facts;
 	const running =
+		facts.rootStreaming &&
 		projection.active_actors.some((actor) => actor.kind === "root") &&
 		projection.phase !== "done" &&
 		projection.control.owner !== "user";

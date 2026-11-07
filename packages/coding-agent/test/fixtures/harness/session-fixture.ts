@@ -2628,18 +2628,31 @@ export interface HarnessWorldOptions {
 }
 
 /** Runs one scenario body in a fresh world and always settles it afterwards, in the order `close` defines. */
+/**
+ * Variables that tell production which machine it runs on. The world virtualizes the filesystem but production reads
+ * these from the process, so a journey run on WSL saw a WSL machine where CI sees plain Linux (the always-on refusal
+ * names the platform's exact reason). They are part of the controlled environment: unset for the world, restored after.
+ */
+const HOST_IDENTITY_ENV = ["WSL_DISTRO_NAME", "WSL_INTEROP"] as const;
+
 export async function runHarnessWorld(
 	options: HarnessWorldOptions,
 	body: (world: HarnessWorld) => Promise<void>,
 ): Promise<void> {
-	const world = new HarnessWorld(options);
-	let bodyFailure: { readonly error: unknown } | undefined;
+	const hostIdentity = HOST_IDENTITY_ENV.map((name) => [name, process.env[name]] as const);
+	for (const name of HOST_IDENTITY_ENV) delete process.env[name];
 	try {
-		await body(world);
-	} catch (error) {
-		bodyFailure = { error };
+		const world = new HarnessWorld(options);
+		let bodyFailure: { readonly error: unknown } | undefined;
+		try {
+			await body(world);
+		} catch (error) {
+			bodyFailure = { error };
+		}
+		await world.close(bodyFailure);
+	} finally {
+		for (const [name, value] of hostIdentity) if (value !== undefined) process.env[name] = value;
 	}
-	await world.close(bodyFailure);
 }
 
 /**
@@ -3029,6 +3042,8 @@ export class HarnessWorld {
 			readonly omitShellOperations?: boolean;
 			/** The loop the owner selects; undefined keeps the SDK's default for this session's System One mode. */
 			readonly executionLoopMode?: CreateAgentSessionOptions["executionLoopMode"];
+			/** The subscription usage this session reads, scripted by the journey; omitted keeps the production reader (the scripted model is no subscription login, so it answers unknown). */
+			readonly subscriptionAllowance?: CreateAgentSessionOptions["subscriptionAllowance"];
 			/**
 			 * Settings of this session only, layered over the world's: the session gets its own manager, so a change it makes
 			 * (a memory-system switch, a policy override) never reaches another session. A key set to `undefined` is absent
@@ -3158,6 +3173,9 @@ export class HarnessWorld {
 				? {}
 				: { resourceLoader: options.resourceLoader ?? extensionLoader }),
 			...(options.executionLoopMode === undefined ? {} : { executionLoopMode: options.executionLoopMode }),
+			...(options.subscriptionAllowance === undefined
+				? {}
+				: { subscriptionAllowance: options.subscriptionAllowance }),
 			...(options.maxRetainedTerminalTasks === undefined
 				? {}
 				: { maxRetainedTerminalTasks: options.maxRetainedTerminalTasks }),

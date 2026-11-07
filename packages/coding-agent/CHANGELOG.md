@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- The cost guard treats every subscription login as unmetered while the account has allowance (usage windows below 95%), not only `openai-codex`, and applies again once the provider reports the allowance exhausted, since extra usage and credits are money. A subscription whose usage the provider does not report stays unmetered.
+- `createAgentSession` takes `subscriptionAllowance`, the port the owner channel's dollar bounds and the cost guard read the subscription's allowance through; an embedder with its own usage source supplies it.
+
+### Fixed
+
+- The Team panel's Brain row showed a running accent bullet and the idle phrase while the session stood by, because the projection names the root an actor even at rest; it now follows the session's own streaming state, as the roster does.
+
 ## [0.104.39] - 2026-11-07
 
 ### Fixed

@@ -7,7 +7,8 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
-import type { AccountUsageMonitor } from "./account-usage-monitor.ts";
+import { resolveProviderAccountKey } from "./account-key.ts";
+import { AccountUsageMonitor } from "./account-usage-monitor.ts";
 import {
 	type AccountUsageSnapshot,
 	type AuthenticatedAccount,
@@ -44,6 +45,11 @@ export function decideSubscriptionAllowance(
 	return { kind: "room", usedPercent };
 }
 
+/** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
+export interface SubscriptionAllowancePort {
+	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance;
+}
+
 export interface SubscriptionAllowanceReaderDeps {
 	getRegistry(): UsageOverviewRegistry & { isUsingSubscription(model: Model<Api>): boolean };
 	readonly monitor: Pick<AccountUsageMonitor, "state" | "refresh">;
@@ -58,15 +64,15 @@ export interface SubscriptionAllowanceReaderDeps {
  * (it spaces its own requests), so a reading is there by the time the next one is asked. A model that is not a
  * subscription login, an account the monitor cannot read, and a failed or missing reading are all unknown.
  */
-export class SubscriptionAllowanceReader {
+export class SubscriptionAllowanceReader implements SubscriptionAllowancePort {
 	private readonly deps: SubscriptionAllowanceReaderDeps;
 
 	constructor(deps: SubscriptionAllowanceReaderDeps) {
 		this.deps = deps;
 	}
 
-	read(maxUsedPercent: number): SubscriptionAllowance {
-		const model = this.deps.getModel();
+	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance {
+		const model = forModel ?? this.deps.getModel();
 		const registry = this.deps.getRegistry();
 		if (!model || !registry.isUsingSubscription(model))
 			return { kind: "unknown", reason: "the model is not a subscription login", subscription: false };
@@ -88,4 +94,16 @@ export class SubscriptionAllowanceReader {
 					: undefined;
 		return decideSubscriptionAllowance(snapshot, this.deps.now(), maxUsedPercent);
 	}
+}
+
+/** The production reader of a session: its own usage monitor over the provider's usage endpoint, for the registry and model it names. */
+export function createSubscriptionAllowanceReader(
+	deps: Pick<SubscriptionAllowanceReaderDeps, "getRegistry" | "getModel">,
+): SubscriptionAllowanceReader {
+	return new SubscriptionAllowanceReader({
+		...deps,
+		monitor: new AccountUsageMonitor(),
+		currentAccountKey: (provider) => resolveProviderAccountKey(deps.getRegistry().authStorage, provider),
+		now: () => Date.now(),
+	});
 }

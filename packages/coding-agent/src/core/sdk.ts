@@ -70,6 +70,7 @@ import {
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
+import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -216,6 +217,12 @@ export interface CreateAgentSessionOptions {
 	 * asks to keep the process alive (`TimerOptions.keepAlive`).
 	 */
 	timers?: TimerSource;
+	/**
+	 * What the running model's subscription allows now, read for the owner channel's dollar bounds and the cost guard; default:
+	 * the provider's own usage endpoint through the session's account usage monitor. An embedder with its own usage source
+	 * supplies this port; it answers `unknown` for a model it cannot read.
+	 */
+	subscriptionAllowance?: SubscriptionAllowancePort;
 	/** Bound of the background tool-task terminal cache; default: the controller's own (64). */
 	maxRetainedTerminalTasks?: number;
 
@@ -948,6 +955,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				systemOneController,
 				systemOneEnabled,
 				timers,
+				...(options.subscriptionAllowance ? { subscriptionAllowance: options.subscriptionAllowance } : {}),
 				maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
 				accountModels,
 				executionLoopMode,

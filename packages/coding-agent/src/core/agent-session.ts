@@ -65,6 +65,7 @@ import { BackgroundLaneController, type SessionChannelsView } from "./background
 import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
+import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
@@ -259,13 +260,15 @@ import type { RuleRepairWork } from "./project-rules/types.ts";
 import { PromptSubmissionController } from "./prompt-submission-controller.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
-import { AccountUsageMonitor } from "./provider-admission/account-usage-monitor.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { openProviderAdmission } from "./provider-admission/gate.ts";
 import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
-import { SubscriptionAllowanceReader } from "./provider-admission/subscription-allowance.ts";
+import {
+	createSubscriptionAllowanceReader,
+	type SubscriptionAllowancePort,
+} from "./provider-admission/subscription-allowance.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { QueuedInputPersistenceController } from "./queued-input-persistence-controller.ts";
@@ -423,13 +426,7 @@ export class AgentSession {
 		(maxUsedPercent) => this._subscriptionAllowance.read(maxUsedPercent),
 	);
 	/** The usage the running model's subscription reports, read for the owner channel's dollar bounds (`OwnerChannelDelivery.quotaAllowance`). */
-	private readonly _subscriptionAllowance = new SubscriptionAllowanceReader({
-		getRegistry: () => this._modelRegistry,
-		monitor: new AccountUsageMonitor(),
-		getModel: () => this.model,
-		currentAccountKey: (provider) => resolveProviderAccountKey(this._modelRegistry.authStorage, provider),
-		now: () => Date.now(),
-	});
+	private _subscriptionAllowance!: SubscriptionAllowancePort;
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
@@ -1015,13 +1012,18 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
+		this._subscriptionAllowance =
+			config.subscriptionAllowance ??
+			createSubscriptionAllowanceReader({ getRegistry: () => this._modelRegistry, getModel: () => this.model });
 		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),
 			getSpawnedUsageCost: () => this.getSpawnedUsage().cost,
+			// A subscription costs no marginal dollars while the account has allowance (or reports none); past it, extra usage is money.
 			isUnmeteredSubscription: (model) =>
-				model.provider === "openai-codex" && this._modelRegistry.isUsingOAuth(model),
+				this._modelRegistry.isUsingSubscription(model) &&
+				this._subscriptionAllowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind !== "exhausted",
 		});
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,
