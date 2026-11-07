@@ -158,7 +158,13 @@ function readTeamMessageView(message: CustomMessage<unknown>): TeamMessageView |
 /** Longest bot entry the group view shows whole; a longer one (a transport error, a pasted log) is cut with its size. Your own words are never cut. */
 const MAX_TEAM_MESSAGE_CHARS = 700;
 
-const TEAM_SPEAKER_TONES = ["accent", "mdLink", "success", "warning"] as const;
+// Five distinct hues in every built-in theme (matrix: green, cyan, amber, peach, sky); success and accent share a green there.
+const TEAM_SPEAKER_TONES = ["accent", "mdLink", "warning", "syntaxNumber", "syntaxType"] as const;
+
+/** A bot's steady colour in a group chat, the same in its messages and in the live line of what it is doing. */
+export function teamSpeakerTone(name: string): (typeof TEAM_SPEAKER_TONES)[number] {
+	return TEAM_SPEAKER_TONES[[...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % TEAM_SPEAKER_TONES.length]!;
+}
 
 /** One speaker of a group chat: a name in its own steady color, who it spoke to, the time, then the words. */
 class TeamMessageComponent extends Container {
@@ -166,14 +172,7 @@ class TeamMessageComponent extends Container {
 		super();
 		const who =
 			view.from.kind === "operator" ? "You" : view.from.kind === "brain" ? "Brain" : (view.from.agentId ?? "bot");
-		const tone =
-			view.from.kind === "operator"
-				? "text"
-				: view.from.kind === "brain"
-					? "muted"
-					: TEAM_SPEAKER_TONES[
-							[...who].reduce((sum, char) => sum + char.charCodeAt(0), 0) % TEAM_SPEAKER_TONES.length
-						]!;
+		const tone = view.from.kind === "operator" ? "text" : view.from.kind === "brain" ? "muted" : teamSpeakerTone(who);
 		const recipients =
 			view.to.length > 0
 				? view.to.map((id) => `@${id}`).join(", ")

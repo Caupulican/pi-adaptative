@@ -25,6 +25,7 @@ import { type AwayService, describeAwayServiceInspection } from "../../core/rout
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
+import { teamSpeakerTone } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { botStateGlyph } from "./components/workbench.ts";
 
@@ -140,6 +141,28 @@ function errorMessage(error: unknown): string {
  * What a rendered chat shows: its header facts plus the message count and the last message's time. A transcript only
  * grows, so these change whenever a message is added; hashing every message on each event would cost more than it saves.
  */
+/** What a bot is doing now, in a few words: its last tool call with the argument that names its target, from its own transcript. */
+function currentActivity(messages: readonly AgentMessage[]): string | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "assistant") continue;
+		const call = [...message.content].reverse().find((block) => block.type === "toolCall");
+		if (call?.type !== "toolCall") return "writing its answer";
+		const args = call.arguments as Record<string, unknown>;
+		// A message to a peer shows who it goes to, never its text; any other call shows the argument that names its target.
+		const keys =
+			call.name === "bot_message"
+				? ["to", "agentId", "target", "recipient"]
+				: ["path", "command", "pattern", "query", "url", "prompt", "message", "text"];
+		const key = keys.find((name) => typeof args[name] === "string");
+		const value = key ? String(args[key]).replace(/\s+/g, " ").trim() : "";
+		const shown = value.length > 42 ? `${value.slice(0, 41)}…` : value;
+		if (call.name === "bot_message") return shown ? `messages ${shown}` : "messages a peer";
+		return shown ? `${call.name} ${shown}` : call.name;
+	}
+	return undefined;
+}
+
 function chatSignature(header: object, messages: readonly AgentMessage[]): string {
 	return JSON.stringify({ header, count: messages.length, last: messages.at(-1)?.timestamp ?? null });
 }
@@ -577,7 +600,12 @@ export class BotTeamChatController {
 	}
 
 	/** Adds the header lines and the messages, or the empty-chat hint, to the chat `beginChatRender` opened. */
-	private finishChatRender(header: readonly string[], messages: readonly AgentMessage[], emptyHint: string): void {
+	private finishChatRender(
+		header: readonly string[],
+		messages: readonly AgentMessage[],
+		emptyHint: string,
+		footer: readonly string[] = [],
+	): void {
 		const chat = this.host.chatContainer;
 		chat.addChild(new Text(header.join("\n"), 1, 0));
 		chat.addChild(new DynamicBorder());
@@ -587,6 +615,8 @@ export class BotTeamChatController {
 		} else {
 			for (const message of messages) this.host.appendRenderedMessageToChat(message);
 		}
+		// What is happening now sits after the last message, where the eye is, not in the header that scrolls away.
+		if (footer.length > 0) chat.addChild(new Text(footer.join("\n"), 1, 0));
 		this.host.ui.requestRender();
 	}
 
@@ -599,16 +629,24 @@ export class BotTeamChatController {
 		const memberStatus = members
 			.map((memberId) => {
 				const bot = liveBots.find((b) => b.agentId === memberId);
-				return `${botStateGlyph(bot?.state ?? "idle")} ${memberId}`;
+				return `${botStateGlyph(bot?.state ?? "idle")} ${theme.fg(teamSpeakerTone(memberId), memberId)}`;
 			})
 			.join("  ");
+		// A member at work gets a live line: its current step, in its own colour, so the group shows what each bot is doing.
+		const working = members.flatMap((memberId) => {
+			const state = liveBots.find((b) => b.agentId === memberId)?.state;
+			if (state !== "running" && state !== "queued") return [];
+			const activity =
+				state === "queued" ? "waiting to start" : currentActivity(port.readBotChatMessages(memberId, teamId));
+			return [{ memberId, activity: activity ?? "starting" }];
+		});
 		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
 			(r) => r.target.kind === "team" && r.target.teamId === teamId,
 		);
 		const messages = port.readTeamChatMessages(teamId);
 		if (
 			!this.beginChatRender(
-				chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus, routines }, messages),
+				chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus, routines, working }, messages),
 			)
 		)
 			return;
@@ -627,6 +665,10 @@ export class BotTeamChatController {
 			lines,
 			messages,
 			`  No messages in team ${teamId} yet. Type below and press Enter to message the team.`,
+			working.map(
+				({ memberId, activity }) =>
+					`${theme.fg(teamSpeakerTone(memberId), `◐ ${memberId}`)} ${theme.fg("muted", activity)}`,
+			),
 		);
 	}
 
