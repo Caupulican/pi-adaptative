@@ -17,6 +17,7 @@ import type {
 	OwnerChannelDelivery,
 	OwnerChannelOrigin,
 	OwnerDraftView,
+	OwnerQuotaAllowance,
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
@@ -60,6 +61,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	private readonly abortPromptSubmission: (reason: string) => void;
 	private readonly getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">;
 	private readonly isClosed: () => boolean;
+	private readonly readQuotaAllowance: (maxUsedPercent: number) => OwnerQuotaAllowance;
 	/** Insertion order is age: the first entry is the oldest. */
 	private readonly runs = new Map<string, OwnerChannelRun>();
 	private readonly draftListeners = new IndependentObserverSet<(view: OwnerDraftView) => void>();
@@ -71,7 +73,9 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		abortPromptSubmission: (reason: string) => void,
 		getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">,
 		isClosed: () => boolean,
+		readQuotaAllowance: (maxUsedPercent: number) => OwnerQuotaAllowance,
 	) {
+		this.readQuotaAllowance = readQuotaAllowance;
 		this.host = host;
 		this.getForeground = getForeground;
 		this.abortPromptSubmission = abortPromptSubmission;
@@ -128,6 +132,10 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			usd += event.message.usage?.cost?.total ?? 0;
 			onUsd(usd);
 		});
+	}
+
+	quotaAllowance(maxUsedPercent: number): OwnerQuotaAllowance {
+		return this.readQuotaAllowance(maxUsedPercent);
 	}
 
 	/**

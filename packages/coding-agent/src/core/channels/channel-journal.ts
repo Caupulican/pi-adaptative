@@ -82,6 +82,8 @@ export interface ChannelBatchRecord {
 	readonly away?: true;
 	/** An owner turn: it charges the channel's owner pool, never the away bound or the channel's third-party bounds. */
 	readonly owner?: true;
+	/** Accepted while the subscription's usage had room (`ownerQuotaMaxUsedPercent`): it charges no dollars to the owner pool. */
+	readonly quota?: true;
 	/** The owner sender's digest (`ownerSenderDigest`): the answer goes back only while that sender is still listed. */
 	readonly senderDigest?: string;
 	/** The held draft this owner turn performs, approved from the owner's chat: at most one turn per draft. */
@@ -246,6 +248,7 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 		(value.usd === undefined || isTime(value.usd)) &&
 		(value.away === undefined || value.away === true) &&
 		(value.owner === undefined || value.owner === true) &&
+		(value.quota === undefined || value.quota === true) &&
 		(value.senderDigest === undefined || isString(value.senderDigest)) &&
 		(value.approval === undefined || isString(value.approval))
 	);

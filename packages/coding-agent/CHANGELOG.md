@@ -2,6 +2,7 @@
 
 ### Added
 
+- `channels.<name>.ownerQuotaMaxUsedPercent` (default `95`, `0` turns it off): on a subscription login whose provider-reported usage windows (5 hour, weekly) are all below it, the owner channel's `ownerMaxUsdPerTurn` and `ownerMaxUsdPerDay` do not apply and those turns charge no dollars to the owner pool; a missing, stale or unsupported reading keeps the dollar bounds, and a turn past its per-turn bound is stopped once the usage is exhausted. `status` and the channels line show the decision. See [Channels](docs/channels.md#the-owners-own-chat).
 - `channels.<name>.ownerAuthority: "full"` on `telegram` and `slack` (default `"guarded"`): the owner's verified phone messages run with the terminal's authority (the session's grants, the terminal's classifier, nothing past the boundary in YOLO, owner rules and operator grants for the owner's words) instead of the guarded phone limits. The live check, hardline and `edge.deny` floor, emergency stop, spend bounds and per-use approvals stay, and any policy edit ends a running full turn. See [Channels](docs/channels.md#the-owners-own-chat).
 
 ## [0.104.35] - 2026-11-06

@@ -146,7 +146,7 @@ function ownerBatchCharge(
 	maxUsdPerTurn: number,
 	now: number,
 ): OwnerChannelCharge | undefined {
-	if (batch.owner !== true) return undefined;
+	if (batch.owner !== true || batch.quota === true) return undefined;
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= now) return undefined;
 	const usd = batch.usd ?? 0;
@@ -169,23 +169,27 @@ function ownerOfferCharges(
 	return charges;
 }
 
-/** The owner pool's charges of one channel: its owner turns and owner offers of the last 24 hours. */
+/**
+ * The owner pool's charges of one channel: its owner turns and owner offers of the last 24 hours. A turn accepted while
+ * the subscription had room (`quota`) charges nothing; while it has room now (`quotaRoom`) an offer reserves nothing.
+ */
 export function ownerChannelCharges(
 	channel: string,
 	state: Pick<ChannelJournalState, "batches" | "pending">,
 	policy: Pick<ResolvedChannelPolicy, "ownerMaxUsdPerTurn">,
 	now: number,
+	quotaRoom = false,
 ): OwnerChannelCharge[] {
 	const charges: OwnerChannelCharge[] = [];
 	for (const batch of state.batches) {
 		const charge = ownerBatchCharge(channel, batch, policy.ownerMaxUsdPerTurn, now);
 		if (charge) charges.push(charge);
 	}
-	charges.push(...ownerOfferCharges(channel, state.pending, policy.ownerMaxUsdPerTurn, now));
+	if (!quotaRoom) charges.push(...ownerOfferCharges(channel, state.pending, policy.ownerMaxUsdPerTurn, now));
 	return charges;
 }
 
-/** The owner pool of a channel now: what it holds, and whether another turn fits; when not, when room returns. */
+/** The owner pool of a channel now: what it holds, and whether another turn fits (`quotaRoom`: the subscription has allowance); when not, when room returns. */
 export interface OwnerRoom {
 	readonly usedUsd: number;
 	readonly fits: boolean;
@@ -198,12 +202,15 @@ export function ownerRoom(
 	state: Pick<ChannelJournalState, "batches" | "pending">,
 	policy: ResolvedChannelPolicy,
 	now: number,
+	quotaRoom = false,
 ): OwnerRoom {
-	const charges = ownerChannelCharges(channel, state, policy, now);
+	const charges = ownerChannelCharges(channel, state, policy, now, quotaRoom);
 	const usedMicros = charges.reduce((sum, charge) => sum + charge.micros, 0);
+	// The subscription's room lifts the daily dollar bound, never the off switch (`ownerMaxUsdPerDay: 0` starts none).
 	const fits =
 		policy.ownerMaxUsdPerDay > 0 &&
-		usedMicros + awaySpendMicros(policy.ownerMaxUsdPerTurn) <= awaySpendMicros(policy.ownerMaxUsdPerDay);
+		(quotaRoom ||
+			usedMicros + awaySpendMicros(policy.ownerMaxUsdPerTurn) <= awaySpendMicros(policy.ownerMaxUsdPerDay));
 	const oldestUntil = charges.length > 0 ? Math.min(...charges.map((charge) => charge.until)) : undefined;
 	return { usedUsd: usedMicros / 1_000_000, fits, ...(oldestUntil !== undefined ? { oldestUntil } : {}) };
 }

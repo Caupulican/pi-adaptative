@@ -259,11 +259,13 @@ import type { RuleRepairWork } from "./project-rules/types.ts";
 import { PromptSubmissionController } from "./prompt-submission-controller.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
+import { AccountUsageMonitor } from "./provider-admission/account-usage-monitor.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { openProviderAdmission } from "./provider-admission/gate.ts";
 import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
+import { SubscriptionAllowanceReader } from "./provider-admission/subscription-allowance.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { QueuedInputPersistenceController } from "./queued-input-persistence-controller.ts";
@@ -418,7 +420,16 @@ export class AgentSession {
 		(reason) => this._promptSubmission.abortSubmission(reason),
 		() => this.sessionManager,
 		() => this._disposed,
+		(maxUsedPercent) => this._subscriptionAllowance.read(maxUsedPercent),
 	);
+	/** The usage the running model's subscription reports, read for the owner channel's dollar bounds (`OwnerChannelDelivery.quotaAllowance`). */
+	private readonly _subscriptionAllowance = new SubscriptionAllowanceReader({
+		getRegistry: () => this._modelRegistry,
+		monitor: new AccountUsageMonitor(),
+		getModel: () => this.model,
+		currentAccountKey: (provider) => resolveProviderAccountKey(this._modelRegistry.authStorage, provider),
+		now: () => Date.now(),
+	});
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so

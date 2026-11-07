@@ -343,6 +343,7 @@ export interface ChannelPolicySettings {
 	ownerSenders?: (string | number)[]; // telegram and slack only: the owner's platform ids (at most 10); their verified private-chat messages are the owner's words
 	ownerMaxUsdPerDay?: number; // default: 5 (0..100) — owner turns' spend over a rolling 24 h; 0 starts none (control words still answer)
 	ownerMaxUsdPerTurn?: number; // default: 1 (0.05..20) — one owner turn's spend; reserved at the offer, the turn is stopped past it
+	ownerQuotaMaxUsedPercent?: number; // default: 95 (0..100) — while a subscription login's usage windows are all below this percent the two dollar bounds do not apply; 0: they always apply
 	ownerPushPerHour?: number; // default: 12 (0..60) — updates pushed to the owner's chat per rolling hour
 	ownerTerminalOnlyClasses?: EdgeClass[]; // default: [] — edge classes a phone `approve` never releases
 	ownerAuthority?: "guarded" | "full"; // default: "guarded"; "full" (telegram and slack) runs an owner turn with the session's grants and mode

@@ -50,9 +50,20 @@ export interface OwnerChannelDelivery {
 	): void;
 	/** Reports the cost of the run that `ref` opened as it grows; returns the unsubscribe. */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
+	/**
+	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
+	 * is below `maxUsedPercent`. Unknown (also when this member is absent) leaves the dollar bounds in force.
+	 */
+	quotaAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
 	/** Aborts the run that `ref` opened. */
 	abortRun(ref: string): void;
 }
+
+/** What the subscription's own usage limits allow now (`SubscriptionAllowance`): decided in code from the account's reported windows. */
+export type OwnerQuotaAllowance =
+	| { readonly kind: "room"; readonly usedPercent: number }
+	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string }
+	| { readonly kind: "unknown"; readonly reason: string };
 
 /** The model-free control words an owner message can be, recognized before any model turn. */
 export type OwnerControl =

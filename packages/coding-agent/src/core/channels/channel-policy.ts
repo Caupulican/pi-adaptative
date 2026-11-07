@@ -58,6 +58,11 @@ export interface ResolvedChannelPolicy {
 	readonly ownerMaxUsdPerDay: number;
 	/** One owner turn's spend; the turn is stopped once a message takes it there, and an offer reserves it. */
 	readonly ownerMaxUsdPerTurn: number;
+	/**
+	 * While the session's model is a subscription login whose account usage reports every window below this percent, the
+	 * two dollar bounds above do not apply (`ownerMaxUsdPerDay: 0` still starts none). 0: the dollar bounds always apply.
+	 */
+	readonly ownerQuotaMaxUsedPercent: number;
 	/** Updates pushed to the owner's chat per rolling hour; past it one line says how many more wait. */
 	readonly ownerPushPerHour: number;
 	/** Classes of held action the owner releases only at the terminal, never by `approve` from the phone. */
@@ -178,6 +183,7 @@ function parsePolicy(name: string, value: unknown): ResolvedChannelPolicy {
 		ownerSenders: parseOwnerSenders(name, value.ownerSenders, key),
 		ownerMaxUsdPerDay: numberIn(value.ownerMaxUsdPerDay, 5, 0, 100, `${key}.ownerMaxUsdPerDay`),
 		ownerMaxUsdPerTurn: numberIn(value.ownerMaxUsdPerTurn, 1, 0.05, 20, `${key}.ownerMaxUsdPerTurn`),
+		ownerQuotaMaxUsedPercent: numberIn(value.ownerQuotaMaxUsedPercent, 95, 0, 100, `${key}.ownerQuotaMaxUsedPercent`),
 		ownerPushPerHour: integerIn(value.ownerPushPerHour, 12, 0, 60, `${key}.ownerPushPerHour`),
 		ownerTerminalOnlyClasses: parseTerminalOnlyClasses(value.ownerTerminalOnlyClasses, key),
 		...(ownerFullAuthority ? { ownerFullAuthority: true as const } : {}),
