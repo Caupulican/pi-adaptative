@@ -112,6 +112,12 @@ export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
 	/** Omit the strict field for transports whose wire schema rejects it, such as the Grok CLI proxy. */
 	omitStrict?: boolean;
+	/**
+	 * Leave a union of object alternatives without a sibling `type: "object"`. The Grok transport reads an object node
+	 * that has a `type` but no `properties` as a free-form object and returns `{}` for the argument, so a tool whose
+	 * argument is a union (the routine tool's `schedule`) could never be called with it.
+	 */
+	unionWithoutObjectType?: boolean;
 	toolNameMap?: ToolNameMap;
 }
 
@@ -446,6 +452,25 @@ export function convertResponsesMessages<TApi extends Api>(
 // Tool conversion
 // =============================================================================
 
+const unionTypeFreeSchemas = new WeakMap<object, unknown>();
+
+/** The schema with `type` removed from every node that is a union (`anyOf`) of alternatives and declares no `properties` of its own. */
+function withoutUnionObjectType(schema: unknown): unknown {
+	if (Array.isArray(schema)) return schema.map(withoutUnionObjectType);
+	if (typeof schema !== "object" || schema === null) return schema;
+	const cached = unionTypeFreeSchemas.get(schema);
+	if (cached !== undefined) return cached;
+	const node = schema as Record<string, unknown>;
+	const result: Record<string, unknown> = {};
+	for (const key of Object.keys(node)) {
+		if (key === "type" && node.type === "object" && Array.isArray(node.anyOf) && node.properties === undefined)
+			continue;
+		result[key] = withoutUnionObjectType(node[key]);
+	}
+	unionTypeFreeSchemas.set(schema, result);
+	return result;
+}
+
 export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
 	const strict = options?.strict === undefined ? false : options.strict;
 	return tools.map((tool) => {
@@ -453,7 +478,9 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 			type: "function",
 			name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
 			description: tool.description,
-			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+			parameters: (options?.unionWithoutObjectType === true
+				? withoutUnionObjectType(tool.parameters)
+				: tool.parameters) as any, // TypeBox already generates JSON Schema
 			strict,
 		};
 		if (options?.omitStrict === true) {
