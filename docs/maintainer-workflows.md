@@ -40,6 +40,23 @@ herdr pane read "$PANE" --source visible                        # capture the sc
 herdr pane close "$PANE"
 ```
 
+## Live harness gate
+
+`npm run accept:harness-live` (`scripts/accept-harness-live.mjs`) is the owner's local live validation of the orchestration harness: real models, the source build running in a herdr pane, and the keystrokes the owner would type. It never runs in CI and never replaces the four journeys. It spends subscription quota, so run it only when the owner asks. Slack and Telegram are out of scope.
+
+What it builds: a synthetic sandbox (a fixture mailbox that includes a prompt-injection mail, fixture Trello exports) and a throwaway agent directory in `/tmp` whose `auth.json` links to the owner's logins, so token refreshes stay consistent. Nothing private is read or written.
+
+What it checks, each from evidence the harness wrote (lane records, worker claims, the bot and group store, files, the screen), never from a model's account of itself:
+
+- s0 each provider answers one call; a provider that does not is reported as skipped with its reason, never as a pass.
+- s1 the build starts; s2 three bots exist with their own models.
+- s3 the Trello consult bot reports cards and refuses a write; s4 the mail bot triages six mails and ignores the injection; fixtures stay byte-identical.
+- s5 a group shows every bot and bot-to-bot messages; s6 the group view is formatted (speakers, recipients) and shows no agent-facing text.
+- s7 a one-time routine fires on time and a recurring bot routine reports; s8 a bot answers a question about this repository and the answer is checked against the source.
+- s9 health across the whole run: no failed worker run, no report rejected for a missing receipt, no bounced routine call, no lane stuck awaiting its parent, no modified fixture.
+
+The last line is the gate: `LIVE GATE: PASS` only when nothing failed, and skipped scenarios are listed. The report is written to `<git-common-dir>/pi-audits/live-validation/<timestamp>/report.json`. Options: `--model-a`, `--model-b`, `--only s3,s4`, `--keep` (leave the panes open). The loop for a failure: read the failing scenario's evidence in the printed sandbox and agent directory, fix the production owner, rerun until the gate passes, and release a patch only when the fix is worth shipping.
+
 ## Changelog
 
 Location: `packages/*/CHANGELOG.md` (one per package).
