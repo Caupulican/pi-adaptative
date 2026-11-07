@@ -42,6 +42,8 @@ export interface WorkbenchSection {
 	body: Component | string[];
 	/** Standing facts with no work in them (an idle team): listed beside real work, never a reason to open the panel. */
 	quiet?: boolean;
+	/** The section only says there is nothing to show (an empty plan): the inspector omits it when another section can head it. */
+	empty?: boolean;
 	/** Standing members worth keeping on screen (persistent teams): they hold the panel open, but never re-open one the operator hid. */
 	standing?: boolean;
 }
@@ -407,6 +409,11 @@ export class WorkbenchComponent extends Container {
 		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
 		return this.effectiveLeftPaneMode(zoneWidth) === "graph";
 	}
+	/** Whether the Chats & Teams roster is the left pane at the current zone width (it already lists every bot and team). */
+	get chatsShown(): boolean {
+		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
+		return this.effectiveLeftPaneMode(zoneWidth) === "chats";
+	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
 		return this.graphPane.scrollAt(column, row, delta) || this.chatRosterPane.scrollAt(column, row, delta);
 	}
@@ -710,7 +717,8 @@ export class WorkbenchComponent extends Container {
 	private conversationHeader(columns: number, originX = 0): string {
 		const inner = Math.max(0, columns - 2);
 		const following = this.conversation.following;
-		const stateText = following ? " · Following latest" : " · Reading";
+		// Following the latest is the default and needs no word; only a reader scrolled away is told.
+		const stateText = following ? "" : " · Reading";
 		const convTitle = this.options.conversationTitle?.() || "Conversation";
 		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
 		const headingWidth = visibleWidth(convTitle) + stateText.length;
@@ -719,7 +727,9 @@ export class WorkbenchComponent extends Container {
 			(this.leftPaneHidden || this.graphHidden) && !this.effectiveLeftPaneMode(this.zoneWidth)
 				? this.leftPaneToOpen(this.zoneWidth)
 				: undefined;
-		const switchChatLabel = this.options.switchChatChip?.();
+		// The roster's own rows select every chat while it is drawn, so its chip is offered only without it.
+		const switchChatLabel =
+			this.effectiveLeftPaneMode(this.zoneWidth) === "chats" ? undefined : this.options.switchChatChip?.();
 		// Chips drop from the end on a narrow header; the only way back to a hidden left pane comes first.
 		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
 			...(opens
@@ -855,6 +865,13 @@ export class WorkbenchComponent extends Container {
 		const plan = this.sections.find((section) => section.title === PLAN_SECTION);
 		const team = this.sections.find((section) => section.title === TEAM_SECTION);
 		const others = this.sections.filter((section) => section !== plan && section !== team);
+		// A plan with nothing in it is not a panel: the team heads the inspector instead of a row saying there is nothing.
+		if ((!plan || plan.empty) && team) {
+			const lines = [...body(team, "No agents")];
+			for (const section of others)
+				lines.push("", labelRow(section.title, section.meta ?? "", width), ...body(section, ""));
+			return { title: TEAM_SECTION, meta: team.meta ?? "", lines };
+		}
 		const lines = [...body(plan, "No open steps")];
 		if (team || !this.graphShown) {
 			lines.push("", labelRow(TEAM_SECTION, team?.meta ?? "", width), ...body(team, "No agents"));
@@ -1209,11 +1226,15 @@ export class WorkbenchComponent extends Container {
 			`${isRoot ? theme.fg("accent", "▸ ") : "  "}${roster.rootRunning ? theme.fg("accent", "●") : theme.fg("success", "●")} ${isRoot ? theme.bold(theme.fg("accent", "Brain (root)")) : theme.fg("text", "Brain (root)")}`,
 			{ kind: "root" },
 		);
-		add(`    ${theme.fg("muted", `${roster.rootModelLabel} · ${roster.rootRunning ? "working" : "ready"}`)}`, {
-			kind: "root",
-		});
-		add(theme.fg("muted", ` TEAMS (${roster.teams.length})`));
-		if (roster.teams.length === 0) add(`  ${theme.fg("dim", "No teams · /team create")}`);
+		// The glyph above says ready; only the working state is worth a word.
+		add(
+			`    ${theme.fg("muted", roster.rootRunning ? `${roster.rootModelLabel} · working` : roster.rootModelLabel)}`,
+			{
+				kind: "root",
+			},
+		);
+		// An empty group is its header with the way to fill it, not a header and a row saying it is empty.
+		add(theme.fg("muted", roster.teams.length === 0 ? " TEAMS · /team create" : ` TEAMS (${roster.teams.length})`));
 		for (const team of roster.teams) {
 			const isSelected = active.kind === "team" && active.teamId === team.teamId;
 			const target: ActiveChatTarget = { kind: "team", teamId: team.teamId };
@@ -1225,8 +1246,7 @@ export class WorkbenchComponent extends Container {
 			);
 			add(`    ${theme.fg("muted", team.description || team.memberAgentIds.join(", ") || "no members")}`, target);
 		}
-		add(theme.fg("muted", ` BOTS (${roster.bots.length})`));
-		if (roster.bots.length === 0) add(`  ${theme.fg("dim", "No bots · /bot new <id>")}`);
+		add(theme.fg("muted", roster.bots.length === 0 ? " BOTS · /bot new <id>" : ` BOTS (${roster.bots.length})`));
 		for (const bot of roster.bots) {
 			const isSelected = active.kind === "bot" && active.agentId === bot.agentId;
 			const target: ActiveChatTarget = { kind: "bot", agentId: bot.agentId };
@@ -1235,11 +1255,18 @@ export class WorkbenchComponent extends Container {
 			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", bot.modelId || bot.modelRef)}${unreadBadge}${scheduleBadge}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${bot.modelRef === roster.rootModelLabel ? "" : `${theme.fg("muted", bot.modelId || bot.modelRef)}`}${unreadBadge}${scheduleBadge}`,
 				target,
 			);
-			const detail = `${bot.state}${bot.teamIds.length > 0 ? ` · [${bot.teamIds.join(",")}]` : ""}${bot.currentSummary ? ` · ${bot.currentSummary}` : ""}`;
-			add(`    ${theme.fg("muted", detail)}`, target);
+			// The default model and the idle state are the glyph's and the row's business; only a difference earns a word.
+			const detail = [
+				bot.state === "idle" ? undefined : bot.state,
+				bot.teamIds.length > 0 ? `[${bot.teamIds.join(",")}]` : undefined,
+				bot.currentSummary,
+			]
+				.filter(Boolean)
+				.join(" · ");
+			if (detail) add(`    ${theme.fg("muted", detail)}`, target);
 		}
 		if (roster.lanes.length > 0) {
 			add(theme.fg("muted", ` LANES (${roster.lanes.length})`));

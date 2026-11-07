@@ -111,6 +111,8 @@ export interface WorkbenchSectionSources {
 	team?: () => WorkbenchTeamFacts;
 	/** Whether the Decision graph is drawn: it carries the Decider and Brain, so the Team then lists members only. */
 	graphShown?: () => boolean;
+	/** Whether the Chats & Teams roster is drawn: it lists every team and bot, so the Team does not list them again. */
+	rosterShown?: () => boolean;
 	persistentTeams?: () => readonly WorkbenchPersistentTeam[];
 	persistentBots?: () => readonly PersistentBotView[];
 	taskMetrics?: () => TaskExecutionMetrics | undefined;
@@ -481,6 +483,7 @@ export class WorkbenchController {
 			buildWorkbenchSections(snapshot, Date.now(), {
 				team: this.ports.team,
 				graphShown: () => this.view.graphShown,
+				rosterShown: () => this.view.chatsShown,
 				persistentTeams: this.ports.persistentTeams,
 				persistentBots: this.ports.persistentBots,
 				taskMetrics: this.ports.taskMetrics,
@@ -765,7 +768,9 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 			: owner === "user"
 				? theme.fg("warning", "waiting for you")
 				: "";
-	return [`  ${glyph} ${name}${control ? ` ${theme.fg("dim", "·")} ${control}` : ""}`, `    ${state}`];
+	const head = `  ${glyph} ${name}${control ? ` ${theme.fg("dim", "·")} ${control}` : ""}`;
+	// A state that says nothing happened (off, ready, no engine) shares the name's line; work or a judgment keeps its own.
+	return evaluating || facts.last ? [head, `    ${state}`] : [`${head} ${theme.fg("dim", "·")} ${state}`];
 }
 
 /** The root executor: the model actually answering, its route when routed, and its current action. */
@@ -807,7 +812,7 @@ export function buildWorkbenchSections(
 	nowMs: number,
 	sources: WorkbenchSectionSources = {},
 ): WorkbenchSection[] {
-	const { team, graphShown, persistentTeams, persistentBots, taskMetrics } = sources;
+	const { team, graphShown, rosterShown, persistentTeams, persistentBots, taskMetrics } = sources;
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
 	const planRows = rows.filter((row) => !TEAM_SECTIONS.has(row.section ?? ""));
@@ -851,7 +856,13 @@ export function buildWorkbenchSections(
 					rows: singleSection ? shown.map((row) => ({ ...row, section: undefined })) : shown,
 				})
 			: [`  ${theme.fg("success", "✓")} ${theme.fg("text", doneSummary)}`];
-		sections.push({ title: PLAN_SECTION, meta, body });
+		const nothingToShow = !shown.length && !planRows.length;
+		sections.push({
+			title: PLAN_SECTION,
+			meta,
+			body,
+			...(nothingToShow ? { empty: true, quiet: true } : {}),
+		});
 	}
 	// Failed verifications are the operator's to see and to resolve; they never hide inside an error.
 	const checks = snapshot.verification ?? [];
@@ -902,8 +913,10 @@ export function buildWorkbenchSections(
 		// The standing members, read at render time so a new team or bot shows at once: persistent teams, the
 		// bots (the same list the Chats roster draws), then the subagents.
 		const memberRows = (width: number): string[] => {
-			const teams = persistentTeams?.() ?? [];
-			const bots = persistentBots?.() ?? [];
+			// The roster beside the conversation already lists every team and bot with their state.
+			const listed = rosterShown?.() === true;
+			const teams = listed ? [] : (persistentTeams?.() ?? []);
+			const bots = listed ? [] : (persistentBots?.() ?? []);
 			return [
 				...(teams.length
 					? [

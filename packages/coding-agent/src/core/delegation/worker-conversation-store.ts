@@ -552,6 +552,21 @@ function workerMessageForPersistence(message: WorkerTranscriptMessage): WorkerTr
 	return persisted;
 }
 
+/** The role and, for a host-injected record, its type: enough to say which message two transcripts disagree on, never its text. */
+function describeTranscriptMessage(message: WorkerTranscriptMessage): string {
+	return message.role === "custom" ? `custom ${message.customType}` : message.role;
+}
+
+/** The top-level fields whose values differ between two transcript messages, by name only. */
+function differingFields(left: WorkerTranscriptMessage, right: WorkerTranscriptMessage): string {
+	const a = left as unknown as Record<string, unknown>;
+	const b = right as unknown as Record<string, unknown>;
+	const differing = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(
+		(key) => !isDeepStrictEqual(a[key], b[key]),
+	);
+	return differing.length > 0 ? differing.join(", ") : "none";
+}
+
 function expectedResumeContext(options: CreateWorkerConversationOptions): AgentResumeContext {
 	const location = workerTranscriptLocation(options.agentDir, options);
 	if (!options.cwd.trim()) throw new TypeError("A worker conversation working directory is required.");
@@ -1942,6 +1957,7 @@ export class WorkerConversation {
 			}
 			let persistedMessages = 0;
 			let divergenceIndex: number | undefined;
+			let divergenceDetail = "";
 			visitWorkerSessionEntries(sessionManager, state.entryIndex, sessionManager.getEntryCount(), (entry) => {
 				if (divergenceIndex !== undefined) return;
 				const persisted = rawWorkerTranscriptMessage(entry);
@@ -1949,10 +1965,13 @@ export class WorkerConversation {
 				const candidate = normalizedSuffix[persistedMessages];
 				if (!candidate) {
 					divergenceIndex = persistedMessages;
+					divergenceDetail = ` (persisted ${describeTranscriptMessage(persisted)}, no message in the suffix)`;
 					return;
 				}
-				if (!isDeepStrictEqual(workerMessageForPersistence(persisted), candidate)) {
+				const normalizedPersisted = workerMessageForPersistence(persisted);
+				if (!isDeepStrictEqual(normalizedPersisted, candidate)) {
 					divergenceIndex = persistedMessages;
+					divergenceDetail = ` (persisted ${describeTranscriptMessage(normalizedPersisted)}, suffix ${describeTranscriptMessage(candidate)}; differing fields: ${differingFields(normalizedPersisted, candidate)})`;
 				}
 				persistedMessages += 1;
 			});
@@ -1961,7 +1980,7 @@ export class WorkerConversation {
 					throw new Error("Worker conversation suffix is shorter than its persisted raw context.");
 				}
 				throw new Error(
-					`Worker conversation suffix diverges from persisted context at message ${divergenceIndex}.`,
+					`Worker conversation suffix diverges from persisted context at message ${divergenceIndex}${divergenceDetail}.`,
 				);
 			}
 			if (options?.appendMissing === false && persistedMessages < normalizedSuffix.length) {
