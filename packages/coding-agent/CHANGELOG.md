@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- Interactive workbench: no state is drawn twice. An empty Work plan no longer takes a panel (the Team heads the inspector), the Chats chip is hidden while the Chats roster is drawn, the Team lists no bots or teams the roster already lists, roster bots show their model only when it differs from the default and an idle bot with no result takes one line, empty Teams and Bots groups carry their `/team create` and `/bot new` hint in the header, "Following latest" is no longer announced (only "Reading" is), and the Decider's default state shares its name's line.
+- A worker transcript that diverges from its persisted context now names the message's role and the fields that differ, never their content.
+
 ## [0.104.36] - 2026-11-07
 
 ### Added
