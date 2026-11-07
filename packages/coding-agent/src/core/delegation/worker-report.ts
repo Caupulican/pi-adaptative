@@ -434,7 +434,7 @@ export function buildNeedsMoreRequest(verdict: WorkerHostVerdict): string {
 		"REPORT REVIEW",
 		"The host checked your report against its records and found:",
 		...verdict.missing.map((line) => `- ${line}`),
-		"Run what is missing or correct the report, then submit it again with submit_report. If something cannot be done, say so in the report and mark it not_met or blocked; that is accepted.",
+		"Run what is missing or correct the report, then submit it again with submit_report. Finished work stays status completed: only submit blocked for something that actually stopped you. If a requirement cannot be met, say so in the report and mark it not_met; that is accepted.",
 	].join("\n");
 }
 
@@ -494,7 +494,9 @@ export function judgeSubmittedReport(input: {
 		const check = citedByCommand(reported, input.receipts);
 		const evidence = resolveCheckEvidence(check, receipts);
 		if (!check.receiptId) {
-			missing.push(`check ${quotedSpan(check.command)} is reported ${check.result} with no receipt id`);
+			missing.push(
+				`check ${quotedSpan(check.command)} is reported ${check.result} but matches no command the host recorded. If it was a file read or a search, take it out of checks and keep it in the summary; if it was a command, run it now so the host records it`,
+			);
 			reasons.push("check_without_receipt");
 		} else if (evidence.kind === "missing") {
 			missing.push(

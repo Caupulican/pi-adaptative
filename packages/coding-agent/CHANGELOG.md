@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- A worker that listed a file read as a passed "check" got a review that only said to run what was missing, so it marked a correct, finished result `blocked`. The review now says what to do (take a read or search out of checks and keep it in the summary; run a command so the host records it) and that finished work stays `completed`.
 - A routine result the host delivered as parent input (every recurring bot routine's) still showed its fenced text and instructions in the history: its fields are stored beside the ledger's, and the plain row did not read them.
 - A routine call with a missing or forbidden field now names it (`create needs routineId`) instead of "missing, invalid or forbidden fields", so a model no longer retries blind.
 
