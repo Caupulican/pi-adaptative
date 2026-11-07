@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- A bot worker whose tool call had its arguments normalized by the host (a path alias expanded, an argument repaired) failed its run with "Worker conversation suffix diverges from persisted context" although its report was accepted, so the first task of a bot that read files often failed and had to be retried. The check now compares the message as the model emitted it, which is the same message whether the transcript copy was written before or after the host's in-place normalization; a change to what the model said still fails closed.
 - A worker report that lists a shell command as a check without a receipt name is no longer rejected "without receipt": a worker reports before it is shown any receipt name, so the host now matches the check to its own record of the exact same command (equal digest, the latest run). A check no recorded command matches is still reported as missing, and the report tool now says that reading files is not a check.
 - A bot answering the owner in its own chat (`/bot msg`, a group message) no longer wakes the root into redoing, widening or routing around the request (a Trello consult bot that refused a write by its role had the root start a writer that edited the file). The root reads the answer with its next turn; a turn that failed still wakes it.
 

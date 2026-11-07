@@ -552,6 +552,24 @@ function workerMessageForPersistence(message: WorkerTranscriptMessage): WorkerTr
 	return persisted;
 }
 
+/**
+ * The message as the model emitted it. The agent loop normalizes a tool call's arguments in place after the message ends
+ * (a path alias expanded, an argument repaired, a default filled) and keeps what the model wrote in `rawArguments`; whether
+ * the transcript copy was written before or after that, it is the same message. The commit check compares the emitted form
+ * on both sides, so a host normalization is never read as a divergence, while a change to what the model said still is.
+ */
+function modelEmittedMessage(message: WorkerTranscriptMessage): WorkerTranscriptMessage {
+	if (message.role !== "assistant") return message;
+	return {
+		...message,
+		content: message.content.map((block) => {
+			if (block.type !== "toolCall") return block;
+			const { rawArguments, repairNotes: _repairNotes, ...call } = block;
+			return rawArguments === undefined ? call : { ...call, arguments: rawArguments };
+		}),
+	};
+}
+
 /** The role and, for a host-injected record, its type: enough to say which message two transcripts disagree on, never its text. */
 function describeTranscriptMessage(message: WorkerTranscriptMessage): string {
 	return message.role === "custom" ? `custom ${message.customType}` : message.role;
@@ -1968,10 +1986,11 @@ export class WorkerConversation {
 					divergenceDetail = ` (persisted ${describeTranscriptMessage(persisted)}, no message in the suffix)`;
 					return;
 				}
-				const normalizedPersisted = workerMessageForPersistence(persisted);
-				if (!isDeepStrictEqual(normalizedPersisted, candidate)) {
+				const emittedPersisted = modelEmittedMessage(workerMessageForPersistence(persisted));
+				const emittedCandidate = modelEmittedMessage(candidate);
+				if (!isDeepStrictEqual(emittedPersisted, emittedCandidate)) {
 					divergenceIndex = persistedMessages;
-					divergenceDetail = ` (persisted ${describeTranscriptMessage(normalizedPersisted)}, suffix ${describeTranscriptMessage(candidate)}; differing fields: ${differingFields(normalizedPersisted, candidate)})`;
+					divergenceDetail = ` (persisted ${describeTranscriptMessage(emittedPersisted)}, suffix ${describeTranscriptMessage(emittedCandidate)}; differing fields: ${differingFields(emittedPersisted, emittedCandidate)})`;
 				}
 				persistedMessages += 1;
 			});
