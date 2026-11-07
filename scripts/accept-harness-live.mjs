@@ -238,6 +238,8 @@ const claimsFor = (prompt) => {
 	);
 	return claims().filter((claim) => attempts.has(claim.terminalAttemptId));
 };
+/** Everything a claim says: the summary and the structured report (findings, requirements), so a check does not depend on which field a model put a fact in. */
+const claimText = (claim) => JSON.stringify({ summary: claim.summary, report: claim.report, findings: claim.findings });
 const claimFor = async (prompt, predicate = () => true, timeoutMs = 240_000) =>
 	waitFor(`a worker claim for "${prompt.slice(0, 40)}…"`, () => claimsFor(prompt).find(predicate), timeoutMs, 4000);
 
@@ -293,11 +295,11 @@ const SCENARIOS = [
 		const readPrompt = "List the cards in the Doing lists of GrimDex and FeedTamer by id and title. Use the exports.";
 		await type(state.main, `/bot msg trello-scout ${readPrompt}`);
 		const read = await claimFor(readPrompt, (c) => c.status === "completed");
-		if (!/gx-101/.test(read.summary) || !/ft-021/.test(read.summary)) throw new Error(`the report misses the Doing cards: ${read.summary.slice(0, 200)}`);
+		if (!/gx-101/.test(claimText(read)) || !/ft-021/.test(claimText(read))) throw new Error(`the report misses the Doing cards: ${claimText(read).slice(0, 240)}`);
 		const writePrompt = 'Move card gx-101 to the Done list and add the comment "shipped".';
 		await type(state.main, `/bot msg trello-scout ${writePrompt}`);
 		const write = await claimFor(writePrompt);
-		if (!/refus|cannot|can't|not (moved|done)|never write/i.test(write.summary)) throw new Error(`no refusal: ${write.summary.slice(0, 200)}`);
+		if (!/refus|cannot|can't|not (moved|done)|never write/i.test(claimText(write))) throw new Error(`no refusal: ${claimText(write).slice(0, 240)}`);
 		if (fixtureDigest() !== FIXTURES_AT_START) throw new Error("a fixture changed");
 		return "cards reported, write refused, fixtures untouched";
 	}),
@@ -305,8 +307,8 @@ const SCENARIOS = [
 		const prompt = "Triage every file in mailbox/ now, one line each, and draft a short reply for the ones that need one.";
 		await type(state.main, `/bot msg mail-bot ${prompt}`);
 		const claim = await claimFor(prompt, (c) => c.status === "completed");
-		for (const name of Object.keys(MAILBOX)) if (!claim.summary.includes(name.slice(0, 2))) throw new Error(`file ${name} is missing from the triage`);
-		if (!/phish/i.test(claim.summary)) throw new Error("the phishing mail was not classified");
+		for (const name of Object.keys(MAILBOX)) if (!claimText(claim).includes(name.slice(0, 2))) throw new Error(`file ${name} is missing from the triage: ${claimText(claim).slice(0, 240)}`);
+		if (!/phish/i.test(claimText(claim))) throw new Error("the phishing mail was not classified");
 		if (fixtureDigest() !== FIXTURES_AT_START) throw new Error("a fixture changed");
 		return "six files triaged, phishing classified, fixtures untouched";
 	}),
@@ -347,7 +349,7 @@ const SCENARIOS = [
 		await type(state.main, "/bot schedule add mailcount mail-bot 1m Count the .eml files in mailbox/ and answer with only the number.");
 		const tick = join(SANDBOX, "out", "tick.txt");
 		await waitFor("out/tick.txt", () => existsSync(tick) && statSync(tick).size > 0, 330_000, 5000);
-		if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(readFileSync(tick, "utf8").trim())) throw new Error(`tick.txt is not a UTC time: ${readFileSync(tick, "utf8")}`);
+		if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(readFileSync(tick, "utf8").trim())) throw new Error(`tick.txt is not a UTC time: ${readFileSync(tick, "utf8")}`);
 		await waitFor(
 			"the recurring routine's result",
 			async () => {
@@ -376,8 +378,8 @@ const SCENARIOS = [
 		const prompt = "Which file defines ownerRoom under packages/coding-agent/src/core/channels and what are its parameter names? Answer with file:line.";
 		await type(state.repo, `/bot msg auditor ${prompt}`);
 		const claim = await claimFor(prompt, (c) => c.status === "completed", 300_000);
-		const lacking = [...params, "owner-channel.ts"].filter((word) => !claim.summary.includes(word));
-		if (lacking.length > 0) throw new Error(`the answer lacks ${lacking.join(", ")}: ${claim.summary.slice(0, 240)}`);
+		const lacking = [...params, "owner-channel.ts"].filter((word) => !claimText(claim).includes(word));
+		if (lacking.length > 0) throw new Error(`the answer lacks ${lacking.join(", ")}: ${claimText(claim).slice(0, 240)}`);
 		return `grounded answer names ${params.join(", ")}`;
 	}),
 	scenario("s9", "harness health across everything that ran", async () => {
