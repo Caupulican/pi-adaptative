@@ -155,7 +155,7 @@ function readTeamMessageView(message: CustomMessage<unknown>): TeamMessageView |
 	};
 }
 
-/** Longest entry the group view shows whole; a longer one (a transport error, a pasted log) is cut with its size. */
+/** Longest bot entry the group view shows whole; a longer one (a transport error, a pasted log) is cut with its size. Your own words are never cut. */
 const MAX_TEAM_MESSAGE_CHARS = 700;
 
 const TEAM_SPEAKER_TONES = ["accent", "mdLink", "success", "warning"] as const;
@@ -189,7 +189,7 @@ class TeamMessageComponent extends Container {
 			(time ? theme.fg("dim", `  ${time}`) : "");
 		this.addChild(new Text(header, 1, 0));
 		const text =
-			view.text.length > MAX_TEAM_MESSAGE_CHARS
+			view.from.kind !== "operator" && view.text.length > MAX_TEAM_MESSAGE_CHARS
 				? `${view.text.slice(0, MAX_TEAM_MESSAGE_CHARS).trimEnd()}…\n\n_+${view.text.length - MAX_TEAM_MESSAGE_CHARS} more characters; open ${who}'s own chat for the rest._`
 				: view.text;
 		this.addChild(new Markdown(text, 3, 0, markdownTheme, { color: (text: string) => theme.fg("text", text) }));
