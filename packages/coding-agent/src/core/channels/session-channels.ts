@@ -2293,9 +2293,10 @@ export class SessionChannels {
 			.map((view) => `${view.id} (${classLabels(view)}${shown(view) ? "" : ", not shown yet"})`);
 		const more = drafts.length - listed.length;
 		const suppressed = this.ownerPush.takeSuppressed(name);
+		const quotaLine = quotaStatusLine(name, policy, quota);
 		const lines = [
 			`Owner spend: $${room.usedUsd.toFixed(2)} of $${policy.ownerMaxUsdPerDay.toFixed(2)} in 24 hours, $${policy.ownerMaxUsdPerTurn.toFixed(2)} per turn${refusal ? `; no new turn: ${refusal}` : ""}.`,
-			...(quotaStatusLine(name, policy, quota) ?? []),
+			...(quotaLine === undefined ? [] : [quotaLine]),
 			`${running ? "A turn is running." : "No turn is running."} ${waiting.length} message(s) wait.`,
 			listed.length > 0
 				? `Held: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`

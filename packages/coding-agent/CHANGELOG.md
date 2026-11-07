@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- The owner's `status` reply printed the subscription usage line one character per line (the line was spread as if it were a list).
 - The Team panel's Brain row showed a running accent bullet and the idle phrase while the session stood by, because the projection names the root an actor even at rest; it now follows the session's own streaming state, as the roster does.
 
 ## [0.104.39] - 2026-11-07
