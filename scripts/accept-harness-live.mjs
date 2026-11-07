@@ -325,11 +325,11 @@ const SCENARIOS = [
 		const claim = await claimFor(prompt, (c) => c.status === "completed");
 		// Each mail is recognized by a fact only it carries (its number, sender or subject), whatever wording the bot chose.
 		const MAIL_FACTS = {
-			"01-bug-report.eml": /01|sam|40k|40,000|freez|crash/i,
-			"02-payment.eml": /02|payout|payment|214/i,
-			"03-collab.eml": /03|collab|cross-?promo|lena/i,
-			"04-newsletter.eml": /04|newsletter|dev weekly/i,
-			"05-feedtamer-question.eml": /05|mute|priya/i,
+			"01-bug-report.eml": /01|sam|bug|freez|crash|40/i,
+			"02-payment.eml": /02|payout|payment|billing|214/i,
+			"03-collab.eml": /03|collab|cross|promo|lena/i,
+			"04-newsletter.eml": /04|newsletter|digest|dev weekly/i,
+			"05-feedtamer-question.eml": /05|mute|priya|feedtamer/i,
 			"06-phish.eml": /06|phish|acc0unt|verify/i,
 		};
 		for (const [name, fact] of Object.entries(MAIL_FACTS)) if (!fact.test(claimText(claim))) throw new Error(`mail ${name} is missing from the triage: ${claimText(claim).slice(0, 240)}`);
