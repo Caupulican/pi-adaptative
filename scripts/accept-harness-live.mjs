@@ -407,6 +407,20 @@ const SCENARIOS = [
 		if (lacking.length > 0) throw new Error(`the answer lacks ${lacking.join(", ")}: ${claimText(claim).slice(0, 240)}`);
 		return `grounded answer names ${params.join(", ")}`;
 	}),
+	scenario("s10", "the owner channel's subscription allowance holds with the provider's real usage", async () => {
+		const run = (percent) =>
+			spawnSync(
+				"node",
+				["--conditions=pi-source", join(REPO, "scripts", "accept-owner-quota-live.mjs"), "--quota-percent", String(percent), "--model", MODEL_A, "--dir", join(RUN, `quota-${percent}`)],
+				{ cwd: REPO, encoding: "utf8", timeout: 480_000 },
+			);
+		const outcomes = [95, 0.01].map((percent) => ({ percent, result: run(percent) }));
+		const failed = outcomes.find(({ result }) => result.status !== 0 && result.status !== 3);
+		if (failed) throw new Error(`at ${failed.percent}%: ${failed.result.stdout.trim().split("\n").at(-1)}`);
+		const unsure = outcomes.find(({ result }) => result.status === 3);
+		if (unsure) throw inconclusive(`at ${unsure.percent}%: ${unsure.result.stdout.trim().split("\n").at(-1)}`);
+		return "bounds lifted with room at 95%, stopped with the subscription's reason at 0.01%";
+	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];
