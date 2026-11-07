@@ -18,6 +18,15 @@ import {
 } from "./routine-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
+/** Longest preview of a run's report the owner's history row carries; the model reads the whole fenced report. */
+const MAX_RESULT_PREVIEW_CHARS = 160;
+
+/** The first words of a run's report on one line, control characters collapsed, for the owner's history row. */
+function resultPreview(summary: string): string | undefined {
+	const flat = summary.replace(/[\p{Cc}\s]+/gu, " ").trim();
+	if (flat.length === 0) return undefined;
+	return flat.length > MAX_RESULT_PREVIEW_CHARS ? `${flat.slice(0, MAX_RESULT_PREVIEW_CHARS - 1)}…` : flat;
+}
 /** Why a result that would start a parent turn rides with the owner's next turn instead. */
 export const ROUTINE_RESULT_WAKES_HOLD = "max_result_wakes_per_day_reached";
 export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
@@ -102,6 +111,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 			routineRevision: occurrence.routineRevision,
 			outcome: result.outcome,
 			resultDigest: result.digest,
+			...(resultPreview(result.summary) ? { resultPreview: resultPreview(result.summary) } : {}),
 			...(missedCount > 0 ? { missedCount } : {}),
 			...(saturated ? { missedCountIsLowerBound: true as const } : {}),
 			...(trigger.kind === "event"

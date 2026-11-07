@@ -74,6 +74,13 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
+		const teamView = readTeamMessageView(this.message);
+		if (teamView) {
+			this.customComponent = new TeamMessageComponent(teamView, this.markdownTheme);
+			this.addChild(this.customComponent);
+			return;
+		}
+
 		const backgroundSummary = formatBackgroundActivitySummary(this.message);
 		if (backgroundSummary) {
 			this.customComponent = new BackgroundActivitySummaryComponent(backgroundSummary);
@@ -124,6 +131,68 @@ export class CustomMessageComponent extends Container {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+	}
+}
+
+interface TeamMessageView {
+	readonly from: { readonly kind: "operator" | "brain" | "bot"; readonly agentId?: string };
+	readonly to: readonly string[];
+	readonly text: string;
+	readonly timestamp?: number;
+}
+
+/** A group chat entry, read from the fields the transcript wrote (never from its text). */
+function readTeamMessageView(message: CustomMessage<unknown>): TeamMessageView | undefined {
+	if (message.customType !== "team-message" || !isPlainRecord(message.details)) return undefined;
+	const { from, to } = message.details;
+	if (!isPlainRecord(from) || (from.kind !== "operator" && from.kind !== "brain" && from.kind !== "bot"))
+		return undefined;
+	return {
+		from: { kind: from.kind, ...(typeof from.agentId === "string" ? { agentId: from.agentId } : {}) },
+		to: Array.isArray(to) ? to.filter((id): id is string => typeof id === "string") : [],
+		text: typeof message.content === "string" ? message.content : "",
+		...(typeof message.timestamp === "number" ? { timestamp: message.timestamp } : {}),
+	};
+}
+
+/** Longest entry the group view shows whole; a longer one (a transport error, a pasted log) is cut with its size. */
+const MAX_TEAM_MESSAGE_CHARS = 700;
+
+const TEAM_SPEAKER_TONES = ["accent", "mdLink", "success", "warning"] as const;
+
+/** One speaker of a group chat: a name in its own steady color, who it spoke to, the time, then the words. */
+class TeamMessageComponent extends Container {
+	constructor(view: TeamMessageView, markdownTheme: MarkdownTheme) {
+		super();
+		const who =
+			view.from.kind === "operator" ? "You" : view.from.kind === "brain" ? "Brain" : (view.from.agentId ?? "bot");
+		const tone =
+			view.from.kind === "operator"
+				? "text"
+				: view.from.kind === "brain"
+					? "muted"
+					: TEAM_SPEAKER_TONES[
+							[...who].reduce((sum, char) => sum + char.charCodeAt(0), 0) % TEAM_SPEAKER_TONES.length
+						]!;
+		const recipients =
+			view.to.length > 0
+				? view.to.map((id) => `@${id}`).join(", ")
+				: view.from.kind === "operator"
+					? "everyone"
+					: "";
+		const time = view.timestamp
+			? new Date(view.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+			: "";
+		const header =
+			`${theme.fg(tone, "●")} ${theme.bold(theme.fg(tone, who))}` +
+			(recipients ? theme.fg("dim", ` → ${recipients}`) : "") +
+			(time ? theme.fg("dim", `  ${time}`) : "");
+		this.addChild(new Text(header, 1, 0));
+		const text =
+			view.text.length > MAX_TEAM_MESSAGE_CHARS
+				? `${view.text.slice(0, MAX_TEAM_MESSAGE_CHARS).trimEnd()}…\n\n_+${view.text.length - MAX_TEAM_MESSAGE_CHARS} more characters; open ${who}'s own chat for the rest._`
+				: view.text;
+		this.addChild(new Markdown(text, 3, 0, markdownTheme, { color: (text: string) => theme.fg("text", text) }));
 	}
 }
 
@@ -263,9 +332,51 @@ function agentDetailSuffix(records: readonly Record<string, unknown>[]): string 
 	return parts.length > 0 ? parts.join(" — ") : undefined;
 }
 
+/**
+ * A routine's result, expiry or end, and the host's intake notice, are durable model input: their content is the fenced
+ * report and instructions for the model. The owner's history reads one line built from the message's own fields; the
+ * rendered content is never shown or parsed.
+ */
+function formatRoutineActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
+	const details = isPlainRecord(message.details) ? message.details : {};
+	const routineId = typeof details.routineId === "string" ? details.routineId : undefined;
+	if (message.customType === "routine-intake") {
+		if (routineId) return { text: `Scheduled routine ${routineId}`, status: "success" };
+		const refused = typeof details.refused === "string" ? details.refused : undefined;
+		const other = Object.entries(details).find(
+			([key, value]) => key !== "routineIntakeKey" && key !== "sourceId" && typeof value === "string",
+		);
+		const reason = refused ?? (typeof other?.[1] === "string" ? other[1] : undefined);
+		return {
+			text: `${refused ? "Not scheduled" : "Could not schedule"}${reason ? `: ${reason}` : ""}`,
+			status: "warning",
+		};
+	}
+	if (message.customType !== "routine-completion" || !routineId) return undefined;
+	if (typeof details.expiresAt === "number")
+		return { text: `Routine ${routineId} reached its end time and was removed`, status: "warning" };
+	if (typeof details.conditionMetBy === "string")
+		return { text: `Routine ${routineId} met its end and was removed`, status: "success" };
+	const outcome = typeof details.outcome === "string" ? details.outcome : "ended";
+	const note = [
+		details.ownerUpdate === "none" ? "nothing for you" : undefined,
+		details.deliveryHold !== undefined ? "waits for your next message" : undefined,
+		typeof details.missedCount === "number" && details.missedCount > 0
+			? `covers ${details.missedCount} earlier ${details.missedCount === 1 ? "slot" : "slots"}`
+			: undefined,
+		typeof details.resultPreview === "string" ? details.resultPreview : undefined,
+	].filter((part): part is string => part !== undefined);
+	return {
+		text: `Routine ${routineId} ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`,
+		status: outcome === "succeeded" ? "success" : outcome === "failed" ? "error" : "warning",
+	};
+}
+
 function formatBackgroundActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
 	const supervisionSummary = formatSupervisionActivitySummary(message);
 	if (supervisionSummary) return supervisionSummary;
+	const routineSummary = formatRoutineActivitySummary(message);
+	if (routineSummary) return routineSummary;
 	const kind =
 		message.customType === "background-worker-completion"
 			? "agent"

@@ -2551,34 +2551,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const result: AgentMessage[] = [];
 
 		for (const msg of teamMessages) {
-			if (msg.sender.kind === "operator") {
-				result.push({
-					role: "user",
-					content: [
-						{
-							type: "text",
-							text: `[to team:${teamId} -> ${msg.targetAgentIds.length > 0 ? msg.targetAgentIds.join(", ") : "all members"}] ${msg.text}`,
-						},
-					],
-					timestamp: msg.timestamp,
-				});
-			} else if (msg.sender.kind === "bot") {
-				result.push({
-					role: "custom",
-					customType: "team-bot-message",
-					content: `**[bot: ${msg.sender.agentId}]**\n${msg.text}`,
-					display: true,
-					timestamp: msg.timestamp,
-				});
-			} else {
-				result.push({
-					role: "custom",
-					customType: "team-brain-message",
-					content: `**[brain]**\n${msg.text}`,
-					display: true,
-					timestamp: msg.timestamp,
-				});
-			}
+			// One shape for every speaker: the text as written, and who spoke to whom as fields the chat view draws.
+			result.push({
+				role: "custom",
+				customType: "team-message",
+				content: msg.text,
+				display: true,
+				details: {
+					teamId,
+					from:
+						msg.sender.kind === "bot" ? { kind: "bot", agentId: msg.sender.agentId } : { kind: msg.sender.kind },
+					to: [...msg.targetAgentIds],
+				},
+				timestamp: msg.timestamp,
+			});
 		}
 
 		result.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));

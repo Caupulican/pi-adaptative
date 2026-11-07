@@ -4,6 +4,8 @@
 
 - Interactive workbench: no state is drawn twice. An empty Work plan no longer takes a panel (the Team heads the inspector), the Chats chip is hidden while the Chats roster is drawn, the Team lists no bots or teams the roster already lists, roster bots show their model only when it differs from the default and an idle bot with no result takes one line, empty Teams and Bots groups carry their `/team create` and `/bot new` hint in the header, "Following latest" is no longer announced (only "Reading" is), and the Decider's default state shares its name's line.
 - A worker transcript that diverges from its persisted context now names the message's role and the fields that differ, never their content.
+- Group chats (`/team open <id>`): each entry is one speaker with its own steady color, who it spoke to (`mail-bot → @trello-scout`) and the time, your messages read `You → everyone` or the bots you addressed, the header is one line of members with their live state, and an entry longer than 700 characters (a transport error, a log) is cut with its size. Bot-to-bot messages are visible in the group as they happen.
+- The interactive history shows a routine's result, expiry or end, and the host's schedule notices, as one plain line (`Routine mailcount succeeded · …`), and a call the harness bounced as `Not run: invalid arguments (…)`, instead of the fenced text and JSON written for the model; the model still reads the full text.
 
 ### Fixed
 

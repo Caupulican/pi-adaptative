@@ -26,6 +26,7 @@ import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/r
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
+import { botStateGlyph } from "./components/workbench.ts";
 
 export interface BotTeamChatSessionPort {
 	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[];
@@ -598,9 +599,9 @@ export class BotTeamChatController {
 		const memberStatus = members
 			.map((memberId) => {
 				const bot = liveBots.find((b) => b.agentId === memberId);
-				return `${memberId} (${bot?.state ?? "unknown"})`;
+				return `${botStateGlyph(bot?.state ?? "idle")} ${memberId}`;
 			})
-			.join(" · ");
+			.join("  ");
 		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
 			(r) => r.target.kind === "team" && r.target.teamId === teamId,
 		);
@@ -612,20 +613,15 @@ export class BotTeamChatController {
 		)
 			return;
 
-		const memoryPath = team?.memoryFilePath ?? `~/.pi/agent/memory/teams/${teamId}.md`;
 		const routineLine =
 			routines.length > 0
-				? ` · Routines: ${routines.map((r) => `${r.routineId} (${routineScheduleLabel(r)})`).join(", ")}`
+				? `  ⏱ ${routines.map((r) => `${r.routineId} ${routineScheduleLabel(r)}`).join(", ")}`
 				: "";
+		// The members' own glyphs say who is working; the hint is the one thing a newcomer to the group needs.
 		const lines = [
-			theme.fg("accent", theme.bold(`◆ LIVE TEAM CHAT · ${team?.name ?? teamId}`)) +
-				theme.fg("muted", ` [${members.join(", ")}]${routineLine}`),
-			theme.fg("text", memberStatus.length > 0 ? memberStatus : "No members"),
-			theme.fg("muted", `Memory: ${memoryPath}`),
-			theme.fg(
-				"muted",
-				"Direct team chat active: messages you submit here dispatch to all team members (or prefix @<botId> for one member) · /chat root or Alt+A to return to Brain",
-			),
+			theme.fg("accent", theme.bold(`◆ ${team?.name ?? teamId}`)) +
+				`  ${memberStatus.length > 0 ? memberStatus : theme.fg("muted", "no members")}${theme.fg("muted", routineLine)}`,
+			theme.fg("dim", "Type to message everyone · @bot for one · /chat root returns to Brain"),
 		];
 		this.finishChatRender(
 			lines,
