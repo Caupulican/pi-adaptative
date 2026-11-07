@@ -32,13 +32,9 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { args, flag } from "./live-args.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const args = process.argv.slice(2);
-const flag = (name, fallback) => {
-	const at = args.indexOf(`--${name}`);
-	return at >= 0 && args[at + 1] ? args[at + 1] : fallback;
-};
 const MODEL_A = flag("model-a", "xai/grok-4.7-build-fast");
 const MODEL_B = flag("model-b", "google-antigravity/gemini-3.8-flash-high");
 const ONLY = flag("only", "")

@@ -24,12 +24,8 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "../packages/coding-agent/src/index.ts";
+import { flag } from "./live-args.mjs";
 
-const args = process.argv.slice(2);
-const flag = (name, fallback) => {
-	const at = args.indexOf(`--${name}`);
-	return at >= 0 && args[at + 1] ? args[at + 1] : fallback;
-};
 const QUOTA_PERCENT = Number(flag("quota-percent", "95"));
 const [PROVIDER, ...MODEL_PARTS] = flag("model", "xai/grok-4.7-build-fast").split("/");
 const OWNER_ID = 424242;
