@@ -55,7 +55,7 @@ What it checks, each from evidence the harness wrote (lane records, worker claim
 - s7 a one-time routine fires on time and a recurring bot routine reports; s8 a bot answers a question about this repository and the answer is checked against the source.
 - s9 health across the whole run: no failed worker run, no report rejected for a missing receipt, no bounced routine call, no lane stuck awaiting its parent, no modified fixture.
 
-The last line is the gate: `LIVE GATE: PASS` only when nothing failed, and skipped scenarios are listed. The report is written to `<git-common-dir>/pi-audits/live-validation/<timestamp>/report.json`. Options: `--model-a`, `--model-b`, `--only s3,s4`, `--keep` (leave the panes open). The loop for a failure: read the failing scenario's evidence in the printed sandbox and agent directory, fix the production owner, rerun until the gate passes, and release a patch only when the fix is worth shipping.
+The last line is the gate: `LIVE GATE: PASS` only when nothing failed, `FAIL` when a scenario failed, and `INCONCLUSIVE` (exit 3) when a worker run ended on a provider network failure after the harness exhausted its retries, which says nothing about the harness: rerun when the network is healthy. Skipped scenarios are listed and never counted as passes. The report is written to `<git-common-dir>/pi-audits/live-validation/<timestamp>/report.json`. Options: `--model-a`, `--model-b`, `--only s3,s4`, `--keep` (leave the panes open). The loop for a failure: read the failing scenario's evidence in the printed sandbox and agent directory, fix the production owner, rerun until the gate passes, and release a patch only when the fix is worth shipping.
 
 ## Changelog
 

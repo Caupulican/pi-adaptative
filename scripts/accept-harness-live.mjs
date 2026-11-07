@@ -238,10 +238,26 @@ const claimsFor = (prompt) => {
 	);
 	return claims().filter((claim) => attempts.has(claim.terminalAttemptId));
 };
+/** A provider or network failure after the harness exhausted its retries: it says nothing about the harness, so it is neither a pass nor a harness failure. */
+const TRANSPORT_FAILURE = /fetch failed|EAI_AGAIN|ENOTFOUND|UND_ERR_|ECONNRESET|ETIMEDOUT|Request timed out|Connection error|transport failed/i;
+const inconclusive = (message) => Object.assign(new Error(message), { inconclusive: true });
+
 /** Everything a claim says: the summary and the structured report (findings, requirements), so a check does not depend on which field a model put a fact in. */
 const claimText = (claim) => JSON.stringify({ summary: claim.summary, report: claim.report, findings: claim.findings });
 const claimFor = async (prompt, predicate = () => true, timeoutMs = 240_000) =>
-	waitFor(`a worker claim for "${prompt.slice(0, 40)}…"`, () => claimsFor(prompt).find(predicate), timeoutMs, 4000);
+	waitFor(
+		`a worker claim for "${prompt.slice(0, 40)}…"`,
+		() => {
+			const own = claimsFor(prompt);
+			const hit = own.find(predicate);
+			if (hit) return hit;
+			const network = own.find((claim) => claim.status === "failed" && TRANSPORT_FAILURE.test(claim.summary));
+			if (network) throw inconclusive(`provider network failure: ${network.summary.replace(/\s+/g, " ").slice(0, 140)}`);
+			return undefined;
+		},
+		timeoutMs,
+		4000,
+	);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Scenarios.
@@ -349,7 +365,7 @@ const SCENARIOS = [
 		await type(state.main, "/bot schedule add mailcount mail-bot 1m Count the .eml files in mailbox/ and answer with only the number.");
 		const tick = join(SANDBOX, "out", "tick.txt");
 		await waitFor("out/tick.txt", () => existsSync(tick) && statSync(tick).size > 0, 330_000, 5000);
-		if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(readFileSync(tick, "utf8").trim())) throw new Error(`tick.txt is not a UTC time: ${readFileSync(tick, "utf8")}`);
+		if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$/.test(readFileSync(tick, "utf8").trim())) throw new Error(`tick.txt is not a UTC time: ${readFileSync(tick, "utf8")}`);
 		await waitFor(
 			"the recurring routine's result",
 			async () => {
@@ -385,7 +401,9 @@ const SCENARIOS = [
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];
-		const failedClaims = claims().filter((c) => c.status === "failed");
+		const allFailed = claims().filter((c) => c.status === "failed");
+		const network = allFailed.filter((c) => TRANSPORT_FAILURE.test(c.summary));
+		const failedClaims = allFailed.filter((c) => !TRANSPORT_FAILURE.test(c.summary));
 		if (failedClaims.length > 0) problems.push(`${failedClaims.length} worker run(s) failed: ${[...new Set(failedClaims.map((c) => c.summary.replace(/\s+/g, " ").slice(0, 110)))].join(" | ")}`);
 		const receiptBlocked = claims().filter((c) => (c.blockers ?? []).some((b) => /check_without_receipt|check_unknown_receipt/.test(b)));
 		if (receiptBlocked.length > 0) problems.push(`${receiptBlocked.length} finished worker report(s) rejected for a check without a receipt id`);
@@ -397,6 +415,7 @@ const SCENARIOS = [
 		const stuckBots = (Array.isArray(bots) ? bots : Object.values(bots ?? {})).filter((b) => b.state === "awaiting_parent");
 		if (stuck.length + stuckBots.length > 0) problems.push("a worker lane is still awaiting its parent after everything finished");
 		if (problems.length > 0) throw new Error(problems.join("; "));
+		if (network.length > 0) throw inconclusive(`${network.length} worker run(s) ended on a provider network failure, which says nothing about the harness`);
 		return "no failed run, no receipt rejection, no bounced routine call, no stuck lane";
 	}),
 ];
@@ -418,19 +437,22 @@ for (const s of SCENARIOS) {
 		const skipped = typeof out === "object" && out !== null && "skipped" in out;
 		results.push({ id: s.id, title: s.title, status: skipped ? "skipped" : "pass", detail: skipped ? out.skipped : out, seconds: Math.round((Date.now() - started) / 1000) });
 	} catch (error) {
-		results.push({ id: s.id, title: s.title, status: "FAIL", detail: error instanceof Error ? error.message : String(error), seconds: Math.round((Date.now() - started) / 1000) });
+		results.push({ id: s.id, title: s.title, status: error?.inconclusive ? "INCONCLUSIVE" : "FAIL", detail: error instanceof Error ? error.message : String(error), seconds: Math.round((Date.now() - started) / 1000) });
 		if (s.id === "s0" || s.id === "s1") aborted = true;
 	}
 	const last = results[results.length - 1];
 	console.log(`${last.status.padEnd(7)} ${last.id} ${last.title} (${last.seconds ?? 0}s)\n        ${last.detail}`);
 }
 const failed = results.filter((r) => r.status === "FAIL");
+const unsure = results.filter((r) => r.status === "INCONCLUSIVE");
 const skipped = results.filter((r) => r.status === "skipped");
 writeFileSync(join(REPORT_DIR, "report.json"), JSON.stringify({ at: stamp, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1));
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
-if (!KEEP && failed.length === 0) rmSync(RUN, { recursive: true, force: true });
+if (!KEEP && failed.length === 0 && unsure.length === 0) rmSync(RUN, { recursive: true, force: true });
 console.log(`\nreport: ${join(REPORT_DIR, "report.json")}`);
-if (!KEEP && failed.length > 0) console.log(`evidence kept: ${RUN} (removed by the next run)`);
+if (!KEEP && (failed.length > 0 || unsure.length > 0)) console.log(`evidence kept: ${RUN} (removed by the next run)`);
 console.log(skipped.length > 0 ? `skipped (not counted as passes): ${skipped.map((r) => r.id).join(", ")}` : "skipped: none");
-console.log(failed.length === 0 ? "LIVE GATE: PASS" : `LIVE GATE: FAIL (${failed.map((r) => r.id).join(", ")})`);
-process.exit(failed.length === 0 ? 0 : 1);
+if (failed.length > 0) console.log(`LIVE GATE: FAIL (${failed.map((r) => r.id).join(", ")})`);
+else if (unsure.length > 0) console.log(`LIVE GATE: INCONCLUSIVE (${unsure.map((r) => r.id).join(", ")}: provider network failure; rerun when the network is healthy)`);
+else console.log("LIVE GATE: PASS");
+process.exit(failed.length > 0 ? 1 : unsure.length > 0 ? 3 : 0);
