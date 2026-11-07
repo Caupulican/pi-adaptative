@@ -13,7 +13,7 @@
  * Needs: HERDR_ENV=1 (run inside herdr), the owner's provider logins, network. Spends subscription quota; CI never runs
  * it. Slack and Telegram are out of scope. Usage:
  *   node scripts/accept-harness-live.mjs [--model-a xai/grok-4.7-build-fast] [--model-b google-antigravity/gemini-3.8-flash-high]
- *                                         [--only s3,s4] [--keep]
+ *                                         [--only s3,s4] [--keep] [--installed]
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -41,6 +41,8 @@ const ONLY = flag("only", "")
 	.split(",")
 	.filter(Boolean);
 const KEEP = args.includes("--keep");
+// `--installed` drives the installed `pi` binary instead of the source build, to validate what a user runs.
+const PI_COMMAND = args.includes("--installed") ? "pi" : join(REPO, "pi-test.sh");
 
 if (process.env.HERDR_ENV !== "1") {
 	console.error("accept-harness-live: run this inside herdr (HERDR_ENV=1).");
@@ -158,7 +160,7 @@ const launch = (pane, cwd, extra = "") =>
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${AGENT} ${join(REPO, "pi-test.sh")} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
+		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${AGENT} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
 	);
 const type = async (pane, text) => {
 	herdr("pane", "send-text", pane, text);
@@ -272,7 +274,7 @@ const SCENARIOS = [
 	scenario("s0", "providers answer a one-token call", async () => {
 		const ask = (model) => {
 			const [provider, ...id] = model.split("/");
-			const r = spawnSync(join(REPO, "pi-test.sh"), ["--provider", provider, "--model", id.join("/"), "-p", "Reply with the single word ok."], {
+			const r = spawnSync(PI_COMMAND, ["--provider", provider, "--model", id.join("/"), "-p", "Reply with the single word ok."], {
 				cwd: SANDBOX,
 				env: { ...process.env, PI_ADAPTATIVE_CODING_AGENT_DIR: AGENT },
 				encoding: "utf8",
@@ -287,7 +289,7 @@ const SCENARIOS = [
 		}
 		return "both providers answer";
 	}),
-	scenario("s1", "the source build starts and shows the prompt", async () => {
+	scenario("s1", "the build starts and shows the prompt", async () => {
 		state.main = openPane();
 		launch(state.main, SANDBOX);
 		await waitFor("the prompt", () => /Ask anything/.test(screen(state.main, 60)), 90_000, 2000);
