@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- A routine result the host delivered as parent input (every recurring bot routine's) still showed its fenced text and instructions in the history: its fields are stored beside the ledger's, and the plain row did not read them.
+- A routine call with a missing or forbidden field now names it (`create needs routineId`) instead of "missing, invalid or forbidden fields", so a model no longer retries blind.
+
 ## [0.104.38] - 2026-11-07
 
 ### Fixed
