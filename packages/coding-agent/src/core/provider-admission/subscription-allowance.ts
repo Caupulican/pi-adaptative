@@ -21,7 +21,7 @@ export const SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS = 5 * 60_000;
 export type SubscriptionAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
 	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string }
-	| { readonly kind: "unknown"; readonly reason: string };
+	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
 
 /**
  * The ordered exits over one usage snapshot: a missing or stale reading is unknown; a provider-reported limit, or any
@@ -32,10 +32,11 @@ export function decideSubscriptionAllowance(
 	now: number,
 	maxUsedPercent: number,
 ): SubscriptionAllowance {
-	if (!snapshot) return { kind: "unknown", reason: "no usage reading yet" };
+	if (!snapshot) return { kind: "unknown", reason: "no usage reading yet", subscription: true };
 	if (now - snapshot.observedAt > SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS)
-		return { kind: "unknown", reason: "the usage reading is stale" };
-	if (snapshot.windows.length === 0) return { kind: "unknown", reason: "the account reports no usage window" };
+		return { kind: "unknown", reason: "the usage reading is stale", subscription: true };
+	if (snapshot.windows.length === 0)
+		return { kind: "unknown", reason: "the account reports no usage window", subscription: true };
 	const usedPercent = Math.max(...snapshot.windows.map((window) => window.usedPercent));
 	if (snapshot.limitReached) return { kind: "exhausted", usedPercent, reason: snapshot.limitReached };
 	if (usedPercent >= maxUsedPercent)
@@ -68,13 +69,14 @@ export class SubscriptionAllowanceReader {
 		const model = this.deps.getModel();
 		const registry = this.deps.getRegistry();
 		if (!model || !registry.isUsingSubscription(model))
-			return { kind: "unknown", reason: "the model is not a subscription login" };
+			return { kind: "unknown", reason: "the model is not a subscription login", subscription: false };
 		const account: AuthenticatedAccount | undefined = listAuthenticatedAccounts(registry).find(
 			(candidate) => candidate.provider === model.provider,
 		);
-		if (!account) return { kind: "unknown", reason: "the account is not signed in" };
+		if (!account) return { kind: "unknown", reason: "the account is not signed in", subscription: true };
 		const state = this.deps.monitor.state(account, registry);
-		if (state.kind === "unsupported") return { kind: "unknown", reason: "the provider reports no usage" };
+		if (state.kind === "unsupported")
+			return { kind: "unknown", reason: "the provider reports no usage", subscription: true };
 		void this.deps.monitor
 			.refresh([account], registry, { currentAccountKey: this.deps.currentAccountKey })
 			.catch(() => undefined);

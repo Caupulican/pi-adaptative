@@ -63,7 +63,8 @@ export interface OwnerChannelDelivery {
 export type OwnerQuotaAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
 	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string }
-	| { readonly kind: "unknown"; readonly reason: string };
+	/** `subscription`: the model is a subscription login (so the status says why no reading decides); false when none applies. */
+	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
 
 /** The model-free control words an owner message can be, recognized before any model turn. */
 export type OwnerControl =

@@ -119,14 +119,14 @@ const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
  * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
  * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
  */
-/** The status line for the subscription allowance: whether the dollar bounds apply now, and why. */
-function quotaStatusLine(name: string, policy: ResolvedChannelPolicy, quota: OwnerQuotaAllowance): string {
+/** The status line for the subscription allowance (none when the model is no subscription login): whether the dollar bounds apply now, and why. */
+function quotaStatusLine(name: string, policy: ResolvedChannelPolicy, quota: OwnerQuotaAllowance): string | undefined {
 	const key = `channels.${name}.ownerQuotaMaxUsedPercent`;
 	if (quota.kind === "room")
 		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${policy.ownerQuotaMaxUsedPercent}% (${key}); the dollar bounds do not apply.`;
 	if (quota.kind === "exhausted")
 		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); the dollar bounds apply.`;
-	return `Subscription usage: ${quota.reason}; the dollar bounds apply.`;
+	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds apply.` : undefined;
 }
 
 function senderNoticeText(name: string, namedId: string | undefined): string {
@@ -457,16 +457,18 @@ export class SessionChannels {
 	 * every decision below uses. Unknown (no reading, not a subscription login, the bypass off, a throw) keeps the bounds.
 	 */
 	private ownerQuota(policy: ResolvedChannelPolicy): OwnerQuotaAllowance {
-		if (policy.ownerQuotaMaxUsedPercent <= 0) return { kind: "unknown", reason: "the subscription bypass is off" };
+		if (policy.ownerQuotaMaxUsedPercent <= 0)
+			return { kind: "unknown", reason: "the subscription bypass is off", subscription: false };
 		try {
 			return (
 				this.deps.ownerDelivery?.quotaAllowance?.(policy.ownerQuotaMaxUsedPercent) ?? {
 					kind: "unknown",
 					reason: "this session reads no subscription usage",
+					subscription: false,
 				}
 			);
 		} catch {
-			return { kind: "unknown", reason: "the subscription usage could not be read" };
+			return { kind: "unknown", reason: "the subscription usage could not be read", subscription: true };
 		}
 	}
 
@@ -2293,7 +2295,7 @@ export class SessionChannels {
 		const suppressed = this.ownerPush.takeSuppressed(name);
 		const lines = [
 			`Owner spend: $${room.usedUsd.toFixed(2)} of $${policy.ownerMaxUsdPerDay.toFixed(2)} in 24 hours, $${policy.ownerMaxUsdPerTurn.toFixed(2)} per turn${refusal ? `; no new turn: ${refusal}` : ""}.`,
-			quotaStatusLine(name, policy, quota),
+			...(quotaStatusLine(name, policy, quota) ?? []),
 			`${running ? "A turn is running." : "No turn is running."} ${waiting.length} message(s) wait.`,
 			listed.length > 0
 				? `Held: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`
@@ -2399,7 +2401,7 @@ export class SessionChannels {
 			const quota: OwnerQuotaAllowance =
 				policy.ownerSenders.length > 0
 					? this.ownerQuota(policy)
-					: { kind: "unknown", reason: "the channel lists no owner sender" };
+					: { kind: "unknown", reason: "the channel lists no owner sender", subscription: false };
 			return {
 				name,
 				wakes: { used: usage.wakes, max: policy.maxWakesPerDay },
