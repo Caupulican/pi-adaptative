@@ -638,12 +638,24 @@ export class ForegroundTerminalHandoffController {
 	}
 
 	private resolveWake(
-		records: readonly { goalId?: string; ownerEpoch?: number }[],
+		records: readonly {
+			goalId?: string;
+			ownerEpoch?: number;
+			ownerDirect?: true;
+			status?: string;
+		}[],
 	): Pick<TerminalDeliveryPlan, "wakeParent" | "goalId" | "ownerEpoch"> {
 		const goal = this.deps.getGoalStateSnapshot();
-		const wakeParent = records.some(
-			(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
-		);
+		// What the owner asked a bot in its own chat is answered there: the root reads it with its next turn but is not
+		// woken to redo, widen or route around it (a bot that refused a write by its role stays refused). A turn that
+		// failed for a harness reason still wakes it.
+		const ownersOwn =
+			records.length > 0 && records.every((record) => record.ownerDirect === true && record.status !== "failed");
+		const wakeParent =
+			!ownersOwn &&
+			records.some(
+				(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
+			);
 		// A batch's owner epoch is established only when every record in it agrees -- mixed or
 		// partially-unknown ownership must fall back to the safe idle route for the whole batch
 		// rather than fold on a majority or a first-seen value. See rule 4 of the delivery-boundary

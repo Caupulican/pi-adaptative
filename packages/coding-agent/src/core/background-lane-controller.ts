@@ -2674,6 +2674,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
 			}
 			const res = this.followUpSessionRootWorkerAgent(runtime, message, messageOptions);
+			if (res.record?.attemptId)
+				this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(res.record.attemptId);
 			return {
 				agentId: normId,
 				mode: res.steering ? "steered" : res.started ? "followed_up" : "queued",
@@ -2735,6 +2737,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			throw new Error(`Failed to start persistent bot agent "${normId}": ${started.skipReason ?? "unknown error"}`);
 		}
 		const startedAgentId = started.record.agentId ?? started.record.laneId;
+		if (started.record.attemptId)
+			this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(started.record.attemptId);
 		try {
 			assertCurrentBranch();
 			if (startedAgentId !== preferredAgentId) throw new Error("Bot start returned a different runtime identity.");

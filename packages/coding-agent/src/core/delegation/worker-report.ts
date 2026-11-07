@@ -94,14 +94,20 @@ export const submitReportParameters = Type.Object(
 								"Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
 						}),
 						receiptId: Type.Optional(
-							Type.String({ description: "The stable host receipt name (c-...) or id of that command." }),
+							Type.String({
+								description:
+									"The stable host receipt name (c-...) of that command, when you were shown one. Omit it otherwise: the host matches the exact command to its own record.",
+							}),
 						),
 						result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
 						note: Type.Optional(Type.String()),
 					},
 					{ additionalProperties: false },
 				),
-				{ description: "The checks you ran or chose not to run, with what each showed." },
+				{
+					description:
+						"The shell commands (bash, run_process) you ran or chose not to run, with what each showed. Reading files with read, grep, find or ls is not a check: say it in the summary.",
+				},
 			),
 		),
 		changes: Type.Optional(
@@ -322,6 +328,18 @@ type CheckEvidence =
 	| { kind: "missing" | "ambiguous" | "unavailable" | "mismatch" | "incomplete" }
 	| { kind: "resolved"; receipt: WorkerCommandReceipt; outcome: "passed" | "failed" };
 
+/**
+ * A check that names no receipt is the host's own record of the very same command: receipts and checks carry the digest
+ * of the exact command, so equal digests identify it (the latest run when it ran more than once). A worker reports before
+ * it is shown any receipt name, so requiring it to quote one made every honest report "without receipt". A check no
+ * recorded command matches stays without one and is still reported as such.
+ */
+function citedByCommand(check: WorkerReportCheck, receipts: readonly WorkerCommandReceipt[]): WorkerReportCheck {
+	if (check.receiptId || !check.commandDigest) return check;
+	const latest = receipts.filter((receipt) => receipt.commandDigest === check.commandDigest).at(-1);
+	return latest ? { ...check, receiptId: receiptAlias(latest) } : check;
+}
+
 function resolveCheckEvidence(
 	check: WorkerReportCheck,
 	receipts: ReadonlyMap<string, WorkerCommandReceipt | undefined>,
@@ -471,8 +489,9 @@ export function judgeSubmittedReport(input: {
 	const missing: string[] = [];
 	const reasons: string[] = [];
 
-	for (const check of submitted.report.checks) {
-		if (check.result === "not_run") continue;
+	for (const reported of submitted.report.checks) {
+		if (reported.result === "not_run") continue;
+		const check = citedByCommand(reported, input.receipts);
 		const evidence = resolveCheckEvidence(check, receipts);
 		if (!check.receiptId) {
 			missing.push(`check ${quotedSpan(check.command)} is reported ${check.result} with no receipt id`);
@@ -613,9 +632,9 @@ export function hostVerifiedChecks(claim: {
 	const receipts = receiptIndex(claim.commandReceipts);
 	const verified: WorkerCommandReceipt[] = [];
 	const counted = new Set<string>();
-	for (const check of claim.report.checks) {
-		if (check.result === "not_run") continue;
-		const evidence = resolveCheckEvidence(check, receipts);
+	for (const reported of claim.report.checks) {
+		if (reported.result === "not_run") continue;
+		const evidence = resolveCheckEvidence(citedByCommand(reported, claim.commandReceipts), receipts);
 		if (evidence.kind !== "resolved" || counted.has(evidence.receipt.id)) continue;
 		counted.add(evidence.receipt.id);
 		verified.push(evidence.receipt);

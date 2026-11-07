@@ -54,6 +54,11 @@ export interface WorkerTerminalHandoffRecord {
 	 * never a correctness risk.
 	 */
 	ownerEpoch?: number;
+	/**
+	 * The owner started this turn by talking to the bot in its own chat (`/bot msg`, a group message): the bot's answer
+	 * belongs to that chat. Runtime-only, like `ownerEpoch`; an absent flag is the root's own work and wakes it.
+	 */
+	ownerDirect?: true;
 }
 
 export interface WorkerNotificationStatus {
@@ -138,6 +143,8 @@ export class WorkerNotificationCoordinator {
 	 * ownership routes the handoff through the idle delivery path, never the boundary fold.
 	 */
 	private readonly attemptOwnerEpochs = new Map<string, number>();
+	/** Attempts the owner started by talking to a bot directly, consumed with their terminal like `attemptOwnerEpochs`. */
+	private readonly ownerDirectAttempts = new Set<string>();
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
@@ -166,6 +173,11 @@ export class WorkerNotificationCoordinator {
 		if (!this.attemptOwnerEpochs.has(attemptId)) this.attemptOwnerEpochs.set(attemptId, ownerEpoch);
 	}
 
+	/** Note that `attemptId` is the owner's own turn with a bot, so its terminal does not wake the root. */
+	noteOwnerDirectAttempt(attemptId: string): void {
+		if (!this.disposed) this.ownerDirectAttempts.add(attemptId);
+	}
+
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
 		if (this.disposed || record.status === "queued" || record.status === "running") return;
 		const key = durableNotificationId ?? `transient:${workerTerminalGenerationIdentity(record)}`;
@@ -187,6 +199,9 @@ export class WorkerNotificationCoordinator {
 			pending?.record.ownerEpoch ??
 			(record.attemptId === undefined ? undefined : this.attemptOwnerEpochs.get(record.attemptId));
 		if (record.attemptId !== undefined) this.attemptOwnerEpochs.delete(record.attemptId);
+		const ownerDirect =
+			pending?.record.ownerDirect === true ||
+			(record.attemptId !== undefined && this.ownerDirectAttempts.delete(record.attemptId));
 		// Re-recording the same generation while it waits for redelivery replaces its payload, not its count.
 		const reportedInStatus = pending?.reportedInStatus === true;
 		this.pending.set(key, {
@@ -201,6 +216,7 @@ export class WorkerNotificationCoordinator {
 				...(record.goalId ? { goalId: record.goalId } : {}),
 				...(observedAt ? { observedAt } : {}),
 				...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
+				...(ownerDirect ? { ownerDirect: true as const } : {}),
 			},
 			...(durableNotificationId ? { durableNotificationId } : {}),
 			...(reportedInStatus ? { reportedInStatus } : {}),
@@ -247,6 +263,7 @@ export class WorkerNotificationCoordinator {
 		this.inFlight.clear();
 		this.observedTerminals.clear();
 		this.attemptOwnerEpochs.clear();
+		this.ownerDirectAttempts.clear();
 		for (const alarm of alarms) this.clearTimerBestEffort(alarm.timer, alarm.purpose);
 	}
 
