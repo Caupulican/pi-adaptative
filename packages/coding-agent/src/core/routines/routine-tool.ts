@@ -135,6 +135,46 @@ const parameters = Type.Object(
 	{ additionalProperties: false },
 );
 
+const ROUTINE_ACTION_FIELDS: Readonly<
+	Record<string, { readonly required: readonly string[]; readonly optional: readonly string[] }>
+> = {
+	list: { required: [], optional: ["after"] },
+	get: { required: ["routineId"], optional: [] },
+	create: { required: ["routineId", "prompt", "schedule"], optional: ["profileId", "knowledge"] },
+	update: {
+		required: ["routineId", "prompt", "schedule", "expectedRevision"],
+		optional: ["profileId", "knowledge"],
+	},
+	pause: { required: ["routineId", "expectedRevision"], optional: [] },
+	resume: { required: ["routineId", "expectedRevision"], optional: [] },
+	delete: { required: ["routineId", "expectedRevision"], optional: [] },
+	run: { required: ["routineId", "expectedRevision"], optional: [] },
+};
+
+/**
+ * What is wrong with a routine call, by field name: the action's required fields that are absent and the supplied fields
+ * it does not take. The private command schema decides validity; this only names what it found, so a model that left
+ * out `routineId` is told so instead of being sent to guess.
+ */
+function describeRoutineActionProblem(params: unknown): string {
+	const generic = "Routine action has missing, invalid or forbidden fields";
+	if (typeof params !== "object" || params === null) return generic;
+	const given = params as Record<string, unknown>;
+	const fields = typeof given.action === "string" ? ROUTINE_ACTION_FIELDS[given.action] : undefined;
+	if (!fields) return `${generic}: action must be one of ${Object.keys(ROUTINE_ACTION_FIELDS).join(", ")}`;
+	const present = (key: string) => given[key] !== undefined;
+	const missing = fields.required.filter((key) => !present(key));
+	const allowed = new Set(["action", ...fields.required, ...fields.optional]);
+	const forbidden = Object.keys(given).filter((key) => given[key] !== undefined && !allowed.has(key));
+	const parts = [
+		...(missing.length > 0 ? [`${given.action} needs ${missing.join(", ")}`] : []),
+		...(forbidden.length > 0 ? [`${given.action} does not take ${forbidden.join(", ")}`] : []),
+	];
+	return parts.length > 0
+		? `${generic}: ${parts.join("; ")}`
+		: `${generic}: a supplied value is not valid for its field`;
+}
+
 /** The one validation of authored routine fields, shared by the model tool and host callers. */
 export function parseRoutineToolInput(value: {
 	readonly routineId: unknown;
@@ -166,8 +206,7 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 			const params: unknown = input;
 			try {
 				signal?.throwIfAborted();
-				if (!Value.Check(commandSchema, params))
-					throw new Error("Routine action has missing, invalid or forbidden fields.");
+				if (!Value.Check(commandSchema, params)) throw new Error(describeRoutineActionProblem(params));
 				const port = getPort();
 				if (!port) throw new Error("Routine management is unavailable in this session.");
 				switch (params.action) {

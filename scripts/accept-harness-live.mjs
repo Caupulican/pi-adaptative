@@ -23,6 +23,8 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	rmSync,
+	statfsSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
@@ -50,7 +52,24 @@ if (process.env.HERDR_ENV !== "1") {
 }
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+// A run keeps a snapshot of the runtime (hundreds of MB) in its agent directory, and /tmp is often memory-backed: earlier
+// runs of this script (recognized by their marker file) are removed before a new one starts, and a passing run removes
+// itself. A failing run stays for its evidence until the next run.
+const MARKER = ".accept-harness-live";
+for (const name of readdirSync(tmpdir())) {
+	const old = join(tmpdir(), name);
+	if (name.startsWith("pi-live-gate-") && existsSync(join(old, MARKER))) rmSync(old, { recursive: true, force: true });
+}
+const freeBytes = (() => {
+	const fs = statfsSync(tmpdir());
+	return fs.bavail * fs.bsize;
+})();
+if (freeBytes < 2 * 1024 ** 3) {
+	console.error(`accept-harness-live: ${tmpdir()} has ${Math.round(freeBytes / 1024 ** 2)} MB free; a run needs about 1 GB.`);
+	process.exit(2);
+}
 const RUN = mkdtempSync(join(tmpdir(), "pi-live-gate-"));
+writeFileSync(join(RUN, MARKER), `${stamp}\n`);
 const SANDBOX = join(RUN, "work");
 const AGENT = join(RUN, "agent");
 const COMMON_DIR = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: REPO, encoding: "utf8" }).trim();
@@ -160,6 +179,16 @@ const waitFor = async (label, check, timeoutMs, everyMs = 3000) => {
 		if (Date.now() > end) throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${label}`);
 		await sleep(everyMs);
 	}
+};
+
+/** The agent-facing markers that must never reach the owner's screen, with the text around the first one found. */
+const AGENT_FACING = ["[team-bot-message]", "[bot:", "<untrusted_content", "[harness]", '"MUST"', "REPORT REVIEW"];
+const agentFacingLeak = (text) => {
+	for (const marker of AGENT_FACING) {
+		const at = text.indexOf(marker);
+		if (at >= 0) return `${marker} in: ${text.slice(Math.max(0, at - 120), at + 160).replace(/\s+/g, " ")}`;
+	}
+	return undefined;
 };
 
 // Evidence the harness wrote. Reads only; nothing here asks a model.
@@ -307,8 +336,8 @@ const SCENARIOS = [
 		if (!state.sawYou) throw new Error("the owner's own message was not shown as `You → …` right after sending");
 		const missing = [/● (trello-scout|mail-bot|ideator)/, /→ @/].filter((re) => !re.test(text));
 		if (missing.length > 0) throw new Error(`group view lacks ${missing.map(String).join(", ")}`);
-		const leaks = ["[team-bot-message]", "[bot:", "<untrusted_content", "[harness]", '"MUST"'].filter((s) => text.includes(s));
-		if (leaks.length > 0) throw new Error(`the screen shows agent-facing text: ${leaks.join(", ")}`);
+		const leak = agentFacingLeak(text);
+		if (leak) throw new Error(`the screen shows agent-facing text: ${leak}`);
 		return "speakers, recipients and no agent-facing text";
 	}),
 	scenario("s7", "scheduling: a one-time routine fires and a recurring bot routine runs", async () => {
@@ -328,7 +357,8 @@ const SCENARIOS = [
 			240_000,
 			20_000,
 		);
-		if (/<untrusted_content|\[harness\]/.test(screen(state.main, 400))) throw new Error("a routine result shows agent-facing text");
+		const leak = agentFacingLeak(screen(state.main, 400));
+		if (leak) throw new Error(`a routine result shows agent-facing text: ${leak}`);
 		await type(state.main, "/bot schedule rm mailcount");
 		return "tick.txt written on time; mailcount succeeded; history is plain";
 	}),
@@ -396,7 +426,9 @@ const failed = results.filter((r) => r.status === "FAIL");
 const skipped = results.filter((r) => r.status === "skipped");
 writeFileSync(join(REPORT_DIR, "report.json"), JSON.stringify({ at: stamp, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1));
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
+if (!KEEP && failed.length === 0) rmSync(RUN, { recursive: true, force: true });
 console.log(`\nreport: ${join(REPORT_DIR, "report.json")}`);
+if (!KEEP && failed.length > 0) console.log(`evidence kept: ${RUN} (removed by the next run)`);
 console.log(skipped.length > 0 ? `skipped (not counted as passes): ${skipped.map((r) => r.id).join(", ")}` : "skipped: none");
 console.log(failed.length === 0 ? "LIVE GATE: PASS" : `LIVE GATE: FAIL (${failed.map((r) => r.id).join(", ")})`);
 process.exit(failed.length === 0 ? 0 : 1);

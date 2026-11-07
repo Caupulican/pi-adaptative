@@ -338,7 +338,9 @@ function agentDetailSuffix(records: readonly Record<string, unknown>[]): string 
  * rendered content is never shown or parsed.
  */
 function formatRoutineActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
-	const details = isPlainRecord(message.details) ? message.details : {};
+	// A message the host delivered as parent input keeps the fields it was built with beside the ledger's own.
+	const raw = isPlainRecord(message.details) ? message.details : {};
+	const details = "parentInput" in raw && isPlainRecord(raw.originalDetails) ? raw.originalDetails : raw;
 	const routineId = typeof details.routineId === "string" ? details.routineId : undefined;
 	if (message.customType === "routine-intake") {
 		if (routineId) return { text: `Scheduled routine ${routineId}`, status: "success" };
