@@ -7,6 +7,7 @@ import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
 import { stateFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { CONTINUOUS_CHAT_FOREGROUND_QUIET_MS } from "../../../../src/core/memory/continuous-chat-runtime.ts";
 import { KNOWLEDGE_JUDGMENT_TOOL_NAME } from "../../../../src/core/memory/knowledge-judgment-runner.ts";
 import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
 import { SERIAL_CALL_HINT_PREFIX } from "../../../../src/core/serial-call-hint.ts";
@@ -1420,6 +1421,24 @@ export function icmReadScheduler(
 }
 
 /**
+ * Lets the chat's foreground quiet window pass. The runtime starts no summary until its foreground has been quiet for
+ * `CONTINUOUS_CHAT_FOREGROUND_QUIET_MS` after the last turn, on the chat's own timer, which a journey drives (virtual time).
+ * Waits for the turn that just ended to arm the window, then advances it. The window is the first alarm the chat arms after a
+ * turn, so a journey calls this before it waits for, or counts, the summary requests that turn made due.
+ */
+export async function icmEndForegroundQuiet(world: HarnessWorld): Promise<void> {
+	const delay = await withDeadline(
+		world.trace,
+		"the chat's foreground quiet window is armed",
+		world.timers.whenArmed("continuous-chat"),
+	);
+	expect(delay, "the first alarm the chat arms after a turn is its foreground quiet window").toBe(
+		CONTINUOUS_CHAT_FOREGROUND_QUIET_MS,
+	);
+	expect(world.timers.advance("continuous-chat", delay), "exactly the quiet window falls due").toBe(1);
+}
+
+/**
  * Waits event-driven on `world.io` until the continuous chat under `agentDir` has published at least `expectedMessages`,
  * the scheduler has seen every published message, and its work queue has settled with no running, ready, or blocked work.
  */
@@ -1430,24 +1449,37 @@ export async function icmWaitForChatIdle(
 	predicate?: (records: readonly IcmStoredContinuousRecord[], nodes: readonly IcmStoredContinuousNode[]) => boolean,
 ): Promise<void> {
 	const store = icmContinuousStore(agentDir);
-	await withDeadline(
-		world.trace,
-		`ICM continuous chat idle (${expectedMessages} messages)`,
-		world.io.waitForMutation(() => {
-			const rootRaw = world.io.peekFile(store.rootFile);
-			if (rootRaw === undefined) return false;
-			const root = JSON.parse(rootRaw) as { readonly nextId: number };
-			if (root.nextId < expectedMessages) return false;
-			const queue = icmReadScheduler(world, store);
-			// The root file is published before the scheduler is told of the new messages: wait out that gap too.
-			if (queue === undefined || queue.totalMessages !== root.nextId) return false;
-			if (queue.running > 0 || queue.readyLeaves > 0 || queue.readyParents > 0 || queue.blocked > 0) return false;
-			return predicate
-				? predicate(icmReadContinuousRecords(world, store), icmReadContinuousNodes(world, store))
-				: true;
-		}),
-		60_000,
+	const settled = world.io.waitForMutation(() => {
+		const rootRaw = world.io.peekFile(store.rootFile);
+		if (rootRaw === undefined) return false;
+		const root = JSON.parse(rootRaw) as { readonly nextId: number };
+		if (root.nextId < expectedMessages) return false;
+		const queue = icmReadScheduler(world, store);
+		// The root file is published before the scheduler is told of the new messages: wait out that gap too.
+		if (queue === undefined || queue.totalMessages !== root.nextId) return false;
+		if (queue.running > 0 || queue.readyLeaves > 0 || queue.readyParents > 0 || queue.blocked > 0) return false;
+		return predicate ? predicate(icmReadContinuousRecords(world, store), icmReadContinuousNodes(world, store)) : true;
+	});
+	// A turn that ended before this wait holds the chat's summaries for the foreground quiet window (see
+	// `icmEndForegroundQuiet`): let it pass whenever it is the first alarm armed, until the chat has settled.
+	let finished = false;
+	void settled.then(
+		() => {
+			finished = true;
+		},
+		() => {
+			finished = true;
+		},
 	);
+	void (async () => {
+		while (!finished) {
+			if (world.timers.armedDelays("continuous-chat")[0] === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS) {
+				world.timers.advance("continuous-chat", CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
+			}
+			await Promise.race([world.timers.nextArmed("continuous-chat"), settled.catch(() => undefined)]);
+		}
+	})();
+	await withDeadline(world.trace, `ICM continuous chat idle (${expectedMessages} messages)`, settled, 60_000);
 }
 
 /** The newest result of `toolName` in the request's latest tool batch; fails when the batch carried none. */

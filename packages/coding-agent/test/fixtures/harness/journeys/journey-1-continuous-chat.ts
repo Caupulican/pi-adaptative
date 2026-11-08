@@ -19,6 +19,7 @@ import {
 	ICM_INTAKE_JUDGMENTS,
 	icmContinuousSettings,
 	icmContinuousStore,
+	icmEndForegroundQuiet,
 	icmLatestResult,
 	icmReadContinuousNodes,
 	icmReadContinuousRecords,
@@ -81,6 +82,8 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					: undefined,
 				`${label}: the refused summary settings do not stop the root turn`,
 			).toEqual({ stopReason: "stop", text: JSON.stringify([{ type: "text", text: "Acknowledged." }]) });
+			// Summaries start once the foreground has been quiet for its window, which the journey lets pass.
+			await icmEndForegroundQuiet(world);
 			// Settled: both messages are logged and the scheduler has seen them, and the one model-generated leaf (the user message,
 			// id 0) is blocked by the refusal and not yet due a retry. The other message is an exact leaf and needs no model.
 			const settled = (): boolean => {
@@ -491,6 +494,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		world.systemOne.enterPhase("icm-turn-2", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "ICM turn 2", icmRoot.session.prompt("Inspect the summary tree, raw echo, and date."));
+		await icmEndForegroundQuiet(world);
 		await advanceIcmTransportBackoff(world, "ICM merge 8+9", 2000, merge89RequestMark, [
 			"worker-c:icm-merge-8-9-transient-503",
 		]);
@@ -668,6 +672,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	// Turn A uses no tool, so its owner words are settled by the next submission: the carries_0 screen and the owner-policy classification are scripted on turn B.
 	world.systemOne.enterPhase(`${label}-turn-a`, {});
 	await withDeadline(trace, "R10s turn A", root.session.prompt("Record the R10s spacing reply."));
+	await icmEndForegroundQuiet(world);
 	await advanceIcmTransportBackoff(world, "R10s idle first retry", 2000, reachedMark, ["worker-c:r10s-idle-a"]);
 	await advanceIcmTransportBackoff(world, "R10s idle second retry", 4000, reachedMark, [
 		"worker-c:r10s-idle-a",
@@ -725,6 +730,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		// The previous turn used no tool: its owner words are settled by this submission.
 		world.systemOne.enterPhase(`${label}-${name}`, turnJudgments);
 		await withDeadline(trace, `R10s ${name}`, root.session.prompt(`Answer after the R10s ${name}.`));
+		await icmEndForegroundQuiet(world);
 		messages += 2;
 		await withDeadline(
 			trace,
