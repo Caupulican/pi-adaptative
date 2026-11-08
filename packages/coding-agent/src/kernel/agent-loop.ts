@@ -77,6 +77,7 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolErrorKind,
+	AgentToolOutcomeDetails,
 	AgentToolResult,
 	ToolCallRepairInfo,
 } from "./types.ts";
@@ -2699,7 +2700,7 @@ async function executePreparedToolCall(
 			};
 		} else {
 			executed = {
-				result: createErrorToolResult(message),
+				result: createErrorToolResult(message, toolFailure?.details),
 				operationCompleted: toolFailure?.errorKind === "operation_outcome",
 				isError: true,
 				errorClass: described.errorClass,
@@ -3008,10 +3009,10 @@ function detailsWithoutVerification(details: unknown): unknown {
 	return Object.defineProperties({}, descriptors);
 }
 
-function createErrorToolResult(message: string): AgentToolResult<any> {
+function createErrorToolResult(message: string, details?: AgentToolOutcomeDetails): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
-		details: {},
+		details: details ? { ...details } : {},
 	};
 }
 

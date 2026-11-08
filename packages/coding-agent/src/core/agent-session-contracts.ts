@@ -48,6 +48,7 @@ import type { SessionBundleLease } from "./orchestration/session-bundle-lifecycl
 import type { OwnerInputEnd } from "./owner-input-ledger.ts";
 import type { PendingInputHandle } from "./pending-input-queue-controller.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
+import type { ProviderAdmissionRefusal } from "./provider-admission/refusal.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
@@ -456,6 +457,8 @@ export interface IsolatedCompletionResult {
 	stopReason: StopReason;
 	/** Provider diagnostic for an error stop; lane owners classify it without parsing transcript history. */
 	errorMessage?: string;
+	/** Present when the error stop is a request refused at provider admission: when admission can next succeed. */
+	providerRefusal?: ProviderAdmissionRefusal;
 	/** Complete child-owned conversation; isolated calls never expose foreground history. */
 	messages?: Message[];
 }

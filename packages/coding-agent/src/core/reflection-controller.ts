@@ -102,7 +102,11 @@ import {
 	type UserPreferenceMetadata,
 } from "./memory/user-preference-metadata.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
+import {
+	createProviderLaneScope,
+	providerLaneForIsolatedLaneKind,
+	runInProviderLaneScope,
+} from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
@@ -1462,9 +1466,11 @@ export class ReflectionController {
 			// Every provider request this call starts is attributed to its admission lane (worker lanes
 			// to `worker`, everything else to `background`) so the machine-wide admission gate can let
 			// the owner's foreground turn go first; see core/provider-admission/.
-			return await runInProviderLane(providerLaneForIsolatedLaneKind(opts.laneKind), () =>
-				this.runIsolatedCompletionInLane(opts),
-			);
+			const scope = createProviderLaneScope(providerLaneForIsolatedLaneKind(opts.laneKind));
+			const result = await runInProviderLaneScope(scope, () => this.runIsolatedCompletionInLane(opts));
+			// A completion loop reports a refused request as an error reply with only the message; the refusal the gate
+			// noted on the scope rides on the result so the caller can wait for its `retryAt`.
+			return scope.refusal && result.stopReason === "error" ? { ...result, providerRefusal: scope.refusal } : result;
 		} finally {
 			runtimeLease.release();
 		}

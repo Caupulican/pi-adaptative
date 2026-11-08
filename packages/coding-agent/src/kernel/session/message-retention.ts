@@ -82,14 +82,27 @@ export function hasRecalledHistoryMarker(details: unknown): boolean {
  * end-of-turn claim check. The stub keeps them; dropping one turns a proven claim into an unproven one.
  * The recalled-history marker is one too: dropping it would let history capture index its own recall.
  * So are the delivered rule ids: dropping them would deliver the same rule again into a context that holds it.
+ * And the failure-memory record and the engine invocation receipt: recovery gating, resume and failure
+ * statistics classify a result by them, so an oversized failed result must stay a counted failure.
  */
 export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piVerification",
 	"piReceipts",
 	RECALLED_HISTORY_DETAIL_KEY,
 	RULE_IDS_DETAIL_KEY,
+	"piToolFailureMemory",
+	"piToolInvocation",
 ] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
+/**
+ * Per-key budgets above the default, in the units of `estimateJsonLikeBytes` (four bytes per string character).
+ * A failure-memory record is bounded by construction: tool name, failure key, operation, diagnostic, note,
+ * evidence, correction, output signature and failure code total about 3.2K characters (evidence alone is 1.6K),
+ * so 16K covers the largest legal record with its keys. A larger value is not a legal record and is dropped.
+ */
+const RETAINED_RECEIPT_BYTE_BUDGETS: Readonly<Record<string, number>> = {
+	piToolFailureMemory: 16 * 1024,
+};
 
 /** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */
 export function compactRetainedDetails(
@@ -109,7 +122,8 @@ export function compactRetainedDetails(
 		for (const key of RETAINED_RECEIPT_DETAIL_KEYS) {
 			const descriptor = Object.getOwnPropertyDescriptor(holder.details, key);
 			if (!descriptor || !("value" in descriptor)) continue;
-			if (estimateJsonLikeBytes(descriptor.value, MAX_RETAINED_RECEIPT_BYTES).exceeded) continue;
+			const receiptBudget = RETAINED_RECEIPT_BYTE_BUDGETS[key] ?? MAX_RETAINED_RECEIPT_BYTES;
+			if (estimateJsonLikeBytes(descriptor.value, receiptBudget).exceeded) continue;
 			// The same descriptor: an executor-owned receipt stays as immutable as it was written.
 			Object.defineProperty(stub, key, descriptor);
 		}

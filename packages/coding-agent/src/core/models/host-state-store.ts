@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { cpus, totalmem } from "node:os";
+import { arch, cpus, platform, totalmem } from "node:os";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
@@ -12,17 +13,42 @@ export interface HostFingerprint {
 	totalMemGb: number;
 }
 
+function cpuSlug(cpu: string): string {
+	return cpu
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 48);
+}
+
+/** Total RAM rounded up to a power-of-two GB, so rounding at a boundary never splits one machine. */
+function memoryBucketGb(totalMemGb: number): number {
+	return totalMemGb <= 1 ? 1 : 2 ** Math.ceil(Math.log2(totalMemGb));
+}
+
+/**
+ * The host id is built from properties that do not change while the machine stays the same: CPU model,
+ * platform, architecture and the RAM bucket. Neither the available core count (a container or a VM
+ * limit changes it) nor free memory is part of it, so the learned rows keyed by it are not orphaned
+ * when the machine is seen with a different core allotment.
+ */
 export function currentHostFingerprint(): HostFingerprint {
 	const cpuList = cpus();
 	const cpu = (cpuList[0]?.model ?? "unknown-cpu").trim();
 	const cores = Math.max(1, cpuList.length);
 	const totalMemGb = Math.round(totalmem() / 1024 ** 3);
-	const id = `${cpu
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 48)}-${cores}c-${totalMemGb}g`;
+	const id = `${cpuSlug(cpu)}-${platform()}-${arch()}-${memoryBucketGb(totalMemGb)}g`;
 	return { id, cpu, cores, totalMemGb };
+}
+
+/** An id of the earlier shape, `<cpu>-<cores>c-<gb>g`, that names `host`'s machine but not its current id. */
+const LEGACY_HOST_ID_PATTERN = /^(.*)-(\d+)c-(\d+)g$/;
+
+export function isLegacyHostIdOf(host: HostFingerprint, candidateId: string): boolean {
+	if (candidateId === host.id) return false;
+	const match = LEGACY_HOST_ID_PATTERN.exec(candidateId);
+	if (!match) return false;
+	return match[1] === cpuSlug(host.cpu) && memoryBucketGb(Number(match[3])) === memoryBucketGb(host.totalMemGb);
 }
 
 export function isHostFingerprint(value: unknown): value is HostFingerprint {
@@ -62,6 +88,14 @@ export interface HostStateStoreOptions<THostData> {
 	fingerprint?: () => HostFingerprint;
 	readOnly?: boolean;
 	parseHost(value: unknown, hostId: string): THostData | undefined;
+	/**
+	 * Fold the rows stored under earlier host ids of this machine into one row for the current id. Called
+	 * when a file holds no row for the current id but at least one legacy-id row (see
+	 * {@link isLegacyHostIdOf}); the result is persisted by the next locked write. Rows keep their
+	 * legacy ids untouched. Per key, the entry backed by the larger sample count wins, never a sum, so a
+	 * second fold of the same rows cannot double-count. Without it, legacy rows are only readable by id.
+	 */
+	foldLegacyHosts?(legacy: readonly THostData[], host: HostFingerprint): { data: THostData; rows: number };
 	/**
 	 * Apply mutations in memory immediately and persist them in batches (see
 	 * {@link HostStateStore.flush}) instead of one durable transaction per mutation. For stores
@@ -105,6 +139,9 @@ export class HostStateStore<THostData> {
 	private readonly fingerprint: () => HostFingerprint;
 	private readonly readOnly: boolean;
 	private readonly parseHost: (value: unknown, hostId: string) => THostData | undefined;
+	private readonly foldLegacyHosts: HostStateStoreOptions<THostData>["foldLegacyHosts"];
+	/** A fold the latest parse computed that no write has persisted yet; reported once, when it is written. */
+	private unpersistedFold: { hosts: number; rows: number } | undefined;
 	/**
 	 * The host this process runs on does not change while it runs, but `currentHostFingerprint`
 	 * asks the OS for its CPU list every time -- measured at 4% of host CPU across a 1,500-turn
@@ -147,6 +184,7 @@ export class HostStateStore<THostData> {
 		this.fingerprint = options.fingerprint ?? currentHostFingerprint;
 		this.readOnly = options.readOnly ?? false;
 		this.parseHost = options.parseHost;
+		this.foldLegacyHosts = options.foldLegacyHosts;
 		this.writeBehind =
 			options.writeBehind && !this.readOnly
 				? {
@@ -247,6 +285,7 @@ export class HostStateStore<THostData> {
 				const text = `${JSON.stringify(file)}\n`;
 				writeFileAtomicSync(this.filePath, text);
 				this.parsed = { text, file: deepFreeze(file) };
+				this.reportPersistedFold();
 			}
 			return mutation.result;
 		};
@@ -285,6 +324,7 @@ export class HostStateStore<THostData> {
 			const text = `${JSON.stringify(next)}\n`;
 			writeFileAtomicSync(this.filePath, text);
 			this.parsed = { text, file: deepFreeze(next) };
+			this.reportPersistedFold();
 		});
 		this.pending = [];
 		this.discardWorkingState();
@@ -320,6 +360,7 @@ export class HostStateStore<THostData> {
 			// Advisory reads may fall back, but a write must not treat unreadable state as absent.
 			if (access === "mutation" && !isMissingPathError(error)) throw error;
 			this.parsed = undefined;
+			this.unpersistedFold = undefined;
 			return { version: this.version, hosts: {} };
 		}
 		if (this.parsed?.text === text) return this.parsed.file;
@@ -328,7 +369,39 @@ export class HostStateStore<THostData> {
 		return file;
 	}
 
+	private reportPersistedFold(): void {
+		const fold = this.unpersistedFold;
+		if (!fold) return;
+		this.unpersistedFold = undefined;
+		harnessLog.info("models", "folded learned host state of earlier host ids into the current host id", fold);
+	}
+
+	/**
+	 * The current host's row is built from the legacy rows of the same machine when the file has none.
+	 * Done at parse time so every reader, the locked mutation that persists it and a write-behind replay see
+	 * one state; the file keeps the legacy rows, so the fold runs again only while no write has landed.
+	 */
+	private withLegacyFold(file: HostStateFile<THostData>): HostStateFile<THostData> {
+		this.unpersistedFold = undefined;
+		if (!this.foldLegacyHosts) return file;
+		const host = this.currentHost();
+		if (file.hosts[host.id] !== undefined) return file;
+		const legacy = Object.entries(file.hosts).filter(([hostId]) => isLegacyHostIdOf(host, hostId));
+		if (legacy.length === 0) return file;
+		const folded = this.foldLegacyHosts(
+			legacy.map(([, data]) => data),
+			host,
+		);
+		file.hosts[host.id] = folded.data;
+		this.unpersistedFold = { hosts: legacy.length, rows: folded.rows };
+		return file;
+	}
+
 	private parseFile(text: string): HostStateFile<THostData> {
+		return this.withLegacyFold(this.parseRawFile(text));
+	}
+
+	private parseRawFile(text: string): HostStateFile<THostData> {
 		try {
 			const parsed: unknown = JSON.parse(text);
 			if (!isPlainRecord(parsed) || parsed.version !== this.version || !isPlainRecord(parsed.hosts)) {

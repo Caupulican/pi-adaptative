@@ -50,6 +50,7 @@ import {
 import { traceToolCalls } from "./read.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
+	type BashExitDetails,
 	type BashOperations,
 	type BashToolDetails,
 	type BashToolInput,
@@ -182,7 +183,7 @@ function createLocalShellOperations(
 			if (signal?.aborted) throw new Error("aborted");
 			if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
 			if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
-			return { exitCode: terminal.code, initialCwd: cwd };
+			return { exitCode: terminal.code, signal: child.signalCode, initialCwd: cwd };
 		} finally {
 			silenceWatchdog?.disarm();
 			untrackDetachedChild(child);
@@ -473,6 +474,11 @@ export interface BashToolOptions {
 	managedToolResolver?: ManagedToolResolver;
 	/** Output reduction switches (settings `toolOutput`); reduction is on at the standard level by default. */
 	outputReduction?: OutputReductionToolOptions;
+}
+
+/** The exit status every shell result's details carry; a missing signal or bound is stated, not omitted. */
+function exitDetails(exitCode: number | null, signal: string | null = null, timedOut = false): BashExitDetails {
+	return { exitCode, signal, timedOut };
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -1031,7 +1037,12 @@ function createShellToolDefinition(
 			// The shell ran the command to completion and is reporting the process's own status. That is
 			// the observation the caller asked for — a red test run, a search that matched nothing, a
 			// false predicate — so it is an operation outcome, never a failure of this tool.
-			const createExitError = (text: string, exitCode: number, effectiveCwd: string) => {
+			const createExitError = (
+				text: string,
+				exitCode: number,
+				effectiveCwd: string,
+				exit: BashExitDetails = exitDetails(exitCode),
+			) => {
 				const coverage =
 					/No files were processed in the specified paths/i.test(text) &&
 					classifyCommandFamily(command).family === "diagnostics"
@@ -1042,6 +1053,7 @@ function createShellToolDefinition(
 					`exit_${exitCode}`,
 					output.getOutputSignature(),
 					"operation_outcome",
+					exit,
 				);
 			};
 			const effectiveTimeoutSeconds = resolveCommandTimeoutSeconds(timeout, background === true);
@@ -1055,6 +1067,7 @@ function createShellToolDefinition(
 				execution?: { detached?: boolean; floorCommand?: string },
 			): Promise<{
 				exitCode: number | null;
+				signal: string | null;
 				cwd?: string;
 				spawnCwd: string;
 				initialCwd?: string;
@@ -1188,6 +1201,7 @@ function createShellToolDefinition(
 				}
 				return {
 					exitCode: result.exitCode,
+					signal: result.signal ?? null,
 					cwd: result.cwd,
 					spawnCwd: spawnContext.cwd,
 					// Per-command adapters run in the supplied cwd. Stateful adapters report their
@@ -1222,7 +1236,7 @@ function createShellToolDefinition(
 						mutationAnnouncer,
 					});
 					if (routedText !== undefined) {
-						return { content: [{ type: "text", text: routedText }], details: { exitCode: 0 } };
+						return { content: [{ type: "text", text: routedText }], details: exitDetails(0) };
 					}
 				}
 				if (filterContext && filterContext.command === command) {
@@ -1244,7 +1258,7 @@ function createShellToolDefinition(
 								for (const chunk of cdChunks) output.append(chunk);
 								const snapshot = await finishOutput();
 								const { text: cdText } = formatOutput(snapshot, "");
-								return createExitError(cdText, exitCode ?? 1, reportedCwd);
+								return createExitError(cdText, exitCode ?? 1, reportedCwd, exitDetails(exitCode));
 							};
 							if (background === true) {
 								// A detached command runs in its own child shell and must leave the session
@@ -1310,9 +1324,9 @@ function createShellToolDefinition(
 							}
 							if (res.exitCode !== 0) {
 								const { text: rawOutputText } = formatOutput(snapshot);
-								throw createExitError(rawOutputText, res.exitCode, gitCwd);
+								throw createExitError(rawOutputText, res.exitCode, gitCwd, exitDetails(res.exitCode));
 							}
-							const details = snapshot.truncation.truncated
+							const details: BashToolDetails = snapshot.truncation.truncated
 								? {
 										truncation: snapshot.truncation,
 										fullOutputPath: snapshot.fullOutputPath,
@@ -1320,15 +1334,16 @@ function createShellToolDefinition(
 									}
 								: snapshot.fullOutputPath || snapshot.fullOutputError
 									? { fullOutputPath: snapshot.fullOutputPath, fullOutputError: snapshot.fullOutputError }
-									: undefined;
+									: {};
 							return {
 								content: [{ type: "text", text: applyGitTailStage(res.output, classification.tailStage) }],
-								details,
+								details: { ...details, ...exitDetails(res.exitCode) },
 							};
 						}
 					}
 				}
 				let exitCode: number | null;
+				let exitSignal: string | null = null;
 				let sessionCwd: string | undefined;
 				let spawnCwd = cwd;
 				let initialCwd: string | undefined;
@@ -1336,6 +1351,7 @@ function createShellToolDefinition(
 				try {
 					const result = await runInSession(command, handleData, { detached: background === true });
 					exitCode = result.exitCode;
+					exitSignal = result.signal;
 					sessionCwd = result.cwd;
 					spawnCwd = result.spawnCwd;
 					initialCwd = result.initialCwd;
@@ -1356,6 +1372,7 @@ function createShellToolDefinition(
 							"timeout",
 							output.getOutputSignature(),
 							"operation_outcome",
+							exitDetails(null, null, true),
 						);
 					}
 					if (err instanceof Error && err.message.startsWith("silence:")) {
@@ -1448,7 +1465,7 @@ function createShellToolDefinition(
 								text: appendStatus(outputText, `Command terminated without an exit code\ncwd: ${reportedCwd}`),
 							},
 						],
-						details: verificationDetails,
+						details: { ...verificationDetails, ...exitDetails(null, exitSignal) },
 						isError: true,
 						errorKind: "tool_failure",
 					};
@@ -1464,7 +1481,7 @@ function createShellToolDefinition(
 								),
 							},
 						],
-						details: { ...verificationDetails, exitCode },
+						details: { ...verificationDetails, ...exitDetails(exitCode, exitSignal) },
 						isError: true,
 						errorKind: "operation_outcome",
 					};
@@ -1478,7 +1495,7 @@ function createShellToolDefinition(
 									text: appendStatus(outputText, `Final ${expectedNoMatch} search completed with no matches.`),
 								},
 							],
-							details: { ...details, exitCode },
+							details: { ...details, ...exitDetails(exitCode, exitSignal) },
 						};
 					}
 					if (verification) {
@@ -1489,16 +1506,16 @@ function createShellToolDefinition(
 									text: appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`),
 								},
 							],
-							details: { ...verificationDetails, exitCode },
+							details: { ...verificationDetails, ...exitDetails(exitCode, exitSignal) },
 							isError: true,
 							errorKind: "operation_outcome",
 						};
 					}
-					throw createExitError(outputText, exitCode, reportedCwd);
+					throw createExitError(outputText, exitCode, reportedCwd, exitDetails(exitCode, exitSignal));
 				}
 				return {
 					content: [{ type: "text", text: outputText }],
-					details: { ...verificationDetails, exitCode },
+					details: { ...verificationDetails, ...exitDetails(exitCode, exitSignal) },
 				};
 			} finally {
 				clearUpdateTimer();

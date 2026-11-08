@@ -26,6 +26,7 @@ import {
 import { KnowledgeJudgmentRunner } from "../memory/knowledge-judgment-runner.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
+import { logProviderLanePark, providerAdmissionRefusalOf } from "../provider-admission/refusal.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -474,9 +475,17 @@ export class RoutineIntake {
 		} catch (error) {
 			status = lifetime.signal.aborted ? "cancelled" : "failed";
 			if (status === "failed") {
-				this.warn("Routine intake pass failed", error);
-				this.retryAt = this.deps.time.now() + RETRY_DELAY_MS;
-				this.giveUpAfterRepeatedFailure(batch);
+				const refusal = providerAdmissionRefusalOf(error);
+				if (refusal) {
+					// Refused at provider admission, nothing sent: the retained batch waits for the time admission reopens and
+					// the refusal is not a failure of the pass, so it neither warns nor spends the failure bound.
+					logProviderLanePark("routine_intake", refusal);
+					this.retryAt = refusal.retryAt;
+				} else {
+					this.warn("Routine intake pass failed", error);
+					this.retryAt = this.deps.time.now() + RETRY_DELAY_MS;
+					this.giveUpAfterRepeatedFailure(batch);
+				}
 			}
 		} finally {
 			this.deps.time.clearTimeout(deadline);

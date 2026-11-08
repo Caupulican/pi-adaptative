@@ -9,6 +9,7 @@ import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
+import { isolatedCompletionError } from "../provider-admission/refusal.ts";
 import { MAX_ROUTINE_INTAKE_SOURCE_REQUESTS, MAX_ROUTINE_PROMPT_CHARS } from "./routine-contract.ts";
 import {
 	INTAKE_LIFETIMES,
@@ -169,7 +170,7 @@ export async function extractRoutineRequests(
 		});
 		usage.assertHealthy();
 		if (result.stopReason === "error" || result.stopReason === "aborted")
-			throw new Error(result.errorMessage ?? `Routine intake extraction ${result.stopReason}.`);
+			throw isolatedCompletionError(result, `Routine intake extraction ${result.stopReason}.`);
 		if (capture.proposals === undefined) throw new Error("Routine intake extraction ended without a submission.");
 		return capture.proposals;
 	} finally {

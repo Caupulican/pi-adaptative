@@ -8,6 +8,7 @@ import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
 import type { OwnerEvidenceDescriptor, OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
+import { logProviderLanePark, providerAdmissionRefusalOf } from "../provider-admission/refusal.ts";
 import type { LaneModelResolver } from "../research/lane-model-resolver.ts";
 import type {
 	AutoLearnSettings,
@@ -535,6 +536,7 @@ export class KnowledgeCollector {
 				claim.retries >= MAX_SOURCE_RETRIES &&
 				!code.startsWith("configuration:") &&
 				!code.startsWith("accounting:") &&
+				!code.startsWith("provider:") &&
 				code !== "time:deadline";
 			const held = limited ? "configuration:retry_limit" : code;
 			journal.hold(claim, {
@@ -736,9 +738,16 @@ export class KnowledgeCollector {
 			assertCurrent();
 			// A paid attempt with an unknown outcome is never replayed: its work is keyed by model and engine, so only a
 			// configuration change can give the source new work.
+			const refusal = providerAdmissionRefusalOf(error);
 			if (error instanceof KnowledgeWorkUnresolved) hold("configuration:unresolved_work");
 			else if (isRequestSpendRefusal(error)) hold("configuration:spending");
 			else if (error instanceof KnowledgeExtractionRefusal) hold(`configuration:${error.code}`);
+			// A request refused at provider admission was never sent: the source waits for the time admission reopens,
+			// without spending its retry bound, instead of trying again into the same refusal.
+			else if (refusal) {
+				logProviderLanePark("knowledge_collection", refusal);
+				hold("provider:refused", refusal.retryAt);
+			}
 			// A failed request may be transient: it is tried again after a delay, within the retry bound.
 			else hold("context:collection_failed", this.deps.time.now() + RETRY_DELAY_MS);
 			return false;

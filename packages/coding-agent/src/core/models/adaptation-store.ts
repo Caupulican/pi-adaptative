@@ -230,6 +230,59 @@ function parseAdaptationHost(value: unknown, hostId: string): Record<string, Sto
 	return profiles;
 }
 
+function perfSamples(entry: StoredModelAdaptation): number {
+	return entry.profile.perf?.samples ?? 0;
+}
+
+function teachEvidence(stats: ModelTeachStats): number {
+	return stats.recurrenceBefore + stats.recurrenceAfter;
+}
+
+/**
+ * Fold the profiles stored under earlier host ids of this machine into one row. Per model the profile
+ * backed by more perf samples is the base (the later one on a tie); the rest only contribute what the base
+ * lacks: a missing protocol, tool probe or capability tier, standing rules of other modes, and teach stats
+ * of modes the base never saw or backed by more recurrences. Counts are compared, never added, so folding
+ * the same rows twice cannot double-count.
+ */
+function foldLegacyAdaptationHosts(
+	legacy: readonly Record<string, StoredModelAdaptation>[],
+	host: HostFingerprint,
+): { data: Record<string, StoredModelAdaptation>; rows: number } {
+	const byModel = new Map<string, StoredModelAdaptation[]>();
+	for (const profiles of legacy) {
+		for (const [model, entry] of Object.entries(profiles)) byModel.set(model, [...(byModel.get(model) ?? []), entry]);
+	}
+	const data: Record<string, StoredModelAdaptation> = {};
+	for (const [model, entries] of byModel) {
+		const ranked = [...entries].sort(
+			(a, b) => perfSamples(b) - perfSamples(a) || Date.parse(b.at) - Date.parse(a.at),
+		);
+		const [base, ...others] = ranked;
+		const recent = [...others].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+		const profile = normalizeProfile(base!.profile);
+		let rules = profile.rules;
+		const teachStats = { ...profile.teachStats };
+		for (const other of recent) {
+			const extra = normalizeProfile(other.profile);
+			if (!profile.protocol && extra.protocol) profile.protocol = extra.protocol;
+			if (!profile.toolProbe && extra.toolProbe) profile.toolProbe = extra.toolProbe;
+			if (!profile.capabilityTier && extra.capabilityTier) profile.capabilityTier = extra.capabilityTier;
+			for (const rule of extra.rules) {
+				const held = rules.find((existing) => existing.mode === rule.mode);
+				if (!held || ruleRecency(rule) > ruleRecency(held)) rules = mergeRule(rules, rule);
+			}
+			for (const [mode, stats] of Object.entries(extra.teachStats)) {
+				const held = teachStats[mode];
+				if (!held || teachEvidence(stats) > teachEvidence(held)) teachStats[mode] = stats;
+			}
+		}
+		const latest = ranked.reduce((a, b) => (Date.parse(b.at) > Date.parse(a.at) ? b : a));
+		data[model] = { model, profile: { ...profile, rules, teachStats }, at: latest.at, host };
+	}
+	return { data, rows: Object.keys(data).length };
+}
+
 export class ModelAdaptationStore {
 	private readonly storage: HostStateStore<Record<string, StoredModelAdaptation>>;
 
@@ -262,6 +315,7 @@ export class ModelAdaptationStore {
 			fingerprint: options?.fingerprint,
 			readOnly,
 			parseHost: parseAdaptationHost,
+			foldLegacyHosts: foldLegacyAdaptationHosts,
 		});
 		this.deferPerfSamples = options?.deferPerfSamples === true && !readOnly;
 		if (this.deferPerfSamples) this.unregisterExitFlush = registerProcessExitFlush(() => this.flush());

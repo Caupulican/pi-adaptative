@@ -51,6 +51,14 @@ export const bashSchema = Type.Object({
 
 export type BashToolInput = Static<typeof bashSchema>;
 
+/**
+ * Machine-readable status of the process a shell call ran, so a failure can be classified without parsing
+ * text: a command that exited non-zero, a verification that failed and a timeout look different here.
+ * `exitCode` is null when the process did not exit on its own; `signal` is the terminating signal when the
+ * backend reports one (null when none or unknown); `timedOut` is true when the call's wall-clock bound ended it.
+ */
+export type BashExitDetails = { exitCode: number | null; signal: string | null; timedOut: boolean };
+
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
@@ -66,7 +74,9 @@ export interface BashToolDetails {
 	outputReduction?: OutputReductionDetails;
 	piVerification?: VerificationRecord;
 	/** The process's exit code when the command ran to completion; a worker's report is checked against it. */
-	exitCode?: number;
+	exitCode?: number | null;
+	signal?: string | null;
+	timedOut?: boolean;
 }
 
 /**
@@ -99,7 +109,7 @@ export interface BashOperations {
 			 */
 			detached?: boolean;
 		},
-	) => Promise<{ exitCode: number | null; cwd?: string; initialCwd?: string }>;
+	) => Promise<{ exitCode: number | null; signal?: string | null; cwd?: string; initialCwd?: string }>;
 }
 
 /** Result of one host-side bash execution (the `!` command path and RPC). */

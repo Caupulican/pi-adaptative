@@ -79,6 +79,18 @@ const RECOVERY_SCHEMA_SQL = `
 	CREATE TABLE IF NOT EXISTS recovery_configuration (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL) STRICT;
 `;
 
+/**
+ * Version of the length rule that decides whether a node fails. Rule 1 (no marker stored) failed a node whose shortest
+ * reply stayed over the node maximum and parked it; rule 2 cuts that reply to fit, so nothing fails for length.
+ * A scheduler file stamped below the current rule releases the nodes the old rule parked, once. The marker has its
+ * own table, so the schema version stays 3 and an older build ignores it.
+ */
+const LENGTH_RULE_VERSION = 2;
+const LENGTH_RULE_SCHEMA_SQL =
+	"CREATE TABLE IF NOT EXISTS scheduler_rules (id INTEGER PRIMARY KEY CHECK(id=1), length_rule INTEGER NOT NULL) STRICT;";
+/** Start of the failure reason that rule 1 recorded for an overflowing node. */
+const LEGACY_OVERFLOW_REASON_PATTERN = "Shortest compaction reply was %";
+
 /** SQL form of `continuousChatNodeContextEnd`. The claim indexes and every claim ORDER BY spell it identically. */
 const CONTEXT_END_SQL = "(CASE WHEN level=0 THEN ordinal ELSE (ordinal+1)<<level END)";
 
@@ -198,6 +210,7 @@ export class ContinuousChatScheduler {
 						db.exec(RECOVERY_SCHEMA_SQL);
 						db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
 					});
+				scheduler.applyLengthRule();
 				if (version !== SCHEDULER_SCHEMA_VERSION)
 					harnessLog.info("memory", version === 0 ? "chat scheduler created" : "chat scheduler migrated", {
 						from: version,
@@ -217,6 +230,45 @@ export class ContinuousChatScheduler {
 
 	close(): void {
 		this.db[Symbol.dispose]();
+	}
+	private storedLengthRule(): number {
+		if (!this.sql("SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='scheduler_rules'").get())
+			return 1;
+		const stored = this.sql("SELECT length_rule FROM scheduler_rules WHERE id=1").get()?.length_rule;
+		return isNonNegativeSafeInteger(stored) ? stored : 1;
+	}
+	/**
+	 * Releases, once, the nodes the previous length rule parked: a node that failed because its shortest reply stayed over
+	 * the node maximum is made ready for a retry with one attempt on record, and the rule marker is stamped. The version is
+	 * re-checked under the write lock, since another process may have applied the rule between the unlocked read and the lock.
+	 */
+	private applyLengthRule(): void {
+		if (this.storedLengthRule() >= LENGTH_RULE_VERSION) return;
+		let released = 0;
+		this.transaction(() => {
+			this.db.exec(LENGTH_RULE_SCHEMA_SQL);
+			if (this.storedLengthRule() >= LENGTH_RULE_VERSION) return;
+			this.sql(
+				"DELETE FROM recovery_only WHERE (level,ordinal) IN (SELECT level,ordinal FROM work WHERE status='blocked' AND reason LIKE ?)",
+			).run(LEGACY_OVERFLOW_REASON_PATTERN);
+			released = changesOf(
+				this.sql(
+					"UPDATE work SET status='ready',attempts=1,retry_after=-1,last_action='release',reason=NULL WHERE status='blocked' AND reason LIKE ?",
+				).run(LEGACY_OVERFLOW_REASON_PATTERN),
+			);
+			if (released > 0) {
+				const meta = this.meta();
+				meta.revision++;
+				this.save(meta);
+			}
+			this.sql(
+				"INSERT INTO scheduler_rules VALUES(1,?) ON CONFLICT(id) DO UPDATE SET length_rule=excluded.length_rule",
+			).run(LENGTH_RULE_VERSION);
+		});
+		if (released > 0)
+			harnessLog.info("memory", "chat work parked by an earlier length rule released for retry", {
+				count: released,
+			});
 	}
 	prepareMigrationMove(): void {
 		if (this.db.prepare("PRAGMA journal_mode=DELETE").get()?.journal_mode !== "delete")
@@ -300,11 +352,14 @@ export class ContinuousChatScheduler {
 		).run(item.level, item.ordinal, item.level === 0 ? 0 : 1, sequence);
 	}
 
-	/** Only an unpublished database may be reset; caller holds legacy authority until finishImport commits. */
+	/**
+	 * Only an unpublished database may be reset; caller holds legacy authority until finishImport commits. The length-rule
+	 * marker is cleared too, so the published database applies the rule to the failures it imported.
+	 */
 	beginImport(): void {
 		this.transaction(() => {
 			this.db.exec(
-				"DELETE FROM recovery_only; DELETE FROM recovery_configuration; DELETE FROM work; DELETE FROM legacy_half; DELETE FROM meta;",
+				"DELETE FROM recovery_only; DELETE FROM recovery_configuration; DELETE FROM scheduler_rules; DELETE FROM work; DELETE FROM legacy_half; DELETE FROM meta;",
 			);
 		});
 	}

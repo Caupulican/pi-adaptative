@@ -409,6 +409,76 @@ function putEvidenceRecord<T>(
 	);
 }
 
+/** The record backed by more samples, the later one on a tie. */
+function foldKeyedByLargerSample<T>(
+	maps: ReadonlyArray<Record<string, T>>,
+	samples: (record: T) => number,
+	timestamp: (record: T) => string,
+): Record<string, T> {
+	const folded: Record<string, T> = {};
+	for (const records of maps) {
+		for (const [key, record] of Object.entries(records)) {
+			const current = folded[key];
+			if (
+				!current ||
+				samples(record) > samples(current) ||
+				(samples(record) === samples(current) && Date.parse(timestamp(record)) > Date.parse(timestamp(current)))
+			)
+				folded[key] = record;
+		}
+	}
+	return folded;
+}
+
+/**
+ * Fold the rows stored under earlier host ids of this machine into one row. A stats or agreement record
+ * keeps the version backed by more samples (never a sum, so folding the same rows twice cannot
+ * double-count); the observation log is the union of distinct observations, newest kept within its bounds.
+ */
+function foldLegacyToolPerformanceHosts(
+	legacy: readonly HostToolPerformanceData[],
+	host: HostFingerprint,
+): { data: HostToolPerformanceData; rows: number } {
+	const stats = trimEvidenceRecords(
+		foldKeyedByLargerSample(
+			legacy.map((data) => data.stats),
+			(record) => record.sampleCount,
+			(record) => record.lastUsedAt,
+		),
+		MAX_STATS_PER_HOST,
+		(record) => record.lastUsedAt,
+	);
+	const intentAgreement = trimEvidenceRecords(
+		foldKeyedByLargerSample(
+			legacy.map((data) => data.intentAgreement),
+			(record) => record.sampleCount,
+			(record) => record.lastUpdatedAt,
+		),
+		MAX_INTENT_AGREEMENT_PER_HOST,
+		(record) => record.lastUpdatedAt,
+	);
+	const distinct = new Map<string, ToolSelectionObservation>();
+	for (const data of legacy) {
+		for (const observation of data.observations) distinct.set(JSON.stringify(observation), observation);
+	}
+	const observations = trimObservations([...distinct.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)));
+	return {
+		data: {
+			host,
+			stats: stats.records,
+			statsBytes: stats.bytes,
+			observations: observations.observations,
+			observationBytes: observations.bytes,
+			intentAgreement: intentAgreement.records,
+			intentAgreementBytes: intentAgreement.bytes,
+		},
+		rows:
+			Object.keys(stats.records).length +
+			Object.keys(intentAgreement.records).length +
+			observations.observations.length,
+	};
+}
+
 export class ToolPerformanceStore {
 	private readonly storage: HostStateStore<HostToolPerformanceData>;
 
@@ -426,6 +496,7 @@ export class ToolPerformanceStore {
 			fingerprint: options.fingerprint,
 			readOnly: options.readOnly ?? isWorkerSession(),
 			parseHost,
+			foldLegacyHosts: foldLegacyToolPerformanceHosts,
 			writeBehind: options.writeBehind,
 		});
 	}

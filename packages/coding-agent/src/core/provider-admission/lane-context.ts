@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { ProviderAdmissionRefusal } from "./refusal.ts";
 
 /**
  * Which kind of work a provider request serves. The owner's own turn is `foreground`; a delegated
@@ -8,16 +9,37 @@ import { AsyncLocalStorage } from "node:async_hooks";
  */
 export type ProviderRequestLane = "foreground" | "worker" | "background";
 
-const laneStorage = new AsyncLocalStorage<ProviderRequestLane>();
+/**
+ * The lane one piece of work runs in, and the admission refusal its requests met. A completion loop turns a refused
+ * request into an error reply with only the message text, so the gate also notes the refusal here, where the owner of the
+ * work reads it after the loop ends.
+ */
+export interface ProviderLaneScope {
+	readonly lane: ProviderRequestLane;
+	/** The latest admission refusal a request of this scope met. */
+	refusal?: ProviderAdmissionRefusal;
+}
 
-/** Run `fn` with every provider request it (transitively) starts attributed to `lane`. */
-export function runInProviderLane<T>(lane: ProviderRequestLane, fn: () => T): T {
-	return laneStorage.run(lane, fn);
+const laneStorage = new AsyncLocalStorage<ProviderLaneScope>();
+
+export function createProviderLaneScope(lane: ProviderRequestLane): ProviderLaneScope {
+	return { lane };
+}
+
+/** Run `fn` with every provider request it (transitively) starts attributed to `scope`'s lane, refusals noted on `scope`. */
+export function runInProviderLaneScope<T>(scope: ProviderLaneScope, fn: () => T): T {
+	return laneStorage.run(scope, fn);
 }
 
 /** The lane of the current async context; a request started outside any lane is the foreground. */
 export function currentProviderLane(): ProviderRequestLane {
-	return laneStorage.getStore() ?? "foreground";
+	return laneStorage.getStore()?.lane ?? "foreground";
+}
+
+/** Note an admission refusal on the current scope, if the request runs inside one. */
+export function noteProviderRefusal(refusal: ProviderAdmissionRefusal): void {
+	const scope = laneStorage.getStore();
+	if (scope) scope.refusal = refusal;
 }
 
 /** Map an isolated completion's `laneKind` namespace onto an admission lane. */

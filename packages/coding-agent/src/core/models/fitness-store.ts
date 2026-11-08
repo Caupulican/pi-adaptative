@@ -99,6 +99,28 @@ function parseFitnessHost(value: unknown, hostId: string): Record<string, Stored
 	return reports;
 }
 
+/**
+ * Fold the reports stored under earlier host ids of this machine into one row. Per model the report
+ * backed by more trials wins (the later one on a tie), so folding twice cannot count a trial twice.
+ */
+function foldLegacyFitnessHosts(
+	legacy: readonly Record<string, StoredFitnessReport>[],
+	host: HostFingerprint,
+): { data: Record<string, StoredFitnessReport>; rows: number } {
+	const data: Record<string, StoredFitnessReport> = {};
+	for (const reports of legacy) {
+		for (const [model, entry] of Object.entries(reports)) {
+			const current = data[model];
+			const better =
+				!current ||
+				entry.report.trials > current.report.trials ||
+				(entry.report.trials === current.report.trials && Date.parse(entry.at) > Date.parse(current.at));
+			if (better) data[model] = { ...entry, host };
+		}
+	}
+	return { data, rows: Object.keys(data).length };
+}
+
 export class FitnessStore {
 	private readonly storage: HostStateStore<Record<string, StoredFitnessReport>>;
 
@@ -109,6 +131,7 @@ export class FitnessStore {
 			fingerprint: options?.fingerprint,
 			readOnly: options?.readOnly ?? isWorkerSession(),
 			parseHost: parseFitnessHost,
+			foldLegacyHosts: foldLegacyFitnessHosts,
 		});
 	}
 

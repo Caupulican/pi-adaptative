@@ -698,7 +698,7 @@ export class ContinuousChatRuntime {
 				await this.recordOrRetain(item, {
 					kind: "fail",
 					reason: outcome.message,
-					recoveryOnly: outcome.reason === "overflow" || outcome.reason === "empty-reply",
+					recoveryOnly: outcome.reason === "empty-reply",
 					recoveryKey,
 				});
 				return;

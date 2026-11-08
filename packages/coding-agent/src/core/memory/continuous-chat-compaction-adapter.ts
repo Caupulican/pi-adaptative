@@ -3,7 +3,9 @@
  * model repeats that request's system prompt and tools, so the compaction reads the turns' cached prefix. Any other
  * summary model shares no cache with the turns: it gets the chat's own stable system prompt and no tools, so a call does
  * not pay for the foreground's prompt and tool schemas. The view and task go through the isolated request path. A reply
- * is plain text: a tool call or a stop other than "stop" fails the node.
+ * is plain text: a tool call or a stop other than "stop" fails the node. A node's requests all run on the model and
+ * thinking level resolved when it opened: a different resolution (a fallback model, a changed setting) is refused, never
+ * sent, so this lane cannot drift onto a costlier model.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -16,6 +18,11 @@ import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../..
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { CompletionResponseUsage } from "../cost/completion-response-usage.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
+import {
+	isolatedCompletionError,
+	logProviderLanePark,
+	providerAdmissionRefusalOf,
+} from "../provider-admission/refusal.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type {
 	ContinuousChatCompactionConversation,
@@ -36,6 +43,12 @@ export interface ContinuousChatPrefixSnapshot {
 	systemPrompt: string;
 	tools: readonly Tool[];
 	model: ContinuousChatPrefixModel | undefined;
+}
+
+/** The model and thinking level a node opened with; every request of the node runs on exactly these. */
+interface PinnedSummary {
+	model: Model<Api>;
+	thinkingLevel: Extract<ContinuousChatSummaryModelResolution, { ok: true }>["thinkingLevel"];
 }
 
 function userText(text: string): Message {
@@ -108,6 +121,8 @@ export interface ContinuousChatCompactionAdapterDeps {
 
 export class ContinuousChatCompactionAdapter implements ContinuousChatCompactionAdapterPort {
 	private readonly deps: ContinuousChatCompactionAdapterDeps;
+	/** Epoch milliseconds before which the provider refused this lane; claims wait for it. */
+	private providerHoldUntil = 0;
 
 	constructor(deps: ContinuousChatCompactionAdapterDeps) {
 		this.deps = deps;
@@ -118,7 +133,19 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	}
 
 	spendHold(): string | undefined {
-		return this.deps.spend?.hold();
+		const spend = this.deps.spend?.hold();
+		if (spend !== undefined) return spend;
+		return Date.now() < this.providerHoldUntil
+			? "Memory summaries wait for the model provider's limit to reset."
+			: undefined;
+	}
+
+	/** A refused request parks new claims until the provider can admit them again; it never counts as a failed attempt. */
+	private noteProviderRefusal(source: unknown): void {
+		const refusal = providerAdmissionRefusalOf(source);
+		if (refusal === undefined) return;
+		this.providerHoldUntil = Math.max(this.providerHoldUntil, refusal.retryAt);
+		logProviderLanePark("continuous_chat", refusal);
 	}
 
 	recoveryKey(): string | undefined {
@@ -152,18 +179,29 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		return summary;
 	}
 
-	private guardSummaryRequest(model: Model<Api>, signal: AbortSignal | undefined): undefined {
+	/**
+	 * Throws unless the summary configuration resolves, now, to the model and thinking level the node opened with. An
+	 * attempted substitution is logged at warn and fails the attempt in plain words; nothing is sent to the other model.
+	 */
+	private assertPinned(pinned: PinnedSummary, signal: AbortSignal | undefined): void {
 		signal?.throwIfAborted();
-		const current = this.summaryModel();
-		if (
-			current.provider !== model.provider ||
-			current.id !== model.id ||
-			current.api !== model.api ||
-			current.baseUrl !== model.baseUrl
-		) {
-			throw new Error("Continuous-chat summary model changed before its request could start.");
-		}
-		return undefined;
+		const current = this.summaryResolution();
+		if (sameCacheModel(pinned.model, current.model) && pinned.thinkingLevel === current.thinkingLevel) return;
+		this.refuseSubstitution(pinned, current);
+	}
+
+	private refuseSubstitution(pinned: PinnedSummary, attempted: PinnedSummary): never {
+		const from = `${pinned.model.provider}/${pinned.model.id}`;
+		const to = `${attempted.model.provider}/${attempted.model.id}`;
+		harnessLog.warn("memory", "a summary request was refused because its model would change", {
+			from,
+			to,
+			fromThinking: pinned.thinkingLevel,
+			toThinking: attempted.thinkingLevel,
+		});
+		throw new Error(
+			`The ICM chat's summaries run only on ${from} at ${pinned.thinkingLevel} thinking, and this one would have run on ${to} at ${attempted.thinkingLevel} thinking, so it was not sent. If ${from} is unavailable, restore it or set contextPolicy.memory.history.summaryModel to another model.`,
+		);
 	}
 
 	/**
@@ -184,7 +222,8 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		// A background node can summarize several tasks. Its execution-time goal is not its billing owner.
 		const origin = { sessionId: capturedOrigin.sessionId, operationId: `${jobId}:${node}` };
 		const head = this.deps.prefixHead();
-		this.validate();
+		const { model: pinnedModel, thinkingLevel: pinnedThinking } = this.summaryResolution();
+		const pinned: PinnedSummary = { model: pinnedModel, thinkingLevel: pinnedThinking };
 		const view: Message = {
 			role: "user",
 			content: renderContinuousChatViewBlocks(prefix.view, prefix.viewCache),
@@ -204,8 +243,8 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 					const request: Message[] = [view, userText(task)];
 					if (correction !== undefined) request.push(userText(correction));
 					const runTurn = async (toolFree = false) => {
-						signal?.throwIfAborted();
-						const { model, thinkingLevel } = this.summaryResolution();
+						this.assertPinned(pinned, signal);
+						const { model, thinkingLevel } = pinned;
 						const sharesCache = head.model !== undefined && sameCacheModel(head.model, model);
 						const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
 						const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
@@ -216,27 +255,42 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						): undefined => {
 							try {
 								usage.assertAvailable();
-								return this.guardSummaryRequest(requestModel, requestSignal);
+								this.assertPinned(pinned, requestSignal);
+								if (!sameCacheModel(pinned.model, requestModel)) {
+									this.refuseSubstitution(pinned, {
+										model: requestModel,
+										thinkingLevel: pinned.thinkingLevel,
+									});
+								}
+								return undefined;
 							} catch (error) {
 								guardRejected = true;
 								throw error;
 							}
 						};
 						attempt++;
-						const completion = await this.deps.complete({
-							systemPrompt,
-							messages: [],
-							requestContext: { systemPrompt, tools: activeTools, messages: request },
-							model,
-							thinkingLevel,
-							cacheRetention: "short",
-							laneKind: "continuous-chat",
-							requestPreflight: ({ model: requestModel }, requestSignal) =>
-								requestGuard(requestModel, requestSignal),
-							requestGuard,
-							providerResponseObserver: usage,
-							signal,
-						});
+						const completion = await this.deps
+							.complete({
+								systemPrompt,
+								messages: [],
+								requestContext: { systemPrompt, tools: activeTools, messages: request },
+								model,
+								thinkingLevel,
+								cacheRetention: "short",
+								laneKind: "continuous-chat",
+								requestPreflight: ({ model: requestModel }, requestSignal) =>
+									requestGuard(requestModel, requestSignal),
+								requestGuard,
+								providerResponseObserver: usage,
+								signal,
+							})
+							.catch((error: unknown) => {
+								this.noteProviderRefusal(error);
+								throw error;
+							});
+						this.noteProviderRefusal(completion);
+						if (providerAdmissionRefusalOf(completion))
+							throw isolatedCompletionError(completion, "The provider refused the summary request.");
 						usage.assertHealthy();
 						this.deps.spend?.record(completion.usage.cost.total);
 						const reply = completion.messages?.at(-1);
@@ -271,10 +325,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 								}));
 								await sleepAbortable(delayMs, signal, this.deps.timers);
 							} else {
-								harnessLog.warn("memory", "a summary request moves to another model", () => ({
-									attempt,
-									model: nextSummary.model.id,
-								}));
+								this.refuseSubstitution(pinned, nextSummary);
 							}
 						} else if (
 							sentTools &&

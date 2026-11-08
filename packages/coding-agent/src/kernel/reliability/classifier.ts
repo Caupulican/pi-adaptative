@@ -53,6 +53,13 @@ const SERVER_ERROR =
 	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|ResourceExhausted|retry delay|provider retry directive:\s*retry|you can retry your request|try your request again|please retry your request/i;
 const NETWORK =
 	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
+/**
+ * The summarizer's own marker for a checkpoint that ended at the output length limit
+ * (`finalizeSummaryResponse`). The provider answered normally; the same request only length-stops
+ * again, so it is neither a provider fault nor retryable as-is. The compaction ladder escalates the
+ * output budget or tier instead.
+ */
+const SUMMARY_LENGTH_STOP = /\bsummary-length-stop\b/;
 const PROVIDER_NO_RETRY = /Provider retry directive:\s*do not retry\./i;
 
 /**
@@ -154,6 +161,7 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 	// An output runaway (the stream guard ended a degenerate loop) is never retried as-is: the same
 	// prompt reproduces the loop. The host records it and lets the goal loop change approach.
 	if (/^output runaway:/i.test(message)) return { ...base, reason: "runaway_output", retryable: false };
+	if (SUMMARY_LENGTH_STOP.test(message)) return { ...base, reason: "summary_length_stop", retryable: false };
 	if (MODEL_UNSUPPORTED.test(message))
 		return withRetry({ ...base, reason: "model_unsupported", shouldFallback: true });
 	if (BILLING_OR_QUOTA.test(message)) return withRetry({ ...base, reason: "billing_or_quota", shouldFallback: true });

@@ -12,6 +12,7 @@ import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { registerBuiltInApiProviders } from "@caupulican/pi-ai/register-builtins";
 import { getAgentDir } from "../config.ts";
 import { Agent } from "../kernel/agent.ts";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentStreamOptions } from "../kernel/loop-config.ts";
 import { convertToLlm } from "../kernel/messages.ts";
 import { getDefaultSessionDir, SessionManager } from "../kernel/session/session-manager.ts";
@@ -71,6 +72,7 @@ import {
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
+import { currentProviderLane } from "./provider-admission/lane-context.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -686,14 +688,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					if (options?.signal?.aborted) throw new Error("Request was aborted");
 				}
 				const serviceTiers = accountModels.serviceTiers(model);
-				const fastModeServiceTier = resolveFastModeServiceTier(
-					model,
-					settingsManager.getFastModePreference(model.provider),
-					serviceTiers,
-					accountModels.defaultServiceTier(model),
-				);
+				// Fast mode buys latency, which only the owner's live turn waits on: a worker's, an isolated completion's
+				// or a child session's request runs at standard processing whatever the provider's saved preference.
+				const requestLane = currentProviderLane();
+				const foregroundRequest =
+					!forceBackgroundRequests &&
+					requestLane === "foreground" &&
+					(options?.interactionMode ?? "user") !== "background";
+				const fastModeServiceTier = foregroundRequest
+					? resolveFastModeServiceTier(
+							model,
+							settingsManager.getFastModePreference(model.provider),
+							serviceTiers,
+							accountModels.defaultServiceTier(model),
+						)
+					: undefined;
 				const serviceTier =
 					options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier;
+				harnessLog.debug("provider", "request tier chosen", () => ({
+					lane: foregroundRequest
+						? "foreground"
+						: requestLane === "worker" || isWorkerSession()
+							? "worker"
+							: "background",
+					tier: serviceTier ?? null,
+				}));
 				if (
 					(serviceTier === "ultrafast" || (model.provider === "openai-codex" && serviceTier === "priority")) &&
 					resolveFastModeServiceTier(model, serviceTier === "ultrafast" ? "ultrafast" : true, serviceTiers) !==

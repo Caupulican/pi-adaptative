@@ -216,25 +216,54 @@ export function readAgentToolPolicyDeniedError(error: unknown): AgentToolPolicyD
  * `failureCode` identifies the tool-owned terminal outcome. `outputSignature` identifies the complete raw
  * operation output, including bytes omitted from bounded model-facing previews. `errorKind` says whether the
  * tool failed or completed and reported a negative operation status; it defaults to `tool_failure` so a tool
- * that has not classified itself is never mistaken for a completed operation.
+ * that has not classified itself is never mistaken for a completed operation. `details` are the tool's
+ * machine-readable facts about the outcome (an exit status); a completed-operation failure carries them into
+ * the persisted result in place of the empty details a thrown error would otherwise leave.
  */
 export class AgentToolExecutionError extends Error {
 	readonly failureCode: string;
 	readonly outputSignature: string;
 	readonly errorKind: AgentToolErrorKind;
+	readonly details: AgentToolOutcomeDetails | undefined;
 
 	constructor(
 		message: string,
 		failureCode: string,
 		outputSignature: string,
 		errorKind: AgentToolErrorKind = "tool_failure",
+		details?: AgentToolOutcomeDetails,
 	) {
 		super(message);
 		this.name = "AgentToolExecutionError";
 		this.failureCode = failureCode;
 		this.outputSignature = outputSignature;
 		this.errorKind = errorKind;
+		this.details = details;
 	}
+}
+
+/** Flat, bounded primitives only: a thrown error's details never carry output, paths or nested structures. */
+export type AgentToolOutcomeDetails = Readonly<Record<string, string | number | boolean | null>>;
+
+const MAX_OUTCOME_DETAIL_KEYS = 16;
+const MAX_OUTCOME_DETAIL_STRING_CHARS = 64;
+
+/** Strict copy of a runtime-copy error's details; anything outside the flat bounded shape is dropped. */
+function readAgentToolOutcomeDetails(value: unknown): AgentToolOutcomeDetails | undefined {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const keys = Object.keys(value);
+	if (keys.length === 0 || keys.length > MAX_OUTCOME_DETAIL_KEYS) return undefined;
+	const copy: Record<string, string | number | boolean | null> = {};
+	for (const key of keys) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) return undefined;
+		const item: unknown = descriptor.value;
+		if (item === null || typeof item === "boolean") copy[key] = item;
+		else if (typeof item === "number" && Number.isFinite(item)) copy[key] = item;
+		else if (typeof item === "string" && item.length <= MAX_OUTCOME_DETAIL_STRING_CHARS) copy[key] = item;
+		else return undefined;
+	}
+	return Object.freeze(copy);
 }
 
 /**
@@ -252,7 +281,13 @@ export function readAgentToolExecutionError(error: unknown): AgentToolExecutionE
 		if (typeof failureCode !== "string" || failureCode.length === 0) return undefined;
 		if (typeof outputSignature !== "string") return undefined;
 		if (errorKind !== "tool_failure" && errorKind !== "operation_outcome") return undefined;
-		return new AgentToolExecutionError(identity.message, failureCode, outputSignature, errorKind);
+		return new AgentToolExecutionError(
+			identity.message,
+			failureCode,
+			outputSignature,
+			errorKind,
+			readAgentToolOutcomeDetails(Reflect.get(identity.error, "details")),
+		);
 	} catch {
 		return undefined;
 	}

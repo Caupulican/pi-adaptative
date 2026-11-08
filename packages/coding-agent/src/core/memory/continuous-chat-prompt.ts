@@ -13,8 +13,14 @@ import {
 	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
 
-/** Ruler line that shows a compaction its byte budget. */
+/** Ruler line that shows a compaction the node limit, the longest line it may write. */
 export const CONTINUOUS_CHAT_RULER = "-".repeat(CONTINUOUS_CHAT_NODE_TARGET_BYTES);
+
+/**
+ * The length a compaction is asked to aim for: about 85% of the node target. A model asked to fill the limit overshoots
+ * it, so the task names a target with headroom and the limit only as the line it never crosses.
+ */
+export const CONTINUOUS_CHAT_NODE_AIM_BYTES = 440;
 
 /** Pi-adaptative-memory system prompt for the continuous chat, without device tools or live state. */
 export const CONTINUOUS_CHAT_SYSTEM_PROMPT = `You are Pi, an AI agent that works for one user in a single chat that never
@@ -103,7 +109,8 @@ Call no tools, and output only the line, without an id+n| head.
 
 Goal: let Pi work later as well as if it remembered everything.
 
-Use the space up to the limit, and give it by value:
+Use the space up to the length the task asks for, never above its limit, and give
+it by value:
 
 1. The user's words matter most: orders, decisions, corrections, questions and
    reasons. Keep them close to verbatim, however short.
@@ -246,17 +253,22 @@ export function renderContinuousChatMergeTask(left: ContinuousChatTreeNode, righ
 	].join("\n");
 }
 
-/** Correction for an overlong reply: shows its byte count and the first limit bytes, which the model must shorten. */
+/**
+ * Correction for an overlong reply: its byte count, the exact excess over the limit and the bytes to remove, and the
+ * first limit bytes, which the model must shorten. It is the last text of a request, after the node's task.
+ */
 export function renderContinuousChatOverlengthCorrection(candidate: string): string {
 	const bytes = Buffer.byteLength(candidate, "utf8");
 	if (bytes <= CONTINUOUS_CHAT_NODE_TARGET_BYTES) {
 		throw new RangeError("Continuous-chat overlength correction requires an overlong candidate.");
 	}
+	const excess = bytes - CONTINUOUS_CHAT_NODE_TARGET_BYTES;
 	const cut = truncateContinuousChatUtf8(candidate, CONTINUOUS_CHAT_NODE_TARGET_BYTES);
 	return [
-		`Too long: your line is ${bytes} bytes, over the ${CONTINUOUS_CHAT_NODE_TARGET_BYTES}-byte limit. Write`,
-		"the whole line again for the same <input>, cutting just enough of the",
-		"least valuable items to fit before this cut:",
+		`Too long: your line is ${bytes} bytes, ${excess} over the ${CONTINUOUS_CHAT_NODE_TARGET_BYTES}-byte limit.`,
+		`Remove at least ${excess} bytes, about ${bytes - CONTINUOUS_CHAT_NODE_AIM_BYTES} to land near ${CONTINUOUS_CHAT_NODE_AIM_BYTES}.`,
+		"Write the whole line again for the same <input>, cutting the least valuable",
+		"items first. Everything after this cut is the excess:",
 		`${cut}| ← LIMIT`,
 	].join("\n");
 }

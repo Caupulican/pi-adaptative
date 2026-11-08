@@ -9,6 +9,7 @@ import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { providerAdmissionDir, safeSegment } from "./ledger.ts";
 import { readProviderAdmissionRecord } from "./record-storage.ts";
+import { type ProviderAdmissionRefusal, ProviderAdmissionRefusedError } from "./refusal.ts";
 
 /**
  * Machine-wide "this provider is limited until T" state, shared by every pi process on the agent
@@ -102,20 +103,22 @@ export { splitProviderAccountKey };
  * Thrown instead of sending when a provider is limited for longer than the lane may wait. The
  * message is shaped for the reliability classifier: it names the rate limit and carries the
  * remaining delay as "retry after N seconds", so the owner's retry controller and a worker's retry
- * ladder both sleep until the recorded reset with no request sent.
+ * ladder both sleep until the recorded reset with no request sent. `retryAt` carries the same reset for callers that wait
+ * on their own timer.
  */
-export class ProviderLimitedError extends Error {
+export class ProviderLimitedError extends ProviderAdmissionRefusedError {
 	readonly failureCode = "rate_limit" as const;
 	readonly retryAfterMs: number;
 	readonly record: ProviderLimitRecord;
 
-	constructor(record: ProviderLimitRecord, nowMs: number) {
+	constructor(record: ProviderLimitRecord, nowMs: number, refusal: ProviderAdmissionRefusal) {
 		const retryAfterMs = Math.max(0, record.limitedUntil - nowMs);
 		const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
 		super(
 			`Provider ${describeProviderAccountKey(record.provider)} is rate-limited machine-wide until ${new Date(record.limitedUntil).toISOString()} ` +
 				`(${record.reason.replace("_", " ")} recorded by pid ${record.pid}` +
 				`${record.detail ? `: ${record.detail}` : ""}); retry after ${seconds} seconds.`,
+			refusal,
 		);
 		this.name = "ProviderLimitedError";
 		this.retryAfterMs = retryAfterMs;

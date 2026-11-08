@@ -15,6 +15,7 @@ import {
 	StructuredLlmDecisionEngine,
 } from "../decision/engines/structured-llm-engine.ts";
 import { DecisionEngineProtocolError } from "../decision/protocol-error.ts";
+import { isolatedCompletionError } from "../provider-admission/refusal.ts";
 import type { MaintenanceUsageRoute } from "../review/system-one-review-port.ts";
 import type { AutoLearnSettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
@@ -108,7 +109,7 @@ export class KnowledgeJudgmentRunner implements LlmCompletionRunner {
 			if (capture.answers !== undefined) return capture.answers;
 			usage.assertHealthy();
 			if (result.stopReason === "error" || result.stopReason === "aborted")
-				throw new Error(result.errorMessage ?? `Session-model judgment ${result.stopReason}.`);
+				throw isolatedCompletionError(result, `Session-model judgment ${result.stopReason}.`);
 			throw new DecisionEngineProtocolError("The session-model judgment ended without a submission.");
 		} finally {
 			unsubscribe?.();

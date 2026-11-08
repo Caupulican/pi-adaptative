@@ -3,7 +3,7 @@ import type { StreamFn } from "../../kernel/index.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { type WaitEndReason, type WaitEndReport, type WakeSource, waitEndReport, waitFor } from "../util/wait.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
-import { currentProviderLane, type ProviderRequestLane } from "./lane-context.ts";
+import { currentProviderLane, noteProviderRefusal, type ProviderRequestLane } from "./lane-context.ts";
 import { type ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
 import {
 	observeProviderResult,
@@ -11,6 +11,12 @@ import {
 	ProviderLimitStore,
 	providerLimitFromFailure,
 } from "./limit-state.ts";
+import {
+	type ProviderAdmissionRefusal,
+	ProviderAdmissionRefusedError,
+	type ProviderRefusalReason,
+	ProviderRefusalWindows,
+} from "./refusal.ts";
 
 /**
  * Durable record of one admission wait: a request that found the provider limited machine-wide,
@@ -89,6 +95,11 @@ export interface ProviderAdmissionGateDeps {
 	getAccountKey?(provider: string, apiKey?: string): string;
 	getLane?(): ProviderRequestLane;
 	record?(record: ProviderAdmissionWaitRecord): void;
+	/**
+	 * The open refusal windows of this gate. A non-foreground refusal is logged and recorded once per window, however many
+	 * attempts it refuses; omitted, every refusal is recorded. {@link withProviderAdmission} supplies one.
+	 */
+	refusals?: ProviderRefusalWindows;
 }
 
 /**
@@ -99,6 +110,8 @@ const FIRST_POLL_MS = 250;
 const MAX_POLL_MS = 2_000;
 /** The cross-process re-read of an emergency stop: a lift in this process wakes the wait at once. */
 const EMERGENCY_STOP_POLL_MS = 2_000;
+/** The least a refusal with no stated reset asks its caller to wait, so a lane with a zero wait budget never retries in a spin. */
+const OPEN_REFUSAL_MIN_RETRY_MS = EMERGENCY_STOP_POLL_MS;
 
 /**
  * Why an owner steer never ends an admission pause: the pause is the admission of the provider request the run is
@@ -122,11 +135,12 @@ export function openProviderAdmission(
 	};
 }
 
-export class EmergencyStopError extends Error {
-	constructor(waitedMs: number) {
+export class EmergencyStopError extends ProviderAdmissionRefusedError {
+	constructor(waitedMs: number, refusal: ProviderAdmissionRefusal) {
 		super(
 			`Paused by the machine-wide emergency stop (ESTOP) for ${Math.ceil(waitedMs / 1000)} seconds; ` +
 				"worker and background provider requests are held until it is lifted. Provider retry directive: do not retry.",
+			refusal,
 		);
 		this.name = "EmergencyStopError";
 	}
@@ -138,13 +152,14 @@ export class EmergencyStopError extends Error {
  * on the account. The retry delay is spelled as the classifier reads it, so the owner's failover records the
  * model's reset rather than an open-ended exhaustion.
  */
-export class ModelQuotaExhaustedError extends Error {
-	constructor(modelRef: string, until: number | undefined, nowMs: number) {
+export class ModelQuotaExhaustedError extends ProviderAdmissionRefusedError {
+	constructor(modelRef: string, until: number | undefined, nowMs: number, refusal: ProviderAdmissionRefusal) {
 		super(
 			until === undefined
 				? `Model ${modelRef} quota exceeded with no reset recorded; no request was sent.`
 				: `Model ${modelRef} quota exceeded until ${new Date(until).toISOString()}: ` +
 						`retry after ${Math.max(1, Math.ceil((until - nowMs) / 1000))} seconds; no request was sent.`,
+			refusal,
 		);
 		this.name = "ModelQuotaExhaustedError";
 	}
@@ -236,6 +251,10 @@ function thrownWaitEnd(error: unknown, signal: AbortSignal | undefined): WaitEnd
  *     regardless once `maxWaitMs` has passed (recorded as `timedOut`) so a wedged sibling can never
  *     starve it.
  *
+ * A refusal carries `retryAt` ({@link ProviderAdmissionRefusal}): the recorded reset, or with none the lane's wait budget
+ * from now. A non-foreground refusal is logged and recorded once per open refusal window (`deps.refusals`), however many
+ * attempts it refuses.
+ *
  * Every pause runs on the ledger's `provider-admission` port. Returns the release to call when the request's stream has
  * settled.
  */
@@ -255,28 +274,55 @@ export async function admitProviderRequest(
 	const account = splitProviderAccountKey(key).account;
 	const inflightNow = (): number => deps.ledger.countInflight(key).total;
 	const base = { provider, ...(account ? { account } : {}), lane, limit } as const;
+	/**
+	 * Opens the refusal for `reason`: its `retryAt` is the recorded reset, or, with none stated, the lane's wait budget from
+	 * now. A non-foreground refusal inside an open window gets that window's own `retryAt` and is not `first`; only a
+	 * `first` refusal is written (log and durable record). The refusal is noted on the current lane scope, where the owner
+	 * of the work reads it after a completion loop has turned the thrown error into a message.
+	 */
+	const openRefusal = (
+		reason: ProviderRefusalReason,
+		limitedUntil: number | undefined,
+	): { refusal: ProviderAdmissionRefusal; first: boolean; at: number } => {
+		const at = now();
+		const proposed: ProviderAdmissionRefusal = {
+			provider,
+			lane,
+			reason,
+			retryAt: limitedUntil ?? at + Math.max(policy.maxWaitMs, OPEN_REFUSAL_MIN_RETRY_MS),
+			retryAtBasis: limitedUntil === undefined ? "wait_budget" : "recorded_reset",
+		};
+		const window = lane === "foreground" ? undefined : deps.refusals?.enter(key, proposed, limitedUntil, at);
+		const refusal = window ? { ...proposed, retryAt: window.retryAt } : proposed;
+		noteProviderRefusal(refusal);
+		return { refusal, first: window?.first !== false, at };
+	};
 	const refuse = (
 		reason: "model_quota" | "provider_limit",
 		waitedMs: number,
 		limitedUntil: number | undefined,
-	): void => {
-		harnessLog.warn("provider", "a provider request was refused at admission", () => ({
-			provider,
-			account: describeProviderAccountKey(key),
-			lane,
-			reason,
-			waitedMs,
-			...(limitedUntil === undefined ? {} : { retryAfterMs: Math.max(0, limitedUntil - now()) }),
-		}));
-		deps.record?.({
-			...base,
-			reason,
-			inflightAtStart: inflightNow(),
-			inflightAtAdmission: inflightNow(),
-			waitedMs,
-			timedOut: true,
-			limitedUntil,
-		});
+	): ProviderAdmissionRefusal => {
+		const { refusal, first, at } = openRefusal(reason, limitedUntil);
+		if (first) {
+			harnessLog.warn("provider", "a provider request was refused at admission", () => ({
+				provider,
+				account: describeProviderAccountKey(key),
+				lane,
+				reason,
+				waitedMs,
+				retryAfterMs: Math.max(0, refusal.retryAt - at),
+			}));
+			deps.record?.({
+				...base,
+				reason,
+				inflightAtStart: inflightNow(),
+				inflightAtAdmission: inflightNow(),
+				waitedMs,
+				timedOut: true,
+				limitedUntil,
+			});
+		}
+		return refusal;
 	};
 	/** Waits out one recorded reset `remainingMs` away within the `budgetLeftMs` the lane still has, then records it. */
 	const waitOutReset = async (
@@ -330,8 +376,12 @@ export async function admitProviderRequest(
 			const startedAt = now();
 			const waitedMs = startedAt - quotaWaitStartedAt;
 			if (exhaustion.until === undefined || exhaustion.until - startedAt > policy.maxWaitMs - waitedMs) {
-				refuse("model_quota", waitedMs, exhaustion.until);
-				throw new ModelQuotaExhaustedError(modelRef, exhaustion.until, startedAt);
+				throw new ModelQuotaExhaustedError(
+					modelRef,
+					exhaustion.until,
+					startedAt,
+					refuse("model_quota", waitedMs, exhaustion.until),
+				);
 			}
 			const remainingMs = exhaustion.until - startedAt;
 			if (remainingMs > 0)
@@ -352,23 +402,26 @@ export async function admitProviderRequest(
 			while (deps.isEmergencyStopEngaged?.()) {
 				const waitedMs = now() - startedAt;
 				if (waitedMs >= policy.maxWaitMs) {
-					harnessLog.warn("provider", "a request was refused: the emergency stop outlasted its wait", () => ({
-						provider,
-						account: describeProviderAccountKey(key),
-						lane,
-						waitedMs,
-						maxWaitMs: policy.maxWaitMs,
-					}));
-					deps.record?.({
-						...base,
-						reason: "emergency_stop",
-						inflightAtStart,
-						inflightAtAdmission: inflightNow(),
-						waitedMs,
-						timedOut: true,
-					});
+					const { refusal, first } = openRefusal("emergency_stop", undefined);
+					if (first) {
+						harnessLog.warn("provider", "a request was refused: the emergency stop outlasted its wait", () => ({
+							provider,
+							account: describeProviderAccountKey(key),
+							lane,
+							waitedMs,
+							maxWaitMs: policy.maxWaitMs,
+						}));
+						deps.record?.({
+							...base,
+							reason: "emergency_stop",
+							inflightAtStart,
+							inflightAtAdmission: inflightNow(),
+							waitedMs,
+							timedOut: true,
+						});
+					}
 					end = { kind: "timed_out", boundMs: policy.maxWaitMs };
-					throw new EmergencyStopError(waitedMs);
+					throw new EmergencyStopError(waitedMs, refusal);
 				}
 				const budgetLeftMs = Math.max(1, policy.maxWaitMs - waitedMs);
 				const pollMs = Math.min(EMERGENCY_STOP_POLL_MS, budgetLeftMs);
@@ -413,8 +466,11 @@ export async function admitProviderRequest(
 			const budgetMs = lane === "foreground" ? policy.foregroundLimitWaitMs : policy.maxWaitMs;
 			const budgetLeftMs = budgetMs - (startedAt - limitWaitStartedAt);
 			if (remainingMs > budgetLeftMs) {
-				refuse("provider_limit", startedAt - limitWaitStartedAt, recorded.limitedUntil);
-				throw new ProviderLimitedError(recorded, startedAt);
+				throw new ProviderLimitedError(
+					recorded,
+					startedAt,
+					refuse("provider_limit", startedAt - limitWaitStartedAt, recorded.limitedUntil),
+				);
 			}
 			if (remainingMs > 0)
 				await waitOutReset("provider_limit", remainingMs, budgetLeftMs, recorded.limitedUntil, limitChange);
@@ -518,7 +574,8 @@ export async function admitProviderRequest(
  * and the perf profiler, so time spent waiting is neither a connect stall nor part of the model's
  * measured time to first token.
  */
-export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissionGateDeps): StreamFn {
+export function withProviderAdmission(streamFn: StreamFn, gateDeps: ProviderAdmissionGateDeps): StreamFn {
+	const deps: ProviderAdmissionGateDeps = { ...gateDeps, refusals: gateDeps.refusals ?? new ProviderRefusalWindows() };
 	return async (model, context, options) => {
 		const key =
 			options?.providerAccountKey ?? deps.getAccountKey?.(model.provider, options?.apiKey) ?? model.provider;

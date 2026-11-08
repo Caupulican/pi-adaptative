@@ -2,12 +2,14 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
+import { providerAdmissionRefusalOf } from "../provider-admission/refusal.ts";
 import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
 import {
 	renderContinuousChatLeafTask,
 	renderContinuousChatMergeTask,
 	renderContinuousChatOverlengthCorrection,
+	truncateContinuousChatUtf8,
 } from "./continuous-chat-prompt.ts";
 import { buildContinuousChatToolLeafText, clipUtf8SingleLine } from "./continuous-chat-tool-leaf.ts";
 import {
@@ -94,8 +96,30 @@ export interface ContinuousChatCompactionJob {
 	closing?: AbortSignal;
 }
 
-/** Why a run failed. A sink error may follow partial publication; the store reconciles before abandoning work. */
-export type ContinuousChatCompactionFailureReason = "empty-reply" | "overflow" | "port-error" | "sink-error";
+/**
+ * Why a run failed. A reply that stays over the node maximum is not a failure: the coordinator cuts it to fit. A sink
+ * error may follow partial publication; the store reconciles before abandoning work.
+ */
+export type ContinuousChatCompactionFailureReason = "empty-reply" | "port-error" | "sink-error";
+
+/** Ends a summary the coordinator had to cut; it counts in the byte budget. */
+const CUT_MARK = "\u2026";
+
+/**
+ * The longest prefix of `text` that fits `maxBytes` with the cut mark appended, ending at a whole-word boundary when
+ * the text has one inside the budget, UTF-8 safe, with the clause punctuation and spaces before the cut dropped. A
+ * single token longer than the budget is cut inside the token, at a code point.
+ */
+export function cutContinuousChatToFit(text: string, maxBytes: number): string {
+	const fitted = truncateContinuousChatUtf8(text, maxBytes - Buffer.byteLength(CUT_MARK, "utf8"));
+	let head = fitted;
+	const endsAtWord = fitted.length === text.length || /\s/u.test(text.charAt(fitted.length)) || /\s$/u.test(fitted);
+	if (!endsAtWord) {
+		const boundary = fitted.search(/\s\S*$/u);
+		if (boundary > 0) head = fitted.slice(0, boundary);
+	}
+	return `${head.replace(/[\s,;:]+$/u, "")}${CUT_MARK}`;
+}
 
 interface ContinuousChatCompactionCandidate {
 	text: string;
@@ -118,8 +142,9 @@ export type ContinuousChatCompactionOutcome =
  * Builds one tree node per run, from the cheapest source that fits: an existing node, the message leaf, the joined
  * children, or the model. Every model request carries the node's frozen view and task, plus only the latest overlength
  * note after a reply that was too long; a request never replays an earlier reply or note, so it is independent of the
- * run's history and a restarted node simply starts again. Replies target 512 bytes; after five replies the shortest is
- * retained when it satisfies the tree's bounded interpretation of the reference's "a few bytes over is fine" exception.
+ * run's history and a restarted node simply starts again. A reply up to the node maximum is published at once. After
+ * five replies that all ran over, code cuts the shortest to the maximum at a word boundary and marks the cut, so
+ * only an empty reply or a port error leaves a node unbuilt.
  */
 export class ContinuousChatCompactionCoordinator {
 	private readonly port: ContinuousChatCompactionPort;
@@ -178,7 +203,7 @@ export class ContinuousChatCompactionCoordinator {
 			const bytes = Buffer.byteLength(candidate, "utf8");
 			if (shortest === undefined || bytes < shortest.bytes) shortest = { text: candidate, bytes };
 			// The bound is the node maximum: a reply a few bytes over the target is a complete line, and asking again for it
-			// bought a second paid reply for no information (half of all replies were such corrections).
+			// buys another paid reply for no information.
 			if (bytes <= CONTINUOUS_CHAT_NODE_MAX_BYTES) {
 				const node =
 					target.kind === "leaf"
@@ -189,18 +214,19 @@ export class ContinuousChatCompactionCoordinator {
 			correction = renderContinuousChatOverlengthCorrection(candidate);
 		}
 		if (shortest === undefined) return failure("empty-reply", replies, "Compaction produced no candidate.");
-		if (shortest.bytes > CONTINUOUS_CHAT_NODE_MAX_BYTES) {
-			return failure(
-				"overflow",
-				replies,
-				`Shortest compaction reply was ${shortest.bytes} bytes; bounded overflow ends at ${CONTINUOUS_CHAT_NODE_MAX_BYTES}.`,
-				shortest,
-			);
-		}
+		// Every reply was over the maximum (a shorter one would have been published). Code ends the node: the shortest
+		// reply is cut at a word boundary and marked, so a model that cannot hold the limit never leaves a node unbuilt.
+		const text = cutContinuousChatToFit(shortest.text, CONTINUOUS_CHAT_NODE_MAX_BYTES);
+		harnessLog.info("memory", "chat summary cut to fit", {
+			replies,
+			originalBytes: shortest.bytes,
+			cutBytes: Buffer.byteLength(text, "utf8"),
+			maxBytes: CONTINUOUS_CHAT_NODE_MAX_BYTES,
+		});
 		const node =
 			target.kind === "leaf"
-				? createContinuousChatLeaf(target.record, shortest.text)
-				: createContinuousChatParent(target.left, target.right, shortest.text);
+				? createContinuousChatLeaf(target.record, text)
+				: createContinuousChatParent(target.left, target.right, text);
 		return this.publish(signal, node, replies, shortest);
 	}
 
@@ -287,5 +313,7 @@ function portFailure(
 	shortest?: ContinuousChatCompactionCandidate,
 ): ContinuousChatCompactionOutcome {
 	if (job.signal?.aborted || job.closing?.aborted) return { status: "cancelled", replies };
+	// A provider that refused to admit the request is a wait, not a failed attempt: the claim is released and the adapter holds new claims until the provider can admit them.
+	if (providerAdmissionRefusalOf(error) !== undefined) return { status: "cancelled", replies };
 	return failure("port-error", replies, safeErrorMessage(error, "Continuous-chat port failed."), shortest);
 }

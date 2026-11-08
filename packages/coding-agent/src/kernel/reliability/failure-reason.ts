@@ -5,6 +5,8 @@ export type FailureReason =
 	| "network"
 	| "stream_stall"
 	| "runaway_output"
+	/** A compaction/branch summary stopped at its output length limit: a host-side budget outcome, not a provider fault. */
+	| "summary_length_stop"
 	| "context_overflow"
 	| "auth"
 	| "billing_or_quota"

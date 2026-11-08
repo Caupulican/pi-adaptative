@@ -1117,6 +1117,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 						classified.failureCode,
 						classified.outputSignature,
 						classified.errorKind,
+						classified.details,
 					);
 				}
 				if (error instanceof Error) throw new Error(redact(error.message));

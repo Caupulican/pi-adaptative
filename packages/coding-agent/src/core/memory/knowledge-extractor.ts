@@ -10,6 +10,7 @@ import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import type { OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
+import { isolatedCompletionError } from "../provider-admission/refusal.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { type KnowledgeChange, knowledgeChangeSchema } from "./knowledge-admission.ts";
 import { MAX_COLLECTION_CANDIDATES, validateCollectionCandidates } from "./knowledge-collection-journal.ts";
@@ -240,7 +241,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		if (capture.submission === undefined) {
 			usage.assertHealthy();
 			if (result.stopReason === "error" || result.stopReason === "aborted")
-				throw new Error(result.errorMessage ?? `Knowledge extraction ${result.stopReason}.`);
+				throw isolatedCompletionError(result, `Knowledge extraction ${result.stopReason}.`);
 			throw new KnowledgeExtractionRefusal(
 				"missing_submission",
 				"Extraction ended without a complete candidate submission.",
