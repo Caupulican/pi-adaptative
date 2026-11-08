@@ -32,6 +32,7 @@ import {
 } from "../delegation/worker-agent-control.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
+import { describeWorkerModelMoves, type WorkerModelMove } from "../delegation/worker-credential-health.ts";
 import {
 	MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH,
 	parseWorkerParallelWorkIntent,
@@ -1338,7 +1339,13 @@ export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentI
 
 type DelegateStartOutcome =
 	| { started: false; skipReason: string }
-	| { started: true; record: LaneRecord; modelPinBypass?: string; similarLaneIds?: string[] };
+	| {
+			started: true;
+			record: LaneRecord;
+			modelPinBypass?: string;
+			similarLaneIds?: string[];
+			modelMoves?: readonly WorkerModelMove[];
+	  };
 
 export interface DelegateToolDependencies {
 	startWorkerDelegation?: (
@@ -1381,11 +1388,15 @@ function describeStartedWorker(
 	record: LaneRecord,
 	grant: WorkerGrantSummary | undefined,
 	similarLaneIds?: readonly string[],
+	modelMoves?: readonly WorkerModelMove[],
 ): string {
 	const parts = [
 		`delegate started (${record.status}) — stable agentId ${record.agentId ?? record.laneId}, task laneId ${record.laneId}`,
 	];
 	if (record.modelRef) parts.push(`effective model ${record.modelRef}, thinking ${record.thinkingLevel ?? "unknown"}`);
+	// The harness already moved the worker past an unusable model: said here so the parent neither probes nor names one.
+	const moved = describeWorkerModelMoves(modelMoves);
+	if (moved) parts.push(moved);
 	if (grant) {
 		parts.push(
 			`tools: ${grant.toolNames.length > 0 ? grant.toolNames.join(", ") : "none"}`,
@@ -3145,7 +3156,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							{
 								type: "text" as const,
 								text: withStateLine(
-									`${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds)}; the owning parent will receive its terminal handoff, then read the report with delegate status (transcript pages on demand)${idleHint ? `\n${idleHint}` : ""}`,
+									`${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds, started.modelMoves)}; the owning parent will receive its terminal handoff, then read the report with delegate status (transcript pages on demand)${idleHint ? `\n${idleHint}` : ""}`,
 									started.record.status === "queued" ? ["QUEUED"] : [],
 								),
 							},

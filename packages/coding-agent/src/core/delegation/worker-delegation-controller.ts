@@ -70,6 +70,7 @@ import {
 import type { FleetAllowancePort } from "../fleet/capacity/allowance-room.ts";
 import { SessionFleetScheduler } from "../fleet/fleet-scheduler.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import {
 	type KnowledgeGrant,
 	type KnowledgeGrantReference,
@@ -138,6 +139,7 @@ import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receip
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
+import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../provider-display-names.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
@@ -215,6 +217,14 @@ import {
 	type WorkerConversationRetentionPolicy,
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
+import {
+	awaitWorkerStartSettlement,
+	isOAuthCredentialUnusableText,
+	WorkerCredentialHealth,
+	type WorkerModelMove,
+	type WorkerModelMoveReason,
+	WorkerStartSettlement,
+} from "./worker-credential-health.ts";
 import {
 	parseWorkerDelegationAuthorityRequest,
 	parseWorkerParallelWorkIntent,
@@ -377,6 +387,8 @@ export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	fleetAllowance?: FleetAllowancePort;
 	/** The fleet queue metadata's file key; the session id when absent. A second host on the same session names its own. */
 	fleetQueueKey?: string;
+	/** The session's owner notices (once per episode); absent where no notice can be kept. */
+	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 }
 
 type WorkerAdmission =
@@ -439,10 +451,14 @@ type QueuedWorkerAttemptOutcome =
 			modelPinBypass?: WorkerRole;
 			/** Active lanes whose instructions resemble this one; the parent decides whether one is a copy. */
 			similarLaneIds?: string[];
+			/** Moves the worker already made off its admitted model while its start credentials settled. */
+			modelMoves?: readonly WorkerModelMove[];
 	  };
 
 type PreparedWorkerRun = QueuedWorkerAttemptOutcome & {
 	completion?: Promise<WorkerDelegationRunOutcome>;
+	/** Settles once the running worker's start credentials resolved or failed, with the moves made on the way. */
+	startSettled?: Promise<readonly WorkerModelMove[]>;
 };
 
 interface WorkerContextForkSource {
@@ -551,6 +567,13 @@ export class WorkerDelegationController {
 	private readonly recovery: WorkerRecoveryCoordinator;
 	/** Lazily created; publishes the worker retry ladder's rate-limit waits machine-wide. */
 	private providerLimitStore: ProviderLimitStore | undefined;
+	/** Stored-credential facts per worker model provider, and the owner's one notice per expired login. */
+	private readonly credentialHealth = new WorkerCredentialHealth({
+		getAuthStorage: () => this.deps.getModelRegistry().authStorage,
+		getProviderDisplayName: (provider) =>
+			BUILT_IN_PROVIDER_DISPLAY_NAMES[provider] ?? this.deps.getModelRegistry().getProviderDisplayName(provider),
+		observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read) ?? false,
+	});
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
@@ -1525,7 +1548,10 @@ export class WorkerDelegationController {
 	}
 
 	private resolveWorkerAuthority(
-		input: Pick<WorkerAuthorityResolutionInput, "authority" | "base" | "modelPin" | "executionCwd"> & {
+		input: Pick<
+			WorkerAuthorityResolutionInput,
+			"authority" | "base" | "modelPin" | "routeChoice" | "executionCwd"
+		> & {
 			foregroundModel?: Model<Api>;
 		},
 	): WorkerAuthorityResolution {
@@ -1597,41 +1623,53 @@ export class WorkerDelegationController {
 	}
 
 	/**
-	 * A worker that ran its model's account out of quota: the model is marked exhausted where every
-	 * routing decision reads it (the same registry root's billing failover writes), and when the
-	 * attempt's contract routed it with fallbacks, whether its retry now resolves to another model.
+	 * A worker whose model cannot take work: out of quota, refused for the account, or its credential unusable. A
+	 * model-level failure is marked exhausted where every routing decision reads it (the same registry root's billing
+	 * failover writes). An expired login that cannot be refreshed is the provider's and is read live from the credential
+	 * store, which already skips every model on it until the owner signs in again, so it marks nothing that would
+	 * outlive the new login and tells the owner once. Returns why the worker moved when its contract carries ordered
+	 * fallbacks and its retry now resolves to another model; undefined when it did not move.
 	 */
 	private failOverQuotaExhaustion(
 		laneId: string,
 		outcome: { reasonCode: string; reasonDetail?: string },
 		model: Model<Api>,
-	): boolean {
-		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return false;
+	): WorkerModelMoveReason | undefined {
+		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return undefined;
 		const classified = classifyFailure({ message: outcome.reasonDetail, provider: model.provider });
-		const oauthCredentialUnusable = /OAuth credential for .+ expired on .+ and could not be refreshed/i.test(
-			outcome.reasonDetail,
-		);
+		const loginExpired = this.credentialHealth.loginExpired(model.provider);
+		const oauthCredentialUnusable = loginExpired || isOAuthCredentialUnusableText(outcome.reasonDetail);
 		if (
 			classified.reason !== "billing_or_quota" &&
 			classified.reason !== "model_unsupported" &&
 			classified.reason !== "auth" &&
 			!oauthCredentialUnusable
 		) {
-			return false;
+			return undefined;
 		}
-		this.deps.markModelExhausted?.(model, classified.retryAfterMs);
+		if (!loginExpired) this.deps.markModelExhausted?.(model, classified.retryAfterMs);
 		const contract = this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract;
-		if (contract?.worker.profile.modelPolicy.mode !== "ordered-fallback") return false;
-		const next = this.getWorkerProfileResolver().resolveContract(contract.worker);
-		const moved = next.ok && (next.resolved.model.provider !== model.provider || next.resolved.model.id !== model.id);
-		if (moved) {
-			this.safeWarn(
-				classified.reason === "billing_or_quota"
-					? `Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`
-					: `Worker ${laneId} model ${model.provider}/${model.id} unavailable (${oauthCredentialUnusable ? "auth" : classified.reason}); retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`,
-			);
-		}
-		return moved;
+		const next =
+			contract?.worker.profile.modelPolicy.mode === "ordered-fallback"
+				? this.getWorkerProfileResolver().resolveContract(contract.worker)
+				: undefined;
+		const nextModel = next?.ok ? next.resolved.model : undefined;
+		const moved = nextModel !== undefined && (nextModel.provider !== model.provider || nextModel.id !== model.id);
+		if (loginExpired) this.credentialHealth.tellLoginExpired(model, moved);
+		if (!moved || !nextModel) return undefined;
+		const reason: WorkerModelMoveReason = loginExpired
+			? "login_expired"
+			: classified.reason === "billing_or_quota"
+				? "quota_exhausted"
+				: classified.reason === "model_unsupported"
+					? "model_unavailable"
+					: "credential_rejected";
+		this.safeWarn(
+			reason === "quota_exhausted"
+				? `Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${nextModel.provider}/${nextModel.id}.`
+				: `Worker ${laneId} model ${model.provider}/${model.id} unavailable (${oauthCredentialUnusable ? "auth" : classified.reason}); retrying on ${nextModel.provider}/${nextModel.id}.`,
+		);
+		return reason;
 	}
 
 	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
@@ -2024,7 +2062,9 @@ export class WorkerDelegationController {
 					authority,
 					executionCwd,
 					...(baseShipment ? { base: baseShipment } : {}),
-					...(modelPin || selectedBinding ? { modelPin: modelPin?.binding ?? selectedBinding } : {}),
+					// The owner's pin fixes the model; a binding the harness selected (route judgment, lane re-admission,
+					// reused worker) only leads the routed order, so the worker keeps its fallbacks.
+					...(modelPin ? { modelPin: modelPin.binding } : selectedBinding ? { routeChoice: selectedBinding } : {}),
 				});
 		if (!adaptive.ok) {
 			return {
@@ -4765,10 +4805,26 @@ export class WorkerDelegationController {
 			await this.laneIsolation?.discard(selected.admission.executionPlan.cwd);
 			return outcome;
 		}
+		const { startSettled, ...started } = outcome;
+		// A running worker's result names the model it settled on, and the moves on the way, so the parent never probes
+		// credentials or names a model to work around a login the harness already routed past. Bounded: past it, the
+		// admitted model is reported and the lane's status shows any later move.
+		const modelMoves = startSettled
+			? await awaitWorkerStartSettlement(
+					startSettled,
+					AbortSignal.any([
+						this.workerAbort.signal,
+						AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+						...(signal ? [signal] : []),
+					]),
+				)
+			: undefined;
+		const record = (modelMoves ? this.lifecycle.getRecord(started.record.laneId) : undefined) ?? started.record;
 		return {
-			...outcome,
-			record: this.withWaitReasons([outcome.record])[0] ?? outcome.record,
+			...started,
+			record: this.withWaitReasons([record])[0] ?? record,
 			...(similar.length > 0 ? { similarLaneIds: similar.map((lane) => lane.laneId) } : {}),
+			...(modelMoves && modelMoves.length > 0 ? { modelMoves } : {}),
 		};
 	}
 
@@ -4853,7 +4909,14 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
+	):
+		| { started: false; skipReason: string }
+		| {
+				started: true;
+				record: LaneRecord;
+				modelPinBypass?: WorkerRole;
+				startSettled?: Promise<readonly WorkerModelMove[]>;
+		  } {
 		if (this.workerAbort.signal.aborted || this.deps.isDisposed())
 			return { started: false, skipReason: "session_disposed" };
 		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
@@ -5964,6 +6027,7 @@ export class WorkerDelegationController {
 			})().then(cleanup.resolve, cleanup.reject);
 			return cleanup.promise;
 		};
+		const startSettlement = new WorkerStartSettlement();
 		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
 				// Register before the first execution await: disposal sees the live mutable ledger.
@@ -5994,18 +6058,23 @@ export class WorkerDelegationController {
 				// Resolve credentials before repository observation. A rejected or expired account must
 				// fail admission without paying for a checkout-wide snapshot first. The executor resolves
 				// again at the actual provider boundary so refreshed credentials are never pinned here.
+				// The start result waits for this point (startSettlement), so it names the model the worker runs on.
 				if (!recoveredTerminal) {
 					let requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-					while (
-						!requestAuth.ok &&
-						this.failOverQuotaExhaustion(
+					while (!requestAuth.ok) {
+						const moveReason = this.failOverQuotaExhaustion(
 							startedRecord.laneId,
 							{ reasonCode: "completion_error", reasonDetail: requestAuth.error },
 							model,
-						)
-					) {
+						);
+						if (!moveReason) break;
 						const resolvedNext = this.getWorkerProfileResolver().resolveContract(immutableWorker);
 						if (!resolvedNext.ok) break;
+						startSettlement.moves.push({
+							from: `${model.provider}/${model.id}`,
+							to: `${resolvedNext.resolved.model.provider}/${resolvedNext.resolved.model.id}`,
+							reason: moveReason,
+						});
 						model = resolvedNext.resolved.model;
 						modelBinding = resolvedNext.resolved.modelBinding;
 						laneCapability = this.laneCapabilityProfile(model);
@@ -6016,9 +6085,12 @@ export class WorkerDelegationController {
 						registerInFlightLedger();
 						requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
 					}
+					if (requestAuth.ok) this.credentialHealth.noteUsable(model);
+					startSettlement.settle();
 					if (!requestAuth.ok) throw new Error(requestAuth.error);
 					workerSignal.throwIfAborted();
 				}
+				startSettlement.settle();
 				const observer = this.deps.repositoryObserver;
 				const objectiveId = durableTask.task.objectiveId;
 				const sessionCwd = this.deps.getSessionCwd?.() ?? executionPlan.cwd;
@@ -6089,7 +6161,7 @@ export class WorkerDelegationController {
 						}
 					}
 					const retry = this.recovery.scheduleAttemptRetry({
-						...(failover ? { failover } : {}),
+						...(failover ? { failover: true } : {}),
 						laneId: startedRecord.laneId,
 						agentId,
 						ownerId: this.agentControl.getProcessOwnerId(),
@@ -6432,6 +6504,8 @@ export class WorkerDelegationController {
 				this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 				return { started: true, record };
 			} finally {
+				// A run that ended before its credentials settled still releases a waiting start result.
+				startSettlement.settle();
 				this.runTeardownStep("stop worker lease heartbeat", () => leaseHeartbeat.stop(), cleanupErrors);
 				let physicalSettled = false;
 				try {
@@ -6480,6 +6554,7 @@ export class WorkerDelegationController {
 			started: true,
 			record: startedRecord,
 			completion,
+			startSettled: startSettlement.settled,
 			...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
 		};
 	}

@@ -103,6 +103,12 @@ export interface WorkerAuthorityResolutionInput {
 	authority?: WorkerDelegationAuthorityRequest;
 	base?: ResolvedWorkerProfile;
 	modelPin?: OrchestrationModelBinding;
+	/**
+	 * A model the harness itself chose for this worker (a route judgment, a lane re-admission, a reused worker's last
+	 * binding). It leads the routed order and the rest of that order stays as fallbacks: it is never an owner pin. Ignored
+	 * when routing no longer offers it; where nothing is routed it binds as given.
+	 */
+	routeChoice?: OrchestrationModelBinding;
 	foregroundModel?: Model<Api>;
 	foregroundThinkingLevel?: OrchestrationThinkingLevel;
 	/** How an inherited foreground thinking level is applied to the worker; default `step_down`. */
@@ -370,10 +376,14 @@ function selectModelBinding(
 	accountRouting: WorkerAccountRouting,
 	isModelExhausted: (model: Model<Api>) => boolean,
 	isModelLimited: ((model: Model<Api>) => boolean) | undefined,
+	routeChoice: OrchestrationModelBinding | undefined,
 ):
 	| {
 			binding: OrchestrationModelBinding;
-			/** Where a routed worker moves, in order, when its account runs out of quota. Authored choices have none. */
+			/**
+			 * Where the worker moves, in order, when its model's account is out of quota or its login is unusable: the routed
+			 * order, or a base's own ordered policy. An explicit caller model, an owner pin and a fixed policy have none.
+			 */
 			fallbacks: OrchestrationModelBinding[];
 	  }
 	| undefined {
@@ -419,14 +429,34 @@ function selectModelBinding(
 								? resolveModelThinkingLevel(model, inherited)
 								: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
 			});
-			const [first, ...rest] = routed.map(bind);
+			const order = routed.map(bind);
+			// The harness's own choice moves to the front; the routed order behind it stays the worker's way out.
+			const chosen = routeChoice
+				? order.findIndex(
+						(entry) => entry.provider === routeChoice.provider && entry.modelId === routeChoice.modelId,
+					)
+				: -1;
+			if (routeChoice && chosen >= 0) {
+				order.splice(chosen, 1);
+				order.unshift(structuredClone(routeChoice));
+			}
+			const [first, ...rest] = order;
 			return { binding: first!, fallbacks: rest };
 		}
 	}
+	// A base's own ordered policy (an owner profile's list, or a routed worker's admitted order on reuse) stays its way
+	// out; an explicit caller model and a fixed policy keep none.
+	const baseFallbacks = (binding: OrchestrationModelBinding): OrchestrationModelBinding[] =>
+		!authority?.model && base?.profile.modelPolicy.mode === "ordered-fallback"
+			? base.profile.modelPolicy.candidates
+					.filter((candidate) => candidate.provider !== binding.provider || candidate.modelId !== binding.modelId)
+					.map((candidate) => structuredClone(candidate))
+			: [];
+	if (routeChoice) return { binding: structuredClone(routeChoice), fallbacks: baseFallbacks(routeChoice) };
 	const provider = authority?.model?.provider ?? base?.modelBinding.provider ?? foregroundModel?.provider;
 	const modelId = authority?.model?.modelId ?? base?.modelBinding.modelId ?? foregroundModel?.id;
 	if (!provider || !modelId) return undefined;
-	const authored = (binding: OrchestrationModelBinding) => ({ binding, fallbacks: [] });
+	const authored = (binding: OrchestrationModelBinding) => ({ binding, fallbacks: baseFallbacks(binding) });
 	const sameAsBase = provider === base?.modelBinding.provider && modelId === base.modelBinding.modelId;
 	const selectedModel = modelRegistry.find(provider, modelId);
 	// Only the branch that copies the FOREGROUND level is subject to the thinking policy: an
@@ -529,6 +559,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.accountRouting ?? { account: DEFAULT_WORKER_DELEGATION_ACCOUNT, routeProviders: [] },
 		isModelExhausted,
 		input.isModelLimited,
+		input.routeChoice,
 	);
 	if (!selected) {
 		harnessLog.warn("delegation", "no model could be chosen for a worker", () => ({

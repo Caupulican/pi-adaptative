@@ -35,7 +35,8 @@ export type HarnessNoticeKind =
 	| "channel-sender"
 	| "act-ahead"
 	| "soul-review"
-	| "system-one-engine";
+	| "system-one-engine"
+	| "worker-login";
 
 /** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */
 export interface HarnessNotice {
