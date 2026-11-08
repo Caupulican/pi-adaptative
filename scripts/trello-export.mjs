@@ -16,13 +16,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { flag } from "./live-args.mjs";
+import { flag, requireOut } from "./live-args.mjs";
 
-const OUT = flag("out", undefined);
-if (!OUT) {
-	console.error("trello-export: --out <dir> is required.");
-	process.exit(2);
-}
+const OUT = requireOut("trello-export");
 const candidates = [
 	flag("env", undefined),
 	process.env.TRELLO_ENV_FILE,
