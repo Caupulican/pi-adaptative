@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -478,7 +479,11 @@ const SCENARIOS = [
 	}),
 	scenario("s12", "the mail bot reads the owner's real recent mail (read-only export; skipped without a Gmail credential file)", async () => {
 		const out = join(SANDBOX, "mailbox-real");
-		const exported = spawnSync("node", [join(REPO, "scripts", "gmail-export.mjs"), "--out", out, "--max", "8"], { encoding: "utf8", timeout: 180_000 });
+		// Mail the owner supplied without pi's Gmail credential (for example read through a connected Gmail connector): a private directory of `.eml` files.
+		const supplied = process.env.PI_LIVE_REAL_MAILDIR;
+		const exported = supplied
+			? (cpSync(supplied, out, { recursive: true }), { status: 0, stdout: "", stderr: "" })
+			: spawnSync("node", [join(REPO, "scripts", "gmail-export.mjs"), "--out", out, "--max", "8"], { encoding: "utf8", timeout: 180_000 });
 		if (exported.status === 2) return { skipped: "no Gmail credential file (docs/channels.md describes creating one): the mail bot has only the synthetic mailbox" };
 		if (exported.status !== 0) throw inconclusive(`the Gmail export did not finish: ${(exported.stderr || exported.stdout).trim().slice(0, 160)}`);
 		chmodSync(out, 0o700);

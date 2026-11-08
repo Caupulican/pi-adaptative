@@ -593,7 +593,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			if (worthAFollowUpTurn(hostVerdict) && needsMoreRounds < MAX_NEEDS_MORE_ROUNDS && budgetLeft) {
 				needsMoreRounds++;
 				reportCapture.submitted = undefined;
-				return message(buildNeedsMoreRequest(hostVerdict));
+				return message(buildNeedsMoreRequest(hostVerdict, commandReceipts));
 			}
 			return [];
 		}

@@ -429,11 +429,24 @@ export function worthAFollowUpTurn(verdict: WorkerHostVerdict): boolean {
 }
 
 /** The follow-up the host sends once when its checks find named proof missing. */
-export function buildNeedsMoreRequest(verdict: WorkerHostVerdict): string {
+export function buildNeedsMoreRequest(
+	verdict: WorkerHostVerdict,
+	receipts: readonly WorkerCommandReceipt[] = [],
+): string {
+	// A check that matches no recorded command is usually a command the worker did run but wrote differently (a `python -c`
+	// line for code the python tool ran): showing what the host recorded lets it cite the exact input instead of giving up.
+	const recorded =
+		receipts.length > 0 && verdict.reasonCodes.some((code) => code.startsWith("check_"))
+			? [
+					"Commands the host recorded; to keep a check, give its receipt name (c-...) and repeat that exact input as the check's command:",
+					...receipts.slice(-12).map(receiptLine),
+				]
+			: [];
 	return [
 		"REPORT REVIEW",
 		"The host checked your report against its records and found:",
 		...verdict.missing.map((line) => `- ${line}`),
+		...recorded,
 		"Run what is missing or correct the report, then submit it again with submit_report. Finished work stays status completed: only submit blocked for something that actually stopped you. If a requirement cannot be met, say so in the report and mark it not_met; that is accepted.",
 	].join("\n");
 }
