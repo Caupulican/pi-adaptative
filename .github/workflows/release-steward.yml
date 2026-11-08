@@ -1,0 +1,223 @@
+name: Release Steward
+
+# On-demand release steward. It runs only when the repository owner fires it:
+#   - workflow_dispatch: `gh workflow run release-steward.yml -f mode=live` (mode=dry, the default, only reports)
+#   - a `vX.Y.Z` tag pushed by the owner: the steward validates the tag, waits for build-binaries.yml (which owns the
+#     assets and the release object) and then adds a summary to the release body.
+# There is no schedule and no automatic trigger. The rules that decide a release live in scripts/release-steward.mjs and
+# scripts/release-steward-rules.mjs; a model only answers two advisory questions and never supplies a fact.
+#
+# OWNER-ONLY, defense in depth. On a public repository only accounts with write access can dispatch a workflow or push a
+# tag, and a fork pull request can never reach this file because it has no pull_request, pull_request_target,
+# issue_comment, issues or workflow_run trigger. Beyond that:
+#   (a) the job `if` requires the repository, github.actor and github.triggering_actor (a re-run by someone else changes
+#       the triggering actor) to be the repository owner;
+#   (b) the first step re-checks everything in shell and fails closed: the repository, the event kind, the actor, the
+#       triggering actor, the event sender, admin permission through the API, a dispatch from refs/heads/main, a vX.Y.Z
+#       tag whose commit is reachable from main, and the optional RELEASE_STEWARD=off hard stop;
+#   (c) permissions are minimal: read at workflow level, `contents: write` (release body) and `actions: write`
+#       (dispatch release.yml) on the one job;
+#   (d) the token is never printed, and it is never sent to a model endpoint (the model has its own secret).
+# Limit that no workflow can lift: a person with write access can change this file on their own branch or tag. The real
+# lock is the collaborator list (keep the owner the only one), a repository ruleset restricting `v*` tag creation to
+# admins, and optionally a protected environment `release-steward` limited to main and v* tags with the owner as
+# required reviewer (then add `environment: release-steward` to the job).
+#
+# Concurrency: runs of this workflow are grouped per ref and never cancelled midway. They deliberately do NOT share the
+# `release` group of release.yml: the steward waits for the release it dispatches, and a shared group would queue that
+# release behind the steward and deadlock. Only one release runs at a time anyway: release.yml holds the `release` group
+# and the steward refuses to dispatch while release.yml or build-binaries.yml has a queued or running run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: dry only reports the decision; live dispatches the release when the rules pass
+        required: true
+        type: choice
+        options:
+          - dry
+          - live
+        default: dry
+      target:
+        description: Release target; auto lets the rules choose (minor when Breaking Changes has entries, else patch)
+        required: true
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+        default: auto
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-steward-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  steward:
+    name: Release steward (${{ github.event_name == 'push' && github.ref_name || inputs.mode }})
+    if: >-
+      github.repository == 'Caupulican/pi-adaptative' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: write # edit the release body of an existing release
+      actions: write # dispatch release.yml
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_STEWARD: ${{ vars.RELEASE_STEWARD }}
+    steps:
+      - name: Owner-only gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          SENDER: ${{ github.event.sender.login }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          fail() { echo "::error::Release steward refused: $1" >&2; exit 1; }
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          [ "${GH_REPO}" = "Caupulican/pi-adaptative" ] || fail "not the owner's repository."
+          [ "$(lower "${RELEASE_STEWARD}")" != "off" ] || fail "RELEASE_STEWARD is off."
+          case "${EVENT_NAME}" in
+            workflow_dispatch | push) ;;
+            *) fail "event '${EVENT_NAME}' cannot fire the steward." ;;
+          esac
+          owner="$(lower "${OWNER}")"
+          for who in "${ACTOR}" "${TRIGGERING_ACTOR}" "${SENDER}"; do
+            [ "$(lower "${who}")" = "${owner}" ] || fail "'${who}' is not the repository owner."
+          done
+          permission="$(gh api "repos/${GH_REPO}/collaborators/${ACTOR}/permission" --jq .permission)"
+          [ "${permission}" = "admin" ] || fail "'${ACTOR}' does not have admin permission."
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            [ "${REF}" = "refs/heads/main" ] || fail "dispatch the steward from main, not ${REF}."
+          else
+            [[ "${REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "${REF} is not a vX.Y.Z tag."
+            relation="$(gh api "repos/${GH_REPO}/compare/${SHA}...main" --jq .status)"
+            case "${relation}" in
+              ahead | identical) ;;
+              *) fail "the tagged commit ${SHA} is not reachable from main (${relation})." ;;
+            esac
+          fi
+          echo "Owner gate passed for ${EVENT_NAME} by ${ACTOR}."
+
+      # The rules and the script always come from main. For a tag, main is checked out with its full history and tags
+      # and the script reads the tagged commit through git.
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.ref_type == 'tag' && 'main' || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+
+      # The steward uses only Node built-ins and gh, so there is nothing to install.
+      - name: Decide
+        id: decide
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_TARGET: ${{ inputs.target }}
+          RELEASE_STEWARD_MODEL: ${{ vars.RELEASE_STEWARD_MODEL }}
+          RELEASE_STEWARD_ENDPOINT: ${{ vars.RELEASE_STEWARD_ENDPOINT }}
+          RELEASE_STEWARD_MODEL_TOKEN: ${{ secrets.RELEASE_STEWARD_MODEL_TOKEN }}
+        run: node scripts/release-steward.mjs decide
+
+      # A workflow_dispatch created with the workflow token does start the run (unlike a push made with it).
+      - name: Dispatch the release and follow it
+        id: release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          TARGET: ${{ steps.decide.outputs.target }}
+        run: |
+          # Taken before the dispatch, with margin for clock skew; the newest run created after it is ours (the decision
+          # proved no other release run was queued or running).
+          since="$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run release.yml --ref main -f target="${TARGET}"
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --workflow=release.yml --branch main --event workflow_dispatch --json databaseId,createdAt \
+              --jq "[.[] | select(.createdAt >= \"${since}\")] | .[0].databaseId // empty")"
+            if [ -n "${run_id}" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "${run_id}" ]; then
+            echo "::error::release.yml was dispatched but no run appeared." >&2
+            exit 1
+          fi
+          {
+            echo "### Release dispatched (${TARGET})"
+            echo
+            echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rc=0
+          gh run watch "${run_id}" --exit-status --interval 30 || rc=$?
+          conclusion="$(gh run view "${run_id}" --json conclusion --jq '.conclusion // "unknown"')"
+          echo "Release run ${run_id} concluded: ${conclusion}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          exit "${rc}"
+
+      - name: Add the summary to the release body
+        if: steps.release.conclusion == 'success'
+        env:
+          PREVIOUS_TAG: ${{ steps.decide.outputs.previous_tag }}
+          RELEASE_STEWARD_MODEL: ${{ vars.RELEASE_STEWARD_MODEL }}
+          RELEASE_STEWARD_ENDPOINT: ${{ vars.RELEASE_STEWARD_ENDPOINT }}
+          RELEASE_STEWARD_MODEL_TOKEN: ${{ secrets.RELEASE_STEWARD_MODEL_TOKEN }}
+        run: |
+          git fetch --tags --force --quiet origin
+          node scripts/release-steward.mjs notes --previous "${PREVIOUS_TAG}"
+
+      - name: Validate the tag
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-steward.mjs tag
+
+      # build-binaries.yml starts on the same tag push and is the only owner of the assets and the release object. The
+      # steward never publishes anything: it follows that run and annotates the release only after it succeeded.
+      - name: Follow the asset workflow on the tag
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --workflow=build-binaries.yml --branch "${RELEASE_TAG}" --event push --json databaseId \
+              --jq '.[0].databaseId // empty')"
+            if [ -n "${run_id}" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "${run_id}" ]; then
+            echo "::error::No build-binaries.yml run appeared for ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+          {
+            echo "### ${RELEASE_TAG}"
+            echo
+            echo "Assets are built, verified and published by: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          gh run watch "${run_id}" --exit-status --interval 30
+
+      - name: Add the summary to the tag's release body
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_STEWARD_MODEL: ${{ vars.RELEASE_STEWARD_MODEL }}
+          RELEASE_STEWARD_ENDPOINT: ${{ vars.RELEASE_STEWARD_ENDPOINT }}
+          RELEASE_STEWARD_MODEL_TOKEN: ${{ secrets.RELEASE_STEWARD_MODEL_TOKEN }}
+        run: node scripts/release-steward.mjs notes --tag "${RELEASE_TAG}"
