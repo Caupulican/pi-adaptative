@@ -80,6 +80,7 @@ export interface WorkerTreeBudgetProjection {
 			string,
 			{
 				attemptId: string;
+				taskId: string;
 				agentId?: string;
 				dispatch: Pick<OrchestrationDispatchRequest, "executionKind" | "logicalLaneId">;
 				checkpointIds: readonly string[];
@@ -96,15 +97,40 @@ export function workerTreeCanAdmitAttempt(existingAttemptCount: number, maxAttem
 	return existingAttemptCount < maxAttempts;
 }
 
-/** Rebuild every durable tree attempt, including attempts with no usage checkpoint yet. */
+/**
+ * The task whose tree an attempt draws on. A root agent draws on the task the attempt serves, so a persistent
+ * specialist that takes a new task starts a fresh tree. A nested descendant (recovered lineage) has no durable link to
+ * the root task that spawned it, so it draws on the task its root is running.
+ */
+export function workerTreeTaskId(args: {
+	agentId: string;
+	rootAgentId: string;
+	attemptTaskId: string;
+	rootAttempt: { taskId: string } | undefined;
+}): string {
+	return args.agentId === args.rootAgentId ? args.attemptTaskId : (args.rootAttempt?.taskId ?? args.attemptTaskId);
+}
+
+/** The key one task's tree budget lives under, durable seeds and in-memory aggregate alike. */
+export function workerTreeBudgetKey(treeTaskId: string): string {
+	return `task:${treeTaskId}`;
+}
+
+/**
+ * Rebuild every durable attempt of one task's tree, including attempts with no usage checkpoint yet. The root agent's
+ * attempts count only for `treeTaskId` (a persistent specialist's earlier tasks are not charged to a new one); a
+ * descendant agent's attempts all count, because recovered nested lineage records no per-task link.
+ */
 export function collectWorkerTreeBudgetSeeds(
 	snapshot: WorkerTreeBudgetProjection,
 	rootAgentId: string,
+	treeTaskId: string,
 ): WorkerTreeBudgetSeed[] {
 	const seeds: WorkerTreeBudgetSeed[] = [];
 	for (const attempt of Object.values(snapshot.attempts)) {
 		const attemptAgentId = nativeAgentIdForAttempt(attempt);
 		if (!attemptAgentId || snapshot.agents[attemptAgentId]?.rootAgentId !== rootAgentId) continue;
+		if (attemptAgentId === rootAgentId && attempt.taskId !== treeTaskId) continue;
 		const usage = projectAttemptUsage(attempt, snapshot.checkpoints);
 		seeds.push({ attemptId: attempt.attemptId, usage: usage ?? EMPTY_ATTEMPT_USAGE });
 	}
@@ -163,7 +189,7 @@ export class WorkerRunCostRefusal extends BoundedCompletionFailureError {
 	}
 }
 
-/** One in-memory aggregate reconstructed from durable checkpoints whenever a root is first used. */
+/** One in-memory aggregate reconstructed from durable checkpoints whenever a tree is first used. */
 export class WorkerTreeBudgetCoordinator {
 	private readonly trees = new Map<string, TreeBudgetState>();
 
@@ -175,14 +201,15 @@ export class WorkerTreeBudgetCoordinator {
 	 * settled spend only, as it always was.
 	 */
 	createPort(args: {
-		rootAgentId: string;
+		/** Identity of the aggregate: `workerTreeBudgetKey(task)` for a task's tree, a run id for a run's. */
+		treeKey: string;
 		attemptId: string;
 		budget: RiskBudget;
 		seeds: readonly WorkerTreeBudgetSeed[];
 		initialUsage: AttemptUsageSnapshot;
 		pricesRequests?: boolean;
 	}): SharedCapabilityBudget {
-		let state = this.trees.get(args.rootAgentId);
+		let state = this.trees.get(args.treeKey);
 		if (!state) {
 			state = {
 				budget: structuredClone(args.budget),
@@ -192,7 +219,7 @@ export class WorkerTreeBudgetCoordinator {
 				reservations: new Map(),
 				waiters: [],
 			};
-			this.trees.set(args.rootAgentId, state);
+			this.trees.set(args.treeKey, state);
 		} else {
 			state.budget = intersectRiskBudgets(state.budget, args.budget);
 		}

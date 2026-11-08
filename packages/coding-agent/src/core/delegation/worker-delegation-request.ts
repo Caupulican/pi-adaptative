@@ -49,6 +49,11 @@ export interface WorkerDelegationModelRequest {
 export interface WorkerDelegationAuthorityRequest {
 	role?: WorkerRole;
 	model?: WorkerDelegationModelRequest;
+	/**
+	 * Host-only: the owner themselves chose `model` (an owner-made bot's model), so the subscription-first check on
+	 * explicit models does not apply. The model-facing `delegate` adapter never sets it.
+	 */
+	modelChosenBy?: "owner";
 	thinkingLevel?: OrchestrationThinkingLevel;
 	capabilities?: readonly HarnessCapability[];
 	toolNames?: readonly string[];
@@ -93,6 +98,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		!hasOnlyKeys(value, [
 			"role",
 			"model",
+			"modelChosenBy",
 			"thinkingLevel",
 			"capabilities",
 			"toolNames",
@@ -110,6 +116,9 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	}
 	if (value.shellReadOnly !== undefined && typeof value.shellReadOnly !== "boolean") {
 		throw new WorkerDelegationRequestError("Delegation authority shellReadOnly must be a boolean.");
+	}
+	if (value.modelChosenBy !== undefined && value.modelChosenBy !== "owner") {
+		throw new WorkerDelegationRequestError("Delegation authority modelChosenBy must be owner.");
 	}
 	if (value.role !== undefined && !WORKER_ROLES.includes(value.role as WorkerRole)) {
 		throw new WorkerDelegationRequestError("Delegation authority role is invalid.");
@@ -177,6 +186,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	return {
 		...(value.role ? { role: value.role as WorkerRole } : {}),
 		...(model ? { model } : {}),
+		...(model && value.modelChosenBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
 		...(value.thinkingLevel ? { thinkingLevel: value.thinkingLevel as OrchestrationThinkingLevel } : {}),
 		...(capabilities ? { capabilities } : {}),
 		...(toolNames ? { toolNames } : {}),

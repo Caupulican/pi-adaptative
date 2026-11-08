@@ -216,6 +216,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 			...INTAKE_JUDGMENTS,
 			...NO_DELIVERY_CLAIMS,
 			performs_task_work: { kind: "noul", probability: 0.97 },
+			command_evidence_sufficient: { kind: "noul", probability: 0.97 },
 		});
 		await withDeadline(trace, "J4 turn 2", session.prompt("Run the build yourself."));
 		await withDeadline(trace, "J4 root idle after the refused build", session.waitForForegroundIdle());
@@ -246,6 +247,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 		world.systemOne.enterPhase("j4-shell-allowed", {
 			...INTAKE_JUDGMENTS,
 			performs_task_work: { kind: "noul", probability: 0.02 },
+			command_evidence_sufficient: { kind: "noul", probability: 0.97 },
 		});
 		await withDeadline(trace, "J4 turn 3", session.prompt("Check the current state."));
 		await withDeadline(trace, "J4 root idle after the inspection", session.waitForForegroundIdle());

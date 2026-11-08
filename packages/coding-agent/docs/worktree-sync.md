@@ -38,7 +38,7 @@ behavior change once set. Settings live under `worktreeSync` in `settings.json`:
 | `gateCommand` | unset | Land gate command (G4), e.g. `"npm run check"`, run in the lane worktree at the exact tip that becomes main. |
 | `gate` | `"on"` | `"off"` is the owner-level G4 opt-out, recorded per land event. Agents cannot flip this at runtime. |
 | `gateTimeoutMs` | `900000` | Gate command timeout. |
-| `maxLanes` | `5` | Active-lane ceiling; `create_lane` refuses beyond it. |
+| `maxLanes` | `64` | Active-lane ceiling; `create_lane` refuses beyond it. Any positive integer is accepted. |
 | `worktreesRoot` | agent-paths default | Overrides the lane-checkout root. |
 | `workerLand` | `"deny"` | `"allow"` lets a WORKER session (see "Identity, UAC, and zero footprint" below) run `land` on its own bound lane; still subject to normal freshness/ownership gating. |
 

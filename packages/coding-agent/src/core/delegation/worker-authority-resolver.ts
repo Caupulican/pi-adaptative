@@ -472,9 +472,52 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 		: undefined;
 }
 
+/**
+ * Subscription models are always preferred: an explicit model on a provider paid by API key runs only when the owner
+ * chose it. The owner's channels are a pin (never reaches here), `routeProviders` (by provider or `provider/modelId`,
+ * global or for the worker's role), the session's own provider, and a model the owner themselves picked
+ * (`authority.modelChosenBy`). Anything else, while an allowed subscription model is usable now, is refused rather
+ * than moved: an explicit model is a request, so running another one would be a mislabelled success. Undefined = fine.
+ */
+function explicitMeteredModelRefusal(input: WorkerAuthorityResolutionInput): string | undefined {
+	const requested = input.authority?.model;
+	if (!requested || input.modelPin || input.authority?.modelChosenBy === "owner") return undefined;
+	const { modelRegistry } = input;
+	const model = modelRegistry.find(requested.provider, requested.modelId);
+	// An unknown model is refused later with its own cause; a free model (local, zero price) costs nothing to run.
+	if (!model || (model.cost.input <= 0 && model.cost.output <= 0)) return undefined;
+	const isSubscription = (provider: string): boolean => modelRegistry.authStorage.get(provider)?.type === "oauth";
+	if (isSubscription(model.provider) || input.foregroundModel?.provider === model.provider) return undefined;
+	const routing = input.accountRouting;
+	const role = defaultWorkerRole(input.authority, input.base);
+	const named = [...(routing?.routeProviders ?? []), ...(routing?.routeProvidersByRole?.[role] ?? [])];
+	if (named.some((entry) => entry === model.provider || entry === `${model.provider}/${model.id}`)) return undefined;
+	const usable = modelRegistry
+		.getAvailable()
+		.filter(
+			(candidate) =>
+				isSubscription(candidate.provider) &&
+				modelRegistry.hasConfiguredAuth(candidate) &&
+				!input.modelUnusableCause(candidate) &&
+				(!input.isModelAllowed || input.isModelAllowed(candidate)),
+		);
+	if (usable.length === 0) return undefined;
+	const ref = `${model.provider}/${model.id}`;
+	const alternatives = [...new Map(usable.map((candidate) => [candidate.provider, candidate])).values()]
+		.slice(0, 3)
+		.map((candidate) => `${candidate.provider}/${candidate.id}`);
+	harnessLog.info("delegation", "an explicit API-key model was refused while subscription models are usable", () => ({
+		model: ref,
+		subscriptionProviders: new Set(usable.map((candidate) => candidate.provider)).size,
+	}));
+	return `worker_model_metered:${ref}:${ref} is paid by API key and the owner has not chosen it for workers while subscription models are usable. Use a subscription model such as ${alternatives.join(", ")}, or add ${model.provider} to workerDelegation.routeProviders.`;
+}
+
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
 	const isModelExhausted = (model: Model<Api>) => input.modelUnusableCause(model) !== undefined;
+	const meteredRefusal = explicitMeteredModelRefusal(input);
+	if (meteredRefusal) return { ok: false, reason: meteredRefusal };
 	const selected = selectModelBinding(
 		input.modelPin,
 		input.authority,

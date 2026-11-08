@@ -153,6 +153,7 @@ import {
 } from "../util/resource-release.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
 import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
+import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import type { ParentExecutionContext, ParentExecutionSettingsSource } from "./parent-execution-context.ts";
 import {
@@ -160,7 +161,11 @@ import {
 	type SanitizedContextForkMode,
 	selectSanitizedContextFork,
 } from "./sanitized-context-fork.ts";
-import { readWorkerClaimSnapshotForAttempt, type WorkerClaimSnapshotPayload } from "./session-worker-claim.ts";
+import {
+	getWorkerClaimSnapshots,
+	readWorkerClaimSnapshotForAttempt,
+	type WorkerClaimSnapshotPayload,
+} from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import {
 	type WorkerAgentControlPort,
@@ -286,7 +291,9 @@ import {
 	boundedByRunBudget,
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
+	workerTreeBudgetKey,
 	workerTreeCanAdmitAttempt,
+	workerTreeTaskId,
 } from "./worker-tree-budget-coordinator.ts";
 import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
@@ -388,8 +395,8 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 
 export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
-	/** Whether the subscription the session runs on reports room now; unknown reads as false. */
-	subscriptionRoom?(): boolean;
+	/** Whether the subscription the given worker model runs on reports room now; unknown reads as false. */
+	subscriptionRoom?(model: Model<Api>): boolean;
 }
 
 type WorkerAdmission =
@@ -2386,7 +2393,7 @@ export class WorkerDelegationController {
 				usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
 			}));
 		return this.runBudgets.createPort({
-			rootAgentId: bound.runId,
+			treeKey: bound.runId,
 			attemptId,
 			budget: { maxCostUsd: bound.maxCostUsd },
 			pricesRequests: true,
@@ -2637,7 +2644,7 @@ export class WorkerDelegationController {
 		return record;
 	}
 
-	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings): boolean {
+	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings, model: Model<Api> | undefined): boolean {
 		const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
 		let yielded = 0;
 		for (const attemptId of this.yieldedCapacityAttemptIds.keys()) {
@@ -2648,13 +2655,19 @@ export class WorkerDelegationController {
 				this.yieldedWriteReservations.delete(attemptId);
 			}
 		}
-		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) < this.effectiveMaxConcurrent(settings);
+		return (
+			Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) <
+			this.effectiveMaxConcurrent(settings, model)
+		);
 	}
 
-	/** The configured width, widened up to the burst width while the subscription has room (the fleet ceilings still hold). */
-	private effectiveMaxConcurrent(settings: ResolvedWorkerDelegationSettings): number {
-		if (settings.maxConcurrentBurst <= settings.maxConcurrent) return settings.maxConcurrent;
-		return this.deps.subscriptionRoom?.() === true ? settings.maxConcurrentBurst : settings.maxConcurrent;
+	/**
+	 * The configured width, widened up to the burst width while the subscription the worker's model runs on has room
+	 * (the fleet ceilings still hold). Without a model the account the worker would use is unknown, so no widening.
+	 */
+	private effectiveMaxConcurrent(settings: ResolvedWorkerDelegationSettings, model: Model<Api> | undefined): number {
+		if (settings.maxConcurrentBurst <= settings.maxConcurrent || !model) return settings.maxConcurrent;
+		return this.deps.subscriptionRoom?.(model) === true ? settings.maxConcurrentBurst : settings.maxConcurrent;
 	}
 
 	private waitTargetsBlockedByCaller(callerAgentId: string, targetAgentIds: readonly string[]): string[] {
@@ -2797,17 +2810,17 @@ export class WorkerDelegationController {
 			}
 			this.foregroundHoldCleared.add(attempt.attemptId);
 		}
-		if (!this.hasWorkerCapacity(admission.settings)) {
+		if (!this.hasWorkerCapacity(admission.settings, admission.shipment.model)) {
 			harnessLog.debug("delegation", "a worker waits for capacity", () => ({
 				running: this.getWorkerLifecycle().getRunningCount(),
-				allowed: this.effectiveMaxConcurrent(admission.settings),
+				allowed: this.effectiveMaxConcurrent(admission.settings, admission.shipment.model),
 				base: admission.settings.maxConcurrent,
 				burst: admission.settings.maxConcurrentBurst,
 			}));
 			return {
 				action: "wait",
 				reason: "capacity",
-				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${this.effectiveMaxConcurrent(admission.settings)} allowed`,
+				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${this.effectiveMaxConcurrent(admission.settings, admission.shipment.model)} allowed`,
 			};
 		}
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
@@ -2964,10 +2977,12 @@ export class WorkerDelegationController {
 		const parent = this.lifecycle.getAgent(request.parentAgentId);
 		if (!parent) return undefined;
 		const rootAttempt = this.lifecycle.getLatestAgentAttempt(parent.rootAgentId);
-		const maxAttempts = rootAttempt?.dispatch.executionContract?.worker.authority.budget.maxAttempts;
+		if (!rootAttempt) return undefined;
+		const maxAttempts = rootAttempt.dispatch.executionContract?.worker.authority.budget.maxAttempts;
 		const existingAttempts = collectWorkerTreeBudgetSeeds(
 			this.lifecycle.getTaskRuntimeSnapshot(),
 			parent.rootAgentId,
+			rootAttempt.taskId,
 		).length;
 		return workerTreeCanAdmitAttempt(existingAttempts, maxAttempts)
 			? undefined
@@ -2990,46 +3005,12 @@ export class WorkerDelegationController {
 		if (request.verificationOfTaskId) return undefined;
 		const goal = this.goalForWorkerRequest(request);
 		if (!goal?.requirements || goal.requirements.length === 0) return undefined;
-
-		const reqIds = new Set<string>();
-		for (const id of request.taskContext?.requirementIds ?? []) {
-			if (id.trim()) reqIds.add(id.trim());
-		}
-
-		if (reqIds.size === 0 && request.instructions) {
-			for (const req of goal.requirements) {
-				if (request.instructions.includes(req.id)) {
-					reqIds.add(req.id);
-				}
-			}
-		}
-
-		if (reqIds.size > 0) {
-			for (const reqId of reqIds) {
-				const req = goal.requirements.find((r) => r.id === reqId);
-				if (req?.dependencies && req.dependencies.length > 0) {
-					const unsatisfied = req.dependencies.some((depId) => {
-						const dep = goal.requirements.find((r) => r.id === depId);
-						return dep?.status !== "satisfied";
-					});
-					if (unsatisfied) return "goal_dependency_unsatisfied";
-				}
-			}
-		} else {
-			const openReqs = goal.requirements.filter((r) => r.status === "open");
-			const hasOpenReqWithoutUnsatisfiedDeps = openReqs.some((req) => {
-				if (!req.dependencies || req.dependencies.length === 0) return true;
-				return req.dependencies.every((depId) => {
-					const dep = goal.requirements.find((r) => r.id === depId);
-					return dep && dep.status === "satisfied";
-				});
-			});
-			if (openReqs.length > 0 && !hasOpenReqWithoutUnsatisfiedDeps) {
-				return "goal_dependency_unsatisfied";
-			}
-		}
-
-		return undefined;
+		return unmetGoalDependencyReason({
+			requirements: goal.requirements,
+			requirementIds: request.taskContext?.requirementIds ?? [],
+			snapshot: () => this.lifecycle.getTaskRuntimeSnapshot(),
+			claims: () => getWorkerClaimSnapshots(getActiveSessionBranchEntries(this.deps.getSessionManager())),
+		});
 	}
 
 	/**
@@ -4630,9 +4611,11 @@ export class WorkerDelegationController {
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
 		if (fleetSkipReason) return fleetSkipReason;
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		const admission = this.resolveWorkerAdmission(request);
 		const freeConcurrency = Math.max(
 			0,
-			this.effectiveMaxConcurrent(settings) - this.getWorkerLifecycle().getRunningCount(),
+			this.effectiveMaxConcurrent(settings, admission.ok ? admission.shipment.model : undefined) -
+				this.getWorkerLifecycle().getRunningCount(),
 		);
 		const queueSlotsNeeded = Math.max(0, remaining - freeConcurrency) + pendingVerifiers.size;
 		const queueSlotsFree = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
@@ -4908,7 +4891,12 @@ export class WorkerDelegationController {
 
 		const contendsWithLocalForeground = this.contendsWithLocalForeground(shipment.model);
 		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
-		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
+		if (
+			!preparedAdmission ||
+			dependencyGated ||
+			contendsWithLocalForeground ||
+			!this.hasWorkerCapacity(settings, shipment.model)
+		) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
@@ -5163,7 +5151,7 @@ export class WorkerDelegationController {
 		const { instructions, settings, verifierShipment } = admission;
 		let { model, modelBinding } = admission.shipment;
 		const { profile: orchestrationProfile, soul } = admission.shipment;
-		if (!this.hasWorkerCapacity(settings)) {
+		if (!this.hasWorkerCapacity(settings, model)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		let laneCapability = this.laneCapabilityProfile(model);
@@ -5371,11 +5359,27 @@ export class WorkerDelegationController {
 		}
 		const rootAttempt = lifecycle.getLatestAgentAttempt(agentBinding.rootAgentId);
 		const rootBudget = rootAttempt?.dispatch.executionContract?.worker.authority.budget ?? grant.budget;
-		const treeBudget = this.treeBudgets.createPort({
+		const treeTaskId = workerTreeTaskId({
+			agentId: agentBinding.agentId,
 			rootAgentId: agentBinding.rootAgentId,
+			attemptTaskId: prepared.attempt.taskId,
+			rootAttempt,
+		});
+		const treeSeeds = collectWorkerTreeBudgetSeeds(
+			lifecycle.getTaskRuntimeSnapshot(),
+			agentBinding.rootAgentId,
+			treeTaskId,
+		);
+		harnessLog.debug("delegation", "a worker tree budget was seeded from its own task", {
+			taskId: treeTaskId,
+			attemptId: durableHandle.attemptId,
+			seeds: treeSeeds.length,
+		});
+		const treeBudget = this.treeBudgets.createPort({
+			treeKey: workerTreeBudgetKey(treeTaskId),
 			attemptId: durableHandle.attemptId,
 			budget: rootBudget,
-			seeds: collectWorkerTreeBudgetSeeds(lifecycle.getTaskRuntimeSnapshot(), agentBinding.rootAgentId),
+			seeds: treeSeeds,
 			initialUsage,
 		});
 		const runBudget = this.runBudgetPort(durableHandle.attemptId, initialUsage);

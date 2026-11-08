@@ -343,7 +343,8 @@ export const DEFAULT_WORKTREE_SYNC_POLICY: WorktreeSyncPolicySetting = "on_land_
 
 export const DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS = 900_000;
 
-export const DEFAULT_WORKTREE_SYNC_MAX_LANES = 5;
+/** Blast-radius ceiling on concurrent active lanes when the owner sets none; an explicit owner value is a hard cap. */
+export const DEFAULT_WORKTREE_SYNC_MAX_LANES = 64;
 
 export const DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS = 30_000;
 

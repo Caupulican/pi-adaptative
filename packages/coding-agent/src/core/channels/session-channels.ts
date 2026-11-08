@@ -317,6 +317,8 @@ export interface SessionChannelsDeps extends SessionChannelsOwnerDeps {
 	now?(): number;
 	/** The schedule clock a shipped polling transport waits on (`channel-poll`); the system clock when omitted. */
 	timers?: TimerPort;
+	/** The clock of the one expiry alarm (`channel-expiry`); the system clock when omitted. */
+	wakeTimers?: TimerPort;
 	/**
 	 * Set for the daemon's host while no session is open (`away-channel-host.ts`): it serves a channel only while no open
 	 * session does and yields to one at once, marks its batches and drafts `away`, and delivers a turn only while
@@ -1294,7 +1296,7 @@ export class SessionChannels {
 		if (this.wake?.at === at) return;
 		this.clearWake();
 		if (at === undefined) return;
-		const handle = (this.deps.timers ?? SYSTEM_TIMER_PORT).setTimeout(() => {
+		const handle = (this.deps.wakeTimers ?? SYSTEM_TIMER_PORT).setTimeout(() => {
 			if (this.wake?.handle !== handle) return;
 			this.wake = undefined;
 			harnessLog.debug("channels", "the expiry wake fired");

@@ -34,7 +34,9 @@ import {
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
 import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
+import { requirementCoverageProbe } from "../goals/requirement-dependencies.ts";
 import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import type { RuleHookRefusal } from "../rule-hooks/rule-hook-delivery.ts";
@@ -304,6 +306,11 @@ export interface GoalToolDependencies {
 	 * the existing verified/complete gate.
 	 */
 	getWorkerClaimSnapshots?: () => readonly WorkerClaim[];
+	/**
+	 * The durable task runtime, read with {@link getWorkerClaimSnapshots} to decide whether an accepted, reviewed
+	 * worker result covers a requirement, so `dispatch_worker` counts a covered dependency as met.
+	 */
+	getTaskRuntimeSnapshot?: () => TaskRuntimeProjection | undefined;
 	/**
 	 * Tool-layer side effect for a 'dispatch_worker' action when `dispatchTarget` is 'in_process'
 	 * (the default) or when {@link dispatchCollaborationWorker} is not wired: dispatches a real in-process
@@ -1153,6 +1160,15 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
 					activePipeline,
 					activeGoalLaneIds,
+					...(current && deps.getWorkerClaimSnapshots
+						? {
+								dependencyCovered: requirementCoverageProbe({
+									requirements: current.requirements,
+									snapshot: () => deps.getTaskRuntimeSnapshot?.(),
+									claims: () => deps.getWorkerClaimSnapshots?.() ?? [],
+								}),
+							}
+						: {}),
 				});
 				if (!result.ok) {
 					return withCheckRuns({

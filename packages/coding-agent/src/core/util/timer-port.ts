@@ -59,6 +59,8 @@ export {
  *   only at a cold moment. It arms no alarm.
  * - `channel-poll`: the schedule of a shipped channel transport that polls (Gmail): the wait between quiet polls, its
  *   error backoffs, its access-token expiry clock and its send pacing. Its request timeouts stay on the system clock.
+ * - `channel-expiry`: the one alarm of a channel runtime for the earliest time a held item expires or a bound lifts,
+ *   kept apart from `channel-poll` so a day-long expiry never reads as the transport's next scheduled wait.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -85,7 +87,8 @@ export type TimerOwner =
 	| "routine-intake"
 	| "tool-recovery-log"
 	| "system-prompt"
-	| "channel-poll";
+	| "channel-poll"
+	| "channel-expiry";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

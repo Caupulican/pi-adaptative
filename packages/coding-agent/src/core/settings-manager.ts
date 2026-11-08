@@ -3805,7 +3805,12 @@ export class SettingsManager {
 				1000,
 				3_600_000,
 			),
-			maxLanes: sanitizeIntegerSetting(configured.maxLanes, DEFAULT_WORKTREE_SYNC_MAX_LANES, 1, 32),
+			maxLanes: sanitizeIntegerSetting(
+				configured.maxLanes,
+				DEFAULT_WORKTREE_SYNC_MAX_LANES,
+				1,
+				Number.MAX_SAFE_INTEGER,
+			),
 			workerLand: configured.workerLand === "allow" ? "allow" : "deny",
 		};
 		if (typeof configured.mainBranch === "string" && configured.mainBranch.trim().length > 0) {

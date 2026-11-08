@@ -154,6 +154,18 @@ export interface DurableTaskRuntimeOptions {
 	createId?: () => string;
 }
 
+/** The retained record kinds with a lifetime bound on the hot projection, in the order a shortage is reported. */
+const LIFETIME_BOUNDED_RECORDS = [
+	{ field: "agents", label: "Agent binding", noun: "agent bindings" },
+	{ field: "tasks", label: "Task", noun: "tasks" },
+	{ field: "attempts", label: "Attempt", noun: "attempts" },
+	{ field: "objectives", label: "Objective", noun: "objectives" },
+	{ field: "checkpoints", label: "Checkpoint", noun: "checkpoints" },
+	{ field: "approvals", label: "Approval", noun: "approvals" },
+	{ field: "notifications", label: "Notification", noun: "notifications" },
+	{ field: "evidence", label: "Evidence", noun: "evidence entries" },
+] as const;
+
 export class DurableTaskRuntime {
 	readonly hostEvents: HostEventRuntime;
 	private readonly store: OrchestrationEventStore;
@@ -206,52 +218,15 @@ export class DurableTaskRuntime {
 			if (slots > capacity.headroom[field])
 				throw new DurableTaskRuntimeError(`Orchestration ${field} lacks ${slots} required slots.`);
 		}
-		const agents = requestedProjectionSlots(required.agents, "Agent binding");
-		const objectives = requestedProjectionSlots(required.objectives, "Objective");
-		const tasks = requestedProjectionSlots(required.tasks, "Task");
-		const attempts = requestedProjectionSlots(required.attempts, "Attempt");
-		const checkpoints = requestedProjectionSlots(required.checkpoints, "Checkpoint");
-		const approvals = requestedProjectionSlots(required.approvals, "Approval");
-		const notifications = requestedProjectionSlots(required.notifications, "Notification");
-		const evidence = requestedProjectionSlots(required.evidence, "Evidence");
-		if (agents > capacity.headroom.agents) {
+		const requests = LIFETIME_BOUNDED_RECORDS.map((record) => ({
+			record,
+			slots: requestedProjectionSlots(required[record.field], record.label),
+		}));
+		for (const { record, slots } of requests) {
+			if (slots <= capacity.headroom[record.field]) continue;
+			// The bound is per session and lifetime: finished records stay in the projection, so only a new session frees room.
 			throw new DurableTaskRuntimeError(
-				`Orchestration agent binding limit (${capacity.limits.agents}) lacks ${agents} required slots.`,
-			);
-		}
-		if (tasks > capacity.headroom.tasks) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration task limit (${capacity.limits.tasks}) lacks ${tasks} required slots.`,
-			);
-		}
-		if (attempts > capacity.headroom.attempts) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration attempt limit (${capacity.limits.attempts}) lacks ${attempts} required slots.`,
-			);
-		}
-		if (objectives > capacity.headroom.objectives) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration objective limit (${capacity.limits.objectives}) lacks ${objectives} required slots.`,
-			);
-		}
-		if (checkpoints > capacity.headroom.checkpoints) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration checkpoint limit (${capacity.limits.checkpoints}) lacks ${checkpoints} required slots.`,
-			);
-		}
-		if (approvals > capacity.headroom.approvals) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration approval limit (${capacity.limits.approvals}) lacks ${approvals} required slots.`,
-			);
-		}
-		if (notifications > capacity.headroom.notifications) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration notification limit (${capacity.limits.notifications}) lacks ${notifications} required slots.`,
-			);
-		}
-		if (evidence > capacity.headroom.evidence) {
-			throw new DurableTaskRuntimeError(
-				`Orchestration evidence limit (${capacity.limits.evidence}) lacks ${evidence} required slots.`,
+				`This session has used ${capacity.counts[record.field]} of its ${capacity.limits[record.field]} ${record.noun} (a lifetime limit; finished ones count until the session ends) and ${slots} more ${slots === 1 ? "is" : "are"} needed. Start a new session to continue.`,
 			);
 		}
 		return capacity;

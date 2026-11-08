@@ -425,6 +425,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isChildSession: () => deps.isChildSession(),
 			refreshTools: () => deps.refreshToolRegistry(),
 			timers: deps.getTimers().port("channel-poll"),
+			wakeTimers: deps.getTimers().port("channel-expiry"),
 		});
 		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
 		this._laneModels = new LaneModelResolver(deps);
@@ -535,14 +536,23 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _allowance: SubscriptionAllowanceReader | undefined;
 
-	/** Whether the subscription the session runs on reports room; any failure to read it is "no". */
-	private subscriptionRoom(): boolean {
+	/**
+	 * Whether the subscription the worker's model will run on reports room; any failure to read it is "no". The
+	 * worker's model decides the account, not the foreground's: under the default `account: "other"` they differ.
+	 */
+	private subscriptionRoom(workerModel: Model<Api>): boolean {
 		try {
 			this._allowance ??= createSubscriptionAllowanceReader({
 				getRegistry: () => this.deps.getModelRegistry(),
 				getModel: () => this.deps.getModel(),
 			});
-			return this._allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT).kind === "room";
+			const allowance = this._allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, workerModel);
+			harnessLog.debug("delegation", "burst room read on the worker model's subscription", {
+				provider: workerModel.provider,
+				modelId: workerModel.id,
+				allowance: allowance.kind,
+			});
+			return allowance.kind === "room";
 		} catch {
 			return false;
 		}
@@ -554,7 +564,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				...this.deps,
 				...this._getTranscriptWrites(),
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
-				subscriptionRoom: () => this.subscriptionRoom(),
+				subscriptionRoom: (model) => this.subscriptionRoom(model),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -3020,6 +3030,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			...(bot.profileId ? { profileId: bot.profileId } : {}),
 			authority: {
 				...(!bot.profileId ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
+				// The owner's own choice of this bot's model is honoured as given; a root's or a leader's is held to the subscription rule.
+				...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
 				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
 				readOnly: bot.canWrite !== true,
 				...(!bot.profileId && this.isOrchestrationThinkingLevel(bot.thinkingLevel)

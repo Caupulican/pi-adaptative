@@ -601,8 +601,9 @@ export class AwayChannelHosts {
 			warn: (message) => this.input.report(message),
 			isDisposed: () => this.closed,
 			isChildSession: () => false,
-			// The same schedule port the open session's channels run on: the expiry wake and a polling transport's waits.
+			// The same ports the open session's channels run on: a polling transport's waits and the expiry wake.
 			timers: this.input.timers.port("channel-poll"),
+			wakeTimers: this.input.timers.port("channel-expiry"),
 			away: { capReason: (nowMs) => this.capReason(nowMs) },
 		});
 		const host: AwayChannelHost = {

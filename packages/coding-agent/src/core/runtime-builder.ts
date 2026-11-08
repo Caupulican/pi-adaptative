@@ -1939,6 +1939,7 @@ export class RuntimeBuilder {
 					// and read-defensive on the goal-tool deps type).
 					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
 					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
+					getTaskRuntimeSnapshot: () => this.deps.getTaskRuntimeSnapshot?.(),
 					// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
 					// real in-process worker lane through the SAME starter the delegate tool uses (below),
 					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this

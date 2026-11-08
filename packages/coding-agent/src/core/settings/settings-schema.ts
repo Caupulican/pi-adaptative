@@ -479,7 +479,7 @@ export interface WorktreeSyncSettings {
 	gateCommand?: string; // land gate command run in the lane worktree at the exact tip that becomes main (e.g. "npm run check")
 	gate?: "on" | "off"; // default: "on" -- "off" is the owner-level G4 opt-out, recorded per land event
 	gateTimeoutMs?: number; // default: 900000
-	maxLanes?: number; // default: 5 -- active-lane ceiling, matches the <=5-coder orchestration shape
+	maxLanes?: number; // default: 64 -- active-lane ceiling (blast radius, not a throughput target); any positive integer is accepted as a hard cap
 	worktreesRoot?: string; // overrides the default lane-checkout root (agent-paths worktreesDir)
 	workerLand?: "deny" | "allow"; // default: "deny" -- whether a WORKER session (see session-role.ts) may run the "land" action at all; "allow" still subjects the land to normal ownership/freshness gating
 }

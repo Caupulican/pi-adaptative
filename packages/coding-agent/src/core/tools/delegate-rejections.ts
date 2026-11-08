@@ -144,6 +144,7 @@ const DUPLICATE_OF_PREFIX = "worker_duplicate_of:";
 const PIN_UNAVAILABLE_MARKER = "worker_model_pin_unavailable:";
 const PIN_CONFLICT_MARKER = "worker_model_pin_conflict:";
 const MODEL_NOT_ALLOWED_PREFIX = "worker_model_not_allowed:";
+const MODEL_METERED_PREFIX = "worker_model_metered:";
 const MODEL_UNAVAILABLE_PREFIX = "orchestration_model_unavailable:";
 const PROFILE_MODEL_UNAVAILABLE_PREFIX = "orchestration_profile_model_unavailable:";
 const CHOICE_REQUIRED_PREFIX = "worker_specialist_choice_required";
@@ -197,6 +198,15 @@ export function delegateStartRejection(reason: string): CommsErrRecord {
 			m: "The requested model is outside the owner's model policy or favorite pool; no different model started. Report the model so the owner can pin it as a favorite, allow its provider, or choose a pooled model.",
 		});
 	}
+	if (reason.startsWith(MODEL_METERED_PREFIX)) {
+		return commsErr({
+			c: "E_AUTH",
+			f: "model",
+			h: "RETRY_OMIT",
+			x: reason,
+			m: "The requested model is paid by API key and the owner has not chosen it; subscription models are usable, so no worker started on it. Omit model to inherit, or name a subscription model; only the owner can allow an API-key provider (workerDelegation.routeProviders).",
+		});
+	}
 	if (reason === "orchestration_profile_not_found") {
 		return commsErr({
 			c: "E_REF",
@@ -229,6 +239,13 @@ export function delegateStartRejection(reason: string): CommsErrRecord {
 			c: "E_LIMIT",
 			h: "REUSE",
 			m: "worker_agent_session_limit_reached: expected policy capacity, not instability.",
+		});
+	}
+	if (reason === "orchestration_projection_capacity_exhausted") {
+		return commsErr({
+			c: "E_LIMIT",
+			h: "ASK_OWNER",
+			m: "This session has used up its lifetime limit of retained worker records (finished workers count until the session ends); no worker started. Tell the owner: continuing needs a new session.",
 		});
 	}
 	if (reason === "worker_specialist_busy") {

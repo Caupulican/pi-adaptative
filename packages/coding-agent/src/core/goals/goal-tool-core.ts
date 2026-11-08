@@ -1,3 +1,4 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import {
@@ -19,6 +20,7 @@ import {
 	MAX_GOAL_OBJECTIVE_LENGTH,
 	type RequirementCheck,
 } from "./goal-state.ts";
+import { unmetRequirementDependencies } from "./requirement-dependencies.ts";
 
 const MAX_GOAL_ID_LENGTH = 128;
 const MAX_GOAL_REQUIREMENTS = 256;
@@ -117,6 +119,11 @@ export interface ApplyGoalActionOptions {
 	activePipeline?: { runId: string; pipelineName: string; goalId?: string; status: string };
 	/** Queued/running worker lanes owned by this goal or bound to one of its requirements. */
 	activeGoalLaneIds?: readonly string[];
+	/**
+	 * Whether an accepted, reviewed worker result covers a requirement; `dispatch_worker` counts a covered dependency
+	 * as met, like a satisfied one. Absent means nothing is covered.
+	 */
+	dependencyCovered?: (requirementId: string) => boolean;
 }
 
 function requirementExists(state: GoalState, requirementId: string): boolean {
@@ -310,7 +317,16 @@ function toGoalEvent(
 			}
 			if (action.dependencies) {
 				for (const depId of action.dependencies) {
-					if (!requirementExists(state, depId) && depId !== id) {
+					if (depId.trim() === id) {
+						harnessLog.info("goals", "a requirement was refused: it listed itself as a dependency", {
+							requirementId: id,
+						});
+						return {
+							ok: false,
+							error: `Requirement '${id}' cannot depend on itself: a requirement waits only on other requirements.`,
+						};
+					}
+					if (!requirementExists(state, depId)) {
 						return { ok: false, error: `Dependency requirementId '${depId}' does not exist.` };
 					}
 				}
@@ -415,17 +431,16 @@ function toGoalEvent(
 			if (requirement.status !== "open") {
 				return { ok: false, error: `Requirement '${id}' is not open (status: ${requirement.status}).` };
 			}
-			if (requirement.dependencies) {
-				const unsatisfied = requirement.dependencies.filter((depId) => {
-					const dep = state.requirements.find((r) => r.id === depId);
-					return dep?.status !== "satisfied";
-				});
-				if (unsatisfied.length > 0) {
-					return {
-						ok: false,
-						error: `Cannot dispatch worker: dependencies not satisfied [${unsatisfied.join(", ")}].`,
-					};
-				}
+			const unsatisfied = unmetRequirementDependencies(
+				state.requirements,
+				requirement,
+				options?.dependencyCovered ?? (() => false),
+			);
+			if (unsatisfied.length > 0) {
+				return {
+					ok: false,
+					error: `Cannot dispatch worker: dependencies not satisfied [${unsatisfied.join(", ")}].`,
+				};
 			}
 			return { ok: true, event: { type: "dispatch_worker", id, instructions, laneId: action.laneId, now } };
 		}

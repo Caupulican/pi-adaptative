@@ -19,14 +19,30 @@ import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 import { OPERATION_JUDGMENT_TIMEOUT_MS } from "./operation-gate.ts";
+import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 
 /** Shell and code tools: what they do is only known by reading the command. */
 const JUDGED_TOOLS: ReadonlySet<string> = new Set(["bash", "run_process", "powershell", "python"]);
 /** Typed writes: the path alone decides. */
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
-/** The reading at or above which System One has established that a call is task work. */
-const TASK_WORK_ESTABLISHED = 0.8;
+/**
+ * Where an answer decides: the owner's rule for any acceptance is P >= 0.90 (a yes) or P <= 0.10 (a no), and an
+ * evidence-sufficiency answer must reach 0.90 before the judgment it covers counts. No yes/no family carries these
+ * cuts, and nothing here has been measured on its own answers, so they stay the rule's own values.
+ */
+const ACCEPT_AT = 0.9;
+const ACCEPT_ABSENCE_AT = 0.1;
+
+/** Why a call was or was not refused, in the order the exits are tried. */
+type DelegationExit = "unasked" | "evidence_insufficient" | "task_work" | "not_task_work" | "open";
+/** The questions that drove each exit that read an answer. */
+const DRIVING_QUESTIONS: Readonly<Record<Exclude<DelegationExit, "unasked">, readonly string[]>> = {
+	evidence_insufficient: ["command_evidence_sufficient"],
+	task_work: ["performs_task_work", "command_evidence_sufficient"],
+	not_task_work: ["performs_task_work", "command_evidence_sufficient"],
+	open: ["performs_task_work", "command_evidence_sufficient"],
+};
 
 export const DELEGATION_PROGRAM = {
 	schema_version: "2.0",
@@ -37,6 +53,11 @@ export const DELEGATION_PROGRAM = {
 			id: "performs_task_work",
 			instruction:
 				"Does `operation.command` change any file other than agent definitions and instruction files inside `orchestration_directories`, or run a build, test, install, migration, formatter or program that carries out the owner's work? Answer no for a command that only reads, lists, searches, shows or inspects state, including git status, log and diff.",
+		},
+		{
+			id: "command_evidence_sufficient",
+			instruction:
+				"Does `operation.command` itself show what it does, so that whether it changes files or carries out work can be read from its text alone? Answer no when what it does depends on content not shown here, such as a script, alias, function or program that is only named, or an input that is cut off.",
 		},
 	],
 } as const;
@@ -130,7 +151,26 @@ export class DelegationGate {
 				},
 				{ consequence: "high", signal: AbortSignal.any(bounded) },
 			);
-			return (probability(evaluation.answers?.performs_task_work) ?? 0) >= TASK_WORK_ESTABLISHED;
+			const taskWork = probability(evaluation.answers?.performs_task_work);
+			const sufficient = probability(evaluation.answers?.command_evidence_sufficient);
+			// Ordered exits: only a sufficiently evidenced, established answer refuses; every other case is open and runs.
+			let exit: DelegationExit;
+			if (taskWork === undefined || sufficient === undefined) exit = "unasked";
+			else if (sufficient < ACCEPT_AT) exit = "evidence_insufficient";
+			else if (taskWork >= ACCEPT_AT) exit = "task_work";
+			else if (taskWork <= ACCEPT_ABSENCE_AT) exit = "not_task_work";
+			else exit = "open";
+			harnessLog.info("delegation", "a root call was judged for task work", () => ({
+				tool: toolName,
+				exit,
+				taskWork: taskWork ?? null,
+				evidenceSufficient: sufficient ?? null,
+			}));
+			noteDecisionTrace(engine, evaluation, {
+				decision: `root delegation gate: ${exit}`,
+				drove: exit === "unasked" ? [] : DRIVING_QUESTIONS[exit],
+			});
+			return exit === "task_work";
 		} catch (error) {
 			signal?.throwIfAborted();
 			// Reversible work is never stopped by an outage: the call runs, and the doubt is shown once.

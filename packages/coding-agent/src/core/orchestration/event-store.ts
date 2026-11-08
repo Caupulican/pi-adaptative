@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import {
@@ -399,15 +400,24 @@ function assertCanonicalOrchestrationEvent(value: unknown): asserts value is Orc
 	}
 }
 
-function observeListenerResult(value: unknown): void {
-	if ((typeof value !== "object" || value === null) && typeof value !== "function") return;
+/** Reports how a listener's call ended once it is known: at once for a synchronous listener, later for an async one. */
+function settleListenerResult(value: unknown, onSettled: (error: unknown, failed: boolean) => void): void {
 	let then: unknown;
 	try {
-		then = (value as { then?: unknown }).then;
-	} catch {
+		if ((typeof value === "object" && value !== null) || typeof value === "function")
+			then = (value as { then?: unknown }).then;
+	} catch (error) {
+		onSettled(error, true);
 		return;
 	}
-	if (typeof then === "function") void Promise.resolve(value).catch(() => {});
+	if (typeof then !== "function") {
+		onSettled(undefined, false);
+		return;
+	}
+	void Promise.resolve(value).then(
+		() => onSettled(undefined, false),
+		(error: unknown) => onSettled(error, true),
+	);
 }
 
 function boundedIdempotencyEvents(events: readonly OrchestrationEvent[], maxEvents: number): OrchestrationEvent[] {
@@ -482,6 +492,7 @@ export class OrchestrationEventStore {
 	private readonly fs: FaultableFs;
 	private readonly sleepSync: ((delayMs: number) => void) | undefined;
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
+	private readonly failingListeners = new WeakSet<(event: OrchestrationEvent) => void>();
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 	private synchronizedIndexes: SynchronizedIndexes | undefined;
 	private cursorRead: SignedRead<EventCursor | undefined> | undefined;
@@ -590,13 +601,36 @@ export class OrchestrationEventStore {
 		} finally {
 			for (const event of committed)
 				for (const listener of [...this.listeners]) {
+					// A durable commit survives an observer failure; the failure is reported once per listener episode.
+					const settled = (error: unknown, failed: boolean) =>
+						this.noteListenerOutcome(listener, event, error, failed);
 					try {
-						observeListenerResult(listener(structuredClone(event)) as unknown);
-					} catch {
-						/* Durable commits survive observer failure. */
+						settleListenerResult(listener(structuredClone(event)) as unknown, settled);
+					} catch (error) {
+						settled(error, true);
 					}
 				}
 		}
+	}
+
+	/** One warning when a listener starts failing, none while it keeps failing, and a fresh one after it recovers. */
+	private noteListenerOutcome(
+		listener: (event: OrchestrationEvent) => void,
+		event: OrchestrationEvent,
+		error: unknown,
+		failed: boolean,
+	): void {
+		if (!failed) {
+			this.failingListeners.delete(listener);
+			return;
+		}
+		if (this.failingListeners.has(listener)) return;
+		this.failingListeners.add(listener);
+		harnessLog.warn("orchestration", "an event-store listener failed; the commit stands", () => ({
+			eventType: event.type,
+			ordinal: event.ordinal,
+			error: error instanceof Error ? error.name : typeof error,
+		}));
 	}
 
 	private appendUnlocked(
