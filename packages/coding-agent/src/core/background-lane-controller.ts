@@ -46,6 +46,12 @@ import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
+import {
+	type BotCreationRequest,
+	type CreatedBotView,
+	MAX_BOTS_PER_LEADER,
+	mayNotCreateBotsText,
+} from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
@@ -195,6 +201,7 @@ import { getSessionRole } from "./session-role.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { createBotToolDefinition } from "./tools/bot.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
@@ -2052,8 +2059,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				throw new Error("Bot messaging sender alias has been rebound.");
 			requireGroup();
 		};
+		const leaderIds = () =>
+			store
+				.listBots()
+				.filter((bot) => bot.leader === true)
+				.map((bot) => bot.agentId);
+		const senderRecord = sourceAlias ? store.getBot(sourceAlias) : undefined;
+		const senderIsLeader = senderRecord?.leader === true && senderRecord.retired !== true;
 		return {
 			assertCurrent,
+			leaderIds,
+			...(senderIsLeader && sourceAlias
+				? {
+						createBot: (request: BotCreationRequest) =>
+							this.createBotFor({ kind: "leader", agentId: sourceAlias }, request),
+					}
+				: {}),
 			list: (teamId) => {
 				assertCurrent();
 				const group = requireGroup(teamId);
@@ -2080,6 +2101,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 							displayName: bot.displayName,
 							state: bot.retired || agent?.status === "retired" ? "retired" : (agent?.activity ?? "inactive"),
 							available: !bot.retired && agent !== undefined && agent.status !== "retired",
+							...(bot.leader ? { leader: true as const } : {}),
 						};
 					});
 				return {
@@ -2324,7 +2346,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.assertBotDispatchIdle(agentId);
 		store.reload();
 		const existing = store.getBot(agentId);
-		const bindingFields = ["provider", "modelId", "thinkingLevel", "profileId", "canWrite", "soul"] as const;
+		const bindingFields = [
+			"provider",
+			"modelId",
+			"thinkingLevel",
+			"profileId",
+			"canWrite",
+			"soul",
+			"leader",
+		] as const;
 		const bindingChanged =
 			existing &&
 			bindingFields.some((field) => {
@@ -2342,9 +2372,80 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			)
 		)
 			throw new Error(
-				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions or soul: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
+				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions, soul or leadership: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
 			);
 		return store.upsertBot({ ...input, agentId });
+	}
+
+	/**
+	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
+	 * cannot make a leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
+	 */
+	createBotFor(
+		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
+		request: BotCreationRequest,
+	): CreatedBotView {
+		const store = this.getBotTeamStore();
+		store.reload();
+		const agentId = normalizeBotOrTeamId(request.agentId, "agentId");
+		let createdBy = "root";
+		let mayWrite = true;
+		if (creator.kind === "leader") {
+			const leader = store.getBot(creator.agentId);
+			if (leader?.leader !== true || leader.retired === true)
+				throw new Error(
+					mayNotCreateBotsText(
+						store
+							.listBots()
+							.filter((bot) => bot.leader === true)
+							.map((bot) => bot.agentId),
+					),
+				);
+			createdBy = leader.agentId;
+			mayWrite = leader.canWrite === true;
+		}
+		if (request.canWrite === true && !mayWrite)
+			throw new Error(`${createdBy} cannot give a bot write access: it has none itself.`);
+		const soul = request.soul === undefined ? undefined : normalizeBotSoul(request.soul);
+		const spec = this.resolveModelSpec(request.model);
+		const thinkingLevel = request.thinkingLevel ?? spec.thinkingLevel;
+		const bot = store.createBotIfAbsent(
+			{
+				agentId,
+				provider: spec.provider,
+				modelId: spec.modelId,
+				...(thinkingLevel ? { thinkingLevel } : {}),
+				...(soul ? { soul } : {}),
+				...(request.description ? { description: request.description } : {}),
+				canWrite: request.canWrite === true,
+				leader: false,
+				createdBy,
+			},
+			creator.kind === "leader" ? { createdBy, max: MAX_BOTS_PER_LEADER } : undefined,
+		);
+		return {
+			agentId: bot.agentId,
+			modelRef: `${bot.provider}/${bot.modelId}`,
+			canWrite: bot.canWrite === true,
+			createdBy,
+		};
+	}
+
+	/** The orchestrator's tool for bots on the fly. */
+	createBotToolDefinition(): ToolDefinition {
+		return createBotToolDefinition({
+			create: (request) => this.createBotFor({ kind: "root" }, request),
+			list: () =>
+				this.getBotTeamStore()
+					.listBots({ includeRetired: true })
+					.map((bot) => ({
+						agentId: bot.agentId,
+						modelRef: `${bot.provider}/${bot.modelId}`,
+						leader: bot.leader === true,
+						retired: bot.retired === true,
+						...(bot.createdBy ? { createdBy: bot.createdBy } : {}),
+					})),
+		});
 	}
 
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {

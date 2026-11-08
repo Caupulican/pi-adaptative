@@ -1,6 +1,7 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
 import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
+import { BOT_TOOL_NAME } from "./delegation/bot-creation.ts";
 import { BOT_MESSAGE_TOOL_NAME } from "./delegation/bot-message-contract.ts";
 import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
@@ -105,6 +106,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["self_compact", policy([["workflow.plan"]], "control-plane")],
 	[PROACTIVITY_TOOL_NAME, policy([["settings.read", "settings.write"]], "control-plane")],
 	[ROUTINE_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
+	[BOT_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[CHANNEL_REPLY_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],

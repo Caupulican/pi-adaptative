@@ -152,6 +152,10 @@ export interface PersistentBotRecord {
 	readonly profileId?: string;
 	/** A bot edits files only when asked to: its replies are then structured reports, not chat. */
 	readonly canWrite?: boolean;
+	/** Only the owner makes a bot a leader. A leader creates bots; any other bot asks a leader or the orchestrator for one. */
+	readonly leader?: boolean;
+	/** Who created the bot: `owner`, `root`, or the leader's agent id. Set once, when the bot is created. */
+	readonly createdBy?: string;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 	readonly retired?: boolean;
@@ -172,6 +176,8 @@ export interface PersistentBotView {
 	readonly thinkingLevel?: string;
 	readonly soul?: string;
 	readonly profileId?: string;
+	readonly leader?: boolean;
+	readonly createdBy?: string;
 	readonly state: PersistentBotLiveState;
 	readonly currentTaskId?: string;
 	readonly currentSummary?: string;
@@ -234,6 +240,9 @@ export interface UpsertPersistentBotInput {
 	readonly soul?: string;
 	readonly profileId?: string;
 	readonly canWrite?: boolean;
+	readonly leader?: boolean;
+	/** Recorded only on creation; an existing bot keeps its creator. */
+	readonly createdBy?: string;
 	readonly retired?: boolean;
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
@@ -484,6 +493,8 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		instructions: legacyInstructions,
 		profileId,
 		canWrite,
+		leader,
+		createdBy,
 		createdAt,
 		updatedAt,
 		retired,
@@ -517,6 +528,8 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		soul: typeof soul === "string" ? soul : undefined,
 		profileId: typeof profileId === "string" ? profileId : undefined,
 		canWrite: typeof canWrite === "boolean" ? canWrite : undefined,
+		leader: typeof leader === "boolean" ? leader : undefined,
+		createdBy: typeof createdBy === "string" && createdBy.length > 0 ? createdBy : undefined,
 		createdAt,
 		updatedAt,
 		retired: typeof retired === "boolean" ? retired : undefined,
@@ -1459,6 +1472,31 @@ export class PersistentBotTeamStore {
 		return this.mutate(() => this.writeBot(input, nowIso));
 	}
 
+	/**
+	 * Creates a bot whose id is free (a retired bot keeps its id): the check and the write happen under the same lock, so two
+	 * creators of one id cannot both succeed. `limit` bounds how many live bots one creator has made.
+	 */
+	createBotIfAbsent(
+		input: UpsertPersistentBotInput,
+		limit?: { readonly createdBy: string; readonly max: number },
+		nowIso?: string,
+	): PersistentBotRecord {
+		return this.mutate(() => {
+			const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+			if (this.bots.has(agentId)) throw new Error(`A bot named ${agentId} already exists.`);
+			if (limit) {
+				const made = Array.from(this.bots.values()).filter(
+					(bot) => bot.createdBy === limit.createdBy && !bot.retired,
+				).length;
+				if (made >= limit.max)
+					throw new Error(
+						`${limit.createdBy} already has ${made} bots it created; retire one or ask the owner before creating more.`,
+					);
+			}
+			return this.writeBot({ ...input, agentId }, nowIso);
+		});
+	}
+
 	/** Select creation defaults only after the shared record has been reloaded under its lock. */
 	ensureBotForDispatch(
 		agentId: string,
@@ -1494,6 +1532,8 @@ export class PersistentBotTeamStore {
 			soul: input.soul !== undefined ? normalizeBotSoul(input.soul) || undefined : existing?.soul,
 			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
 			canWrite: input.canWrite ?? existing?.canWrite,
+			leader: input.leader ?? existing?.leader,
+			createdBy: existing?.createdBy ?? input.createdBy,
 			createdAt: existing?.createdAt ?? now,
 			updatedAt: now,
 			retired: input.retired ?? existing?.retired ?? false,
@@ -3554,6 +3594,8 @@ export class PersistentBotTeamStore {
 				thinkingLevel,
 				soul,
 				profileId,
+				...(botRecord?.leader ? { leader: true } : {}),
+				...(botRecord?.createdBy ? { createdBy: botRecord.createdBy } : {}),
 				state,
 				currentTaskId,
 				currentSummary,

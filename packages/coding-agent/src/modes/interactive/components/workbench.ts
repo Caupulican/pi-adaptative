@@ -1254,8 +1254,9 @@ export class WorkbenchComponent extends Container {
 			const glyph = botStateGlyph(bot.state);
 			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
+			const leaderBadge = bot.leader ? ` ${theme.fg("warning", "leader")}` : "";
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${bot.modelRef === roster.rootModelLabel ? "" : `${theme.fg("muted", bot.modelId || bot.modelRef)}`}${unreadBadge}${scheduleBadge}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${bot.modelRef === roster.rootModelLabel ? "" : `${theme.fg("muted", bot.modelId || bot.modelRef)}`}${leaderBadge}${unreadBadge}${scheduleBadge}`,
 				target,
 			);
 			// The default model and the idle state are the glyph's and the row's business; only a difference earns a word.

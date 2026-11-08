@@ -5337,6 +5337,15 @@ export class WorkerDelegationController {
 						directory.authorizeReply(request.threadId, request.senderAgentId, teamId),
 					);
 				},
+				leaderIds: () => directory.leaderIds(),
+				...(directory.createBot
+					? {
+							create: (request) => {
+								directory.assertCurrent();
+								return directory.createBot!(request);
+							},
+						}
+					: {}),
 			};
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {

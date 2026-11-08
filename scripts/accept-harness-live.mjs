@@ -503,6 +503,36 @@ const SCENARIOS = [
 		if (!new RegExp(`(^|\\D)${count}(\\D|$)`).test(claimText(claim))) throw new Error(`the answer does not give the real count ${count}: ${claimText(claim).slice(0, 200)}`);
 		return `the real mailbox export holds ${count} mail(s) and the bot counted them without acting on them`;
 	}),
+	scenario("s13", "leaders and the orchestrator create bots on the fly; any other bot asks for one", async () => {
+		const botRecord = (id) => {
+			const bots = botStore().bots;
+			return (Array.isArray(bots) ? bots : Object.values(bots ?? {})).find((b) => b.agentId === id);
+		};
+		await type(state.main, `/bot new chief ${MODEL_A} You coordinate small projects and make the bots they need.`);
+		await sleep(3000);
+		await type(state.main, `/bot new clerk ${MODEL_A} You file and tidy notes. You never create bots.`);
+		await waitFor("chief and clerk", () => ["chief", "clerk"].every((id) => botIds().includes(id)), 60_000, 2000);
+		await type(state.main, "/bot lead chief");
+		await waitFor("chief marked as leader", () => botRecord("chief")?.leader === true, 30_000, 1000);
+		if (botRecord("clerk")?.leader === true) throw new Error("clerk became a leader without the owner asking");
+		const leaderPrompt = 'Leader task: use your bot_message tool with action "create" to make a bot named "scribe" whose soul is "You write short release notes." Then say done.';
+		await type(state.main, `/bot msg chief ${leaderPrompt}`);
+		await claimFor(leaderPrompt, (c) => c.status === "completed");
+		const scribe = botRecord("scribe");
+		if (!scribe) throw new Error("the leader did not create the bot");
+		if (scribe.createdBy !== "chief" || scribe.leader === true) throw new Error(`scribe's record is wrong: createdBy=${scribe.createdBy} leader=${scribe.leader}`);
+		const clerkPrompt = 'Clerk task: use your bot_message tool with action "create" to make a bot named "rogue". If you cannot, say who you would ask instead.';
+		await type(state.main, `/bot msg clerk ${clerkPrompt}`);
+		const refused = await claimFor(clerkPrompt);
+		if (botRecord("rogue")) throw new Error("a bot that is not a leader created a bot");
+		if (!/leader|chief|orchestrator|parent|root/i.test(claimText(refused))) throw new Error(`the bot did not say who to ask: ${claimText(refused).slice(0, 240)}`);
+		// `/bot new` and `/bot msg` leave a bot's chat open: plain text goes to the orchestrator only from its own chat.
+		await type(state.main, "/chat root");
+		await sleep(2000);
+		await type(state.main, 'Use your bot tool to create a bot named "helper" whose soul is "You help with small chores." Then say done.');
+		await waitFor("the orchestrator's bot", () => botRecord("helper")?.createdBy === "root", 180_000, 3000);
+		return "chief (leader) created scribe, clerk (not a leader) created nothing and named who to ask, the orchestrator created helper";
+	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];

@@ -87,6 +87,7 @@ import type {
 import type { ContextGcReport } from "./context-gc.ts";
 import { captureSessionAccountingOrigin } from "./cost/accounting-origin.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
+import { BOT_TOOL_NAME } from "./delegation/bot-creation.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
@@ -463,6 +464,7 @@ export interface RuntimeBuilderDeps {
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
 	getRoutineTool?(): ToolDefinition | undefined;
+	getBotTool?(): ToolDefinition | undefined;
 	/** The owner's release of channel reply drafts; undefined while no channel has an explicit policy. */
 	getChannelReplyTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
@@ -1803,6 +1805,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows(ROUTINE_TOOL_NAME)) {
 				const definition = this.deps.getRoutineTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(BOT_TOOL_NAME)) {
+				const definition = this.deps.getBotTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows(CHANNEL_REPLY_TOOL_NAME)) {

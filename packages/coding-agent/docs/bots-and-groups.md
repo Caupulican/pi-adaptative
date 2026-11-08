@@ -9,6 +9,21 @@ and System One. With that gate off, no task-fitness judgment is required at star
 or execution. Authentication, model availability, permissions, capacity, and lifecycle checks remain
 in force. See [Model Router settings](settings.md#model-router).
 
+## Who creates bots
+
+Bots are created on the fly, for whatever purpose you have:
+
+- You create one with `/bot new <id> [--write] [model] [soul...]`.
+- The orchestrator (the root session, always the same one) creates one with its `bot` tool: `action create` with an
+  `agentId`, a `soul` (the bot's standing instructions), an optional `model` and `canWrite`.
+- A **leader** creates one with `bot_message` `action create`, with the same fields. Only you make a bot a leader:
+  `/bot lead <id>` and `/bot unlead <id>` (they take effect from the bot's next worker start; `/bot list` marks a leader).
+
+Every other bot cannot create bots. It asks a leader (leaders are marked in its `bot_message` peer list) or its parent in its
+report. Bounds that always hold: a leader cannot make a leader, grants `canWrite` only when it can write itself, and keeps at
+most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
+(`owner`, `root` or the leader's id).
+
 ## Create and use a group
 
 Use existing bot names in the member list:

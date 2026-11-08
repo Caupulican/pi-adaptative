@@ -390,6 +390,10 @@ export class BotTeamChatController {
 				case "soul":
 					await this.editBotSoul(rest, port);
 					return;
+				case "lead":
+				case "unlead":
+					this.setBotLeader(rest, sub === "lead", port);
+					return;
 				case "msg":
 				case "send":
 					await this.sendToBotFromCommand(rest, port, undefined);
@@ -445,7 +449,7 @@ export class BotTeamChatController {
 					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot lead|unlead <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -752,6 +756,7 @@ export class BotTeamChatController {
 			modelId: modelSpec.modelId,
 			thinkingLevel: modelSpec.thinkingLevel,
 			soul: soul.length > 0 ? soul : undefined,
+			createdBy: "owner",
 			...(canWrite ? { canWrite } : {}),
 		});
 		await this.switchTarget({ kind: "bot", agentId: bot.agentId });
@@ -760,19 +765,40 @@ export class BotTeamChatController {
 		);
 	}
 
-	/** `/bot soul <id>`: edit the bot's soul in a panel and store it through the same write path as `/bot new`. */
-	private async editBotSoul(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+	/** The persistent bot a `/bot` subcommand names, or a warning (usage, or no such bot) and undefined. */
+	private namedPersistentBot(
+		rest: string,
+		usage: string,
+		port: BotTeamChatSessionPort,
+	): PersistentBotView | undefined {
 		const [rawId] = splitHead(rest);
 		if (rawId.length === 0) {
-			this.host.showWarning("Usage: /bot soul <id>");
-			return;
+			this.host.showWarning(`Usage: ${usage}`);
+			return undefined;
 		}
 		const agentId = normalizeBotOrTeamId(rawId, "agentId");
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId && b.persistent);
-		if (!bot) {
-			this.host.showWarning(`No bot named ${agentId}. Create it with /bot new ${agentId} <model> [soul...].`);
-			return;
-		}
+		if (!bot) this.host.showWarning(`No bot named ${agentId}. Create it with /bot new ${agentId} <model> [soul...].`);
+		return bot;
+	}
+
+	/** `/bot lead <id>` and `/bot unlead <id>`: only the owner makes a bot a leader; a leader creates bots on the fly. */
+	private setBotLeader(rest: string, leader: boolean, port: BotTeamChatSessionPort): void {
+		const bot = this.namedPersistentBot(rest, `/bot ${leader ? "lead" : "unlead"} <id>`, port);
+		if (!bot) return;
+		port.upsertPersistentBot({ agentId: bot.agentId, leader });
+		this.host.showStatus(
+			leader
+				? `${bot.agentId} is now a leader: it can create bots, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start.`
+				: `${bot.agentId} is no longer a leader. It takes effect from the bot's next worker start.`,
+		);
+	}
+
+	/** `/bot soul <id>`: edit the bot's soul in a panel and store it through the same write path as `/bot new`. */
+	private async editBotSoul(rest: string, port: BotTeamChatSessionPort): Promise<void> {
+		const bot = this.namedPersistentBot(rest, "/bot soul <id>", port);
+		if (!bot) return;
+		const agentId = bot.agentId;
 		const edited = await this.host.promptForEdit(`Edit soul of bot ${agentId}`, bot.soul ?? "");
 		if (edited === undefined) {
 			this.host.showStatus("Soul edit cancelled.");
@@ -860,7 +886,8 @@ export class BotTeamChatController {
 			.map((b) => {
 				const unread = (b.unreadCount ?? 0) > 0 ? ` · ${b.unreadCount} unread` : "";
 				const sched = (b.routineCount ?? 0) > 0 ? ` · ⏱${b.routineCount}` : "";
-				return `${b.agentId} · ${b.state} · ${b.modelRef}${unread}${sched}`;
+				const role = b.leader ? " · leader" : "";
+				return `${b.agentId}${role} · ${b.state} · ${b.modelRef}${unread}${sched}`;
 			})
 			.join("\n");
 	}

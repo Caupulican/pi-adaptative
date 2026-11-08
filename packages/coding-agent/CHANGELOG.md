@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Bots are created on the fly by the orchestrator and by leaders: the root session has a `bot` tool (create, list), a bot you make a leader with `/bot lead <id>` (`/bot unlead <id>` takes it back) creates bots with `bot_message` `action create`, and every other bot is told to ask a leader or its parent. A leader cannot make a leader, grants write access only when it can write itself, keeps at most 12 bots, and the store records each bot's creator.
+
 ### Changed
 
 - A tool call the harness bounced now reads as one plain sentence in the Execution pane (it showed the `[harness] {"MUST":...}` record written for the model), and record types (`background_tool_task`, `parent_input_wake`, and the rest) show as plain labels in custom messages, the session tree and the report; a message body that is a payload for the model reads "Details for the assistant; they are kept in the transcript." File references in replies are underlined. The live gate now scans the owner's screens for machine text and snake_case identifiers.

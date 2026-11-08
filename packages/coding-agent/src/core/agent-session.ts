@@ -1950,6 +1950,7 @@ export class AgentSession {
 			getProactivityTool: () =>
 				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
 			getRoutineTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createRoutineToolDefinition()),
+			getBotTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createBotToolDefinition()),
 			getChannelReplyTool: () => this._backgroundLanes.createChannelReplyToolDefinition(),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
@@ -2907,10 +2908,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * The session's model is not offered to the owner's account: this session moves to the
-	 * provider's own default for the account (the owner's saved default is left alone), with a
-	 * warning naming both. Returns the replacement's ref, or undefined when there is nothing to leave
-	 * or nothing to move to.
+	 * The session's model is not offered to the owner's account: this session moves to the provider's own
+	 * default for the account (the owner's saved default is left alone), with a warning naming both. Returns
+	 * the replacement's ref, or undefined when there is nothing to leave or nothing to move to.
 	 */
 	private async _leaveUnavailableSessionModel(): Promise<string | undefined> {
 		const current = this.model;

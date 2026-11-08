@@ -6,6 +6,7 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
+import { BOT_TOOL_NAME } from "./delegation/bot-creation.ts";
 import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
@@ -45,6 +46,8 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	SELF_COMPACT_TOOL_NAME,
 	PROACTIVITY_TOOL_NAME,
 	ROUTINE_TOOL_NAME,
+	// Bots are created by the orchestrator and by leaders (through bot_message), never by a worker's own tool.
+	BOT_TOOL_NAME,
 	CHANNEL_REPLY_TOOL_NAME,
 ]);
 
