@@ -34,7 +34,7 @@
 		"border": "fence",
 		"borderAccent": "vivid",
 		"borderMuted": "rule",
-		"success": "green",
+		"success": "greenSoft",
 		"error": "red",
 		"warning": "amber",
 		"muted": "muted",

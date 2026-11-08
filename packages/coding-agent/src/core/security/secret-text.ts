@@ -32,8 +32,9 @@ const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
 const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [
 	/\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_])/,
 	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_])/,
-	// A Telegram bot token, bare or inside a Bot API URL path (`/bot<token>/`), where no word boundary precedes it.
-	/(?:(?<=\/bot)|(?<![A-Za-z0-9_]))\d{6,12}:[A-Za-z0-9_-]{30,64}(?![A-Za-z0-9_-])/,
+	// A Telegram bot token, bare or inside a Bot API URL path (`/bot<token>/`), where no word boundary precedes it. A bot id has at
+	// least eight digits; fewer would also match a seven-digit process id before a UUID (`pi-worker:<pid>:<uuid>`).
+	/(?:(?<=\/bot)|(?<![A-Za-z0-9_]))\d{8,12}:[A-Za-z0-9_-]{30,64}(?![A-Za-z0-9_-])/,
 	// A Google refresh token. `1//` followed by an identifier also reads as floor division in source text.
 	/(?<![A-Za-z0-9_])1\/\/[A-Za-z0-9_-]{40,}/,
 ];
