@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { DEFAULT_COMPACTION_SETTINGS } from "../kernel/compaction/compaction.ts";
-import { isLogLevel, type LogLevel } from "../kernel/harness-log.ts";
+import { harnessLog, isLogLevel, type LogLevel } from "../kernel/harness-log.ts";
 import { withHostFileWrite } from "../utils/host-write-transition.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
@@ -48,6 +48,10 @@ import {
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
 	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+	DEFAULT_FLEET_CEILING_RUNNING,
+	DEFAULT_FLEET_CEILING_TREE,
+	DEFAULT_FLEET_CEILING_WRITERS,
+	DEFAULT_FLEET_RESERVE_MEMORY_PERCENT,
 	DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS,
 	DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
 	DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
@@ -92,8 +96,6 @@ import {
 	DEFAULT_WORKER_DELEGATION_ACCOUNT,
 	DEFAULT_WORKER_DELEGATION_ENABLED,
 	DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
-	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
@@ -141,7 +143,6 @@ import {
 	MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
 	MAX_TOOL_EXECUTION_CONCURRENCY,
 	MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-	MAX_WORKER_DELEGATION_MAX_CONCURRENT,
 	MAX_WORKER_DELEGATION_MAX_USD,
 	MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT,
@@ -162,6 +163,7 @@ import {
 	parseProfileFileDefinition,
 	parseStallBoundMs,
 	parseTimeoutSetting,
+	RETIRED_WORKER_DELEGATION_KEYS,
 	resolveMemorySystem,
 	sanitizeGnuToolsDirSetting,
 	sanitizeIntegerSetting,
@@ -176,6 +178,7 @@ import type {
 	ContextPromptEnforcementSettings,
 	DirectoryResourceProfileInfo,
 	FailoverSettings,
+	FleetSettings,
 	GlobalResourceProfileConfiguration,
 	LearningPolicyLayer,
 	LearningPolicySettings,
@@ -198,6 +201,7 @@ import type {
 	ResolvedActAheadSettings,
 	ResolvedBackgroundToolSettings,
 	ResolvedEdgeSettings,
+	ResolvedFleetSettings,
 	ResolvedLearningPolicySettings,
 	ResolvedProactivityFeedbackSettings,
 	ResolvedProactivitySettings,
@@ -242,6 +246,9 @@ import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
+
+/** The retired worker concurrency keys are reported once per process, however many settings layers or reloads carry them. */
+let retiredWorkerDelegationKeysReported = false;
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
@@ -509,6 +516,16 @@ export class SettingsManager {
 	}
 
 	private reportWorkerDelegationDiagnostics(scope: SettingsErrorScope, settings: Settings): void {
+		const retired = RETIRED_WORKER_DELEGATION_KEYS.filter(
+			(key) => settings.workerDelegation !== undefined && Object.hasOwn(settings.workerDelegation, key),
+		);
+		if (retired.length > 0 && !retiredWorkerDelegationKeysReported) {
+			retiredWorkerDelegationKeysReported = true;
+			harnessLog.info("settings", "retired worker concurrency settings are ignored; the fleet computes room", {
+				scope,
+				keys: retired.join(","),
+			});
+		}
 		const diagnostics: string[] = [];
 		normalizeWorkerDelegationLayer(settings.workerDelegation, (message) => diagnostics.push(message));
 		const pinPolicy = compileWorkerModelPinPolicy({ [scope]: settings.workerDelegation?.modelPins });
@@ -3790,6 +3807,33 @@ export class SettingsManager {
 		return resolved;
 	}
 
+	getFleetSettings(): ResolvedFleetSettings {
+		const configured = this.settings.fleet ?? {};
+		const ceiling = (value: unknown, fallback: number) =>
+			sanitizeIntegerSetting(value, fallback, 1, Number.MAX_SAFE_INTEGER);
+		return {
+			ceiling: {
+				running: ceiling(configured.ceiling?.running, DEFAULT_FLEET_CEILING_RUNNING),
+				writers: ceiling(configured.ceiling?.writers, DEFAULT_FLEET_CEILING_WRITERS),
+				tree: ceiling(configured.ceiling?.tree, DEFAULT_FLEET_CEILING_TREE),
+			},
+			reserve: {
+				memoryPercent: sanitizeNumberSetting(
+					configured.reserve?.memoryPercent,
+					DEFAULT_FLEET_RESERVE_MEMORY_PERCENT,
+					0,
+					90,
+				),
+			},
+		};
+	}
+
+	setFleetSettings(settings: FleetSettings): void {
+		this.globalSettings.fleet = structuredClone(settings);
+		this.markModified("fleet");
+		this.save();
+	}
+
 	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings {
 		const configured = this.settings.worktreeSync ?? {};
 		const resolved: ResolvedWorktreeSyncSettings = {
@@ -4029,18 +4073,6 @@ export class SettingsManager {
 				DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
 				1,
 				MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-			),
-			maxConcurrent: sanitizeIntegerSetting(
-				configured.maxConcurrent,
-				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
-				1,
-				MAX_WORKER_DELEGATION_MAX_CONCURRENT,
-			),
-			maxConcurrentBurst: sanitizeIntegerSetting(
-				configured.maxConcurrentBurst,
-				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST,
-				1,
-				MAX_WORKER_DELEGATION_MAX_CONCURRENT,
 			),
 		};
 		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {

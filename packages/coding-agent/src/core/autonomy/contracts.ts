@@ -3,6 +3,7 @@ import type { JsonObject } from "../../kernel/utils/json-types.ts";
 export type { JsonObject, JsonPrimitive, JsonValue } from "../../kernel/utils/json-types.ts";
 
 import type { HarnessCapability } from "../capability-contract.ts";
+import type { WorkerDeclarableBlocker } from "../delegation/worker-outcome-contract.ts";
 
 export type ModelTier = "cheap" | "medium" | "expensive" | "learning";
 
@@ -202,6 +203,8 @@ export interface WorkerSubmittedReport {
 	readonly ownerUpdate?: "none";
 	/** The worker's statement that the end its routine's brief named was reached; only routines with a stated end act on it. */
 	readonly conditionMet?: true;
+	/** The closed cause the worker declared with a blocker; host facts override it. */
+	readonly blockerCode?: WorkerDeclarableBlocker;
 }
 
 /**

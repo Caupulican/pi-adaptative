@@ -1,5 +1,6 @@
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
@@ -39,6 +40,8 @@ export interface TaskRuntimeState {
 	attemptIds: readonly string[];
 	/** Read-only historical evidence. New verdicts belong to the exact subject attempt. */
 	verification?: VerificationRecord;
+	/** The latest host-computed outcome of this task; a newer build's record keeps only its identity. */
+	outcome?: StoredOutcome;
 }
 
 export interface VerificationRecord {

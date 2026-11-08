@@ -15,29 +15,34 @@ interface RejectionShape {
 	readonly c: CommsErrCode;
 	readonly f?: string;
 	readonly h?: CommsHintCode;
+	/**
+	 * The refusal judges only the call's own input, so the identical call is refused identically whatever else
+	 * happens: it carries a schema and remedies, and the repeated-rejection detector counts it.
+	 */
+	readonly input?: true;
 }
 
 /** How a dispatch-level skip reason maps to an error class, field and hint. A reason absent here is a state refusal. */
 const DELEGATE_REJECTION_SHAPES: Readonly<Record<string, RejectionShape>> = {
-	invalid_action: { c: "E_FIELD", f: "action" },
+	invalid_action: { c: "E_FIELD", f: "action", input: true },
 	action_unavailable: { c: "E_STATE", f: "action" },
-	action_field_forbidden: { c: "E_FIELD", h: "DROP_FIELD" },
-	profile_budget_forbidden: { c: "E_AUTH", f: "budget", h: "DROP_FIELD" },
-	reply_action_required: { c: "E_FIELD", f: "replyToMessageId", h: "DROP_FIELD" },
-	reply_target_forbidden: { c: "E_FIELD", h: "DROP_FIELD" },
-	worker_parallel_intent_invalid: { c: "E_FIELD", f: "parallelWork" },
-	agent_ids_invalid: { c: "E_FIELD", f: "agentIds" },
-	dependency_ids_invalid: { c: "E_FIELD", f: "dependsOn" },
-	wait_mode_invalid: { c: "E_FIELD", f: "mode" },
-	instructions_too_long: { c: "E_LIMIT", f: "instructions", h: "NARROW" },
-	profile_id_too_long: { c: "E_LIMIT", f: "profileId", h: "NARROW" },
-	agent_id_too_long: { c: "E_LIMIT", f: "agentId", h: "NARROW" },
-	message_too_long: { c: "E_LIMIT", f: "message", h: "NARROW" },
-	control_id_invalid: { c: "E_FIELD" },
-	ack_token_invalid: { c: "E_FIELD", f: "ackToken" },
-	cursor_invalid: { c: "E_FIELD", f: "cursor" },
-	page_size_invalid: { c: "E_FIELD", f: "maxMessages" },
-	timeout_invalid: { c: "E_FIELD", f: "timeoutMs" },
+	action_field_forbidden: { c: "E_FIELD", h: "DROP_FIELD", input: true },
+	profile_budget_forbidden: { c: "E_AUTH", f: "budget", h: "DROP_FIELD", input: true },
+	reply_action_required: { c: "E_FIELD", f: "replyToMessageId", h: "DROP_FIELD", input: true },
+	reply_target_forbidden: { c: "E_FIELD", h: "DROP_FIELD", input: true },
+	worker_parallel_intent_invalid: { c: "E_FIELD", f: "parallelWork", input: true },
+	agent_ids_invalid: { c: "E_FIELD", f: "agentIds", input: true },
+	dependency_ids_invalid: { c: "E_FIELD", f: "dependsOn", input: true },
+	wait_mode_invalid: { c: "E_FIELD", f: "mode", input: true },
+	instructions_too_long: { c: "E_LIMIT", f: "instructions", h: "NARROW", input: true },
+	profile_id_too_long: { c: "E_LIMIT", f: "profileId", h: "NARROW", input: true },
+	agent_id_too_long: { c: "E_LIMIT", f: "agentId", h: "NARROW", input: true },
+	message_too_long: { c: "E_LIMIT", f: "message", h: "NARROW", input: true },
+	control_id_invalid: { c: "E_FIELD", input: true },
+	ack_token_invalid: { c: "E_FIELD", f: "ackToken", input: true },
+	cursor_invalid: { c: "E_FIELD", f: "cursor", input: true },
+	page_size_invalid: { c: "E_FIELD", f: "maxMessages", input: true },
+	timeout_invalid: { c: "E_FIELD", f: "timeoutMs", input: true },
 	cursor_out_of_range: { c: "E_LIMIT", f: "cursor" },
 	root_only_action: { c: "E_STATE", f: "action" },
 	worker_only_action: { c: "E_STATE", f: "action" },
@@ -54,19 +59,81 @@ const DELEGATE_REJECTION_SHAPES: Readonly<Record<string, RejectionShape>> = {
 	missing_agent_id: { c: "E_FIELD", f: "agentId" },
 	missing_instructions: { c: "E_FIELD", f: "instructions" },
 	worker_control_identity_conflict: { c: "E_DUP" },
-	goal_instructions_conflict: { c: "E_FIELD", f: "instructions", h: "DROP_FIELD" },
-	brief_requires_goal: { c: "E_FIELD", h: "DROP_FIELD" },
-	goal_invalid: { c: "E_FIELD", f: "goal" },
-	note_invalid: { c: "E_FIELD", f: "note" },
-	refs_invalid: { c: "E_FIELD", f: "refs" },
-	goal_too_long: { c: "E_LIMIT", f: "goal", h: "NARROW" },
-	note_too_long: { c: "E_LIMIT", f: "note", h: "NARROW" },
-	refs_too_long: { c: "E_LIMIT", f: "refs", h: "NARROW" },
+	goal_instructions_conflict: { c: "E_FIELD", f: "instructions", h: "DROP_FIELD", input: true },
+	brief_requires_goal: { c: "E_FIELD", h: "DROP_FIELD", input: true },
+	goal_invalid: { c: "E_FIELD", f: "goal", input: true },
+	note_invalid: { c: "E_FIELD", f: "note", input: true },
+	refs_invalid: { c: "E_FIELD", f: "refs", input: true },
+	goal_too_long: { c: "E_LIMIT", f: "goal", h: "NARROW", input: true },
+	note_too_long: { c: "E_LIMIT", f: "note", h: "NARROW", input: true },
+	refs_too_long: { c: "E_LIMIT", f: "refs", h: "NARROW", input: true },
 	worker_transcript_envelope_exceeded: { c: "E_LIMIT", f: "maxMessages", h: "NARROW" },
-	fanout_agent_id_conflict: { c: "E_FIELD", f: "agentId", h: "DROP_FIELD" },
-	read_only_tool_conflict: { c: "E_FIELD", f: "toolNames", h: "DROP_FIELD" },
+	fanout_agent_id_conflict: { c: "E_FIELD", f: "agentId", h: "DROP_FIELD", input: true },
+	read_only_tool_conflict: { c: "E_FIELD", f: "toolNames", h: "DROP_FIELD", input: true },
 	fanout_unavailable: { c: "E_STATE", f: "slices" },
+	// The third identical input refusal inside the window; the record keeps the repeated refusal's class, field and hint.
+	request_repeated: { c: "E_FIELD", input: true },
 };
+
+/** Whether a skip reason judges only the call's own input (see {@link RejectionShape.input}). */
+export function isInputRejection(skipReason: string | undefined): boolean {
+	return skipReason !== undefined && DELEGATE_REJECTION_SHAPES[skipReason]?.input === true;
+}
+
+/**
+ * One way to make a refused call valid. `patch` is an RFC 7386 merge patch over the call's arguments (a `null`
+ * member removes that field) when the repair is mechanical; a remedy without one names the field to change.
+ */
+export interface DelegateRemedy {
+	readonly kind: "drop_field" | "move_field" | "narrow_field" | "fix_field";
+	readonly field: string;
+	readonly patch?: Readonly<Record<string, unknown>>;
+}
+
+/** A refusal of the call's own input: the record, the action's schema fragment `s` and the remedies `r`. */
+export interface DelegateErrRecord extends CommsErrRecord {
+	/** The refused action's fields, required fields and one minimal valid call. */
+	readonly s?: string;
+	readonly r?: readonly DelegateRemedy[];
+}
+
+/**
+ * Longest `s` a refusal carries. The kernel shows a tool's own refusal view to the model only as failure evidence,
+ * bounded at 1,600 characters, so the header, `m`, `s` and `r` together must fit inside it.
+ */
+export const MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS = 700;
+/** A moved value travels inside its patch only up to this length; past it the patch removes the field and `x` names the target. */
+const MAX_MOVED_VALUE_CHARS = 240;
+
+/** The remedies an input refusal's hint implies for its field, with the call's own arguments for a move. */
+export function delegateInputRemedies(err: CommsErrRecord, input: Readonly<Record<string, unknown>>): DelegateRemedy[] {
+	const field = err.f;
+	if (!field) return [];
+	switch (err.h) {
+		case "DROP_FIELD":
+			return [{ kind: "drop_field", field, patch: { [field]: null } }];
+		case "MOVE_FIELD": {
+			const value = input[field];
+			const carried = typeof value === "string" && value.trim() && value.length <= MAX_MOVED_VALUE_CHARS;
+			return [
+				{
+					kind: "move_field",
+					field,
+					patch: { [field]: null, ...(err.x && carried ? { [err.x]: value } : {}) },
+				},
+			];
+		}
+		case "NARROW":
+			return [{ kind: "narrow_field", field }];
+		default:
+			return [{ kind: "fix_field", field }];
+	}
+}
+
+/** The lines a refusal adds after its tagged view: `s` (the schema fragment) and `r` (the remedies as JSON). */
+export function renderDelegateRemedyLines(err: DelegateErrRecord): string[] {
+	return [...(err.s ? [`s ${err.s}`] : []), ...(err.r && err.r.length > 0 ? [`r ${JSON.stringify(err.r)}`] : [])];
+}
 
 export interface RejectionOverrides {
 	readonly c?: CommsErrCode;

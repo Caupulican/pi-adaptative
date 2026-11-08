@@ -610,6 +610,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"approval.resolved",
 	"notification.enqueued",
 	"notification.delivered",
+	"task.outcome_recorded",
 ] as const;
 
 export type OrchestrationEventType = (typeof ORCHESTRATION_EVENT_TYPES)[number];

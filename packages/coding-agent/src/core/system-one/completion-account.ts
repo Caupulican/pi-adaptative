@@ -149,15 +149,26 @@ export type CompletionAccount = Omit<CompletionAccountInput, "changes"> & { chan
 /**
  * What the goal tools advertise: a short shape only, because every request carries the tool schemas and the full
  * schema weighed about 700 tokens on each. The account is checked against {@link completionAccountSchema} when it
- * is used, and a malformed one is refused with the first thing wrong.
+ * is used, and a malformed one is refused with every location that is wrong and {@link COMPLETION_ACCOUNT_SHAPE}.
  */
 export function completionAccountInputSchema(description: string) {
 	return Type.Object({}, { additionalProperties: true, description });
 }
 
+/** The locations a malformed account is refused with, at most; the rest are counted. */
+export const MAX_ACCOUNT_ERRORS = 12;
+
+/** The account's compact shape and a minimal valid account, sent back with a malformed one. */
+export const COMPLETION_ACCOUNT_SHAPE =
+	'account {changes:[{path:string|string[], reason, serves:[requirementId|changedPath], evidenceIds?:[id]}], assumptions:[{claim, evidenceIds:[id]}], regressions:[{path, evidenceIds:[id]}], cause?:{claim, evidenceIds:[id], paths?:[changedPath]}}; no other keys; minimal {"changes":[],"assumptions":[],"regressions":[]}';
+
+/**
+ * The account, or every location where it departs from its schema: one entry per JSON path (a union such as `path`
+ * reports one mistake under several branches), at most {@link MAX_ACCOUNT_ERRORS} of them, and how many there were.
+ */
 export function parseCompletionAccount(
 	value: unknown,
-): { readonly account: CompletionAccount } | { readonly error: string } {
+): { readonly account: CompletionAccount } | { readonly errors: readonly string[]; readonly total: number } {
 	if (Value.Check(completionAccountSchema, value))
 		return {
 			account: {
@@ -167,10 +178,14 @@ export function parseCompletionAccount(
 				),
 			},
 		};
-	const first = Value.Errors(completionAccountSchema, value)[0];
-	return {
-		error: first ? `${first.instancePath || "account"}: ${first.message}` : "account does not match its shape",
-	};
+	const byPath = new Map<string, string>();
+	for (const error of Value.Errors(completionAccountSchema, value)) {
+		const path = error.instancePath || "account";
+		if (!byPath.has(path)) byPath.set(path, `${path}: ${error.message}`);
+	}
+	const errors = [...byPath.values()];
+	if (errors.length === 0) return { errors: ["account: does not match its shape"], total: 1 };
+	return { errors: errors.slice(0, MAX_ACCOUNT_ERRORS), total: errors.length };
 }
 
 export type AccountTopic = "scope" | "assumption" | "regression" | "cause" | "mask";

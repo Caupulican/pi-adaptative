@@ -79,12 +79,10 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		reply: { content: [{ type: "text", text: "Worker A reports the held value." }] },
 	});
 	const e7Owner = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
-	// Explicit scenario host configuration: the native global layer keeps its existing workerDelegation fields and sets the cap.
-	const e7GlobalDelegation = world.settingsManager.getGlobalSettings().workerDelegation ?? {};
-	world.settingsManager.setWorkerDelegationSettings({ ...e7GlobalDelegation, maxConcurrent: 1 });
-	expect(world.settingsManager.getWorkerDelegationSettings().maxConcurrent, "the scenario caps workers at one").toBe(
-		1,
-	);
+	// Explicit scenario host configuration: the native global layer keeps its existing fleet fields and sets the running ceiling.
+	const e7GlobalFleet = world.settingsManager.getGlobalSettings().fleet ?? {};
+	world.settingsManager.setFleetSettings({ ...e7GlobalFleet, ceiling: { ...e7GlobalFleet.ceiling, running: 1 } });
+	expect(world.settingsManager.getFleetSettings().ceiling.running, "the scenario caps workers at one").toBe(1);
 	world.provider.enqueue(
 		"root",
 		calls("e7-start-a", [
@@ -348,10 +346,9 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		retainedClaims: [],
 		check: crashCutChecks("the auxiliary owner disposes cleanly"),
 	});
-	expect(
-		world.settingsManager.getWorkerDelegationSettings().maxConcurrent,
-		"the recovered owner keeps the scenario cap",
-	).toBe(1);
+	expect(world.settingsManager.getFleetSettings().ceiling.running, "the recovered owner keeps the scenario cap").toBe(
+		1,
+	);
 	// Only the CURRENT tail may answer a wake: a user-role worker handoff whose header names one of the phase's lanes. Earlier
 	// history never counts, so unrelated words in old turns cannot admit a wake.
 	const e7IsHandoffWake = (request: ScriptedRequest, lanes: readonly string[]): boolean => {

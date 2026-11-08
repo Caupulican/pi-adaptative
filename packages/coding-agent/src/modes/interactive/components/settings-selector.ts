@@ -12,7 +12,6 @@ import {
 	Text,
 } from "@caupulican/pi-tui";
 import { type CostGuardSettings, DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD } from "../../../core/cost-guard.ts";
-import { DEFAULT_WORKER_FLEET_LIMITS } from "../../../core/delegation/worker-fleet-limits.ts";
 import type {
 	HmoeIndependence,
 	HmoePreference,
@@ -39,7 +38,6 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_USD,
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_ENABLED,
-	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
@@ -1549,7 +1547,6 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 		this.state = {
 			...settings,
 			enabled: settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED,
-			maxConcurrent: settings.maxConcurrent ?? DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
 			maxUsd: settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD,
 			maxWallClockMs: settings.maxWallClockMs ?? DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 		};
@@ -1628,29 +1625,6 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				values: ["true", "false"],
 				valueLabels: ON_OFF_VALUE_LABELS,
 			},
-			{
-				id: "worker-delegation-max-concurrent",
-				label: "Max concurrent workers",
-				description: `Global scheduler concurrency for leaf workers; the fleet retains at most ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} logical agents per session`,
-				currentValue: String(this.state.maxConcurrent),
-				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						"Global Worker Concurrency",
-						`Enter any positive safe integer. This limits running leaf workers; fixed safety ceilings separately bound ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents and ${DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches} queued dispatches.`,
-						String(this.state.maxConcurrent),
-						(value) => {
-							const maxConcurrent = Number(value.trim());
-							if (Number.isSafeInteger(maxConcurrent) && maxConcurrent > 0) {
-								this.state = { ...this.state, maxConcurrent };
-								done(String(maxConcurrent));
-								return;
-							}
-							done();
-						},
-						() => done(),
-						"positive safe integer; invalid input keeps the current value",
-					),
-			},
 		];
 
 		this.mountSettingsList(
@@ -1671,9 +1645,6 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 						break;
 					case "worker-delegation-write-enabled":
 						this.state = { ...this.state, writeEnabled: newValue === "true" };
-						break;
-					case "worker-delegation-max-concurrent":
-						this.state = { ...this.state, maxConcurrent: Number(newValue) };
 						break;
 					default:
 						return;

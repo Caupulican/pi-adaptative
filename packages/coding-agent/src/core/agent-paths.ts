@@ -381,6 +381,18 @@ export function workerTerminalOutputArtifactFile(
 	);
 }
 
+/** `<orchestrationSessionDir>/worker-outcome-digests/<outcome-digest>.json` -- one bounded OutcomeDigest per outcome. */
+export function workerOutcomeDigestFile(agentDir: string, parentSessionId: string, outcomeDigest: string): string {
+	if (!/^[a-f0-9]{64}$/i.test(outcomeDigest)) {
+		throw new TypeError("Worker outcome digest identities must be hexadecimal SHA-256 digests.");
+	}
+	return join(
+		orchestrationSessionDir(agentDir, parentSessionId),
+		"worker-outcome-digests",
+		`${outcomeDigest.toLowerCase()}.json`,
+	);
+}
+
 /**
  * `<orchestrationSessionDir>/worker-mailboxes/<scope-digest>.json` -- durable bounded control
  * messages for one logical worker. Identity stays hashed so neither agent ids nor project paths

@@ -30,12 +30,13 @@ export function finalizeWorkerClaim(lifecycle: WorkerLifecycle, input: FinalizeW
 	const snapshot = lifecycle.getTaskRuntimeSnapshot();
 	const task = snapshot.tasks[input.handle.taskId]?.task;
 	const subject = task ? verificationSubjectAttempt(snapshot, task) : undefined;
+	const claim = normalizeWorkerClaimForHost(resultInput.claim);
 	const result = createWorkerResultContract({
 		...resultInput,
 		verificationSubject: subject ? { taskId: subject.taskId, attemptId: subject.attemptId } : undefined,
-		claim: normalizeWorkerClaimForHost(resultInput.claim),
+		claim,
 	});
-	const record = lifecycle.finish(result, { ...(notify === false ? { notify: false } : {}) });
+	const record = lifecycle.finish(result, { claim, ...(notify === false ? { notify: false } : {}) });
 	const notification = notify === false ? undefined : lifecycle.getTerminalNotification(record.laneId);
 	return { result, record, ...(notification ? { notification } : {}) };
 }

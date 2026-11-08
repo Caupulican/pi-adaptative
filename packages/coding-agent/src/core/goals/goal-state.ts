@@ -137,10 +137,10 @@ export interface GoalState {
 	 */
 	clarifications?: readonly GoalClarification[];
 	/**
-	 * System One's last refusal of this goal's completion, keyed by a fingerprint of everything it read
-	 * (the completion view); `count` says how many refusals in a row read the same view. Every
-	 * completion request reruns current proof: a repeat is judged again and never latches an owner
-	 * question.
+	 * The last refusal of this goal's completion: the fingerprint of what was judged, the failed gates and
+	 * `count`, how many refusals in a row failed the same set of gates. Every completion request reruns the
+	 * code checks on current state; System One is asked again only when what it reads changed (an
+	 * unchanged resubmission replays its last judgment), and a repeat never latches an owner question.
 	 */
 	lastCompletionRejection?: GoalCompletionRejection;
 }
@@ -153,8 +153,33 @@ export interface GoalCompletionRejection {
 	findingsOmitted?: number;
 	evidence?: GoalCompletionEvidence;
 	evidenceUnavailable?: string;
-	/** Refusals of this same fingerprint so far. */
+	/**
+	 * The failed gate ids, sorted and unique ({@link completionGateSet}). Optional: refusals persisted before the
+	 * repeat count was keyed by gates carry none.
+	 */
+	gateSet?: readonly string[];
+	/** Refusals in a row that failed this same set of gates. */
 	count: number;
+}
+
+const MAX_GATE_SET_IDS = 16;
+const MAX_GATE_ID_CHARS = 200;
+
+/** The set of failed gate ids a completion refusal is counted under: sorted, unique and bounded. */
+export function completionGateSet(failedGates: readonly { readonly id: string }[]): string[] {
+	return [...new Set(failedGates.map((gate) => gate.id.slice(0, MAX_GATE_ID_CHARS)))]
+		.sort()
+		.slice(0, MAX_GATE_SET_IDS);
+}
+
+function isGateSet(value: unknown): boolean {
+	return (
+		isStringArray(value) && value.length <= MAX_GATE_SET_IDS && value.every((id) => id.length <= MAX_GATE_ID_CHARS)
+	);
+}
+
+function sameGateSet(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+	return left !== undefined && right !== undefined && left.join("\n") === right.join("\n");
 }
 
 export interface GoalCompletionFinding {
@@ -331,11 +356,12 @@ export type GoalEvent =
 			now: string;
 	  }
 	| { type: "progress"; now: string }
-	/** System One refused completion over the view with this fingerprint. */
+	/** Completion was refused over what this fingerprint names, failing the gates in `gateSet`. */
 	| {
 			type: "completion_rejected";
 			fingerprint: string;
 			reasons: readonly string[];
+			gateSet?: readonly string[];
 			findings?: readonly GoalCompletionFinding[];
 			findingsOmitted?: number;
 			evidence?: GoalCompletionEvidence;
@@ -648,7 +674,8 @@ function hasCompletionRejectionFields(value: Record<string, unknown>): boolean {
 		(value.evidenceUnavailable === undefined ||
 			(typeof value.evidenceUnavailable === "string" && value.evidenceUnavailable.length <= 500)) &&
 		(value.findingsOmitted === undefined ||
-			(Number.isSafeInteger(value.findingsOmitted) && Number(value.findingsOmitted) >= 0))
+			(Number.isSafeInteger(value.findingsOmitted) && Number(value.findingsOmitted) >= 0)) &&
+		(value.gateSet === undefined || isGateSet(value.gateSet))
 	);
 }
 
@@ -691,6 +718,7 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 		return {
 			...event,
 			reasons: [...event.reasons],
+			...(event.gateSet ? { gateSet: [...event.gateSet] } : {}),
 			...(event.findings
 				? {
 						findings: copyCompletionFindings(event.findings),
@@ -722,6 +750,9 @@ function cloneGoalState(state: GoalState): GoalState {
 					lastCompletionRejection: {
 						...state.lastCompletionRejection,
 						reasons: [...state.lastCompletionRejection.reasons],
+						...(state.lastCompletionRejection.gateSet
+							? { gateSet: [...state.lastCompletionRejection.gateSet] }
+							: {}),
 						...(state.lastCompletionRejection.findings
 							? { findings: copyCompletionFindings(state.lastCompletionRejection.findings) }
 							: {}),
@@ -1004,6 +1035,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.lastCompletionRejection = {
 				fingerprint: event.fingerprint,
 				reasons: [...event.reasons],
+				...(event.gateSet ? { gateSet: [...event.gateSet] } : {}),
 				...(event.findings
 					? { findings: copyCompletionFindings(event.findings) }
 					: same && previous?.findings
@@ -1023,7 +1055,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 					: same && previous?.evidence
 						? { evidence: { ...previous.evidence } }
 						: {}),
-				count: same && previous ? previous.count + 1 : 1,
+				count: previous && sameGateSet(previous.gateSet, event.gateSet) ? previous.count + 1 : 1,
 			};
 			break;
 		}

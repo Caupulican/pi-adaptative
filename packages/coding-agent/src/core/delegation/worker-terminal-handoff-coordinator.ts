@@ -22,33 +22,35 @@ export interface WorkerTerminalHandoff {
  * snapshot in the same unit as its source means every terminal the durable state admits fits here. A
  * byte ceiling on the serialized record could not promise that: the codec bounds characters, and one
  * character can serialize to six JSON bytes. `waitReason` is process-local queue state that a terminal
- * record never carries, and `costUsd` is a number. With the three handoff identities, one entry holds at
+ * record never carries, `outcomeText` is display text re-derived from the recorded outcome at each
+ * projection (never retained), and `costUsd` is a number. With the three handoff identities, one entry holds at
  * most 11,001 code units, so the durable attempt cap bounds the outbox to about 5.4 MiB of string data.
  */
-const LANE_RECORD_FIELD_MAX_CHARS: Readonly<Record<Exclude<keyof LaneRecord, "waitReason" | "costUsd">, number>> =
-	Object.freeze({
-		laneId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		type: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		status: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		label: MAX_WORKER_TASK_LABEL_LENGTH,
-		profileId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		// `${provider}/${modelId}` of the model binding the attempt ran on.
-		modelRef: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH + 1 + MAX_ORCHESTRATION_MODEL_ID_LENGTH,
-		thinkingLevel: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		reasonCode: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		reasonDetail: MAX_RETAINED_DIAGNOSTIC_CHARS,
-		queuedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		startedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		completedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		goalId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		evidenceEntryId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		worktreeLaneKey: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		agentStatus: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		agentId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		attemptId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		routeSource: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		routePinSource: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	});
+const LANE_RECORD_FIELD_MAX_CHARS: Readonly<
+	Record<Exclude<keyof LaneRecord, "waitReason" | "costUsd" | "outcomeText">, number>
+> = Object.freeze({
+	laneId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	type: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	status: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	label: MAX_WORKER_TASK_LABEL_LENGTH,
+	profileId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	// `${provider}/${modelId}` of the model binding the attempt ran on.
+	modelRef: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH + 1 + MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	thinkingLevel: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	reasonCode: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	reasonDetail: MAX_RETAINED_DIAGNOSTIC_CHARS,
+	queuedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	startedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	completedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	goalId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	evidenceEntryId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	worktreeLaneKey: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	agentStatus: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	agentId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	attemptId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	routeSource: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	routePinSource: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+});
 
 const LANE_RECORD_STRING_FIELDS = Object.keys(LANE_RECORD_FIELD_MAX_CHARS) as Array<
 	keyof typeof LANE_RECORD_FIELD_MAX_CHARS

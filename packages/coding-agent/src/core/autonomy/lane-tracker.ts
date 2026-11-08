@@ -85,6 +85,8 @@ export interface LaneRecord {
 	routeSource?: WorkerModelRouteSource;
 	/** The pin policy layer behind a `model_pin` route. */
 	routePinSource?: string;
+	/** The recorded outcome of this attempt in plain words (status, blocker, next step); no ids or codes. */
+	outcomeText?: string;
 }
 
 const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "managed-worker"];
@@ -145,6 +147,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 		return false;
 	}
 	if (!isOptionalString(record.waitReason)) return false;
+	if (!isOptionalString(record.outcomeText)) return false;
 	return true;
 }
 

@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { storedOutcomeFromValue, taskOutcomeId } from "../delegation/worker-outcome-codec.ts";
+import { isOutcomeFromNewerBuild } from "../delegation/worker-outcome-contract.ts";
 import {
 	hostEventArray,
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
@@ -80,6 +82,7 @@ import {
 	assertRecordHasCapacity,
 	cacheProjectionSerializedBytes,
 	emptyProjection,
+	exactRecord,
 	ProjectionByteTracker,
 } from "./task-runtime-projection.ts";
 import {
@@ -1278,6 +1281,29 @@ export function reduceOrchestrationEvent(
 			const reasonCode = string(event.payload.reasonCode, "task.failed.reasonCode");
 			const current = assertTaskFailureTransition(state, event.aggregateId, taskId, reasonCode);
 			tasks[taskId] = { ...current, task: { ...current.task, status: "failed", updatedAt: event.occurredAt } };
+			break;
+		}
+		case "task.outcome_recorded": {
+			const taskId = event.aggregateId;
+			const current = tasks[taskId];
+			const outcome = storedOutcomeFromValue(event.payload.outcome, "task.outcome_recorded.outcome");
+			// A newer build's outcome is kept by identity and never refused: this build recomputes from durable facts.
+			if (isOutcomeFromNewerBuild(outcome)) {
+				if (current) tasks[taskId] = { ...current, outcome };
+				break;
+			}
+			if (!current) throw new DurableTaskRuntimeError(`Outcome recorded for unknown task '${taskId}'.`);
+			exactRecord(event.payload, "task.outcome_recorded", ["outcome"]);
+			const generation = (current.outcome?.generation ?? 0) + 1;
+			if (
+				outcome.taskId !== taskId ||
+				outcome.objectiveId !== current.task.objectiveId ||
+				outcome.generation !== generation ||
+				outcome.outcomeId !== taskOutcomeId(taskId, generation)
+			) {
+				throw new DurableTaskRuntimeError(`Outcome '${outcome.outcomeId}' does not follow task '${taskId}'.`);
+			}
+			tasks[taskId] = { ...current, outcome };
 			break;
 		}
 		case "task.verification_finished": {

@@ -61,6 +61,7 @@ import type {
 	ModelRouterPoolPreference,
 	ModelRouterSelectionMode,
 	ResolvedEdgeSettings,
+	ResolvedFleetSettings,
 	ResolvedWorkerDelegationSettings,
 	SystemOneSettings,
 	ThinkingLevel,
@@ -86,6 +87,7 @@ export interface ParentExecutionSettingsSource {
 		triggerPercent: number;
 	};
 	getEdgeSettings(): ResolvedEdgeSettings;
+	getFleetSettings(): ResolvedFleetSettings;
 	getMemoryRetrievalSettings(): {
 		enabled: boolean;
 		maxResults: number;

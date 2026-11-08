@@ -43,7 +43,6 @@ import {
 	readAwayChannelCharges,
 	readAwayChannelStatus,
 } from "./channels/away-channels.ts";
-import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
@@ -98,6 +97,7 @@ import type {
 } from "./delegation/session-root-mailbox.ts";
 import { sessionRootAddress } from "./delegation/session-root-mailbox.ts";
 import { getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
+import { type TerminalRoute, type TerminalRouteOwner, TerminalRouting } from "./delegation/terminal-routing.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
 	WorkerAgentActivity,
@@ -141,6 +141,7 @@ import type {
 import { HostEventSessionController } from "./events/host-event-session-controller.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import type { SendUserMessageOptions, ToolDefinition } from "./extensions/types.ts";
+import { subscriptionAllowancePort } from "./fleet/capacity/allowance-room.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalAutoContinueHold, GoalAutoContinueState } from "./goals/goal-auto-continue-state.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
@@ -535,27 +536,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _allowance: SubscriptionAllowanceReader | undefined;
+	private readonly _terminalRouting = new TerminalRouting();
 
-	/**
-	 * Whether the subscription the worker's model will run on reports room; any failure to read it is "no". The
-	 * worker's model decides the account, not the foreground's: under the default `account: "other"` they differ.
-	 */
-	private subscriptionRoom(workerModel: Model<Api>): boolean {
-		try {
-			this._allowance ??= createSubscriptionAllowanceReader({
-				getRegistry: () => this.deps.getModelRegistry(),
-				getModel: () => this.deps.getModel(),
-			});
-			const allowance = this._allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, workerModel);
-			harnessLog.debug("delegation", "burst room read on the worker model's subscription", {
-				provider: workerModel.provider,
-				modelId: workerModel.id,
-				allowance: allowance.kind,
-			});
-			return allowance.kind === "room";
-		} catch {
-			return false;
-		}
+	/** Claims a durable terminal for a structured owner (plan executor, leader controller); see `terminal-routing.ts`. */
+	registerTerminalRoute(owner: TerminalRouteOwner, route: TerminalRoute): () => void {
+		return this._terminalRouting.register(owner, route);
 	}
 
 	private _getWorkerController(): WorkerDelegationController {
@@ -564,7 +549,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				...this.deps,
 				...this._getTranscriptWrites(),
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
-				subscriptionRoom: (model) => this.subscriptionRoom(model),
+				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
+				fleetAllowance: subscriptionAllowancePort(
+					() =>
+						(this._allowance ??= createSubscriptionAllowanceReader({
+							getRegistry: () => this.deps.getModelRegistry(),
+							getModel: () => this.deps.getModel(),
+						})),
+				),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -680,6 +672,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				const notification = this._getWorkerLifecycle().getTaskRuntimeSnapshot().notifications[notificationId];
 				if (!notification) throw new Error("Worker notification is absent from the durable outbox.");
 				if (notification.status === "delivered") return "acknowledged";
+				// A plan- or delegation-owned terminal is that owner's input; its outbox entry stays pending until it acknowledges.
+				if (this._terminalRouting.route(record)) return "separate";
 				// An acting-ahead worker's completion is that episode's own input; it never wakes the owner.
 				if (
 					!this.deps.isChildSession() &&

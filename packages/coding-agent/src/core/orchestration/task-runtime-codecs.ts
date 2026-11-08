@@ -1,6 +1,7 @@
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
+import { storedOutcomeFromValue } from "../delegation/worker-outcome-codec.ts";
 import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
 import {
 	hostEventArray,
@@ -756,13 +757,14 @@ function verificationFromValue(value: unknown, label: string): VerificationRecor
 }
 
 function taskRuntimeStateFromValue(value: unknown, label: string): TaskRuntimeState {
-	const state = exactRecord(value, label, ["task", "attemptIds", "verification"]);
+	const state = exactRecord(value, label, ["task", "attemptIds", "verification", "outcome"]);
 	return {
 		task: taskFromValue(state.task, `${label}.task`),
 		attemptIds: retainedIdentifierArray(state.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, `${label}.attemptIds`),
 		...(state.verification === undefined
 			? {}
 			: { verification: verificationFromValue(state.verification, `${label}.verification`) }),
+		...(state.outcome === undefined ? {} : { outcome: storedOutcomeFromValue(state.outcome, `${label}.outcome`) }),
 	};
 }
 

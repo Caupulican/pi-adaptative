@@ -809,17 +809,23 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				if (truthful === undefined) {
 					throw new Error("the follow-up's report did not reach the foreground root");
 				}
-				// Two facts, asserted separately. The typed report is accepted by the host (Claim Status completed, Host verdict accepted).
-				// The overall line is partial because the lane holds this worker's uncommitted change (host finding, intentional).
+				// Two facts, asserted separately. The typed report is accepted by the host (the claim snapshot: completed, host verdict
+				// accepted). The overall line and the host outcome are partial because the lane holds this worker's uncommitted change
+				// (host finding `lane`, intentional), which leaves the accepted result unverified.
 				// The handoff bounds each blocker value to 240 characters, keeping its head and tail around one elision (worker-claim.ts
 				// handoffClaimValue, bounded-line.ts boundedText). The head budget is ceil((240 - 1) / 2) = 120 and the lane finding's
 				// opening clause through the quoted lane key ends at character 63, so the visible integration note keeps it whole.
 				const identity = `- ${lateRepairTaskId}: partial reason=worker_host_findings`;
+				const lateClaim = session
+					.getWorkerClaimSnapshots()
+					.filter((candidate) => candidate.requestId === lateRepairTaskId)
+					.at(-1);
 				if (
 					lateRepairTaskId === undefined ||
 					!truthful.includes(identity) ||
-					!truthful.includes("Claim Status: completed") ||
-					!truthful.includes("Host verdict: accepted") ||
+					lateClaim?.status !== "completed" ||
+					lateClaim.hostVerdict?.verdict !== "accepted" ||
+					!truthful.includes("Outcome: partial (blocker: unverified_result;") ||
 					truthful.split("LATE-CURRENT-REPORT").length !== 2 ||
 					!truthful.includes("Changed Files (untrusted worker evidence)") ||
 					!truthful.includes("src/late.ts") ||

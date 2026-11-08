@@ -29,6 +29,7 @@ import {
 	type OperationVerdict,
 	operationDroveIds,
 	operationHasNoEffect,
+	operationJudgmentReading,
 	readOperationEffects,
 	readOperationRequest,
 	triageOperation,
@@ -301,6 +302,8 @@ export class OperationGate {
 				noteDecisionTrace(engine, evaluation, {
 					decision: verdicts.map((entry, index) => `c${index}: ${entry.verdict.action}`).join(", "),
 					drove,
+					exit: verdicts.map((entry) => entry.verdict.action).join(","),
+					read: operationJudgmentReading,
 				});
 			return verdicts;
 		});
@@ -431,6 +434,8 @@ export class OperationGate {
 			noteDecisionTrace(engine, evaluation, {
 				decision: `${verdict.action}: ${verdict.finding}`,
 				drove: operationDroveIds(effects, request !== undefined),
+				exit: verdict.action,
+				read: operationJudgmentReading,
 				...(cached ? { facts: ["effects reused from the effect cache"] } : {}),
 			});
 		};

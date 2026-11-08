@@ -7,9 +7,10 @@
  * on System One).
  */
 
+import { type NoulDirection, readNoul } from "../decision/noul.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
-import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
+import { noteDecisionTrace, type SemanticTraceReading } from "./semantic-evaluation-ledger.ts";
 
 /**
  * Each question names one defect. Two ask for the defect itself, which live System One separates far
@@ -58,47 +59,45 @@ export function changesPlan(toolName: string, args: unknown): boolean {
 	return typeof action === "string" && PLAN_CHANGING_ACTIONS.has(action);
 }
 
-/** Each question's defect, and how the defect's probability reads off the answer. */
+/**
+ * Each question's defect and the end a sound plan needs: no to a defect asked as such, yes to the result check.
+ * The cuts are the `plan_review` family's: a decisive fail steers, an ambiguous reading is a doubt.
+ */
 const DEFECTS: readonly {
 	readonly id: string;
 	readonly steer: string;
 	readonly doubt: string;
-	readonly positive: boolean;
+	readonly direction: NoulDirection;
 }[] = [
 	{
 		id: "misses_request_part",
 		steer: "the plan does not cover everything the request asks for; add the missing steps",
 		doubt: "whether the plan covers the whole request",
-		positive: false,
+		direction: "required_false",
 	},
 	{
 		id: "needs_later_step",
 		steer: "a step needs what a later step produces; reorder the plan",
 		doubt: "whether the plan's order works",
-		positive: false,
+		direction: "required_false",
 	},
 	{
 		id: "checks_result",
 		steer: "no step checks the result; add one that runs the tests, the build or the program",
 		doubt: "whether the plan checks its result",
-		positive: true,
+		direction: "required_true",
 	},
 ];
 
-/** A defect this likely steers the model (the noul hard-fail band); above an even chance it is a doubt. */
-const STEER_AT = 0.8;
-const DOUBT_ABOVE = 0.5;
+const PLAN_REVIEW_READINGS: ReadonlyMap<string, SemanticTraceReading> = new Map(
+	DEFECTS.map((defect) => [defect.id, { family: "plan_review", direction: defect.direction }]),
+);
 
 export interface PlanReview {
 	/** Appended to the task_steps result: what the model must fix in the plan now. */
 	readonly steer?: string;
 	/** For the operator: what System One could not settle about the plan. */
 	readonly doubt?: string;
-}
-
-function probability(answer: unknown): number | undefined {
-	const noul = (answer as { noul?: unknown } | undefined)?.noul;
-	return typeof noul === "number" && Number.isFinite(noul) && noul >= 0 && noul <= 1 ? noul : undefined;
 }
 
 export async function reviewPlan(
@@ -127,21 +126,18 @@ export async function reviewPlan(
 	const doubts: string[] = [];
 	const drove: string[] = [];
 	for (const defect of DEFECTS) {
-		const answered = probability(answers[defect.id]);
-		if (answered === undefined) {
-			doubts.push(defect.doubt);
-			drove.push(defect.id);
-			continue;
-		}
-		const defectProbability = defect.positive ? 1 - answered : answered;
-		if (defectProbability >= STEER_AT) steers.push(defect.steer);
-		else if (defectProbability > DOUBT_ABOVE) doubts.push(defect.doubt);
+		// An unanswered question settled nothing: it is a doubt, never a default probability.
+		const reading = readNoul(answers[defect.id], defect.direction, "plan_review");
+		if (reading === "hard_fail") steers.push(defect.steer);
+		else if (reading === "ambiguous" || reading === "unasked") doubts.push(defect.doubt);
 		else continue;
 		drove.push(defect.id);
 	}
 	noteDecisionTrace(engine, evaluation, {
 		decision: `plan review: ${steers.length} steered, ${doubts.length} doubted`,
 		drove,
+		exit: steers.length > 0 ? "steer" : doubts.length > 0 ? "doubt" : "sound",
+		read: (id) => PLAN_REVIEW_READINGS.get(id),
 	});
 	return {
 		...(steers.length > 0 ? { steer: `System One checked the plan: ${steers.join("; ")}.` } : {}),

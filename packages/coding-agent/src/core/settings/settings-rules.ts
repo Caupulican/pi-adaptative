@@ -306,14 +306,18 @@ export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
 
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
 
+/** Worker-delegation keys a settings file may still carry from before computed fleet room; they are ignored. */
+export const RETIRED_WORKER_DELEGATION_KEYS = ["maxConcurrent", "maxConcurrentBurst"] as const;
+
 /**
- * Five concurrently running subagents. The Codex CLI's own per-session default is 4 threads
- * including the root (three subagents); this is an owner-chosen raise above it, not a measured
- * optimum. Lower it in settings when the account or the box cannot take it.
+ * Fleet blast-radius ceilings: they bound a runaway loop, not throughput. Running width is computed room (subscription
+ * allowance, free memory and heap, ledger headroom); in practice the session ledger binds before these.
  */
-export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 5;
-/** Running workers while the subscription reports room: the fleet widens with the allowance, never past the fixed fleet ceilings. */
-export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST = 12;
+export const DEFAULT_FLEET_CEILING_RUNNING = 256;
+export const DEFAULT_FLEET_CEILING_WRITERS = 64;
+export const DEFAULT_FLEET_CEILING_TREE = 1024;
+/** Share of total memory the fleet keeps free for the rest of the machine (never under 1 GiB). */
+export const DEFAULT_FLEET_RESERVE_MEMORY_PERCENT = 10;
 
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE = true;
@@ -326,8 +330,6 @@ export const DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS = 120_000;
 
 /** The largest delay a timer honors; anything above it fires at once. */
 export const MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS = 2_147_483_647;
-
-export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 
 export const WORKER_ACCOUNT_POLICIES: readonly WorkerAccountPolicy[] = ["other", "same"];
 
@@ -813,38 +815,6 @@ export function normalizeWorkerDelegationLayer(
 				reportDiagnostic,
 				"haltReportDeadlineMs",
 				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS}`,
-			);
-		}
-	}
-	if (Object.hasOwn(value, "maxConcurrent")) {
-		if (
-			typeof value.maxConcurrent === "number" &&
-			Number.isSafeInteger(value.maxConcurrent) &&
-			value.maxConcurrent > 0 &&
-			value.maxConcurrent <= MAX_WORKER_DELEGATION_MAX_CONCURRENT
-		) {
-			normalized.maxConcurrent = value.maxConcurrent;
-		} else {
-			reportInvalidWorkerDelegationField(
-				reportDiagnostic,
-				"maxConcurrent",
-				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
-			);
-		}
-	}
-	if (Object.hasOwn(value, "maxConcurrentBurst")) {
-		if (
-			typeof value.maxConcurrentBurst === "number" &&
-			Number.isSafeInteger(value.maxConcurrentBurst) &&
-			value.maxConcurrentBurst > 0 &&
-			value.maxConcurrentBurst <= MAX_WORKER_DELEGATION_MAX_CONCURRENT
-		) {
-			normalized.maxConcurrentBurst = value.maxConcurrentBurst;
-		} else {
-			reportInvalidWorkerDelegationField(
-				reportDiagnostic,
-				"maxConcurrentBurst",
-				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
 			);
 		}
 	}

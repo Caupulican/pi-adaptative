@@ -20,10 +20,7 @@ import { isPlainRecord } from "../util/value-guards.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "./worker-fleet-limits.ts";
 
 /** Keep task views within the same durable session fan-out ceiling as the worker fleet. */
-export const MAX_WORKER_TASK_VIEW_ENTRIES = Math.min(
-	DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession,
-	DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches,
-);
+export const MAX_WORKER_TASK_VIEW_ENTRIES = DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession;
 
 /** Bound model-facing serialization independently of task-count and field-count limits. */
 export const MAX_WORKER_TASK_VIEW_BYTES = 64 * 1024;

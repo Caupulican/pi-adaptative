@@ -3066,11 +3066,9 @@ async function failedQueuedCancel(
 ): Promise<{ held: string; queued: string }> {
 	const trace = world.trace;
 	const R32_REPORT = "The capped reader report is ready.";
-	const previousDelegation = world.settingsManager.getGlobalSettings().workerDelegation ?? {};
-	world.settingsManager.setWorkerDelegationSettings({ ...previousDelegation, maxConcurrent: 1 });
-	expect(world.settingsManager.getWorkerDelegationSettings().maxConcurrent, "the scenario caps workers at one").toBe(
-		1,
-	);
+	const previousFleet = world.settingsManager.getGlobalSettings().fleet ?? {};
+	world.settingsManager.setFleetSettings({ ...previousFleet, ceiling: { ...previousFleet.ceiling, running: 1 } });
+	expect(world.settingsManager.getFleetSettings().ceiling.running, "the scenario caps workers at one").toBe(1);
 	const heldReached = createBarrier();
 	const heldRelease = createBarrier();
 	const wake = createBarrier();
@@ -3231,7 +3229,7 @@ async function failedQueuedCancel(
 	).toBe(queuedReachedBefore);
 	expect(cancelFailures(), "the retried cancellation adds no failure").toHaveLength(1);
 	world.faultMatrix.witness("R32", { control: true });
-	world.settingsManager.setWorkerDelegationSettings(previousDelegation);
+	world.settingsManager.setFleetSettings(previousFleet);
 	if (started.held === undefined || started.queued === undefined)
 		throw new Error("the R32 starts carried no agent ids");
 	// The readiness gate of the next worker-c start, R31's (see R30): both terminals reaching the idle root precede the

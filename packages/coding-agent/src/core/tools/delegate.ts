@@ -4,7 +4,6 @@ import { formatWallClockCap } from "../autonomy/bounded-completion.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
 	COMMS_RECORD_VERSION,
-	type CommsErrRecord,
 	type CommsResultEnvelope,
 	MAX_TASK_GOAL_CHARS,
 	MAX_TASK_NOTE_CHARS,
@@ -73,12 +72,18 @@ import {
 	delegateEventPanelModel,
 	executeDelegateEventAction,
 } from "./delegate-events.ts";
+import { BLOCK_AT_OCCURRENCE, RepeatedRejectionDetector, rejectionSignature } from "./delegate-rejection-signature.ts";
 import {
+	type DelegateErrRecord,
+	delegateInputRemedies,
 	delegateRejection,
 	delegateStartRejection,
+	isInputRejection,
 	isSpecialistStateRefusal,
+	MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS,
 	parseSpecialistReleaseHold,
 	type RejectionOverrides,
+	renderDelegateRemedyLines,
 } from "./delegate-rejections.ts";
 import {
 	DELEGATE_STATUS_ACTIONS,
@@ -550,6 +555,51 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	subscriptions: ["action", "taskId", "expectedRevision", "subscriptions", "cursor", "maxMessages"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
+/** One placeholder value of a schema property's type, for a minimal valid call. */
+function exampleValue(field: string): unknown {
+	const node: unknown = Reflect.get(delegateSchema.properties, field);
+	if (!node || typeof node !== "object") return `<${field}>`;
+	const schema = node as { type?: unknown; minimum?: unknown; anyOf?: unknown; enum?: unknown };
+	const literal = Array.isArray(schema.anyOf)
+		? (schema.anyOf as { const?: unknown }[]).find((member) => member.const !== undefined)?.const
+		: Array.isArray(schema.enum)
+			? schema.enum[0]
+			: undefined;
+	if (literal !== undefined) return literal;
+	if (schema.type === "array") return [`<${field.replace(/s$/, "")}>`];
+	if (schema.type === "integer" || schema.type === "number")
+		return typeof schema.minimum === "number" ? Math.max(schema.minimum, 1) : 1;
+	if (schema.type === "boolean") return true;
+	return `<${field}>`;
+}
+
+/**
+ * The `s` of an input refusal: the action's required fields (each alternative the advertised schema accepts), its
+ * optional fields and one minimal valid call, read from the advertised schema and the action's field list. Bounded
+ * so the whole refusal fits the kernel's failure-evidence bound, where the model reads it.
+ */
+function delegateSchemaFragment(action: DelegateAction): string {
+	const alternatives = delegateSchema.anyOf
+		.filter((alternative) => alternative.properties.action.const === action)
+		.map((alternative) => alternative.required.filter((field) => field !== "action"));
+	const required = alternatives[0] ?? [];
+	const optional = (EXACT_ACTION_ALLOWED_FIELDS[action] as readonly string[]).filter(
+		(field) => field !== "action" && !alternatives.some((fields) => fields.includes(field)),
+	);
+	const instead =
+		alternatives.length > 1
+			? ` (or ${alternatives
+					.slice(1)
+					.map((fields) => fields.join("+"))
+					.join(" or ")} in place of ${required.join("+")})`
+			: "";
+	const example = { action, ...Object.fromEntries(required.map((field) => [field, exampleValue(field)])) };
+	const fragment = `delegate ${action} required: ${required.join(", ") || "none"}${instead}; optional: ${optional.join(", ") || "none"}; minimal call ${JSON.stringify(example)}`;
+	return fragment.length <= MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS
+		? fragment
+		: `${fragment.slice(0, MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS - 1)}…`;
+}
+
 /**
  * Wrong-field input that CARRIES A PAYLOAD is corrected by name instead of being deleted. Deleting
  * these produced a downstream error that never named the field the model actually sent
@@ -558,7 +608,9 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
  * ambiguity these actions exist to avoid. Spellings with exactly one reading are absorbed instead
  * (`task` on follow_up/send is the message, `agentId` on status is that agent's latest lane,
  * `message` on interrupt is queued for the paused worker) — see sanitizeExactActionInput and the
- * executor. Every other disallowed field is refused by name (`E_FIELD`), never deleted.
+ * executor. A lossless spelling in the closed alias map is applied and reported in `n`, never
+ * silently; authority fields are never aliased. Every other disallowed field is refused by name
+ * (`E_FIELD`) with the action's schema and a removal patch, never deleted.
  */
 const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	readonly actions: readonly DelegateAction[];
@@ -682,11 +734,16 @@ function resolveTaskBrief(
 	return { input: { ...input, instructions: renderTaskBrief(brief) }, brief };
 }
 
+/**
+ * The input an action accepts: refused by name, or with each absorbed spelling of the closed alias map moved to its
+ * canonical field and listed in `normalized` as `from->to`, so the result reports it.
+ */
 function sanitizeExactActionInput(
 	input: DelegateToolInput,
 	action: DelegateAction,
-): { input: DelegateToolInput; violation?: ActionViolation } {
+): { input: DelegateToolInput; violation: ActionViolation } | { input: DelegateToolInput; normalized: string[] } {
 	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly string[];
+	const normalized: string[] = [];
 	const correction = correctExactActionInput(input, action);
 	if (correction) return { input: { ...input }, violation: correction };
 	const exactInput = { ...input };
@@ -714,6 +771,7 @@ function sanitizeExactActionInput(
 			if (taskText && !messageText) {
 				exactInput.message = exactInput.task;
 				delete exactInput.task;
+				normalized.push("task->message");
 				continue;
 			}
 			return {
@@ -756,6 +814,7 @@ function sanitizeExactActionInput(
 			if (taskText) {
 				exactInput.instructions = instructionsText ? `${taskText}\n\n${instructionsText}` : taskText;
 				delete exactInput.task;
+				normalized.push("task->instructions");
 				continue;
 			}
 			return {
@@ -828,8 +887,9 @@ function sanitizeExactActionInput(
 				},
 			};
 		}
-		// Every other field outside the action's list is refused by name: deleting it and proceeding ran a call the model
-		// did not write, and the reply never said which of its fields the host ignored.
+		// Every other field outside the action's list and outside the closed alias map is refused by name, with the
+		// action's schema and a removal patch: deleting it and proceeding ran a call the model did not write, and the
+		// reply never said which of its fields the host ignored.
 		return {
 			input: exactInput,
 			violation: {
@@ -839,7 +899,258 @@ function sanitizeExactActionInput(
 			},
 		};
 	}
-	return { input: exactInput };
+	return { input: exactInput, normalized };
+}
+
+/** A call whose input passed every check that reads only the input itself. */
+interface ScreenedDelegateCall {
+	readonly action: DelegateAction;
+	/** The exact input; a structured start carries its rendered task text as `instructions`. */
+	readonly input: DelegateToolInput;
+	readonly brief?: TaskBrief;
+	readonly agentIds?: string[];
+	readonly dependsOnTaskIds?: string[];
+	/** Absorbed spellings as `from->to`, reported on the result. */
+	readonly normalized: readonly string[];
+}
+
+/** A call refused before anything ran: the reason, the detail fields and the record fields the refusal sets. */
+interface DelegateCallRefusal {
+	readonly message: string;
+	readonly details: DelegateToolDetails;
+	readonly overrides?: RejectionOverrides;
+}
+
+/**
+ * Every check of a `delegate` call that reads only its input and the caller's fixed action list, in the order the
+ * executor applies them. Pure: the executor runs it before any host call, and a refusal it returns is the same for
+ * the same input.
+ */
+function screenDelegateInput(
+	originalInput: DelegateToolInput,
+	availableActions: readonly DelegateAction[],
+): { screened: ScreenedDelegateCall } | { refusal: DelegateCallRefusal } {
+	const requestedAction = originalInput.action ?? "start";
+	const refuse = (message: string, details: DelegateToolDetails, overrides?: RejectionOverrides) => ({
+		refusal: { message, details, ...(overrides ? { overrides } : {}) },
+	});
+	if (!isDelegateAction(requestedAction)) {
+		return refuse(`delegate action is invalid: ${requestedAction}`, { started: false, skipReason: "invalid_action" });
+	}
+	if (!availableActions.includes(requestedAction)) {
+		return refuse(`delegate action is unavailable to this caller: ${requestedAction}`, {
+			started: false,
+			action: requestedAction,
+			skipReason: "action_unavailable",
+		});
+	}
+	// A wait for several workers is wait_many however the caller spelled it: waiting is
+	// read-only, so the plural never means anything else (unlike cancel/interrupt/resume/retire,
+	// whose plural spelling stays refused). Measured live: `wait` with agentIds was refused, the
+	// corrected call came a turn later, and the failure ledger rode every request after it. A
+	// plural wait without a mode waits for all of them.
+	const pluralWait =
+		requestedAction === "wait" &&
+		originalInput.agentIds !== undefined &&
+		originalInput.agentId === undefined &&
+		availableActions.includes("wait_many");
+	const action: DelegateAction = pluralWait ? "wait_many" : requestedAction;
+	const normalizedInput =
+		pluralWait && originalInput.mode === undefined ? { ...originalInput, mode: "all" as const } : originalInput;
+	const sanitized = sanitizeExactActionInput(normalizedInput, action);
+	if ("violation" in sanitized) {
+		const { violation } = sanitized;
+		return refuse(
+			violation.message,
+			{ started: false, action, skipReason: violation.skipReason },
+			violation.overrides,
+		);
+	}
+	const resolved = resolveTaskBrief(sanitized.input, action);
+	if (resolved.violation) {
+		const { violation } = resolved;
+		return refuse(
+			violation.message,
+			{ started: false, action, skipReason: violation.skipReason },
+			violation.overrides,
+		);
+	}
+	const { input, brief } = resolved;
+	const normalized = [...(pluralWait ? ["wait->wait_many"] : []), ...sanitized.normalized];
+	if (input.parallelWork !== undefined) {
+		try {
+			const intent = parseWorkerParallelWorkIntent(input.parallelWork);
+			if (input.agentId && intent.independentOf.includes(input.agentId)) {
+				throw new Error(`${input.agentId} cannot run independently of itself; name a different recipient`);
+			}
+		} catch (error) {
+			return refuse(error instanceof Error ? error.message : String(error), {
+				started: false,
+				action,
+				skipReason: "worker_parallel_intent_invalid",
+			});
+		}
+	}
+	let agentIds: string[] | undefined;
+	if (input.agentIds !== undefined) {
+		if (
+			!Array.isArray(input.agentIds) ||
+			input.agentIds.length < 1 ||
+			input.agentIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH
+		) {
+			return refuse(`delegate agentIds must contain from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH} entries`, {
+				started: false,
+				action,
+				skipReason: "agent_ids_invalid",
+			});
+		}
+		agentIds = [];
+		for (const agentId of input.agentIds) {
+			if (
+				typeof agentId !== "string" ||
+				!agentId.trim() ||
+				agentId.trim().length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
+			) {
+				return refuse("delegate agentIds contains an invalid logical worker id", {
+					started: false,
+					action,
+					skipReason: "agent_ids_invalid",
+				});
+			}
+			agentIds.push(agentId.trim());
+		}
+	}
+	let dependsOnTaskIds: string[] | undefined;
+	if (input.dependsOn !== undefined) {
+		try {
+			dependsOnTaskIds = [...normalizeWorkerAgentDependencyTaskIds(input.dependsOn)];
+		} catch (error) {
+			return refuse(error instanceof Error ? error.message : String(error), {
+				started: false,
+				action,
+				skipReason: "dependency_ids_invalid",
+			});
+		}
+	}
+	if (input.mode !== undefined && input.mode !== "any" && input.mode !== "all") {
+		return refuse("delegate wait mode is invalid", { started: false, action, skipReason: "wait_mode_invalid" });
+	}
+	if (input.instructions !== undefined && input.instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) {
+		return refuse(
+			`delegate instructions may not exceed ${MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH} characters`,
+			{
+				started: false,
+				action,
+				skipReason: "instructions_too_long",
+			},
+		);
+	}
+	if (input.profileId !== undefined && input.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
+		return refuse(`delegate profileId may not exceed ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`, {
+			started: false,
+			action,
+			skipReason: "profile_id_too_long",
+		});
+	}
+	if (input.agentId !== undefined && input.agentId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
+		return refuse(`delegate agentId may not exceed ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`, {
+			started: false,
+			action,
+			skipReason: "agent_id_too_long",
+		});
+	}
+	if (input.message !== undefined && input.message.length > MAX_DELEGATE_MESSAGE_CHARS) {
+		return refuse(`delegate message may not exceed ${MAX_DELEGATE_MESSAGE_CHARS} characters`, {
+			started: false,
+			action,
+			skipReason: "message_too_long",
+		});
+	}
+	for (const [label, value] of [
+		["threadId", input.threadId],
+		["replyToMessageId", input.replyToMessageId],
+		["requestMessageId", input.requestMessageId],
+		["messageId", input.messageId],
+	] as const) {
+		if (
+			value !== undefined &&
+			(!value.trim() || value.trim() !== value || value.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
+		) {
+			return refuse(`delegate ${label} is invalid`, { started: false, action, skipReason: "control_id_invalid" });
+		}
+	}
+	if (
+		input.ackToken !== undefined &&
+		(!input.ackToken.trim() ||
+			input.ackToken.trim() !== input.ackToken ||
+			input.ackToken.length > MAX_DELEGATE_ACK_TOKEN_CHARS)
+	) {
+		return refuse("delegate ackToken is invalid", { started: false, action, skipReason: "ack_token_invalid" });
+	}
+	if (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0)) {
+		return refuse("delegate cursor is invalid", { started: false, action, skipReason: "cursor_invalid" });
+	}
+	if (
+		input.maxMessages !== undefined &&
+		(!Number.isSafeInteger(input.maxMessages) ||
+			input.maxMessages < 1 ||
+			input.maxMessages > MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES)
+	) {
+		return refuse("delegate maxMessages is invalid", { started: false, action, skipReason: "page_size_invalid" });
+	}
+	if (
+		input.timeoutMs !== undefined &&
+		(!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 300_000)
+	) {
+		return refuse("delegate timeoutMs is invalid", { started: false, action, skipReason: "timeout_invalid" });
+	}
+	return {
+		screened: {
+			action,
+			input,
+			...(brief ? { brief } : {}),
+			...(agentIds ? { agentIds } : {}),
+			...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
+			normalized,
+		},
+	};
+}
+
+/**
+ * The refusal record of a screened call. An input refusal carries the action's schema fragment `s` and its remedies
+ * `r`; `occurrence` (from the repeated-rejection detector) leads the second with the repeat and turns the third and
+ * later into a block with a plain reason. A refusal that reads state is the bare record.
+ */
+function screenedRefusalRecord(
+	refusal: DelegateCallRefusal,
+	input: DelegateToolInput,
+	occurrence: number,
+): DelegateErrRecord {
+	const { skipReason, action } = refusal.details;
+	const err = delegateRejection(skipReason, refusal.message, refusal.overrides);
+	if (!isInputRejection(skipReason)) return err;
+	const blocked = occurrence >= BLOCK_AT_OCCURRENCE;
+	const record = blocked
+		? delegateRejection(
+				"request_repeated",
+				`Blocked: the host refused this same call ${occurrence - 1} times in the last ten minutes and refuses it again unchanged (${err.m}) Apply a remedy below or change the call.`,
+				{
+					c: err.c,
+					...(err.f ? { f: err.f } : {}),
+					...(err.h ? { h: err.h } : {}),
+					...(err.x ? { x: err.x } : {}),
+				},
+			)
+		: occurrence === 2
+			? delegateRejection(
+					skipReason,
+					`This is the same call the host refused a moment ago. ${refusal.message}`,
+					refusal.overrides,
+				)
+			: err;
+	const s = action && isDelegateAction(action) ? delegateSchemaFragment(action) : undefined;
+	const r = delegateInputRemedies(err, input as Record<string, unknown>);
+	return { ...record, ...(s ? { s } : {}), ...(r.length > 0 ? { r } : {}) };
 }
 
 export interface DelegateRunOutcome {
@@ -922,7 +1233,10 @@ export type DelegateToolDetails = (
 	| DelegateEventToolDetails
 ) &
 	DelegateDispatchDetailProjection &
-	CommsResultEnvelope;
+	CommsResultEnvelope & {
+		/** Spellings the host absorbed into their canonical fields before the call ran, as `from->to`. */
+		n?: readonly string[];
+	};
 
 interface DelegateToolResult {
 	content: Array<{ type: "text"; text: string }>;
@@ -945,10 +1259,69 @@ function stampCommsVersion(run: DelegateExecute): DelegateExecute {
 	};
 }
 
-/** A refusal: nothing ran. The record is the canonical fact; the content is its tagged model view. */
-function refusalResult(err: CommsErrRecord, details: DelegateToolDetails, errorKind?: "operation_outcome") {
+/** The line a result carries when the host moved absorbed spellings to their canonical fields before running the call. */
+function withNormalizations(result: DelegateToolResult, normalized: readonly string[]): DelegateToolResult {
+	if (normalized.length === 0) return result;
 	return {
-		content: [{ type: "text" as const, text: renderCommsErrView(err) }],
+		...result,
+		content: [
+			...result.content,
+			{
+				type: "text",
+				text: `n ${normalized.join(", ")}: the host renamed these fields to the canonical ones before the call ran; send the canonical names next time.`,
+			},
+		],
+		details: { ...result.details, n: normalized },
+	};
+}
+
+/**
+ * The executor's boundary: every input-only check runs first ({@link screenDelegateInput}). A refused input is
+ * counted by its signature, so the repeat leads the second refusal and the third identical one is blocked; a
+ * screened call runs and its result reports the spellings the host absorbed.
+ */
+function screenedExecution(
+	availableActions: readonly DelegateAction[],
+	rejections: RepeatedRejectionDetector,
+	run: (
+		toolCallId: string,
+		screened: ScreenedDelegateCall,
+		signal: AbortSignal | undefined,
+	) => Promise<DelegateToolResult>,
+): DelegateExecute {
+	return stampCommsVersion(async (toolCallId, originalInput, signal) => {
+		const outcome = screenDelegateInput(originalInput, availableActions);
+		if ("screened" in outcome)
+			return withNormalizations(await run(toolCallId, outcome.screened, signal), outcome.screened.normalized);
+		const { refusal } = outcome;
+		const { skipReason } = refusal.details;
+		const occurrence = isInputRejection(skipReason)
+			? rejections.note(
+					rejectionSignature({
+						action: refusal.details.action ?? String(originalInput.action ?? "start"),
+						skipReason: skipReason ?? "",
+						...(refusal.overrides?.f ? { field: refusal.overrides.f } : {}),
+						input: originalInput,
+					}),
+				).occurrence
+			: 1;
+		const record = screenedRefusalRecord(refusal, originalInput, occurrence);
+		return refusalResult(
+			record,
+			occurrence >= BLOCK_AT_OCCURRENCE ? { ...refusal.details, skipReason: "request_repeated" } : refusal.details,
+		);
+	});
+}
+
+/**
+ * A refusal: nothing ran. The record is the canonical fact; the content is its tagged model view, with the `s` and
+ * `r` lines of an input refusal after it.
+ */
+function refusalResult(err: DelegateErrRecord, details: DelegateToolDetails, errorKind?: "operation_outcome") {
+	return {
+		content: [
+			{ type: "text" as const, text: [renderCommsErrView(err), ...renderDelegateRemedyLines(err)].join("\n") },
+		],
 		details: { ...details, err },
 		isError: true as const,
 		...(errorKind ? { errorKind } : {}),
@@ -1652,6 +2025,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 	// An owner model pin policy replaces the fresh-start authority clause.
 	const authorityClause = workerModelPinAuthorityClause(deps.workerModelPinPolicy) ?? DELEGATE_AUTHORITY_CLAUSE;
 	const availableActions = availableDelegateActions(caller, deps);
+	// One window of refused calls per session and caller: a definition is built for exactly one of each.
+	const rejections = new RepeatedRejectionDetector();
 	return {
 		name: "delegate",
 		label: "delegate",
@@ -1691,203 +2066,14 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				expanded,
 			});
 		},
-		execute: stampCommsVersion(async (toolCallId, originalInput, signal) => {
-			const requestedAction = originalInput.action ?? "start";
+		// The kernel shows the model a failed call's record, not the call's own result; the refusal view (its reason, and
+		// for an input refusal the schema fragment and remedies) reaches the model as that record's evidence.
+		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },
+		execute: screenedExecution(availableActions, rejections, async (toolCallId, screened, signal) => {
+			const { action, input, brief, agentIds, dependsOnTaskIds } = screened;
 			// Every refusal is an `err` record: the class, field and hint come from the skip reason's table entry.
 			const invalid = (message: string, actionDetails: DelegateToolDetails, overrides?: RejectionOverrides) =>
 				refusalResult(delegateRejection(actionDetails.skipReason, message, overrides), actionDetails);
-			if (!isDelegateAction(requestedAction)) {
-				return invalid(`delegate action is invalid: ${requestedAction}`, {
-					started: false,
-					skipReason: "invalid_action",
-				});
-			}
-			if (!availableActions.includes(requestedAction)) {
-				return invalid(`delegate action is unavailable to this caller: ${requestedAction}`, {
-					started: false,
-					action: requestedAction,
-					skipReason: "action_unavailable",
-				});
-			}
-			// A wait for several workers is wait_many however the caller spelled it: waiting is
-			// read-only, so the plural never means anything else (unlike cancel/interrupt/resume/retire,
-			// whose plural spelling stays refused). Measured live: `wait` with agentIds was refused, the
-			// corrected call came a turn later, and the failure ledger rode every request after it. A
-			// plural wait without a mode waits for all of them.
-			const pluralWait =
-				requestedAction === "wait" &&
-				originalInput.agentIds !== undefined &&
-				originalInput.agentId === undefined &&
-				availableActions.includes("wait_many");
-			const action: DelegateAction = pluralWait ? "wait_many" : requestedAction;
-			const normalizedInput =
-				pluralWait && originalInput.mode === undefined ? { ...originalInput, mode: "all" as const } : originalInput;
-			const sanitized = sanitizeExactActionInput(normalizedInput, action);
-			const resolved = sanitized.violation ? undefined : resolveTaskBrief(sanitized.input, action);
-			const violation = sanitized.violation ?? resolved?.violation;
-			if (violation) {
-				return invalid(
-					violation.message,
-					{ started: false, action, skipReason: violation.skipReason },
-					violation.overrides,
-				);
-			}
-			// A structured start carries its rendered task text as `instructions`; every reader below sees one task text.
-			const input = resolved?.input ?? sanitized.input;
-			const brief = resolved?.brief;
-			let agentIds: string[] | undefined;
-			if (input.parallelWork !== undefined) {
-				try {
-					const intent = parseWorkerParallelWorkIntent(input.parallelWork);
-					if (input.agentId && intent.independentOf.includes(input.agentId)) {
-						throw new Error(`${input.agentId} cannot run independently of itself; name a different recipient`);
-					}
-				} catch (error) {
-					return invalid(error instanceof Error ? error.message : String(error), {
-						started: false,
-						action,
-						skipReason: "worker_parallel_intent_invalid",
-					});
-				}
-			}
-			if (input.agentIds !== undefined) {
-				if (
-					!Array.isArray(input.agentIds) ||
-					input.agentIds.length < 1 ||
-					input.agentIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH
-				) {
-					return invalid(
-						`delegate agentIds must contain from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH} entries`,
-						{
-							started: false,
-							action,
-							skipReason: "agent_ids_invalid",
-						},
-					);
-				}
-				agentIds = [];
-				for (const agentId of input.agentIds) {
-					if (
-						typeof agentId !== "string" ||
-						!agentId.trim() ||
-						agentId.trim().length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
-					) {
-						return invalid("delegate agentIds contains an invalid logical worker id", {
-							started: false,
-							action,
-							skipReason: "agent_ids_invalid",
-						});
-					}
-					agentIds.push(agentId.trim());
-				}
-			}
-			let dependsOnTaskIds: string[] | undefined;
-			if (input.dependsOn !== undefined) {
-				try {
-					dependsOnTaskIds = [...normalizeWorkerAgentDependencyTaskIds(input.dependsOn)];
-				} catch (error) {
-					return invalid(error instanceof Error ? error.message : String(error), {
-						started: false,
-						action,
-						skipReason: "dependency_ids_invalid",
-					});
-				}
-			}
-			if (input.mode !== undefined && input.mode !== "any" && input.mode !== "all") {
-				return invalid("delegate wait mode is invalid", {
-					started: false,
-					action,
-					skipReason: "wait_mode_invalid",
-				});
-			}
-			if (
-				input.instructions !== undefined &&
-				input.instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH
-			) {
-				return invalid(
-					`delegate instructions may not exceed ${MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH} characters`,
-					{
-						started: false,
-						action,
-						skipReason: "instructions_too_long",
-					},
-				);
-			}
-			if (input.profileId !== undefined && input.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
-				return invalid(`delegate profileId may not exceed ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`, {
-					started: false,
-					action,
-					skipReason: "profile_id_too_long",
-				});
-			}
-			if (input.agentId !== undefined && input.agentId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
-				return invalid(`delegate agentId may not exceed ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`, {
-					started: false,
-					action,
-					skipReason: "agent_id_too_long",
-				});
-			}
-			if (input.message !== undefined && input.message.length > MAX_DELEGATE_MESSAGE_CHARS) {
-				return invalid(`delegate message may not exceed ${MAX_DELEGATE_MESSAGE_CHARS} characters`, {
-					started: false,
-					action,
-					skipReason: "message_too_long",
-				});
-			}
-			for (const [label, value] of [
-				["threadId", input.threadId],
-				["replyToMessageId", input.replyToMessageId],
-				["requestMessageId", input.requestMessageId],
-				["messageId", input.messageId],
-			] as const) {
-				if (
-					value !== undefined &&
-					(!value.trim() || value.trim() !== value || value.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
-				) {
-					return invalid(`delegate ${label} is invalid`, {
-						started: false,
-						action,
-						skipReason: "control_id_invalid",
-					});
-				}
-			}
-			if (
-				input.ackToken !== undefined &&
-				(!input.ackToken.trim() ||
-					input.ackToken.trim() !== input.ackToken ||
-					input.ackToken.length > MAX_DELEGATE_ACK_TOKEN_CHARS)
-			) {
-				return invalid("delegate ackToken is invalid", {
-					started: false,
-					action,
-					skipReason: "ack_token_invalid",
-				});
-			}
-			if (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0)) {
-				return invalid("delegate cursor is invalid", { started: false, action, skipReason: "cursor_invalid" });
-			}
-			if (
-				input.maxMessages !== undefined &&
-				(!Number.isSafeInteger(input.maxMessages) ||
-					input.maxMessages < 1 ||
-					input.maxMessages > MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES)
-			) {
-				return invalid("delegate maxMessages is invalid", {
-					started: false,
-					action,
-					skipReason: "page_size_invalid",
-				});
-			}
-			if (
-				input.timeoutMs !== undefined &&
-				(!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 300_000)
-			) {
-				return invalid("delegate timeoutMs is invalid", {
-					started: false,
-					action,
-					skipReason: "timeout_invalid",
-				});
-			}
 			const requireAgentId = (): string | undefined => {
 				const agentId = input.agentId?.trim();
 				if (agentId) return agentId;

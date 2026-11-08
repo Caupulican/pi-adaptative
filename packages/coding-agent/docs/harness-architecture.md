@@ -173,8 +173,10 @@ workers, session identities, and queued dispatches. There is no worker-child dep
 authority to inherit.
 Admission preserves queue, task, attempt, and agent headroom for every already-admitted pending
 verifier plus the current contract's future verifier. Failed mandatory-verifier dispatch remains
-durably derivable and replays on queue-capacity events. One global scheduler owns concurrency and
-durable queuing, one root coordinator owns cumulative token/cost/tool/active-time/attempt budgets, and exact
+durably derivable and replays on queue-capacity events. One scheduler per session owns durable
+queuing; the session's fleet (`core/fleet/`) decides concurrency as room computed from facts (the
+running and writer ceilings, the worker account's subscription allowance, free memory and the shared
+heap) and wakes a queued worker when the resource it waits on changes. One root coordinator owns cumulative token/cost/tool/active-time/attempt budgets, and exact
 task cycles are rejected. Each worker's host execution grant remains immutable for its lifetime and
 is narrowed only by explicit root-owned policy. `run_process`
 keeps its separate exact executable allowlist, direct argv, scoped environment, bounded output, and

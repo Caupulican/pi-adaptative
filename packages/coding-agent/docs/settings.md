@@ -266,7 +266,7 @@ For a new logical agent, `forkTurns` chooses immutable sanitized birth context: 
 }
 ```
 
-Fleet creation is bounded before Pi creates a durable task, conversation, agent, or queue entry: one session may retain at most 256 logical agents, and the scheduler may retain at most 256 queued dispatches. Every compiled worker profile has zero descendant depth and fan-out even if a legacy profile contains recursive limits. Admission preserves queue and durable-projection headroom for mandatory verifiers. A verifier dispatch that encounters saturation remains represented by its durable subject and replays on a queue-capacity event. `workerDelegation.maxConcurrent` is the global running-agent limit; excess admitted work enters the bounded durable queue. Worker token, cost, tool-call, active-wall-clock, and attempt usage are reconstructed from durable checkpoints and checked before more work is admitted. The default delegation baseline adds no cost or active-time ceiling; positive global settings, profile budgets, and inherited foreground ceilings remain authoritative when explicitly configured.
+Fleet creation is bounded before Pi creates a durable task, conversation, agent, or queue entry: one session may retain at most 256 logical agents, and the scheduler queues at most its ready window (see Fleet). Every compiled worker profile has zero descendant depth and fan-out even if a legacy profile contains recursive limits. Admission preserves queue and durable-projection headroom for mandatory verifiers. A verifier dispatch that encounters saturation remains represented by its durable subject and replays on a queue-capacity event. How many workers run at once is the fleet's computed room (see Fleet); excess admitted work enters the bounded durable queue. Worker token, cost, tool-call, active-wall-clock, and attempt usage are reconstructed from durable checkpoints and checked before more work is admitted. The default delegation baseline adds no cost or active-time ceiling; positive global settings, profile budgets, and inherited foreground ceilings remain authoritative when explicitly configured.
 
 `delegate` exposes the shared durable worker state to the owning root through distinct control actions:
 
@@ -295,8 +295,6 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.maxUsd` | number | `0` | USD ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
 | `workerDelegation.maxWallClockMs` | number | `0` | Active wall-clock ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
 | `workerDelegation.haltReportDeadlineMs` | number | `120000` | How long an interrupted worker gets to reach a request boundary and report before it is cancelled; up to 2147483647 |
-| `workerDelegation.maxConcurrent` | number | `5` | Global running-agent concurrency inside the fixed fleet and queue bounds; the Codex CLI's own per-session limit is 3 subagents (4 threads including the root) |
-| `workerDelegation.maxConcurrentBurst` | number | `12` | Running-agent concurrency while the session's subscription reports room (the account's usage windows are below the quota percent); never below `maxConcurrent`, and the fixed fleet bounds still hold. A model that is not a subscription login, or a usage reading that is missing or stale, keeps `maxConcurrent` |
 | `workerDelegation.routeProviders` | string[] | `[]` | Providers workers are routed to, in order, under `account: other`. Left empty, the harness routes only to subscription logins (OAuth), never to a provider reached only by an API key; naming an API provider here is the explicit choice that allows it |
 | `workerDelegation.modelPins.default` | binding | unset | The worker profile: `{provider, modelId, thinkingLevel}` every worker uses. A hard task (`assign` with `deep`, or `delegate` with a higher `thinkingLevel`) raises only the thinking level, never the model |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
@@ -306,6 +304,27 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.routeProviders` | string[] | `[]` | Ordered routing candidates, each `provider` (its default model) or `provider/modelId`; every other authenticated provider follows in catalog order. Example: `["openrouter/inclusionai/ling-3.0-flash-fin:free", "openai-codex"]` |
 | `workerDelegation.routeProvidersByRole` | object | - | Per worker role (`explorer`, `implementer`, `verifier`, ...), an ordered candidate list that replaces `routeProviders` for that role, so a verifier can run on a stronger account than an explorer |
 | `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
+
+The former `workerDelegation.maxConcurrent` and `workerDelegation.maxConcurrentBurst` are retired: a settings file that still contains them loads, the keys are ignored, and the harness log records one `settings` info line naming them.
+
+### Fleet
+
+The fleet decides how many workers run at once from facts, not from a fixed count. Before a queued worker starts, its room is the smallest of these terms, checked in order; the first term without room for one more worker holds it and names the reason in the queue entry:
+
+1. the fleet is stopped;
+2. the running ceiling (`fleet.ceiling.running`), and for a worker that writes files the writer ceiling;
+3. the subscription allowance of the account the worker's own model runs on: while the provider flags a limit or any usage window is at or past 95% (the default owner quota line, fixed for the fleet), nothing more starts on that account until the latest of those windows resets; a reading below it, or one that is missing, stale or not a subscription, leaves the term open;
+4. free machine memory above the reserve (`fleet.reserve.memoryPercent` of total memory, at least 1 GiB), after the expected cost of workers that started but have not grown yet;
+5. the shared heap of in-process workers, kept under 70% of its limit (open under Bun, which reports no V8 old-space limit).
+
+A waiting worker starts when the resource it waits on changes (a worker ends, an allowance reading changes, an allowance window's reset time arrives); nothing polls. The queue is fair across objectives and their subtrees, ages waiting work, and keeps mandatory verifiers first. Queued ordering metadata (first enqueue time, last wait reason, reopen time, the stop flag) is kept at `<agentDir>/state/fleet/queue/<sessionId>.json` so a restarted session restores it; the queued work itself is recovered from the durable task ledger. The queue admits at most its ready window: the running ceiling plus the larger of 8 and a quarter of it, with the last slot reserved for a mandatory verifier.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `fleet.ceiling.running` | number | `256` | Blast-radius ceiling on workers running at once; computed room decides below it |
+| `fleet.ceiling.writers` | number | `64` | Ceiling on running workers that hold write authority |
+| `fleet.ceiling.tree` | number | `1024` | Ceiling on the nodes of one work tree; read by plan and leader owners, which do not exist yet, so nothing enforces it today |
+| `fleet.reserve.memoryPercent` | number | `10` | Percent of total memory kept free for the rest of the machine (at least 1 GiB); clamped to 0-90 |
 
 ### Orchestrator
 
@@ -713,7 +732,7 @@ Every pi process on the machine (owner sessions, their delegated workers, backgr
 
 **Emergency stop.** `/estop on [reason]` writes `<agentDir>/ESTOP`; every pi on the machine then holds new worker and background provider requests (queued workers stay queued, a running worker's next request waits up to `maxWaitMs` then refuses) while foreground turns continue. `/estop off` lifts it; `touch ~/.pi/agent/ESTOP` works too. `/load` shows what is in flight machine-wide by provider and lane, the recorded limits, the latest provider windows, and the stop.
 
-Measured 2026-09-11 on one box running several pi sessions, Codex CLI and Claude Code: with another Codex request in flight from any process, Codex generation fell from 97.7 to 62.2 tokens per second and first-token latency rose 40% at two or more, while xAI showed no per-account slowdown at up to eight in flight. The census did not measure the in-flight count at which a cap pays for itself, and the Codex CLI applies no per-account cap of its own (its only concurrency control is the per-session thread limit mirrored by `workerDelegation.maxConcurrent`), so no provider is capped by default: the ledger records what is in flight and a limit is an owner choice. Raising a limit trades the owner's foreground latency for aggregate worker throughput.
+Measured 2026-09-11 on one box running several pi sessions, Codex CLI and Claude Code: with another Codex request in flight from any process, Codex generation fell from 97.7 to 62.2 tokens per second and first-token latency rose 40% at two or more, while xAI showed no per-account slowdown at up to eight in flight. The census did not measure the in-flight count at which a cap pays for itself, and the Codex CLI applies no per-account cap of its own (its only concurrency control is a per-session thread limit), so no provider is capped by default: the ledger records what is in flight and a limit is an owner choice. Raising a limit trades the owner's foreground latency for aggregate worker throughput.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -1013,7 +1032,7 @@ Project settings (`.pi/settings.json`) override global settings. Nested objects 
 
 ### Logging
 
-The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
+The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, `fleet`, `settings`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|

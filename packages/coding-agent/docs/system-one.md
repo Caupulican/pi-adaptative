@@ -192,9 +192,31 @@ against the diff or the cited evidence with the same fixed pair of questions the
 evidence show it, does it contradict it), all in one request beside the evidence-matrix questions: it never guesses
 what a diff means, and the model never authors a question. A contradicted claim refuses completion and names the
 claim; a claim the evidence does not settle keeps completion open. Repeating the same account never turns an
-unresolved claim into support. After two evidence requests the guidance changes, while the failure remains. A failure in the account opens no verification obligation: it
+unresolved claim into support. After two judged passes over the claim the guidance changes, while the failure remains;
+an unchanged resubmission is replayed (below) and does not count as a pass. A failure in the account opens no verification obligation: it
 is answered with evidence, not with a hold on every other operation. An account missing or incomplete is one
 refusal that lists what is missing and the evidence ids the model can cite.
+
+Before System One is asked, code runs everything it can on current state: the goal's requirement checks are
+rerun, a malformed account is refused with every location that departs from the schema (one per JSON path, at
+most 12, then the count) and the account's compact shape with a minimal valid account, and the account,
+obligation and deterministic gates are checked. When all of those pass, the transaction computes a digest of
+what the judgment reads (the cold completion projection with each observation keyed by what it says rather than
+its id, the account claims with their evidence text, the whole work diff, the bug-fix flag and the thresholds).
+If System One already refused completion over the same digest in this session, that refusal is replayed and
+System One is not asked again; the refusal says so. Only a refusal System One judged in full is replayed: an
+evaluator outage, an external gate or hook, and any code-only refusal are decided again every time. A
+requirement check's run is keyed by its requirement, not by its output: a failing check is refused before the
+judgment, so every latest run has passed and its output tail (durations, counts) would otherwise change the digest
+on every request. A failed run between two judged requests does not change the digest when the work and the
+latest run are unchanged.
+
+Every completion refusal ends with an `r` line: a JSON list with one remedy per failed gate (`gate`, `kind`,
+`next`, and `requirementId` for a requirement check). The kind comes from a closed table over the gate ids:
+`fix_work`, `attach_evidence`, `revise_claim`, `revise_account`, `resolve_obligation`, `wait_evaluator`
+(an outage, not a production finding) and `ask_owner`; an id outside the table is `follow_next`, meaning
+do what its next step says. The goal records the sorted set of failed gate ids with each refusal and counts
+refusals in a row by that set, so a probability that moves between attempts does not reset the count.
 
 A lint or type-check suppression the patch adds (a `ts-ignore`, `eslint-disable`, `biome-ignore`, `noqa` or `nolint` comment, an
 `allow` attribute, or a cast to `any` in a script file) hides what a check found, so code requires each one to be accounted for:
@@ -285,10 +307,11 @@ there; the rest are starting points kept until an evaluation on this harness's o
 |---|---|---|---|
 | yes/no | `gating` | hard pass 0.93, soft pass 0.85, hard fail 0.2 (mirror 0.07 / 0.15 / 0.8) | measured on the owner-words screen; a soft pass may continue a step, never authorize |
 | yes/no | `advisory` | pass 0.7, fail 0.3 | no soft band; between is undecided and gets its own outcome |
-| yes/no | `operation_effect` | effect absent at or below 0.5, established at 0.8 | probed live on common commands |
+| yes/no | `operation_effect` | effect absent at or below 0.5, established at 0.8 | probed live on common commands; absence looser than 0.10 by written reason (below) |
 | yes/no | `operation_request` | asks at 0.8, clearly does not at 0.2 | |
-| yes/no | `plan_review` | defect steers at 0.8, sound at or below 0.5 | probed live on planted plan defects |
+| yes/no | `plan_review` | defect steers at 0.8, sound at or below 0.5 | probed live on planted plan defects; absence looser than 0.10 by written reason (below) |
 | yes/no | `completion` | outcome holds at 0.7, defect absent at or below 0.5, claim supported at 0.5 | measured on the completion eval set, 2026-09-25 |
+| yes/no | `orchestration` | accept 0.9, absence at or below 0.1 | no soft band: between is `open`; plan graphs, briefs, pair sufficiency, routing doubts; unmeasured |
 | yes/no | knowledge | 0.9 | admission and grounding |
 | Choice | `reversible` | P(option) 0.7 | |
 | Choice | `route` | P(option) 0.88, lead 0.15 | preflight and postflight route |
@@ -297,6 +320,16 @@ there; the rest are starting points kept until an evaluation on this harness's o
 | Choice | `destructive` | P(option) 0.9, then a confirmation step | identifying the intent never performs it |
 | Choice | follow-up | decide at 0.9, ask a narrower question from 0.8 | the authority line |
 | Score | any | confidence at least 0.5, then 0.7 of the mass on one side of the boundary | below the floor a Score decides nothing |
+
+`operation_effect` and `plan_review` share one presence band and accept absence at or below 0.5, looser than
+the 0.10 the owner's rule sets for requiring absence. The written reason: an absence reading in either family
+authorizes nothing beyond what runs without System One. A plan review only steers or annotates a plan the model
+keeps working from; an effect absence lets a shell call run under the edge policy that already governs it. At
+0.10, every routine command whose effect reads between 0.10 and 0.5 would become unsettled, refused in a worker
+and asked of the owner at the root. The measurement owed: a labelled set per question (effect-free and effectful
+operations; sound and planted-defect plans), answered once and re-decided offline from the saved answers
+(`typesafe-review decide`), placing the absence cut where no labelled effect or defect reads below it. Both
+readers take their cuts from `noulBand` over the family's band; neither keeps a local copy.
 
 How an answer is read:
 
@@ -616,7 +649,10 @@ evidence" is one route on one evidence marker, twice. The root reads the ledger 
 
 An evaluation may carry its decision trace: the decision code took, the gates it checked, the judgments
 behind it (P(true) and band for a yes/no, P(chosen option) and the runner-up for a Choice, and whether each
-drove the decision), short facts, and whether the answer came from the certificate cache. The recorder bounds
+drove the decision), short facts, the exit code took, and whether the answer came from the certificate cache.
+Each yes/no judgment also carries the family and direction its consumer read it under, and its band is the
+consumer's reading, not the engine's generic stamp: the operation gate (`operation_effect`, `operation_request`)
+and plan review (`plan_review`) record theirs, so a trace shows the cut that actually decided. The recorder bounds
 it (8 gates, 16 judgments, 8 facts, 120 characters per string) and redacts secrets before it is kept. A caller
 attaches it with `noteTrace(evaluationId, trace)`, taking the id from `audit.evaluationId` of the recorded
 evaluation; it works on an open evaluation, a settled one, and one no longer held in memory. The trace is

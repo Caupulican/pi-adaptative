@@ -109,7 +109,7 @@ function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
 		record.costUsd !== undefined ? `$${record.costUsd.toFixed(2)}` : undefined,
 	].filter((value): value is string => value !== undefined && value !== "");
 	const details = [
-		record.reasonCode ? `reason: ${record.reasonCode.replace(/_/g, " ")}` : undefined,
+		record.outcomeText ?? (record.reasonCode ? `reason: ${record.reasonCode.replace(/_/g, " ")}` : undefined),
 		started ? `started: ${started}` : undefined,
 		completed ? `completed: ${completed}` : undefined,
 	].filter((value): value is string => value !== undefined);

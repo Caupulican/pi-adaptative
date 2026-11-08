@@ -35,6 +35,12 @@ export interface CompletionRejectionDetail {
 export type FinalCompletionVerdict = {
 	failed_gates: CompletionRejectionDetail[];
 	advisories?: CompletionRejectionDetail[];
+	/** System One answered every judged question: both completion stages and the account claims, none unavailable. */
+	judged?: true;
+	/** The last judged refusal, replayed: what the judgment reads is unchanged, so System One was not asked again. */
+	replayed?: true;
+	/** Digest of what the judgment read (`completionJudgmentDigest`); set on judged and replayed verdicts. */
+	inputDigest?: string;
 } & (
 	| { verdict: "complete" | "verify_more" | "retrieve_more" | "rework" }
 	| { verdict: "blocked_external"; diagnostic?: "evaluator_unavailable" }

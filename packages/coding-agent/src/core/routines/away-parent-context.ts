@@ -109,6 +109,7 @@ function awaySettingsSource(settings: SettingsManager, maxUsdPerRun: () => numbe
 	return {
 		getCompactionSettings: () => settings.getCompactionSettings(),
 		getEdgeSettings: () => settings.getEdgeSettings(),
+		getFleetSettings: () => settings.getFleetSettings(),
 		getMemoryRetrievalSettings: () => ({ ...settings.getMemoryRetrievalSettings(), enabled: false }),
 		getModelCapabilitySettings: () => settings.getModelCapabilitySettings(),
 		getModelFavorites: () => settings.getModelFavorites(),
@@ -375,6 +376,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				isDelegateToolActive: () => true,
 				getCapabilityEnvelope: () => undefined,
 				getGoalStateSnapshot: () => undefined,
+				// The parent may open while this host still runs: each keeps its own fleet queue metadata.
+				fleetQueueKey: `${parentSessionId}.away`,
 			},
 			notifications,
 			lifecycle,

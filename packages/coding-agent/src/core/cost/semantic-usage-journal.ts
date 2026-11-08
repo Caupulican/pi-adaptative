@@ -25,9 +25,10 @@ import type { SemanticUsageLedgerIdentity } from "./session-ledger-port.ts";
 /**
  * Bounds of one session's pending usage journal. Upper bound of concurrent evaluations: scan 32 (code-duplicates.ts:310,
  * scaled at most 2x at :305), admission 4 jobs (settings-rules.ts:71), root tool execution 32 (settings-rules.ts:302),
- * and five default workers (settings-schema.ts:321) each running 32 tool calls: (32 + 4 + 32 + 5 * 32) evaluations x 3
- * responses (SYSTEM_ONE_RESPONSES_PER_EVALUATION) = 684, rounded up to 1024. A worker `maxConcurrent` above its default
- * has no source ceiling; once the owner's bound is reached, paid work is refused before payment instead of growing unbounded.
+ * and five workers (the former default concurrency) each running 32 tool calls: (32 + 4 + 32 + 5 * 32) evaluations x 3
+ * responses (SYSTEM_ONE_RESPONSES_PER_EVALUATION) = 684, rounded up to 1024. The fleet may run more workers than five
+ * (its room is computed, bounded only by `fleet.ceiling.running`); once the bound is reached, paid work is refused before
+ * payment instead of growing unbounded.
  *
  * On disk the journal holds at most 1024 records within the derived encoded-receipt bound: every write is checked under the lock against the
  * merged document, and a write past either bound is refused as capacity (the record stays held in memory). In memory the

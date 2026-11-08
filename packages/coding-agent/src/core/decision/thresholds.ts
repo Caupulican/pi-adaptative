@@ -23,11 +23,23 @@ export type YesNoFamily =
 	| "operation_effect"
 	| "operation_request"
 	| "plan_review"
-	| "completion";
+	| "completion"
+	| "orchestration";
 
 /**
  * "Something is present that must not be": established at 0.8, absent at or below an even chance,
  * unsettled between. Shared by the families that ask for an effect or a defect, each measured on its own.
+ *
+ * Absence is accepted at or below 0.5, looser than the 0.10 the owner's rule sets for requiring absence.
+ * The written reason: in both families an absence reading authorizes nothing beyond what runs without
+ * System One. `plan_review` only steers or annotates a plan the model keeps working from, and an
+ * `operation_effect` absence lets a shell call run under the edge policy that already governs it; at 0.10
+ * every routine command whose effect reads in (0.10, 0.5] becomes unsettled, which refuses it in a worker
+ * and asks the owner at the root, an autonomy loss on calls the probes below read as effect-free. The
+ * measurement owed: a labelled set per question (effect-free and effectful operations; sound and planted-defect
+ * plans), answered once, then re-decided offline from the saved answers (`typesafe-review decide`) to place
+ * the absence cut where no labelled effect or defect reads below it. Until that set exists the cut stays a
+ * starting point.
  */
 const PRESENCE_BANDS: NoulBandThresholds = Object.freeze({
 	requiredTrue: Object.freeze({ hardPass: 0.5, softPass: 0.5, hardFail: 0.2 }),
@@ -82,6 +94,16 @@ export const YES_NO_BANDS: Readonly<Record<YesNoFamily, NoulBandThresholds>> = O
 	completion: Object.freeze({
 		requiredTrue: Object.freeze({ hardPass: 0.7, softPass: 0.7, hardFail: 0.7 }),
 		requiredFalse: Object.freeze({ hardPassMax: 0.5, softPassMax: 0.5, hardFailMin: 0.5 }),
+	}),
+	/**
+	 * Orchestration judgments: a plan graph's missing part or dependency, a brief's self-containment, a
+	 * pair's evidence sufficiency, findings that contradict, routing doubts. The owner's rule as written:
+	 * accept at 0.90, require absence at 0.10, no soft band; anything between is `open` and the caller's
+	 * ordered exits give it its own outcome. Unmeasured; Choices in this area read `consequential`.
+	 */
+	orchestration: Object.freeze({
+		requiredTrue: Object.freeze({ hardPass: 0.9, softPass: 0.9, hardFail: 0.1 }),
+		requiredFalse: Object.freeze({ hardPassMax: 0.1, softPassMax: 0.1, hardFailMin: 0.9 }),
 	}),
 });
 

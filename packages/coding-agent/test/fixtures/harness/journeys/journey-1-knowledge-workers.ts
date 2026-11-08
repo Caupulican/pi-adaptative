@@ -475,7 +475,7 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		expect(store.get(privateRecord.id)?.text, "worker reads never mutate unselected owner knowledge").toBe(
 			privateRecord.text,
 		);
-		root.settingsManager.setWorkerDelegationSettings({ maxConcurrent: 1 });
+		root.settingsManager.setFleetSettings({ ceiling: { running: 1 } });
 		await runQueued("correct");
 		await runQueued("forget");
 		const before = world.provider.requests.filter((request) => request.model.id === "worker-a").length;

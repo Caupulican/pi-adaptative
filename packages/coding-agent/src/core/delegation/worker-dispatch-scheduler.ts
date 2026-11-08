@@ -1,13 +1,14 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { FleetQueue } from "../fleet/fleet-queue.ts";
+import type { WeightClass } from "../fleet/fleet-types.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { RetainedReleases } from "../util/resource-release.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
-import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
 export type WorkerDispatchWaitReason =
 	| "capacity"
@@ -73,6 +74,12 @@ export interface WorkerDispatchSchedulerOptions {
 	isDisposed(): boolean;
 	/** Alarm clock of the retained-cancellation retry; absent means the system timers. */
 	timers?: TimerPort;
+	/** The fleet's queue: membership and fair order of every queued lane. */
+	queue: FleetQueue<WorkerDelegationRequest>;
+	/** Whether the fleet's ready window takes one more queued lane; priority work may use the verifier's slot. */
+	queueHasCapacity(queuedCount: number, priority: boolean): boolean;
+	/** The fleet flow a queued lane joins and the class of work it is charged as there. */
+	flowOf(record: LaneRecord): { objectiveId: string; subtreeId: string; weight: WeightClass };
 	admit(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission;
 	/** Read-only asynchronous validation; queue ownership stays live until it settles. */
 	preflight?(
@@ -105,11 +112,10 @@ type CancellationOutcome = { state: "cancelled" } | { state: "unowned" } | { sta
  */
 export class WorkerDispatchScheduler {
 	private readonly options: WorkerDispatchSchedulerOptions;
-	private readonly queued = new Map<string, WorkerDelegationRequest>();
+	/** Queued lanes in the fleet's fair order; priority (verifier) work runs ahead of ordinary work in its flow. */
+	private readonly queued: FleetQueue<WorkerDelegationRequest>;
 	private readonly queuedDispatchTokens = new Map<string, string | undefined>();
 	private readonly queuedDeregisters = new Map<string, () => void>();
-	/** Queued lanes admitted as priority work; they keep arrival order among themselves ahead of ordinary work. */
-	private readonly queuedPriority = new Set<string>();
 	private readonly running = new Map<string, Promise<WorkerDelegationRunOutcome>>();
 	private readonly runningDispatchTokens = new Map<string, string | undefined>();
 	/** Lanes enqueued while their previous run was still settling; queued when that run finishes. */
@@ -153,6 +159,7 @@ export class WorkerDispatchScheduler {
 
 	constructor(options: WorkerDispatchSchedulerOptions) {
 		this.options = options;
+		this.queued = options.queue;
 		this.cancellationRetries = new RetainedReleases<string>({
 			retryOwner: "worker dispatch scheduler",
 			...(options.timers ? { timers: options.timers } : {}),
@@ -211,7 +218,7 @@ export class WorkerDispatchScheduler {
 	}
 
 	hasQueueCapacity(priority = false): boolean {
-		return workerQueueHasCapacity(this.queued.size, priority);
+		return this.options.queueHasCapacity(this.queued.size, priority);
 	}
 
 	/** Notify retained priority work when a bounded queue slot is released. */
@@ -237,22 +244,14 @@ export class WorkerDispatchScheduler {
 			return;
 		}
 		if (!this.hasQueueCapacity(priority)) throw new Error("worker_dispatch_queue_full");
-		if (priority) {
-			// Priority work runs ahead of ordinary work but not ahead of older priority work, so an
-			// earlier mandatory verifier is never overtaken by a later one.
-			const waiting = [...this.queued];
-			this.queued.clear();
-			for (const [laneId, queuedRequest] of waiting) {
-				if (this.queuedPriority.has(laneId)) this.queued.set(laneId, queuedRequest);
-			}
-			this.queued.set(record.laneId, request);
-			for (const [laneId, queuedRequest] of waiting) {
-				if (!this.queuedPriority.has(laneId)) this.queued.set(laneId, queuedRequest);
-			}
-			this.queuedPriority.add(record.laneId);
-		} else {
-			this.queued.set(record.laneId, request);
-		}
+		// Priority work runs ahead of ordinary work in its flow but not ahead of older priority work, so an
+		// earlier mandatory verifier is never overtaken by a later one.
+		this.queued.push({
+			id: record.laneId,
+			payload: request,
+			...this.options.flowOf(record),
+			priority: priority ? 3 : 0,
+		});
 		this.queuedDispatchTokens.set(record.laneId, dispatchToken);
 		try {
 			this.queuedDeregisters.set(
@@ -267,7 +266,6 @@ export class WorkerDispatchScheduler {
 			// Queue insertion and reload-gate registration are one process-local transition. A failed
 			// registration must not leave a lane that appears queued but has no matching blocker.
 			this.queued.delete(record.laneId);
-			this.queuedPriority.delete(record.laneId);
 			this.queuedDispatchTokens.delete(record.laneId);
 			this.reservationBlocked.delete(record.laneId);
 			throw error;
@@ -723,7 +721,7 @@ export class WorkerDispatchScheduler {
 			const runtime = runtimeGenerationAdmission(this.options.agentDir);
 			runtimeLease = runtime.tryAdmitWork({ kind: "lane", label: "worker dispatch" });
 			if (!runtimeLease) {
-				for (const laneId of this.queued.keys()) {
+				for (const laneId of this.queued.ids()) {
 					this.recordWait(laneId, {
 						action: "wait",
 						reason: "runtime_generation",
@@ -742,7 +740,7 @@ export class WorkerDispatchScheduler {
 				this.redrainRequested = false;
 				const passReservationAvailable = this.reservationAvailabilityRequested;
 				this.reservationAvailabilityRequested = false;
-				for (const [laneId, request] of [...this.queued]) {
+				for (const { id: laneId, payload: request } of this.queued.ordered()) {
 					if (this.stopped || this.options.isDisposed()) break;
 					if (this.pendingCancellations.has(laneId)) continue;
 					if (this.reservationBlocked.has(laneId) && !passReservationAvailable) continue;
@@ -827,7 +825,7 @@ export class WorkerDispatchScheduler {
 						continue;
 					}
 					const dispatchToken = this.queuedDispatchTokens.get(laneId);
-					this.removeQueued(laneId);
+					this.removeQueued(laneId, true);
 					if (this.stopped || this.options.isDisposed()) break;
 					let run: Promise<WorkerDelegationRunOutcome>;
 					let started = true;
@@ -868,7 +866,7 @@ export class WorkerDispatchScheduler {
 			this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "session_disposed" }, true);
 		}
 		this.deferred.clear();
-		for (const laneId of [...this.queued.keys()]) {
+		for (const laneId of this.queued.ids()) {
 			// The controller owns durable cancellation and any pre-admission resources (for example a
 			// write reservation). Disposal must still visit every lane and release every process-local
 			// blocker when one durable write fails; the next controller generation recovers any retained
@@ -934,11 +932,11 @@ export class WorkerDispatchScheduler {
 		return true;
 	}
 
-	private removeQueued(laneId: string): void {
+	/** `dispatched` charges the lane's flow for the run it starts; every other removal leaves the flow's share alone. */
+	private removeQueued(laneId: string, dispatched = false): void {
 		this.preflights.delete(laneId);
 		this.validated.delete(laneId);
-		const removed = this.queued.delete(laneId);
-		this.queuedPriority.delete(laneId);
+		const removed = dispatched ? this.queued.dispatch(laneId) : this.queued.delete(laneId);
 		this.queuedDispatchTokens.delete(laneId);
 		this.reservationBlocked.delete(laneId);
 		this.waitStates.delete(laneId);

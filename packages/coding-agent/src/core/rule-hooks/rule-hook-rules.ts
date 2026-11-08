@@ -62,7 +62,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 - Reuse: one specialist per role; retire a worker when its line of work is done.
 - Right-size each worker: readOnly unless it must write; only the tools and paths it needs; the cheapest model and thinkingLevel that can do the task (exploration cheap, design and review strong). Token, cost and wall-clock ceilings come only from host settings or an owner-authored profileId.
 - Brief once, completely, in start fields: goal (objective), refs (paths, ids; never pasted content), note (constraints, stop condition), out (find, edit, ans, rev), evid (cite, cmd, diff, none), requirementIds; instructions is the free-text alternative to goal. No drip of clarifications.
-- Start independent workers in the same turn; maxConcurrent (default 5) queues the rest.
+- Start independent workers in the same turn; the fleet runs as many as it has room for (account allowance, machine memory) and queues the rest.
 - Review in proportion: spot-check cheap claims against files, diffs and check commands; verify risky ones with an independent verifier (a fresh readOnly worker). Send back the specific delta; never redo the work yourself.
 - Steer early: follow_up with a targeted message at the first drift, interrupt when off track, cancel when obsolete. A blocked report is your decision: decide, follow up once, never re-dispatch the identical task.
 - Cost: do not spawn for work smaller than its coordination; batch related questions to one worker. Respect explicit user restrictions and granted authority. On an admission failure use the reported reason and continue locally or report the blocker; never change settings to force a worker.

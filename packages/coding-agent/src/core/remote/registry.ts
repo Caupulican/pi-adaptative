@@ -89,9 +89,10 @@ function writeSecretFile(path: string, value: unknown): void {
 	}
 }
 
-function readJson(path: string): unknown {
+/** Reads a link record; one that holds a secret narrows the directory on Windows first, one that does not (identity, settings) leaves it alone. */
+function readJson(path: string, holdsSecret = true): unknown {
 	if (!existsSync(path)) return undefined;
-	protectLinkDir(dirname(path));
+	if (holdsSecret) protectLinkDir(dirname(path));
 	try {
 		return JSON.parse(readFileSync(path, "utf8"));
 	} catch {
@@ -100,7 +101,7 @@ function readJson(path: string): unknown {
 }
 
 export function loadLinkSettings(agentDir: string): LinkSettings {
-	const stored = readJson(join(dirOf(agentDir), "settings.json"));
+	const stored = readJson(join(dirOf(agentDir), "settings.json"), false);
 	return { requireSealed: isPlainRecord(stored) && stored.requireSealed === true };
 }
 
@@ -114,7 +115,7 @@ function sanitizeName(raw: string): string {
 }
 
 function readIdentity(path: string): MachineIdentity | undefined {
-	const stored = readJson(path);
+	const stored = readJson(path, false);
 	return isPlainRecord(stored) && typeof stored.machineId === "string" && isMachineName(stored.name)
 		? { machineId: stored.machineId, name: stored.name }
 		: undefined;
@@ -132,7 +133,6 @@ export function loadIdentity(agentDir: string): MachineIdentity {
 	if (stored) return stored;
 	const identity: MachineIdentity = { machineId: randomUUID(), name: sanitizeName(hostname()) };
 	mkdirSync(dirOf(agentDir), { recursive: true });
-	protectLinkDir(dirOf(agentDir));
 	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	writeFileSync(temp, `${JSON.stringify(identity, null, 1)}\n`, { mode: 0o600 });
 	try {

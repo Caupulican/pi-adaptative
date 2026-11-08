@@ -14,6 +14,7 @@ import {
 	type AuthenticatedAccount,
 	listAuthenticatedAccounts,
 	type UsageOverviewRegistry,
+	type UsageWindow,
 } from "./usage-overview.ts";
 
 /** How old a snapshot may be and still decide; past it the allowance is unknown (the dollar ceilings apply). */
@@ -21,12 +22,20 @@ export const SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS = 5 * 60_000;
 
 export type SubscriptionAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
-	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string }
+	| {
+			readonly kind: "exhausted";
+			readonly usedPercent: number;
+			readonly reason: string;
+			/** When every exhausted window resets, if the account reports all of them; the allowance reopens then. */
+			readonly retryAt?: number;
+	  }
 	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
 
 /**
- * The ordered exits over one usage snapshot: a missing or stale reading is unknown; a provider-reported limit, or any
- * window at or past `maxUsedPercent`, is exhausted; otherwise there is room.
+ * The ordered exits over one usage snapshot: a missing or stale reading is unknown; a window whose reset time has passed
+ * no longer counts (its usage started over), and a reading whose windows have all reset is unknown; a provider-reported
+ * limit, or any live window at or past `maxUsedPercent`, is exhausted, reopening when the last of those windows resets;
+ * otherwise there is room.
  */
 export function decideSubscriptionAllowance(
 	snapshot: AccountUsageSnapshot | undefined,
@@ -38,11 +47,20 @@ export function decideSubscriptionAllowance(
 		return { kind: "unknown", reason: "the usage reading is stale", subscription: true };
 	if (snapshot.windows.length === 0)
 		return { kind: "unknown", reason: "the account reports no usage window", subscription: true };
-	const usedPercent = Math.max(...snapshot.windows.map((window) => window.usedPercent));
-	if (snapshot.limitReached) return { kind: "exhausted", usedPercent, reason: snapshot.limitReached };
-	if (usedPercent >= maxUsedPercent)
-		return { kind: "exhausted", usedPercent, reason: `a usage window is at ${Math.round(usedPercent)}%` };
+	const live = snapshot.windows.filter((window) => window.resetsAt === undefined || window.resetsAt > now);
+	if (live.length === 0)
+		return { kind: "unknown", reason: "every usage window reset after the reading", subscription: true };
+	const usedPercent = Math.max(...live.map((window) => window.usedPercent));
+	const full = live.filter((window) => window.usedPercent >= maxUsedPercent);
+	if (snapshot.limitReached) return exhausted(usedPercent, snapshot.limitReached, full.length > 0 ? full : live);
+	if (full.length > 0) return exhausted(usedPercent, `a usage window is at ${Math.round(usedPercent)}%`, full);
 	return { kind: "room", usedPercent };
+}
+
+function exhausted(usedPercent: number, reason: string, windows: readonly UsageWindow[]): SubscriptionAllowance {
+	const resets = windows.map((window) => window.resetsAt);
+	const retryAt = resets.every((at) => at !== undefined) ? Math.max(...(resets as number[])) : undefined;
+	return { kind: "exhausted", usedPercent, reason, ...(retryAt !== undefined ? { retryAt } : {}) };
 }
 
 /** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
@@ -66,9 +84,26 @@ export interface SubscriptionAllowanceReaderDeps {
  */
 export class SubscriptionAllowanceReader implements SubscriptionAllowancePort {
 	private readonly deps: SubscriptionAllowanceReaderDeps;
+	private readonly listeners = new Set<(accountKey: string) => void>();
 
 	constructor(deps: SubscriptionAllowanceReaderDeps) {
 		this.deps = deps;
+	}
+
+	/**
+	 * Calls `listener` with the account's key each time a refresh this reader asked for brings a different usage reading
+	 * (a new observation time). A refresh that finds the reading fresh, or fails without a new one, stays silent.
+	 */
+	subscribe(listener: (accountKey: string) => void): () => void {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+
+	/** The usage account a model's requests count against; the provider id when it is not signed in. */
+	accountKey(model: Model<Api>): string {
+		return this.accountFor(model)?.accountKey ?? model.provider;
 	}
 
 	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance {
@@ -76,24 +111,42 @@ export class SubscriptionAllowanceReader implements SubscriptionAllowancePort {
 		const registry = this.deps.getRegistry();
 		if (!model || !registry.isUsingSubscription(model))
 			return { kind: "unknown", reason: "the model is not a subscription login", subscription: false };
-		const account: AuthenticatedAccount | undefined = listAuthenticatedAccounts(registry).find(
-			(candidate) => candidate.provider === model.provider,
-		);
+		const account = this.accountFor(model);
 		if (!account) return { kind: "unknown", reason: "the account is not signed in", subscription: true };
 		const state = this.deps.monitor.state(account, registry);
 		if (state.kind === "unsupported")
 			return { kind: "unknown", reason: "the provider reports no usage", subscription: true };
+		const snapshot = snapshotOf(state);
 		void this.deps.monitor
 			.refresh([account], registry, { currentAccountKey: this.deps.currentAccountKey })
+			.then(() => {
+				const next = snapshotOf(this.deps.monitor.state(account, registry));
+				if (next?.observedAt === snapshot?.observedAt) return;
+				for (const listener of [...this.listeners]) {
+					try {
+						listener(account.accountKey);
+					} catch {
+						// A listener's failure never stops the others from hearing the new reading.
+					}
+				}
+			})
 			.catch(() => undefined);
-		const snapshot =
-			state.kind === "fetched"
-				? state.snapshot
-				: state.kind === "pending" || state.kind === "failed"
-					? state.last
-					: undefined;
 		return decideSubscriptionAllowance(snapshot, this.deps.now(), maxUsedPercent);
 	}
+
+	private accountFor(model: Model<Api>): AuthenticatedAccount | undefined {
+		return listAuthenticatedAccounts(this.deps.getRegistry()).find(
+			(candidate) => candidate.provider === model.provider,
+		);
+	}
+}
+
+function snapshotOf(state: ReturnType<AccountUsageMonitor["state"]>): AccountUsageSnapshot | undefined {
+	return state.kind === "fetched"
+		? state.snapshot
+		: state.kind === "pending" || state.kind === "failed"
+			? state.last
+			: undefined;
 }
 
 /** The production reader of a session: its own usage monitor over the provider's usage endpoint, for the registry and model it names. */

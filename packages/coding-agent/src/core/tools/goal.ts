@@ -14,6 +14,7 @@ import {
 } from "../goals/goal-lifecycle.ts";
 import {
 	applyGoalEvent,
+	completionGateSet,
 	type GoalCompletionEvidence,
 	type GoalEvidenceKind,
 	type GoalEvidenceOutcome,
@@ -43,9 +44,11 @@ import type { RuleHookRefusal } from "../rule-hooks/rule-hook-delivery.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	COMPLETION_ACCOUNT_GUIDANCE,
+	COMPLETION_ACCOUNT_SHAPE,
 	completionAccountInputSchema,
 	parseCompletionAccount,
 } from "../system-one/completion-account.ts";
+import { completionRemedies, completionRemedy, renderCompletionRemedies } from "../system-one/completion-remedies.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
@@ -640,7 +643,25 @@ async function proveGoalRequirementChecks(
 		requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
 		...(signal ? { signal } : {}),
 	});
-	const refusal = describeRequirementCheckRefusal(proof);
+	const described = describeRequirementCheckRefusal(proof);
+	// The harness reruns every check on complete, so a failed one asks for the work it reads to be fixed; checks this
+	// host cannot run are the owner's to run or change.
+	const remedies = proof.unrunnable
+		? [
+				completionRemedy(
+					"requirement_check",
+					"This session cannot run the requirement checks: ask the owner to run them here or to change the check.",
+					{ kind: "ask_owner" },
+				),
+			]
+		: proof.failures.map((failure) =>
+				completionRemedy(
+					"requirement_check",
+					"Fix the outcome this check reads, then call complete; the harness reruns the check.",
+					{ kind: "fix_work", requirementId: failure.requirementId },
+				),
+			);
+	const refusal = described ? [described, ...renderCompletionRemedies(remedies)].join("\n") : undefined;
 	// Checks that could not run ran nothing: there are no runs to report.
 	const ran = proof.checked > 0 && !proof.unrunnable;
 	return {
@@ -668,17 +689,29 @@ function goalCompletionRefusal(
 	return { ...goalExecutionError(action, message, state), errorKind: "operation_outcome" };
 }
 
-/** System One's completion rejection as one line per failed judgment, then what would change it. */
-export function describeCompletionRejection(verdict: {
-	verdict: string;
-	failed_gates: ReadonlyArray<{ reason: string; required_next_proof?: string }>;
-}): string {
+/**
+ * A completion rejection as one line per failed gate, then what would change it, then the same as structured remedies
+ * (`r`, one per gate: its kind from the closed table in `completion-remedies.ts` and its next step). A replayed
+ * verdict says System One was not asked again, and `count` above one says how many refusals in a row failed the same
+ * gates.
+ */
+export function describeCompletionRejection(
+	verdict: Pick<FinalCompletionVerdict, "verdict" | "failed_gates" | "replayed">,
+	count = 1,
+): string {
 	if (verdict.failed_gates.length === 0) return `Completion refused: System One's verdict is '${verdict.verdict}'.`;
 	const nextSteps = [...new Set(verdict.failed_gates.map((gate) => gate.required_next_proof).filter(Boolean))];
 	return [
 		`Completion refused: System One found ${verdict.failed_gates.length} issue(s) (verdict: ${verdict.verdict}).`,
+		...(verdict.replayed
+			? [
+					"Nothing System One reads changed since it refused this completion, so it was not asked again: change the work, the evidence or the account before completing.",
+				]
+			: []),
+		...(count > 1 ? [`This is refusal ${count} in a row over the same failed gates.`] : []),
 		...verdict.failed_gates.map((gate) => `- ${gate.reason}`),
 		...(nextSteps.length > 0 ? ["Next:", ...nextSteps.map((step) => `- ${step}`)] : []),
+		...renderCompletionRemedies(completionRemedies(verdict.failed_gates)),
 	].join("\n");
 }
 
@@ -1223,30 +1256,39 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						// The model's account of the change, which completion reads whoever asks for it.
 						if (input.account) {
 							const parsed = parseCompletionAccount(input.account);
-							if ("error" in parsed)
+							if ("errors" in parsed)
 								return withCheckRuns(
 									goalCompletionRefusal(
 										input.action,
-										`The completion account is malformed: ${parsed.error}.`,
+										[
+											`The completion account is malformed at ${parsed.total} location(s); nothing was judged.`,
+											...parsed.errors.map((error) => `- ${error}`),
+											...(parsed.total > parsed.errors.length
+												? [`- and ${parsed.total - parsed.errors.length} more`]
+												: []),
+											`s ${COMPLETION_ACCOUNT_SHAPE}`,
+										].join("\n"),
 										current,
 									),
 								);
 							systemOne.noteCompletionAccount?.(parsed.account);
 						}
 						const completionView = await systemOne.completionView(signal);
-						const fingerprint = createHash("sha256")
-							.update(JSON.stringify(completionView.view))
-							.digest("hex")
-							.slice(0, 16);
 						const completionDecision = await systemOne.executeCompletionTransaction(
 							requestsBugFix(result.state.goalId, result.state.userGoal),
 							{ persistTerminal: false, signal },
 						);
 						completionAdvisories = completionDecision.advisories;
 						if (completionDecision.verdict !== "complete") {
+							// A judged verdict names what it read; a code-only refusal is keyed by the view.
+							const fingerprint =
+								completionDecision.inputDigest ??
+								createHash("sha256").update(JSON.stringify(completionView.view)).digest("hex").slice(0, 16);
 							let evidence: GoalCompletionEvidence | undefined;
 							let evidenceUnavailable: string | undefined;
 							try {
+								// A replay is retained too (no System One cost): a code-only refusal between the judgment and
+								// its replay changes the fingerprint, and nothing would carry the earlier retention forward.
 								evidence = deps.retainCompletionEvidence?.(toolCallId, completionDecision);
 							} catch (error) {
 								evidenceUnavailable =
@@ -1260,6 +1302,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								type: "completion_rejected",
 								fingerprint,
 								reasons: completionDecision.failed_gates.map((gate) => gate.reason),
+								gateSet: completionGateSet(completionDecision.failed_gates),
 								findings: completionDecision.failed_gates,
 								...(evidence ? { evidence } : {}),
 								...(evidenceUnavailable ? { evidenceUnavailable } : {}),
@@ -1267,7 +1310,11 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 							});
 							deps.saveGoalState(recorded, getGoalStateRevision(current));
 							return withCheckRuns(
-								goalCompletionRefusal(input.action, describeCompletionRejection(completionDecision), recorded),
+								goalCompletionRefusal(
+									input.action,
+									describeCompletionRejection(completionDecision, recorded.lastCompletionRejection?.count),
+									recorded,
+								),
 							);
 						}
 					}

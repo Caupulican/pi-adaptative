@@ -52,6 +52,7 @@ import {
 	judgeAccountClaims,
 } from "./completion-account.ts";
 import { concretizeOutcomeFinding } from "./completion-evidence-gaps.ts";
+import { completionJudgmentDigest } from "./completion-replay.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
@@ -433,6 +434,14 @@ export class SystemOneController {
 	noteCompletionAccount(account: CompletionAccount | undefined): void {
 		this.completionAccount = account;
 	}
+
+	/**
+	 * The last completion refusal System One judged in full, with the digest of what it read. A completion request whose
+	 * code checks pass and whose digest is unchanged replays it instead of asking System One again.
+	 */
+	private judgedRefusal:
+		| { readonly digest: string; readonly verdict: FinalCompletionVerdict; readonly evaluationId: string }
+		| undefined;
 
 	private activeEvaluations = 0;
 	private evaluationIdleListener?: () => void;
@@ -1441,6 +1450,32 @@ export class SystemOneController {
 		const primaryOmit: string[] = [];
 		const primaryProjection = this.projector.completion(this.store.snapshot(), work);
 		const challengeProjection = this.projector.completionChallenge(this.store.snapshot(), work);
+		const judgmentDigest = completionJudgmentDigest({
+			projection: primaryProjection,
+			checkRuns: requirementCheckRuns(snapshot),
+			claims: checkedAccount.claims,
+			work,
+			isBugFix,
+			thresholds: this.config.thresholds,
+		});
+		// Every check above ran on current state; the judgment below reads nothing that changed since System One last
+		// refused, so its answer stands and is not bought again.
+		const replay = this.judgedRefusal?.digest === judgmentDigest ? this.judgedRefusal : undefined;
+		if (replay) {
+			this.syncJudgedCompletionFindings(replay.verdict, replay.evaluationId, true);
+			this.assertStageCurrent(scope);
+			this.settleCompletionPhase(replay.verdict);
+			return {
+				...replay.verdict,
+				failed_gates: replay.verdict.failed_gates.map((gate) => ({ ...gate })),
+				...(replay.verdict.advisories
+					? { advisories: replay.verdict.advisories.map((item) => ({ ...item })) }
+					: {}),
+				judged: true,
+				replayed: true,
+				inputDigest: judgmentDigest,
+			};
+		}
 		const stages = new Map<ValidationStage, StageValidation>();
 		const unavailable: CompletionRejectionDetail[] = [];
 		// The account's claims are judged beside the stages, in the same round trip's time. Started here and
@@ -1537,24 +1572,9 @@ export class SystemOneController {
 		finalVerdict.failed_gates = finalVerdict.failed_gates.map((finding) =>
 			concretizeOutcomeFinding(finding, outcomeRows),
 		);
-		// A claim in the model's own account is answered with better evidence, not with a verification obligation
-		// that holds every other operation until it is resolved.
-		const verifiable = finalVerdict.failed_gates.filter((finding) => !finding.id.startsWith("account_"));
-		// The findings this evaluation raised are the open completion findings. Stale ones are closed only when both
-		// questions were judged: an unavailable evaluator says nothing about a finding it did not re-judge.
-		this.verification.syncCompletionFindings(
-			finalVerdict.verdict === "verify_more"
-				? verifiable.map((finding) =>
-						// The probability changes between evaluations of the same finding; the finding does not.
-						`${finding.id}: ${finding.reason.replace(/\s*\(System One: [^)]*\)/gu, "")} ${finding.required_next_proof}`.slice(
-							0,
-							3_900,
-						),
-					)
-				: [],
-			stages.get("completion")?.evaluationId ?? "completion-evaluation",
-			unavailable.length === 0 && stages.has("completion") && stages.has("completion_challenge"),
-		);
+		const judgedBoth = unavailable.length === 0 && stages.has("completion") && stages.has("completion_challenge");
+		const evaluationId = stages.get("completion")?.evaluationId ?? "completion-evaluation";
+		this.syncJudgedCompletionFindings(finalVerdict, evaluationId, judgedBoth);
 		this.assertStageCurrent(scope);
 		let interruption: SystemOneStageInterruptedError | undefined;
 		for (const stage of stages.values()) {
@@ -1573,6 +1593,19 @@ export class SystemOneController {
 			}
 		}
 		if (interruption) throw interruption;
+		if (judgedBoth) {
+			finalVerdict.judged = true;
+			finalVerdict.inputDigest = judgmentDigest;
+		}
+		// Only System One's own refusal is replayed; external gates, hooks and outages are asked again every time.
+		this.judgedRefusal =
+			judgedBoth && finalVerdict.verdict === "verify_more"
+				? {
+						digest: judgmentDigest,
+						verdict: { ...finalVerdict, failed_gates: finalVerdict.failed_gates.map((gate) => ({ ...gate })) },
+						evaluationId,
+					}
+				: undefined;
 
 		// 5. External completion gate and hooks check (PI-021)
 		if (finalVerdict.verdict === "complete") {
@@ -1643,19 +1676,65 @@ export class SystemOneController {
 		}
 		this.assertStageCurrent(scope);
 
-		// 6. Update state phase according to verdict. Omitted or explicit
-		// persistTerminal does not persist terminal complete. Only
-		// commitTerminalCompletion, called by the outer objective finalization, does.
-		if (finalVerdict.verdict === "blocked_external") {
+		this.settleCompletionPhase(finalVerdict);
+		return finalVerdict;
+	}
+
+	/**
+	 * Update state phase according to the verdict. Omitted or explicit persistTerminal does not persist terminal
+	 * complete. Only commitTerminalCompletion, called by the outer objective finalization, does.
+	 */
+	private settleCompletionPhase(verdict: FinalCompletionVerdict): void {
+		if (verdict.verdict === "blocked_external") {
 			this.store.transitionPhase("blocked_external", true);
-		} else if (finalVerdict.verdict === "rework") {
+		} else if (verdict.verdict === "rework") {
 			this.store.transitionPhase("replan_required", true);
 		} else if (this.store.phase !== "complete") {
 			this.store.transitionPhase("verifying", true);
 		}
-
-		return finalVerdict;
 	}
+
+	/**
+	 * The findings a judged verdict raised are the open completion findings. Stale ones are closed only when both
+	 * questions were judged: an unavailable evaluator says nothing about a finding it did not re-judge. A claim in the
+	 * model's own account is answered with better evidence, not with a verification obligation that holds every other
+	 * operation until it is resolved.
+	 */
+	private syncJudgedCompletionFindings(
+		verdict: FinalCompletionVerdict,
+		evaluationId: string,
+		closesStale: boolean,
+	): void {
+		const verifiable = verdict.failed_gates.filter((finding) => !finding.id.startsWith("account_"));
+		this.verification.syncCompletionFindings(
+			verdict.verdict === "verify_more"
+				? verifiable.map((finding) =>
+						// The probability changes between evaluations of the same finding; the finding does not.
+						`${finding.id}: ${finding.reason.replace(/\s*\(System One: [^)]*\)/gu, "")} ${finding.required_next_proof}`.slice(
+							0,
+							3_900,
+						),
+					)
+				: [],
+			evaluationId,
+			closesStale,
+		);
+	}
+}
+
+/**
+ * Each requirement check run's observation id, to its requirement: a test-kind observation located at a requirement
+ * that carries a harness check (`VR-check-<id>`, see canonical-truth).
+ */
+function requirementCheckRuns(state: ExecutionState): Map<string, string> {
+	const checked = new Set(
+		state.verification.filter((run) => run.id.startsWith("VR-check-")).map((run) => run.id.slice("VR-check-".length)),
+	);
+	return new Map(
+		state.observations
+			.filter((observation) => observation.source.kind === "test" && checked.has(observation.source.locator))
+			.map((observation) => [observation.id, observation.source.locator]),
+	);
 }
 
 const TOOL_INTENT_ARG_KEYS = ["command", "path", "file_path", "pattern", "query", "url", "action", "agentId"] as const;

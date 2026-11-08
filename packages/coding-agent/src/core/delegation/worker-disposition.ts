@@ -3,6 +3,7 @@ import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { boundedText } from "../util/bounded-line.ts";
+import type { NextAction } from "./worker-outcome-contract.ts";
 
 /**
  * What the host recommends the root do with a worker whose task ended. It is advice printed for the
@@ -51,65 +52,148 @@ export interface WorkerDispositionInput extends WorkerDispositionFacts {
 	readonly profileId?: string;
 }
 
+function plainReason(reason: string): string {
+	return boundedText(reason.replace(/[\r\n]+/g, " "), MAX_WORKER_DISPOSITION_REASON_CHARS);
+}
+
 function advice(disposition: WorkerDisposition, reason: string): WorkerDispositionAdvice {
-	return { disposition, reason: boundedText(reason.replace(/[\r\n]+/g, " "), MAX_WORKER_DISPOSITION_REASON_CHARS) };
+	return { disposition, reason: plainReason(reason) };
 }
 
 /**
- * Advice for the root on one ended worker task. In order: `needs_follow_up` when the host verdict,
- * the claim or the owner route leaves something unresolved; `idle` when more work for this profile
- * or an uncovered requirement remains, or when a fact is unknown; otherwise `retire`. The root
- * decides; this never acts.
+ * The typed next step for one ended worker task, with the decision exit that chose it and the reason printed for the
+ * root. `keepWorker` says whether an accepted result still leaves this worker reusable (open work for its profile, an
+ * uncovered requirement, or a fact the host could not read).
  */
-export function deriveWorkerDisposition(input: WorkerDispositionInput): WorkerDispositionAdvice {
+export interface WorkerNextStep {
+	readonly nextAction: NextAction;
+	readonly keepWorker: boolean;
+	readonly exit: string;
+	readonly reason: string;
+}
+
+function step(nextAction: NextAction, exit: string, reason: string, keepWorker = true): WorkerNextStep {
+	return { nextAction, keepWorker, exit, reason };
+}
+
+const FOLLOW_UP: NextAction = { kind: "verify_in_lane" };
+const ACCEPT: NextAction = { kind: "accept" };
+
+/**
+ * The next step for one ended worker task. In order: follow up in the same lane when the host verdict, the claim or the
+ * owner route leaves something unresolved; abandon a cancelled task; check an unverifiable or missing claim before
+ * relying on it; otherwise accept, keeping the worker when more work for its profile or an uncovered requirement
+ * remains, or when a fact is unknown. The root decides; this never acts.
+ */
+export function deriveWorkerNextStep(input: WorkerDispositionInput): WorkerNextStep {
 	const claim = input.claim;
-	if (!claim) return advice("idle", "No claim was recorded; inspect the transcript before deciding.");
+	if (!claim) {
+		return step(
+			{ kind: "verify_independently", requirementIds: [] },
+			"disposition_no_claim",
+			"No claim was recorded; inspect the transcript before deciding.",
+		);
+	}
 	const verdict = claim.hostVerdict?.verdict;
-	if (verdict === "needs_more") return advice("needs_follow_up", "Host verdict needs_more: named proof is missing.");
+	if (verdict === "needs_more")
+		return step(FOLLOW_UP, "disposition_verdict_needs_more", "Host verdict needs_more: named proof is missing.");
 	if (verdict === "rejected")
-		return advice("needs_follow_up", "Host verdict rejected: a stated claim is contradicted.");
-	if (verdict === "blocked") return advice("needs_follow_up", "Host verdict blocked: the worker reported a blocker.");
+		return step(FOLLOW_UP, "disposition_verdict_rejected", "Host verdict rejected: a stated claim is contradicted.");
+	if (verdict === "blocked")
+		return step(FOLLOW_UP, "disposition_verdict_blocked", "Host verdict blocked: the worker reported a blocker.");
 	if (claim.blockers && claim.blockers.length > 0) {
-		return advice("needs_follow_up", `The claim carries ${claim.blockers.length} blocker(s).`);
+		return step(FOLLOW_UP, "disposition_blockers", `The claim carries ${claim.blockers.length} blocker(s).`);
 	}
 	if (claim.inconclusive && claim.inconclusive.length > 0) {
-		return advice("needs_follow_up", `The claim carries ${claim.inconclusive.length} inconclusive finding(s).`);
+		return step(
+			FOLLOW_UP,
+			"disposition_inconclusive",
+			`The claim carries ${claim.inconclusive.length} inconclusive finding(s).`,
+		);
 	}
 	// A change flagged for review holds no problem with the work itself: the root acknowledges it with
 	// `delegate review`, and the advice that follows is about what to do with the worker afterwards.
 	const reviewPending = claim.parentReviewRequired === true && claim.parentReviewedAt === undefined;
-	const settled = (() => {
+	const settled = ((): WorkerNextStep => {
 		if (claim.verification?.verdict === "rejected") {
-			return advice("needs_follow_up", "Independent verification rejected the claim.");
+			return step(FOLLOW_UP, "disposition_verification_rejected", "Independent verification rejected the claim.");
 		}
-		if (claim.ownerFollowUp) return advice("needs_follow_up", "An owner follow-up was recorded for open findings.");
+		if (claim.ownerFollowUp)
+			return step(FOLLOW_UP, "disposition_owner_follow_up", "An owner follow-up was recorded for open findings.");
 		if (claim.status === "partial" || claim.status === "blocked" || claim.status === "failed") {
-			return advice("needs_follow_up", `The claim status is ${claim.status}.`);
+			return step(FOLLOW_UP, `disposition_claim_${claim.status}`, `The claim status is ${claim.status}.`);
 		}
 		if (claim.status === "cancelled")
-			return advice("idle", "The task was cancelled; the worker keeps its transcript.");
+			return step(
+				{ kind: "abandon", reason: "cancelled" },
+				"disposition_cancelled",
+				"The task was cancelled; the worker keeps its transcript.",
+			);
 		if (verdict === "unverified") {
-			return advice("idle", "The host could not check this claim; verify it before retiring the worker.");
+			return step(
+				{ kind: "verify_independently", requirementIds: [] },
+				"disposition_unverified",
+				"The host could not check this claim; verify it before retiring the worker.",
+			);
 		}
 		const open = input.openTasksForSameProfile;
 		if (open !== undefined && open > 0) {
-			return advice("idle", `${open} open task(s) would route to ${input.profileId ?? "this profile"}.`);
+			return step(
+				ACCEPT,
+				"disposition_open_tasks",
+				`${open} open task(s) would route to ${input.profileId ?? "this profile"}.`,
+			);
 		}
 		const uncovered = input.uncoveredRequirementIds;
 		if (uncovered !== undefined && uncovered.length > 0) {
-			return advice(
-				"idle",
+			return step(
+				ACCEPT,
+				"disposition_uncovered_requirements",
 				`${uncovered.length} goal requirement(s) remain uncovered: ${uncovered.slice(0, 3).join(", ")}.`,
 			);
 		}
 		if (open === undefined || uncovered === undefined) {
-			return advice("idle", "Remaining work for this profile is unknown; keep it reusable until you decide.");
+			return step(
+				ACCEPT,
+				"disposition_facts_unknown",
+				"Remaining work for this profile is unknown; keep it reusable until you decide.",
+			);
 		}
-		return advice("retire", "No open task or uncovered requirement remains for this profile.");
+		return step(
+			ACCEPT,
+			"disposition_no_remaining_work",
+			"No open task or uncovered requirement remains for this profile.",
+			false,
+		);
 	})();
 	return reviewPending
-		? advice(settled.disposition, `Acknowledge the change with delegate review first. ${settled.reason}`)
+		? { ...settled, reason: `Acknowledge the change with delegate review first. ${plainReason(settled.reason)}` }
 		: settled;
+}
+
+/**
+ * The lifecycle advice a next action implies. Following up in the lane needs the worker; an accepted result retires it
+ * only when nothing keeps it reusable; every other action leaves it idle while the root decides.
+ */
+export function dispositionFromNextAction(nextAction: NextAction, keepWorker: boolean): WorkerDisposition {
+	switch (nextAction.kind) {
+		case "verify_in_lane":
+			return "needs_follow_up";
+		case "accept":
+			return keepWorker ? "idle" : "retire";
+		default:
+			return "idle";
+	}
+}
+
+/** The lifecycle advice of one next step: the disposition its action implies, with its bounded reason. */
+export function workerDispositionAdviceFromStep(next: WorkerNextStep): WorkerDispositionAdvice {
+	return advice(dispositionFromNextAction(next.nextAction, next.keepWorker), next.reason);
+}
+
+/** Advice for the root on one ended worker task, chosen from its next action. */
+export function deriveWorkerDisposition(input: WorkerDispositionInput): WorkerDispositionAdvice {
+	return workerDispositionAdviceFromStep(deriveWorkerNextStep(input));
 }
 
 /**
@@ -186,16 +270,16 @@ export function deriveWorkerDispositionFacts(args: {
 	};
 }
 
-/** Advice for one claim given the host facts; requirements the host verdict already covers are not uncovered. */
-export function deriveWorkerDispositionForClaim(args: {
+/** The next step for one claim given the host facts; requirements the host verdict already covers are not uncovered. */
+function deriveWorkerNextStepForClaim(args: {
 	claim: WorkerDispositionClaim | undefined;
 	facts: (WorkerDispositionFacts & { profileId?: string }) | undefined;
 	profileId?: string;
-}): WorkerDispositionAdvice {
+}): WorkerNextStep {
 	const { claim, facts } = args;
 	const covered = new Set(claim?.hostVerdict?.coveredRequirementIds ?? []);
 	const profileId = facts?.profileId ?? args.profileId;
-	return deriveWorkerDisposition({
+	return deriveWorkerNextStep({
 		claim,
 		...(profileId !== undefined ? { profileId } : {}),
 		...(facts?.openTasksForSameProfile !== undefined
@@ -207,15 +291,31 @@ export function deriveWorkerDispositionForClaim(args: {
 	});
 }
 
-/** Derive advice for one claim from the host's projections; absent sources degrade to unknown facts. */
-export function deriveWorkerDispositionFromProjections(args: {
+/** Advice for one claim given the host facts; requirements the host verdict already covers are not uncovered. */
+export function deriveWorkerDispositionForClaim(args: {
+	claim: WorkerDispositionClaim | undefined;
+	facts: (WorkerDispositionFacts & { profileId?: string }) | undefined;
+	profileId?: string;
+}): WorkerDispositionAdvice {
+	return workerDispositionAdviceFromStep(deriveWorkerNextStepForClaim(args));
+}
+
+/** The next step for one claim from the host's projections; absent sources degrade to unknown facts. */
+export function deriveWorkerNextStepFromProjections(args: {
 	claim: WorkerDispositionClaim | undefined;
 	snapshot: TaskRuntimeProjection | undefined;
 	goal: Pick<GoalState, "requirements"> | undefined;
 	laneId: string;
 	attemptId?: string;
-}): WorkerDispositionAdvice {
-	return deriveWorkerDispositionForClaim({ claim: args.claim, facts: deriveWorkerDispositionFacts(args) });
+}): WorkerNextStep {
+	return deriveWorkerNextStepForClaim({ claim: args.claim, facts: deriveWorkerDispositionFacts(args) });
+}
+
+/** Derive advice for one claim from the host's projections; absent sources degrade to unknown facts. */
+export function deriveWorkerDispositionFromProjections(
+	args: Parameters<typeof deriveWorkerNextStepFromProjections>[0],
+): WorkerDispositionAdvice {
+	return workerDispositionAdviceFromStep(deriveWorkerNextStepFromProjections(args));
 }
 
 const MAX_VERDICT_LIST_ITEMS = 8;

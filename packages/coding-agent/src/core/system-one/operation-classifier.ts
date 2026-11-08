@@ -19,9 +19,14 @@ import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
 import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { type NoulReading, noulBand } from "../decision/noul.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
-import type { SemanticDecisionTrace, SemanticTraceJudgment } from "./semantic-evaluation-ledger.ts";
+import type {
+	SemanticDecisionTrace,
+	SemanticTraceJudgment,
+	SemanticTraceReading,
+} from "./semantic-evaluation-ledger.ts";
 
 /** Why System One is asked: the operation runs code, or writes outside the task. */
 export type JudgedOperationKind = "shell" | "code" | "write_outside_task";
@@ -309,10 +314,7 @@ export interface OperationEvaluation {
  * request. `prefix` is a batch entry's id prefix.
  */
 export function operationDroveIds(effects: OperationEffectReading, requestAsked: boolean, prefix = ""): string[] {
-	const present = OPERATION_EFFECT_IDS.filter((id) => {
-		const value = effects[id];
-		return value === undefined || value > EFFECT_UNSETTLED_ABOVE;
-	});
+	const present = OPERATION_EFFECT_IDS.filter((id) => !isEffectAbsent(effects[id]));
 	return [...present, ...(present.length > 0 && requestAsked ? [OPERATION_REQUEST_ID] : [])].map(
 		(id) => `${prefix}${id}`,
 	);
@@ -347,16 +349,29 @@ function operationAction(reading: JudgmentReading, actor: "root" | "worker"): Op
 
 /**
  * How the answers read. Every shell call reaches this gate, so the reading scales with what an
- * interruption costs (TypeSafe: thresholds follow the cost of the action): an effect is established
- * at the noul hard-fail band, unsettled above an even chance, absent below it. Probed live: `npm test`,
- * `git status`, a build script and a `sed` edit stay at or below 0.22 on every effect; `pip install`
- * reads 0.99 acquires external code; a Python POST reads 0.93 leaves the machine.
+ * interruption costs (TypeSafe: thresholds follow the cost of the action). An effect is asked as present
+ * and needs a no, under the `operation_effect` family: a decisive fail establishes it, a pass reads it
+ * absent, anything else (an ambiguous or missing answer) leaves it unsettled. The owner's request reads
+ * under `operation_request`: a pass asks for the operation, a fail clearly does not.
  */
-const EFFECT_ESTABLISHED = 0.8;
-const EFFECT_UNSETTLED_ABOVE = 0.5;
-/** The owner's request: asks for it at 0.8 or above, clearly does not at 0.2 or below. */
-const REQUEST_ASKS = 0.8;
-const REQUEST_DOES_NOT_ASK = 0.2;
+const EFFECT_READING: SemanticTraceReading = { family: "operation_effect", direction: "required_false" };
+const REQUEST_READING: SemanticTraceReading = { family: "operation_request", direction: "required_true" };
+
+function effectReading(value: number | undefined): NoulReading {
+	return value === undefined ? "unasked" : noulBand(value, EFFECT_READING.direction, EFFECT_READING.family);
+}
+
+function isEffectAbsent(value: number | undefined): boolean {
+	const reading = effectReading(value);
+	return reading === "hard_pass" || reading === "soft_pass";
+}
+
+/** How the operation program's judgments are read, by question id (a batch id's `c<index>_` prefix included). */
+export function operationJudgmentReading(judgmentId: string): SemanticTraceReading | undefined {
+	const id = judgmentId.replace(/^c\d+_/, "");
+	if (id === OPERATION_REQUEST_ID) return REQUEST_READING;
+	return (OPERATION_EFFECT_IDS as readonly string[]).includes(id) ? EFFECT_READING : undefined;
+}
 
 function probability(answer: unknown): number | undefined {
 	const noul = (answer as { noul?: unknown } | undefined)?.noul;
@@ -496,10 +511,7 @@ export function readOperationRequest(answers: Record<string, unknown>): number |
 
 /** Whether the effect reading alone settles the operation: no effect established or unsettled. */
 export function operationHasNoEffect(effects: OperationEffectReading): boolean {
-	return OPERATION_EFFECT_IDS.every((id) => {
-		const value = effects[id];
-		return value !== undefined && value <= EFFECT_UNSETTLED_ABOVE;
-	});
+	return OPERATION_EFFECT_IDS.every((id) => isEffectAbsent(effects[id]));
 }
 
 /** An operation System One could not judge (error, outage, deadline): the authority line decides what that costs. */
@@ -517,10 +529,10 @@ export function verdictFromReadings(
 	asked: number | undefined,
 	actor: "root" | "worker",
 ): OperationVerdict {
-	const established = OPERATION_EFFECT_IDS.filter((id) => (effects[id] ?? 0) >= EFFECT_ESTABLISHED);
+	const established = OPERATION_EFFECT_IDS.filter((id) => effectReading(effects[id]) === "hard_fail");
 	const unsettled = OPERATION_EFFECT_IDS.filter((id) => {
-		const value = effects[id];
-		return value === undefined || (value > EFFECT_UNSETTLED_ABOVE && value < EFFECT_ESTABLISHED);
+		const reading = effectReading(effects[id]);
+		return reading === "ambiguous" || reading === "unasked";
 	});
 	harnessLog.debug("edge", "system one read an operation's effects", () => ({
 		actor,
@@ -535,10 +547,11 @@ export function verdictFromReadings(
 		established.length > 0
 			? established.map((id) => EFFECT_WORDS[id]).join(", ")
 			: `possibly ${unsettled.map((id) => EFFECT_WORDS[id]).join(", possibly ")}`;
-	if (asked !== undefined && asked >= REQUEST_ASKS) {
+	const request = asked === undefined ? "unasked" : noulBand(asked, REQUEST_READING.direction, REQUEST_READING.family);
+	if (request === "hard_pass" || request === "soft_pass") {
 		return { action: "proceed", finding: `${described}; the owner's request asks for it`, notable: true };
 	}
-	const clearlyNot = asked !== undefined && asked <= REQUEST_DOES_NOT_ASK;
+	const clearlyNot = request === "hard_fail";
 	const reading: JudgmentReading = established.length > 0 && clearlyNot ? "fail" : "ambiguous";
 	return {
 		action: operationAction(reading, actor),

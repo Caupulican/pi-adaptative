@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
@@ -47,8 +48,27 @@ import {
 	selectedManagedWorkerAttempt,
 	selectedWorkerAttempt,
 } from "./worker-lane-projection.ts";
+import { WorkerOutcomeRecorder } from "./worker-outcome-recorder.ts";
 import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
 import type { WorkerUsageAccountingStoragePort } from "./worker-usage-accounting.ts";
+
+/** A lane's place in the fleet: the flow it is queued and charged in, and whether its grant holds write paths. */
+export interface WorkerLaneFlow {
+	readonly laneId: string;
+	readonly objectiveId: string;
+	/** The parent agent the lane serves; empty for the session root. */
+	readonly subtreeId: string;
+	readonly writes: boolean;
+}
+
+function laneFlow(laneId: string, objectiveId: string, attempt: AttemptRuntimeState): WorkerLaneFlow {
+	return {
+		laneId,
+		objectiveId,
+		subtreeId: attempt.dispatch.parentAgentId ?? "",
+		writes: (attempt.dispatch.executionContract?.worker.authority.writePaths.length ?? 0) > 0,
+	};
+}
 
 export type PendingVerificationRecovery =
 	| {
@@ -88,6 +108,7 @@ export class ManagedLaneLifetimeInputError extends Error {
 
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
+	private readonly outcomes: WorkerOutcomeRecorder;
 	private nextLaneNumber: number;
 	private readonly isProcessAlive: (pid: number) => boolean;
 
@@ -105,6 +126,12 @@ export class WorkerLifecycle {
 		store?: OrchestrationEventStore;
 	}) {
 		this.ledger = new DelegationOrchestrationLedger(options);
+		this.outcomes = new WorkerOutcomeRecorder({
+			runtime: this.ledger.runtime,
+			agentDir: options.agentDir,
+			sessionId: options.sessionId,
+			...(options.now ? { now: options.now } : {}),
+		});
 		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const highest = Object.keys(snapshot.tasks).reduce((current, taskId) => {
@@ -479,8 +506,10 @@ export class WorkerLifecycle {
 		this.ledger.runtime.bindAttemptGrant(attemptId, grant);
 	}
 
-	finish(result: WorkerResultContract, options: { notify?: boolean } = {}): LaneRecord {
+	/** `claim` is the host-normalized claim the result was built from; the outcome reads its host verdict and findings. */
+	finish(result: WorkerResultContract, options: { notify?: boolean; claim?: WorkerClaim } = {}): LaneRecord {
 		this.ledger.runtime.finishAttempt(result);
+		this.outcomes.record(result.attemptId, options.claim);
 		const record = this.getRecord(result.taskId);
 		if (!record) throw new Error(`Durable worker '${result.taskId}' was not projected after completion.`);
 		if (options.notify !== false) this.enqueueTerminalNotification(record);
@@ -508,6 +537,7 @@ export class WorkerLifecycle {
 			verdict: args.verdict,
 			reasonCode: args.reasonCode,
 		});
+		this.outcomes.record(subjectAttemptId);
 		const settled = this.ledger.runtime.getSnapshot();
 		const subject = projectWorkerAttemptLaneRecord(settled, subjectAttemptId);
 		if (!subject) throw new Error(`Verified worker attempt '${subjectAttemptId}' was not projected.`);
@@ -518,7 +548,9 @@ export class WorkerLifecycle {
 	cancel(laneId: string, reasonCode: string, reasonDetail?: string): LaneRecord | undefined {
 		const attempt = this.getActiveAttempt(laneId);
 		if (!attempt) return this.getRecord(laneId);
+		const wasOpen = NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status);
 		this.ledger.cancel(attempt.attemptId, reasonCode, reasonDetail);
+		if (wasOpen) this.outcomes.record(attempt.attemptId);
 		const record = this.getRecord(laneId);
 		if (record) this.enqueueTerminalNotification(record);
 		return record;
@@ -579,6 +611,7 @@ export class WorkerLifecycle {
 			if (stillOwned) throw error;
 			return { cancelled: false, record: projectWorkerLaneRecord(currentSnapshot, laneId) };
 		}
+		this.outcomes.record(attempt.attemptId);
 		const terminal = this.getRecord(laneId);
 		if (terminal) this.enqueueTerminalNotification(terminal);
 		return { cancelled: true, record: terminal };
@@ -755,6 +788,26 @@ export class WorkerLifecycle {
 		}).length;
 	}
 
+	/** A lane's fleet flow (its task's objective and the parent agent it serves) and whether its grant writes. */
+	getLaneFlow(laneId: string): WorkerLaneFlow | undefined {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		const attempt = selectedWorkerAttempt(snapshot, laneId);
+		const task = snapshot.tasks[laneId]?.task;
+		return attempt && task ? laneFlow(laneId, task.objectiveId, attempt) : undefined;
+	}
+
+	/** The fleet's local running facts: every running unmanaged lane with its flow. */
+	getRunningLaneFlows(): WorkerLaneFlow[] {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		const flows: WorkerLaneFlow[] = [];
+		for (const [taskId, task] of Object.entries(snapshot.tasks)) {
+			const attempt = selectedWorkerAttempt(snapshot, taskId);
+			if (attempt?.status === "running" && !isManagedWorkerAttempt(attempt))
+				flows.push(laneFlow(taskId, task.task.objectiveId, attempt));
+		}
+		return flows;
+	}
+
 	getPendingTerminalNotifications(): Array<{ notificationId: string; record: LaneRecord }> {
 		this.ensureTerminalNotifications();
 		const snapshot = this.ledger.runtime.getSnapshot();
@@ -845,14 +898,15 @@ export class WorkerLifecycle {
 			message: `Worker ${record.laneId} reached ${record.status}.`,
 		};
 		const existing = snapshot.notifications[notification.notificationId];
-		if (
-			existing &&
+		const settled =
+			existing !== undefined &&
 			existing.objectiveId === notification.objectiveId &&
 			existing.attemptId === notification.attemptId &&
-			existing.message === notification.message
-		) {
-			return false;
-		}
+			existing.message === notification.message;
+		if (settled && existing.status === "delivered") return false;
+		// A terminal fact committed outside this lifecycle reaches the parent with its outcome recorded first.
+		const recorded = this.outcomes.ensure(snapshot, attempt, record.status);
+		if (settled) return recorded;
 		this.ledger.runtime.enqueueNotification(notification);
 		return true;
 	}

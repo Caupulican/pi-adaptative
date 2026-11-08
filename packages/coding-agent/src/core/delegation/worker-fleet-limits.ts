@@ -18,7 +18,6 @@ export interface WorkerFleetLimits {
 	maxAgentsPerSession: number;
 	maxChildrenPerAgent: number;
 	maxNestedAgentsPerSession: number;
-	maxQueuedDispatches: number;
 }
 
 export const DEFAULT_WORKER_FLEET_LIMITS: Readonly<WorkerFleetLimits> = Object.freeze({
@@ -26,7 +25,6 @@ export const DEFAULT_WORKER_FLEET_LIMITS: Readonly<WorkerFleetLimits> = Object.f
 	maxAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
 	maxChildrenPerAgent: MAX_ORCHESTRATION_DIRECT_CHILDREN,
 	maxNestedAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
-	maxQueuedDispatches: 256,
 });
 
 /** Every newly compiled native worker is a leaf; legacy wider limits are narrowed to this contract. */
@@ -92,8 +90,25 @@ export type WorkerIdentityHeadroomAdmission =
 	| { ok: true }
 	| { ok: false; reasonCode: "worker_agent_session_limit_reached" };
 
-/** Subjects whose admitted verifier identity has not yet been materialized. */
+/** The verifier counter: one scan per projection revision (each revision is a new frozen snapshot object). */
+const pendingVerifierSubjectsByRevision = new WeakMap<object, ReadonlySet<string>>();
+
+/**
+ * Subjects whose admitted verifier identity has not yet been materialized. Admission asks this several times per
+ * dispatch and once per queued lane in a selection pass; the scan runs once per projection revision and each caller
+ * gets its own copy to narrow.
+ */
 export function pendingVerifierSubjectTaskIds(
+	snapshot: Pick<TaskRuntimeProjection, "agents" | "tasks" | "attempts">,
+): Set<string> {
+	const known = pendingVerifierSubjectsByRevision.get(snapshot);
+	if (known) return new Set(known);
+	const pending = scanPendingVerifierSubjects(snapshot);
+	if (Object.isFrozen(snapshot)) pendingVerifierSubjectsByRevision.set(snapshot, new Set(pending));
+	return pending;
+}
+
+function scanPendingVerifierSubjects(
 	snapshot: Pick<TaskRuntimeProjection, "agents" | "tasks" | "attempts">,
 ): Set<string> {
 	const agents = snapshot.agents ?? {};
@@ -207,15 +222,4 @@ export function evaluateNewWorkerAdmission(
 		return { ok: false, reasonCode: "worker_agent_nested_session_limit_reached" };
 	}
 	return { ok: true, depth };
-}
-
-/** Keep one queue slot reserved for an already-admitted mandatory verifier. */
-export function workerQueueHasCapacity(
-	queuedCount: number,
-	priority: boolean,
-	limits: Readonly<WorkerFleetLimits> = DEFAULT_WORKER_FLEET_LIMITS,
-): boolean {
-	if (!Number.isSafeInteger(queuedCount) || queuedCount < 0) return false;
-	const ceiling = priority ? limits.maxQueuedDispatches : limits.maxQueuedDispatches - 1;
-	return queuedCount < ceiling;
 }

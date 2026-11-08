@@ -5,6 +5,7 @@ export { attemptVerification } from "../orchestration/verification-identity.ts";
 
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptVerification, currentTaskTerminalOverride } from "../orchestration/verification-identity.ts";
+import { describeNextAction, sameOutcomeAttempt } from "./worker-outcome-words.ts";
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
 
 export const ACTIVE_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running"]);
@@ -108,6 +109,7 @@ export function projectWorkerAttemptLaneRecord(
 	// A terminal result seals execution, not subsequent received billing. Legacy managed results
 	// have no generation accounting and retain their reported cost.
 	const costUsd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd;
+	const outcome = sameOutcomeAttempt(task.outcome, attempt.attemptId);
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,
 		type: managed ? "managed-worker" : "worker",
@@ -137,6 +139,7 @@ export function projectWorkerAttemptLaneRecord(
 		...(attempt.dispatch.worktreeLaneKey ? { worktreeLaneKey: attempt.dispatch.worktreeLaneKey } : {}),
 		...(attempt.dispatch.modelRouteSource ? { routeSource: attempt.dispatch.modelRouteSource } : {}),
 		...(attempt.dispatch.modelPinSource ? { routePinSource: attempt.dispatch.modelPinSource } : {}),
+		...(outcome ? { outcomeText: describeNextAction(outcome) } : {}),
 	};
 }
 

@@ -1,3 +1,4 @@
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { CustomMessage } from "../kernel/index.ts";
 import type { WorkerHostVerdict } from "./autonomy/contracts.ts";
 import type { LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
@@ -18,18 +19,25 @@ import {
 	workerClaimSettlementLines,
 } from "./delegation/worker-claim.ts";
 import {
-	deriveWorkerDispositionFromProjections,
-	describeWorkerDisposition,
-	describeWorkerHostVerdict,
-	WORKER_DISPOSITION_ADVICE_NOTE,
-	type WorkerDispositionAdvice,
+	deriveWorkerNextStepFromProjections,
+	type WorkerNextStep,
+	workerDispositionAdviceFromStep,
 	workerDispositionGuidance,
 	workerLaneStateCodes,
 } from "./delegation/worker-disposition.ts";
+import { selectedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import {
 	type WorkerTerminalHandoffRecord,
 	workerTerminalGenerationIdentity,
 } from "./delegation/worker-notification-coordinator.ts";
+import {
+	describeOutcomeForHandoff,
+	nextActionPhrase,
+	type Outcome,
+	projectOutcome,
+	sameOutcomeAttempt,
+} from "./delegation/worker-outcome.ts";
+import { taskOutcomeId } from "./delegation/worker-outcome-codec.ts";
 import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
@@ -184,27 +192,17 @@ const MAX_DELIVERED_TERMINAL_IDENTITIES = 512;
 const ATTENTION_CLAIM_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["blocked", "partial"]);
 const MAX_ATTENTION_CLAIM_SUMMARY_BYTES = 16 * 1024;
 
-/** The reading guidance for a woken parent: the fixed line when no lane carries advice, else one line per advised lane. */
-function workerHandoffGuidanceLines(
-	records: readonly {
-		laneId: string;
-		recommendedDisposition?: WorkerDispositionAdvice;
-		hostVerdict?: WorkerHostVerdict;
-	}[],
-): string[] {
-	const advised = records.filter((record) => record.recommendedDisposition !== undefined);
-	if (advised.length === 0) {
-		return ["Read each lane with delegate status, verify the claim, then continue or replan the parent task."];
-	}
-	return [
-		`Read each lane with delegate status and verify the claim before acting. ${WORKER_DISPOSITION_ADVICE_NOTE} Next step per lane:`,
-		...advised.flatMap((record) =>
-			record.recommendedDisposition
-				? [`- ${record.laneId}: ${workerDispositionGuidance(record.recommendedDisposition, record.hostVerdict)}`]
-				: [],
-		),
-		"Then continue or replan the parent task.",
-	];
+/** The reading guidance for a woken parent: each lane's own Next line carries its step, so one fixed line follows. */
+function workerHandoffGuidanceLine(records: readonly { nextStep?: WorkerNextStep }[]): string {
+	return records.some((record) => record.nextStep !== undefined)
+		? "Read each lane with delegate status and verify the claim before acting. Each Next line is advice; you decide. Then continue or replan the parent task."
+		: "Read each lane with delegate status, verify the claim, then continue or replan the parent task.";
+}
+
+/** `Next: <plain step>; <how to act on the worker>. <reason>` -- one line per lane, chosen from the typed next action. */
+function describeHandoffNextStep(nextStep: WorkerNextStep, hostVerdict: WorkerHostVerdict | undefined): string {
+	const advised = workerDispositionAdviceFromStep(nextStep);
+	return `Next: ${nextActionPhrase(nextStep.nextAction)}; ${workerDispositionGuidance(advised, hostVerdict)}. ${advised.reason}`;
 }
 
 export function buildForegroundWorkerTerminalHandoffContent(
@@ -216,10 +214,12 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		outputArtifact?: ArtifactContract;
 		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
 		fanout?: string;
-		/** The host's judgment of the claim against the receipts; absent on a legacy claim. */
+		/** The host's judgment of the claim against the receipts; names the missing proof a follow-up asks for. */
 		hostVerdict?: WorkerHostVerdict;
-		/** Host advice on the worker's lifecycle; the root decides. */
-		recommendedDisposition?: WorkerDispositionAdvice;
+		/** The host-computed outcome of this exact attempt. */
+		outcome?: Outcome;
+		/** The typed next step for the worker; the root decides. */
+		nextStep?: WorkerNextStep;
 		/** Host state codes for this lane (see `workerHandoffStateCodes`); the glossary lives in the root prompt. */
 		h?: readonly CommsStateCode[];
 		claim?: {
@@ -256,8 +256,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 					`  Full Output: ${record.outputArtifact.uri}${record.outputArtifact.sizeBytes === undefined ? "" : ` (${record.outputArtifact.sizeBytes} bytes)`}`,
 				);
 			}
+			if (record.outcome) lines.push(`  ${describeOutcomeForHandoff(record.outcome)}`);
 			if (record.claim?.summary) {
-				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
 				const source = `worker-claim:${record.laneId}`;
 				// A verifier's rejection is the finding the receiving agent must reproduce: it is carried
 				// as fully as a blocked or partial claim, never cut to the one-line success form.
@@ -284,8 +284,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 				for (const line of workerClaimSettlementLines(record.claim, handoffClaimValue, source))
 					lines.push(`  ${line}`);
 			}
-			if (record.hostVerdict) lines.push(`  ${describeWorkerHostVerdict(record.hostVerdict)}`);
-			if (record.recommendedDisposition) lines.push(`  ${describeWorkerDisposition(record.recommendedDisposition)}`);
+			if (record.nextStep) lines.push(`  ${describeHandoffNextStep(record.nextStep, record.hostVerdict)}`);
+			else if (record.outcome) lines.push(`  Next: ${nextActionPhrase(record.outcome.nextAction)}.`);
 			const stateLine = renderCommsStateLine(record.h ?? []);
 			if (stateLine) lines.push(`  ${stateLine}`);
 			return lines;
@@ -293,7 +293,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
 		"h DELIVERED",
 		...(wakeParent
-			? workerHandoffGuidanceLines(included)
+			? [workerHandoffGuidanceLine(included)]
 			: [
 					"The owning parent is no longer eligible for automatic continuation. Persist this handoff, but do not continue or replan automatically.",
 				]),
@@ -514,8 +514,8 @@ export class ForegroundTerminalHandoffController {
 					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
 					: undefined;
 			const fanout = index < 8 ? this.deps.getWorkerFanoutNote?.(record.laneId) : undefined;
-			const recommendedDisposition =
-				index < 8 && claim ? this.recommendDisposition(claim, record.laneId, record.attemptId) : undefined;
+			const outcome = index < 8 ? this.terminalOutcome(record.laneId, record.attemptId, claim) : undefined;
+			const nextStep = index < 8 && claim ? this.nextStep(claim, record.laneId, record.attemptId) : undefined;
 			return {
 				summaryItem: {
 					id: record.laneId,
@@ -532,7 +532,8 @@ export class ForegroundTerminalHandoffController {
 				...(outputArtifact ? { outputArtifact } : {}),
 				...(fanout ? { fanout } : {}),
 				...(claim?.hostVerdict ? { hostVerdict: claim.hostVerdict } : {}),
-				...(recommendedDisposition ? { recommendedDisposition } : {}),
+				...(outcome ? { outcome } : {}),
+				...(nextStep ? { nextStep } : {}),
 				h: workerLaneStateCodes(record, claim),
 				...(claim
 					? {
@@ -557,6 +558,22 @@ export class ForegroundTerminalHandoffController {
 			};
 		});
 		const included = prepared.slice(0, 8).map(({ summaryItem: _summaryItem, ...record }) => record);
+		// The stored message keeps the outcome's verdict fields; the whole outcome stays in the orchestration journal.
+		const detailRecords = included.map(({ outcome, nextStep, ...record }) => ({
+			...record,
+			...(outcome
+				? {
+						outcome: {
+							outcomeId: outcome.outcomeId,
+							status: outcome.status,
+							blocker: outcome.blocker,
+							assurance: outcome.assurance,
+							nextAction: outcome.nextAction.kind,
+						},
+					}
+				: {}),
+			...(nextStep ? { recommendedDisposition: workerDispositionAdviceFromStep(nextStep) } : {}),
+		}));
 		const wake = this.resolveWake(unread);
 		// A report of work a third party's words reached opens a third-party run (`customTurnOrigin`).
 		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
@@ -578,7 +595,7 @@ export class ForegroundTerminalHandoffController {
 				display: true,
 				details: {
 					v: COMMS_RECORD_VERSION,
-					records: included,
+					records: detailRecords,
 					summary: createBackgroundActivitySummaryContract(
 						"agent",
 						prepared.map((entry) => entry.summaryItem),
@@ -590,14 +607,48 @@ export class ForegroundTerminalHandoffController {
 		};
 	}
 
-	/** Advice for the root on one worker's end; an unreachable host fact stays unknown and advises idle. */
-	private recommendDisposition(
+	/**
+	 * The recorded outcome of this exact attempt. The lifecycle records it before the notification is enqueued, so a
+	 * missing one is computed from the same facts here (never written) and logged as a recording gap.
+	 */
+	private terminalOutcome(
+		laneId: string,
+		attemptId: string | undefined,
+		claim: WorkerClaimSnapshotPayload["claim"] | undefined,
+	): Outcome | undefined {
+		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
+		const attempt = attemptId !== undefined ? snapshot?.attempts[attemptId] : undefined;
+		if (!snapshot || !attempt) return undefined;
+		const stored = snapshot.tasks[attempt.taskId]?.outcome;
+		const recorded = sameOutcomeAttempt(stored, attempt.attemptId);
+		if (recorded) return recorded;
+		const generation = (stored?.generation ?? 0) + 1;
+		const computed = projectOutcome({
+			snapshot,
+			attemptId: attempt.attemptId,
+			...(claim ? { claim } : {}),
+			generation,
+			outcomeId: taskOutcomeId(attempt.taskId, generation),
+			...(stored ? { previous: stored } : {}),
+			recordedAt: new Date().toISOString(),
+		});
+		if (computed && selectedWorkerAttempt(snapshot, attempt.taskId)?.attemptId === attempt.attemptId) {
+			harnessLog.warn("outcomes", "a terminal handoff found no recorded outcome for its attempt", () => ({
+				laneId,
+				attemptId: attempt.attemptId,
+			}));
+		}
+		return computed;
+	}
+
+	/** The next step for one worker's end; an unreachable host fact stays unknown and keeps the worker. */
+	private nextStep(
 		claim: WorkerClaimSnapshotPayload["claim"],
 		laneId: string,
 		attemptId: string | undefined,
-	): WorkerDispositionAdvice {
+	): WorkerNextStep {
 		const goal = this.deps.getGoalStateSnapshot();
-		return deriveWorkerDispositionFromProjections({
+		return deriveWorkerNextStepFromProjections({
 			claim,
 			snapshot: this.deps.getTaskRuntimeSnapshot?.(),
 			goal: goal?.requirements ? { requirements: goal.requirements } : undefined,

@@ -437,8 +437,6 @@ export interface WorkerDelegationSettings {
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	reportHandshake?: boolean; // default: true; a worker about to stop with something checkable (requirement ids, commands, changed files) is asked once for a report the host checks against its receipts; explicit false keeps the plain text path
 	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
-	maxConcurrent?: number; // default: 5 (above the Codex CLI per-session default of 3); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
-	maxConcurrentBurst?: number; // default: 12; running concurrency while the subscription of the worker's account reports room (never below maxConcurrent); the fleet ceilings still hold
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
@@ -470,6 +468,26 @@ export interface ResolvedToolOutputSettings {
 	reduction: "on" | "off";
 	level: "standard" | "compact" | "auto";
 	rulesFile?: string;
+}
+
+/**
+ * The worker fleet's blast-radius bounds (`core/fleet`). How many workers run is computed room (subscription allowance,
+ * free memory and heap, ledger headroom); these ceilings only stop a runaway loop.
+ */
+export interface FleetSettings {
+	ceiling?: {
+		running?: number; // default: 256; running workers per session
+		writers?: number; // default: 64; running workers with write paths per session
+		tree?: number; // default: 1024; live workers across a root and its leaders (enforced once leaders exist)
+	};
+	reserve?: {
+		memoryPercent?: number; // default: 10; share of total memory kept free (at least 1 GiB)
+	};
+}
+
+export interface ResolvedFleetSettings {
+	ceiling: { running: number; writers: number; tree: number };
+	reserve: { memoryPercent: number };
 }
 
 export interface WorktreeSyncSettings {
@@ -517,7 +535,7 @@ export type ResolvedToolExecutionSettings = Required<ToolExecutionSettings>;
  * Machine-wide per-provider admission for worker and background provider requests; see
  * `core/provider-admission/`. The foreground lane never waits. No provider is capped by default:
  * the Codex CLI itself applies no per-account request cap (its only concurrency control is the
- * per-session thread limit mirrored by `workerDelegation.maxConcurrent`), and the 2026-09-11
+ * per-session thread limit), and the 2026-09-11
  * census measured per-stream slowdown under shared load but not the number at which a cap pays
  * for itself. By default the ledger only records what is in flight; a limit is an owner choice.
  */
@@ -826,6 +844,7 @@ export interface Settings {
 	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words, and routines run away (both on by default)
 	channels?: Record<string, ChannelPolicySettings>; // Admission per registered channel provider (core/channels); global or directory profile only
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
+	fleet?: FleetSettings; // Worker fleet safety ceilings and machine reserve (core/fleet); running width itself is computed room
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default

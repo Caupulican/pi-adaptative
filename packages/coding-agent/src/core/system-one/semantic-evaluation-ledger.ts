@@ -7,9 +7,9 @@
 
 import type { SemanticEvaluationOccupancy, SemanticEvaluationScope } from "../decision/engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
-import type { NoulBand } from "../decision/noul.ts";
+import { type NoulBand, type NoulDirection, noulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
-import { choiceProbability, choiceRunnerUp } from "../decision/thresholds.ts";
+import { choiceProbability, choiceRunnerUp, YES_NO_BANDS, type YesNoFamily } from "../decision/thresholds.ts";
 import { findPackForCheckpoint } from "../steering/programs.ts";
 import type { SteeringCertificate } from "../steering/types.ts";
 import { isAdverseAnswer } from "./policy.ts";
@@ -75,6 +75,18 @@ export interface SemanticTraceJudgment {
 	readonly runnerUp?: { readonly option: string; readonly p: number };
 	/** This judgment drove the result. */
 	readonly drove?: boolean;
+	/**
+	 * Yes/no: the family whose cuts the consumer read it under, and the end it required. With `p` they let a
+	 * changed cut re-decide the row offline; `band` is then the consumer's band, not the engine's default.
+	 */
+	readonly family?: YesNoFamily;
+	readonly direction?: NoulDirection;
+}
+
+/** How a consumer reads one yes/no judgment: the family's cuts and the end it requires. */
+export interface SemanticTraceReading {
+	readonly family: YesNoFamily;
+	readonly direction: NoulDirection;
 }
 
 /**
@@ -86,6 +98,8 @@ export interface SemanticDecisionTrace {
 	readonly gates?: readonly SemanticTraceGate[];
 	readonly judgments?: readonly SemanticTraceJudgment[];
 	readonly facts?: readonly string[];
+	/** The ordered decision exit that fired (for example `steer`, `doubt`, `sound`, `proceed`, `confirm`). */
+	readonly exit?: string;
 	/** The judgments were reused (a certificate or answer cache), not asked again. */
 	readonly cached?: boolean;
 }
@@ -124,6 +138,10 @@ export function boundedTrace(trace: SemanticDecisionTrace): SemanticDecisionTrac
 				? { runnerUp: { option: traceText(judgment.runnerUp.option), p: runnerUpP } }
 				: {}),
 			...(judgment.drove === true ? { drove: true } : {}),
+			...(judgment.family !== undefined && judgment.family in YES_NO_BANDS ? { family: judgment.family } : {}),
+			...(judgment.direction === "required_true" || judgment.direction === "required_false"
+				? { direction: judgment.direction }
+				: {}),
 		};
 	});
 	const facts = (trace.facts ?? []).slice(0, TRACE_LIMITS.facts).map(traceText);
@@ -132,6 +150,7 @@ export function boundedTrace(trace: SemanticDecisionTrace): SemanticDecisionTrac
 		...(gates.length ? { gates } : {}),
 		...(judgments.length ? { judgments } : {}),
 		...(facts.length ? { facts } : {}),
+		...(trace.exit !== undefined ? { exit: traceText(trace.exit) } : {}),
 		...(trace.cached === true ? { cached: true } : {}),
 	};
 }
@@ -176,23 +195,47 @@ export function traceJudgmentsFromEvaluation(
 	return judgments;
 }
 
+/** A yes/no judgment as the consumer read it: its family and direction, and the band under that family's cuts. */
+function readAsConsumer(
+	judgment: SemanticTraceJudgment,
+	reading: SemanticTraceReading | undefined,
+): SemanticTraceJudgment {
+	if (!reading || judgment.kind !== "yes_no") return judgment;
+	return {
+		...judgment,
+		family: reading.family,
+		direction: reading.direction,
+		band: judgment.p === undefined ? "unasked" : noulBand(judgment.p, reading.direction, reading.family),
+	};
+}
+
 /**
  * Attaches a consumer's decision to the evaluation it was made from: the evaluation's judgments, those named in
- * `drove` marked as having driven it. A no-op when the engine records no traces or the evaluation has no ledger id.
+ * `drove` marked as having driven it, each yes/no judgment `read` names re-banded under the family the consumer
+ * decided with, and the exit that fired. A no-op when the engine records no traces or the evaluation has no
+ * ledger id.
  */
 export function noteDecisionTrace(
 	engine: { noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void } | undefined,
 	evaluation: { readonly evaluationId?: string; readonly judgments?: readonly SemanticTraceJudgment[] },
-	trace: { readonly decision: string; readonly drove?: readonly string[]; readonly facts?: readonly string[] },
+	trace: {
+		readonly decision: string;
+		readonly drove?: readonly string[];
+		readonly facts?: readonly string[];
+		readonly exit?: string;
+		readonly read?: (judgmentId: string) => SemanticTraceReading | undefined;
+	},
 ): void {
 	if (!engine?.noteTrace || evaluation.evaluationId === undefined) return;
 	const drove = new Set(trace.drove ?? []);
 	engine.noteTrace(evaluation.evaluationId, {
 		decision: trace.decision,
-		judgments: (evaluation.judgments ?? []).map((judgment) =>
-			drove.has(judgment.id) ? { ...judgment, drove: true } : judgment,
-		),
+		judgments: (evaluation.judgments ?? []).map((judgment) => {
+			const read = readAsConsumer(judgment, trace.read?.(judgment.id));
+			return drove.has(judgment.id) ? { ...read, drove: true } : read;
+		}),
 		...(trace.facts?.length ? { facts: trace.facts } : {}),
+		...(trace.exit !== undefined ? { exit: trace.exit } : {}),
 	});
 }
 

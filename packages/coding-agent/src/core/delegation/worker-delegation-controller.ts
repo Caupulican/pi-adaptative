@@ -59,6 +59,16 @@ import {
 	WorkerTaskFitness,
 	type WorkerTaskFitnessFailure,
 } from "../expert-routing/worker-task-fitness.ts";
+import {
+	decideWorkerDispatch,
+	FOREGROUND_HOLD_WAIT,
+	readinessWait,
+	reservationWait,
+	type WorkerDispatchAdmissionPort,
+	type WorkerDispatchWait,
+} from "../fleet/admission-bridge.ts";
+import type { FleetAllowancePort } from "../fleet/capacity/allowance-room.ts";
+import { SessionFleetScheduler } from "../fleet/fleet-scheduler.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import {
 	type KnowledgeGrant,
@@ -126,11 +136,7 @@ import {
 } from "../orchestration/worker-receipt-origin.ts";
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
-import {
-	emergencyStopPath,
-	isEmergencyStopEngaged,
-	subscribeEmergencyStop,
-} from "../provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
@@ -217,7 +223,6 @@ import {
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
 import {
 	formatWorkerDispatchWait,
-	type WorkerDispatchAdmission,
 	type WorkerDispatchResourceSnapshot,
 	WorkerDispatchScheduler,
 } from "./worker-dispatch-scheduler.ts";
@@ -297,37 +302,10 @@ import {
 } from "./worker-tree-budget-coordinator.ts";
 import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
-	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationResourceSnapshot,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
-
-type WorkerDispatchWait = Extract<WorkerDispatchAdmission, { action: "wait" }>;
-
-const FOREGROUND_HOLD_WAIT: WorkerDispatchWait = {
-	action: "wait",
-	reason: "foreground",
-	detail: "starts when the foreground turn ends; both use the same local model",
-};
-
-function readinessWait(reasonCode: string): WorkerDispatchWait {
-	return {
-		action: "wait",
-		reason: reasonCode === "objective_paused" ? "objective" : "dependencies",
-		detail: reasonCode,
-	};
-}
-
-function reservationWait(
-	detail: Parameters<typeof formatWorkerWriteReservationBlock>[0] | undefined,
-): WorkerDispatchWait {
-	return {
-		action: "wait",
-		reason: "write_reservation",
-		...(detail ? { detail: formatWorkerWriteReservationBlock(detail) } : {}),
-	};
-}
 
 /** An owner pin that cannot run keeps the refusal causes its resolver reported: `...:<role>:<causes>`. */
 function pinnedModelSkipReason(role: string, refusal: string): string {
@@ -395,8 +373,10 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 
 export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
-	/** Whether the subscription the given worker model runs on reports room now; unknown reads as false. */
-	subscriptionRoom?(model: Model<Api>): boolean;
+	/** The subscription allowance the fleet's room reads per worker account; absent leaves that term unbounded. */
+	fleetAllowance?: FleetAllowancePort;
+	/** The fleet queue metadata's file key; the session id when absent. A second host on the same session names its own. */
+	fleetQueueKey?: string;
 }
 
 type WorkerAdmission =
@@ -613,7 +593,8 @@ export class WorkerDelegationController {
 		/** The retired worker's latest attempt: a kept-lane notice is that attempt's parent write. */
 		readonly attemptId: string;
 	}>;
-	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
+	/** The session's fleet: room, the queue's order and capacity yields; this controller materializes and runs its lanes. */
+	private readonly fleet: SessionFleetScheduler;
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
 	private readonly projectDirectory: WorkerProjectDirectory;
@@ -652,11 +633,29 @@ export class WorkerDelegationController {
 			agentDir: this.deps.getAgentDir(),
 			parentSessionId: this.deps.getSessionId(),
 		});
+		this.fleet = new SessionFleetScheduler({
+			agentDir: this.deps.getAgentDir(),
+			sessionId: this.deps.fleetQueueKey ?? this.deps.getSessionId(),
+			timers: this.deps.getTimers().port("fleet"),
+			settings: () => this.deps.getSettingsManager().getFleetSettings(),
+			...(this.deps.fleetAllowance ? { allowance: this.deps.fleetAllowance } : {}),
+		});
+		const dispatchAdmission = this.dispatchAdmissionPort();
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed() || this.workerAbort.signal.aborted,
 			timers: this.deps.getTimers().port("orchestration"),
-			admit: (request, record) => this.workerDispatchAdmission(request, record),
+			queue: this.fleet.createQueue<WorkerDelegationRequest>(),
+			queueHasCapacity: (queued, priority) => this.fleet.readyWindowFree(queued, priority) > 0,
+			flowOf: (record) => {
+				const flow = this.getWorkerLifecycle().getLaneFlow(record.laneId);
+				return {
+					objectiveId: flow?.objectiveId ?? "",
+					subtreeId: flow?.subtreeId ?? "",
+					weight: flow?.writes ? "write" : "read",
+				};
+			},
+			admit: (request, record) => decideWorkerDispatch(dispatchAdmission, this.fleet, request, record),
 			preflight: async (request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
 				if (reasonCode) return { action: "cancel", reasonCode };
@@ -675,6 +674,21 @@ export class WorkerDelegationController {
 			cancel: (laneId, reasonCode, attemptId, detail) =>
 				this.cancelScheduledWorker(laneId, reasonCode, attemptId, detail),
 			warn: (message) => this.safeWarn(message),
+		});
+		this.fleet.bindLocal({
+			runningCount: () => this.runningSlotCount(),
+			runningWriterCount: () =>
+				this.getWorkerLifecycle()
+					.getRunningLaneFlows()
+					.filter((lane) => lane.writes).length,
+			drain: () => this.scheduler.drain(),
+			runningLanes: () => this.getWorkerLifecycle().getRunningLaneFlows(),
+			cancelLanes: (laneIds, reasonCode) => {
+				for (const laneId of laneIds) {
+					const agentId = this.getWorkerLifecycle().getActiveAttempt(laneId)?.agentId;
+					if (agentId) this.agentControl.cancelWorkerAgent(agentId, reasonCode);
+				}
+			},
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),
@@ -1137,6 +1151,8 @@ export class WorkerDelegationController {
 		this.shutdownCompletion = shutdown.promise;
 		void shutdown.promise.catch(() => undefined);
 		this.scheduler.closeAdmission();
+		// The queue metadata is flushed as it stands at shutdown, before teardown empties the in-memory queue.
+		this.fleet.dispose();
 		this.unsubscribeRuntimeRecovery?.();
 		this.unsubscribeRuntimeRecovery = undefined;
 		this.unsubscribeEmergencyStop?.();
@@ -2644,30 +2660,31 @@ export class WorkerDelegationController {
 		return record;
 	}
 
-	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings, model: Model<Api> | undefined): boolean {
+	/** Running workers holding a slot: a worker yielded while it waits on another gives its slot back meanwhile. */
+	private runningSlotCount(): number {
 		const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
-		let yielded = 0;
-		for (const attemptId of this.yieldedCapacityAttemptIds.keys()) {
+		const { held, pruned } = this.fleet.heldYields((attemptId) => {
 			const status = snapshot.attempts[attemptId]?.status;
-			if (status === "leased" || status === "running") yielded += 1;
-			else {
-				this.yieldedCapacityAttemptIds.delete(attemptId);
-				this.yieldedWriteReservations.delete(attemptId);
-			}
-		}
-		return (
-			Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) <
-			this.effectiveMaxConcurrent(settings, model)
-		);
+			return status === "leased" || status === "running";
+		});
+		for (const attemptId of pruned) this.yieldedWriteReservations.delete(attemptId);
+		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - held);
 	}
 
-	/**
-	 * The configured width, widened up to the burst width while the subscription the worker's model runs on has room
-	 * (the fleet ceilings still hold). Without a model the account the worker would use is unknown, so no widening.
-	 */
-	private effectiveMaxConcurrent(settings: ResolvedWorkerDelegationSettings, model: Model<Api> | undefined): number {
-		if (settings.maxConcurrentBurst <= settings.maxConcurrent || !model) return settings.maxConcurrent;
-		return this.deps.subscriptionRoom?.(model) === true ? settings.maxConcurrentBurst : settings.maxConcurrent;
+	/** How many more workers on this admission's model the fleet has room for, now. */
+	private fleetRoom(admission: Extract<WorkerAdmission, { ok: true }>): number {
+		const writes = admission.executionContract.worker.authority.writePaths.length > 0;
+		const decision = this.fleet.localRoom({ model: admission.shipment.model, writes });
+		return decision.ok ? decision.room : 0;
+	}
+
+	private hasFleetRoom(admission: Extract<WorkerAdmission, { ok: true }>): boolean {
+		return this.fleetRoom(admission) >= 1;
+	}
+
+	/** The session's fleet scheduler, for owners that stop, resume or read its room. */
+	getFleet(): SessionFleetScheduler {
+		return this.fleet;
 	}
 
 	private waitTargetsBlockedByCaller(callerAgentId: string, targetAgentIds: readonly string[]): string[] {
@@ -2693,7 +2710,7 @@ export class WorkerDelegationController {
 		if (!caller) return () => true;
 		const attempt = this.lifecycle.getLatestAgentAttempt(caller.agentId);
 		if (!attempt || (attempt.status !== "leased" && attempt.status !== "running")) return () => true;
-		const existingYields = this.yieldedCapacityAttemptIds.get(attempt.attemptId) ?? 0;
+		const existingYields = this.fleet.yieldedCount(attempt.attemptId) ?? 0;
 		if (existingYields === 0 && attempt.lease) {
 			const yieldedReservation = this.writeReservations.yieldForWait(
 				attempt.taskId,
@@ -2702,17 +2719,17 @@ export class WorkerDelegationController {
 			);
 			if (yieldedReservation) this.yieldedWriteReservations.set(attempt.attemptId, yieldedReservation);
 		}
-		this.yieldedCapacityAttemptIds.set(attempt.attemptId, existingYields + 1);
+		this.fleet.setYielded(attempt.attemptId, existingYields + 1);
 		let restored = false;
 		const restore = (): boolean => {
 			if (restored) return true;
-			const leases = this.yieldedCapacityAttemptIds.get(attempt.attemptId);
+			const leases = this.fleet.yieldedCount(attempt.attemptId);
 			if (leases === undefined) {
 				restored = true;
 				return true;
 			}
 			if (leases > 1) {
-				this.yieldedCapacityAttemptIds.set(attempt.attemptId, leases - 1);
+				this.fleet.setYielded(attempt.attemptId, leases - 1);
 				restored = true;
 				return true;
 			}
@@ -2720,11 +2737,11 @@ export class WorkerDelegationController {
 			// yielded and must retry restore() later, so its bookkeeping must survive. Every other
 			// exit — granted, no reservation to restore, or "denied" below — is terminal and must
 			// always release the yield bookkeeping, even when "denied" throws. An entry left behind
-			// on that throw path permanently over-counts virtual headroom in hasWorkerCapacity()
-			// for the rest of this attempt's life, silently admitting maxConcurrent+1 workers.
+			// on that throw path permanently over-counts the fleet's running room for the rest of
+			// this attempt's life, silently admitting one worker more than the room allows.
 			let stillBlocked = false;
 			const releaseYield = () => {
-				this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
+				this.fleet.forgetYield(attempt.attemptId);
 				this.yieldedWriteReservations.delete(attempt.attemptId);
 				restored = true;
 			};
@@ -2775,58 +2792,27 @@ export class WorkerDelegationController {
 		return restore;
 	}
 
-	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
-		if (this.recovery.deferRetryIfNeeded(record, request)) return { action: "wait" };
-		const lifecycle = this.getWorkerLifecycle();
-		const attempt = lifecycle.getActiveAttempt(record.laneId);
-		if (!attempt) return { action: "cancel", reasonCode: "orchestration_attempt_missing" };
-		if (attempt.status === "queued" || attempt.status === "suspended") {
-			const readiness = lifecycle.getAttemptDispatchReadiness(attempt.attemptId);
-			if (readiness.state === "waiting") {
-				return readinessWait(readiness.reasonCode);
-			}
-			if (readiness.state === "blocked") return { action: "cancel", reasonCode: readiness.reasonCode };
-		}
-		const contract = attempt.dispatch.executionContract;
-		const admission = this.resolveWorkerAdmission(request, contract, undefined, attempt);
-		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
-		if (isEmergencyStopEngaged(this.deps.getAgentDir())) {
-			return {
-				action: "wait",
-				reason: "capacity",
-				detail: `paused by the machine-wide emergency stop (${emergencyStopPath(this.deps.getAgentDir())})`,
-			};
-		}
-		// An attempt on the foreground's local model waits for the foreground turn to end, whichever
-		// entrance admitted it (fresh start, follow_up, resume of a suspended attempt, retry, restart
-		// recovery) and whichever signal drains the queue. The turn's release is the wake: it drains the
-		// scheduler, so a held resume still starts when the turn ends.
-		if (attempt.status === "queued" || attempt.status === "suspended") {
-			if (
-				!this.foregroundHoldCleared.has(attempt.attemptId) &&
-				this.holdsForLocalForeground(admission.shipment.model)
-			) {
-				return FOREGROUND_HOLD_WAIT;
-			}
-			this.foregroundHoldCleared.add(attempt.attemptId);
-		}
-		if (!this.hasWorkerCapacity(admission.settings, admission.shipment.model)) {
-			harnessLog.debug("delegation", "a worker waits for capacity", () => ({
-				running: this.getWorkerLifecycle().getRunningCount(),
-				allowed: this.effectiveMaxConcurrent(admission.settings, admission.shipment.model),
-				base: admission.settings.maxConcurrent,
-				burst: admission.settings.maxConcurrentBurst,
-			}));
-			return {
-				action: "wait",
-				reason: "capacity",
-				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${this.effectiveMaxConcurrent(admission.settings, admission.shipment.model)} allowed`,
-			};
-		}
-		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
-		if (reservation.kind === "denied") return { action: "cancel", reasonCode: reservation.reasonCode };
-		if (reservation.kind === "granted") return { action: "start" };
-		return reservationWait(reservation.detail);
+	/** The facts the fleet's admission bridge decides a queued lane's dispatch on (`fleet/admission-bridge.ts`). */
+	private dispatchAdmissionPort(): WorkerDispatchAdmissionPort<Extract<WorkerAdmission, { ok: true }>> {
+		return {
+			getAgentDir: () => this.deps.getAgentDir(),
+			deferRetryIfNeeded: (record, request) => this.recovery.deferRetryIfNeeded(record, request),
+			getActiveAttempt: (laneId) => this.getWorkerLifecycle().getActiveAttempt(laneId),
+			getAttemptDispatchReadiness: (attemptId) => this.getWorkerLifecycle().getAttemptDispatchReadiness(attemptId),
+			resolveAdmission: (request, attempt) =>
+				this.resolveWorkerAdmission(request, attempt.dispatch.executionContract, undefined, attempt),
+			modelOf: (admission) => admission.shipment.model,
+			// An attempt on the foreground's local model waits for the foreground turn to end, whichever entrance
+			// admitted it and whichever signal drains the queue; the turn's release drains the scheduler.
+			holdsForForeground: (attempt, admission) => {
+				if (this.foregroundHoldCleared.has(attempt.attemptId)) return false;
+				if (this.holdsForLocalForeground(admission.shipment.model)) return true;
+				this.foregroundHoldCleared.add(attempt.attemptId);
+				return false;
+			},
+			acquireWriteReservation: (laneId, attempt, admission) =>
+				this.writeReservations.acquire(laneId, attempt, admission.executionPlan),
+		};
 	}
 
 	/** Attach this generation's dispatch wait state to queued records; durable records never carry it. */
@@ -2892,7 +2878,7 @@ export class WorkerDelegationController {
 			)
 		)
 			pendingVerifierSubjects.delete(request.verificationOfTaskId!);
-		const remainingQueueSlots = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
+		const remainingQueueSlots = this.fleet.readyWindow() - this.scheduler.queuedCount;
 		return requestQueueSlots + pendingVerifierSubjects.size + unpersistedVerifierSlots > remainingQueueSlots
 			? "worker_dispatch_queue_full"
 			: undefined;
@@ -4610,15 +4596,10 @@ export class WorkerDelegationController {
 			pendingVerifiers.delete(request.verificationOfTaskId!);
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
 		if (fleetSkipReason) return fleetSkipReason;
-		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		const admission = this.resolveWorkerAdmission(request);
-		const freeConcurrency = Math.max(
-			0,
-			this.effectiveMaxConcurrent(settings, admission.ok ? admission.shipment.model : undefined) -
-				this.getWorkerLifecycle().getRunningCount(),
-		);
+		const freeConcurrency = admission.ok ? this.fleetRoom(admission) : 0;
 		const queueSlotsNeeded = Math.max(0, remaining - freeConcurrency) + pendingVerifiers.size;
-		const queueSlotsFree = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
+		const queueSlotsFree = this.fleet.readyWindow() - this.scheduler.queuedCount;
 		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;
 	}
 
@@ -4877,7 +4858,7 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: "session_disposed" };
 		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		const { settings, shipment } = admission;
+		const { shipment } = admission;
 		// A prepared admission was judged before the caller's async hop. Concurrent starts each passed
 		// that judgement against the same fleet snapshot, so identity headroom is judged again in this
 		// same synchronous step that persists the agent, never trusted from the earlier snapshot.
@@ -4891,12 +4872,7 @@ export class WorkerDelegationController {
 
 		const contendsWithLocalForeground = this.contendsWithLocalForeground(shipment.model);
 		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
-		if (
-			!preparedAdmission ||
-			dependencyGated ||
-			contendsWithLocalForeground ||
-			!this.hasWorkerCapacity(settings, shipment.model)
-		) {
+		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || !this.hasFleetRoom(admission)) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
@@ -5148,10 +5124,10 @@ export class WorkerDelegationController {
 				? preparedAdmission
 				: this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		const { instructions, settings, verifierShipment } = admission;
+		const { instructions, verifierShipment } = admission;
 		let { model, modelBinding } = admission.shipment;
 		const { profile: orchestrationProfile, soul } = admission.shipment;
-		if (!this.hasWorkerCapacity(settings, model)) {
+		if (!this.hasFleetRoom(admission)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		let laneCapability = this.laneCapabilityProfile(model);
@@ -5170,6 +5146,8 @@ export class WorkerDelegationController {
 		onPrepared(prepared.record);
 		const { lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
+		// Every start passes here, queued or direct: the fleet's room subscribers see the slot taken.
+		this.fleet.noteAdmitted(prepared.record.laneId);
 		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
 		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool. One granted the
 		// broker before a steer tainted it keeps that grant's plan when it is recovered (a durable grant is never
@@ -5882,7 +5860,7 @@ export class WorkerDelegationController {
 			cleanupCompletion = cleanup.promise;
 			void (async () => {
 				let releaseTransferred = false;
-				this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
+				this.fleet.noteReleased(durableHandle.attemptId);
 				this.yieldedWriteReservations.delete(durableHandle.attemptId);
 				// Bookkeeping steps a retry can repeat: a live owner retains their failure with the hold.
 				const retryable = new Set<unknown>();

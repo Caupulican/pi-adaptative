@@ -20,6 +20,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { WORKER_DECLARABLE_BLOCKERS } from "./worker-outcome-contract.ts";
 
 export const MAX_WORKER_CLAIM_SUMMARY_CHARS = DEFAULT_MAX_BYTES;
 export const MAX_WORKER_CLAIM_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
@@ -376,6 +377,9 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 		invalidWorkerClaim("claim.report.ownerUpdate is invalid.");
 	if (report.conditionMet !== undefined && report.conditionMet !== true)
 		invalidWorkerClaim("claim.report.conditionMet is invalid.");
+	const blockerCode = WORKER_DECLARABLE_BLOCKERS.find((code) => code === report.blockerCode);
+	if (report.blockerCode !== undefined && blockerCode === undefined)
+		invalidWorkerClaim("claim.report.blockerCode is invalid.");
 	return {
 		requirements: workerClaimRecordArray(
 			report.requirements ?? [],
@@ -428,6 +432,7 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 		remaining: texts(report.remaining, "claim.report.remaining"),
 		...(report.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		...(report.conditionMet === true ? { conditionMet: true as const } : {}),
+		...(blockerCode !== undefined ? { blockerCode } : {}),
 	};
 }
 

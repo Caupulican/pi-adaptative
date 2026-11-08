@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { taskOutcomeId } from "../delegation/worker-outcome-codec.ts";
+import type { Outcome, StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
 import { HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -916,6 +918,40 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ ...args, reasonCode: dispatchIdentifier(args.reasonCode.trim(), "reasonCode") }),
 		});
 		return structuredClone(this.state.tasks[args.taskId]!);
+	}
+
+	/**
+	 * Record a task's next outcome. `build` runs against the freshest projection with the generation and outcome id the
+	 * reducer requires; it returns undefined when nothing changed, and then nothing is written.
+	 */
+	recordTaskOutcome(
+		taskId: string,
+		build: (next: {
+			snapshot: TaskRuntimeProjection;
+			generation: number;
+			outcomeId: string;
+			previous?: StoredOutcome;
+		}) => Outcome | undefined,
+	): Outcome | undefined {
+		this.refresh();
+		const task = this.state.tasks[taskId];
+		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+		const generation = (task.outcome?.generation ?? 0) + 1;
+		const outcome = build({
+			snapshot: this.state,
+			generation,
+			outcomeId: taskOutcomeId(taskId, generation),
+			...(task.outcome ? { previous: task.outcome } : {}),
+		});
+		if (!outcome) return undefined;
+		this.commit({
+			type: "task.outcome_recorded",
+			aggregateId: taskId,
+			actor: "runtime",
+			idempotencyKey: `task-outcome-recorded:${generation}:${createHash("sha256").update(taskId).digest("hex")}`,
+			payload: toJsonObject({ outcome }),
+		});
+		return outcome;
 	}
 
 	/**

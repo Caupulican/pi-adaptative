@@ -37,6 +37,7 @@ import {
 	MAX_WORKER_REPORT_REFS,
 	MAX_WORKER_REPORT_TEXT_CHARS,
 } from "./worker-claim.ts";
+import { LEAF_WORKER_DECLARABLE_BLOCKERS } from "./worker-outcome-contract.ts";
 import { workerCommandEvidence, workerCommandOutcome } from "./worker-receipts.ts";
 
 export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
@@ -129,6 +130,15 @@ export const submitReportParameters = Type.Object(
 		regressions: Type.Optional(Type.Array(Type.String(), { description: "Behavior this change could break." })),
 		remaining: Type.Optional(Type.Array(Type.String(), { description: "What is not done yet." })),
 		blockers: Type.Optional(Type.Array(Type.String())),
+		blockerCode: Type.Optional(
+			Type.Union(
+				LEAF_WORKER_DECLARABLE_BLOCKERS.map((code) => Type.Literal(code)),
+				{
+					description:
+						"With a blocker only: missing_input (an input you need was not given), dependency_wrong (something the task depends on is wrong), needs_owner_decision (only the owner can choose), scope_denied (the work needs files or tools outside your grant), owner_authority_required (the owner must permit it), external_unavailable (an outside service is down).",
+				},
+			),
+		),
 		inconclusive: Type.Optional(
 			Type.Array(Type.String(), { description: "Findings you could not settle: what is missing." }),
 		),
@@ -266,6 +276,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 			remaining: clipped(args.remaining, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS),
 			...(args.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 			...(args.conditionMet === true ? { conditionMet: true as const } : {}),
+			...(args.blockerCode ? { blockerCode: args.blockerCode } : {}),
 		},
 	};
 }
