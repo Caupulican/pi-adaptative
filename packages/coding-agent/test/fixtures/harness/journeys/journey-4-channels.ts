@@ -444,6 +444,7 @@ export async function runJourney4ChannelsPhase(world: HarnessWorld): Promise<voi
 		verified: true,
 		thirdParty: true,
 		ref: lateBatch?.id,
+		shown: `Alice: ${lateWords}`,
 	});
 	expect(lateBatch?.state, "the late reply is routed by the batch id on its turn's origin").toBe("drafted");
 	trace.mark("root", "channels.late-message-queued");
