@@ -831,9 +831,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		options.lifecycle.checkpoint(options.durableHandle, { summary, usage });
 		return usage;
 	};
-	options.toolSurface.toolUsage.bindCheckpoint(() => {
-		options.toolSurface.gateway?.flushUsage();
-	});
 	const usageSignals = new Set<AbortSignal>();
 	const stopUsageClock = (): void => options.toolSurface.gateway?.stopUsageClock();
 	const observeUsageSignal = (signal: AbortSignal): void => {
@@ -1043,6 +1040,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			try {
 				const gateway = options.toolSurface.gateway;
 				if (!gateway) throw new Error("Worker execution requires a capability gateway with durable accounting.");
+				// The surface's single-owner accounting binds to the executor that runs, never to one that is built:
+				// the controller replaces an unrun executor when admission moves the attempt to a fallback model.
+				options.toolSurface.toolUsage.bindCheckpoint(() => {
+					gateway.flushUsage();
+				});
 				gateway.bindUsageAccounting(
 					new WorkerUsageAccounting({
 						port: options.lifecycle.beginUsageAccounting(options.durableHandle, options.initialUsage),

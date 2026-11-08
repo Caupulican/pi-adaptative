@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { AgentToolExecutionError } from "../../kernel/types.ts";
 import { truncateHead } from "../../kernel/utils/truncate.ts";
 import { INSTALLED_TOOL_METADATA_BOUND, resolveInstalledExecutable } from "../../utils/tools-manager.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
@@ -40,6 +41,14 @@ const CONFIG = [
 	"-c",
 	"diff.submodule=short",
 ];
+
+/**
+ * Git ran and answered with a non-zero exit (no repository, an unknown revision): the tool's observation, recorded
+ * as a completed negative outcome, never as a failed call the model must repair.
+ */
+function gitExitOutcome(action: RepoReadAction, code: number, message: string): AgentToolExecutionError {
+	return new AgentToolExecutionError(message, `exit_${code}`, `repo-read:${action}:exit_${code}`, "operation_outcome");
+}
 
 /** Git internals are opaque: only native processes, retained output, scope and time are bounded. */
 export async function executeBoundedRepoRead(operation: ReadOperation, input: RepoReadToolInput, cwd: string) {
@@ -125,7 +134,13 @@ export async function executeBoundedRepoRead(operation: ReadOperation, input: Re
 				outputCap: 128 * 1024,
 			});
 		const repository = await run(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]);
-		if (repository.code !== 0 || repository.capped) throw new Error("repo_read could not identify its repository");
+		if (repository.capped || repository.code === null) throw new Error("repo_read could not identify its repository");
+		if (repository.code !== 0)
+			throw gitExitOutcome(
+				input.action,
+				repository.code,
+				`repo_read could not identify its repository: ${repository.stderr.toString("utf8").trim().slice(0, 1024)}`,
+			);
 		const head = await run(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]);
 		if (head.capped) throw new Error("repo_read could not identify HEAD");
 		const pins: string[] = [];
@@ -183,8 +198,12 @@ export async function executeBoundedRepoRead(operation: ReadOperation, input: Re
 	};
 	const startedAt = Date.now();
 	const result = await inspect(operation);
-	if (result.output.code !== 0 && !result.output.capped)
-		throw new Error(`git ${input.action}: ${result.stderr.trim().slice(0, 1024) || result.output.code}`);
+	if (result.output.code !== 0 && !result.output.capped) {
+		const message = `git ${input.action}: ${result.stderr.trim().slice(0, 1024) || result.output.code}`;
+		throw result.output.code === null
+			? new Error(message)
+			: gitExitOutcome(input.action, result.output.code, message);
+	}
 	const truncation = truncateHead(result.text, { maxLines: limit });
 	const partial = result.output.capped || truncation.truncated || input.action === "log";
 	let text = truncation.content || "(no output)";

@@ -563,10 +563,13 @@ export function createRepoReadToolDefinition(
 				const diagnostic =
 					[run.stdout.trim(), run.stderr.trim()].filter(Boolean).join("\n") ||
 					`git ${action} exited with ${run.code}`;
+				// Git ran and answered with its exit status (no repository here, an unknown revision): that is the
+				// observation, not a failed tool call, so it reaches the model verbatim and opens no recovery obligation.
 				return {
 					content: [{ type: "text" as const, text: diagnostic.slice(0, 4_096) }],
 					details,
 					isError: true,
+					...(run.code !== null ? { errorKind: "operation_outcome" as const } : {}),
 				};
 			}
 			if (run.capped) details.capped = true;
