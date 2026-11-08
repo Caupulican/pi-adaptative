@@ -29,6 +29,9 @@ export type ThemeColor =
 	| "mdQuoteBorder"
 	| "mdHr"
 	| "mdListBullet"
+	| "mdBold"
+	| "mdItalic"
+	| "mdReference"
 	| "toolDiffAdded"
 	| "toolDiffRemoved"
 	| "toolDiffContext"
@@ -107,6 +110,11 @@ export class Theme {
 		if (ansi === undefined) throw new Error(`Unknown theme background color: ${color}`);
 		if (this.mode === "none") return text;
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/** Optional tones (`mdBold`, `mdItalic`, `mdReference`) exist only when the theme defines them. */
+	hasFg(color: ThemeColor): boolean {
+		return this.fgColors.has(color);
 	}
 
 	/** Optional surfaces (diff rows) exist only when the theme defines them. */
@@ -298,6 +306,11 @@ export function getMarkdownTheme(): MarkdownTheme {
 		italic: (text: string) => theme.italic(text),
 		underline: (text: string) => theme.underline(text),
 		strikethrough: (text: string) => chalk.strikethrough(text),
+		// Inline strong, emphasis and references take their own tone when the theme defines one; bold and italic always stay.
+		strong: (text: string) => (theme.hasFg("mdBold") ? theme.fg("mdBold", theme.bold(text)) : theme.bold(text)),
+		emphasis: (text: string) =>
+			theme.hasFg("mdItalic") ? theme.fg("mdItalic", theme.italic(text)) : theme.italic(text),
+		...(theme.hasFg("mdReference") ? { reference: (text: string) => theme.fg("mdReference", text) } : {}),
 		highlightCode: (code: string, lang?: string): string[] => highlightCodeLines(code, lang, "themed"),
 		codeBlockSurface: codeSurface,
 		codeBlockLabel: (text: string) => theme.fg("muted", text),
@@ -540,11 +553,24 @@ export function buildCliHighlightTheme(t: Theme): CliHighlightTheme {
 		number: (s: string) => t.fg("syntaxNumber", s),
 		regexp: (s: string) => t.fg("syntaxString", s),
 		string: (s: string) => t.fg("syntaxString", s),
-		comment: (s: string) => t.fg("syntaxComment", s),
+		comment: (s: string) => t.italic(t.fg("syntaxComment", s)),
 		doctag: (s: string) => t.fg("syntaxComment", s),
 		meta: (s: string) => t.fg("muted", s),
 		function: (s: string) => t.fg("syntaxFunction", s),
 		title: (s: string) => t.fg("syntaxFunction", s),
+		"title.class": (s: string) => t.fg("syntaxType", s),
+		"variable.language": (s: string) => t.fg("syntaxKeyword", s),
+		"selector-tag": (s: string) => t.fg("syntaxKeyword", s),
+		"selector-class": (s: string) => t.fg("syntaxType", s),
+		"selector-id": (s: string) => t.fg("syntaxFunction", s),
+		"selector-attr": (s: string) => t.fg("syntaxVariable", s),
+		"selector-pseudo": (s: string) => t.fg("syntaxKeyword", s),
+		"template-variable": (s: string) => t.fg("syntaxVariable", s),
+		attribute: (s: string) => t.fg("syntaxVariable", s),
+		property: (s: string) => t.fg("syntaxVariable", s),
+		symbol: (s: string) => t.fg("syntaxNumber", s),
+		bullet: (s: string) => t.fg("syntaxNumber", s),
+		section: (s: string) => t.fg("syntaxFunction", s),
 		class: (s: string) => t.fg("syntaxType", s),
 		type: (s: string) => t.fg("syntaxType", s),
 		tag: (s: string) => t.fg("syntaxPunctuation", s),

@@ -23,6 +23,24 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 	}
 }
 
+/**
+ * Candidates for reference styling in plain text: a path with a slash (`src/a.ts:12`, `~/x`, `../y/z`), a bare
+ * `file.ext:line[:col]`, and an issue or pull request number (`#42`). `isReference` then drops the look-alikes.
+ */
+const REFERENCE_PATTERN =
+	/(?<![\w/.~:@-])(?:~|\.{1,2})?\/?(?:[\w@.-]+\/)+[\w@.-]*[\w@](?::\d+(?::\d+)?)?(?![\w/])|(?<![\w/.@-])[\w-]+\.[A-Za-z]\w{0,7}:\d+(?::\d+)?|(?<![\w&#])#\d{1,6}\b/g;
+
+/** Whether a candidate reads as a file or issue reference: not `and/or`, not a date, not a ratio. */
+function isReference(candidate: string): boolean {
+	if (candidate.startsWith("#")) return true;
+	const path = candidate.replace(/:\d+(?::\d+)?$/, "");
+	if (path !== candidate) return true;
+	if (/^[\d/]+$/.test(path)) return false;
+	if (/^(?:~|\.{1,2})?\//.test(path)) return true;
+	if (/\.[A-Za-z]\w{0,7}$/.test(path)) return true;
+	return path.split("/").length > 2;
+}
+
 function trimPartialClosingFences(tokens: readonly Token[]): void {
 	const token = tokens[tokens.length - 1];
 	if (token?.type === "list") {
@@ -98,6 +116,12 @@ export interface MarkdownTheme {
 	italic: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
+	/** Inline `**strong**` text; defaults to `bold`. Headings and table headers keep plain `bold`. */
+	strong?: (text: string) => string;
+	/** Inline `*emphasis*` text; defaults to `italic`. */
+	emphasis?: (text: string) => string;
+	/** File paths (`src/a.ts:12`) and issue numbers (`#42`) found in plain text; unstyled when absent. */
+	reference?: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
@@ -435,6 +459,24 @@ export class Markdown extends CachedTextComponent implements Component {
 		return lines;
 	}
 
+	/** Plain text with its references (paths, `#42`) in the theme's reference style; the rest keeps the surrounding style. */
+	private renderTextWithReferences(text: string, applyText: (text: string) => string, stylePrefix: string): string {
+		const reference = this.theme.reference;
+		if (!reference) return applyText(text);
+		const parts: string[] = [];
+		let last = 0;
+		for (const match of text.matchAll(REFERENCE_PATTERN)) {
+			const found = match[0];
+			if (!isReference(found)) continue;
+			if (match.index > last) parts.push(applyText(text.slice(last, match.index)));
+			parts.push(reference(found), stylePrefix);
+			last = match.index + found.length;
+		}
+		if (last === 0) return applyText(text);
+		if (last < text.length) parts.push(applyText(text.slice(last)));
+		return parts.join("");
+	}
+
 	private renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext): string {
 		const parts: string[] = [];
 		const resolvedStyleContext = styleContext ?? this.getDefaultInlineStyleContext();
@@ -451,7 +493,7 @@ export class Markdown extends CachedTextComponent implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						parts.push(this.renderInlineTokens(token.tokens, resolvedStyleContext));
 					} else {
-						parts.push(applyTextWithNewlines(token.text));
+						parts.push(this.renderTextWithReferences(token.text, applyTextWithNewlines, stylePrefix));
 					}
 					break;
 
@@ -462,13 +504,13 @@ export class Markdown extends CachedTextComponent implements Component {
 
 				case "strong": {
 					const boldContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					parts.push(this.theme.bold(boldContent), stylePrefix);
+					parts.push((this.theme.strong ?? this.theme.bold)(boldContent), stylePrefix);
 					break;
 				}
 
 				case "em": {
 					const italicContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					parts.push(this.theme.italic(italicContent), stylePrefix);
+					parts.push((this.theme.emphasis ?? this.theme.italic)(italicContent), stylePrefix);
 					break;
 				}
 

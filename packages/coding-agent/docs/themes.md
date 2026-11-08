@@ -145,7 +145,7 @@ The `$schema` field enables editor auto-completion and validation.
 
 ## Color Tokens
 
-Every theme must define all 51 color tokens. There are no optional colors.
+Every theme must define the 51 required color tokens. The tokens marked optional below (surface tones, `mdBold`, `mdItalic`, `mdReference`) may be left out.
 
 ### Core UI (11 colors)
 
@@ -193,6 +193,9 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `mdQuoteBorder` | Blockquote border |
 | `mdHr` | Horizontal rule |
 | `mdListBullet` | List bullets |
+| `mdBold` | Optional tone of inline **strong** text (set, strong text is bold in this colour; left out, it is bold in the body colour) |
+| `mdItalic` | Optional tone of inline *emphasis* (italic in this colour when set) |
+| `mdReference` | Optional tone of file paths (`src/a.ts`, `./run.sh`, `~/x`), `file.ext:line:col` and issue numbers (`#42`) written in plain text |
 
 ### Tool Diffs (3 colors)
 
@@ -212,12 +215,12 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | Token | Purpose |
 |-------|---------|
 | `syntaxComment` | Comments |
-| `syntaxKeyword` | Keywords |
+| `syntaxKeyword` | Keywords, `this`/`self`, CSS selectors tags |
 | `syntaxFunction` | Function names |
 | `syntaxVariable` | Variables |
 | `syntaxString` | Strings |
 | `syntaxNumber` | Numbers |
-| `syntaxType` | Types |
+| `syntaxType` | Types, class names, built-ins |
 | `syntaxOperator` | Operators |
 | `syntaxPunctuation` | Punctuation |
 

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Replies colour what they name the way an editor does: file paths and `file.ext:line` references and issue numbers in plain text take their own tone, **strong** and *emphasis* can carry a tone besides bold and italic, and code distinguishes class names from functions and `this`/`self` from other variables. Themes opt in with the optional `mdBold`, `mdItalic` and `mdReference` tokens.
+
+### Changed
+
+- Matrix theme: keywords are violet, inline code is orange, links stay cyan, references are blue, strong text is gold and emphasis lilac; plain code text is the body colour so the token colours stand out, and comments are italic in every theme.
+
 ## [0.104.43] - 2026-11-08
 
 ### Fixed

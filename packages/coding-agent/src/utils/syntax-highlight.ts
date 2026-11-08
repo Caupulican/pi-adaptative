@@ -22,13 +22,18 @@ function getScopeFromSpanTag(tag: string): string | undefined {
 		return undefined;
 	}
 
-	for (const className of classValue.split(/\s+/)) {
-		if (className.startsWith(HIGHLIGHT_CLASS_PREFIX)) {
-			return className.slice(HIGHLIGHT_CLASS_PREFIX.length);
-		}
+	// highlight.js marks a sub-kind with a trailing-underscore class after the scope (`hljs-title class_`,
+	// `hljs-variable language_`); it is carried as `title.class` so a theme can tell a class from a function.
+	const classNames = classValue.split(/\s+/);
+	const scopeIndex = classNames.findIndex((className) => className.startsWith(HIGHLIGHT_CLASS_PREFIX));
+	if (scopeIndex === -1) {
+		return undefined;
 	}
-
-	return undefined;
+	const scope = classNames[scopeIndex].slice(HIGHLIGHT_CLASS_PREFIX.length);
+	const modifier = classNames
+		.slice(scopeIndex + 1)
+		.find((className) => className.endsWith("_") && !className.startsWith(HIGHLIGHT_CLASS_PREFIX));
+	return modifier ? `${scope}.${modifier.replace(/_+$/, "")}` : scope;
 }
 
 function getScopeFormatter(scope: string, theme: HighlightTheme): HighlightFormatter | undefined {

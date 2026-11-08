@@ -62,6 +62,12 @@ const ThemeJsonSchema = Type.Object({
 		mdQuoteBorder: ColorValueSchema,
 		mdHr: ColorValueSchema,
 		mdListBullet: ColorValueSchema,
+		/** Tone of inline **strong** text; optional, strong text keeps the body colour in bold without it. */
+		mdBold: Type.Optional(ColorValueSchema),
+		/** Tone of inline *emphasis*; optional, emphasis keeps the body colour in italic without it. */
+		mdItalic: Type.Optional(ColorValueSchema),
+		/** Tone of file paths (`src/a.ts:12`) and issue numbers (`#42`) in plain text; optional, they stay unstyled without it. */
+		mdReference: Type.Optional(ColorValueSchema),
 		// Tool Diffs (3 colors)
 		toolDiffAdded: ColorValueSchema,
 		toolDiffRemoved: ColorValueSchema,

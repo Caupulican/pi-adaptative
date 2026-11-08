@@ -216,6 +216,18 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Markdown list bullets/numbers"
 				},
+				"mdBold": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional tone of inline strong text; bold keeps the body colour without it"
+				},
+				"mdItalic": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional tone of inline emphasis; italic keeps the body colour without it"
+				},
+				"mdReference": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional tone of file paths with line numbers and issue numbers in plain text"
+				},
 				"toolDiffAdded": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Added lines in tool diffs"
