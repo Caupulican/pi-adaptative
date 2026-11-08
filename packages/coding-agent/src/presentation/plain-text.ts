@@ -57,7 +57,7 @@ const PLAIN_LABELS: Readonly<Record<string, string>> = {
 };
 
 /** Words that stay upper case when a stored name is spelled out. */
-const ACRONYMS = new Set(["icm", "usd", "ci", "id", "api", "url", "mcp", "ui", "tui", "cpu", "gpu", "pid"]);
+const ACRONYMS = new Set(["icm", "okf", "usd", "ci", "id", "api", "url", "mcp", "ui", "tui", "cpu", "gpu", "pid"]);
 
 /** A readable name for a record type: a known one by its phrase, any other with the separators turned into spaces. */
 export function plainLabel(id: string): string {

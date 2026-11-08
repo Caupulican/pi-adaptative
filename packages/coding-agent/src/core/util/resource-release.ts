@@ -9,6 +9,7 @@
  * promise; both share the backoff and the entry bookkeeping.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { boundedLine } from "./bounded-line.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "./timer-port.ts";
 
@@ -256,6 +257,10 @@ abstract class RetainedReleaseSet<T> {
 					entry.cause = releaseFailureCause(error);
 					entry.failures += 1;
 				}
+				harnessLog.warn("process", "a retained release failed and stays queued", () => ({
+					attempts: entry.failures,
+					errorClass: error instanceof Error ? error.name : typeof error,
+				}));
 				if (!options.report) return;
 				try {
 					this.base.reportFailure?.({ ...entry }, error);

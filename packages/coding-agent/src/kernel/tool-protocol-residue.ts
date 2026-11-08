@@ -1,9 +1,9 @@
 import { parseTextToolCalls } from "@caupulican/pi-ai/text-tool-protocol";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
+import { harnessLog } from "./harness-log.ts";
 import type { AgentTool } from "./types.ts";
 
 export const NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR = "native_tool_protocol_residue";
-export const TOOL_FREE_RESPONSE_TOOL_CALL_ERROR = "tool_free_response_tool_call";
 
 /**
  * Marks which lines fall inside a genuinely closed ```/~~~ fence (open and matching close both
@@ -131,10 +131,11 @@ export function rejectToolCallsFromToolFreeResponse(
 		text && knownTools.length > 0 ? parseTextToolCalls(text, knownTools).calls[0]?.name : undefined;
 	const toolName = nativeToolCall?.name ?? renderedToolName ?? envelopeToolName;
 	if (!toolName) return message;
+	harnessLog.debug("ui", "a tool call came back while tools were disabled", () => ({ toolName }));
 	return {
 		...message,
 		content: [{ type: "text", text: "" }],
 		stopReason: "error",
-		errorMessage: `${TOOL_FREE_RESPONSE_TOOL_CALL_ERROR}: provider returned ${toolName} while tools were disabled`,
+		errorMessage: "The provider returned a tool call while tools were disabled; no operation was executed.",
 	};
 }

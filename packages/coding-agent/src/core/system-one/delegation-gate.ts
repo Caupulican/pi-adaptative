@@ -136,6 +136,10 @@ export class DelegationGate {
 			// Reversible work is never stopped by an outage: the call runs, and the doubt is shown once.
 			if (!this.outageReported) {
 				this.outageReported = true;
+				harnessLog.warn("delegation", "a root call could not be judged; the call runs", () => ({
+					tool: toolName,
+					error: error instanceof Error ? error.name : typeof error,
+				}));
 				this.deps.notify(
 					`System One could not judge whether the root's call is task work (${error instanceof Error ? error.message : String(error)}); it runs.`,
 				);
@@ -147,7 +151,6 @@ export class DelegationGate {
 	private refusal(operation: string): DelegationRefusal {
 		const shown = operation.replace(/\s+/g, " ").trim();
 		const subject = shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`;
-		harnessLog.info("delegation", "the delegation gate refused a root call", { subject });
 		this.deps.notify(`The root delegates task work: ${subject}`);
 		return {
 			block: true,

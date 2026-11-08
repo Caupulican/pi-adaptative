@@ -539,7 +539,9 @@ export class ModelRegistry implements ModelRegistryContract {
 						.Errors(parsed)
 						.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
 						.join("\n") || "Unknown schema error";
-				return emptyCustomModelsResult(`Invalid models.json schema:\n${errors}\n\nFile: ${modelsJsonPath}`);
+				return emptyCustomModelsResult(
+					`Custom models were not loaded: a setting has the wrong format.\n${errors}\n\nFile: ${modelsJsonPath}`,
+				);
 			}
 
 			const config = parsed as ModelsConfig;
@@ -571,10 +573,12 @@ export class ModelRegistry implements ModelRegistryContract {
 			return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
 		} catch (error) {
 			if (error instanceof SyntaxError) {
-				return emptyCustomModelsResult(`Failed to parse models.json: ${error.message}\n\nFile: ${modelsJsonPath}`);
+				return emptyCustomModelsResult(
+					`Custom models were not loaded: the file is not valid JSON.\nDetail: ${error.message}\n\nFile: ${modelsJsonPath}`,
+				);
 			}
 			return emptyCustomModelsResult(
-				`Failed to load models.json: ${error instanceof Error ? error.message : error}\n\nFile: ${modelsJsonPath}`,
+				`Custom models were not loaded.\nDetail: ${error instanceof Error ? error.message : error}\n\nFile: ${modelsJsonPath}`,
 			);
 		}
 	}

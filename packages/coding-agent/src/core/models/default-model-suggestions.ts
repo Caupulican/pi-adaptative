@@ -64,12 +64,12 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 	{
 		name: "FastContext-1.0-4B",
 		pullRef: "hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf",
-		role: "Repository scout (context_scout)",
+		role: "Repository scout",
 		toolCalling: true,
 		assignRole: "scout",
 		rationale:
-			"The model the context_scout lane is built around (Plan 9): 4B Qwen3, 256K context, trained for read-only repo exploration returning file:line citations. /fitness must pass the tool-calls + research lanes before assignment.",
-		note: "Q4 ≈ 2.5 GB; ~5-6 GB peak with 32-64K KV. Qwen3 template caveat: if tool calls fail the probe, use the Modelfile recipe in docs/scout.md.",
+			"The model the repository scout is built around: 4B Qwen3, 256K context, trained for read-only repo exploration returning file:line citations. /fitness must pass its tool-call and research checks before assignment.",
+		note: "Q4 ≈ 2.5 GB; ~5-6 GB peak with 32-64K KV. Qwen3 template caveat: if tool calls fail the probe, use the Modelfile recipe in the repository's scout guide.",
 	},
 	{
 		name: "Ornith-1.0-9B",

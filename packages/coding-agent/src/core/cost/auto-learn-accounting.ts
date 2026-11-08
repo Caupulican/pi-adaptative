@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import {
 	isOwnerMachineIdField,
@@ -60,6 +61,21 @@ interface ObligationExpiry {
 	usage: "delivered" | "unaccounted";
 	reason: string;
 }
+
+/** The owner's words for why an obligation expired, by the phase its owning session ended in. */
+const EXPIRY_REASON_WORDS: Readonly<Record<ExpirablePhase, string>> = {
+	prepared: "the owning session ended before the learner launch was confirmed",
+	running: "the owning session ended while the learner was running",
+	terminal: "the owning session ended and the learner's usage could not be read",
+	captured: "the owning session ended before the learner's usage was charged to it",
+	confirmed: "the owning session ended before the handoff and cleanup finished",
+};
+
+/** The owner's words for whether an expired obligation's usage reached the session. */
+const EXPIRY_USAGE_WORDS: Readonly<Record<ObligationExpiry["usage"], string>> = {
+	delivered: "Its usage was charged to the session",
+	unaccounted: "Its usage was not charged to the session",
+};
 
 /**
  * One learner run's charge to its parent session. Two processes are named:
@@ -323,7 +339,10 @@ export class AutoLearnAccounting {
 		try {
 			names = this.locked(() => recordNames(this.directory));
 		} catch (error) {
-			this.warn(`Auto Learn accounting remains pending: ${String(error).slice(0, 512)}`);
+			harnessLog.debug("ui", "Auto Learn accounting could not be listed; it stays pending", {
+				error: String(error),
+			});
+			this.warn("Auto Learn accounting could not be read and stays pending.");
 			return;
 		}
 		for (const name of names) {
@@ -357,7 +376,8 @@ export class AutoLearnAccounting {
 			record = this.adopt(runId);
 			if (record.phase === "expired") return;
 			if (record.phase === "prepared") {
-				this.warn(`Auto Learn accounting ${runId} requires launch reconciliation; evidence retained.`);
+				harnessLog.debug("ui", "an Auto Learn accounting record needs its launch reconciled", { runId });
+				this.warn("An Auto Learn learner run needs its start confirmed; its evidence is retained.");
 				return;
 			}
 			record = this.settleExitedLearner(runId, record);
@@ -416,8 +436,13 @@ export class AutoLearnAccounting {
 				});
 			}
 		} catch (error) {
-			if (!isMissingFileError(error) || existsSync(this.file(runId)))
-				this.warn(`Auto Learn accounting ${runId} remains pending: ${String(error).slice(0, 512)}`);
+			if (!isMissingFileError(error) || existsSync(this.file(runId))) {
+				harnessLog.debug("ui", "an Auto Learn accounting record could not be settled; it stays pending", {
+					runId,
+					error: String(error),
+				});
+				this.warn("An Auto Learn accounting record could not be settled and stays pending.");
+			}
 		}
 	}
 
@@ -529,13 +554,21 @@ export class AutoLearnAccounting {
 			.sort((left, right) => left.at - right.at);
 		for (const oldest of receipts.slice(0, Math.max(0, receipts.length - MAX_EXPIRED_RECEIPTS + 1))) {
 			unlinkSync(join(ledger, oldest.name));
-			this.warn(
-				`Auto Learn expired obligation receipt ${oldest.name.slice(0, -5)} dropped from its bounded ledger.`,
-			);
+			harnessLog.debug("ui", "the expired Auto Learn ledger dropped its oldest record", {
+				runId: oldest.name.slice(0, -5),
+			});
+			this.warn("An old expired Auto Learn record was dropped to keep the expired list within its size limit.");
 		}
 		renameSync(this.file(record.runId), join(ledger, `${record.runId}.json`));
+		harnessLog.debug("ui", "an Auto Learn accounting record expired", {
+			runId: record.runId,
+			from: record.expiry.from,
+			usage: record.expiry.usage,
+			reason: record.expiry.reason,
+			ledger,
+		});
 		this.warn(
-			`Auto Learn accounting ${record.runId} expired (${record.expiry.usage}): ${record.expiry.reason}. Receipt kept in ${ledger}.`,
+			`An Auto Learn accounting record expired: ${EXPIRY_REASON_WORDS[record.expiry.from]}. ${EXPIRY_USAGE_WORDS[record.expiry.usage]}. Its record is kept for review.`,
 		);
 	}
 

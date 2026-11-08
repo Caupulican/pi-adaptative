@@ -15,7 +15,7 @@ export function formatRouteValue(route: ForegroundRouteSnapshot): string {
 		case "direct":
 			return "direct";
 		case "manual":
-			return `manual:${shortModelName(route.activeModel)}`;
+			return `chosen by you: ${shortModelName(route.activeModel)}`;
 		case "model_router_retry":
 			return `escalated→${shortModelName(route.activeModel)} via model-router`;
 		case "model_router_hmoe":

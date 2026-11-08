@@ -1,8 +1,9 @@
 import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@caupulican/pi-tui";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { Theme, ThemeColor } from "../../presentation/theme-model.ts";
 import { renderTitleBadge, type TitleBadgeStatus } from "../../presentation/tool-title.ts";
-import type { GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
+import type { GoalEvidenceKind, GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
 import { isTrustedGoalEvidence } from "../goals/goal-state.ts";
 import type { TaskStep } from "../tasks/task-state.ts";
 
@@ -83,34 +84,51 @@ const NOTICE_STYLES: Record<OrchestrationPanelNotice["status"], { icon: string; 
 	error: { icon: "×", color: "error" },
 };
 
+/** The owner's word for each evidence kind; the stored kind stays in the harness log. */
+const EVIDENCE_KIND_WORDS: Readonly<Record<GoalEvidenceKind, string>> = {
+	file: "file",
+	test: "test run",
+	tool: "tool result",
+	user: "your input",
+	finding: "finding",
+	worker: "worker report",
+	check: "check",
+};
+
 export function goalRequirementPanelRow(requirement: Requirement): OrchestrationPanelRow {
+	harnessLog.debug("ui", "a requirement row was built", () => ({
+		requirementId: requirement.id,
+		boundLaneId: requirement.boundLaneId ?? null,
+		dependencyIds: requirement.dependencies ?? [],
+		evidenceIds: requirement.evidenceIds,
+	}));
+	const dependencyCount = requirement.dependencies?.length ?? 0;
 	return {
 		status:
 			requirement.status === "satisfied" ? "completed" : requirement.status === "blocked" ? "blocked" : "pending",
 		label: requirement.text,
 		section: "Requirements",
 		meta: [
-			requirement.id,
 			requirement.evidenceIds.length > 0 ? `${requirement.evidenceIds.length} evidence` : undefined,
-			requirement.boundLaneId ? `worker: ${requirement.boundLaneId}` : undefined,
+			requirement.boundLaneId ? "worker assigned" : undefined,
 		].filter((value): value is string => value !== undefined),
 		details: [
 			requirement.blockedReason ? `blocked: ${requirement.blockedReason}` : undefined,
-			requirement.dependencies?.length ? `depends on: ${requirement.dependencies.join(", ")}` : undefined,
-			requirement.evidenceIds.length ? `evidence: ${requirement.evidenceIds.join(", ")}` : undefined,
+			dependencyCount ? `depends on ${dependencyCount} requirement${dependencyCount === 1 ? "" : "s"}` : undefined,
+			requirement.evidenceIds.length ? `${requirement.evidenceIds.length} evidence linked` : undefined,
 		].filter((value): value is string => value !== undefined),
 	};
 }
 
 export function goalEvidencePanelRow(evidence: GoalEvidenceRef): OrchestrationPanelRow {
 	const trusted = isTrustedGoalEvidence(evidence);
+	harnessLog.debug("ui", "an evidence row was built", () => ({ evidenceId: evidence.id, kind: evidence.kind }));
 	return {
 		status: trusted ? (evidence.outcome ?? "reviewed") : "info",
 		label: evidence.summary,
 		section: "Evidence",
 		meta: [
-			evidence.id,
-			evidence.kind,
+			EVIDENCE_KIND_WORDS[evidence.kind],
 			trusted ? "verified" : "unverified",
 			evidence.outcome ? `operation ${evidence.outcome}` : undefined,
 		].filter((value): value is string => value !== undefined),
@@ -119,13 +137,18 @@ export function goalEvidencePanelRow(evidence: GoalEvidenceRef): OrchestrationPa
 }
 
 export function taskStepPanelRow(step: TaskStep): OrchestrationPanelRow {
+	harnessLog.debug("ui", "a task step row was built", () => ({
+		stepId: step.id,
+		pipelineRunId: step.pipelineRunId ?? null,
+		pipelineStageId: step.pipelineStageId ?? null,
+	}));
 	const meta = [
 		step.priority === "high" ? "high priority" : undefined,
 		step.owner ? `@${step.owner}` : undefined,
 		step.requirementIds?.length
 			? `${step.requirementIds.length} requirement${step.requirementIds.length === 1 ? "" : "s"}`
 			: undefined,
-		step.pipelineRunId && step.pipelineStageId ? `${step.pipelineRunId}/${step.pipelineStageId}` : undefined,
+		step.pipelineRunId && step.pipelineStageId ? "pipeline stage" : undefined,
 		step.evidence.length ? `${step.evidence.length} evidence` : undefined,
 	].filter((value): value is string => value !== undefined);
 	const details = [

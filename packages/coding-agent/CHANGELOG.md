@@ -9,6 +9,7 @@
 - Fan-out is wider: `delegate slices` up to 24 and `race` up to 8, and running concurrency widens from `maxConcurrent` to `maxConcurrentBurst` (default 12) while the subscription reports room.
 
 ### Fixed
+- The ICM continuous chat fires far fewer background summaries: a reply up to the node maximum (528 bytes) is accepted at once instead of being corrected (half of all paid replies were corrections), a failed node is retried with growing backoff and a six-attempt cap instead of on every message, and background summaries stop for the day at `contextPolicy.memory.history.compactionMaxUsdPerDay` (default $10 across projects), with one plain-words notice.
 - Two processes creating or migrating the continuous-chat projection or scheduler database at the same time no longer fail or downgrade the schema: the schema version is re-checked under the write lock.
 
 - Delegation failed in any setup without favorite models: with the model router on and an empty candidate pool nothing counted as allocatable, so every worker start died with `no_allowed_model` and the root went digging through the harness source. An empty pool now restricts nothing, and the session's own model is always usable.
@@ -16,6 +17,8 @@
 - The root's own file edits are no longer refused (`orchestrator.delegationGate` is off by default; the strict split stays as an opt-in), and the system prompt names the working directory's top-level entries so a plain request needs no searching.
 
 ### Changed
+- The ICM continuous chat no longer pays a model to summarize tool traffic: a tool call or result too long for a node (90% of chat messages are tool calls or results, 41% of all messages exceed the node target, mostly results) becomes a one-line leaf built in code, with the call's name and chief arguments or the result's size, head and tail, marked as an automatic summary that `zoom` opens exactly; user words, replies and work reports are still summarized by the model.
+- ICM background summaries no longer run alongside the turn that produced their messages: new claims wait while a foreground turn runs and resume 2 seconds after it ends, since that turn's pinned view cannot use them; running compactions are not cancelled and an idle session is unchanged.
 - Fewer tool rounds: a successful `edit` returns the changed region with new-file line numbers (bounded), so the model no longer reads the file back to verify; after two consecutive rounds that each made a single independent lookup, the result carries a one-line note to batch independent reads and searches in one message. Measured over 147 sessions: 62% of rounds carried one call, about 9% of rounds were avoidable serial lookups, and 17% of edits were followed by a read of the same file.
 - Model router `selectionMode` now defaults to `hybrid`: unset tiers are chosen from the candidate pool (subscription first) instead of warning at startup that they are unset; pinned tiers are unchanged.
 

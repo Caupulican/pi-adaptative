@@ -25,6 +25,7 @@ import type {
 import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
 import type { ContinuousChatSummaryModelResolution } from "./continuous-chat-settings.ts";
+import type { ContinuousChatSpendMeter } from "./continuous-chat-spend.ts";
 import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 
 /** The model a request ran on, as far as a provider's prompt cache tells models apart. */
@@ -99,6 +100,8 @@ export interface ContinuousChatCompactionAdapterDeps {
 	summary(): ContinuousChatSummaryModelResolution;
 	/** Resolved once when a job opens, so physical responses retain their original session owner. */
 	usage(): SessionSemanticUsageDelivery;
+	/** The summaries' daily spend, shared across projects: new claims wait once its limit is reached. */
+	spend?: ContinuousChatSpendMeter;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
@@ -112,6 +115,10 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	validate(): void {
 		this.summaryModel();
+	}
+
+	spendHold(): string | undefined {
+		return this.deps.spend?.hold();
 	}
 
 	recoveryKey(): string | undefined {
@@ -231,6 +238,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							signal,
 						});
 						usage.assertHealthy();
+						this.deps.spend?.record(completion.usage.cost.total);
 						const reply = completion.messages?.at(-1);
 						const assistant = reply?.role === "assistant" ? reply : undefined;
 						return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };

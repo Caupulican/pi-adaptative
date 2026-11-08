@@ -1,5 +1,6 @@
 /** Provider-neutral coordinator that builds one node of the permanent chat's summary tree. */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
@@ -8,6 +9,7 @@ import {
 	renderContinuousChatMergeTask,
 	renderContinuousChatOverlengthCorrection,
 } from "./continuous-chat-prompt.ts";
+import { buildContinuousChatToolLeafText, clipUtf8SingleLine } from "./continuous-chat-tool-leaf.ts";
 import {
 	CONTINUOUS_CHAT_NODE_MAX_BYTES,
 	CONTINUOUS_CHAT_NODE_TARGET_BYTES,
@@ -59,6 +61,8 @@ export interface ContinuousChatCompactionConversation {
 export interface ContinuousChatCompactionPort {
 	/** Stable summary configuration identity; changes permit retrying exhausted output failures. */
 	recoveryKey?(): string | undefined;
+	/** The owner's words for why no compaction may start now (a spend limit), or undefined. New claims wait while it holds. */
+	spendHold?(): string | undefined;
 	/** The node the conversation builds names its paid spend, so every reply's usage is attributable to it. */
 	open(
 		prefix: ContinuousChatCompactionPrefix,
@@ -173,7 +177,9 @@ export class ContinuousChatCompactionCoordinator {
 			if (candidate.length === 0) return failure("empty-reply", replies, "Compaction reply was empty.", shortest);
 			const bytes = Buffer.byteLength(candidate, "utf8");
 			if (shortest === undefined || bytes < shortest.bytes) shortest = { text: candidate, bytes };
-			if (bytes <= CONTINUOUS_CHAT_NODE_TARGET_BYTES) {
+			// The bound is the node maximum: a reply a few bytes over the target is a complete line, and asking again for it
+			// bought a second paid reply for no information (half of all replies were such corrections).
+			if (bytes <= CONTINUOUS_CHAT_NODE_MAX_BYTES) {
 				const node =
 					target.kind === "leaf"
 						? createContinuousChatLeaf(target.record, candidate)
@@ -230,24 +236,7 @@ function isLegacyNoteNodeText(text: string): boolean {
 	return lines.length > 0 && lines.every((line) => line.startsWith("note: "));
 }
 
-function clipUtf8SingleLine(text: string, maxBytes: number): string {
-	const singleLine = text.replaceAll(/\r?\n/g, " ");
-	if (Buffer.byteLength(singleLine, "utf8") <= maxBytes) return singleLine;
-	const suffix = " ...";
-	const suffixBytes = Buffer.byteLength(suffix, "utf8");
-	const budget = Math.max(0, maxBytes - suffixBytes);
-	let used = 0;
-	let out = "";
-	for (const char of singleLine) {
-		const charBytes = Buffer.byteLength(char, "utf8");
-		if (used + charBytes > budget) break;
-		out += char;
-		used += charBytes;
-	}
-	return `${out}${suffix}`;
-}
-
-/** The node that needs no model call: the leaf when it fits as is (or is a legacy note), or the joined children when their join fits (or both are legacy-note subtrees). */
+/** The node that needs no model call: the leaf when it fits as is (or is a legacy note), a tool call or result as an automatic line of code facts, or the joined children when their join fits (or both are legacy-note subtrees). */
 function noCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeNode | undefined {
 	if (target.kind === "merge") {
 		const exact = createContinuousChatParentWithoutCall(target.left, target.right);
@@ -268,7 +257,14 @@ function noCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeN
 	}
 	const fits = Buffer.byteLength(source, "utf8") <= CONTINUOUS_CHAT_NODE_TARGET_BYTES;
 	if (fits) return createContinuousChatLeaf(target.record);
-	return undefined;
+	// A tool call or result that does not fit is still code facts (name and arguments, size, head and tail), not words.
+	const toolLine = buildContinuousChatToolLeafText(target.record);
+	if (toolLine === undefined) return undefined;
+	harnessLog.debug("memory", "chat tool leaf built without a model call", () => ({
+		kind: target.record.kind,
+		originalBytes: target.record.textBytes,
+	}));
+	return createContinuousChatLeaf(target.record, toolLine);
 }
 
 function failure(

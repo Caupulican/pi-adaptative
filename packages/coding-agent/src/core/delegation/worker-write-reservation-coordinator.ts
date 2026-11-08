@@ -1,3 +1,4 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { canonicalPathScopeIdentity } from "../autonomy/path-scope.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
@@ -233,6 +234,7 @@ export class WorkerWriteReservationCoordinator {
 		if (!this.leases.has(laneId)) return undefined;
 		const held = this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, "yield")?.held;
 		if (!held) return undefined;
+		harnessLog.debug("workers", "a lane yielded its write reservation for a wait", { laneId });
 		return {
 			laneId,
 			lease: { ...held, writeScopes: [...held.writeScopes] },
@@ -247,13 +249,17 @@ export class WorkerWriteReservationCoordinator {
 			lease.parentSessionId !== this.options.getParentSessionId() ||
 			lease.ownerId !== this.options.ownerId
 		) {
+			harnessLog.warn("workers", "a yielded write reservation cannot be restored: its owner changed", { laneId });
 			return { kind: "denied", reasonCode: "write_reservation_unavailable" };
 		}
 		const current = this.leases.get(laneId);
 		if (current) {
-			return current.attemptId === lease.attemptId && current.fencingToken === lease.fencingToken
-				? { kind: "granted" }
-				: { kind: "denied", reasonCode: "write_reservation_unavailable" };
+			if (current.attemptId === lease.attemptId && current.fencingToken === lease.fencingToken)
+				return { kind: "granted" };
+			harnessLog.warn("workers", "a yielded write reservation cannot be restored: the lane holds another fence", {
+				laneId,
+			});
+			return { kind: "denied", reasonCode: "write_reservation_unavailable" };
 		}
 		return this.acquireLease(
 			laneId,
@@ -330,6 +336,11 @@ export class WorkerWriteReservationCoordinator {
 			this.warnBestEffort(
 				`Failed to release worker write reservation ${laneId}; retrying: ${releaseFailureCause(error)}`,
 			);
+			harnessLog.warn("workers", "a worker's write reservation release failed; it is retained for a retry", () => ({
+				laneId,
+				error: error instanceof Error ? error.name : typeof error,
+				code: error instanceof Error && "code" in error ? String(error.code) : undefined,
+			}));
 			// The lane no longer holds the lease, but its durable record still names this live process,
 			// which no reaper may release. Keep the exact record until a release is proven.
 			this.forgetLease(laneId, held);
@@ -537,6 +548,10 @@ export class WorkerWriteReservationCoordinator {
 				}
 				if (released === "released" || released === "not_found") {
 					reaped.push(conflict.lease.reservationId);
+					harnessLog.warn("workers", "a dead owner's write reservation was released", {
+						reservationId: conflict.lease.reservationId,
+						ownerId: conflict.lease.ownerId,
+					});
 					this.options.warn(
 						`Released stale worker write reservation ${conflict.lease.reservationId} on ${conflict.lease.repositoryRoot}: owner ${conflict.lease.ownerId} (session ${conflict.lease.parentSessionId}, created ${conflict.createdAt}) is dead.`,
 					);
@@ -584,15 +599,20 @@ export class WorkerWriteReservationCoordinator {
 			if (result.kind === "blocked") {
 				this.recordLocalBlockers(laneId, result.conflictingReservationIds);
 				this.ensureWatch(request.workspace);
-				return {
-					kind: "blocked",
-					detail: {
-						reasonCode: result.reasonCode,
-						repositoryRoot: request.workspace.repositoryRoot,
-						conflicts: remainingConflicts,
-						reapedReservationIds,
-					},
+				const detail: WorkerWriteReservationBlockDetail = {
+					reasonCode: result.reasonCode,
+					repositoryRoot: request.workspace.repositoryRoot,
+					conflicts: remainingConflicts,
+					reapedReservationIds,
 				};
+				harnessLog.debug("workers", "a worker's write reservation is blocked; the lane waits", () => ({
+					laneId,
+					reasonCode: detail.reasonCode,
+					holders: detail.conflicts.length,
+					holderIds: detail.conflicts.map((conflict) => conflict.reservationId),
+					reaped: detail.reapedReservationIds.length,
+				}));
+				return { kind: "blocked", detail };
 			}
 			if (!result.lease) {
 				this.blockedByLocalLaneIds.delete(laneId);
@@ -609,13 +629,16 @@ export class WorkerWriteReservationCoordinator {
 			this.blockedByLocalLaneIds.delete(laneId);
 			const message = error instanceof Error ? error.message : String(error);
 			this.options.warn(`${warningPrefix}: ${message}`);
-			return {
-				kind: "denied",
-				reasonCode:
-					classifyScopeFailure && message.includes("within the execution root")
-						? "write_reservation_scope_invalid"
-						: "write_reservation_unavailable",
-			};
+			const reasonCode =
+				classifyScopeFailure && message.includes("within the execution root")
+					? "write_reservation_scope_invalid"
+					: "write_reservation_unavailable";
+			harnessLog.warn("workers", "a worker's write reservation was denied", {
+				laneId,
+				reasonCode,
+				error: error instanceof Error ? error.name : typeof error,
+			});
+			return { kind: "denied", reasonCode };
 		}
 	}
 
@@ -641,6 +664,9 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private emitAvailability(): void {
+		harnessLog.debug("workers", "a write reservation was released; waiters are woken", () => ({
+			listeners: this.availabilityListeners.size,
+		}));
 		// A completed wait still owns its logical attempt and must restore the reservation it yielded
 		// before ordinary queued work can consume the release. Snapshot this wake generation so a
 		// callback cannot extend the synchronous dispatch by registering more waiters.

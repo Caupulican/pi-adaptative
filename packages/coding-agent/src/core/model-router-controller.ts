@@ -34,6 +34,7 @@
 
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { Agent, AgentMessage, AgentMessageOrigin, ThinkingLevel } from "../kernel/index.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/node.ts";
 import type {
@@ -686,6 +687,10 @@ export class ModelRouterController {
 		decision.model = expensive.ref;
 		decision.selection = expensive.selection;
 		this._lastModelRouterSkipReason = undefined;
+		harnessLog.info("router", "a medium route fell back to the expensive tier", () => ({
+			reasonCode,
+			model: expensive.ref,
+		}));
 		return { decision, model: expensive.model };
 	}
 
@@ -861,14 +866,32 @@ export class ModelRouterController {
 		for (const tier of ["expensive", "medium", "cheap"] as const) {
 			// Same order as a routed turn: the owner's pin in any selection mode, then the tier's automatic pick.
 			const pinned = this._usablePin(tier, facts).model;
-			if (usable(pinned)) return pinned;
+			if (usable(pinned)) return this._quotaFallbackChosen(failed, pinned, tier, "pin");
 			if (!this.isTierAutoSelected(tier)) continue;
 			const auto = this.selectAutoTierModel(tier).candidates.find(
 				(entry) => entry.admitted && fitsTurnFacts(entry.model, facts) && usable(entry.model),
 			)?.model;
-			if (auto) return auto;
+			if (auto) return this._quotaFallbackChosen(failed, auto, tier, "pool");
 		}
+		harnessLog.warn("router", "no usable model can take over from an exhausted model", () => ({
+			failed: formatModelRouterModel(failed),
+		}));
 		return undefined;
+	}
+
+	private _quotaFallbackChosen(
+		failed: Model<Api>,
+		model: Model<Api>,
+		tier: AutoSelectionTier,
+		why: "pin" | "pool",
+	): Model<Api> {
+		harnessLog.info("router", "a quota fallback model was chosen", () => ({
+			failed: formatModelRouterModel(failed),
+			model: formatModelRouterModel(model),
+			tier,
+			why,
+		}));
+		return model;
 	}
 
 	resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
@@ -1067,29 +1090,47 @@ export class ModelRouterController {
 			: judged?.kind === "fallback"
 				? [`System One route not judged: ${judged.reason}`]
 				: [];
-		const route = (model: Model<Api>, selection: RouteDecision["selection"], detail: string) => ({
-			decision: {
-				...baseline.decision,
+		const route = (
+			model: Model<Api>,
+			selection: RouteDecision["selection"],
+			detail: string,
+			why: "pin" | "judge" | "pool",
+		) => {
+			const routed = {
+				decision: {
+					...baseline.decision,
+					tier,
+					model: formatModelRouterModel(model),
+					selection,
+					...(category
+						? {
+								thinkingLevel: clampThinkingLevel(model, CATEGORY_THINKING[category.category]),
+								confidence: category.confidence,
+							}
+						: {}),
+					reasons: [...baseline.decision.reasons, ...judgedReasons, detail],
+				},
+				model,
+			};
+			harnessLog.debug("router", "a turn's route was decided", () => ({
 				tier,
-				model: formatModelRouterModel(model),
+				baselineTier,
+				why,
 				selection,
-				...(category
-					? {
-							thinkingLevel: clampThinkingLevel(model, CATEGORY_THINKING[category.category]),
-							confidence: category.confidence,
-						}
-					: {}),
-				reasons: [...baseline.decision.reasons, ...judgedReasons, detail],
-			},
-			model,
-		});
+				model: formatModelRouterModel(model),
+				reasonCode: baseline.decision.reasonCode,
+				judged: category?.category,
+				subscription: this.deps.isUsingSubscription(model),
+			}));
+			return routed;
+		};
 
 		// The owner's pin for that tier runs it, in any selection mode, when it can: authenticated,
 		// allowed by the owner's model policy, not exhausted, and able to take this turn's facts.
 		const pinned = this._usablePin(tier, facts);
 		if (pinned.model) {
 			this._noticeSupersededPin(tier, pinned.model, signal);
-			return route(pinned.model, category ? "system_one" : "manual", `owner pin for ${tier}`);
+			return route(pinned.model, category ? "system_one" : "manual", `owner pin for ${tier}`, "pin");
 		}
 		const pinNote = pinned.reason ? [`${tier} pin not used: ${pinned.reason}`] : [];
 
@@ -1103,6 +1144,7 @@ export class ModelRouterController {
 					`${bySystemOne ? "System One" : "H-MoE ranking"} selected ${formatModelRouterModel(expert.model)}${
 						expert.decidedBy ? ` (${expert.decidedBy.reasons.join("; ")})` : ""
 					}`,
+					bySystemOne ? "judge" : "pool",
 				);
 				if (bySystemOne) picked.decision.thinkingLevel = expert.thinkingLevel;
 				picked.decision.reasons = [...pinNote, ...picked.decision.reasons];
@@ -1118,7 +1160,7 @@ export class ModelRouterController {
 				(candidate) => candidate.admitted && fitsTurnFacts(candidate.model, facts),
 			);
 			if (auto) {
-				const picked = route(auto.model, "auto", `auto-selected ${auto.ref} for ${tier}`);
+				const picked = route(auto.model, "auto", `auto-selected ${auto.ref} for ${tier}`, "pool");
 				picked.decision.reasons = [...pinNote, ...picked.decision.reasons];
 				return picked;
 			}
@@ -1128,9 +1170,24 @@ export class ModelRouterController {
 				facts.hasImages && !baseline.model.input.includes("image")
 					? `${tier} tier has no candidate that can read images`
 					: `${tier} tier has no candidate with a context window large enough for this turn`;
+			harnessLog.warn("router", "the tier's route cannot take this turn; the session model answers", () => ({
+				tier,
+				hasImages: facts.hasImages,
+				contextTokens: facts.contextTokens,
+			}));
 			return undefined;
 		}
 		baseline.decision.reasons = [...baseline.decision.reasons, ...judgedReasons, ...pinNote];
+		harnessLog.debug("router", "a turn's route was decided", () => ({
+			tier: baseline.decision.tier,
+			baselineTier,
+			why: baseline.decision.fallbackFrom === undefined ? "floor" : "escalation",
+			selection: baseline.decision.selection,
+			model: baseline.decision.model,
+			reasonCode: baseline.decision.reasonCode,
+			judged: category?.category,
+			subscription: this.deps.isUsingSubscription(baseline.model),
+		}));
 		return baseline;
 	}
 
@@ -1387,6 +1444,17 @@ export class ModelRouterController {
 				? this.resolveConfiguredTierModel(tier)
 				: undefined;
 		const replacement = [next, active.rootModel, fallback].find(usable);
+		harnessLog.warn(
+			"router",
+			replacement
+				? "a refused routed model was replaced for the rest of the turn"
+				: "a refused routed model has no usable replacement",
+			() => ({
+				tier,
+				refused: formatModelRouterModel(refused),
+				replacement: replacement ? formatModelRouterModel(replacement) : undefined,
+			}),
+		);
 		if (!replacement) return undefined;
 		const agent = this.deps.getAgent();
 		agent.state.model = replacement;
@@ -1419,6 +1487,15 @@ export class ModelRouterController {
 				`Routed model ${formatModelRouterModel(routedModel)} is outside the current favorite candidate pool.`,
 			);
 		}
+
+		harnessLog.debug("router", "a turn runs on a routed model", () => ({
+			tier: routeDecision?.tier,
+			reasonCode: routeDecision?.reasonCode,
+			selection: routeDecision?.selection,
+			fallbackFrom: routeDecision?.fallbackFrom,
+			model: formatModelRouterModel(routedModel),
+			subscription: this.deps.isUsingSubscription(routedModel),
+		}));
 
 		const agent = this.deps.getAgent();
 		const previousModel = agent.state.model;
@@ -1560,10 +1637,18 @@ export class ModelRouterController {
 				this.dropUnpersistedRoutedMessages();
 				// A side trip that reaches for a mutating tool reruns on the talker it stepped away from, whose
 				// cache holds the conversation; any other cheap turn escalates to the modify tier.
-				retryModel =
-					routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE
-						? previousModel
-						: (this._resolveModelRouterModelForIntent("modify") ?? previousModel);
+				const sideTrip = routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE;
+				const modifyModel = sideTrip ? undefined : this._resolveModelRouterModelForIntent("modify");
+				retryModel = sideTrip ? previousModel : (modifyModel ?? previousModel);
+				if (!sideTrip && !modifyModel) {
+					harnessLog.warn(
+						"router",
+						"no modify-tier model is usable; the escalation retries on the session model",
+						() => ({
+							from: formatModelRouterModel(routedModel),
+						}),
+					);
+				}
 				completedDecision = {
 					route: routeDecision!,
 					routedModel: formatModelRouterModel(routedModel),
@@ -1572,6 +1657,11 @@ export class ModelRouterController {
 					intent: routeDecision!.tier === "cheap" ? "research" : "modify",
 				};
 				this._lastModelRouterDecision = completedDecision;
+				const escalatedTo = retryModel;
+				harnessLog.info("router", "a cheap routed turn escalated to the modify tier", () => ({
+					from: formatModelRouterModel(routedModel),
+					to: formatModelRouterModel(escalatedTo),
+				}));
 			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
 				flushModelRouterSessionBuffer(this._modelRouterSessionBuffer, (batch, attempt) =>
 					this.deps.appendSessionMessageBatch(batch, attempt),

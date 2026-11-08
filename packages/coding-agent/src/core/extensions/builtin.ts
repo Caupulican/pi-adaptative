@@ -1,16 +1,20 @@
 import { Type } from "typebox";
 import { estimateStringTokens, estimateTokens } from "../../kernel/compaction/compaction.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { sessionContextItems } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import {
 	formatKnowledgeCollectionLine,
 	formatTranscriptMemoryLines,
 	type MemoryPromptInclusionReport,
+	type MemoryPromptInclusionStatus,
 	type MemoryRetrievalDiagnostics,
 	type TranscriptMemoryDiagnostics,
 } from "../context/memory-diagnostics.ts";
+import type { MemoryPolicyRejectionReason } from "../context/memory-provider-contract.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import {
 	CONTINUOUS_CHAT_STATE_CUSTOM_TYPE,
@@ -193,27 +197,80 @@ function formatMemoryRetrievalLine(retrieval: MemoryRetrievalDiagnostics): strin
 	return `Memory retrieval: ${retrieval.enabled ? `enabled (max ${retrieval.maxResults} results)` : "disabled"}`;
 }
 
+/** Owner words for each memory policy rejection; the codes stay in the debug log. */
+const REJECTION_WORDS: Readonly<Record<MemoryPolicyRejectionReason, string>> = {
+	provider_disabled: "the provider is turned off",
+	provider_not_searchable: "the provider cannot search",
+	provider_not_fetchable: "the provider cannot fetch items",
+	provider_not_writable: "the provider cannot write",
+	provider_scope_unsupported: "the provider does not support this scope",
+	policy_scope_blocked: "the policy blocks this scope",
+	external_egress_blocked: "sending data outside is blocked",
+	query_payload_disabled: "sending the query is turned off",
+	query_too_large: "the query is too large",
+	secret_like_query: "the query looks like it contains a secret",
+	secret_write_rejected: "the write looks like it contains a secret",
+	missing_evidence: "no evidence was given",
+	durable_write_requires_approval: "a lasting write needs the owner's approval",
+	external_write_requires_approval: "a write outside needs the owner's approval",
+	missing_approval: "the owner's approval is missing",
+};
+
+/** Owner words for a failed provider's error class; any class not listed reads as an unexpected error. */
+const FAILURE_WORDS: Readonly<Record<string, string | undefined>> = {
+	pending: "still pending",
+	unavailable: "unavailable",
+	forbidden: "access refused",
+	not_found: "not found",
+	expired: "expired",
+	uncaptured: "not captured",
+	stale_snapshot: "out of date",
+};
+
+const INCLUSION_WORDS: Readonly<Record<MemoryPromptInclusionStatus, string>> = {
+	disabled: "disabled",
+	include_disabled: "not included in prompts",
+	withheld: "withheld",
+	no_results: "no results",
+	empty_block: "nothing to include",
+	included: "included",
+	failed: "failed",
+};
+
 function formatMemoryProviderLines(retrieval: MemoryRetrievalDiagnostics): string[] {
 	return retrieval.providerReports.map((providerReport) => {
+		harnessLog.debug("ui", "a memory provider line was shown in words", () => ({
+			providerId: providerReport.providerId,
+			rejectionReasons: providerReport.rejectionReasons,
+			failure: providerReport.failure,
+		}));
 		const rejection =
-			providerReport.rejectionReasons.length > 0 ? `; rejected: ${providerReport.rejectionReasons.join(", ")}` : "";
-		const failure = providerReport.failure !== undefined ? `; failure: ${providerReport.failure}` : "";
-		return `  provider ${providerReport.providerId}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection}${failure})`;
+			providerReport.rejectionReasons.length > 0
+				? `; rejected: ${providerReport.rejectionReasons.map((reason) => REJECTION_WORDS[reason]).join(", ")}`
+				: "";
+		const failure =
+			providerReport.failure !== undefined
+				? `; failure: ${FAILURE_WORDS[providerReport.failure] ?? "an unexpected error"}`
+				: "";
+		return `  ${plainLabel(providerReport.providerId)}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection}${failure})`;
 	});
 }
 
 function formatMemoryPromptInclusionLine(promptInclusion: MemoryPromptInclusionReport): string {
-	return `Prompt inclusion: ${promptInclusion.status} (${promptInclusion.includedCount} included, ${promptInclusion.omittedCount} omitted, ${promptInclusion.blockChars} chars)`;
+	harnessLog.debug("ui", "the prompt inclusion status was shown in words", () => ({ status: promptInclusion.status }));
+	return `Prompt inclusion: ${INCLUSION_WORDS[promptInclusion.status]} (${promptInclusion.includedCount} included, ${promptInclusion.omittedCount} omitted, ${promptInclusion.blockChars} chars)`;
 }
 
 function formatSelfCompactionLine(view: SelfCompactionView): string {
-	if (view.settingsError)
-		return `self-compaction: disabled because its settings were rejected (${view.settingsError})`;
+	if (view.settingsError) {
+		harnessLog.debug("ui", "self-compaction settings were rejected", () => ({ settingsError: view.settingsError }));
+		return "self-compaction: disabled because one of its settings is invalid; check the compaction settings in settings.json";
+	}
 	if (!view.thresholds) return `self-compaction: ${view.enabled ? "unavailable (no compaction trigger)" : "disabled"}`;
 	const t = view.thresholds;
 	const handoff =
 		view.handoff.status === "none" ? "" : `, handoff ${view.handoff.status} (attempts ${view.handoff.attempts})`;
-	return `self-compaction: level ${view.level}; notice ${t.noticeTokens}, warning ${t.warningTokens}, forced ${t.forcedTokens}, host early ${t.earlyTokens ?? "off"}, hard ${t.hardTokens}; tools ${view.toolsLocked ? "locked to self_compact" : "open"}${handoff}`;
+	return `self-compaction: level ${view.level}; notice ${t.noticeTokens}, warning ${t.warningTokens}, forced ${t.forcedTokens}, host early ${t.earlyTokens ?? "off"}, hard ${t.hardTokens}; tools ${view.toolsLocked ? "locked to self-compaction" : "open"}${handoff}`;
 }
 
 export function createCoreDiagnosticsToolDefinitions(

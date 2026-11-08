@@ -134,12 +134,13 @@ type SoulVerdict =
 /** An owner-path write: refused, or held off by the soul lock (`locked`, worth trying again). */
 type SoulWriteResult = SoulSaveResult | { readonly ok: false; readonly reason: string; readonly locked: true };
 
-function reviewCodes(outcome: SoulReviewOutcome): string {
-	if (outcome.kind !== "adverse") return "System One could not settle it";
+/** The owner's words for why a review rejected the text: the clause of each adverse decision, joined. */
+function adverseReasons(outcome: SoulReviewOutcome): string {
+	if (outcome.kind !== "adverse") return "the review could not settle the text";
 	return outcome.findings
 		.filter((finding) => finding.answer === "adverse")
-		.map((finding) => finding.id)
-		.join(", ");
+		.map((finding) => finding.adverse)
+		.join("; ");
 }
 
 /** A verdict that went stale because the file moved is made again at most this many times, then the file is adopted. */
@@ -447,9 +448,8 @@ export class SoulController {
 			this.evaluations.set(identity, (this.evaluations.get(identity) ?? 0) + 1);
 			return block("System One could not settle this soul.md text. Simplify the text and write it again.");
 		}
-		const adverse = outcome.findings.filter((finding) => finding.answer === "adverse");
 		return block(
-			`System One blocked the soul.md write: ${adverse.map((finding) => `${finding.id} (${finding.adverse})`).join("; ")}. Rewrite it as a plain description of who you are and how you work.`,
+			`System One blocked the soul.md write: ${adverseReasons(outcome)}. Rewrite it as a plain description of who you are and how you work.`,
 		);
 	}
 
@@ -918,7 +918,7 @@ export class SoulController {
 		this.endHeld(
 			held,
 			"write-rejected",
-			`System One rejected the held soul.md write (${reviewCodes(outcome)}); it was not written.`,
+			`System One rejected the held soul.md write (${adverseReasons(outcome)}); it was not written.`,
 			false,
 		);
 	}
@@ -1196,7 +1196,7 @@ export class SoulController {
 			case "allow":
 				return { kind: "accept", reviewer: "allow" };
 			case "adverse":
-				return { kind: "reject", reason: `System One: ${reviewCodes(outcome)}` };
+				return { kind: "reject", reason: `System One: ${adverseReasons(outcome)}` };
 			case "unsettled":
 				return { kind: "reject", reason: "System One could not settle the text" };
 			case "failed":

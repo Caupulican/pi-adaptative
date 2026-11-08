@@ -408,6 +408,7 @@ const ACTIONABLE_REASON_CODES: ReadonlySet<string> = new Set([
 	"change_not_recorded",
 	"unreported_changes",
 	"requirement_missing",
+	"requirement_id_unknown",
 	"requirement_without_evidence",
 	"requirement_unknown_evidence",
 	"requirement_evidence_failed",
@@ -612,8 +613,19 @@ export function judgeSubmittedReport(input: {
 	}
 	const allRequirementsCovered =
 		context.requirementIds.length > 0 && context.requirementIds.every((id) => covered.includes(id));
-	for (const entry of submitted.report.requirements) {
-		if (!context.requirementIds.includes(entry.id) && context.requirementIds.length > 0) {
+	// An entry for an id the task never declared covers nothing and usually means a mistyped id whose real requirement
+	// is also reported missing above: it is named so the worker can correct or remove it. A task with no declared ids
+	// has nothing to compare against.
+	if (context.requirementIds.length > 0) {
+		const unknownIds = [
+			...new Set(
+				submitted.report.requirements.map((entry) => entry.id).filter((id) => !context.requirementIds.includes(id)),
+			),
+		];
+		if (unknownIds.length > 0) {
+			missing.push(
+				`requirement ${unknownIds.slice(0, 6).map(quotedSpan).join(", ")} is not one of this task's requirement ids (${context.requirementIds.join(", ")}). Correct the id or remove the entry`,
+			);
 			reasons.push("requirement_id_unknown");
 		}
 	}

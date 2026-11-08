@@ -188,6 +188,11 @@ export function steeringCertificatesFile(agentDir: string): string {
 	return stateFile(agentDir, "steering", "certificates.json");
 }
 
+/** `<agentDir>/state/continuous-chat-spend.json` -- the chat summaries' spend for the current day, shared by every project. */
+export function continuousChatSpendFile(agentDir: string): string {
+	return stateFile(agentDir, "continuous-chat-spend.json");
+}
+
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
 export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");

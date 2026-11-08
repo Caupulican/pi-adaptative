@@ -17,6 +17,7 @@ import {
 	shouldCompact,
 } from "../kernel/compaction/compaction.ts";
 import { NothingToCompactError, runCompactionLoop } from "../kernel/compaction/loop.ts";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
@@ -152,6 +153,9 @@ interface PendingRequestFrontier extends ThresholdFrontierSettings {
 	compactionEntryId: string;
 }
 
+/** What started a compaction: an owner or self-compaction request, or an automatic reason. */
+type CompactionTrigger = "manual" | AutoCompactionReason;
+
 interface ActiveCompactionLifecycle {
 	usageComponents: UsageComponent[];
 	compactionId: string;
@@ -160,6 +164,10 @@ interface ActiveCompactionLifecycle {
 	committedOutcome?: "success" | "fallback";
 	committedCause?: string;
 	endAttempted: boolean;
+	trigger: CompactionTrigger;
+	startedAt: number;
+	/** Set once the compaction loop has returned: the loop logs its run's own end, so the controller does not repeat it. */
+	loopEnded: boolean;
 }
 
 export interface EarlyCompactionFeedback {
@@ -175,6 +183,69 @@ export interface EarlyCompactionFeedback {
 }
 
 type CompactionLifecycleOutcome = "success" | "failure" | "cancelled" | "fallback";
+
+/** The owner's clause for a checkpoint cause (the loop's closed cause codes); the raw code stays in the harness log. */
+const COMPACTION_CAUSE_WORDS: Partial<Record<string, string>> = {
+	"auth-failed": "the summary model had no usable credentials or quota",
+	"gate-failed": "the summary failed its quality check",
+	"length-stop": "the summary ran past its length limit",
+	"input-overflow": "the history was too large for the summary model",
+	"provider-failure": "the summary model returned an error",
+	"deterministic-required": "the summary would not fit the space reserved for it",
+	"effect-not-restored": "the compaction did not free enough room",
+	"unknown-failure": "the summary failed for an unknown reason",
+	"deterministic-only": "the run was set to skip the written summary",
+	"max-llm-cycles": "the written summary was tried as many times as allowed",
+};
+
+function compactionCauseWords(cause: string): string {
+	return COMPACTION_CAUSE_WORDS[cause] ?? "the summary could not be written";
+}
+
+/** The owner's clause for a retry ladder that ended without a checkpoint; the raw reason stays in the harness log. */
+function compactionFailureWords(reason: string): string {
+	if (reason === "exhausted-compaction-cycles") return "the summary could not be made to fit after several attempts";
+	if (reason.startsWith("effect-not-restored")) return "the compaction did not free enough room";
+	return "the run could not be finished";
+}
+
+/** The owner's clause for why an early compaction waits (the economics verdict's closed reasons). */
+const EARLY_COMPACTION_DEFERRAL_WORDS: Readonly<Record<"insufficient_evidence" | "insufficient_savings", string>> = {
+	insufficient_evidence: "early compaction waits until its cost can be measured",
+	insufficient_savings: "early compaction waits because resuming costs less for now",
+};
+
+/** The one line that opens a compaction the controller admits: what triggered it and its token counts, never text. */
+function logCompactionTriggered(
+	trigger: CompactionTrigger,
+	tokensBefore: number,
+	summarizerInputTokens?: number,
+): void {
+	harnessLog.info("compaction", "compaction triggered", () => ({
+		trigger,
+		tokensBefore,
+		summarizerInputTokens: summarizerInputTokens ?? null,
+	}));
+}
+
+/** One line at the end of a compaction the loop did not log: the controller's own finish, failure or cancel. */
+function logCompactionEnded(
+	lifecycle: ActiveCompactionLifecycle,
+	outcome: CompactionLifecycleOutcome,
+	error?: string,
+): void {
+	harnessLog.log(
+		outcome === "success" || outcome === "cancelled" ? "info" : "warn",
+		"compaction",
+		"compaction ended",
+		() => ({
+			trigger: lifecycle.trigger,
+			outcome,
+			durationMs: Date.now() - lifecycle.startedAt,
+			reason: error ?? null,
+		}),
+	);
+}
 
 function boundedCompactionLifecycleError(error: unknown): string {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "compaction failed";
@@ -848,7 +919,7 @@ export class CompactionController {
 		return coveredThroughEntryId ? { ...preparation, coveredThroughEntryId } : preparation;
 	}
 
-	private beginCompactionLifecycle(preparation: CompactionPreparation): void {
+	private beginCompactionLifecycle(preparation: CompactionPreparation, trigger: CompactionTrigger): void {
 		// The one start of a durable lifecycle on the preparation paths: a compaction that reaches it after the session closed (it was
 		// held at `abortForeground`, evidence planning or an extension) starts nothing, so no start record can follow the close.
 		if (this.closed) throw new Error("Compaction cancelled");
@@ -860,7 +931,20 @@ export class CompactionController {
 			preparation.tokensBefore,
 			preparation.summarizerInputTokens,
 		);
-		this.activeCompactionLifecycle = { compactionId, endAttempted: false, usageComponents: [] };
+		logCompactionTriggered(trigger, preparation.tokensBefore, preparation.summarizerInputTokens);
+		this.activeCompactionLifecycle = {
+			compactionId,
+			endAttempted: false,
+			usageComponents: [],
+			trigger,
+			startedAt: Date.now(),
+			loopEnded: false,
+		};
+	}
+
+	/** The loop has returned and logged its run's end; the lifecycle's own end line is then not written again. */
+	private markCompactionLoopEnded(): void {
+		if (this.activeCompactionLifecycle) this.activeCompactionLifecycle.loopEnded = true;
 	}
 
 	private recordAppliedCompaction(compactionEntryId: string): void {
@@ -937,6 +1021,7 @@ export class CompactionController {
 			}
 		} finally {
 			if (this.activeCompactionLifecycle === lifecycle) this.activeCompactionLifecycle = undefined;
+			if (!lifecycle.loopEnded) logCompactionEnded(lifecycle, terminalOutcome, terminalError);
 		}
 		if (invalidSuccess) throw new Error(terminalError);
 	}
@@ -1246,7 +1331,7 @@ export class CompactionController {
 			}
 			throw new Error("Nothing to compact (session too small)");
 		}
-		this.beginCompactionLifecycle(initialPreparation);
+		this.beginCompactionLifecycle(initialPreparation, "manual");
 
 		// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
 		// must not be repeated for every summarizer/gate retry.
@@ -1340,19 +1425,21 @@ export class CompactionController {
 			},
 			verifyPostApplyEffect: () => false,
 			onTransition: ({ cycle, cause, detail }) => {
-				this.deps.emit({
-					type: "warning",
-					message: `manual compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this.deps.describeSummarizer()})`,
-				});
+				this.emitCompactionRetryWarning(cycle, cause, detail);
 			},
 			signal,
 		});
+		this.markCompactionLoopEnded();
 
 		if (outcome.kind === "failed") {
 			if (outcome.reason === "aborted") throw new Error("Compaction cancelled");
-			throw new Error(
-				`manual compaction failed after retry ladder using ${selectedCompactionModel.provider}/${selectedCompactionModel.id} (${selectionReason}); first failure: ${outcome.reason}`,
-			);
+			harnessLog.debug("ui", "a manual compaction ended after its retry ladder", () => ({
+				provider: selectedCompactionModel.provider,
+				model: selectedCompactionModel.id,
+				selectionReason,
+				reason: outcome.reason,
+			}));
+			throw new Error(compactionFailureWords(outcome.reason));
 		}
 		if (outcome.kind === "skip" || !appliedResult) {
 			throw new Error(outcome.kind === "skip" ? outcome.reason : "Compaction failed");
@@ -1378,9 +1465,24 @@ export class CompactionController {
 	 * next turns will re-read and re-derive everything the lost summary carried.
 	 */
 	private emitDeterministicFallbackWarning(cause: string): void {
+		harnessLog.debug("ui", "a compaction fell back to a facts-only summary", { cause });
 		this.deps.emit({
 			type: "warning",
-			message: `Compaction fell back to a deterministic checkpoint (${cause}): the narrative summary was lost and only files and task facts were kept. The model will re-read what it needs; expect slower turns until it recovers context.`,
+			message: `Compaction fell back to a facts-only summary because ${compactionCauseWords(cause)}: the narrative summary was lost and only files and task facts were kept. The model will re-read what it needs; expect slower turns until it recovers context.`,
+		});
+	}
+
+	/** A checkpoint attempt failed and the run tries again: the owner hears why in words; the raw cause, detail and summarizer stay in the log. */
+	private emitCompactionRetryWarning(attempt: number, cause: string, detail: string | undefined): void {
+		harnessLog.debug("ui", "a compaction attempt failed and is retried", () => ({
+			attempt,
+			cause,
+			detail: detail ?? null,
+			summarizer: this.deps.describeSummarizer(),
+		}));
+		this.deps.emit({
+			type: "warning",
+			message: `Retrying the compaction (attempt ${attempt}) because ${compactionCauseWords(cause)}.`,
 		});
 	}
 
@@ -1655,7 +1757,7 @@ export class CompactionController {
 					settings,
 					options.allowTrailingCompactionAsPrevious ? COMPACTION_RETRY_PREPARATION_OPTIONS : undefined,
 				);
-				if (preflightPreparation) this.beginCompactionLifecycle(preflightPreparation);
+				if (preflightPreparation) this.beginCompactionLifecycle(preflightPreparation, reason);
 			}
 			const outcome = await runCompactionLoop({
 				getBranch: () => this.getCompactionBranch(),
@@ -1688,7 +1790,7 @@ export class CompactionController {
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
 					if (!preparation) throw new NothingToCompactError(this.nothingToCompactReason(branchEntries));
-					this.beginCompactionLifecycle(preparation);
+					this.beginCompactionLifecycle(preparation, reason);
 					// One event-driven handoff per compaction run; every retry reuses this bounded value.
 					if (!effectiveInstructionsReady) {
 						effectiveInstructions = await this.buildCompactionInstructions();
@@ -1742,7 +1844,7 @@ export class CompactionController {
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
 					if (!preparation) throw new NothingToCompactError(this.nothingToCompactReason(branch));
-					this.beginCompactionLifecycle(preparation);
+					this.beginCompactionLifecycle(preparation, reason);
 					fromExtension = false;
 					return { result: createDeterministicCompaction(preparation) };
 				},
@@ -1754,13 +1856,11 @@ export class CompactionController {
 				allowTrailingCompactionAsPrevious: options.allowTrailingCompactionAsPrevious,
 				forceDeterministic: options.forceDeterministic,
 				onTransition: ({ cycle, cause, detail }) => {
-					this.deps.emit({
-						type: "warning",
-						message: `auto-compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this.deps.describeSummarizer()})`,
-					});
+					this.emitCompactionRetryWarning(cycle, cause, detail);
 				},
 				signal,
 			});
+			this.markCompactionLoopEnded();
 
 			if (outcome.kind === "skip") {
 				options.onSkip?.(outcome.reason);
@@ -1781,7 +1881,10 @@ export class CompactionController {
 					this.deps.emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
 					return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 				}
-				throw new Error(outcome.reason);
+				harnessLog.debug("ui", "an automatic compaction ended after its retry ladder", {
+					reason: outcome.reason,
+				});
+				throw new Error(compactionFailureWords(outcome.reason));
 			}
 			if (extensionCancelled || signal.aborted) {
 				this.finishCompactionLifecycle("cancelled");
@@ -2420,7 +2523,15 @@ export class CompactionController {
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
-		const lifecycle: ActiveCompactionLifecycle = { compactionId, endAttempted: false, usageComponents: [] };
+		logCompactionTriggered("threshold", result.tokensBefore);
+		const lifecycle: ActiveCompactionLifecycle = {
+			compactionId,
+			endAttempted: false,
+			usageComponents: [],
+			trigger: "threshold",
+			startedAt: Date.now(),
+			loopEnded: false,
+		};
 		this.activeCompactionLifecycle = lifecycle;
 		try {
 			const compactionEntryId = await this.applyResult(result, false);
@@ -2520,6 +2631,7 @@ export class CompactionController {
 			return true;
 		}
 		if (!changed) return false;
+		harnessLog.debug("ui", "an early compaction was deferred", { reason: verdict.reason, detail: verdict.detail });
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		this.deps.emit({
 			type: "compaction_end",
@@ -2527,7 +2639,7 @@ export class CompactionController {
 			result: undefined,
 			aborted: false,
 			willRetry: false,
-			skipReason: `early compaction deferred: ${verdict.reason} (${verdict.detail})`,
+			skipReason: EARLY_COMPACTION_DEFERRAL_WORDS[verdict.reason],
 		});
 		return false;
 	}

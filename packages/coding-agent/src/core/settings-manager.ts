@@ -2712,6 +2712,7 @@ export class SettingsManager {
 		hierarchy: boolean;
 		summaryModel: string | undefined;
 		compactionThinkingLevel: MemoryHistorySettings["compactionThinkingLevel"];
+		compactionMaxUsdPerDay: number | undefined;
 		allowExternalSummaryEgress: boolean;
 		allowExternalAdmissionEgress: boolean;
 		maxConcurrentSummaries: number;
@@ -2729,6 +2730,12 @@ export class SettingsManager {
 			)
 				? history?.compactionThinkingLevel
 				: undefined,
+			compactionMaxUsdPerDay:
+				typeof history?.compactionMaxUsdPerDay === "number" &&
+				Number.isFinite(history.compactionMaxUsdPerDay) &&
+				history.compactionMaxUsdPerDay >= 0
+					? history.compactionMaxUsdPerDay
+					: undefined,
 			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
 			allowExternalAdmissionEgress: history?.allowExternalAdmissionEgress === true,
 			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
@@ -2746,6 +2753,7 @@ export class SettingsManager {
 			hierarchy: settings.hierarchy,
 			summaryModel: settings.summaryModel?.trim() || undefined,
 			compactionThinkingLevel: settings.compactionThinkingLevel,
+			compactionMaxUsdPerDay: settings.compactionMaxUsdPerDay,
 			allowExternalSummaryEgress: settings.allowExternalSummaryEgress,
 			allowExternalAdmissionEgress: settings.allowExternalAdmissionEgress,
 			maxConcurrentSummaries:

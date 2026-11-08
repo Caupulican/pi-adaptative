@@ -24,7 +24,7 @@ import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import type { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { readAgentIdentity } from "./agent-identity.ts";
-import { resourceDir, stateFile } from "./agent-paths.ts";
+import { continuousChatSpendFile, resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
 import {
 	attachSessionAdaptiveRuntime,
@@ -191,6 +191,7 @@ import {
 	resolveContinuousChatTurnStart,
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
+import { ContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
 import { MemoryController, type MemoryOperatorPort } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
@@ -876,10 +877,8 @@ export class AgentSession {
 		this._scopedModels = config.orchestrationProfile
 			? [{ model: this.agent.state.model, thinkingLevel: this.agent.state.thinkingLevel }]
 			: (config.scopedModels ?? []);
-		// The router pool is separate state from the cycling list: an orchestration profile pins the
-		// root model for cycling but never narrows the pool, so a profiled session still routes
-		// across the operator's available favorites. An SDK caller that passes a scope
-		// without an explicit pool means that scope as the pool.
+		// The router pool is separate from the cycling list: an orchestration profile pins the root model for cycling but
+		// never narrows the pool. An SDK caller that passes a scope without an explicit pool means that scope as the pool.
 		this._routerPool = config.routerPool
 			? { source: config.routerPool.source, models: config.routerPool.models.map((scoped) => scoped.model) }
 			: !config.orchestrationProfile && config.scopedModels
@@ -1313,6 +1312,10 @@ export class AgentSession {
 					timers: config.timers.port("continuous-chat"),
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
+					spend: new ContinuousChatSpendMeter(
+						continuousChatSpendFile(this._agentDir),
+						() => readContinuousChatSettings(this.settingsManager).maxUsdPerDay,
+					),
 					summary: () =>
 						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), {
 							resolveModel: (reference) => historyModels.resolveModel(reference),
@@ -4053,13 +4056,9 @@ export class AgentSession {
 		);
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
-		// Final sweep for any grep/find artifact already released (reference count zero) but
-		// not yet reclaimed -- e.g. a release whose cleanup() call failed transiently. This is
-		// conservative: it never releases a still-referenced artifact, so a session that ends
-		// before context-gc ever evicts a result (too short to cross preserveRecentMessages)
-		// correctly leaves that artifact in place, resolvable if the same session is resumed
-		// later. It does not sweep OTHER sessions' artifact directories. Its failures are
-		// required release failures and reject `disposeAndWait()`; they are not discarded.
+		// Final sweep of grep/find artifacts already released (reference count zero) but not yet reclaimed, e.g. after a
+		// transient cleanup() failure. It never releases a still-referenced artifact (a short session leaves its artifact
+		// resolvable on resume) and never touches OTHER sessions' directories. Failures reject `disposeAndWait()`.
 		trackRequired(async () => {
 			this._pipeline.cleanupToolArtifactStoreOnDispose();
 		});

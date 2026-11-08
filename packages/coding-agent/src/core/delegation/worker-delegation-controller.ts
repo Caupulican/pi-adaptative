@@ -4819,6 +4819,10 @@ export class WorkerDelegationController {
 				? { ...current, ...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}) }
 				: current;
 		} catch (error) {
+			harnessLog.warn("workers", "a worker's directory could not be prepared; the worker is not started", () => ({
+				error: error instanceof Error ? error.name : typeof error,
+				code: error instanceof Error && "code" in error ? String(error.code) : undefined,
+			}));
 			return {
 				ok: false,
 				skipReason: `worker_directory_unavailable:${error instanceof Error ? error.message : String(error)}`,

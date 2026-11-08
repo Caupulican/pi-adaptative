@@ -16,6 +16,11 @@ export interface SettingItem {
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
+	/**
+	 * Optional display text per machine value, shown in place of the raw value. Rendering only:
+	 * `currentValue`, `values` and the change callbacks keep the machine values. A value without a label shows as-is.
+	 */
+	valueLabels?: Readonly<Record<string, string>>;
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
 	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
 }
@@ -153,7 +158,11 @@ export class SettingsList implements Component {
 			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
 			const valueMaxWidth = width - usedWidth - 2;
 
-			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
+			const shownValue =
+				item.valueLabels && Object.hasOwn(item.valueLabels, item.currentValue)
+					? item.valueLabels[item.currentValue]
+					: item.currentValue;
+			const valueText = this.theme.value(truncateToWidth(shownValue, valueMaxWidth, ""), isSelected);
 			const row = truncateToWidth(prefix + labelText + separator + valueText, width);
 			const padded =
 				isSelected && this.theme.selectedRow ? row + " ".repeat(Math.max(0, width - visibleWidth(row))) : row;

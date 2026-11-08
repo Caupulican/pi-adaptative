@@ -110,6 +110,43 @@ const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
 	allowExternalEgress: false,
 } as const;
 
+/**
+ * Plain-words display text for machine values. A row stores, cycles and saves the machine value; these
+ * maps only feed SettingItem.valueLabels (and the summaries that print the same value), so no screen
+ * shows a raw enum value.
+ */
+const ON_OFF_VALUE_LABELS: Readonly<Record<string, string>> = { true: "On", false: "Off" };
+const SCOPE_VALUE_LABELS: Readonly<Record<string, string>> = {
+	global: "Global",
+	project: "This project",
+	directoryProfile: "This directory",
+};
+const DELIVERY_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
+	"one-at-a-time": "One at a time",
+	all: "All",
+};
+const COST_GUARD_ACTION_VALUE_LABELS: Readonly<Record<string, string>> = {
+	warn: "Warn only",
+	downgrade: "Reduce reasoning",
+};
+const MODEL_CAPABILITY_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
+	auto: "Automatic",
+	off: "Off",
+	full: "Full",
+	lean: "Lean",
+	minimal: "Minimal",
+	chat: "Chat",
+};
+const MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
+	manual: "Manual",
+	auto: "Automatic",
+	hybrid: "Hybrid",
+};
+const MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS: Readonly<Record<string, string>> = {
+	"subscription-first": "Subscriptions first",
+	balanced: "Balanced",
+};
+
 function booleanSettingValue(value: boolean | undefined, defaultValue = false): string {
 	return (value ?? defaultValue) ? "true" : "false";
 }
@@ -150,7 +187,7 @@ function selfModificationSummary(settings: SelfModificationSettings): string {
 
 function costGuardSummary(settings: CostGuardSettings): string {
 	if (!settings.enabled) return "disabled";
-	return `${settings.action} at $${settings.maxTurnUsd.toFixed(2)}/turn`;
+	return `${COST_GUARD_ACTION_VALUE_LABELS[settings.action] ?? settings.action} at $${settings.maxTurnUsd.toFixed(2)}/turn`;
 }
 
 function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
@@ -207,7 +244,9 @@ function learningPolicySummary(settings: LearningPolicySettings): string {
 
 function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
 	const mode = settings.mode ?? "auto";
-	return mode === "auto" ? "auto (derived from the model's context window)" : mode;
+	return mode === "auto"
+		? "Automatic (derived from the model's context window)"
+		: (MODEL_CAPABILITY_MODE_VALUE_LABELS[mode] ?? mode);
 }
 
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
@@ -270,8 +309,10 @@ function modelRouterTierLabel(model: string | undefined, mode: ModelRouterSelect
 
 function modelRouterSummary(settings: ModelRouterSettings, pool?: ModelRouterPoolView): string {
 	const state = settings.enabled ? "enabled" : "disabled";
-	const mode = (settings.selectionMode ?? "manual").toUpperCase();
-	const preference = (settings.poolPreference ?? "subscription-first").replace(/-/g, " ");
+	const mode = MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS[settings.selectionMode ?? "manual"] ?? settings.selectionMode;
+	const preference =
+		MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS[settings.poolPreference ?? "subscription-first"] ??
+		settings.poolPreference;
 	const gate = settings.fitnessGate ? "gate on" : "gate off";
 	const tier = (model: string | undefined) => modelRouterTierLabel(model, settings.selectionMode);
 	return `${state} · ${mode} · pool ${modelRouterPoolSummary(pool)} · ${preference} · ${gate} · cheap: ${tier(settings.cheapModel)} · medium: ${tier(settings.mediumModel)} · expensive: ${tier(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
@@ -714,6 +755,7 @@ class CostGuardSettingsSubmenu extends SettingsListSubmenu {
 					description: "Save this foreground cost guard globally or in the current project's .pi/settings.json",
 					currentValue: this.scope,
 					values: ["global", "project"],
+					valueLabels: SCOPE_VALUE_LABELS,
 				},
 				{
 					id: "cost-guard-enabled",
@@ -722,6 +764,7 @@ class CostGuardSettingsSubmenu extends SettingsListSubmenu {
 						"Explicit opt-in. A saved threshold alone remains dormant and never limits or labels a turn.",
 					currentValue: String(this.state.enabled),
 					values: ["false", "true"],
+					valueLabels: ON_OFF_VALUE_LABELS,
 				},
 				{
 					id: "cost-guard-max-turn-usd",
@@ -753,6 +796,7 @@ class CostGuardSettingsSubmenu extends SettingsListSubmenu {
 					description: "warn only, or reduce reasoning one supported level for the imminent request",
 					currentValue: this.state.action,
 					values: ["warn", "downgrade"],
+					valueLabels: COST_GUARD_ACTION_VALUE_LABELS,
 				},
 			],
 			(id, newValue) => {
@@ -824,17 +868,23 @@ class ProjectContextFilesSubmenu extends SettingsListSubmenu {
 					id: "project-context-scope",
 					label: "Save scope",
 					description:
-						"this-directory: this folder only (user overlay). this-project: .pi/settings.json. all-projects: every repo.",
+						"This directory: this folder only (user overlay). This project: .pi/settings.json. All projects: every repo.",
 					currentValue: projectContextScopeValue(this.scope),
 					values: [...PROJECT_CONTEXT_SCOPE_VALUES],
+					valueLabels: {
+						"this-directory": "This directory",
+						"this-project": "This project",
+						"all-projects": "All projects",
+					},
 				},
 				{
 					id: "project-context-load",
 					label: "Load",
 					description:
-						"global-only excludes project AGENTS-family files, extensions, skills, and prompts. on-demand admits them.",
+						"Global only excludes project AGENTS-family files, extensions, skills, and prompts. On demand admits them.",
 					currentValue: this.mode === "on-demand" ? "on-demand" : "global-only",
 					values: ["global-only", "on-demand"],
+					valueLabels: { "global-only": "Global only", "on-demand": "On demand" },
 				},
 			],
 			(id, newValue) => {
@@ -874,6 +924,7 @@ class SelfModificationSettingsSubmenu extends SettingsListSubmenu {
 					"Save this self-modification configuration globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "self-modification-enabled",
@@ -881,6 +932,7 @@ class SelfModificationSettingsSubmenu extends SettingsListSubmenu {
 				description: "Allow agents to modify Pi's own source/harness only when explicitly tasked",
 				currentValue: booleanSettingValue(this.state.enabled),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "self-modification-source-path",
@@ -951,6 +1003,7 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 				description: "Save this autonomy preset globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "autonomy-mode",
@@ -959,6 +1012,7 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 					"One preset for learning and root-session reflection cues: off, safe, balanced, or standing autonomy",
 				currentValue: autonomyModeValue(this.state),
 				values: AUTONOMY_MODES,
+				valueLabels: { off: "Off", safe: "Safe", balanced: "Balanced", full: "Standing autonomy" },
 			},
 			{
 				id: "autonomy-goal-auto-continue",
@@ -966,6 +1020,7 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 				description: "Continue an active goal whenever Pi becomes idle until a real terminal condition",
 				currentValue: autonomyGoalAutoContinueValue(this.state),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "autonomy-goal-continue-turns",
@@ -1061,6 +1116,7 @@ class ResearchLaneSettingsSubmenu extends SettingsListSubmenu {
 				description: "Save these research-lane settings globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "research-lane-enabled",
@@ -1069,6 +1125,7 @@ class ResearchLaneSettingsSubmenu extends SettingsListSubmenu {
 					"Run bounded, read-only background research when idle with an active goal (requires autonomy mode on)",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "research-lane-max-usd",
@@ -1152,6 +1209,7 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 				description: "Save these learning-policy settings globally or in the project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "learning-policy-enabled",
@@ -1160,6 +1218,7 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 					"Gate root-session reflection writes through the learning policy (proposals, audits, rollback). Disabled keeps legacy direct-apply with audit records.",
 				currentValue: String(this.state.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "learning-policy-auto-apply",
@@ -1167,6 +1226,7 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 				description: "Allow eligible writes to auto-apply; otherwise everything becomes a proposal",
 				currentValue: String(this.state.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "learning-policy-auto-apply-supersessions",
@@ -1175,6 +1235,7 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 					"Allow a memory replace or remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
 				currentValue: String(this.state.autoApplySupersessions ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "learning-policy-confidence",
@@ -1249,6 +1310,7 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 					"Each scope replaces the whole peer configuration; directory profile overrides project, which overrides global.",
 				currentValue: saveScope,
 				values: ["global", "project", "directoryProfile"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "advisor-enabled",
@@ -1256,6 +1318,7 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 				description: "Root-only independent peer; works with System One off. Disabling preserves earlier findings.",
 				currentValue: String(state.enabled ?? true),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "advisor-model",
@@ -1359,14 +1422,16 @@ class ModelCapabilitySettingsSubmenu extends SettingsListSubmenu {
 				description: "Save globally or in the project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "model-capability-mode",
 				label: "Mode",
 				description:
-					'"auto" derives the tool surface and lane budgets from the model\'s own context window; "off" disables adaptation; a class name forces it',
+					'"Automatic" derives the tool surface and lane budgets from the model\'s own context window; "Off" disables adaptation; a class name forces it',
 				currentValue: this.state.mode ?? "auto",
 				values: ["auto", "off", "full", "lean", "minimal", "chat"],
+				valueLabels: MODEL_CAPABILITY_MODE_VALUE_LABELS,
 			},
 		];
 		this.mountSettingsList(
@@ -1416,6 +1481,7 @@ class ContextCurationSettingsSubmenu extends SettingsListSubmenu {
 				description: "Save these curation settings globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "context-curation-enabled",
@@ -1424,6 +1490,7 @@ class ContextCurationSettingsSubmenu extends SettingsListSubmenu {
 					"Local brain curator: digests GC-packed stubs and scores stale-chunk relevance. Requires a digest-fit local model (run /fitness <model>).",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "context-curation-model",
@@ -1495,6 +1562,7 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				description: "Save these delegation settings globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "worker-delegation-enabled",
@@ -1503,6 +1571,7 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 					"Allow capable models to dispatch autonomous persistent leaf workers; enabled by default, and explicit false is a hard off-switch",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "worker-delegation-max-usd",
@@ -1557,6 +1626,7 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 					"Let workers change files through direct write/edit tools; default authority is machine-wide and explicit false revokes it",
 				currentValue: String(this.state.writeEnabled ?? DEFAULT_WORKER_DELEGATION_WRITE_ENABLED),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "worker-delegation-max-concurrent",
@@ -1645,6 +1715,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				description: "Save this Auto Learn configuration globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "auto-learn-enabled",
@@ -1652,6 +1723,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				description: "Autonomously trigger background history scavenging for long sessions",
 				currentValue: booleanSettingValue(this.state.enabled, defaults.enabled),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "auto-learn-model",
@@ -1712,6 +1784,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 					"Allow high-confidence memory candidates to be applied automatically; broader write authority follows autonomy.mode",
 				currentValue: booleanSettingValue(this.state.applyHighConfidence, defaults.applyHighConfidence),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "auto-learn-reflection-review",
@@ -1720,6 +1793,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 					"Include one durable root-session reflection cue on eligible external turns; completed-turn signals coalesce into it",
 				currentValue: booleanSettingValue(this.state.reflectionReview, defaults.reflectionReview),
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "auto-learn-reflection-tool-calls",
@@ -1807,6 +1881,7 @@ class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 					"Save this context/prompt-policy configuration globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "context-policy-enabled",
@@ -1815,6 +1890,7 @@ class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 					"Opt-in: stub stale artifact-backed grep/find output in the model-visible prompt only. Never touches transcript/session history. Requires the artifact retrieval tool to be active this turn (not configurable here -- it's a runtime fact, not a setting).",
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "context-policy-preserve-recent-messages",
@@ -1890,6 +1966,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 					"Save this local memory-retrieval configuration globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "context-memory-enabled",
@@ -1898,6 +1975,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 					"Default on: search local Pi memory for relevant evidence. Explicit false is a hard off-switch for both legacy recall and context retrieval. External providers remain blocked by the separate consent below.",
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "context-memory-max-results",
@@ -1916,6 +1994,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt,
 				),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "context-memory-allow-external-egress",
@@ -1927,6 +2006,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress,
 				),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 		];
 
@@ -2065,6 +2145,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Save this routing configuration globally or in the current project's .pi/settings.json",
 				currentValue: this.scope,
 				values: ["global", "project"],
+				valueLabels: SCOPE_VALUE_LABELS,
 			},
 			{
 				id: "model-router-enabled",
@@ -2072,14 +2153,16 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Route read-only/research turns to cheap model and modify/tool-heavy turns to expensive model",
 				currentValue: booleanSettingValue(this.state.enabled),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "model-router-selection-mode",
 				label: "Selection mode",
 				description:
-					"manual: exact tier pins only · auto: the router picks each tier's model from the candidate pool · hybrid: pinned tiers win, unpinned tiers auto-select",
+					"Manual: exact tier pins only · Automatic: the router picks each tier's model from the candidate pool · Hybrid: pinned tiers win, unpinned tiers auto-select",
 				currentValue: this.state.selectionMode ?? "manual",
 				values: ["manual", "auto", "hybrid"],
+				valueLabels: MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS,
 			},
 			{
 				id: "model-router-pool",
@@ -2119,9 +2202,10 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				id: "model-router-pool-preference",
 				label: "Pool preference",
 				description:
-					"subscription-first: adequate subscription-backed models rank ahead of metered ones (after hard admission) · balanced: evidence ranking only",
+					"Subscriptions first: adequate subscription-backed models rank ahead of metered ones (after hard admission) · Balanced: evidence ranking only",
 				currentValue: this.state.poolPreference ?? "subscription-first",
 				values: ["subscription-first", "balanced"],
+				valueLabels: MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS,
 			},
 			{
 				id: "model-router-cheap",
@@ -2376,6 +2460,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Opt-in subtractive gate: blocks tier models only when their probed router lane failed",
 				currentValue: booleanSettingValue(this.state.fitnessGate),
 				values: ["false", "true"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "model-router-calibrate",
@@ -2473,6 +2558,15 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Numeric policy preset for ability, operational, and reliability weighting",
 				currentValue: this.state.hmoePreset ?? "balanced",
 				values: [...HMOE_PRESETS],
+				valueLabels: {
+					balanced: "Balanced",
+					quality: "Quality",
+					"subscription-first": "Subscriptions first",
+					cost: "Cost",
+					speed: "Speed",
+					"local-first": "Local first",
+					custom: "Custom",
+				},
 			},
 			{
 				id: "model-router-hmoe-team",
@@ -2480,6 +2574,12 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Selection mode for single model, primary+critic, independent verifier, or adaptive team",
 				currentValue: this.state.hmoeTeamStrategy ?? "single",
 				values: [...HMOE_TEAM_STRATEGIES],
+				valueLabels: {
+					single: "Single model",
+					primary_critic: "Primary + critic",
+					independent_verifier: "Independent verifier",
+					adaptive_team: "Adaptive team",
+				},
 			},
 			{
 				id: "model-router-hmoe-independence",
@@ -2487,6 +2587,14 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Independence level required when selecting verifier or critic models",
 				currentValue: this.state.hmoeIndependence ?? "none",
 				values: [...HMOE_INDEPENDENCE_LEVELS],
+				valueLabels: {
+					none: "None",
+					fresh_context: "Fresh context",
+					distinct_profile: "Distinct profile",
+					distinct_model: "Distinct model",
+					distinct_family: "Distinct family",
+					distinct_provider: "Distinct provider",
+				},
 			},
 			{
 				id: "model-router-hmoe-preference",
@@ -2494,6 +2602,11 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				description: "Ordering preference among adequate candidates after hard admission",
 				currentValue: this.state.hmoePreference ?? "prefer_subscription",
 				values: [...HMOE_PREFERENCES],
+				valueLabels: {
+					prefer_subscription: "Prefer subscription",
+					prefer_local: "Prefer local",
+					neutral: "Neutral",
+				},
 			},
 		];
 
@@ -2556,6 +2669,7 @@ class WarningSettingsSubmenu extends SettingsListSubmenu {
 				description: "Warn when Anthropic subscription auth may use paid extra usage",
 				currentValue: (this.state.anthropicExtraUsage ?? true) ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 		];
 
@@ -2672,6 +2786,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "cost-guard",
@@ -2693,16 +2808,18 @@ export class SettingsSelectorComponent extends Container {
 				id: "steering-mode",
 				label: "Steering mode",
 				description:
-					"Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.",
+					"Enter while streaming queues steering messages. 'One at a time': deliver one, wait for response. 'All': deliver all at once.",
 				currentValue: config.steeringMode,
 				values: ["one-at-a-time", "all"],
+				valueLabels: DELIVERY_MODE_VALUE_LABELS,
 			},
 			{
 				id: "follow-up-mode",
 				label: "Follow-up mode",
-				description: `${followUpKey} queues follow-up messages until agent stops. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.`,
+				description: `${followUpKey} queues follow-up messages until agent stops. 'One at a time': deliver one, wait for response. 'All': deliver all at once.`,
 				currentValue: config.followUpMode,
 				values: ["one-at-a-time", "all"],
+				valueLabels: DELIVERY_MODE_VALUE_LABELS,
 			},
 			{
 				id: "transport",
@@ -2710,6 +2827,12 @@ export class SettingsSelectorComponent extends Container {
 				description: "Preferred transport for providers that support multiple transports",
 				currentValue: config.transport,
 				values: ["sse", "websocket", "websocket-cached", "auto"],
+				valueLabels: {
+					sse: "Streaming (SSE)",
+					websocket: "WebSocket",
+					"websocket-cached": "WebSocket, cached",
+					auto: "Automatic",
+				},
 			},
 			{
 				id: "http-idle-timeout",
@@ -2725,6 +2848,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Hide thinking blocks in assistant responses",
 				currentValue: config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "project-context-files",
@@ -2750,6 +2874,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Show condensed changelog after updates",
 				currentValue: config.collapseChangelog ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "quiet-startup",
@@ -2757,6 +2882,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Disable verbose printing at startup",
 				currentValue: config.quietStartup ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			},
 			{
 				id: "double-escape-action",
@@ -2764,6 +2890,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Action when pressing Escape twice with empty editor",
 				currentValue: config.doubleEscapeAction,
 				values: ["tree", "fork", "none"],
+				valueLabels: { tree: "Open tree", fork: "Fork", none: "None" },
 			},
 			{
 				id: "tree-filter-mode",
@@ -2771,6 +2898,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Default filter when opening /tree",
 				currentValue: config.treeFilterMode,
 				values: ["default", "no-tools", "user-only", "labeled-only", "all"],
+				valueLabels: {
+					default: "Default",
+					"no-tools": "No tools",
+					"user-only": "Your messages only",
+					"labeled-only": "Labeled only",
+					all: "All",
+				},
 			},
 			{
 				id: "self-modification",
@@ -2898,6 +3032,7 @@ export class SettingsSelectorComponent extends Container {
 							description: config.describeSystemOneAccess?.(config.systemOneProvider) ?? "",
 							currentValue: config.systemOneProvider,
 							values: [...SYSTEM_ONE_PROVIDER_CHOICES],
+							valueLabels: { auto: "Automatic", typesafe: "TypeSafe", openrouter: "OpenRouter" },
 						},
 					]
 				: []),
@@ -2925,7 +3060,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "model-router",
 				label: "Model Router",
 				description:
-					"Router Setup: selection mode (manual/auto/hybrid), favorite candidate models, subscription-first preference, tier pins, calibration, route preview and diagnostics",
+					"Router Setup: selection mode (Manual, Automatic or Hybrid), favorite candidate models, Subscriptions first preference, tier pins, calibration, route preview and diagnostics",
 				currentValue: modelRouterSummary(currentModelRouter, config.modelRouterPool),
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(
@@ -3134,6 +3269,7 @@ export class SettingsSelectorComponent extends Container {
 				description: "Render images inline in terminal",
 				currentValue: config.showImages ? "true" : "false",
 				values: ["true", "false"],
+				valueLabels: ON_OFF_VALUE_LABELS,
 			});
 			items.splice(2, 0, {
 				id: "image-width-cells",
@@ -3151,6 +3287,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Resize large images to 2000x2000 max for better model compatibility",
 			currentValue: config.autoResizeImages ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Block images toggle (always available, insert after auto-resize-images)
@@ -3161,6 +3298,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Prevent images from being sent to LLM providers",
 			currentValue: config.blockImages ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Skill commands toggle (insert after block-images)
@@ -3171,6 +3309,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Register skills as /skill:name commands",
 			currentValue: config.enableSkillCommands ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Hardware cursor toggle (insert after skill-commands)
@@ -3181,6 +3320,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Show the terminal cursor while still positioning it for IME support",
 			currentValue: config.showHardwareCursor ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Editor padding toggle (insert after show-hardware-cursor)
@@ -3211,6 +3351,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Clear empty rows when content shrinks (may cause flicker)",
 			currentValue: config.clearOnShrink ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Terminal progress toggle (insert after clear-on-shrink)
@@ -3221,6 +3362,7 @@ export class SettingsSelectorComponent extends Container {
 			description: "Show OSC 9;4 progress indicators in the terminal tab bar",
 			currentValue: config.showTerminalProgress ? "true" : "false",
 			values: ["true", "false"],
+			valueLabels: ON_OFF_VALUE_LABELS,
 		});
 
 		// Add borders

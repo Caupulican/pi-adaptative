@@ -32,6 +32,7 @@ import {
 	getApplicableAssistantUsageInfo,
 } from "../kernel/compaction/compaction.ts";
 import { TokenBudget } from "../kernel/compaction/token-budget.ts";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
@@ -135,6 +136,17 @@ export interface ContextPipelineSettingsSource {
 		};
 	};
 	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number };
+}
+
+/** The error class name and `code` of a caught value, for a log line: never its message, which can quote content. */
+function degradedFields(error: unknown): { errorClass: string; code: string | undefined } {
+	return {
+		errorClass: error instanceof Error ? error.name : typeof error,
+		code:
+			typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+				? error.code
+				: undefined,
+	};
 }
 
 /** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
@@ -759,7 +771,10 @@ export class ContextPipeline {
 			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
 			this._latestContextAuditReport = report;
 			return report;
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "the context audit failed; the turn runs with an empty audit", () =>
+				degradedFields(error),
+			);
 			const report: ContextAuditReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
 			if (!lane) this._latestContextAuditReport = report;
 			return report;
@@ -772,7 +787,10 @@ export class ContextPipeline {
 			const report = runContextAudit(messages, this._buildContextAuditOptions(messages));
 			this._latestContextAuditReport = report;
 			return report;
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "the context audit recompute failed; the caller gets an empty audit", () =>
+				degradedFields(error),
+			);
 			const report: ContextAuditReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
 			this._latestContextAuditReport = report;
 			return report;
@@ -800,7 +818,10 @@ export class ContextPipeline {
 		let report: PromptPolicyShadowReport;
 		try {
 			report = planPromptPolicy(auditReport);
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "prompt-policy planning failed; the turn runs with an empty plan", () =>
+				degradedFields(error),
+			);
 			report = { turnIndex: this.deps.getTurnIndex(), items: [] };
 		}
 		if (!lane) this._latestPromptPolicyReport = report;
@@ -827,7 +848,10 @@ export class ContextPipeline {
 		const shadowReport = this._latestPromptPolicyReport ?? { turnIndex: this.deps.getTurnIndex(), items: [] };
 		try {
 			this._latestPromptPolicyGcCorrelation = correlateWithContextGc(shadowReport, gcReport);
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "the prompt-policy and context-gc correlation failed; it is recorded empty", () =>
+				degradedFields(error),
+			);
 			this._latestPromptPolicyGcCorrelation = { turnIndex: this.deps.getTurnIndex(), entries: [] };
 		}
 	}
@@ -870,7 +894,10 @@ export class ContextPipeline {
 			const result = enforcePromptPolicy(messages, shadowReport, settings, context);
 			if (!lane) this._latestPromptEnforcementReport = result.report;
 			return result;
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "prompt enforcement failed; the messages are sent unchanged", () =>
+				degradedFields(error),
+			);
 			const report: PromptEnforcementReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
 			if (!lane) this._latestPromptEnforcementReport = report;
 			return { messages, transientMessages: [], report, isCurrent: () => true };
@@ -905,8 +932,11 @@ export class ContextPipeline {
 					goal,
 				});
 			}
-		} catch {
+		} catch (error) {
 			// curation is a sidecar; it must never disrupt a turn
+			harnessLog.warn("context", "relevance curation could not enqueue its jobs; the turn runs without them", () =>
+				degradedFields(error),
+			);
 		}
 	}
 
@@ -977,8 +1007,11 @@ export class ContextPipeline {
 			}
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			void this._drainBrainCuration(model, settings.maxJobsPerTurn, recordEntry);
-		} catch {
+		} catch (error) {
 			// curation is a sidecar; it must never disrupt a turn
+			harnessLog.warn("context", "the curation drain gate failed; no drain starts this turn", () =>
+				degradedFields(error),
+			);
 		}
 	}
 
@@ -1035,7 +1068,12 @@ export class ContextPipeline {
 				}
 				return result.text;
 			};
-		} catch {
+		} catch (error) {
+			harnessLog.warn(
+				"context",
+				"building the compaction pre-digest failed; compaction runs on the verbatim text",
+				() => degradedFields(error),
+			);
 			return undefined;
 		}
 	}
@@ -1090,8 +1128,11 @@ export class ContextPipeline {
 				})),
 				telemetry: this._brainCurator.telemetry(),
 			});
-		} catch {
+		} catch (error) {
 			// curation is a sidecar; it must never disrupt a turn
+			harnessLog.warn("context", "a curation drain failed; no curation result is recorded for it", () =>
+				degradedFields(error),
+			);
 		}
 	}
 
@@ -1177,6 +1218,7 @@ export class ContextPipeline {
 				if (committed) return;
 				committed = true;
 				result.commit();
+				logContextGcPass(messages, result.report, lane ? lane.conversation : "root");
 				for (const job of pendingCuration) this._brainCurator.enqueue({ kind: "stub_digest", ...job });
 				// Count digest serves on the REAL per-turn pass only, once per packed record that rendered one.
 				if (curationSettings.enabled) {
@@ -1209,7 +1251,11 @@ export class ContextPipeline {
 			};
 			if (writePayloads) commit();
 			return { messages: result.messages, report: result.report, isCurrent: result.isCurrent, commit };
-		} catch {
+		} catch (error) {
+			harnessLog.warn("context", "context-gc failed; the context is sent unpacked", () => ({
+				conversation: lane ? lane.conversation : "root",
+				error: error instanceof Error ? error.name : typeof error,
+			}));
 			const report: ContextGcReport = {
 				enabled: false,
 				packedCount: 0,
@@ -1412,6 +1458,46 @@ export class ContextPipeline {
 
 		const deltaChars = estimateConversationChars(messages, estimate.lastUsageIndex + 1, messages.length);
 		return this._tokenBudget.current(deltaChars, estimate.tokens);
+	}
+}
+
+/** A packing stage that removes at least this share of the estimated context is logged at info; smaller stages stay at debug. */
+const CONTEXT_GC_INFO_SHARE = 0.2;
+
+/**
+ * Harness-log lines for one applied context-GC pass: the sent-prefix pricing verdict, then per packing stage the items
+ * and estimated tokens before and after. A stage that removes {@link CONTEXT_GC_INFO_SHARE} of the context is also an
+ * info line. The stage tally and the context total are computed only when info is on.
+ */
+function logContextGcPass(messages: readonly AgentMessage[], report: ContextGcReport, conversation: string): void {
+	const rewrite = report.sentPrefixRewrite;
+	if (rewrite) {
+		harnessLog.debug("context", "a sent-prefix rewrite was priced", () => ({
+			conversation,
+			admit: rewrite.admit,
+			reason: rewrite.reason,
+			items: rewrite.packCount,
+			savedTokens: rewrite.savedTokens,
+			rewrittenTokens: rewrite.rewrittenTokens,
+		}));
+	}
+	if (report.packedCount === 0 || !harnessLog.enabled("info", "context")) return;
+	const stages = new Map<string, { items: number; tokensBefore: number; tokensAfter: number }>();
+	for (const record of report.records) {
+		const stage = stages.get(record.reason) ?? { items: 0, tokensBefore: 0, tokensAfter: 0 };
+		stage.items += 1;
+		stage.tokensBefore += record.originalTokens;
+		stage.tokensAfter += record.packedTokens;
+		stages.set(record.reason, stage);
+	}
+	const contextTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+	for (const [stage, totals] of stages) {
+		const line = { conversation, stage, ...totals, contextTokens };
+		harnessLog.debug("context", "context-gc packed a stage's items", line);
+		const removed = totals.tokensBefore - totals.tokensAfter;
+		if (contextTokens > 0 && removed / contextTokens >= CONTEXT_GC_INFO_SHARE) {
+			harnessLog.info("context", "a context-gc stage removed a large share of the context", line);
+		}
 	}
 }
 

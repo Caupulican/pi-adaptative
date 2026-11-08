@@ -52,6 +52,24 @@ export interface ContinuousChatTurnBoundary {
 	release(): void;
 }
 
+/**
+ * How long the foreground must stay quiet after its turn ends before summaries resume: a follow-up turn started within
+ * it keeps them waiting, so the burst of a conversation's turns is one pause.
+ */
+export const CONTINUOUS_CHAT_FOREGROUND_QUIET_MS = 2_000;
+
+/**
+ * The foreground turn phase as the runtime sees it, the pair the knowledge collector takes too. A turn pins its view
+ * when it starts and excludes its own messages, so a summary of them cannot reach that turn; claiming one while it runs
+ * only contends with it.
+ */
+export interface ContinuousChatForegroundPort {
+	/** A turn is being prepared, running or stopping. */
+	isForegroundBusy(): boolean;
+	/** Calls the listener whenever the phase changes. Returns the unsubscribe. */
+	subscribeForegroundActivity(listener: () => void): () => void;
+}
+
 export type ContinuousChatRuntimeEvent =
 	| { type: "message"; id: number }
 	| { type: "node"; level: number; ordinal: number }
@@ -92,6 +110,16 @@ export class ContinuousChatRuntime {
 	private readonly port: ContinuousChatCompactionPort;
 	private readonly prefixHead: () => ContinuousChatCompactionPrefixHead;
 	private readonly warn: (message: string) => void;
+	private readonly timers: TimerPort;
+	/** Set by `followForeground`. Absent: no turn is known, and dispatch is never held for one. */
+	private foreground: ContinuousChatForegroundPort | undefined;
+	private unfollowForeground: (() => void) | undefined;
+	/** The quiet window after a turn ends; a claim waits while it is pending. */
+	private quietTimer: unknown;
+	/** The pause is logged once per hold, not once per pump. */
+	private foregroundPauseLogged = false;
+	/** The daily-limit notice is given once per hold, not once per pump. */
+	private spendHoldNoticed = false;
 	/** Resolves once, when this runtime stops accepting work: at `stop()`, or when its lease is lost. Never rejects. */
 	readonly stopped: Promise<void>;
 	private resolveStopped: () => void = () => undefined;
@@ -125,13 +153,14 @@ export class ContinuousChatRuntime {
 		this.port = options.port;
 		this.prefixHead = options.prefixHead;
 		this.warn = options.warn;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.closing = options.closing;
 		this.stopped = new Promise<void>((resolve) => {
 			this.resolveStopped = () => resolve();
 		});
 		this.workReleases = new AsyncRetainedReleases({
 			retryOwner: "continuous-chat runtime",
-			timers: options.timers ?? SYSTEM_TIMER_PORT,
+			timers: this.timers,
 			release: async ({ item, abandonment }) => {
 				// After a lost lease the store refuses every write: the next owner's startup recovery requeues the claim.
 				if (this.leaseLost)
@@ -139,10 +168,17 @@ export class ContinuousChatRuntime {
 				await this.recordAbandonment(item, abandonment);
 				return "released";
 			},
-			reportFailure: (entry, error) =>
+			reportFailure: (entry, error) => {
+				harnessLog.warn("memory", "chat work could not be recorded again", () => ({
+					attempts: entry.failures,
+					level: entry.value.item.level,
+					ordinal: entry.value.item.ordinal,
+					errorClass: error instanceof Error ? error.name : typeof error,
+				}));
 				this.warn(
 					`Continuous-chat work ${continuousChatNodeLabel(entry.value.item)} could not be recorded again: ${releaseFailureCause(error)}`,
-				),
+				);
+			},
 			reportListenerFailure: (error) =>
 				this.warn(`Continuous-chat work release wake failed: ${safeErrorMessage(error, "unknown error")}`),
 		});
@@ -265,6 +301,42 @@ export class ContinuousChatRuntime {
 		this.requestPump();
 	}
 
+	/**
+	 * Holds new claims while the foreground has a turn and for `CONTINUOUS_CHAT_FOREGROUND_QUIET_MS` after it ends.
+	 * Pending work keeps its place and the next pump after the window takes it; a compaction already running is never
+	 * cancelled, and `stop` never waits on the window. Called once by the owner of the turns, before `start`.
+	 */
+	followForeground(foreground: ContinuousChatForegroundPort): void {
+		if (this.foreground !== undefined) throw new Error("Continuous-chat runtime already follows a foreground.");
+		if (this.stopping) return;
+		this.foreground = foreground;
+		this.unfollowForeground = foreground.subscribeForegroundActivity(() => this.onForegroundActivity());
+	}
+
+	/** A phase change: a turn cancels the pending window; the end of the last one arms it. */
+	private onForegroundActivity(): void {
+		if (this.stopping || this.foreground === undefined) return;
+		if (this.quietTimer !== undefined) this.timers.clearTimeout(this.quietTimer);
+		this.quietTimer = undefined;
+		if (this.foreground.isForegroundBusy()) return;
+		this.quietTimer = this.timers.setTimeout(() => {
+			this.quietTimer = undefined;
+			if (this.stopping) return;
+			if (this.foregroundPauseLogged) {
+				this.foregroundPauseLogged = false;
+				harnessLog.debug("memory", "chat summaries resume after the foreground quiet window", {
+					running: this.jobs.size,
+				});
+			}
+			this.requestPump();
+		}, CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
+	}
+
+	/** A turn is in progress, or one ended less than the quiet window ago. */
+	private foregroundHeld(): boolean {
+		return this.foreground?.isForegroundBusy() === true || this.quietTimer !== undefined;
+	}
+
 	/** Holds new dispatch until released and joins existing work without aborting its requests. */
 	async pauseAndDrain(signal?: AbortSignal): Promise<() => void> {
 		this.assertRunning();
@@ -355,6 +427,10 @@ export class ContinuousChatRuntime {
 	/** Stops accepting work. `stopped` resolves at the first call; later calls change nothing. */
 	private refuseWork(): void {
 		this.stopping = true;
+		this.unfollowForeground?.();
+		this.unfollowForeground = undefined;
+		if (this.quietTimer !== undefined) this.timers.clearTimeout(this.quietTimer);
+		this.quietTimer = undefined;
 		this.resolveStopped();
 	}
 
@@ -454,6 +530,25 @@ export class ContinuousChatRuntime {
 		// A claim that could not be recorded still holds its slot: every dispatch pass retries it first.
 		if (this.workReleases.size > 0) await this.workReleases.retry({ report: false });
 		while (this.dispatchOpen() && this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) {
+			if (this.foregroundHeld()) {
+				// Nothing is claimed, so nothing churns: pending work keeps its place and the first pump after the quiet window takes it.
+				if (!this.foregroundPauseLogged) {
+					this.foregroundPauseLogged = true;
+					harnessLog.debug("memory", "chat summaries wait for the foreground turn", { running: this.jobs.size });
+				}
+				return;
+			}
+			const hold = this.port.spendHold?.();
+			if (hold !== undefined) {
+				// Nothing is claimed, so nothing churns: pending work keeps its place and the next claim after the limit lifts takes it.
+				if (!this.spendHoldNoticed) {
+					this.spendHoldNoticed = true;
+					harnessLog.warn("memory", "chat summaries are paused by the daily spend limit");
+					this.warn(hold);
+				}
+				return;
+			}
+			this.spendHoldNoticed = false;
 			const item = await this.store.claimWork();
 			if (item === undefined) {
 				if (this.jobs.size === 0) this.emit({ type: "idle" });

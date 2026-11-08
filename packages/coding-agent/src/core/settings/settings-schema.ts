@@ -114,6 +114,7 @@ export interface MemoryRetrievalSettings {
 export interface MemoryHistorySettings {
 	hierarchy?: boolean; // default: false -- durable summary hierarchy + history frontier over captured history (either system); the ICM continuous chat does not read it; exact local recall is NOT governed by this switch
 	summaryModel?: string; // model ref ("provider/id" or bare id) for summaries; required for the hierarchy to run, and for the ICM continuous chat's compactions, which need a model that supports compactionThinkingLevel
+	compactionMaxUsdPerDay?: number; // default: 10 -- daily USD the chat's background summaries may spend across all projects; 0 = no limit
 	compactionThinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh"; // default: medium -- reasoning effort of every ICM compaction; its reasoning tokens are billed as output on every reply, and measured xhigh runs spent thousands of them on a line of at most 512 bytes
 	allowExternalSummaryEgress?: boolean; // default: false -- sending captured history to a non-local summarizer is external egress
 	allowExternalAdmissionEgress?: boolean; // default: false -- sending captured history to the remote System One evaluator that admits model summaries is external egress, independent of the summarizer's egress; without it model summaries are held (exact copies still flow)

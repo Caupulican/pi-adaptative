@@ -127,6 +127,11 @@ export class ContinuousChatHost {
 		this.ingestor = parts.ingestor;
 		this.turns = parts.turns;
 		this.workerLogs = parts.workerLogs;
+		// Summaries wait for this host's turns: the runtime learns their phase from the coordinator that owns it.
+		parts.runtime.followForeground({
+			isForegroundBusy: () => parts.turns.phase() !== "idle",
+			subscribeForegroundActivity: (listener) => parts.turns.subscribe(() => listener()),
+		});
 		this.port = parts.port;
 		this.options = parts.options;
 		this.started = parts.started;

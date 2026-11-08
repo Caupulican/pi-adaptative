@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { harnessLog } from "../kernel/harness-log.ts";
 import { configFile } from "./agent-paths.ts";
 import { scanContextFileThreats, stripInvisibleUnicode } from "./security/context-threat-scanner.ts";
 
@@ -74,6 +75,15 @@ export function projectAgentIdentity(markdown: string, file: string): AgentIdent
 	return { name: parseAgentName(cleaned) ?? DEFAULT_AGENT_NAME, ...(body.length > 0 ? { soul: body } : {}) };
 }
 
+/** Owner words for the threat-scan labels a soul is screened for (the context scope); the labels stay in the debug log. */
+const SOUL_THREAT_WORDS: Readonly<Record<string, string | undefined>> = {
+	"instruction override": "an attempt to override the agent's instructions",
+	"secret exfiltration": "an attempt to send out secrets",
+	"hidden instruction": "an instruction to hide things from the owner",
+	"role hijack": "an attempt to take over the agent's role",
+	"system prompt leak": "an attempt to reveal the system prompt",
+};
+
 /**
  * Judges an owner-authored soul that will be stored and delivered whole (a persistent bot's): invisible unicode is
  * removed and the result trimmed, and the text is refused when it matches the threat scan. It has no size limit;
@@ -84,7 +94,9 @@ export function checkSoulText(text: string): { ok: true; soul: string | undefine
 	const { cleaned, findings } = screenSoulText(text);
 	const soul = cleaned.trim();
 	if (findings.length > 0) {
-		return { ok: false, reason: `the soul matched the threat scan (${findings.join(", ")})` };
+		harnessLog.debug("ui", "a soul text was refused by the threat scan", () => ({ findings }));
+		const kinds = findings.map((finding) => SOUL_THREAT_WORDS[finding] ?? "unsafe text");
+		return { ok: false, reason: `the soul contains ${kinds.join("; ")}` };
 	}
 	return { ok: true, soul: soul.length > 0 ? soul : undefined };
 }

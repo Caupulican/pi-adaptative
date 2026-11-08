@@ -8,6 +8,7 @@ import type { Api, Model, ThinkingLevel } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import type { MemorySystem } from "../settings/settings-schema.ts";
+import { DEFAULT_CONTINUOUS_CHAT_COMPACTION_MAX_USD_PER_DAY } from "./continuous-chat-spend.ts";
 import { CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS } from "./continuous-chat-work-queue.ts";
 import type { TranscriptSummarizerDeps } from "./transcript-summarizer.ts";
 
@@ -25,6 +26,8 @@ export interface ContinuousChatSettings {
 	/** The reasoning effort of every compaction. Its reasoning tokens are billed as output on every reply, corrections included. */
 	readonly thinkingLevel: ContinuousChatThinkingLevel;
 	readonly allowExternalSummaryEgress: boolean;
+	/** Daily USD the background summaries may spend across all projects; 0 means no limit. */
+	readonly maxUsdPerDay: number;
 	readonly maxConcurrentCompactions: number;
 	readonly turnView: ContinuousChatViewBudget;
 	readonly causalView: ContinuousChatViewBudget;
@@ -36,6 +39,7 @@ export interface ContinuousChatSettingsSource {
 	getMemoryHistorySettings(): {
 		summaryModel: string | undefined;
 		compactionThinkingLevel: ContinuousChatThinkingLevel | undefined;
+		compactionMaxUsdPerDay?: number | undefined;
 		allowExternalSummaryEgress: boolean;
 	};
 }
@@ -57,6 +61,7 @@ export function readContinuousChatSettings(source: ContinuousChatSettingsSource)
 		summaryModel: history.summaryModel,
 		thinkingLevel: history.compactionThinkingLevel ?? DEFAULT_CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 		allowExternalSummaryEgress: history.allowExternalSummaryEgress,
+		maxUsdPerDay: history.compactionMaxUsdPerDay ?? DEFAULT_CONTINUOUS_CHAT_COMPACTION_MAX_USD_PER_DAY,
 		maxConcurrentCompactions: CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS,
 		turnView: CONTINUOUS_CHAT_TURN_VIEW_BUDGET,
 		causalView: CONTINUOUS_CHAT_CAUSAL_VIEW_BUDGET,

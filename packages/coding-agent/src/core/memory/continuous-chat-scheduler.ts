@@ -58,6 +58,18 @@ interface WorkRow {
 
 /** Schema 2 orders deferred work by context endpoint (see `continuousChatNodeContextEnd`); schema 1 ordered it by arrival. */
 const SCHEDULER_SCHEMA_VERSION = 3;
+/**
+ * A failed node is eligible again only after this many more arrivals (messages and turn starts), doubling with each
+ * failure up to the cap, and only for a bounded number of attempts: past it the node waits for a configuration change or
+ * an explicit retry. Retrying on every single arrival bought thousands of unpaid claims and unbounded paid retries.
+ */
+const RETRY_BACKOFF_ARRIVALS = 8;
+const RETRY_BACKOFF_CAP_ARRIVALS = 2048;
+const MAX_RETRY_ATTEMPTS = 6;
+
+function retryBackoff(attempts: number): number {
+	return Math.min(RETRY_BACKOFF_ARRIVALS * 2 ** Math.max(0, attempts - 1), RETRY_BACKOFF_CAP_ARRIVALS);
+}
 
 /** Successful claims between coarse progress lines. */
 const CLAIM_LOG_INTERVAL = 64;
@@ -426,6 +438,11 @@ export class ContinuousChatScheduler {
 					).run(meta.generation),
 				);
 				this.sql("DELETE FROM recovery_only").run();
+				// A configuration change or an explicit retry gives nodes that used up their attempts one more.
+				this.sql("UPDATE work SET attempts=1,retry_after=? WHERE status='blocked' AND attempts>=?").run(
+					meta.generation,
+					MAX_RETRY_ATTEMPTS,
+				);
 				if (recoveryKey !== undefined)
 					this.sql(
 						"INSERT INTO recovery_configuration VALUES(1,?) ON CONFLICT(id) DO UPDATE SET identity=excluded.identity",
@@ -467,8 +484,8 @@ export class ContinuousChatScheduler {
 			) ??
 			decodeWork(
 				this.sql(
-					"SELECT * FROM work WHERE kind=? AND status='blocked' AND retry_after<? ORDER BY retry_after,sequence LIMIT 1",
-				).get(kind, generation),
+					"SELECT * FROM work WHERE kind=? AND status='blocked' AND retry_after<? AND attempts<? ORDER BY retry_after,sequence LIMIT 1",
+				).get(kind, generation, MAX_RETRY_ATTEMPTS),
 			)
 		);
 	}
@@ -564,7 +581,11 @@ export class ContinuousChatScheduler {
 				).run(
 					action.kind === "fail" ? "blocked" : "ready",
 					++meta.sequence,
-					waitForRecovery ? Number.MAX_SAFE_INTEGER : action.kind === "fail" ? meta.generation : -1,
+					waitForRecovery
+						? Number.MAX_SAFE_INTEGER
+						: action.kind === "fail"
+							? meta.generation + retryBackoff(row.attempts)
+							: -1,
 					reason,
 					action.kind,
 					claim.level,
