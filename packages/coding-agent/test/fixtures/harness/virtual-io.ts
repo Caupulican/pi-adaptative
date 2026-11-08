@@ -1415,24 +1415,32 @@ export class VirtualFileSystem {
 		this.note("utimes", path);
 	}
 
+	/**
+	 * Re-reads every {@link waitForMutation} condition on a later turn: after a modeled file mutation, and after a RAM
+	 * SQLite statement commits, so a condition on queue rows is read after the write that settles it even when no file
+	 * is written afterwards.
+	 */
+	wakeMutationWaiters(): void {
+		if (this.mutationWaiters.size === 0) return;
+		// A later turn: the owner that wrote finishes its synchronous bookkeeping before the condition is read.
+		setImmediate(() => {
+			for (const waiter of [...this.mutationWaiters]) {
+				try {
+					if (!waiter.holds()) continue;
+					this.mutationWaiters.delete(waiter);
+					waiter.resolve();
+				} catch (error) {
+					this.mutationWaiters.delete(waiter);
+					waiter.reject(error);
+				}
+			}
+		});
+	}
+
 	private note(kind: string, path: string): void {
 		this.log({ kind, path });
 		if (!WATCH_CHANGE_OPERATIONS.has(kind)) return;
-		if (this.mutationWaiters.size > 0) {
-			// A later turn: the owner that wrote finishes its synchronous bookkeeping before the condition is read.
-			setImmediate(() => {
-				for (const waiter of [...this.mutationWaiters]) {
-					try {
-						if (!waiter.holds()) continue;
-						this.mutationWaiters.delete(waiter);
-						waiter.resolve();
-					} catch (error) {
-						this.mutationWaiters.delete(waiter);
-						waiter.reject(error);
-					}
-				}
-			});
-		}
+		this.wakeMutationWaiters();
 		for (const record of this.watchers) {
 			if (
 				record.path === path ||
@@ -1503,7 +1511,11 @@ export class EffectGuard {
 	constructor(io: VirtualFileSystem, ports: EffectPorts = {}) {
 		this.io = io;
 		this.ports = ports;
-		this.sqlite = new VirtualSqlite(io, (kind) => this.reject(kind));
+		this.sqlite = new VirtualSqlite(
+			io,
+			(kind) => this.reject(kind),
+			() => io.wakeMutationWaiters(),
+		);
 		this.workerThreads = new VirtualWorkerThreads(
 			(kind) => this.reject(kind),
 			(callback) => io.runInWorker(callback),

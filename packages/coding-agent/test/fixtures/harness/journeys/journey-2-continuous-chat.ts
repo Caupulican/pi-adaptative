@@ -81,9 +81,20 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 			sessionManager: world.createSessionManager(wAgentDir),
 			settings: icmContinuousSettings(),
 		});
+		// The 6 KB read result (message 2) is a code-built leaf near the node target, so its pair with the reply (message 3)
+		// no longer joins under it: the model merges that pair, and only that pair.
 		world.provider.enqueue("worker-c", {
-			name: "w-seed-leaf-2",
-			reply: { content: [{ type: "text", text: "echo: 6 KB worker seed payload." }] },
+			name: "w-seed-merge-2-3",
+			check: (request) => {
+				if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 2+1 and 3+1")) {
+					throw new Error("worker-c did not receive the merge task for messages 2 and 3");
+				}
+			},
+			reply: {
+				content: [
+					{ type: "text", text: "echo: 6 KB worker seed payload. pi: Noted the 6 KB payload for worker zoom." },
+				],
+			},
 		});
 		world.provider.enqueue(
 			"root",
@@ -264,18 +275,19 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		// The delegate start is this root's first successful work trigger, so its receipt (message 6) carries the `work-lifecycle` (829
 		// bytes) and `delegation` (2,186 bytes) rule blocks as two further text blocks, which the chat logs after the receipt, each
-		// joined by a newline. The leaf (about 3,530 bytes) is far over the 512-byte node target and is built by the model; the pair it
-		// forms with message 7 then joins well under the target (80 bytes), so no merge needs the model. Nothing else in the turn nears
-		// the target (the largest join, lines 0+8, is 433 bytes on Linux and 439 on Windows).
+		// joined by a newline. The receipt is a tool result, so its leaf (about 3,530 bytes of text) is built from code facts to
+		// about the node target without a model call; the pair it forms with message 7 then no longer joins under the target, so
+		// the model merges that pair. Nothing else in the turn nears the target (the largest join, lines 0+8, is about 433 bytes
+		// on Linux and 439 on Windows).
 		world.provider.enqueue("worker-c", {
-			name: "w-receipt-leaf-6",
+			name: "w-receipt-merge-6-7",
 			check: (request) => {
-				if (!JSON.stringify(request.context.messages).includes("Compaction: compress message 6 into one line")) {
-					throw new Error("worker-c did not receive the message 6 leaf task");
+				if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 6+1 and 7+1")) {
+					throw new Error("worker-c did not receive the merge task for messages 6 and 7");
 				}
 			},
 			reply: {
-				content: [{ type: "text", text: "echo: delegate started worker-1; rules delivered." }],
+				content: [{ type: "text", text: "echo: delegate started worker-1; rules delivered. pi: reader started." }],
 			},
 		});
 		world.systemOne.enterPhase("w-icm-start", {
@@ -288,11 +300,16 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 		await icmWaitForChatIdle(world, wAgentDir, 10, (records) => records.some((record) => record.kind === "work"));
 
 		// Root zooms the worker's transcript via zoom({ id: "worker-1", page: 0 }).
-		// Because worker-1's transcript contains the 4 KiB zoom echo, root's zoom("worker-1") result is > 512 B,
-		// so worker-c compacts its echo leaf.
+		// Because worker-1's transcript contains the 4 KiB zoom echo, root's zoom("worker-1") result is > 512 B: its echo
+		// (message 12) is a code-built leaf near the node target, so the model merges its pair with the reply (message 13).
 		world.provider.enqueue("worker-c", {
-			name: "w-root-zoom-worker-echo-leaf",
-			reply: { content: [{ type: "text", text: "echo: worker-1 transcript page 1." }] },
+			name: "w-root-zoom-worker-merge-12-13",
+			check: (request) => {
+				if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 12+1 and 13+1")) {
+					throw new Error("worker-c did not receive the merge task for messages 12 and 13");
+				}
+			},
+			reply: { content: [{ type: "text", text: "echo: worker-1 transcript page 1. pi: observed it." }] },
 		});
 		let rootWorkerLogText = "";
 		world.provider.enqueue(
@@ -327,7 +344,8 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 			{
 				workerHasBirthView:
 					workerBirthContext.includes("<chat>") &&
-					workerBirthContext.includes("2+1|echo: 6 KB worker seed payload."),
+					workerBirthContext.includes("2+1|echo: ") &&
+					workerBirthContext.includes("auto-summary: zoom for the exact result"),
 				workerTools: workerToolNames.filter((name) => name === "zoom" || name === "date").sort(),
 				workerZoomIs4kPaged:
 					workerNavResults.zoom2?.isError === false &&

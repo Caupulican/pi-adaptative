@@ -166,9 +166,11 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 
 	// I2 (continuous chat storage, leaf threshold, model compaction + size retry, and 30,000-char bounds):
 	// - Turn 1: user message <= 512 B (id 0, exact leaf), read tool call (id 1, exact leaf; 0+2 merges with 0 worker-c calls),
-	//   read result > 30,000 chars (id 2, clipped to <= 30,000 chars with toolClipping metadata; > 512 B so worker-c compacts leaf 2
-	//   after a first >512 B reply triggers the "Too long: your line is ..." retry), and a 30,050-char assistant reply that splits
-	//   into id 3 (30,000 chars -> worker-c compacts leaf 3; 2+2 and 0+4 merge without extra worker-c calls) and id 4 (50 chars, exact leaf).
+	//   read result > 30,000 chars (id 2, clipped to <= 30,000 chars with toolClipping metadata; a tool result, so its leaf is
+	//   built from code facts to about the node target with no worker-c call), and a 30,050-char assistant reply that splits
+	//   into id 3 (30,000 chars -> worker-c compacts leaf 3 after a first >512 B reply triggers the "Too long: your line is ..."
+	//   retry) and id 4 (50 chars, exact leaf). Leaf 2's code line no longer joins with leaf 3's line under the target, so
+	//   worker-c merges 2+1 and 3+1 once; 0+4 joins without a call.
 	const icmLongPath = projectPath("src", "icm-long-echo.txt");
 	const icmLongEcho = `HEAD-MARKER-${"x".repeat(31_000)}-TAIL-MARKER\n`;
 	world.io.writeFileSync(icmLongPath, icmLongEcho);
@@ -214,44 +216,41 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		world.provider.enqueue(
 			"worker-c",
 			{
-				name: "icm-leaf-2-oversized",
+				name: "icm-leaf-3-oversized",
 				check: (request) => {
 					const text = JSON.stringify(request.context.messages);
 					expect(text, "derived knowledge never becomes a chat compaction source").not.toContain(
 						"K-ORIGINAL-PREFERENCE",
 					);
-					if (!text.includes("HEAD-MARKER-") || !text.includes("-TAIL-MARKER")) {
-						throw new Error("leaf 2 compaction did not receive the clipped 30,000-char tool output");
+					if (!text.includes("SPLIT-START-Retry limit is seven per hour")) {
+						throw new Error("worker-c did not receive the 30,000-char first chunk of the split assistant reply");
 					}
 				},
-				reply: { content: [{ type: "text", text: `echo: ${"oversized-summary-".repeat(35)}` }] },
+				reply: { content: [{ type: "text", text: `pi: ${"oversized-summary-".repeat(35)}` }] },
 			},
 			{
-				name: "icm-leaf-2-retry-accepted",
+				name: "icm-leaf-3-retry-accepted",
 				check: (request) => {
 					const text = JSON.stringify(request.context.messages);
 					if (!text.includes("Too long: your line is")) {
 						throw new Error("worker-c did not receive the >512 B size-retry prompt");
 					}
-				},
-				reply: {
-					content: [
-						{
-							type: "text",
-							text: "echo: HEAD-MARKER..TAIL-MARKER.",
-						},
-					],
-				},
-			},
-			{
-				name: "icm-leaf-3-split-head",
-				check: (request) => {
-					if (!JSON.stringify(request.context.messages).includes("SPLIT-START-Retry limit is seven per hour")) {
-						throw new Error("worker-c did not receive the 30,000-char first chunk of the split assistant reply");
-					}
 					world.faultMatrix.witness("R10", { control: true });
 				},
 				reply: { content: [{ type: "text", text: "pi: Retry limit is seven per hour (part 1)." }] },
+			},
+			{
+				name: "icm-merge-2-3",
+				check: (request) => {
+					if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 2+1 and 3+1")) {
+						throw new Error("worker-c did not receive the merge task for the read result and the split reply");
+					}
+				},
+				reply: {
+					content: [
+						{ type: "text", text: "echo: HEAD-MARKER..TAIL-MARKER. pi: Retry limit is seven per hour (part 1)." },
+					],
+				},
 			},
 		);
 		let turn1SystemPrompt = "";
@@ -330,6 +329,21 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		await icmWaitForChatIdle(world, icmAgentDir, 5, (_records, nodes) =>
 			nodes.some((node) => node.level === 2 && node.ordinal === 0),
 		);
+		const echoLeaf = icmReadContinuousNodes(world, icmStore).find((node) => node.level === 0 && node.ordinal === 2);
+		expect(
+			{
+				text: echoLeaf?.text.slice(0, 40),
+				clippedNote: echoLeaf?.text.includes("(clipped from "),
+				exactNote: echoLeaf?.text.includes("auto-summary: zoom for the exact result"),
+				withinTarget: (echoLeaf?.size ?? Number.POSITIVE_INFINITY) <= 512,
+			},
+			"the over-512-byte read result becomes a code-built leaf: no summary request was scripted for it",
+		).toEqual({
+			text: expect.stringMatching(/^echo: \d+ bytes \(clipped from /),
+			clippedNote: true,
+			exactNote: true,
+			withinTarget: true,
+		});
 		expect(
 			{
 				hasPromptBlock: turn1SystemPrompt.includes(CONTINUOUS_CHAT_SYSTEM_PROMPT),
@@ -354,13 +368,14 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 
 		// I3 (<chat> view projection + root zoom & date navigation):
 		// - Root calls zoom(0, 2) (tree children 0 and 1, <=512 B echo), zoom(2, 1, 0) (raw source of clipped record 2;
-		//   30,000 B fits on 1 root page of 32,768 B, and >512 B so worker-c compacts its echo leaf 9), and date(3) (timestamp of Pi's reply).
-		let leaf9RetriedOnWorkerC = false;
-		const leaf9RequestMark = world.provider.reached.length;
+		//   30,000 B fits on 1 root page of 32,768 B; its echo is message 9, a code-built leaf near the node target, so worker-c
+		//   merges 8+1 and 9+1 and meets one transient 503 on the way), and date(3) (timestamp of Pi's reply).
+		let merge89RetriedOnWorkerC = false;
+		const merge89RequestMark = world.provider.reached.length;
 		world.provider.enqueue(
 			"worker-c",
 			{
-				name: "icm-leaf-9-transient-503",
+				name: "icm-merge-8-9-transient-503",
 				reply: {
 					stopReason: "error",
 					errorMessage: "HTTP 503 Service Unavailable: upstream overloaded",
@@ -368,11 +383,16 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				},
 			},
 			{
-				name: "icm-leaf-9-zoom-raw",
-				check: () => {
-					leaf9RetriedOnWorkerC = true;
+				name: "icm-merge-8-9-accepted",
+				check: (request) => {
+					if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 8+1 and 9+1")) {
+						throw new Error("worker-c did not receive the merge task for the raw zoom call and its echo");
+					}
+					merge89RetriedOnWorkerC = true;
 				},
-				reply: { content: [{ type: "text", text: "echo: zoom(2, 1) raw clipped source." }] },
+				reply: {
+					content: [{ type: "text", text: "tool: zoom(2, 1) page 0; echo: zoom(2, 1) raw clipped source." }],
+				},
 			},
 		);
 		const icmNavOutputs: Record<string, string> = {};
@@ -471,8 +491,8 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		world.systemOne.enterPhase("icm-turn-2", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "ICM turn 2", icmRoot.session.prompt("Inspect the summary tree, raw echo, and date."));
-		await advanceIcmTransportBackoff(world, "ICM leaf 9", 2000, leaf9RequestMark, [
-			"worker-c:icm-leaf-9-transient-503",
+		await advanceIcmTransportBackoff(world, "ICM merge 8+9", 2000, merge89RequestMark, [
+			"worker-c:icm-merge-8-9-transient-503",
 		]);
 		await icmWaitForChatIdle(world, icmAgentDir, 13);
 
@@ -505,7 +525,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				zoomRawHasMarkers:
 					icmNavOutputs.raw2?.includes("HEAD-MARKER-") && icmNavOutputs.raw2?.includes("-TAIL-MARKER"),
 				date3MatchesRecord: icmNavOutputs.date3 === icmRecords[3]!.date,
-				leaf9RetriedOnWorkerC,
+				merge89RetriedOnWorkerC,
 			},
 			`Pi-adaptative-memory persists daily JSONL + index, clips tool output at 30k chars, splits assistant output at 30k chars, retries transient compaction errors without blacklisting the model, and serves zoom/date; raw zoom evidence: ${JSON.stringify({ length: icmNavOutputs.raw2?.length, head: icmNavOutputs.raw2?.slice(0, 1_024), recordHead: icmRecords[9]?.text.slice(0, 1_024) })}`,
 		).toEqual({
@@ -522,7 +542,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			zoomRawHasClipBanner: true,
 			zoomRawHasMarkers: true,
 			date3MatchesRecord: true,
-			leaf9RetriedOnWorkerC: true,
+			merge89RetriedOnWorkerC: true,
 		});
 		world.faultMatrix.witness("R10", { control: false });
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
@@ -606,11 +626,13 @@ async function advanceIcmTransportBackoff(
 }
 
 /**
- * R10s: after transport recovery is exhausted, a failed leaf is retried by a later arrival, never by an alarm and never by making
+ * R10s: after transport recovery is exhausted, a failed leaf is retried by later arrivals, never by an alarm and never by making
  * a root turn wait, on a fresh chat whose only model-generated leaf is message 1. Each scheduler attempt permits three worker-c
  * requests with 2s/4s transport backoffs. The control: after exhaustion, no later arrival means the leaf stays blocked and arms nothing.
- * Turn B's arrival retries the leaf while its root turn proceeds on the pending reference; the leaf fails again and stays
- * blocked. Turn C's arrival retries it once more and publishes it.
+ * A failed leaf is eligible again only after several arrivals (messages and turn starts), and twice as many after each further
+ * failure, so one follow-up turn does not retry it. Once enough turns have passed, the retry runs in the background after the
+ * foreground quiet window while the root turns proceed on the pending reference; it fails again and stays blocked for longer.
+ * The following turns retry it once more and publish it.
  */
 async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Promise<void> {
 	const trace = world.trace;
@@ -674,9 +696,9 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	});
 	world.faultMatrix.witness("R10s", { control: true });
 
-	// Turn B starts with leaf 1 blocked: its arrival makes the leaf eligible and its retry runs in the background while the root turn
-	// proceeds on the pending reference, never waiting. The retry is held at its first request until every arrival of the turn is in,
-	// so the arrivals are absorbed into that one attempt and the order is the same on every run.
+	// A failed leaf stays blocked until enough arrivals have passed (the backoff), then its retry runs in the background after the
+	// foreground quiet window, never inside a turn and never making one wait. The retry is held at its first request until every
+	// arrival is in, so the order is the same on every run.
 	const leafRow = (): Record<string, unknown> | undefined =>
 		world.guard.peekSqlite(
 			store.queueDatabase,
@@ -686,7 +708,31 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		const meta = world.guard.peekSqlite(store.queueDatabase, "SELECT body FROM meta WHERE id = 1")?.[0];
 		return meta === undefined ? undefined : (JSON.parse(String(meta.body)) as { generation: number }).generation;
 	};
-	const turnBJudgments = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
+	const dueForRetry = (): boolean => {
+		const retryAfter = leafRow()?.retry_after;
+		const now = generation();
+		return retryAfter !== undefined && now !== undefined && Number(retryAfter) < now;
+	};
+	const turnJudgments = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
+	let messages = 2;
+	/** One short follow-up turn: its two messages and its start are the only arrivals, and it asks for no summary of its own. */
+	const followUp = async (name: string, check?: (request: ScriptedRequest) => void): Promise<void> => {
+		world.provider.enqueue("root", {
+			name: `${label}-${name}`,
+			...(check === undefined ? {} : { check }),
+			reply: { content: [{ type: "text", text: "Done." }] },
+		});
+		// The previous turn used no tool: its owner words are settled by this submission.
+		world.systemOne.enterPhase(`${label}-${name}`, turnJudgments);
+		await withDeadline(trace, `R10s ${name}`, root.session.prompt(`Answer after the R10s ${name}.`));
+		messages += 2;
+		await withDeadline(
+			trace,
+			`R10s ${name} messages logged`,
+			world.io.waitForMutation(() => icmReadScheduler(world, store)?.totalMessages === messages),
+			60_000,
+		);
+	};
 	const retryHeld = createBarrier();
 	const turnMark = world.provider.reached.length;
 	world.provider.enqueue(
@@ -695,23 +741,29 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		unavailable("arrival-b"),
 		unavailable("arrival-c"),
 	);
-	world.provider.enqueue("root", { name: `${label}-turn-b`, reply: { content: [{ type: "text", text: "Done." }] } });
+	let turnsToFirstRetry = 0;
+	const waits: string[] = [];
+	const unsubscribe = root.session.subscribe((event) => {
+		if (event.type === "continuous_chat_prefix_wait") {
+			waits.push(`${event.phase} ${event.built}/${event.needed}/${event.failed}`);
+		}
+	});
 	try {
-		const waits: string[] = [];
-		const unsubscribe = root.session.subscribe((event) => {
-			if (event.type === "continuous_chat_prefix_wait") {
-				waits.push(`${event.phase} ${event.built}/${event.needed}/${event.failed}`);
-			}
-		});
-		world.systemOne.enterPhase(`${label}-turn-b`, turnBJudgments);
-		await withDeadline(trace, "R10s turn B", root.session.prompt("Answer after the R10s retries."));
+		await followUp("turn-b1");
+		turnsToFirstRetry = 1;
+		expect(
+			dueForRetry(),
+			"one turn's arrivals do not make the failed leaf eligible again: its retry waits for more",
+		).toBe(false);
+		while (!dueForRetry() && turnsToFirstRetry < 10) await followUp(`turn-b${++turnsToFirstRetry}`);
 		unsubscribe();
+		expect(dueForRetry(), "enough arrivals make the failed leaf eligible again").toBe(true);
 		await withDeadline(
 			trace,
-			"R10s retry running with every turn B arrival absorbed",
+			"R10s retry running with every follow-up arrival absorbed",
 			world.io.waitForMutation(() => {
 				const queue = icmReadScheduler(world, store);
-				return queue !== undefined && queue.totalMessages === 4 && queue.running === 1;
+				return queue !== undefined && queue.totalMessages === messages && queue.running === 1;
 			}),
 			60_000,
 		);
@@ -722,7 +774,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 				steps: workerSteps(turnMark),
 				warnings: world.warnings.slice(warningMark),
 			},
-			"the root turn is answered while the leaf's retry is still in flight: no wait, no alarm, no new failure yet",
+			"the root turns were answered while the leaf waited: no wait, no alarm, and the retry is still in flight with no new failure yet",
 		).toEqual({
 			waits: [],
 			armed: [],
@@ -751,10 +803,10 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 				steps: workerSteps(turnMark),
 				warnings: world.warnings.slice(warningMark),
 				row: leafRow(),
-				dueForRetry: (leafRow()?.retry_after as number) < (generation() ?? Number.NEGATIVE_INFINITY),
+				dueForRetry: dueForRetry(),
 				generationUnchanged: generation() === generationBeforeFailure,
 			},
-			"the retried leaf fails again, stays blocked until a later arrival, and arms no alarm",
+			"the retried leaf fails again, stays blocked until enough later arrivals, and arms no alarm",
 		).toEqual({
 			armed: [],
 			steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`, `worker-c:${label}-arrival-c`],
@@ -764,12 +816,14 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			generationUnchanged: true,
 		});
 	} finally {
+		unsubscribe();
 		// The held request must never outlive a failed assertion: teardown joins it.
 		retryHeld.release();
 	}
 
-	// Turn C is the next arrival: it makes the blocked leaf eligible again and its retry publishes the summary.
-	const turnCMark = world.provider.reached.length;
+	// The following turns are the arrivals that make the blocked leaf eligible once more (twice as many as before), and the retry
+	// that follows publishes the summary.
+	const recoveryMark = world.provider.reached.length;
 	const recoveryHeld = createBarrier();
 	world.provider.enqueue("worker-c", {
 		name: `${label}-recovered`,
@@ -777,46 +831,42 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		gate: recoveryHeld.promise,
 		reply: { content: [{ type: "text", text: "pi: R10s spacing reply." }] },
 	});
-	world.provider.enqueue("root", {
-		name: `${label}-turn-c`,
-		check: (request) => {
-			const blocks = chatBlocks(request);
-			expect(blocks[0], "a held summary interrupts the stable prefix inside a complete block").toMatchObject({
-				icmCache: {
-					stablePrefixLineCount: 1,
-					lines: [
-						{ level: 0, ordinal: 0 },
-						{ level: 0, ordinal: 1 },
-						{ level: 0, ordinal: 2 },
-						{ level: 0, ordinal: 3 },
-					],
-				},
-			});
-			expect(
-				blocks.some((block) => block.cacheBoundary),
-				"no marked block may include the pending summary",
-			).toBe(false);
-		},
-		reply: { content: [{ type: "text", text: "Done again." }] },
-	});
-	// Turn B used no tool: its owner words are settled by this submission.
-	world.systemOne.enterPhase(`${label}-turn-c`, turnBJudgments);
+	const prefixInterrupted = (request: ScriptedRequest): void => {
+		const blocks = chatBlocks(request);
+		expect(blocks[0], "a held summary interrupts the stable prefix inside a complete block").toMatchObject({
+			icmCache: {
+				stablePrefixLineCount: 1,
+				lines: Array.from({ length: messages }, (_, ordinal) => ({ level: 0, ordinal })),
+			},
+		});
+		expect(
+			blocks.some((block) => block.cacheBoundary),
+			"no marked block may include the pending summary",
+		).toBe(false);
+	};
+	let turnsToSecondRetry = 0;
 	try {
-		await withDeadline(trace, "R10s turn C", root.session.prompt("Answer after the R10s recovery."));
+		while (turnsToSecondRetry === 0 || (!dueForRetry() && turnsToSecondRetry < 16)) {
+			await followUp(`turn-c${++turnsToSecondRetry}`, prefixInterrupted);
+		}
+		expect(dueForRetry(), "enough arrivals make the leaf eligible once more").toBe(true);
+		expect(turnsToSecondRetry, "each further failure doubles the arrivals the retry waits for").toBeGreaterThan(
+			turnsToFirstRetry,
+		);
 	} finally {
 		recoveryHeld.release();
 	}
-	await icmWaitForChatIdle(world, agentDir, 6, (_records, nodes) =>
+	await icmWaitForChatIdle(world, agentDir, messages, (_records, nodes) =>
 		nodes.some((node) => node.level === 0 && node.ordinal === 1),
 	);
 	expect(
 		{
 			armed: world.timers.armedDelays("continuous-chat"),
-			steps: workerSteps(turnCMark),
+			steps: workerSteps(recoveryMark),
 			warnings: world.warnings.slice(warningMark),
 			row: leafRow(),
 		},
-		"the next arrival retries the blocked leaf once and publishes it, with no alarm and no further failure",
+		"the later arrivals retry the blocked leaf once and publish it, with no alarm and no further failure",
 	).toEqual({
 		armed: [],
 		steps: [`worker-c:${label}-recovered`],

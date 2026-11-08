@@ -263,6 +263,8 @@ function applyJournalMode(backing: Backing, requested: string): void {
 export class VirtualSqlite {
 	private readonly files: SqliteFiles;
 	private readonly reject: (kind: string) => never;
+	/** Called after a write statement leaves no transaction open: its rows are committed and a waiter may read them. */
+	private readonly committed: () => void;
 	private readonly backings = new Map<number | bigint, Backing>();
 	private readonly databases = new Set<DatabaseSync>();
 	private readonly handles = new Set<Handle>();
@@ -271,9 +273,10 @@ export class VirtualSqlite {
 	private readonly denials = new Map<string, NonNullable<SqliteFault["denial"]>>();
 	private active = true;
 
-	constructor(files: SqliteFiles, reject: (kind: string) => never) {
+	constructor(files: SqliteFiles, reject: (kind: string) => never, committed: () => void) {
 		this.files = files;
 		this.reject = reject;
+		this.committed = committed;
 	}
 
 	open(databaseConstructor: typeof DatabaseSync, arguments_: readonly unknown[]): object {
@@ -433,6 +436,7 @@ export class VirtualSqlite {
 			}
 			if (errors.length > 1) throw new AggregateError(errors, "SQLite operation and settings capture failed");
 			if (errors.length) throw errors[0];
+			if ((key === "run" || key === "exec") && !handle.readOnly && !current.database.isTransaction) this.committed();
 			return result;
 		};
 		const close = (idempotent: boolean) => {
