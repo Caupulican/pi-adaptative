@@ -12,6 +12,8 @@ import type {
 	ResolvedProactivitySettings,
 	SettingsScope,
 } from "../../core/settings/settings-schema.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 
 /** The settings this module reads and writes, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ProactivityCommandsSettingsSource {
@@ -34,10 +36,16 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 	const { measured, lastDelivery, lastEventDelivery } = lanes.getProactivityDailyState();
 	const intake = lanes.getRoutineIntakeStatus();
 	const { suppressed } = lanes.getProactivityFeedbackState();
+	harnessLog.debug("ui", "proactivity status reads gate and hold codes", {
+		skip,
+		intakeReason: intake?.reason,
+		lastDeliveryHold: lastDelivery?.hold,
+		lastEventDeliveryHold: lastEventDelivery?.hold,
+	});
 	const delivered = (delivery: ParentWakeDelivery) =>
 		delivery.mode === "turn"
 			? "woke a parent turn"
-			: `waits for the owner's next turn${delivery.hold === undefined ? "" : ` (${delivery.hold})`}`;
+			: `waits for the owner's next turn${delivery.hold === undefined ? "" : ` (${plainLabel(delivery.hold)})`}`;
 	return [
 		`Proactivity: ${settings.enabled ? "on" : "off"}`,
 		`Review after ${Math.round(settings.idleDelayMs / 1000)}s idle, at least ${settings.minOwnerTurnsBetweenRuns} new owner turn(s) apart, ${settings.maxRunsPerSession} per session, up to ${settings.maxNotesPerRun} note(s), $${settings.maxUsd.toFixed(2)} bound per review.`,
@@ -48,7 +56,7 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 		...(intake === undefined
 			? []
 			: [
-					`Routine intake: ${intake.state === "active" ? "on" : `off (${intake.reason})`}${intake.judge === undefined ? "" : `, judged by ${intake.judge}`}, $${intake.spentUsd.toFixed(4)} of $${intake.sessionMaxUsd.toFixed(2)} this session${intake.last === undefined ? "" : `; last pass ${intake.last.status}: ${intake.last.sources} source(s), ${intake.last.created} created, ${intake.last.refused} refused`}`,
+					`Routine intake: ${intake.state === "active" ? "on" : `off${intake.reason === undefined ? "" : ` (${plainLabel(intake.reason)})`}`}${intake.judge === undefined ? "" : `, judged by ${intake.judge}`}, $${intake.spentUsd.toFixed(4)} of $${intake.sessionMaxUsd.toFixed(2)} this session${intake.last === undefined ? "" : `; last pass ${intake.last.status}: ${intake.last.sources} source(s), ${intake.last.created} created, ${intake.last.refused} refused`}`,
 				]),
 		...(measured === undefined
 			? []
@@ -59,7 +67,7 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 			(topic) =>
 				`Set aside after unanswered or declined notes: ${topic.label}, until ${new Date(topic.until).toISOString()}`,
 		),
-		...(skip === undefined ? [] : [`Last gate: ${skip}`]),
+		...(skip === undefined ? [] : [`Last gate: ${plainLabel(skip)}`]),
 		...(lastDelivery === undefined ? [] : [`Last note delivery: ${delivered(lastDelivery)}`]),
 		...(lastEventDelivery === undefined ? [] : [`Last CI event delivery: ${delivered(lastEventDelivery)}`]),
 	].join("\n");
@@ -85,13 +93,16 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 			.runProactiveReviewOnce()
 			.then((outcome) => {
 				if (!outcome.started) {
-					host.showStatus(`Proactive review skipped: ${outcome.skipReason ?? "unknown"}`);
+					harnessLog.debug("ui", "proactive review skipped", { skipReason: outcome.skipReason });
+					host.showStatus(`Proactive review skipped: ${plainLabel(outcome.skipReason ?? "unknown")}`);
 					return;
 				}
+				if (outcome.deliveryHold !== undefined)
+					harnessLog.debug("ui", "proactive review notes held", { deliveryHold: outcome.deliveryHold });
 				host.showStatus(
 					outcome.delivered.length === 0
 						? "Proactive review: nothing to raise."
-						: `Proactive review raised ${outcome.delivered.length} note(s)${outcome.deliveryHold === undefined ? "." : `; they wait for your next turn (${outcome.deliveryHold}).`}`,
+						: `Proactive review raised ${outcome.delivered.length} note(s)${outcome.deliveryHold === undefined ? "." : `; they wait for your next turn (${plainLabel(outcome.deliveryHold)}).`}`,
 				);
 			})
 			.catch((error: unknown) => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import { isNonNegativeSafeInteger } from "../util/value-guards.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
@@ -44,9 +45,11 @@ export class ContinuousChatRecordProjection {
 				throw new Error("Unsupported continuous-chat projection schema.");
 			if (writable) db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
 			if (version === 0) {
-				withSqliteTransaction(
+				const created = withSqliteTransaction(
 					db,
 					() => {
+						// Another process may have created the projection between the unlocked version read and this lock.
+						if (db.prepare("PRAGMA user_version").get()?.user_version !== 0) return false;
 						db.exec(`
 			CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0), derived_revision INTEGER NOT NULL CHECK(derived_revision>=0), indexed_through INTEGER NOT NULL CHECK(indexed_through>=0)) STRICT;
 			CREATE TABLE IF NOT EXISTS source_groups(session_id TEXT NOT NULL, entry_id TEXT NOT NULL, first_id INTEGER NOT NULL CHECK(first_id>=0), record_count INTEGER NOT NULL CHECK(record_count>0), candidate INTEGER NOT NULL CHECK(candidate IN(0,1)), state TEXT NOT NULL CHECK(state IN('unreviewed','unchanged','superseded','quarantined')), PRIMARY KEY(session_id,entry_id)) STRICT, WITHOUT ROWID;
@@ -57,8 +60,13 @@ export class ContinuousChatRecordProjection {
 			CREATE TABLE IF NOT EXISTS unavailable(session_id TEXT PRIMARY KEY, reason TEXT NOT NULL) STRICT, WITHOUT ROWID;
 			PRAGMA user_version=1;`);
 						db.prepare("INSERT INTO meta VALUES(1,?,0,0,0)").run(randomUUID());
+						return true;
 					},
 					"continuous-chat projection initialization",
+				);
+				harnessLog.info(
+					"memory",
+					created ? "chat record projection created" : "chat record projection created by another process",
 				);
 			}
 			if (!writable) db.exec("PRAGMA query_only=ON;");

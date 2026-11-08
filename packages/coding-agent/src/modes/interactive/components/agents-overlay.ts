@@ -13,6 +13,7 @@ import {
 	renderOrchestrationPanelLines,
 	taskStepPanelRow,
 } from "../../../core/tools/orchestration-panel.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
 import type { VerificationObligationView } from "../../../kernel/verification-obligations.ts";
 import { formatKeyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
@@ -72,7 +73,33 @@ function workerElapsed(record: LaneRecord, nowMs: number): string {
 	return formatElapsed(end - started);
 }
 
+/** A stored ISO time as the owner's local clock time; undefined when it does not parse. */
+function clockTime(iso: string | undefined): string | undefined {
+	if (!iso) return undefined;
+	const at = new Date(iso);
+	return Number.isNaN(at.getTime()) ? undefined : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Ids the rows no longer draw are kept in the harness log, once per key: rows are built on every frame. */
+const loggedIdKeys = new Set<string>();
+function keepIdsInLog(key: string, ids: Readonly<Record<string, string | undefined>>): void {
+	const signature = JSON.stringify(ids);
+	if (loggedIdKeys.has(`${key}|${signature}`)) return;
+	if (loggedIdKeys.size >= 256) loggedIdKeys.clear();
+	loggedIdKeys.add(`${key}|${signature}`);
+	harnessLog.debug("ui", "agents overlay ids kept in the log, not on screen", () => ({ key, ...ids }));
+}
+
 function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
+	keepIdsInLog(record.laneId, {
+		lane: record.laneId,
+		goal: record.goalId,
+		reason: record.reasonCode,
+		worktree: record.worktreeLaneKey,
+		evidence: record.evidenceEntryId,
+	});
+	const started = clockTime(record.startedAt);
+	const completed = clockTime(record.completedAt);
 	const meta = [
 		record.type === "managed-worker" ? "managed" : "agent",
 		record.profileId,
@@ -82,17 +109,13 @@ function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
 		record.costUsd !== undefined ? `$${record.costUsd.toFixed(2)}` : undefined,
 	].filter((value): value is string => value !== undefined && value !== "");
 	const details = [
-		`lane: ${record.laneId}`,
-		record.goalId ? `goal: ${record.goalId}` : undefined,
-		record.reasonCode ? `reason: ${record.reasonCode}` : undefined,
-		record.worktreeLaneKey ? `worktree: ${record.worktreeLaneKey}` : undefined,
-		record.evidenceEntryId ? `evidence: ${record.evidenceEntryId}` : undefined,
-		record.startedAt ? `started: ${record.startedAt}` : undefined,
-		record.completedAt ? `completed: ${record.completedAt}` : undefined,
+		record.reasonCode ? `reason: ${record.reasonCode.replace(/_/g, " ")}` : undefined,
+		started ? `started: ${started}` : undefined,
+		completed ? `completed: ${completed}` : undefined,
 	].filter((value): value is string => value !== undefined);
 	return {
 		status: record.status,
-		label: record.label ?? record.laneId,
+		label: record.label ?? "Unnamed task",
 		section: "Workers",
 		meta,
 		details,
@@ -233,17 +256,23 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		...(goal?.requirements.map(goalRequirementPanelRow) ?? []),
 		...(goal?.evidence.map(goalEvidencePanelRow) ?? []),
 		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "Plan" })) ?? []),
-		...peerFindings.slice(0, 3).map((finding) => ({
-			status: "blocked" as const,
-			label: finding.reason,
-			section: "Peer findings",
-			meta: [finding.id],
-			details: [
-				`scope: ${finding.scope}`,
-				`receiver: ${finding.receiverId}`,
-				`candidate: ${finding.candidateKind} ${finding.candidateId}`,
-			],
-		})),
+		...peerFindings.slice(0, 3).map((finding) => {
+			keepIdsInLog(finding.id, {
+				finding: finding.id,
+				receiver: finding.receiverId,
+				candidate: finding.candidateId,
+			});
+			return {
+				status: "blocked" as const,
+				label: finding.reason,
+				section: "Peer findings",
+				meta: [`#${finding.sequence}`],
+				details: [
+					`scope: ${finding.scope}`,
+					`about: ${finding.candidateKind === "outcome" ? "an outcome" : "the repository"}`,
+				],
+			};
+		}),
 		...(peerFindings.length > 3
 			? [
 					{
@@ -257,7 +286,7 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		...activity.rows,
 	];
 	const summary = [
-		goal ? `goal ${goal.status.replace("_", " ")}` : undefined,
+		goal ? `goal ${goal.status.replace(/_/g, " ")}` : undefined,
 		goal ? `${satisfied}/${goal.requirements.length} requirements` : undefined,
 		task ? `${task.steps.length + task.archive.completed + task.archive.cancelled} plan steps` : undefined,
 		`${peerFindings.length} peer finding${peerFindings.length === 1 ? "" : "s"}`,

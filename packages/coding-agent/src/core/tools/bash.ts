@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { Agent } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { createSilenceWatchdog } from "../../kernel/reliability/index.ts";
@@ -45,6 +46,7 @@ import {
 	type ReduceToolOutputOptions,
 	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
+import { traceToolCalls } from "./read.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
 	type BashOperations,
@@ -1323,6 +1325,7 @@ function createShellToolDefinition(
 						// The command ran and did not finish in the time the caller allowed: that is the
 						// operation's own status, like a non-zero exit, not a failure of this tool.
 						const timeoutSecs = err.message.split(":")[1];
+						harnessLog.warn("tools", "a shell command timed out", { timeoutSeconds: timeoutSecs });
 						throw new AgentToolExecutionError(
 							appendStatus(text, `Command timed out after ${timeoutSecs} seconds`),
 							"timeout",
@@ -1332,6 +1335,7 @@ function createShellToolDefinition(
 					}
 					if (err instanceof Error && err.message.startsWith("silence:")) {
 						const secs = err.message.split(":")[1];
+						harnessLog.warn("tools", "a shell command was stopped for silence", { silenceSeconds: secs });
 						throw new Error(
 							appendStatus(
 								text,
@@ -1357,6 +1361,15 @@ function createShellToolDefinition(
 				);
 				// Actual backend frames own reported cwd, including detached engine frames. Backends
 				// without a final directory report fall back to their own invocation, never shared state.
+				if (snapshot.truncation.truncated) {
+					harnessLog.warn("tools", "shell output was truncated", {
+						totalBytes: snapshot.truncation.totalBytes,
+						outputBytes: snapshot.truncation.outputBytes,
+						totalLines: snapshot.truncation.totalLines,
+						outputLines: snapshot.truncation.outputLines,
+						limitedBy: snapshot.truncation.truncatedBy,
+					});
+				}
 				const reportedCwd = sessionCwd ?? spawnCwd;
 				const verification =
 					initialCwd === undefined || verificationCommand === undefined
@@ -1487,7 +1500,7 @@ export function createBashToolDefinition(
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined> {
 	const platform = options?.platform ?? process.platform;
-	return createShellToolDefinition(cwd, getPlatformShellToolName(platform), platform, options);
+	return traceToolCalls(createShellToolDefinition(cwd, getPlatformShellToolName(platform), platform, options));
 }
 
 export function createBashTool(cwd: string, options?: BashToolOptions): AgentTool<typeof bashSchema> {

@@ -1,4 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ModelTier } from "../autonomy/contracts.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
@@ -86,7 +87,13 @@ export function shouldEscalateModelRouterTool(options: {
 	readOnly?: boolean;
 }): boolean {
 	if (options.tier !== "cheap") return false;
-	return isMutatingToolCall(options.toolName, options.args, options.readOnly);
+	const escalate = isMutatingToolCall(options.toolName, options.args, options.readOnly);
+	if (escalate) {
+		harnessLog.debug("router", "a cheap-tier tool call escalates to a stronger model", () => ({
+			tool: options.toolName,
+		}));
+	}
+	return escalate;
 }
 
 /**

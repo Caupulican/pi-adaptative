@@ -29,6 +29,7 @@ function normalizeLearningPhase(phase: string): string {
 	const normalized = phase
 		.toLowerCase()
 		.replace(/[^a-z0-9_-]+/g, "")
+		.replace(/[_-]+/g, " ")
 		.trim();
 	if (!normalized) return "active";
 	if (normalized === "starting") return "start";
@@ -305,7 +306,7 @@ export class FooterComponent implements Component {
 			const totalInputWithCache = u.input + u.cacheRead + u.cacheWrite;
 			if (totalInputWithCache > 0 && (u.cacheRead > 0 || u.cacheWrite > 0)) {
 				const hitRate = Math.round((u.cacheRead / totalInputWithCache) * 100);
-				statsParts.push(`CH:${hitRate}%`);
+				statsParts.push(`cache ${hitRate}%`);
 			}
 		}
 
@@ -316,7 +317,7 @@ export class FooterComponent implements Component {
 		// CURRENT/TODAY/SUBAGENTS totals rendered above.
 		const costGuard = this.session.getLastCostGuardDecision?.();
 		if (this.services.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
-			statsParts.push(theme.fg("warning", `GUARD:$${costGuard.estUsd.toFixed(2)}/turn`));
+			statsParts.push(theme.fg("warning", `over limit $${costGuard.estUsd.toFixed(2)}/turn`));
 		}
 
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
@@ -344,7 +345,7 @@ export class FooterComponent implements Component {
 		};
 
 		// Add model display name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.name || state.model?.id || "no-model";
+		const modelName = state.model?.name || state.model?.id || "no model";
 		const fastModeEnabled = getFastModeStatus({
 			model: this.session.model,
 			settingsManager: this.services.settingsManager,

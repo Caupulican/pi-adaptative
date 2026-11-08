@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { AgentBusyError } from "../../kernel/agent.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,
@@ -346,6 +347,7 @@ export class GoalAutoContinueController {
 			// Preserve the retry when current policy cannot be read; the next wake re-evaluates it.
 		}
 		const delayMs = this._scheduledFailureRetryMs;
+		harnessLog.warn("goals", "a goal continuation will retry", { delayMs });
 		this._scheduledFailureRetryMs = Math.min(MAX_SCHEDULED_FAILURE_RETRY_MS, delayMs * 2);
 		try {
 			// Keep the retry admission atomic with the callback's final activity publication so

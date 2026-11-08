@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { statSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { getAgentDir } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
@@ -125,7 +125,7 @@ export const MODEL_ROUTER_SELECTION_MODES: readonly ModelRouterSelectionMode[] =
 
 export const MODEL_ROUTER_POOL_PREFERENCES: readonly ModelRouterPoolPreference[] = ["subscription-first", "balanced"];
 
-export const DEFAULT_MODEL_ROUTER_SELECTION_MODE: ModelRouterSelectionMode = "manual";
+export const DEFAULT_MODEL_ROUTER_SELECTION_MODE: ModelRouterSelectionMode = "hybrid";
 
 export const DEFAULT_MODEL_ROUTER_POOL_PREFERENCE: ModelRouterPoolPreference = "subscription-first";
 
@@ -312,6 +312,8 @@ export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
  * optimum. Lower it in settings when the account or the box cannot take it.
  */
 export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 5;
+/** Running workers while the subscription reports room: the fleet widens with the allowance, never past the fixed fleet ceilings. */
+export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST = 12;
 
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE = true;
@@ -501,13 +503,31 @@ export function toPosixPath(p: string): string {
 	return p.split(sep).join("/");
 }
 
+/**
+ * The main checkout of a linked git worktree, so a worktree lane is the same project as the checkout it was made from
+ * (memory, chat and settings follow the project, not the directory). `.git` in a linked worktree is a file naming
+ * `<common>/worktrees/<name>`, whose `commondir` file points back at `<common>`; a submodule has no `commondir` and a
+ * bare or unreadable layout stays its own directory.
+ */
+function mainCheckoutOfLinkedWorktree(root: string): string | undefined {
+	try {
+		const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(join(root, ".git"), "utf8"))?.[1];
+		if (!pointer) return undefined;
+		const gitDir = resolve(root, pointer);
+		const common = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+		return basename(common) === ".git" ? dirname(common) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 export function findDirectoryProfileRoot(cwd: string): string {
 	let current = resolvePath(cwd);
 	while (true) {
 		for (const marker of [".git", ".hg", ".svn"]) {
 			try {
-				statSync(join(current, marker));
-				return current;
+				const found = statSync(join(current, marker));
+				return (found.isFile() && marker === ".git" ? mainCheckoutOfLinkedWorktree(current) : undefined) ?? current;
 			} catch {}
 		}
 		const parent = resolve(current, "..");
@@ -807,6 +827,22 @@ export function normalizeWorkerDelegationLayer(
 			reportInvalidWorkerDelegationField(
 				reportDiagnostic,
 				"maxConcurrent",
+				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "maxConcurrentBurst")) {
+		if (
+			typeof value.maxConcurrentBurst === "number" &&
+			Number.isSafeInteger(value.maxConcurrentBurst) &&
+			value.maxConcurrentBurst > 0 &&
+			value.maxConcurrentBurst <= MAX_WORKER_DELEGATION_MAX_CONCURRENT
+		) {
+			normalized.maxConcurrentBurst = value.maxConcurrentBurst;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"maxConcurrentBurst",
 				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
 			);
 		}

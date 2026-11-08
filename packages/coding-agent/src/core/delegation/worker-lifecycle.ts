@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
@@ -464,6 +465,11 @@ export class WorkerLifecycle {
 		retry: AttemptRetryState;
 	}): AttemptRuntimeState {
 		this.suspendAgent(args.laneId, args.agentId, args.ownerId, args.reasonCode, args.retry);
+		harnessLog.warn("workers", "a worker attempt was suspended for retry", {
+			laneId: args.laneId,
+			agentId: args.agentId,
+			reasonCode: args.reasonCode,
+		});
 		const attempt = this.getActiveAttempt(args.laneId);
 		if (!attempt) throw new Error(`Durable worker '${args.laneId}' disappeared after retry suspension.`);
 		return attempt;

@@ -2,6 +2,9 @@
 import type { PersistentBotView } from "../../../core/delegation/persistent-bot-team-store.ts";
 import type { ThemeColor } from "../../../presentation/theme-model.ts";
 
+/** The mark of a bot that lives on another machine, joined over the link: a computer, readable at a glance. */
+export const REMOTE_MARK = "💻";
+
 export interface BotStateMark {
 	readonly glyph: string;
 	readonly tone: ThemeColor;
@@ -23,6 +26,8 @@ export function botStateMark(state: PersistentBotView["state"]): BotStateMark {
 		case "idle":
 		case "retired":
 			return { glyph: "○", tone: "muted" };
+		case "offline":
+			return { glyph: "◌", tone: "dim" };
 		default: {
 			const _exhaustive: never = state;
 			return _exhaustive;

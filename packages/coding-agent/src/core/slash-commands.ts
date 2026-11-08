@@ -104,6 +104,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 			"Manage and message persistent bots directly (/bot [list|new <id> [--write] [model] [soul]|soul <id>|open <id>|msg <id> <text>|stop <id>|retire <id>])",
 	},
 	{
+		name: "remote",
+		duringWork: "local",
+		description:
+			"Link machines: any machine can host (/remote listen, add <name>) or join (/remote join <host:port> <token>); a joined machine shows up as a bot with a remote mark",
+	},
+	{
 		name: "bots",
 		duringWork: "local",
 		description: "Open live Bot & Team chat switcher (/bots or /bot)",

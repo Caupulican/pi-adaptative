@@ -20,9 +20,10 @@ choice. Nothing on this screen runs a provider call by being opened.
 | `auto` | the router decides the tier (regex floor, optional System One judge), then selects the exact model from the candidate pool |
 | `hybrid` | an eligible favorite pin wins; an unpinned tier selects automatically |
 
-Tier pickers show `(AUTO)` for a tier the router selects and `(unset)` in manual mode. Existing
-`modelRouter` settings load unchanged: `selectionMode` defaults to `manual` and `poolPreference` to
-`subscription-first`; no reset happens.
+Tier pickers show `(AUTO)` for a tier the router selects and `(unset)` in manual mode. `selectionMode`
+defaults to `hybrid` and `poolPreference` to `subscription-first`: tiers with a pin keep their exact model,
+unset tiers are chosen automatically (subscription models first), and no startup warning asks for a pin.
+Set `selectionMode` to `manual` to require every tier to be pinned.
 
 ## Candidate pool
 

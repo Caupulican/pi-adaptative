@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	acquireExistingWorkRun,
 	acquireWorkRun,
@@ -176,7 +177,9 @@ export function migrateLegacyContextStores(agentDir: string, onlySessionId?: str
 }
 
 export function pruneContextStores(agentDir: string, options: ContextStoreRetentionOptions = {}): string[] {
-	return pruneWorkTenant(agentDir, "context", CONTEXT_WORK_TENANT, toWorkRetention(options));
+	const pruned = pruneWorkTenant(agentDir, "context", CONTEXT_WORK_TENANT, toWorkRetention(options));
+	if (pruned.length > 0) harnessLog.info("context", "old context stores were removed", { removed: pruned.length });
+	return pruned;
 }
 
 export function getContextStoreDir(agentDir: string, kind: ContextStoreKind, sessionId: string): string {

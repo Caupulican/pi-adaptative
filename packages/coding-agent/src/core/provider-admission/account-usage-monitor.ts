@@ -10,6 +10,7 @@ import {
 	OpenRouterAccountError,
 	XaiAccountError,
 } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { OAuthCredential } from "../auth-storage.ts";
 import {
 	type AccountUsageAdapter,
@@ -349,12 +350,23 @@ export class AccountUsageMonitor {
 		} catch (error) {
 			if (currentAccountKey(request.account.provider) !== key) return;
 			const retryAfter = retryAfterOf(error);
+			const failure = describeAccountFailure(error);
+			harnessLog.log(
+				this.cache.get(key)?.failure ? "debug" : "warn",
+				"provider",
+				"an account usage fetch failed",
+				() => ({
+					provider: request.account.provider,
+					reason: failure,
+					retryAfterMs: retryAfter,
+				}),
+			);
 			if (retryAfter !== undefined) {
 				this.notBefore.set(key, Math.max(this.notBefore.get(key) ?? 0, this.now() + retryAfter));
 			}
 			this.cache.set(key, {
 				...(previous ? { snapshot: previous } : {}),
-				failure: { at: this.now(), error: describeAccountFailure(error) },
+				failure: { at: this.now(), error: failure },
 			});
 		} finally {
 			this.inflight.delete(key);

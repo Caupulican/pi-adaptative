@@ -30,6 +30,7 @@
 
 import { existsSync, type FSWatcher, mkdirSync, watch } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { channelsDir } from "../agent-paths.ts";
@@ -219,6 +220,10 @@ export class AwayChannelHosts {
 		for (const [name, host] of this.hosts) {
 			const channel = wanted.get(name);
 			if (channel && channel.cwd === host.cwd && ownerWanted(channel) === host.ownerWanted) continue;
+			harnessLog.info("channels", "a channel host is closing", () => ({
+				channel: name,
+				reason: channel ? "its directory or owner transport changed" : "its channel is no longer served away",
+			}));
 			this.hosts.delete(name);
 			const closing = this.closeHost(host)
 				.catch((error: unknown) =>
@@ -346,6 +351,11 @@ export class AwayChannelHosts {
 		const refuse = (reason: string, message: string) => {
 			const delayMs = previous ? Math.min(previous.delayMs * 2, REFUSAL_RETRY_MAX_MS) : REFUSAL_RETRY_MIN_MS;
 			this.refused.set(name, { stamp: this.refusalStamp(channel), retryAt: this.now() + delayMs, delayMs });
+			harnessLog.warn("channels", "a channel host refused to open; its messages wait", {
+				channel: name,
+				reason,
+				retryMs: delayMs,
+			});
 			this.report(`open:${name}`, message.replace("{reason}", reason));
 		};
 		let session: AgentSession | undefined;
@@ -524,8 +534,14 @@ export class AwayChannelHosts {
 				// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
 				turnUsd += event.message.usage?.cost?.total ?? 0;
 				const perRun = settings.getRoutineAwaySettings().maxUsdPerRun;
-				if (turnUsd > perRun)
+				if (turnUsd > perRun) {
+					harnessLog.warn("channels", "a channel turn away was stopped at the away spend bound", {
+						channel: name,
+						usd: turnUsd,
+						perRunUsd: perRun,
+					});
 					void session.abort(`a channel turn away spent past routines.away.maxUsdPerRun ($${perRun.toFixed(2)})`);
+				}
 			} else if (event.type === "agent_end") for (const listener of activity) listener();
 		});
 		// An owner turn's end in the phone session wakes the channels core like a child turn's.

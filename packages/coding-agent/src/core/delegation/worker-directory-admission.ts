@@ -1,3 +1,4 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentTool } from "../../kernel/index.ts";
 import { createExecutionContext, type ExecutionContext } from "../../kernel/utils/paths.ts";
 import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "../orchestration/contracts.ts";
@@ -53,7 +54,12 @@ export class WorkerDirectoryAdmission {
 				return profile;
 			}
 			const cwd = profile.authority.cwd;
-			if (!cwd) throw new Error("Worker directory is unknown; explicitly select a directory before dispatch");
+			if (!cwd) {
+				harnessLog.warn("workers", "a worker's directory is unknown; dispatch refused", {
+					profileId: profile.profile.profileId,
+				});
+				throw new Error("Worker directory is unknown; explicitly select a directory before dispatch");
+			}
 			return { ...profile, executionContext: await this.contextForDirectory(cwd, sessionId, signal) };
 		};
 		const worker = await captureProfile(contract.worker);

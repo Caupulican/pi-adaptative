@@ -141,7 +141,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 			line(ITEM_INDENT, `+${model.peerFindings.length - MAX_LISTED} more`, "dim");
 	};
 	const historyFailure = (): void => {
-		if (model.stageHistoryFailure) item(0, "!", "warning", `stage history: ${model.stageHistoryFailure}`, "dim");
+		if (model.stageHistoryFailure) item(0, "!", "warning", model.stageHistoryFailure, "dim");
 	};
 
 	if (model.stageLogEmpty) {
@@ -200,7 +200,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 		);
 		if (selected !== stage.stage) continue;
 		if (stage.note) line(DETAIL_INDENT, stage.note, "muted", stage.stage);
-		if (stage.reasonCode) line(DETAIL_INDENT, `reason: ${stage.reasonCode}`, "dim", stage.stage);
+		if (stage.reasonCode) line(DETAIL_INDENT, `reason: ${stage.reasonCode.replace(/_/g, " ")}`, "dim", stage.stage);
 		for (const event of stage.events) {
 			const tone: ThemeColor =
 				event.severity === "failure" ? "error" : event.severity === "warning" ? "warning" : "muted";

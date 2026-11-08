@@ -12,6 +12,7 @@ import {
 } from "@caupulican/pi-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
 import type { SessionInfo, SessionListProgress } from "../../../kernel/node.ts";
 import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
@@ -44,6 +45,11 @@ function formatSessionDate(date: Date): string {
 	if (diffDays < 30) return `${Math.floor(diffDays / 7)}w`;
 	if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo`;
 	return `${Math.floor(diffDays / 365)}y`;
+}
+
+/** A session operation's raw error text goes to the harness log; the owner sees a plain sentence instead. */
+function logSessionError(message: string, error: string | undefined): void {
+	harnessLog.debug("ui", message, () => ({ error }));
 }
 
 function canonicalizePath(path: string | undefined): string | undefined {
@@ -811,14 +817,18 @@ export class SessionSelectorComponent extends Container implements Focusable {
 						const msg = result.foreground.method === "trash" ? "Session moved to trash" : "Session deleted";
 						this.header.setStatusMessage({ type: "info", message: msg }, 2000);
 					} else {
-						const remaining = [
+						const parts = [
 							["usage journals", result.journal],
 							["worker artifacts", result.workerArtifacts],
 						] as const;
-						const detail = remaining
-							.filter(([, part]) => !part.ok)
-							.map(([label, part]) => ("error" in part && part.error ? `${label} (${part.error})` : label))
-							.join(" and ");
+						const remaining = parts.filter(([, part]) => !part.ok);
+						for (const [label, part] of remaining) {
+							logSessionError(
+								`a session ${label} could not be removed`,
+								"error" in part ? part.error : undefined,
+							);
+						}
+						const detail = remaining.map(([label]) => label).join(" and ");
 						this.header.setStatusMessage(
 							{
 								type: "error",
@@ -829,16 +839,23 @@ export class SessionSelectorComponent extends Container implements Focusable {
 					}
 					await this.refreshSessionsAfterMutation();
 				} else {
-					const errorMessage = result.foreground.error ?? "Unknown error";
-					this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+					logSessionError("the session's files could not be deleted", result.foreground.error);
+					this.header.setStatusMessage(
+						{ type: "error", message: "Failed to delete the session. Details are in the log." },
+						3000,
+					);
 				}
 			} catch (error) {
 				// A remover or settlement may fail after partial effects. Refresh actual state, never claim success.
+				logSessionError(
+					"a session deletion did not finish",
+					error instanceof Error ? error.message : String(error),
+				);
 				await this.refreshSessionsAfterMutation();
 				this.header.setStatusMessage(
 					{
 						type: "error",
-						message: `Session deletion did not finish: ${error instanceof Error ? error.message : String(error)}`,
+						message: "Session deletion did not finish. Details are in the log.",
 					},
 					5000,
 				);
@@ -969,9 +986,12 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			if (scope === "current" && seq !== this.currentLoadSeq) return;
 			if (scope === "all" && seq !== this.allLoadSeq) return;
 
-			const message = err instanceof Error ? err.message : String(err);
+			logSessionError("the session list could not be loaded", err instanceof Error ? err.message : String(err));
 			this.header.setLoading(false);
-			this.header.setStatusMessage({ type: "error", message: `Failed to load sessions: ${message}` }, 4000);
+			this.header.setStatusMessage(
+				{ type: "error", message: "Failed to load sessions. Details are in the log." },
+				4000,
+			);
 
 			if (reason === "initial") {
 				this.sessionList.setSessions([], showCwd);

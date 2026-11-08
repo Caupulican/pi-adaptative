@@ -6,6 +6,7 @@
  * owner does, with a reason, and the closing is recorded on the finding as `waived`.
  */
 import type { SemanticVerificationObligationView } from "../../core/system-one/verification-obligations.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 
 export interface VerificationHost {
 	listVerificationFindings(): readonly SemanticVerificationObligationView[];
@@ -24,7 +25,7 @@ export const VERIFICATION_USAGE = "/verification [list] · /verification waive <
 const MAX_NOTE_LENGTH = 500;
 
 function describeFinding(finding: SemanticVerificationObligationView): string {
-	return `${finding.id}  [${finding.source}]\n    ${finding.reason}`;
+	return `${finding.id}  [${plainLabel(finding.source)}]\n    ${finding.reason}`;
 }
 
 export async function handleVerificationCommand(host: VerificationHost, text: string): Promise<void> {

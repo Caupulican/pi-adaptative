@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	type AgentContextWire,
 	type AgentMessage,
@@ -383,6 +384,8 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 
 export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
+	/** Whether the subscription the session runs on reports room now; unknown reads as false. */
+	subscriptionRoom?(): boolean;
 }
 
 type WorkerAdmission =
@@ -1823,7 +1826,32 @@ export class WorkerDelegationController {
 	}
 
 	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
+	/** Whether a plain worker could start now, and the host's reason when not: the readiness check at session start. */
+	probeWorkerReadiness(): { readonly ready: true } | { readonly ready: false; readonly reason: string } {
+		const admission = this.resolveWorkerAdmission({ instructions: "readiness check" });
+		harnessLog.info("readiness", "worker readiness probed", () => ({
+			ready: admission.ok,
+			reason: admission.ok ? undefined : admission.skipReason,
+		}));
+		return admission.ok ? { ready: true } : { ready: false, reason: admission.skipReason };
+	}
+
 	private resolveWorkerAdmission(
+		request: WorkerDelegationRequest,
+		pinnedContract?: WorkerExecutionContract,
+		selectedBinding?: OrchestrationModelBinding,
+		admittedAttempt?: AttemptRuntimeState,
+	): WorkerAdmission {
+		const admission = this.admitWorker(request, pinnedContract, selectedBinding, admittedAttempt);
+		if (!admission.ok)
+			harnessLog.info("delegation", "a worker was not admitted", () => ({
+				reason: admission.skipReason,
+				instructionChars: request.instructions.length,
+			}));
+		return admission;
+	}
+
+	private admitWorker(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 		selectedBinding?: OrchestrationModelBinding,
@@ -2597,7 +2625,13 @@ export class WorkerDelegationController {
 				this.yieldedWriteReservations.delete(attemptId);
 			}
 		}
-		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) < settings.maxConcurrent;
+		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) < this.effectiveMaxConcurrent(settings);
+	}
+
+	/** The configured width, widened up to the burst width while the subscription has room (the fleet ceilings still hold). */
+	private effectiveMaxConcurrent(settings: ResolvedWorkerDelegationSettings): number {
+		if (settings.maxConcurrentBurst <= settings.maxConcurrent) return settings.maxConcurrent;
+		return this.deps.subscriptionRoom?.() === true ? settings.maxConcurrentBurst : settings.maxConcurrent;
 	}
 
 	private waitTargetsBlockedByCaller(callerAgentId: string, targetAgentIds: readonly string[]): string[] {
@@ -2741,10 +2775,16 @@ export class WorkerDelegationController {
 			this.foregroundHoldCleared.add(attempt.attemptId);
 		}
 		if (!this.hasWorkerCapacity(admission.settings)) {
+			harnessLog.debug("delegation", "a worker waits for capacity", () => ({
+				running: this.getWorkerLifecycle().getRunningCount(),
+				allowed: this.effectiveMaxConcurrent(admission.settings),
+				base: admission.settings.maxConcurrent,
+				burst: admission.settings.maxConcurrentBurst,
+			}));
 			return {
 				action: "wait",
 				reason: "capacity",
-				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${admission.settings.maxConcurrent} allowed`,
+				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${this.effectiveMaxConcurrent(admission.settings)} allowed`,
 			};
 		}
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
@@ -4567,7 +4607,10 @@ export class WorkerDelegationController {
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
 		if (fleetSkipReason) return fleetSkipReason;
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		const freeConcurrency = Math.max(0, settings.maxConcurrent - this.getWorkerLifecycle().getRunningCount());
+		const freeConcurrency = Math.max(
+			0,
+			this.effectiveMaxConcurrent(settings) - this.getWorkerLifecycle().getRunningCount(),
+		);
 		const queueSlotsNeeded = Math.max(0, remaining - freeConcurrency) + pendingVerifiers.size;
 		const queueSlotsFree = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
 		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;

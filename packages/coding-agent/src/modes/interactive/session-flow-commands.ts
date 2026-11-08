@@ -60,10 +60,12 @@ import {
 	updateTaskStep,
 } from "../../core/tasks/task-state.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
 import { SessionManager } from "../../kernel/node.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
@@ -1001,7 +1003,11 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showStatus(`Goal ${verb}, but the session was disposed before continuation could run.`);
 		} else {
 			const continuation = result.finalSnapshot.continuation;
-			host.showStatus(`Goal ${verb}: ${continuation.action}/${continuation.reasonCode}.`);
+			harnessLog.debug("ui", "a goal continuation decided", {
+				action: continuation.action,
+				reasonCode: continuation.reasonCode,
+			});
+			host.showStatus(`Goal ${verb}: ${plainLabel(continuation.action)}, ${plainLabel(continuation.reasonCode)}.`);
 			if (continuation.action === "continue") host.session.restoreGoalRuntimeAfterResume();
 		}
 	} catch (error) {
@@ -1028,7 +1034,7 @@ export function handleTaskCommand(host: TaskCommandHost, text: string): void {
 	}
 	if (parsed.command.type === "retired_execution") {
 		host.showStatus(
-			`/task ${parsed.command.operation} was retired with the detached extension runner. Ask Pi to use native delegate; session-owned worker lanes notify on completion without polling.`,
+			`/task ${parsed.command.operation} is no longer available. Ask Pi to delegate the work instead; workers report back when they finish.`,
 		);
 		return;
 	}
@@ -1096,8 +1102,13 @@ export async function handleGoalContinueCommand(host: GoalContinueCommandHost, t
 			maxWallClockMinutes: parsed.maxWallClockMinutes,
 		});
 		const continuation = result.finalSnapshot.continuation;
+		harnessLog.debug("ui", "a goal continuation loop stopped", {
+			stopReason: result.stopReason,
+			action: continuation.action,
+			reasonCode: continuation.reasonCode,
+		});
 		host.showStatus(
-			`Goal continuation stopped: ${result.stopReason}; submitted ${result.turnsSubmitted} turn(s); latest decision ${continuation.action}/${continuation.reasonCode}.`,
+			`Goal continuation stopped: ${plainLabel(result.stopReason)}; submitted ${result.turnsSubmitted} turn(s); latest decision: ${plainLabel(continuation.action)}, ${plainLabel(continuation.reasonCode)}.`,
 		);
 	} catch (error) {
 		host.showError(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`);

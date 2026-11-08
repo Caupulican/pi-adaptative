@@ -39,24 +39,24 @@ export function getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | unde
 		return undefined;
 	}
 
-	const scopePrefix = sourceInfo.scope === "user" ? "u" : sourceInfo.scope === "project" ? "p" : "t";
+	const scopeWord = sourceInfo.scope === "user" ? "user" : sourceInfo.scope === "project" ? "project" : "temporary";
 	const source = sourceInfo.source.trim();
 
 	if (source === "auto" || source === "local" || source === "cli") {
-		return scopePrefix;
+		return scopeWord;
 	}
 
 	if (source.startsWith("npm:")) {
-		return `${scopePrefix}:${source}`;
+		return `${scopeWord}:${source}`;
 	}
 
 	const gitSource = parseGitUrl(source);
 	if (gitSource) {
 		const ref = gitSource.ref ? `@${gitSource.ref}` : "";
-		return `${scopePrefix}:git:${gitSource.host}/${gitSource.path}${ref}`;
+		return `${scopeWord}:git:${gitSource.host}/${gitSource.path}${ref}`;
 	}
 
-	return scopePrefix;
+	return scopeWord;
 }
 
 export function prefixAutocompleteDescription(

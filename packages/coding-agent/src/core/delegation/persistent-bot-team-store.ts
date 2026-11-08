@@ -138,7 +138,14 @@ export type ActiveChatTarget =
 /** What a bot-and-team update touched: `"all"` for a store change, otherwise the agents whose lane state changed. */
 export type BotTeamChange = "all" | readonly string[];
 
-export type PersistentBotLiveState = "running" | "queued" | "idle" | "awaiting_parent" | "failed" | "retired";
+export type PersistentBotLiveState =
+	| "running"
+	| "queued"
+	| "idle"
+	| "awaiting_parent"
+	| "failed"
+	| "retired"
+	| "offline";
 
 export interface PersistentBotRecord {
 	readonly agentId: string;
@@ -156,6 +163,8 @@ export interface PersistentBotRecord {
 	readonly leader?: boolean;
 	/** Who created the bot: `owner`, `root`, or the leader's agent id. Set once, when the bot is created. */
 	readonly createdBy?: string;
+	/** A machine joined to this hub: its messages travel over the link and its chat is the link's log, not a local worker. */
+	readonly remote?: boolean;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 	readonly retired?: boolean;
@@ -178,6 +187,7 @@ export interface PersistentBotView {
 	readonly profileId?: string;
 	readonly leader?: boolean;
 	readonly createdBy?: string;
+	readonly remote?: boolean;
 	readonly state: PersistentBotLiveState;
 	readonly currentTaskId?: string;
 	readonly currentSummary?: string;
@@ -243,6 +253,7 @@ export interface UpsertPersistentBotInput {
 	readonly leader?: boolean;
 	/** Recorded only on creation; an existing bot keeps its creator. */
 	readonly createdBy?: string;
+	readonly remote?: boolean;
 	readonly retired?: boolean;
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
@@ -495,6 +506,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		canWrite,
 		leader,
 		createdBy,
+		remote,
 		createdAt,
 		updatedAt,
 		retired,
@@ -530,6 +542,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		canWrite: typeof canWrite === "boolean" ? canWrite : undefined,
 		leader: typeof leader === "boolean" ? leader : undefined,
 		createdBy: typeof createdBy === "string" && createdBy.length > 0 ? createdBy : undefined,
+		remote: remote === true ? true : undefined,
 		createdAt,
 		updatedAt,
 		retired: typeof retired === "boolean" ? retired : undefined,
@@ -1534,6 +1547,7 @@ export class PersistentBotTeamStore {
 			canWrite: input.canWrite ?? existing?.canWrite,
 			leader: input.leader ?? existing?.leader,
 			createdBy: existing?.createdBy ?? input.createdBy,
+			remote: existing?.remote ?? (input.remote === true ? true : undefined),
 			createdAt: existing?.createdAt ?? now,
 			updatedAt: now,
 			retired: input.retired ?? existing?.retired ?? false,
@@ -3596,6 +3610,7 @@ export class PersistentBotTeamStore {
 				profileId,
 				...(botRecord?.leader ? { leader: true } : {}),
 				...(botRecord?.createdBy ? { createdBy: botRecord.createdBy } : {}),
+				...(botRecord?.remote ? { remote: true as const } : {}),
 				state,
 				currentTaskId,
 				currentSummary,

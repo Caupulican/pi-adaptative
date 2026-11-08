@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
@@ -479,7 +480,13 @@ export class RoutineIntake {
 			}
 		} finally {
 			this.deps.time.clearTimeout(deadline);
-			if (counts.sources > 0 || status !== "completed") this.last = { ...counts, status };
+			if (counts.sources > 0 || status !== "completed") {
+				this.last = { ...counts, status };
+				harnessLog.log(status === "failed" ? "warn" : "info", "routines", "an intake pass finished", () => ({
+					...counts,
+					status,
+				}));
+			}
 		}
 		await this.announce(lifetime.signal);
 	}
@@ -492,6 +499,7 @@ export class RoutineIntake {
 		if (count < MAX_PASS_FAILURES) return;
 		this.failures = undefined;
 		this.retryAt = undefined;
+		harnessLog.warn("routines", "an intake pass gave up after repeated failures", { failures: count });
 		try {
 			this.deps.store.reload();
 			const current = this.state()?.batch;
@@ -587,6 +595,9 @@ export class RoutineIntake {
 			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
 		);
 		if (remaining <= 0) {
+			harnessLog.warn("routines", "an intake pass ran out of spending allowance", {
+				sources: batch.sourceIds.length,
+			});
 			this.close(batch, "the spending allowance for reading it ran out", "sources_not_read:spent");
 			return;
 		}
@@ -728,6 +739,10 @@ export class RoutineIntake {
 				);
 				if ("refused" in timing) {
 					// Grounded in the owner's stated words, yet not compiled: the owner hears which words were not scheduled.
+					// The refusal text quotes the owner's words, so the log names only the outcome.
+					harnessLog.warn("routines", "a routine request was dropped: its timing did not compile", {
+						sourceId: source.sourceId,
+					});
 					dropped.push({ key, sourceId: source.sourceId, excerpt: displayed(prompt), reason: timing.refused });
 					continue;
 				}
@@ -829,7 +844,13 @@ export class RoutineIntake {
 		} catch {
 			return undefined;
 		}
-		if (decision.kind === "refused") counts.refused++;
+		if (decision.kind === "refused") {
+			counts.refused++;
+			harnessLog.warn("routines", "a routine request was refused", {
+				sourceId: intake.sourceId,
+				reason: decision.reason,
+			});
+		}
 		return decision;
 	}
 

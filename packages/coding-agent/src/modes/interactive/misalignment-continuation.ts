@@ -34,7 +34,7 @@ export function offerMisalignmentContinuation(host: MisalignmentContinuationHost
 			title: "Codex blocked this request",
 			subtitle: block.detailedExplanation,
 			items: [
-				{ value: "continue", label: "Continue", description: block.steer },
+				{ value: "continue", label: "Continue", description: "Send the suggested follow-up as your next message" },
 				{ value: "stop", label: "Stop", description: "Leave the turn as it ended" },
 			],
 			initialSelectedIndex: 1,

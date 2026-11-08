@@ -18,6 +18,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 
 export function presenceEndpoint(sessionId: string): string {
 	const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 24);
@@ -60,6 +61,9 @@ export async function startPresenceBeacon(
 			});
 		});
 	} catch (error) {
+		harnessLog.warn("process", "the presence endpoint is unavailable; workers fall back to polling", {
+			code: error instanceof Error && "code" in error ? String(error.code) : "unknown",
+		});
 		onDiagnostic?.(
 			`process-matrix: presence endpoint unavailable (workers fall back to polling): ${error instanceof Error ? error.message : String(error)}`,
 		);

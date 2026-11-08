@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, Message, Model, Tool } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
 import { classifyFailure } from "../../kernel/reliability/classifier.ts";
@@ -251,11 +252,21 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 									provider: summaryModel.provider,
 								});
 								if (!failure.retryable) break;
-								await sleepAbortable(
-									computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, { retryAfterMs: failure.retryAfterMs }),
-									signal,
-									this.deps.timers,
-								);
+								const delayMs = computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, {
+									retryAfterMs: failure.retryAfterMs,
+								});
+								harnessLog.warn("memory", "a summary request failed and will be retried", () => ({
+									attempt,
+									failure: failure.reason,
+									delayMs,
+									model: summaryModel.id,
+								}));
+								await sleepAbortable(delayMs, signal, this.deps.timers);
+							} else {
+								harnessLog.warn("memory", "a summary request moves to another model", () => ({
+									attempt,
+									model: nextSummary.model.id,
+								}));
 							}
 						} else if (
 							sentTools &&

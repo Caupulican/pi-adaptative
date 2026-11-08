@@ -1,5 +1,6 @@
 import type { Api, Model, ProviderResponseObserver, ProviderResponseTicket } from "@caupulican/pi-ai";
 import { resolveModelCost } from "@caupulican/pi-ai/usage";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentLoopConfig, RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import { affordableOutputTokenLimit } from "../cost-guard.ts";
@@ -37,8 +38,15 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 			cost: resolveModelCost(request.model, inputTokens),
 			remainingUsd: this.spending.remainingUsd(),
 		});
-		if (maxTokens < 1)
+		if (maxTokens < 1) {
+			harnessLog.warn("cost", "a bounded completion was refused: the budget cannot cover the next request", () => ({
+				provider: request.model.provider,
+				model: request.model.id,
+				inputTokens,
+				remainingUsd: this.spending.remainingUsd(),
+			}));
 			throw new RequestSpendRefusal("Completion's remaining budget cannot cover the next projected request.");
+		}
 		this.admittedModel = { provider: request.model.provider, model: request.model.id };
 		return { maxTokens };
 	}

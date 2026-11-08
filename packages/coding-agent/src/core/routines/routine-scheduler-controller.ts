@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import {
@@ -372,6 +373,8 @@ export class RoutineSchedulerController {
 	private awayHeld: ReadonlySet<string> = new Set();
 	/** `routinePreviousSlot` of each routine cursor seen by the last schedule read, so a cursor is evaluated once. */
 	private previousSlots = new Map<string, number | undefined>();
+	/** Pauses already logged by this process, keyed by routine and the occurrence whose failure paused it. */
+	private readonly announcedPauses = new Set<string>();
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
@@ -594,6 +597,16 @@ export class RoutineSchedulerController {
 			if (routine.target.kind !== "session" || routine.target.parentSessionId !== this.deps.parentSessionId)
 				continue;
 			const pause = routine.failurePause;
+			if (pause) {
+				const key = `${routine.routineId}:${pause.occurrenceId}`;
+				if (!this.announcedPauses.has(key)) {
+					this.announcedPauses.add(key);
+					harnessLog.warn("routines", "a routine was paused after failed runs", {
+						routineId: routine.routineId,
+						after: pause.after,
+					});
+				}
+			}
 			parent.noticeRoutineState(
 				"routine-paused",
 				routine.routineId,
@@ -650,6 +663,8 @@ export class RoutineSchedulerController {
 			receiptOrigin: this.deps.getReceiptOrigin(),
 			routineIds: ended.map((routine) => routine.routineId),
 		});
+		for (const routineId of retired.retired)
+			harnessLog.info("routines", "an ended routine was removed", { routineId });
 		if (retired.journalFull)
 			this.report(
 				"retire-journal",
@@ -812,6 +827,10 @@ export class RoutineSchedulerController {
 			occurrence.claim &&
 			occurrence.claim.leaseUntil <= this.deps.timers.now()
 		) {
+			harnessLog.warn("routines", "a routine run was interrupted; its outcome is unknown and it is not repeated", {
+				routineId: occurrence.routineId,
+				occurrenceId: occurrence.occurrenceId,
+			});
 			this.deps.store.markRoutineUncertain({
 				occurrenceId: occurrence.occurrenceId,
 				claimToken: occurrence.claim.token,
@@ -888,6 +907,11 @@ export class RoutineSchedulerController {
 					: {}),
 				...conditionMet,
 			});
+		harnessLog.log(outcome.outcome === "failed" ? "warn" : "info", "routines", "a routine run ended", () => ({
+			routineId: occurrence.routineId,
+			occurrenceId: occurrence.occurrenceId,
+			outcome: outcome.outcome,
+		}));
 	}
 
 	/** Away, a run claimed away is this host's to dispatch or release, whatever its origin reads now. */
@@ -1008,10 +1032,27 @@ export class RoutineSchedulerController {
 						// Nothing started, so nothing was spent.
 						...(occurrence.executor === "away" ? { awaySpentUsd: 0 } : {}),
 					});
+					harnessLog.warn("routines", "a routine run did not start", {
+						routineId: occurrence.routineId,
+						occurrenceId: occurrence.occurrenceId,
+						reason: outcome.skipReason,
+					});
 					result.failed.push(`${occurrence.routineId}: ${outcome.skipReason}`);
 					return;
 				}
 				this.deferred.delete(occurrence.occurrenceId);
+				const missedSlots = occurrence.trigger.kind === "schedule" ? occurrence.trigger.missedCount : 0;
+				harnessLog.log(
+					missedSlots > 0 ? "warn" : "info",
+					"routines",
+					missedSlots > 0 ? "a routine run started after missed slots" : "a routine run started",
+					() => ({
+						routineId: occurrence.routineId,
+						occurrenceId: occurrence.occurrenceId,
+						away: occurrence.executor === "away",
+						missedSlots,
+					}),
+				);
 				this.recordExecution(occurrence, outcome.state);
 			} else {
 				const summary = await this.deps.dispatchMessage(occurrence);
@@ -1045,6 +1086,10 @@ export class RoutineSchedulerController {
 				reason: detail,
 				recipient: this.deps.parentSessionId,
 				nowMs: this.deps.timers.now(),
+			});
+			harnessLog.warn("routines", "a routine run's dispatch failed; its outcome is unknown", {
+				routineId: occurrence.routineId,
+				occurrenceId: occurrence.occurrenceId,
 			});
 			result.failed.push(`${occurrence.routineId}: ${detail}`);
 		}
@@ -1286,6 +1331,10 @@ export class RoutineSchedulerController {
 		const reason = errorText(error);
 		if (this.faults.get(unit) === reason) return;
 		this.faults.set(unit, reason);
+		harnessLog.warn("routines", "routine scheduling reported a fault", () => ({
+			step: unit.split("|")[0],
+			subject: unit.split("|")[1],
+		}));
 		this.warn(error);
 	}
 

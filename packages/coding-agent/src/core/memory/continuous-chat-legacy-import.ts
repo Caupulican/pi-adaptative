@@ -4,6 +4,7 @@
  * log. The marker records completion with every session that was not imported and the real reason.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ParentInputConsumptionSource } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { continuousChatDay } from "./continuous-chat-contracts.ts";
@@ -316,6 +317,7 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		},
 		signal,
 	);
+	harnessLog.info("memory", "legacy chat history imported", { sessions: importedSessions, skipped: skipped.length });
 	signal?.throwIfAborted();
 	const repaired = new Map(
 		listing.sessions

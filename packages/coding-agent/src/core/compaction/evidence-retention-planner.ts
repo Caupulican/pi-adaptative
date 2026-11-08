@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { noulProbability, readNoul } from "../decision/noul.ts";
 import {
 	noteDecisionTrace,
@@ -379,6 +380,10 @@ export class EvidenceRetentionPlanner {
 		} catch (error) {
 			// A System One failure never causes deletion (FR-028)
 			failureReason = error instanceof Error ? error.message : String(error);
+			harnessLog.warn("compaction", "tool-result retention could not be evaluated; every result is kept", () => ({
+				eligiblePairs: eligiblePairsList.length,
+				reason: failureReason?.slice(0, 200),
+			}));
 			evaluatedDecisions = eligiblePairsList.map((pair) => ({
 				callId: pair.callId,
 				disposition: "keep_exact",
@@ -421,6 +426,17 @@ export class EvidenceRetentionPlanner {
 			? `Context retention unavailable · ${totalPairs} tool results retained exactly · proof preserved`
 			: `Context optimized · ${totalPairs} tool results → ${retainedCount} retained · proof preserved`;
 
+		const changed = resultsTruncated + pairsRemoved > 0;
+		harnessLog.log(changed ? "info" : "debug", "compaction", "tool-result retention pass finished", () => ({
+			totalPairs,
+			pinnedPairs: pinnedPairsList.length,
+			eligiblePairs: eligiblePairsList.length,
+			kept: exactResultsKept,
+			truncated: resultsTruncated,
+			dropped: pairsRemoved,
+			artifactRefs: artifactRefsCount,
+			systemOneRequests: stats.systemOneRequestCount,
+		}));
 		return {
 			decisions: allDecisions,
 			stats,

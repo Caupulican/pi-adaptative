@@ -10,8 +10,8 @@ export const FANOUT_KINDS = ["partition", "race"] as const;
 export type FanoutKind = (typeof FANOUT_KINDS)[number];
 
 /** A partition declares at most this many slices; a race starts at most this many candidates. */
-export const MAX_FANOUT_PARTITION_SLICES = 8;
-export const MAX_FANOUT_RACE_CANDIDATES = 4;
+export const MAX_FANOUT_PARTITION_SLICES = 24;
+export const MAX_FANOUT_RACE_CANDIDATES = 8;
 export const MAX_FANOUT_MEMBER_ID_CHARS = 24;
 export const FANOUT_MEMBER_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.-]*$";
 

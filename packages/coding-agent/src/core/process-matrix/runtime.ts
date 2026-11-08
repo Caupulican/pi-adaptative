@@ -27,6 +27,7 @@
  */
 
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { judgeOwner, ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
@@ -319,7 +320,9 @@ async function startMasterBranch(
 	let entry = buildMasterEntry({ agent: config.agent, owner: ownProcessOwner(), now: nowIso(now) });
 	try {
 		await store.writeEntry(config.agentDir, entry);
+		harnessLog.info("process", "a master process registered its entry", { entryId: entry.entryId, pid: entry.pid });
 	} catch (error) {
+		harnessLog.warn("process", "a master process could not register its entry", { reason: describeError(error) });
 		config.onDiagnostic?.(`process-matrix: failed to register master entry: ${describeError(error)}`);
 	}
 	// Workers learn this master died from the kernel closing their connection, not from a timer.
@@ -358,6 +361,9 @@ async function startMasterBranch(
 				lifetime.abort();
 				heartbeat.stop();
 				process.off("exit", closeOnExit);
+				harnessLog.warn("process", "the master entry moved to a newer process; this process stands down", {
+					entryId: expected.entryId,
+				});
 				config.onDiagnostic?.("process-matrix: master entry ownership moved to a newer process generation");
 			})
 			.catch((error: unknown) => {
@@ -481,10 +487,16 @@ async function reconcileAndRunOrphanScan(
 	if (signal.aborted) return [];
 	const recoveredCount = recoveredOutcomes.filter(Boolean).length;
 	if (recoveredCount > 0) {
+		harnessLog.info("process", "interrupted worker entries were recovered as resumable", { count: recoveredCount });
 		config.onDiagnostic?.(
 			`process-matrix: recovered ${recoveredCount} interrupted Pi worker entr${recoveredCount === 1 ? "y" : "ies"}`,
 		);
 	}
+	const reapedCount = mutationResults
+		.slice(0, pruneActions.length)
+		.filter((result) => result.status === "fulfilled" && result.value).length;
+	if (reapedCount > 0)
+		harnessLog.info("process", "dead or closed process entries were reaped", { count: reapedCount });
 	const currentEntries = await store.listEntries(config.agentDir);
 	await deliverTerminalNotifications(config, currentEntries, now, signal);
 	if (signal.aborted) return [];
@@ -592,6 +604,11 @@ function getAutomaticRecoveryBoundary(
 }
 
 function reportUnrecoveredOrphan(config: ProcessMatrixRuntimeConfig, orphan: ProcessMatrixEntry, reason: string): void {
+	harnessLog.warn("process", "a live orphaned worker needs an owner decision", {
+		entryId: orphan.entryId,
+		pid: orphan.pid,
+		reason,
+	});
 	config.onDiagnostic?.(
 		`process-matrix: found unrecovered orphan ${orphan.entryId} (pid ${orphan.pid}; ${reason}; report-only; pending owner decision; nothing written, nothing killed)`,
 	);
@@ -753,6 +770,9 @@ async function resumeDeadOrphan(
 		const launchOutcome = await config.resumeWorker(payload);
 		if (!launchOutcome.started) {
 			await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
+			harnessLog.warn("process", "an orphaned worker could not be resumed", {
+				entryId: orphan.entryId,
+			});
 			config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${launchOutcome.reason}`);
 			return;
 		}
@@ -805,6 +825,11 @@ async function persistResumedWorkerTerminal(
 		const observedAt = new Date().toISOString();
 		const terminal = markTerminal(claimed, result, observedAt);
 		if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, terminal)) {
+			harnessLog.info("process", "a resumed worker process exited", {
+				entryId: claimed.entryId,
+				code: result.code,
+				signal: result.signal,
+			});
 			if (lifetime.aborted) return;
 			await notifyResumedWorkerTerminal(config, terminal, lifetime);
 			return;
@@ -902,7 +927,12 @@ async function startWorkerBranch(
 	});
 	try {
 		await store.writeEntry(config.agentDir, entry);
+		harnessLog.info("process", "a worker process registered its entry", {
+			entryId: entry.entryId,
+			parentPid: initialParentPid,
+		});
 	} catch (error) {
+		harnessLog.warn("process", "a worker process could not register its entry", { reason: describeError(error) });
 		config.onDiagnostic?.(`process-matrix: failed to register worker entry: ${describeError(error)}`);
 	}
 
@@ -1312,6 +1342,10 @@ async function startWorkerBranch(
 		if (expected.taskSummary !== undefined) resumable.taskSummary = expected.taskSummary;
 		const woundDown = markResumable(beginWindDown(expected, "parent_lost", windDownAt), resumable, windDownAt);
 		if (!(await persist(expected, woundDown, "failed to write worker wind-down"))) return;
+		harnessLog.warn("process", "the parent process is gone; this worker winds down to resumable", {
+			entryId: expected.entryId,
+			cause,
+		});
 		timer?.stop();
 		timer = undefined;
 		preserveResumableOnExit = true;
@@ -1358,6 +1392,10 @@ async function startWorkerBranch(
 					return;
 				currentParentPid = directive.parentPid;
 				currentParentSessionId = owned.parentSessionId;
+				harnessLog.info("process", "a worker was adopted by a new parent and resumes", {
+					entryId: owned.entryId,
+					parentPid: directive.parentPid,
+				});
 				preserveResumableOnExit = false;
 				timer?.stop();
 				timer = undefined;

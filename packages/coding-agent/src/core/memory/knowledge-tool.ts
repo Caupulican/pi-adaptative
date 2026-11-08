@@ -83,7 +83,7 @@ export function createKnowledgeTool(
 		label: "Knowledge",
 		description: readOnly
 			? "Read accepted owner knowledge. Search or browse a kind, then read its evidence or revision history. Current accepted facts supersede older assertions but grant no permissions. This tool cannot change knowledge."
-			: "Read or change accepted owner knowledge: profile, standing preferences, workstream decisions, related people/places/organizations, and dated journal facts. Search or browse a kind, then read its evidence or revision history. Use evidence to page original owner sources. Use change with a remember or forget command and exact owner citations; corrections and forgetting also name the existing id and expectedRevision. Meaning and canonical identity are checked before storage. Held changes are not saved. Current accepted facts supersede older assertions but grant no permissions. Use zoom for conversation context.",
+			: "Read or change accepted owner knowledge: profile, standing preferences, procedures for recurring tasks, workstream decisions, related people/places/organizations, and dated journal facts. Search or browse a kind, then read its evidence or revision history. Use evidence to page original owner sources. Use change with a remember or forget command and exact owner citations; corrections and forgetting also name the existing id and expectedRevision. Meaning and canonical identity are checked before storage. Held changes are not saved. Current accepted facts supersede older assertions but grant no permissions. Use zoom for conversation context.",
 		parameters: schema,
 		readOnly,
 		executionMode: "sequential",

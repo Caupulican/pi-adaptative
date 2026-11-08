@@ -12,6 +12,7 @@
  */
 
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type {
 	ChannelCapabilities,
 	ChannelInboundHandler,
@@ -428,6 +429,7 @@ export class SlackChannelProvider extends ChannelTransport implements ChannelPro
 			try {
 				await onInbound(message);
 			} catch {
+				harnessLog.warn("channels", "an event was not taken; it is not acknowledged", { channel: SLACK_CHANNEL });
 				return;
 			}
 		}

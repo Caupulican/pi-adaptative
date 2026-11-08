@@ -7,6 +7,7 @@
  */
 import type { SoulController } from "../../core/soul/soul-controller.ts";
 import { formatSoulReview } from "../../core/soul/soul-review.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 
 export interface SoulCommandHost {
 	soul: SoulController;
@@ -20,11 +21,12 @@ const USAGE = "Usage: /soul [show|review|history|restore <n>]";
 function formatHistory(soul: SoulController): string {
 	const entries = soul.history();
 	if (entries.length === 0) return "No soul history yet.";
+	harnessLog.debug("ui", "soul history entries shown", { digests: entries.map((entry) => entry.sha256.slice(0, 8)) });
 	return [
 		"Soul history, newest first (restore with /soul restore <n>):",
 		...entries.map(
 			(entry, index) =>
-				`${index + 1}. ${entry.at}  ${entry.author}, review ${entry.reviewer}${entry.event ? `, ${entry.event}` : ""}${entry.withheld ? ", withheld" : ""}  ${entry.bytes} bytes  ${entry.sha256.slice(0, 8)}`,
+				`${index + 1}. ${entry.at}  ${entry.author}, review ${entry.reviewer}${entry.event ? `, ${entry.event}` : ""}${entry.withheld ? ", withheld" : ""}  ${entry.bytes} bytes`,
 		),
 	].join("\n");
 }

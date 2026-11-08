@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { KeyedSignal } from "../util/keyed-signal.ts";
 
@@ -69,6 +70,7 @@ export function engageEmergencyStop(
 	const engagedAt = new Date(now()).toISOString();
 	writeFileSync(path, `${JSON.stringify({ ...(reason ? { reason } : {}), engagedAt })}\n`, { mode: 0o600 });
 	emergencyStopChanges.notify(path);
+	harnessLog.info("provider", "the emergency stop was engaged");
 	return { engaged: true, path, engagedAt, ...(reason ? { reason } : {}) };
 }
 
@@ -82,5 +84,6 @@ export function liftEmergencyStop(agentDir: string): boolean {
 		if (!isMissingFileError(error)) throw error;
 	}
 	emergencyStopChanges.notify(path);
+	harnessLog.info("provider", "the emergency stop was lifted");
 	return true;
 }

@@ -45,6 +45,7 @@
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { FlowActor, FlowEvent, FlowKind, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
 import type { ThemeColor } from "../../../presentation/theme-model.ts";
 import { SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
 import { CARRIER_GLYPH } from "./flow-carrier.ts";
@@ -348,14 +349,24 @@ function labelTone(row: FlowRow): ThemeColor {
 	return event.actor === "system_one" ? SYSTEM_ONE_TONE : event.actor === "owner" ? "text" : "muted";
 }
 
+/** Ledger handles the rows no longer draw, kept in the harness log once per handle (rows are built on every frame). */
+const loggedHandles = new Set<string>();
+
 /**
- * The evidence a settled judgment carries, kept whole as the label's suffix: the result it reached,
- * then the short ledger handle of the row behind it (`label (result) #a1b2`).
+ * The result a settled judgment reached, kept whole as the label's suffix (`label (verify more)`). The
+ * short ledger handle of the row behind it is not drawn; it stays in the harness log.
  */
 function evidenceSuffix(event: FlowEvent): string {
-	const handle = event.evidence ? ` ${event.evidence}` : "";
-	if (event.kind !== "judgment" || event.result === undefined || event.endedAt === undefined) return handle;
-	return ` (${event.result})${handle}`;
+	if (event.evidence && !loggedHandles.has(event.evidence)) {
+		if (loggedHandles.size >= 256) loggedHandles.clear();
+		loggedHandles.add(event.evidence);
+		harnessLog.debug("ui", "a flow row's ledger handle is kept in the log, not on screen", {
+			evidence: event.evidence,
+			eventId: event.id,
+		});
+	}
+	if (event.kind !== "judgment" || event.result === undefined || event.endedAt === undefined) return "";
+	return ` (${event.result.replace(/_/g, " ")})`;
 }
 
 function fitLabel(text: string, suffix: string, width: number): string {
@@ -394,7 +405,7 @@ function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number
 				? "running"
 				: "work"
 			: event.kind === "report" && !lifelineHasTag && event.result !== undefined
-				? event.result
+				? event.result.replace(/_/g, " ")
 				: event.label;
 	const evidence = evidenceSuffix(event);
 	const lane = event.actor === "worker" && event.lane && event.kind !== "worker" && event.kind !== "report";

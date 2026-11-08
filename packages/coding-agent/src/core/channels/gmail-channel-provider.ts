@@ -16,6 +16,7 @@
  */
 
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { stateFile } from "../agent-paths.ts";
 import type {
 	ChannelCapabilities,
@@ -732,6 +733,10 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 				rejections = 0;
 				reports.connected();
 				if (end.kind === "handler") {
+					harnessLog.warn("channels", "a mail was not taken; reading repeats it", {
+						channel: GMAIL_CHANNEL,
+						failures: handlerFailures + 1,
+					});
 					await pause(this.timers, backoffDelay(TRANSIENT_BACKOFF, ++handlerFailures), signal);
 					continue;
 				}
@@ -931,6 +936,7 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		if ("kind" in profile) return profile;
 		mailbox.cursor = profile.historyId;
 		this.saveCursor(mailbox);
+		harnessLog.warn("channels", "the mailbox history expired; reading restarts from now", { channel: GMAIL_CHANNEL });
 		this.warn(GAP_WARNING);
 		return { kind: "done" };
 	}
@@ -954,7 +960,10 @@ export class GmailChannelProvider extends ChannelTransport implements ChannelPro
 		if (outcome.kind === "ok") return outcome;
 		const skip = (warning?: string) => {
 			this.refusedMail = undefined;
-			if (warning) this.warn(warning);
+			if (warning) {
+				this.warn(warning);
+				harnessLog.warn("channels", "a mail was skipped", { channel: GMAIL_CHANNEL, reason: warning });
+			}
 			return { kind: "end", end: undefined } as const;
 		};
 		if (outcome.kind === "refused" && outcome.status === 404) return skip();

@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { renameSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -428,9 +429,11 @@ export interface ChannelJournalUpdate<T> {
 
 export class ChannelJournal {
 	readonly path: string;
+	private readonly channel: string;
 
 	constructor(agentDir: string, channel: string) {
 		this.path = join(agentDir, "channels", `${channel}.json`);
+		this.channel = channel;
 	}
 
 	/**
@@ -449,6 +452,9 @@ export class ChannelJournal {
 					state = parseState(text);
 				} catch {
 					renameSync(this.path, `${this.path}.unreadable-${now}`);
+					harnessLog.warn("channels", "a channel journal could not be read; it was moved aside", {
+						channel: this.channel,
+					});
 					state = emptyState();
 					state.gaps.push({
 						id: digest(`${this.path}:reset:${now}`).slice(0, 16),
@@ -463,6 +469,8 @@ export class ChannelJournal {
 			prune(state, now);
 			const next = `${JSON.stringify(state)}\n`;
 			if (next !== text) writeFileAtomicSync(this.path, next);
+			if (text === undefined)
+				harnessLog.info("channels", "a channel journal was created", { channel: this.channel });
 			return { result, reset };
 		});
 	}

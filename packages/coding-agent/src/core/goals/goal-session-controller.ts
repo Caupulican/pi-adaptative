@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { AgentBusyError } from "../../kernel/agent.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentRunawayStopInfo } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "../../kernel/session/session-manager.ts";
@@ -287,6 +288,33 @@ export class GoalSessionController {
 			});
 		}
 		const entryId = appendGoalStateSnapshot(this.deps.getSessionManager(), state, current);
+		if (current?.goalId !== state.goalId) {
+			harnessLog.info("goals", "a goal was set", {
+				goalId: state.goalId,
+				status: state.status,
+				requirements: state.requirements.length,
+			});
+		} else if (current && current.status !== state.status) {
+			const stopped =
+				state.status === "blocked" || state.status === "usage_limited" || state.status === "budget_limited";
+			const message = stopped
+				? "a goal was stopped"
+				: state.status === "completed"
+					? "a goal was completed"
+					: "a goal's status changed";
+			harnessLog.log(stopped ? "warn" : "info", "goals", message, {
+				goalId: state.goalId,
+				from: current.status,
+				to: state.status,
+			});
+		} else if (current && (current.progressRevision ?? 0) !== (state.progressRevision ?? 0)) {
+			harnessLog.debug("goals", "goal progress was recorded", () => ({
+				goalId: state.goalId,
+				progressRevision: state.progressRevision ?? 0,
+				satisfied: state.requirements.filter((requirement) => requirement.status === "satisfied").length,
+				requirements: state.requirements.length,
+			}));
+		}
 		const lease = this.executionLease;
 		if (
 			lease &&
@@ -1383,6 +1411,7 @@ export class GoalSessionController {
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
 		const reason = `${classified.reason}: ${message}`;
+		harnessLog.warn("goals", "a goal continuation failed", { goalId, failure: classified.reason, stop: status });
 
 		if (status === "usage_limited") {
 			this.stopActiveGoal("usage_limited", reason);

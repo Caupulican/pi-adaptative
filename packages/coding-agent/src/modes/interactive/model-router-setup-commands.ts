@@ -17,6 +17,8 @@ import {
 } from "../../core/model-router/calibration.ts";
 import { formatLiveRoutePreview, formatRoutePreview } from "../../core/model-router/route-preview.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
@@ -154,7 +156,8 @@ async function runBatchCalibration(host: ModelRouterSetupHost, rows: RouterCalib
 		try {
 			const outcome = await host.session.runModelFitness({ model: row.ref });
 			if (!outcome.started) {
-				host.showWarning(`Calibration skipped for ${row.ref}: ${outcome.skipReason}`);
+				harnessLog.debug("ui", "router calibration skipped", { ref: row.ref, skipReason: outcome.skipReason });
+				host.showWarning(`Calibration skipped for ${row.ref}: ${plainLabel(outcome.skipReason)}`);
 				continue;
 			}
 			host.showStatus(`Calibrating ${row.ref}: real tool execution probe…`);

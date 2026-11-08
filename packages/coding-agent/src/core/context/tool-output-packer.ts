@@ -10,6 +10,7 @@
  * packing is opt-in per call site, not a global switch.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { type TruncationOptions, type TruncationResult, truncateMiddle } from "../../kernel/utils/truncate.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 
@@ -100,10 +101,22 @@ export function packToolOutput(
 
 		artifactFailure = "reference";
 		if (!artifactStore.addReference(ref.id, holderId)) {
+			harnessLog.warn("context", "a tool output artifact was not claimed; its preview is kept", () => ({
+				tool: request.toolName,
+			}));
 			return { content: truncation.content, truncation, packed: false };
 		}
+		harnessLog.debug("context", "a tool output was packed into an artifact", () => ({
+			tool: request.toolName,
+			bytes: Buffer.byteLength(request.rawContent, "utf8"),
+			truncatedBy: truncation.truncatedBy,
+		}));
 		return { content: truncation.content, truncation, artifactId: ref.id, packed: true };
 	} catch {
+		harnessLog.warn("context", "a tool output could not be stored as an artifact; its preview is kept", () => ({
+			tool: request.toolName,
+			stage: artifactFailure,
+		}));
 		return {
 			content: `${truncation.content}\n\n[Full output unavailable: artifact storage failed. This preview is partial. Do not repeat the operation merely to recover omitted output.]`,
 			truncation,

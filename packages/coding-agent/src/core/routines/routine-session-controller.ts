@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -147,20 +148,21 @@ export class RoutineSessionController implements RoutineToolPort {
 		// Pausing only narrows standing work, so any turn may do it; resuming restarts it and needs the owner's request.
 		if (enabled) this.requireOwnerTurn();
 		const routine = this.require(routineId, expectedRevision);
-		return view(
-			this.deps.store.upsertRoutine({
-				routineId,
-				expectedRevision,
-				target: routine.target,
-				prompt: routine.prompt,
-				schedule: routineScheduleInputOf(routine.schedule),
-				enabled,
-				executionSnapshot: routine.executionSnapshot,
-				nowMs: this.deps.now(),
-			}),
-			this.deps.store,
-			this.deps.now(),
-		);
+		const saved = this.deps.store.upsertRoutine({
+			routineId,
+			expectedRevision,
+			target: routine.target,
+			prompt: routine.prompt,
+			schedule: routineScheduleInputOf(routine.schedule),
+			enabled,
+			executionSnapshot: routine.executionSnapshot,
+			nowMs: this.deps.now(),
+		});
+		harnessLog.info("routines", enabled ? "a routine was resumed" : "a routine was paused", () => ({
+			routineId,
+			revision: saved.revision,
+		}));
+		return view(saved, this.deps.store, this.deps.now());
 	}
 
 	async delete(routineId: string, expectedRevision: number, signal?: AbortSignal): Promise<void> {
@@ -168,6 +170,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		this.require(routineId, expectedRevision);
 		if (!this.deps.store.deleteRoutine(routineId, expectedRevision, this.deps.now()))
 			throw new Error("Routine changed before deletion.");
+		harnessLog.info("routines", "a routine was deleted", { routineId });
 	}
 
 	async run(routineId: string, expectedRevision: number, invocationId: string, signal?: AbortSignal) {
@@ -278,35 +281,40 @@ export class RoutineSessionController implements RoutineToolPort {
 	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
 			throw new Error("Routine parent changed during admission.");
-		return view(
-			this.deps.store.upsertRoutine({
-				routineId: input.routineId,
-				prompt: input.prompt,
-				target: { kind: "session", parentSessionId: this.deps.parentSessionId },
-				// A calendar rule without a zone keeps the routine's saved zone, or follows the authoring session's wall clock.
-				schedule:
-					input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
-						? { ...input.schedule, timeZone: extras.timeZone ?? hostTimeZone() }
-						: input.schedule,
-				enabled: extras.enabled,
-				nowMs: this.deps.now(),
-				...(input.schedule.kind === "event" ? { eventAnchor: this.deps.eventAnchor() } : {}),
-				executionSnapshot: {
-					parentSessionId: this.deps.parentSessionId,
-					parentBranchAnchor: savedIntent.receiptOrigin.leafId,
-					savedIntent,
-					...(input.profileId === undefined ? {} : { profileId: input.profileId }),
-				},
-				...(extras.expectedRevision === undefined
-					? { createOnly: true }
-					: { expectedRevision: extras.expectedRevision }),
-				...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
-				...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
-				...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
-			}),
-			this.deps.store,
-			this.deps.now(),
-		);
+		const saved = this.deps.store.upsertRoutine({
+			routineId: input.routineId,
+			prompt: input.prompt,
+			target: { kind: "session", parentSessionId: this.deps.parentSessionId },
+			// A calendar rule without a zone keeps the routine's saved zone, or follows the authoring session's wall clock.
+			schedule:
+				input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
+					? { ...input.schedule, timeZone: extras.timeZone ?? hostTimeZone() }
+					: input.schedule,
+			enabled: extras.enabled,
+			nowMs: this.deps.now(),
+			...(input.schedule.kind === "event" ? { eventAnchor: this.deps.eventAnchor() } : {}),
+			executionSnapshot: {
+				parentSessionId: this.deps.parentSessionId,
+				parentBranchAnchor: savedIntent.receiptOrigin.leafId,
+				savedIntent,
+				...(input.profileId === undefined ? {} : { profileId: input.profileId }),
+			},
+			...(extras.expectedRevision === undefined
+				? { createOnly: true }
+				: { expectedRevision: extras.expectedRevision }),
+			...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
+			...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
+			...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
+		});
+		const origin =
+			extras.intakeOrigin !== undefined ? "intake" : extras.expectedRevision === undefined ? "create" : "update";
+		harnessLog.info("routines", "a routine was saved", () => ({
+			routineId: input.routineId,
+			origin,
+			schedule: input.schedule.kind,
+			revision: saved.revision,
+		}));
+		return view(saved, this.deps.store, this.deps.now());
 	}
 
 	/**
@@ -316,10 +324,12 @@ export class RoutineSessionController implements RoutineToolPort {
 	 */
 	private requireOwnerTurn(): readonly string[] {
 		const sources = this.deps.ownerTurnSources();
-		if (sources.length === 0)
+		if (sources.length === 0) {
+			harnessLog.warn("routines", "a routine change was refused: the owner has not spoken in this turn");
 			throw new Error(
 				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume and run wait for the owner's request; pause and delete still work. Tell the owner what to change.",
 			);
+		}
 		return sources;
 	}
 

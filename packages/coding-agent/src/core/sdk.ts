@@ -50,6 +50,7 @@ import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
+import { configureHarnessLog } from "./log/configure-harness-log.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
@@ -397,6 +398,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	configureHarnessLog(agentDir, settingsManager);
 	bindSavedBedrockScope(settingsManager, modelRegistry);
 	const isChildSession = options.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
 	const forceBackgroundRequests = isChildSession || isWorkerSession();

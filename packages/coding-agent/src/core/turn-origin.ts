@@ -13,6 +13,7 @@ import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import {
 	MAX_TURN_ORIGIN_REF_CHARS,
+	MAX_TURN_ORIGIN_SHOWN_CHARS,
 	parseTurnOriginRecord,
 	turnOriginStampOf,
 	UNREADABLE_TURN_ORIGIN,
@@ -48,7 +49,7 @@ export type TurnAuthority = "owner" | "remote-owner" | "third-party";
  * and an unreadable origin is third-party like any other.
  */
 export function channelTurnOrigin(
-	origin: Pick<SendUserMessageOrigin, "channel" | "verified" | "ref">,
+	origin: Pick<SendUserMessageOrigin, "channel" | "verified" | "ref"> & Partial<Pick<SendUserMessageOrigin, "text">>,
 ): TurnOriginRecord {
 	return (
 		parseTurnOriginRecord({
@@ -58,6 +59,9 @@ export function channelTurnOrigin(
 			...(origin.verified === true ? { verified: true as const } : {}),
 			thirdParty: true,
 			...(origin.ref !== undefined ? { ref: origin.ref } : {}),
+			...(origin.text !== undefined && origin.text.trim().length > 0
+				? { shown: origin.text.slice(0, MAX_TURN_ORIGIN_SHOWN_CHARS) }
+				: {}),
 		}) ?? UNREADABLE_TURN_ORIGIN
 	);
 }

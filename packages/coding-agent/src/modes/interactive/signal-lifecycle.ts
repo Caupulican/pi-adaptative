@@ -355,7 +355,7 @@ export class SignalLifecycle {
 			this.io.stderr(`${neutralizeControls(`Unhandled promise rejection during shutdown. ${detail}`)}\n`);
 			return;
 		}
-		this.port.showError(`Unhandled promise rejection — session kept alive. ${detail}`);
+		this.port.showError(`Unhandled promise rejection — session kept alive. ${causeHeadline(error)}`);
 	}
 
 	/**

@@ -216,6 +216,7 @@ import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import { type AskQuestionToolOptions, createAskQuestionToolDefinition } from "./tools/ask-question.ts";
+import { createAssignToolDefinition } from "./tools/assign.ts";
 import { buildShellSessionContext } from "./tools/bash.ts";
 import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
@@ -2180,6 +2181,8 @@ export class RuntimeBuilder {
 					...(profileWriter ? { profileWriter } : {}),
 				});
 				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
+				const assignToolDefinition = createAssignToolDefinition(delegateToolDefinition);
+				this._baseToolDefinitions.set(assignToolDefinition.name, assignToolDefinition);
 			}
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).

@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { spawn } from "child_process";
 import { minimatch } from "minimatch";
 import path from "path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentTool } from "../../kernel/index.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../../kernel/utils/truncate.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
@@ -24,6 +25,7 @@ import {
 } from "./fff-search-backend.ts";
 import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { traceToolCalls } from "./read.ts";
 import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
@@ -288,6 +290,7 @@ function formatFindResults(
 			`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or narrow path/pattern`,
 		);
 		details.resultLimitReached = effectiveLimit;
+		harnessLog.warn("tools", "find results were limited", { limit: effectiveLimit });
 	}
 	if (packed.truncation.truncated) {
 		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
@@ -324,6 +327,13 @@ function formatFindResults(
 }
 
 export function createFindToolDefinition(
+	cwd: string,
+	options?: FindToolOptions,
+): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
+	return traceToolCalls(buildFindToolDefinition(cwd, options));
+}
+
+function buildFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {

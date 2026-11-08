@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import type { AgentSessionEventListener } from "../agent-session-contracts.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
@@ -60,16 +61,25 @@ export async function attachNativePiActivity(
 	// would fail its readiness; the reason is reported.
 	const ownership = await herdrPaneOwnership(channel, paneId);
 	if (ownership.status === "foreign") {
+		harnessLog.warn("collab", "a native pi status was not attached: its herdr pane is not this process's", {
+			paneId,
+			reason: "foreign_pane",
+		});
 		channel.close();
 		options.onError?.(
 			new Error("Native Pi collaboration status is not attached: this Herdr pane is not this process's pane."),
 		);
 		return undefined;
 	}
-	if (ownership.status === "unverifiable")
+	if (ownership.status === "unverifiable") {
+		harnessLog.warn("collab", "a native pi status is attached to a herdr pane that could not be verified", {
+			paneId,
+			reason: "unverifiable",
+		});
 		options.onError?.(
 			new Error(`Native Pi collaboration status uses an unverified Herdr pane (${ownership.reason}).`),
 		);
+	}
 	const source = `${NATIVE_PI_SOURCE_PREFIX}${randomUUID()}`;
 	const questions = new Map<string, HumanInputRequest>();
 	let sequence = 0;

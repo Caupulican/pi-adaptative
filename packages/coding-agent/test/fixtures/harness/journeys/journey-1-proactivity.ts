@@ -935,7 +935,7 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 		lastDelivery: { mode: "next-owner-turn", hold: "max_turn_wakes_per_day_reached" },
 	});
 	expect(status(first), "status shows why the note waits").toContain(
-		"Last note delivery: waits for the owner's next turn (max_turn_wakes_per_day_reached)",
+		"Last note delivery: waits for the owner's next turn (Max turn wakes per day reached)",
 	);
 	const beforeOwner = world.provider.requests.length;
 	await ownerTurn(first, "daily-owner-3", "What is still open?", heldNote);
@@ -1009,7 +1009,7 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 		reviewUsd: 2 * reviewUsd,
 		turnWakes: 1,
 	});
-	expect(status(second), "status names the spend bound").toContain("Last gate: max_usd_per_day_reached");
+	expect(status(second), "status names the spend bound").toContain("Last gate: Max USD per day reached");
 
 	// Raising the spend bound admits a review; the first session's wake still holds this session's note.
 	second.settingsManager.setProactivitySettings({

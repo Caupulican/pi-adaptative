@@ -13,6 +13,7 @@ import {
 import type { AuthStatus } from "../../../core/auth-storage.ts";
 import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
 import type { ModelFavorite } from "../../../core/settings/settings-schema.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
 import { formatSelectorActionHints, keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -263,7 +264,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Check for models.json errors
 		const loadError = this.modelRegistry.getError();
 		if (loadError) {
-			this.errorMessage = loadError;
+			harnessLog.debug("ui", "models.json could not be loaded", () => ({ error: loadError }));
+			this.errorMessage =
+				"models.json could not be loaded; built-in models are still listed. The reason is in the log.";
 		}
 
 		// Load available models (built-in models still work even if models.json failed)
@@ -281,7 +284,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.activeModels = [];
 			this.filteredModels = [];
 			this.rows = [];
-			this.errorMessage = error instanceof Error ? error.message : String(error);
+			harnessLog.debug("ui", "the model list could not be loaded", () => ({
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			this.errorMessage = "The model list could not be loaded. The reason is in the log.";
 			return;
 		}
 

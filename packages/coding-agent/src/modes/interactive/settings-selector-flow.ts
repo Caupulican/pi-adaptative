@@ -55,6 +55,7 @@ import type {
 } from "../../core/settings/settings-schema.ts";
 import type { SystemOneProviderChoice } from "../../core/system-one/access.ts";
 import { describeSystemOneAccess } from "../../core/system-one/access.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { getAvailableThemes, setTheme } from "../../presentation/theme/theme.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
@@ -245,7 +246,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				.map((profile) => ({
 					value: profile.name,
 					label: profile.name,
-					description: profile.description ?? profile.source,
+					description: profile.description ?? plainLabel(profile.source),
 				})),
 		];
 		const selector = new SettingsSelectorComponent(

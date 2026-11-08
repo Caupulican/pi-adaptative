@@ -257,7 +257,10 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		this.addChild(new DynamicBorder());
 		this.addChild(
 			new Text(
-				theme.fg("accent", theme.bold(`Library — editing "${this.profileName}" (${this.profileScope})`)),
+				theme.fg(
+					"accent",
+					theme.bold(`Library — editing "${this.profileName}" (${this.profileScope.replace(/-/g, " ")})`),
+				),
 				0,
 				0,
 			),
@@ -294,7 +297,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		const kind = this.kinds[this.currentKindIndex]!;
 		const enabledSet = this.enabledByKind.get(kind.kind)!;
 		const framing = this.framingByKind.get(kind.kind)!;
-		const framingText = framing === "allow" ? "allow-list" : "block-list";
+		const framingText = framing === "allow" ? "allow list" : "block list";
 		const countText = `${enabledSet.size}/${kind.items.length} enabled (${framingText})`;
 		const kindIndicator = this.kinds
 			.map((k, i) => {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { parseWorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
 import {
 	MAX_TURN_ORIGIN_CHANNEL_CHARS,
@@ -2190,7 +2191,10 @@ export class WorkerAgentMailbox {
 					}
 				: state;
 		});
-		if (changed) this.notify();
+		if (changed) {
+			harnessLog.warn("workers", "an ordinary worker task was dead-lettered", { messageId: normalized });
+			this.notify();
+		}
 		return changed;
 	}
 
@@ -2277,7 +2281,10 @@ export class WorkerAgentMailbox {
 			() => recordBeforeSettling(expired),
 			retention,
 		);
-		if (expired.length > 0) this.notify();
+		if (expired.length > 0) {
+			harnessLog.warn("workers", "open worker obligations expired", { count: expired.length });
+			this.notify();
+		}
 		return expired;
 	}
 

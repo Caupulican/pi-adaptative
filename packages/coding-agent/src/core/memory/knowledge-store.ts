@@ -1,6 +1,8 @@
 /** SQLite adapter for the ICM knowledge collection, with paged reads and atomic mutation effects. */
+
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { knowledgeDatabaseFile } from "../agent-paths.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -98,47 +100,50 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	): KnowledgeStore {
 		const databasePath = knowledgeDatabaseFile(agentDir);
 		mkdirSync(dirname(databasePath), { recursive: true });
-		return constructSqliteDatabase({ databasePath }, (db) => {
-			db.exec(
-				"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
-			);
-			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if (
-				version !== 0 &&
-				version !== 1 &&
-				version !== 2 &&
-				version !== 3 &&
-				version !== 4 &&
-				version !== 5 &&
-				version !== SCHEMA_VERSION
-			)
-				throw new Error("Unsupported ICM knowledge schema");
-			const store = new KnowledgeStore(db, collectionTime, hasUsageReceipt);
-			if (version !== SCHEMA_VERSION)
-				store.transaction(() => {
-					const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
-					if (lockedVersion === SCHEMA_VERSION) return;
-					if (lockedVersion === 5) {
-						db.exec(SCHEMA_V6);
-						return;
-					}
-					if (lockedVersion === 4) {
-						db.exec(`${SCHEMA_V5} ${SCHEMA_V6}`);
-						return;
-					}
-					if (lockedVersion === 3) {
-						db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5} ${SCHEMA_V6}`);
-						return;
-					}
-					if (lockedVersion === 1) {
-						db.exec(`ALTER TABLE entries ADD COLUMN identity TEXT;
+		try {
+			return constructSqliteDatabase({ databasePath }, (db) => {
+				db.exec(
+					"PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
+				);
+				const version = db.prepare("PRAGMA user_version").get()?.user_version;
+				if (
+					version !== 0 &&
+					version !== 1 &&
+					version !== 2 &&
+					version !== 3 &&
+					version !== 4 &&
+					version !== 5 &&
+					version !== SCHEMA_VERSION
+				)
+					throw new Error("Unsupported ICM knowledge schema");
+				const store = new KnowledgeStore(db, collectionTime, hasUsageReceipt);
+				let migratedFrom: unknown;
+				if (version !== SCHEMA_VERSION)
+					store.transaction(() => {
+						const lockedVersion = db.prepare("PRAGMA user_version").get()?.user_version;
+						if (lockedVersion === SCHEMA_VERSION) return;
+						migratedFrom = lockedVersion;
+						if (lockedVersion === 5) {
+							db.exec(SCHEMA_V6);
+							return;
+						}
+						if (lockedVersion === 4) {
+							db.exec(`${SCHEMA_V5} ${SCHEMA_V6}`);
+							return;
+						}
+						if (lockedVersion === 3) {
+							db.exec(`${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5} ${SCHEMA_V6}`);
+							return;
+						}
+						if (lockedVersion === 1) {
+							db.exec(`ALTER TABLE entries ADD COLUMN identity TEXT;
 						UPDATE entries SET identity=json_array(json_extract(body,'$.subject'),json_extract(body,'$.key')) WHERE body IS NOT NULL;
 						`);
-					}
-					if (lockedVersion !== 0 && lockedVersion !== 1 && lockedVersion !== 2)
-						throw new Error("ICM knowledge schema changed during initialization");
-					if (lockedVersion === 0)
-						db.exec(`
+						}
+						if (lockedVersion !== 0 && lockedVersion !== 1 && lockedVersion !== 2)
+							throw new Error("ICM knowledge schema changed during initialization");
+						if (lockedVersion === 0)
+							db.exec(`
 					CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
 					INSERT INTO meta VALUES(1,0);
 					CREATE TABLE entries (
@@ -159,13 +164,23 @@ export class KnowledgeStore implements KnowledgeStorePort {
 					) STRICT, WITHOUT ROWID;
 					CREATE TABLE forgotten_sources (id TEXT NOT NULL REFERENCES entries(id), session TEXT NOT NULL, source TEXT NOT NULL, PRIMARY KEY(id,session,source)) STRICT, WITHOUT ROWID;
 				`);
-					db.exec(`CREATE TABLE operation_receipts (
+						db.exec(`CREATE TABLE operation_receipts (
 					 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('remember','forget')),
 					 entry_id TEXT NOT NULL REFERENCES entries(id), revision INTEGER NOT NULL CHECK(revision>0)
 						) STRICT; ${KNOWLEDGE_COLLECTION_SCHEMA} ${KNOWLEDGE_WORK_SCHEMA} ${KNOWLEDGE_WINDOW_SCHEMA} ${SCHEMA_V5} ${SCHEMA_V6}`);
-				});
-			return store;
-		});
+					});
+				if (migratedFrom !== undefined)
+					harnessLog.info("memory", "knowledge store schema migrated", { from: migratedFrom, to: SCHEMA_VERSION });
+				return store;
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			harnessLog.warn("memory", "knowledge store could not open", () => ({
+				busy: /locked|busy/i.test(reason),
+				reason,
+			}));
+			throw error;
+		}
 	}
 
 	private transaction<T>(run: () => T): T {
@@ -478,7 +493,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		requireVersion(expectedRevision);
 		if (citations.length < 1 || citations.length > MAX_KNOWLEDGE_CITATIONS || !citations.every(isKnowledgeCitation))
 			throw new TypeError("Forgetting requires bounded original owner evidence");
-		return this.mutate(assertCurrent, signal, operation, (admission) => {
+		const forgotten = this.mutate(assertCurrent, signal, operation, (admission) => {
 			if (expectedRevision === 0 || this.version(id) !== expectedRevision || !this.get(id))
 				throw new Error("Knowledge changed before forgetting");
 			requireVersion(expectedRevision + 1);
@@ -510,6 +525,8 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			this.collection.discardPendingValues(barrier);
 			return receipt;
 		});
+		harnessLog.info("memory", "knowledge record forgotten", { id, revision: forgotten.revision });
+		return forgotten;
 	}
 
 	close(): void {

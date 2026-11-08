@@ -1,5 +1,7 @@
 import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
+import { SPAWNER_BOT_ID, SPAWNER_SOUL } from "../../core/delegation/bot-creation.ts";
+import { displayNameFor } from "../../core/delegation/bot-naming.ts";
 import { describeDaemonBuild, OWN_DAEMON_BUILD } from "../../core/delegation/bot-team-routine-helpers.ts";
 import {
 	type ActiveChatTarget,
@@ -21,13 +23,28 @@ import {
 } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
+import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
+import { REMOTE_MARK } from "./components/bot-state-mark.ts";
 import { teamSpeakerTone } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { botStateGlyph } from "./components/workbench.ts";
+import { runRemoteCommand } from "./remote-commands.ts";
+
+/** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
+function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult): string {
+	if (result.modelRef === "link/remote") return `Sent to ${agentId}; its answer will appear in its chat.`;
+	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
+		started: "it started on it",
+		followed_up: "added to its conversation",
+		steered: "sent while it works",
+		queued: "queued for it",
+	};
+	return `Sent to ${agentId}: ${how[result.mode]} (${result.modelRef}).`;
+}
 
 export interface BotTeamChatSessionPort {
 	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[];
@@ -61,6 +78,8 @@ export interface BotTeamChatSessionPort {
 	readonly backgroundLanes?: {
 		getAwayService(): AwayService;
 		readAwayChannelStatus(): readonly AwayChannelStatus[];
+		getRemoteHub(): RemoteHubController;
+		readonly channels: { reload(): void };
 	};
 }
 
@@ -363,6 +382,20 @@ export class BotTeamChatController {
 		await this.openBot(botId, port);
 	}
 
+	/** `/remote ...`: machines joined to this session as bots, and hubs this session joined. */
+	async handleRemoteCommand(rawText: string): Promise<void> {
+		const lanes = this.host.getSessionPort().backgroundLanes;
+		if (!lanes) {
+			this.host.showWarning("Remote machines are not available in this session.");
+			return;
+		}
+		await runRemoteCommand(
+			rawText,
+			{ hub: lanes.getRemoteHub(), reloadChannels: () => lanes.channels.reload() },
+			this.host,
+		);
+	}
+
 	async handleBotCommand(rawText: string): Promise<void> {
 		const port = this.host.getSessionPort();
 		const [, afterCommand] = splitHead(rawText);
@@ -393,6 +426,12 @@ export class BotTeamChatController {
 				case "lead":
 				case "unlead":
 					this.setBotLeader(rest, sub === "lead", port);
+					return;
+				case "spawner":
+					this.createSpawnerBot(port);
+					return;
+				case "rename":
+					this.renameBot(rest, port);
 					return;
 				case "msg":
 				case "send":
@@ -449,7 +488,7 @@ export class BotTeamChatController {
 					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot lead|unlead <id> | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> | /bot spawner | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -567,7 +606,7 @@ export class BotTeamChatController {
 		const detail = [bot?.description, bot?.currentSummary].filter((part): part is string => !!part).join(" · ");
 
 		const lines = [
-			theme.fg("accent", theme.bold(`● LIVE BOT CHAT · ${agentId}`)) +
+			theme.fg("accent", theme.bold(`● LIVE BOT CHAT · ${agentId}${bot?.remote ? ` ${REMOTE_MARK} remote` : ""}`)) +
 				theme.fg("muted", ` · ${modelLabel} · thinking ${thinking} · ${state}`),
 		];
 		const secondLine = [teams, routineLabel, detail].filter((part): part is string => !!part).join("  ");
@@ -691,7 +730,7 @@ export class BotTeamChatController {
 				await this.refreshActiveChatView();
 			}
 			if (!options.refreshOnly) {
-				this.host.showStatus(`Sent to ${agentId} (${result.mode}, ${result.modelRef}).`);
+				this.host.showStatus(sentToBotText(agentId, result));
 			}
 		} catch (error) {
 			this.host.showError(errorMessage(error));
@@ -752,6 +791,7 @@ export class BotTeamChatController {
 		const soul = (hasModel ? afterModel : afterId).trim();
 		const bot = port.upsertPersistentBot({
 			agentId,
+			displayName: displayNameFor(agentId),
 			provider: modelSpec.provider,
 			modelId: modelSpec.modelId,
 			thinkingLevel: modelSpec.thinkingLevel,
@@ -780,6 +820,41 @@ export class BotTeamChatController {
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId && b.persistent);
 		if (!bot) this.host.showWarning(`No bot named ${agentId}. Create it with /bot new ${agentId} <model> [soul...].`);
 		return bot;
+	}
+
+	/** `/bot rename <id> <name...>`: what the screen shows for the bot; its id, the handle typed after `@`, stays. */
+	private renameBot(rest: string, port: BotTeamChatSessionPort): void {
+		const bot = this.namedPersistentBot(rest, "/bot rename <id> <name...>", port);
+		if (!bot) return;
+		const name = splitHead(rest)[1].trim();
+		if (name.length === 0 || name.length > 60) {
+			this.host.showWarning("Usage: /bot rename <id> <name...> (a name of 1 to 60 characters).");
+			return;
+		}
+		port.upsertPersistentBot({ agentId: bot.agentId, displayName: name });
+		this.host.showStatus(`${bot.agentId} is now shown as ${name}. Address it as @${bot.agentId} as before.`);
+	}
+
+	/** `/bot spawner`: the one bot whose only work is making the bots and workers the orchestrator asks for. */
+	private createSpawnerBot(port: BotTeamChatSessionPort): void {
+		if (port.listPersistentBots().some((b) => b.agentId === SPAWNER_BOT_ID && b.persistent)) {
+			this.host.showStatus(`${SPAWNER_BOT_ID} already exists.`);
+			return;
+		}
+		const spec = port.resolveModelSpec(undefined);
+		port.upsertPersistentBot({
+			agentId: SPAWNER_BOT_ID,
+			displayName: displayNameFor(SPAWNER_BOT_ID),
+			provider: spec.provider,
+			modelId: spec.modelId,
+			thinkingLevel: spec.thinkingLevel,
+			soul: SPAWNER_SOUL,
+			leader: true,
+			createdBy: "owner",
+		});
+		this.host.showStatus(
+			`${SPAWNER_BOT_ID} is ready. The orchestrator can hand it the making of many bots at once; it creates them and briefs each.`,
+		);
 	}
 
 	/** `/bot lead <id>` and `/bot unlead <id>`: only the owner makes a bot a leader; a leader creates bots on the fly. */
@@ -832,7 +907,7 @@ export class BotTeamChatController {
 		if (!this.isRootChatActive()) {
 			await this.refreshActiveChatView();
 		}
-		this.host.showStatus(`Sent to ${agentId} (${result.mode}, ${result.modelRef}).`);
+		this.host.showStatus(sentToBotText(agentId, result));
 	}
 
 	private ensureTeamMembersExist(memberAgentIds: readonly string[], port: BotTeamChatSessionPort): void {
@@ -886,7 +961,7 @@ export class BotTeamChatController {
 			.map((b) => {
 				const unread = (b.unreadCount ?? 0) > 0 ? ` · ${b.unreadCount} unread` : "";
 				const sched = (b.routineCount ?? 0) > 0 ? ` · ⏱${b.routineCount}` : "";
-				const role = b.leader ? " · leader" : "";
+				const role = `${b.leader ? " · leader" : ""}${b.remote ? ` · ${REMOTE_MARK} remote` : ""}`;
 				return `${b.agentId}${role} · ${b.state} · ${b.modelRef}${unread}${sched}`;
 			})
 			.join("\n");

@@ -17,6 +17,8 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { SessionManager } from "../kernel/node.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { workerControlOf } from "../kernel/worker-control-stamp.ts";
@@ -41,6 +43,7 @@ import {
 	readAwayChannelCharges,
 	readAwayChannelStatus,
 } from "./channels/away-channels.ts";
+import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
@@ -55,6 +58,7 @@ import {
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
+import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
@@ -114,6 +118,7 @@ import type {
 	WorkerGrantSummary,
 } from "./delegation/worker-agent-control.ts";
 import { boundWorkerWaitTimeoutMs } from "./delegation/worker-agent-control-coordinator.ts";
+import { stepDownThinkingLevel } from "./delegation/worker-authority-resolver.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { WorkerDelegationController } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
@@ -174,6 +179,12 @@ import {
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
+import {
+	createSubscriptionAllowanceReader,
+	type SubscriptionAllowanceReader,
+} from "./provider-admission/subscription-allowance.ts";
+import { RemoteHubController } from "./remote/hub-controller.ts";
+import { withLinkPolicy } from "./remote/link-policy.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -380,7 +391,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.channels = new SessionChannels({
 			getAgentDir: () => deps.getAgentDir(),
 			getSessionManager: () => deps.getSessionManager(),
-			getChannelPolicies: () => deps.getSettingsManager().getChannelPolicies(),
+			getChannelPolicies: () => withLinkPolicy(deps.getSettingsManager().getChannelPolicies(), deps.getAgentDir()),
 			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
 			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
@@ -497,12 +508,33 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		);
 	}
 
+	/** Whether a plain worker could start now (and why not), for the session-start readiness check. */
+	probeWorkerReadiness(): ReturnType<WorkerDelegationController["probeWorkerReadiness"]> {
+		return this._getWorkerController().probeWorkerReadiness();
+	}
+
+	private _allowance: SubscriptionAllowanceReader | undefined;
+
+	/** Whether the subscription the session runs on reports room; any failure to read it is "no". */
+	private subscriptionRoom(): boolean {
+		try {
+			this._allowance ??= createSubscriptionAllowanceReader({
+				getRegistry: () => this.deps.getModelRegistry(),
+				getModel: () => this.deps.getModel(),
+			});
+			return this._allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT).kind === "room";
+		} catch {
+			return false;
+		}
+	}
+
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
 			{
 				...this.deps,
 				...this._getTranscriptWrites(),
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
+				subscriptionRoom: () => this.subscriptionRoom(),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -968,6 +1000,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				);
 			}
 		}
+		this._runTeardownStep("close the remote hub", () => void this._remoteHub?.stop());
 		this._runTeardownStep("release managed lanes", () => this._managedLanes?.release());
 		this._runTeardownStep("settle running-attempt waits", () => {
 			for (const settle of [...this._runningAttemptWaits]) settle();
@@ -1748,6 +1781,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
+		if (!this.deps.isChildSession())
+			void this.getRemoteHub()
+				.start()
+				.then((problem) => {
+					if (problem) this._safeWarn(problem);
+				});
 		if (!this._channelsHostedByDaemon) this.channels.start();
 		if (!this.deps.isDisposed() && !this.deps.isChildSession()) this._getActAhead().start();
 	}
@@ -2217,7 +2256,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			}
 		}
 		const laneRecords = this._rosterLaneRecords();
-		const views = this.getBotTeamStore().projectBotViews(
+		const projected = this.getBotTeamStore().projectBotViews(
 			liveAgents
 				.filter((agent) => inContext(agent.agentId))
 				.flatMap((agent) => {
@@ -2232,6 +2271,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				}),
 			defaultModelRef,
 			teamId === undefined,
+		);
+		// A machine joined over the link is idle while connected and offline while not; a local bot's state comes from its lanes.
+		const views = projected.map((view) =>
+			view.remote && view.state !== "retired"
+				? { ...view, state: this.getRemoteHub().isOnline(view.agentId) ? ("idle" as const) : ("offline" as const) }
+				: view,
 		);
 		if (!teamId) this._botViews = { defaultModelRef, delegateActive, bindings, views };
 		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
@@ -2265,9 +2310,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 		const reference = rawModel?.trim();
 		if (!reference) {
-			const current = this.deps.getModel();
+			// A bot with no model named runs on what a worker would (the owner's worker profile, else the subscription-routed
+			// efficient model), not on the session's own, usually the dearest, model.
+			const current = this.previewWorkerModel() ?? this.deps.getModel();
 			if (!current) throw new Error("No model is selected: give the model as <provider>/<model>.");
-			return { provider: current.provider, modelId: current.id, thinkingLevel: fgThinking };
+			const level =
+				fgThinking !== undefined && this.isOrchestrationThinkingLevel(fgThinking)
+					? resolveModelThinkingLevel(current, stepDownThinkingLevel(fgThinking))
+					: fgThinking;
+			return { provider: current.provider, modelId: current.id, thinkingLevel: level };
 		}
 		const registry = this.deps.getModelRegistry();
 		const authenticated = resolveCliModel({
@@ -2374,6 +2425,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			throw new Error(
 				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions, soul or leadership: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
 			);
+		if (input.leader !== undefined)
+			harnessLog.info("bots", input.leader ? "a bot was made a leader" : "a bot stopped being a leader", {
+				agentId,
+			});
 		return store.upsertBot({ ...input, agentId });
 	}
 
@@ -2387,7 +2442,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): CreatedBotView {
 		const store = this.getBotTeamStore();
 		store.reload();
-		const agentId = normalizeBotOrTeamId(request.agentId, "agentId");
+		const agentId = normalizeBotOrTeamId(
+			request.agentId ??
+				suggestBotId(
+					request.description ?? request.soul,
+					new Set(store.listBots({ includeRetired: true }).map((bot) => bot.agentId)),
+				),
+			"agentId",
+		);
 		let createdBy = "root";
 		let mayWrite = true;
 		if (creator.kind === "leader") {
@@ -2412,6 +2474,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const bot = store.createBotIfAbsent(
 			{
 				agentId,
+				displayName: displayNameFor(agentId),
 				provider: spec.provider,
 				modelId: spec.modelId,
 				...(thinkingLevel ? { thinkingLevel } : {}),
@@ -2423,6 +2486,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			creator.kind === "leader" ? { createdBy, max: MAX_BOTS_PER_LEADER } : undefined,
 		);
+		harnessLog.info("bots", "a bot was created", () => ({
+			agentId: bot.agentId,
+			by: createdBy,
+			model: `${bot.provider}/${bot.modelId}`,
+			canWrite: bot.canWrite === true,
+		}));
 		return {
 			agentId: bot.agentId,
 			modelRef: `${bot.provider}/${bot.modelId}`,
@@ -2431,9 +2500,25 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		};
 	}
 
+	private _remoteHub: RemoteHubController | undefined;
+
+	/** This session's hub: the machines joined to it, shown as bots with a remote mark. */
+	getRemoteHub(): RemoteHubController {
+		this._remoteHub ??= new RemoteHubController({
+			agentDir: this.deps.getAgentDir(),
+			getStore: () => this.getBotTeamStore(),
+			// A machine arriving or leaving touches its bot, so the roster follows the same way it follows any bot save.
+			changed: (machine) => this.getBotTeamStore().upsertBot({ agentId: machine }),
+		});
+		return this._remoteHub;
+	}
+
 	/** The orchestrator's tool for bots on the fly. */
 	createBotToolDefinition(): ToolDefinition {
 		return createBotToolDefinition({
+			ask: async (agentId, message) => {
+				await this.sendOperatorMessageToBot(agentId, message, { fromRoot: true });
+			},
 			create: (request) => this.createBotFor({ kind: "root" }, request),
 			list: () =>
 				this.getBotTeamStore()
@@ -2539,6 +2624,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		if (this.getBotTeamStore().getBot(normId)?.remote) return this.getRemoteHub().chat(normId);
 		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
 		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
 		let conv = this.openWorkerTranscript(runtime);
@@ -2682,7 +2768,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	async sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: { mode?: "follow_up" | "queue" | "start"; teamId?: string; teamIncarnationId?: string },
+		options?: {
+			mode?: "follow_up" | "queue" | "start";
+			teamId?: string;
+			teamIncarnationId?: string;
+			/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
+			fromRoot?: boolean;
+		},
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		const manager = this.deps.getSessionManager();
@@ -2737,7 +2829,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private async dispatchOperatorMessageToBot(
 		context: BotRuntimeContext,
 		message: string,
-		options: { mode?: "follow_up" | "queue" | "start" } | undefined,
+		options: { mode?: "follow_up" | "queue" | "start"; fromRoot?: boolean } | undefined,
 		assertCurrentBranch: () => void,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId: normId, teamId, teamIncarnationId } = context;
@@ -2747,6 +2839,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			const team = store.getTeam(teamId);
 			if (!team || teamIncarnation(team) !== teamIncarnationId || !team.memberAgentIds.includes(normId))
 				throw new Error("Bot membership or selected group changed before dispatch.");
+		}
+		if (store.getBot(normId)?.remote) {
+			// A machine joined over the link answers on its own; nothing here starts a worker for it.
+			const messageId = this.getRemoteHub().send(normId, message);
+			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
 		}
 		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);
 		let liveAgents: WorkerAgentView[] = [];
@@ -2775,7 +2872,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
 			}
 			const res = this.followUpSessionRootWorkerAgent(runtime, message, messageOptions);
-			if (res.record?.attemptId)
+			if (res.record?.attemptId && !options?.fromRoot)
 				this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(res.record.attemptId);
 			return {
 				agentId: normId,
@@ -2838,7 +2935,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			throw new Error(`Failed to start persistent bot agent "${normId}": ${started.skipReason ?? "unknown error"}`);
 		}
 		const startedAgentId = started.record.agentId ?? started.record.laneId;
-		if (started.record.attemptId)
+		if (started.record.attemptId && !options?.fromRoot)
 			this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(started.record.attemptId);
 		try {
 			assertCurrentBranch();

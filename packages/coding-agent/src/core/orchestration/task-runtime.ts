@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
@@ -614,6 +615,7 @@ export class DurableTaskRuntime {
 			undefined,
 			() => assertWorkerReceiptAdmission(dispatch.receiptOrigin),
 		);
+		harnessLog.info("workers", "a worker attempt was queued", { taskId, attemptId });
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
@@ -995,6 +997,11 @@ export class DurableTaskRuntime {
 				...(detail ? { reasonDetail: detail } : {}),
 			}),
 		});
+		harnessLog.info("workers", "a worker attempt was cancelled", {
+			taskId: attempt.taskId,
+			attemptId,
+			reasonCode: reasonCode.trim(),
+		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
@@ -1060,6 +1067,7 @@ export class DurableTaskRuntime {
 			idempotencyKey: `task-failed:${taskId}:${reasonCode.trim()}`,
 			payload: toJsonObject({ taskId, reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode") }),
 		});
+		harnessLog.warn("workers", "an orchestration task failed", { taskId, reasonCode: reasonCode.trim() });
 		return structuredClone(this.state.tasks[taskId]!.task);
 	}
 
@@ -1099,6 +1107,10 @@ export class DurableTaskRuntime {
 			});
 			recovered.push(attempt.attemptId);
 		}
+		if (recovered.length > 0)
+			harnessLog.warn("workers", "worker attempts interrupted by a dead owner were expired for recovery", {
+				count: recovered.length,
+			});
 		return recovered;
 	}
 

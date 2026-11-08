@@ -1,7 +1,8 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { StreamFn } from "../../kernel/index.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { type WaitEndReason, type WaitEndReport, type WakeSource, waitEndReport, waitFor } from "../util/wait.ts";
-import { splitProviderAccountKey } from "./account-key.ts";
+import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { currentProviderLane, type ProviderRequestLane } from "./lane-context.ts";
 import { type ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
 import {
@@ -258,7 +259,15 @@ export async function admitProviderRequest(
 		reason: "model_quota" | "provider_limit",
 		waitedMs: number,
 		limitedUntil: number | undefined,
-	): void =>
+	): void => {
+		harnessLog.warn("provider", "a provider request was refused at admission", () => ({
+			provider,
+			account: describeProviderAccountKey(key),
+			lane,
+			reason,
+			waitedMs,
+			...(limitedUntil === undefined ? {} : { retryAfterMs: Math.max(0, limitedUntil - now()) }),
+		}));
 		deps.record?.({
 			...base,
 			reason,
@@ -268,6 +277,7 @@ export async function admitProviderRequest(
 			timedOut: true,
 			limitedUntil,
 		});
+	};
 	/** Waits out one recorded reset `remainingMs` away within the `budgetLeftMs` the lane still has, then records it. */
 	const waitOutReset = async (
 		reason: "model_quota" | "provider_limit",
@@ -279,6 +289,14 @@ export async function admitProviderRequest(
 		const startedAt = now();
 		const inflightAtStart = inflightNow();
 		deps.onWait?.({ ...base, phase: "start", reason, expectedMs: remainingMs, limitedUntil });
+		harnessLog.debug("provider", "a request waits for a recorded reset", () => ({
+			provider,
+			account: describeProviderAccountKey(key),
+			lane,
+			reason,
+			remainingMs,
+			budgetLeftMs,
+		}));
 		const end = await pauseAdmission(
 			timers,
 			{ id: `${reason}.reset`, ms: remainingMs },
@@ -334,6 +352,13 @@ export async function admitProviderRequest(
 			while (deps.isEmergencyStopEngaged?.()) {
 				const waitedMs = now() - startedAt;
 				if (waitedMs >= policy.maxWaitMs) {
+					harnessLog.warn("provider", "a request was refused: the emergency stop outlasted its wait", () => ({
+						provider,
+						account: describeProviderAccountKey(key),
+						lane,
+						waitedMs,
+						maxWaitMs: policy.maxWaitMs,
+					}));
 					deps.record?.({
 						...base,
 						reason: "emergency_stop",
@@ -433,6 +458,16 @@ export async function admitProviderRequest(
 				timedOut = true;
 			}
 			if (hold) {
+				if (timedOut) {
+					harnessLog.warn("provider", "a request went past the in-flight limit after waiting", () => ({
+						provider,
+						account: describeProviderAccountKey(key),
+						lane,
+						limit,
+						inflight: attempt.inflight,
+						waitedMs,
+					}));
+				}
 				if (waitedMs > 0 || timedOut) {
 					deps.record?.({
 						...base,
@@ -451,6 +486,13 @@ export async function admitProviderRequest(
 			if (!waiting) {
 				waiting = true;
 				deps.onWait?.({ ...base, phase: "start", reason: "capacity" });
+				harnessLog.debug("provider", "a request waits for an in-flight slot", () => ({
+					provider,
+					account: describeProviderAccountKey(key),
+					lane,
+					limit,
+					inflight: attempt.inflight,
+				}));
 			}
 			const budgetLeftMs = Math.max(1, policy.maxWaitMs - waitedMs);
 			await pauseAdmission(
@@ -480,12 +522,20 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 	return async (model, context, options) => {
 		const key =
 			options?.providerAccountKey ?? deps.getAccountKey?.(model.provider, options?.apiKey) ?? model.provider;
+		const admitStartedAt = deps.ledger.timers.now();
 		const release = await admitProviderRequest(
 			model.provider,
 			`${model.provider}/${model.id}`,
 			{ ...deps, getAccountKey: () => key },
 			options?.signal,
 		);
+		harnessLog.trace("provider", "a provider request was admitted", () => ({
+			provider: model.provider,
+			model: model.id,
+			account: describeProviderAccountKey(key),
+			lane: (deps.getLane ?? currentProviderLane)(),
+			waitedMs: deps.ledger.timers.now() - admitStartedAt,
+		}));
 		const now = (): number => deps.ledger.timers.now();
 		const requestStartedAt = now();
 		let released = false;
@@ -500,6 +550,13 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 				// ProviderAdmissionLedger stops the failed hold's heartbeat before unlinking it, so
 				// stale-record pruning remains the recovery owner. Cleanup must not replace the provider
 				// failure or create an unobserved rejection from a terminal-result callback.
+				harnessLog.warn(
+					"provider",
+					"a provider slot could not be released; stale-record pruning will reclaim it",
+					() => ({
+						provider: model.provider,
+					}),
+				);
 			}
 		};
 		const releaseBeforeDispatch = (): void => {
@@ -513,6 +570,9 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 				if (limit) deps.limits.record(key, limit);
 			} catch {
 				// Shared-state bookkeeping must never mask the failure.
+				harnessLog.warn("provider", "a provider failure could not be recorded as a limit", () => ({
+					provider: model.provider,
+				}));
 			}
 		};
 		let inner: Awaited<ReturnType<StreamFn>>;
@@ -539,6 +599,13 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 										observeProviderResult(deps.limits, message, now(), key, requestStartedAt);
 									} catch {
 										/* Limit telemetry must not fail terminal accounting. */
+										harnessLog.warn(
+											"provider",
+											"a response could not be folded into the shared limit state",
+											() => ({
+												provider: model.provider,
+											}),
+										);
 									}
 								}
 							},

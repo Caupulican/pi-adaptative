@@ -37,7 +37,6 @@ import { type DecisionGraphModel, workerRouteText } from "./components/decision-
 import { SYSTEM_ONE_TONE } from "./components/decision-graph-render.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
-	botStateGlyph,
 	CHECKS_SECTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
@@ -815,7 +814,7 @@ export function buildWorkbenchSections(
 	nowMs: number,
 	sources: WorkbenchSectionSources = {},
 ): WorkbenchSection[] {
-	const { team, graphShown, rosterShown, persistentTeams, persistentBots, taskMetrics } = sources;
+	const { team, graphShown, taskMetrics } = sources;
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
 	const planRows = rows.filter((row) => !TEAM_SECTIONS.has(row.section ?? ""));
@@ -891,104 +890,55 @@ export function buildWorkbenchSections(
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
-	// Persistent teams and bots are standing members of the Team: they keep it listed whichever pane the left side shows.
-	const persistentTeamCount = persistentTeams?.().length ?? 0;
-	const persistentBotCount = persistentBots?.().length ?? 0;
-	const standing = persistentTeamCount + persistentBotCount > 0;
-	if (teamRows.length || specialists.length || team || standing) {
+	// The panel is what runs the work (brain, decider, workers); the teams and bots to talk to are the Chats roster's.
+	if (teamRows.length || specialists.length || team) {
 		const panel = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter(isActiveWorkerLane).length;
-		const executors = [
-			active ? `${active} active` : `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`,
-			...(persistentTeamCount ? [`${persistentTeamCount} ${persistentTeamCount === 1 ? "team" : "teams"}`] : []),
-			...(persistentBotCount ? [`${persistentBotCount} ${persistentBotCount === 1 ? "bot" : "bots"}`] : []),
-		].join(" · ");
-		const idle = [
-			`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
-		];
+		const executors = active ? `${active} running` : "idle";
+		const idle = [`  ${theme.fg("muted", "No workers running")}`];
 		const lanePanel = { ...panel, rows: shown.map((row) => ({ ...row, section: undefined })) };
 		const executorRows = (width: number): string[] =>
 			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
 		const hasSpecialists = shown.length > 0 || specialists.length > 0;
 		const group = (label: string) => `  ${theme.fg("dim", label)}`;
-		// The standing members, read at render time so a new team or bot shows at once: persistent teams, the
-		// bots (the same list the Chats roster draws), then the subagents.
-		const memberRows = (width: number): string[] => {
-			// The roster beside the conversation already lists every team and bot with their state.
-			const listed = rosterShown?.() === true;
-			const teams = listed ? [] : (persistentTeams?.() ?? []);
-			const bots = listed ? [] : (persistentBots?.() ?? []);
-			return [
-				...(teams.length
-					? [
-							group("Teams"),
-							...teams.map(
-								(t) =>
-									`  ${theme.fg("accent", "◆")} ${theme.fg("text", t.name || t.teamId)} ${theme.fg("muted", `[${t.memberAgentIds.join(", ") || "empty"}]`)}`,
-							),
-						]
-					: []),
-				...(bots.length
-					? [
-							group("Bots"),
-							...bots.map(
-								(bot) =>
-									`  ${botStateGlyph(bot.state)} ${theme.fg("text", bot.displayName || bot.agentId)} ${theme.fg("muted", `${bot.modelId || bot.modelRef} · ${bot.state}`)}`,
-							),
-						]
-					: []),
-				...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
-			];
-		};
-		const membersBody: Component = {
-			render: (width) => memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
-			invalidate() {},
-		};
+		const clampLines = (lines: string[], width: number): string[] =>
+			lines.map((line) => truncateToWidth(line, Math.max(1, width), ""));
 		if (!team) {
 			sections.push({
 				title: TEAM_SECTION,
 				meta: executors,
-				body: standing ? membersBody : shown.length ? rowsComponent(lanePanel) : idle,
+				body: shown.length ? rowsComponent(lanePanel) : idle,
 				quiet: !shown.length && !specialists.length,
-				standing,
 			});
 			return sections;
 		}
-		// The body asks at render time whether the graph is drawn, so a pane hidden or shown since this build
-		// draws the right rows (members alone beside the graph, the full hierarchy without it).
+		// The body asks at render time whether the graph is drawn, so a pane hidden or shown since this build draws the
+		// right rows (the workers alone beside the graph, the whole panel without it).
 		const body: Component = {
 			render: (width) => {
-				if (graphShown?.() === true) {
-					return memberRows(width).map((line) => truncateToWidth(line, Math.max(1, width), ""));
-				}
+				if (graphShown?.() === true)
+					return clampLines(hasSpecialists ? [group("Workers"), ...executorRows(width)] : [], width);
 				const facts = team();
 				const routing = renderRoutingRows(facts);
-				return [
-					group("Decider"),
-					...renderDeciderRows(facts, Date.now()),
-					group("Brain"),
-					renderRootRow(facts),
-					...memberRows(width),
-					...(routing.length ? [group("Routing"), ...routing] : []),
-				].map((line) => truncateToWidth(line, Math.max(1, width), ""));
+				return clampLines(
+					[
+						group("Brain"),
+						renderRootRow(facts),
+						group("Decider"),
+						...renderDeciderRows(facts, Date.now()),
+						group("Workers"),
+						...(hasSpecialists ? executorRows(width) : idle),
+						...(routing.length ? [group("Routing"), ...routing] : []),
+					],
+					width,
+				);
 			},
 			invalidate() {},
 		};
-		if (graphShown?.() === true) {
-			if (hasSpecialists || standing) {
-				sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists, standing });
-			}
-			return sections;
-		}
-		sections.push({
-			title: TEAM_SECTION,
-			meta: `decider + ${executors}`,
-			body,
-			quiet: !hasSpecialists,
-			standing,
-		});
+		if (graphShown?.() === true && !hasSpecialists) return sections;
+		sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists });
 	}
 	return sections;
 }

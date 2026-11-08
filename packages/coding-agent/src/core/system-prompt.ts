@@ -13,6 +13,7 @@ import {
 	ROOT_DIRECTOR_ROLE_PROMPT,
 	renderExplanationStyleRule,
 } from "./provider-prompt-contracts.ts";
+import { workspaceSnapshotLine } from "./workspace-snapshot.ts";
 
 export { OWNER_AUTHORIZATION_RULE };
 
@@ -180,6 +181,7 @@ function appendPromptResources(
 	// receive cwd at runtime. Full and minimal keep the path.
 	if (options.modelCapability?.class !== "chat" && options.modelCapability?.class !== "lean") {
 		result += `\nCurrent working directory: ${options.promptCwd}`;
+		result += workspaceSnapshotLine(options.promptCwd);
 	}
 	// Prompt resources can come from CRLF checkouts or user files. Canonicalize once at the final
 	// assembly boundary so capability budgets and provider cache keys are host-independent.

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
@@ -315,10 +316,14 @@ function collectRoutedWorkerModels(
 	// placeholder key) is not a separate budget and would swallow a worker wave the owner never
 	// pointed at it; the owner can still name such a provider explicitly in `routeProviders`.
 	const isAccount = (provider: string): boolean => modelRegistry.authStorage.hasAuth(provider);
-	const candidate = (provider: string, modelId?: string): Model<Api> | undefined => {
+	// Subscriptions are always preferred: a provider reached only by an API key joins a worker wave when the owner names it in
+	// `routeProviders` (an explicit choice), never because the harness found a key lying there.
+	const isSubscription = (provider: string): boolean => modelRegistry.authStorage.get(provider)?.type === "oauth";
+	const candidate = (provider: string, modelId?: string, explicit = false): Model<Api> | undefined => {
 		if (provider === foregroundModel.provider && (modelId === undefined || modelId === foregroundModel.id)) {
 			return undefined;
 		}
+		if (!explicit && !isSubscription(provider)) return undefined;
 		const model = modelId
 			? modelRegistry.find(provider, modelId)
 			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
@@ -331,9 +336,17 @@ function collectRoutedWorkerModels(
 		if (input.isModelLimited?.(model)) return undefined;
 		return model;
 	};
+	const owned = configuredOrder.length > 0;
 	for (const entry of ordered) {
 		const slash = entry.indexOf("/");
-		if (add(slash > 0 ? candidate(entry.slice(0, slash), entry.slice(slash + 1)) : candidate(entry))) return found;
+		if (
+			add(
+				slash > 0
+					? candidate(entry.slice(0, slash), entry.slice(slash + 1), owned)
+					: candidate(entry, undefined, owned),
+			)
+		)
+			return found;
 	}
 	const seen = new Set<string>();
 	for (const model of available) {
@@ -363,7 +376,22 @@ function selectModelBinding(
 			fallbacks: OrchestrationModelBinding[];
 	  }
 	| undefined {
-	if (modelPin) return { binding: { ...modelPin }, fallbacks: [] };
+	if (modelPin) {
+		// The owner's worker profile fixes the model; a hard task may raise its thinking, never change the model or lower it.
+		const requested = authority?.thinkingLevel;
+		const pinnedModel = modelRegistry.find(modelPin.provider, modelPin.modelId);
+		const raises =
+			requested !== undefined &&
+			ORCHESTRATION_THINKING_LEVELS.indexOf(requested) >
+				ORCHESTRATION_THINKING_LEVELS.indexOf(modelPin.thinkingLevel ?? "off");
+		return {
+			binding: {
+				...modelPin,
+				...(raises && pinnedModel ? { thinkingLevel: resolveModelThinkingLevel(pinnedModel, requested) } : {}),
+			},
+			fallbacks: [],
+		};
+	}
 	// Routing applies only to a fresh worker nothing has bound: no pin, no authority model, no
 	// profile binding. An authored choice is never moved to another account.
 	if (!authority?.model && !base && foregroundModel) {
@@ -458,7 +486,13 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		isModelExhausted,
 		input.isModelLimited,
 	);
-	if (!selected) return { ok: false, reason: "orchestration_model_required" };
+	if (!selected) {
+		harnessLog.warn("delegation", "no model could be chosen for a worker", () => ({
+			foreground: input.foregroundModel ? `${input.foregroundModel.provider}/${input.foregroundModel.id}` : null,
+			account: input.accountRouting?.account,
+		}));
+		return { ok: false, reason: "orchestration_model_required" };
+	}
 	const { binding } = selected;
 	const bound = resolvePinnedOrchestrationModelResolution(binding, input.modelRegistry, (model) =>
 		input.modelUnusableCause(model),
@@ -490,7 +524,18 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			};
 		}
 		fallbacks = [];
-		const allowed = input.allocateAllowedModel?.();
+		// The pool may offer none (a fresh setup has no router pool); the session's own model runs, so it is allowed to work.
+		const allowed =
+			input.allocateAllowedModel?.() ??
+			(input.foregroundModel && input.isModelAllowed(input.foregroundModel) ? input.foregroundModel : undefined);
+		harnessLog.info("delegation", "the worker's model was outside the owner's policy", () => ({
+			wanted: `${boundModel.model.provider}/${boundModel.model.id}`,
+			reallocatedTo: allowed ? `${allowed.provider}/${allowed.id}` : null,
+			foreground: input.foregroundModel ? `${input.foregroundModel.provider}/${input.foregroundModel.id}` : null,
+			foregroundAllowed: input.foregroundModel ? input.isModelAllowed?.(input.foregroundModel) : null,
+			account: input.accountRouting?.account,
+			routeProviders: input.accountRouting?.routeProviders,
+		}));
 		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };
 		resolvedModel = {
 			model: allowed,

@@ -18,13 +18,14 @@ const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [
 	{
 		value: "executor",
 		label: "Toolkit executor",
-		description: "Owns direct toolkit commands end-to-end (Level-0 exact hits route here; needs tool-call fitness)",
+		description:
+			"Owns direct toolkit commands end-to-end (exact command matches route here; needs the tool-call check)",
 	},
 	{
 		value: "scout",
-		label: "Scout (context_scout)",
+		label: "Repository scout",
 		description:
-			"Repository scout role; writes scout.model and enables the scout tool after scout_auto fitness passes",
+			"Repository scout role; writes scout.model and enables the scout tool after its fitness check passes",
 	},
 	{
 		value: "router-cheap",

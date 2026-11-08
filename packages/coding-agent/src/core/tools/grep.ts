@@ -2,6 +2,7 @@ import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "child_process";
 import path from "path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentTool } from "../../kernel/types.ts";
 import {
 	DEFAULT_MAX_BYTES,
@@ -31,6 +32,7 @@ import {
 } from "./fff-search-backend.ts";
 import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { resolveToCwd } from "./path-utils.ts";
+import { traceToolCalls } from "./read.ts";
 import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
@@ -230,6 +232,7 @@ function packGrepOutput(options: {
 			`${options.matchLimitReached} matches limit reached. Use limit=${options.matchLimitReached * 2} for more, or refine pattern`,
 		);
 		details.matchLimitReached = options.matchLimitReached;
+		harnessLog.warn("tools", "grep matches were limited", { limit: options.matchLimitReached });
 	}
 	if (packed.truncation.truncated) {
 		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
@@ -394,6 +397,13 @@ export async function tryFffGrep(options: {
 }
 
 export function createGrepToolDefinition(
+	cwd: string,
+	options?: GrepToolOptions,
+): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {
+	return traceToolCalls(buildGrepToolDefinition(cwd, options));
+}
+
+function buildGrepToolDefinition(
 	cwd: string,
 	options?: GrepToolOptions,
 ): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import nodePath from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionEntry } from "../../kernel/node.ts";
 import { MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../../kernel/tool-failure-memory.ts";
 import { argvExecutions, type ShellExecutions, shellExecutions } from "../model-router/read-only-shell-policy.ts";
@@ -838,6 +839,18 @@ function commandMatchesDeny(command: string, pattern: string): boolean {
 
 /** The small execution floor evaluated before YOLO grants or standing edge grants. */
 export function classifyYoloBoundary(input: YoloBoundaryInput): YoloBoundaryDecision | undefined {
+	const decision = executionFloor(input);
+	if (decision) {
+		harnessLog.debug("edge", "the execution floor stopped a command", () => ({
+			tool: input.toolName,
+			outcome: decision.kind === "block" ? "refused" : "held",
+			reason: decision.reason.startsWith("user deny rule") ? "deny_rule" : decision.reason,
+		}));
+	}
+	return decision;
+}
+
+function executionFloor(input: YoloBoundaryInput): YoloBoundaryDecision | undefined {
 	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
 	const name = input.toolName.toLowerCase();
 	const command =
@@ -1235,6 +1248,10 @@ export function thirdPartyReleaseLine(operations: readonly EdgeOperation[]): str
 export function thirdPartyEdgeRefusal(operations: readonly EdgeOperation[]): { reason: string; correction: string } {
 	const actions = operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`);
 	const classes = [...new Set(operations.map((operation) => operation.class))];
+	harnessLog.debug("edge", "a third party's run was refused an edge operation", () => ({
+		classes,
+		count: operations.length,
+	}));
 	return {
 		reason: boundedActionLine(
 			"Not run: ",

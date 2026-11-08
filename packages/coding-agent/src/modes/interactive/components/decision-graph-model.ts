@@ -16,6 +16,8 @@ import { formatRouteValue, shortModelName } from "../../../core/route-text.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { type SemanticPlaneHealth, semanticPlaneHealthValue } from "../../../core/system-one/semantic-plane-health.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
+import { plainLabel } from "../../../presentation/plain-text.ts";
 
 export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
 export type DecisionCheckStatus = "pending" | "satisfied" | "failed";
@@ -197,6 +199,39 @@ export function idlePreparationText(view: IdlePreparationView, nowMs: number): s
 	}
 }
 
+/** Machine text the graph no longer draws, kept in the harness log once per distinct value (the model is built every frame). */
+const loggedRawText = new Set<string>();
+function logRawOnce(message: string, raw: string): void {
+	if (loggedRawText.has(raw)) return;
+	if (loggedRawText.size >= 256) loggedRawText.clear();
+	loggedRawText.add(raw);
+	harnessLog.debug("ui", message, { raw });
+}
+
+const WAIT_REASON_WORDS: Readonly<Record<string, string>> = {
+	capacity: "waiting for a free worker slot",
+	dependencies: "waiting for work it depends on",
+	objective: "waiting for the objective to be ready",
+	write_reservation: "waiting for files another worker is writing",
+	foreground: "waiting for your current turn to finish",
+	runtime_generation: "waiting for the runtime to reload",
+	preflight: "checking before it starts",
+	unspecified: "waiting to start",
+};
+
+/** The scheduler's wait text (`reason[: detail] (since time)`) in the owner's words; the raw text goes to the log. */
+export function plainWaitReason(waitReason: string): string {
+	logRawOnce("a queued worker's wait reason is kept in the log, not on screen", waitReason);
+	const reason = /^[a-z_]+/.exec(waitReason)?.[0] ?? "";
+	return WAIT_REASON_WORDS[reason] ?? "waiting to start";
+}
+
+/** The stage history's store failure in the owner's words; the error text itself goes to the log. */
+function stageHistoryFailureText(error: string): string {
+	logRawOnce("the stage history could not be saved; the error is kept in the log", error);
+	return "Stage history could not be saved; the rows shown are live.";
+}
+
 /**
  * Who chose a worker's model, in the operator's words. The dispatch records it at admission; a
  * lane from before the record existed shows its profile, the only fact it carries. Never credits
@@ -209,7 +244,7 @@ export function workerRouteText(lane: LaneRecord): string | undefined {
 		case "inherited":
 			return "inherited";
 		case "model_pin":
-			return `model pin${lane.routePinSource ? ` (${lane.routePinSource})` : ""}`;
+			return `model pin${lane.routePinSource ? ` (${plainLabel(lane.routePinSource).toLowerCase()})` : ""}`;
 		case "profile":
 			return lane.profileId ? `profile ${lane.profileId}` : "profile";
 		case "authority":
@@ -399,13 +434,13 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 			return {
 				id: key,
 				kind: participantKind(lane),
-				label: lane.agentId ?? lane.label ?? `worker ${key.slice(0, 8)}`,
+				label: lane.label ?? "",
 				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
 				...(routeText ? { routeText } : {}),
 				...(startedAt !== undefined ? { startedAt } : {}),
 				running: lane.status === "running",
 				queued: lane.status === "queued",
-				...(lane.status === "queued" && lane.waitReason ? { waitReason: lane.waitReason } : {}),
+				...(lane.status === "queued" && lane.waitReason ? { waitReason: plainWaitReason(lane.waitReason) } : {}),
 				acted: true,
 			};
 		})
@@ -438,7 +473,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	for (const lane of laneParticipants) {
 		if (lane.routeText && lane.model)
 			routing.push({
-				text: `${lane.routeText} → ${lane.model} for ${lane.label}`,
+				text: `${lane.routeText} → ${lane.model}${lane.label ? ` for ${lane.label}` : ""}`,
 				live: lane.running || lane.queued === true,
 			});
 	}
@@ -510,7 +545,9 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		...(lastTurnOutcome ? { lastTurnOutcome } : {}),
 		flow,
 		stageLogEmpty: stageLog.entries.length === 0,
-		...(stageLog.sinkFailure !== undefined ? { stageHistoryFailure: stageLog.sinkFailure } : {}),
+		...(stageLog.sinkFailure !== undefined
+			? { stageHistoryFailure: stageHistoryFailureText(stageLog.sinkFailure) }
+			: {}),
 		...(idle ? { idleText: idlePreparationText(idle, nowMs) } : {}),
 		nowMs,
 	};

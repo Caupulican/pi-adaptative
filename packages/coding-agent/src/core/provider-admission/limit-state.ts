@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type AssistantMessage, getProviderRetryDirective } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { KeyedSignal } from "../util/keyed-signal.ts";
@@ -171,6 +172,11 @@ export class ProviderLimitStore {
 				...(input.detail ? { detail: input.detail.slice(0, MAX_DETAIL_LENGTH) } : {}),
 			};
 			writeFileAtomicSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+			harnessLog.info("provider", "a provider limit was recorded", () => ({
+				provider: describeProviderAccountKey(provider),
+				reason: input.reason,
+				retryAfterMs: input.limitedUntil - nowMs,
+			}));
 			changedLimits.notify(path);
 			return record;
 		});
@@ -226,6 +232,10 @@ export class ProviderLimitStore {
 			if (reasons && !reasons.includes(existing.reason)) return false;
 			rmSync(path, { force: true });
 			changedLimits.notify(path);
+			harnessLog.info("provider", "a provider limit was cleared", () => ({
+				provider: describeProviderAccountKey(provider),
+				reason: existing.reason,
+			}));
 			return true;
 		});
 	}
@@ -371,7 +381,10 @@ export function providerLimitFromFailure(
 	if (!reason) return undefined;
 
 	const waitMs = delayMs ?? classified.retryAfterMs;
-	if (waitMs === undefined || !Number.isFinite(waitMs) || waitMs <= 0) return undefined;
+	if (waitMs === undefined || !Number.isFinite(waitMs) || waitMs <= 0) {
+		harnessLog.debug("provider", "a rate limit without a known reset was not recorded", () => ({ provider, reason }));
+		return undefined;
+	}
 	return {
 		limitedUntil: nowMs + waitMs,
 		reason,

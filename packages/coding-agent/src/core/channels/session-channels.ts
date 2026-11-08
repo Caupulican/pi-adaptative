@@ -18,6 +18,7 @@
  */
 
 import { type FSWatcher, watch } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { channelsDir } from "../agent-paths.ts";
@@ -614,6 +615,8 @@ export class SessionChannels {
 		for (const [name, runtime] of this.runtimes) {
 			if (this.deps.away) this.settleOnClose(name);
 			if (runtime.holding) this.releaseHold(name);
+			if (runtime.state !== "stopped")
+				harnessLog.info("channels", "a channel stopped", { channel: name, from: runtime.state });
 			runtime.state = "stopped";
 			runtime.draining = false;
 			runtime.connection = undefined;
@@ -644,6 +647,10 @@ export class SessionChannels {
 		runtime.detail = detail;
 		const notice = this.stateNotice(name, state, detail);
 		this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
+		const fields = { channel: name, state, reason: detail };
+		if (state === "suspended" || state === "invalid" || state === "capped")
+			harnessLog.warn("channels", "a channel changed to a degraded state", fields);
+		else harnessLog.info("channels", "a channel changed state", fields);
 		this.syncDirWatch();
 	}
 
@@ -1073,6 +1080,11 @@ export class SessionChannels {
 		if (this.started) void this.registry.refreshChannels();
 	}
 
+	/** The policies changed outside the settings files (a hub was joined or left): read them again. */
+	reload(): void {
+		this.onSettingsChanged();
+	}
+
 	/** The journal names another holder: stop delivering, keep routing what this session accepted, and re-admit. */
 	private lostHold(name: string): void {
 		const runtime = this.runtime(name);
@@ -1237,6 +1249,10 @@ export class SessionChannels {
 			this.deps.warn(
 				`Channel ${name} delivered an event the harness cannot read (${parsed.reason}); it is ignored.`,
 			);
+			harnessLog.warn("channels", "an inbound event could not be read; it is ignored", {
+				channel: name,
+				reason: parsed.reason,
+			});
 			return;
 		}
 		const event = parsed.event;
@@ -1270,6 +1286,7 @@ export class SessionChannels {
 				state.held.push({ sender: digest(event.senderId).slice(0, 16), kind: event.kind, reason, at: now });
 				state.heldTotal++;
 				state.seen.push({ d: eventDigest, at: now, outcome: "held" });
+				harnessLog.info("channels", "an inbound message was held, not delivered", { channel: name, reason });
 				// Counted for the owner's next session, which tells what the daemon's host left (`tellUntold`).
 				if (this.deps.away) state.awayHeld = { ...state.awayHeld, [reason]: (state.awayHeld?.[reason] ?? 0) + 1 };
 				return "held" as const;
@@ -1315,6 +1332,10 @@ export class SessionChannels {
 		});
 		this.afterJournal(name, update.reset);
 		if (update.result === "full") {
+			harnessLog.warn("channels", "the channel journal is full; an inbound message is refused", {
+				channel: name,
+				pending: MAX_PENDING_MESSAGES,
+			});
 			this.deps.observeNotice("channel-state", () => ({
 				scope: name,
 				state: {
@@ -1324,7 +1345,10 @@ export class SessionChannels {
 			}));
 			throw new Error(`Channel ${name} journal is full.`);
 		}
-		if (update.result === "pending") this.scheduleWork();
+		if (update.result === "pending") {
+			harnessLog.debug("channels", "an inbound message was admitted", { channel: name, owner });
+			this.scheduleWork();
+		}
 		if (update.result === "tell_owner") this.noticeSender(name, event.senderId, namedId, now);
 		// Answered past the provider's handler, which resolves once the journal holds the event.
 		if (update.result === "control" && control && senderDigest !== undefined)
@@ -1571,6 +1595,7 @@ export class SessionChannels {
 			unmark();
 			return;
 		}
+		harnessLog.info("channels", "a turn was offered", { channel: name, messages: messages.length, batch: batchId });
 		const sender = plainLabel(composed.senderLabel) || "unknown sender";
 		runtime.offering = true;
 		let answered = false;
@@ -1580,6 +1605,10 @@ export class SessionChannels {
 			runtime.offering = false;
 			if (!accepted) {
 				unmark();
+				harnessLog.warn("channels", "a turn was not accepted; it is offered again", {
+					channel: name,
+					batch: batchId,
+				});
 				this.deps.warn(`Channel ${name}: the session did not accept a delivery; it is offered again later.`);
 				return;
 			}
@@ -1682,6 +1711,9 @@ export class SessionChannels {
 		const accept = (accepted: boolean) => {
 			if (answered) return;
 			answered = true;
+			const fields = { channel: name, ref: origin.ref, approval };
+			if (accepted) harnessLog.info("channels", "an owner turn started", fields);
+			else harnessLog.warn("channels", "an owner turn was not accepted", fields);
 			if (!onAccepted(accepted)) {
 				this.ownerRuns.delete(origin.ref);
 				return;
@@ -1751,6 +1783,12 @@ export class SessionChannels {
 	 * The owner's chat is told why, when it still holds owner authority.
 	 */
 	private stopOwnerRun(ref: string, run: OwnerRun, why: "bound" | "quota" | "authority" | "owner" | undefined): void {
+		if (!run.stopped) {
+			const fields = { channel: run.name, ref, reason: why ?? "the session stopped" };
+			if (why === "bound" || why === "quota")
+				harnessLog.warn("channels", "an owner turn was stopped at a spend bound", fields);
+			else harnessLog.info("channels", "an owner turn was stopped", fields);
+		}
 		run.stopped = true;
 		this.abortOwnerRun(ref, run.name);
 		if (!this.started) {
@@ -1861,6 +1899,14 @@ export class SessionChannels {
 				waiting = true;
 				continue;
 			}
+			harnessLog.info("channels", "a turn finished", () => ({
+				channel: name,
+				batch: batch.id,
+				owner: batch.owner === true,
+				outcome: outcome.kind,
+				usd: outcome.usd,
+				...(outcome.kind === "unanswered" ? { reason: outcome.reason } : {}),
+			}));
 			if (batch.owner === true) {
 				await this.routeOwnerReply(name, policy, batch, outcome);
 				continue;
@@ -1916,6 +1962,11 @@ export class SessionChannels {
 		if (!this.settleBatch(name, batch.id, "replied", usd, undefined)) return false;
 		try {
 			await this.sendParts(provider, batch, formatted.parts);
+			harnessLog.info("channels", "a reply was sent", {
+				channel: name,
+				batch: batch.id,
+				parts: formatted.parts.length,
+			});
 		} catch (error) {
 			// Only a shipped transport's error is kept: its text is Pi's own words. A wrapper's may carry remote text,
 			// and the reason reaches the owner's notices unfenced.
@@ -2050,6 +2101,9 @@ export class SessionChannels {
 			...(this.deps.away ? { away: true as const } : {}),
 		};
 		if (!this.settleBatch(name, batch.id, "drafted", usd, draft, from)) return;
+		const fields = { channel: name, draft: draft.id, reason };
+		if (from === "replied") harnessLog.warn("channels", "a reply that failed to send waits as a draft", fields);
+		else harnessLog.info("channels", "a reply waits as a draft", fields);
 		this.deps.observeNotice("channel-reply", () => ({
 			scope: `${name}:${batch.id}`,
 			state: {

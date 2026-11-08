@@ -5,6 +5,7 @@
  */
 
 import { statSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelInboundHandler, ChannelStatusReporter } from "../gateways/channel-provider.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -280,6 +281,11 @@ export async function sendPaced(send: PacedSend): Promise<void> {
 				`${service} did not confirm the reply (network error or timeout); it may have been delivered.`,
 			);
 		if (outcome.status === 429 && attempt < MAX_SEND_ATTEMPTS) {
+			harnessLog.warn("channels", "a channel send was rate limited; it is retried", {
+				service,
+				attempt,
+				retryAfterMs: outcome.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS,
+			});
 			await pause(send.timers, outcome.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS, signal);
 			if (signal.aborted) throw new Error(`The ${service} channel stopped before the reply was sent.`);
 			continue;
@@ -318,6 +324,7 @@ export class ConnectionReport {
 	/** One more transient failure in a row; from the third on the owner is told `reason`. Returns the count. */
 	failed(reason: string): number {
 		this.failures++;
+		harnessLog.warn("channels", "a channel receive failed; it is retried", { failures: this.failures, reason });
 		if (this.failures >= FAILURES_BEFORE_REPORT) this.suspend(reason);
 		return this.failures;
 	}

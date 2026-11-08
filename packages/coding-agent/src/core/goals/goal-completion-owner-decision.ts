@@ -1,3 +1,4 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { ExtensionUIContext } from "../extensions/types.ts";
@@ -60,6 +61,7 @@ export async function resolveGoalCompletionOwnerDecision(
 	const reason = input.reasons.join("; ") || "System One could not verify completion.";
 	const question = `System One cannot verify goal "${input.userGoal}" as complete: ${reason} What should Pi do?`;
 	const defer = (deferReason: string): GoalCompletionOwnerDecision => {
+		harnessLog.warn("goals", "a goal completion was deferred", { goalId: input.goalId, reason: deferReason });
 		const followUpPath = deps.recordOwnerFollowUp?.({
 			question,
 			reason: deferReason,
@@ -131,6 +133,10 @@ export async function resolveGoalCompletionOwnerDecision(
 		}),
 	];
 	const answer = resolved.snapshot.answers[0];
+	harnessLog.info("goals", "the owner answered a goal completion question", {
+		goalId: input.goalId,
+		accepted: answer?.selected.includes(ACCEPT_COMPLETE) === true,
+	});
 	if (answer?.selected.includes(ACCEPT_COMPLETE)) return { decision: "accept_complete", clarification };
 	const answerText = answer?.custom?.trim() || answer?.selected.join(", ") || undefined;
 	return { decision: "continue", ...(answerText ? { answer: answerText } : {}), clarification };

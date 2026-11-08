@@ -22,6 +22,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../kernel/harness-log.ts";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
 import { HOST_REQUEST_ONLY_DETAILS } from "../kernel/transient-records.ts";
@@ -770,9 +771,12 @@ export class MemoryController {
 		const recovered = this._summarySettingsFailure !== undefined;
 		this._summarySettingsFailure = undefined;
 		if (recovered) {
+			harnessLog.info("memory", "summary model usable again; work it blocked is released for retry");
 			void this._continuousChat.runtime.retryFailedWork().catch((error: unknown) => {
+				const reason = error instanceof Error ? error.message : String(error);
+				harnessLog.warn("memory", "work blocked by the summary model could not be released", { reason });
 				this.deps.emitWarning(
-					`Continuous-chat could not release the work the summary model refusal blocked: ${error instanceof Error ? error.message : String(error)}`,
+					`Continuous-chat could not release the work the summary model refusal blocked: ${reason}`,
 				);
 			});
 		}
@@ -794,7 +798,10 @@ export class MemoryController {
 	 * still uses its projection.
 	 */
 	private _reportSummaryRefusal(refusal: string): void {
-		if (refusal !== this._summarySettingsFailure) this.deps.emitWarning(refusal);
+		if (refusal !== this._summarySettingsFailure) {
+			harnessLog.warn("memory", "summary model refused the chat's compactions", { reason: refusal });
+			this.deps.emitWarning(refusal);
+		}
 		this._summarySettingsFailure = refusal;
 	}
 
@@ -2837,6 +2844,7 @@ export class MemoryController {
 	 */
 	private async _continuousChatStoppedOnItsOwn(host: ContinuousChatHost): Promise<void> {
 		if (this._continuousChat !== host) return;
+		harnessLog.warn("memory", "project chat stopped on its own; provider requests are blocked");
 		const knowledgeStopped = Promise.allSettled([this._stopKnowledgeCollector()]);
 		this._continuousChat = undefined;
 		this._setContinuousChatWire({
@@ -3384,6 +3392,7 @@ export class MemoryController {
 		previousActivation?.abort(new Error("Memory activation was superseded."));
 		const readsStopped = this._laneMemoryReads.abort(new Error("Memory reads belong to a retired generation."));
 		const system = this.deps.getSettingsManager().getMemorySystem();
+		const startedAt = Date.now();
 		this.deps.onActivation?.({ phase: "start", generation, system, cause });
 		let ended = false;
 		const end = (error: string | undefined): void => {
@@ -3401,6 +3410,15 @@ export class MemoryController {
 				outcome,
 				...(error === undefined ? {} : { error }),
 			});
+			const level = outcome === "failed" ? "warn" : outcome === "superseded" ? "debug" : "info";
+			harnessLog.log(level, "memory", "memory activation ended", () => ({
+				generation,
+				system,
+				cause,
+				outcome,
+				durationMs: Date.now() - startedAt,
+				...(error === undefined ? {} : { reason: error }),
+			}));
 		};
 		let failure: string | undefined;
 		const previous = this._memoryManager;

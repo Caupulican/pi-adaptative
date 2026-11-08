@@ -185,8 +185,10 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseTone = undefined;
 		phaseValue = workState.label;
 	} else {
+		// The activity row above already says that it is working, and for how long: this row says on what.
 		phaseLabel = "WORKING";
 		phaseTone = undefined;
+		phaseBare = true;
 		phaseValue = `${projection.phase}: ${projection.current_action}`;
 	}
 

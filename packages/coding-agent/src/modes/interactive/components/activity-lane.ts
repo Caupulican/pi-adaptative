@@ -74,7 +74,6 @@ const ELAPSED_TICK_MS = 1_000;
  * "it is writing", which is the whole reason the mark exists (measured: p50 11.5 s to first token
  * on a slow-first-token provider, ~40 % of the turn's active time).
  */
-const FIRST_TOKEN_NOTICE_MS = 3_000;
 
 /** `12s`, `1m12s`, `1h02m`: the coarsest unit the operator needs to judge "is it stuck". */
 export function formatElapsed(ms: number): string {
@@ -480,22 +479,11 @@ export function renderActivityLaneLine(
 	// glyph of its own: the row's only glyph is the status dot. The first-token half appears only
 	// once the wait is long enough to mean something (FIRST_TOKEN_NOTICE_MS), so a fast provider
 	// renders exactly what it always did.
-	const elapsed = (item: ActivityLaneItem | undefined, compact = false): string => {
+	const elapsed = (item: ActivityLaneItem | undefined): string => {
 		if (item?.startedAt === undefined || now === undefined) return "";
 		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
 		const kind = item.clockKind === "observed" ? "observed " : item.timingRole === "oldest" ? "oldest " : "";
-		if (!isTurnActivityItem(item) || slots.overlay) return ` (${kind}${total})`;
-		const totalMs = (item.completedAt ?? now) - item.startedAt;
-		if (totalMs < FIRST_TOKEN_NOTICE_MS) return ` (${kind}${total})`;
-		if (item.firstTokenAt === undefined) return ` (${kind}${total}, no token${compact ? "" : " yet"})`;
-		const providerWaitMs = item.firstTokenAt - item.startedAt;
-		if (item.firstVisibleTokenAt === undefined) {
-			return ` (${kind}${total}, ${compact ? "hidden +" : "hidden thinking after "}${formatElapsed(providerWaitMs)})`;
-		}
-		const visibleWaitMs = item.firstVisibleTokenAt - item.startedAt;
-		return item.firstVisibleTokenAt === item.firstTokenAt
-			? ` (${kind}${total}, first ${formatElapsed(providerWaitMs)})`
-			: ` (${kind}${total}, ${compact ? "visible +" : "first visible "}${formatElapsed(visibleWaitMs)})`;
+		return ` (${kind}${total})`;
 	};
 
 	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
@@ -521,7 +509,7 @@ export function renderActivityLaneLine(
 		const turnTextMax = mode && !slots.queue ? ANIMATED_TURN_TEXT_MAX : TURN_TEXT_MAX;
 		let animatedLabel = "";
 		const withTiming = (label: string, item: ActivityLaneItem): string => {
-			let suffix = elapsed(item, mode !== undefined);
+			let suffix = elapsed(item);
 			const available = Math.max(0, Math.min(turnTextMax, safeWidth - 3));
 			if (
 				visibleWidth(suffix) + TURN_TEXT_MIN_LABEL > available &&
@@ -533,7 +521,7 @@ export function renderActivityLaneLine(
 			}
 			if (!label) return suffix.trim();
 			const labelWidth = Math.max(0, Math.min(turnTextMax, available) - visibleWidth(suffix));
-			if (mode) label = activityStatusPhrase(mode, elapsedMs, labelWidth, animate);
+			if (mode) label = activityStatusPhrase(mode);
 			if (safeWidth < 24 && visibleWidth(label) > labelWidth) label = status === "waiting" ? "Waiting" : "Working";
 			const renderedLabel = truncateToWidth(label, labelWidth, "…");
 			if (mode) animatedLabel = renderedLabel;

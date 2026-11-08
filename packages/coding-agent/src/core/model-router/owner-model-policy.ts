@@ -13,6 +13,7 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 
 export const MODEL_POOLS = ["subscription", "metered", "local"] as const;
 export type ModelPool = (typeof MODEL_POOLS)[number];
@@ -154,12 +155,17 @@ export class OwnerModelPolicy extends ModelPoolPolicyView {
 		const current = this.policy;
 		const next: ModelPoolPolicy = Object.freeze({ ...current, ...change });
 		if (MODEL_POOLS.every((pool) => next[pool] === current[pool])) return { kind: "unchanged" };
-		if (!candidates.some((model) => next[modelPoolOf(model, this.facts)]))
+		if (!candidates.some((model) => next[modelPoolOf(model, this.facts)])) {
+			harnessLog.warn("router", "a model pool change was refused: no model would be allowed", () => ({
+				policy: describePolicy(next),
+			}));
 			return {
 				kind: "refused",
 				reason: `${describePolicy(next)} leaves no model in the pool to allocate; kept ${describePolicy(current)}`,
 			};
+		}
 		this.store.record({ version: 1, policy: next, changedAt: new Date().toISOString() });
+		harnessLog.info("router", "the model pool policy changed", () => ({ policy: describePolicy(next) }));
 		return { kind: "applied", policy: next };
 	}
 }

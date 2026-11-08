@@ -1,5 +1,6 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import nodePath from "path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentTool } from "../../kernel/index.ts";
 import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
@@ -11,6 +12,7 @@ import {
 } from "./file-failure-recovery.ts";
 import { LocalReadSession } from "./local-read-io.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { traceToolCalls } from "./read.ts";
 import { boundReadResult, type ReadOperationFactory } from "./read-operation-context.ts";
 import {
 	formatCollapsibleToolResult,
@@ -84,6 +86,13 @@ function getPermissionString(mode: number, isDirectory: boolean): string {
 }
 
 export function createLsToolDefinition(
+	cwd: string,
+	options?: LsToolOptions,
+): ToolDefinition<typeof lsSchema, LsToolDetails | undefined> {
+	return traceToolCalls(buildLsToolDefinition(cwd, options));
+}
+
+function buildLsToolDefinition(
 	cwd: string,
 	options?: LsToolOptions,
 ): ToolDefinition<typeof lsSchema, LsToolDetails | undefined> {
@@ -248,6 +257,7 @@ export function createLsToolDefinition(
 						if (entryLimitReached) {
 							notices.push(`${effectiveLimit} entries limit reached. Use limit=${effectiveLimit * 2} for more`);
 							details.entryLimitReached = effectiveLimit;
+							harnessLog.warn("tools", "directory entries were limited", { limit: effectiveLimit });
 						}
 						if (truncation.truncated) {
 							notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);

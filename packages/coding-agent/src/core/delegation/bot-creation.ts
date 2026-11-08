@@ -10,7 +10,8 @@ export const BOT_TOOL_NAME = "bot";
 export const MAX_BOTS_PER_LEADER = 12;
 
 export interface BotCreationRequest {
-	readonly agentId: string;
+	/** The bot's id; when left out the harness names the bot from its purpose and the answer says which id it chose. */
+	readonly agentId?: string;
 	/** The bot's standing instructions; it opens the bot's system prompt on every turn. */
 	readonly soul?: string;
 	readonly description?: string;
@@ -23,7 +24,7 @@ export interface BotCreationRequest {
 
 /** The creation fields a tool call carries, with the absent ones left out. */
 export function botCreationRequestFrom(input: {
-	readonly agentId: string;
+	readonly agentId?: string | undefined;
 	readonly soul?: string;
 	readonly description?: string;
 	readonly model?: string;
@@ -31,7 +32,7 @@ export function botCreationRequestFrom(input: {
 	readonly canWrite?: boolean;
 }): BotCreationRequest {
 	return {
-		agentId: input.agentId,
+		...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
 		...(input.soul !== undefined ? { soul: input.soul } : {}),
 		...(input.description !== undefined ? { description: input.description } : {}),
 		...(input.model !== undefined ? { model: input.model } : {}),
@@ -47,7 +48,14 @@ export interface CreatedBotView {
 	readonly createdBy: string;
 }
 
+/** The standing instructions of the spawner bot: the one bot whose only work is making the bots and workers others need. */
+export const SPAWNER_BOT_ID = "spawner";
+export const SPAWNER_SOUL =
+	"You make bots for the orchestrator and do nothing else. When asked, create each bot with bot_message action create: a short clear agentId, and a soul that states that bot's single purpose and rules, no more than it needs. Then send each new bot its first task with bot_message send, and answer the orchestrator with the ids you created and what each was asked to do. Never do the task yourself and never write files.";
+
 export interface BotToolPort {
+	/** Sends a message to a bot and returns at once; the bot's answer reaches the orchestrator as an event. */
+	ask(agentId: string, message: string): Promise<void>;
 	create(request: BotCreationRequest): CreatedBotView;
 	list(): readonly { agentId: string; modelRef: string; leader: boolean; retired: boolean; createdBy?: string }[];
 }

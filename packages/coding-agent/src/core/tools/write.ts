@@ -1,5 +1,6 @@
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import { Container, Text } from "@caupulican/pi-tui";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "../../kernel/types.ts";
 import { keyHint } from "../../presentation/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../presentation/theme-model.ts";
@@ -17,7 +18,7 @@ import {
 	FileMutationPreflightError,
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
-import { trimTrailingEmptyLines } from "./read.ts";
+import { traceToolCalls, trimTrailingEmptyLines } from "./read.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { type WriteOperations, type WriteToolDetails, type WriteToolInput, writeSchema } from "./schemas/write.ts";
 import { assertNoNulInWriteContent } from "./text-nul-guard.ts";
@@ -252,6 +253,13 @@ export function createWriteToolDefinition(
 	cwd: string,
 	options?: WriteToolOptions,
 ): ToolDefinition<typeof writeSchema, WriteToolDetails> {
+	return traceToolCalls(buildWriteToolDefinition(cwd, options));
+}
+
+function buildWriteToolDefinition(
+	cwd: string,
+	options?: WriteToolOptions,
+): ToolDefinition<typeof writeSchema, WriteToolDetails> {
 	const ops = options?.operations ?? defaultWriteOperations;
 	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
 		options?.operations !== undefined,
@@ -387,6 +395,9 @@ export function createWriteToolDefinition(
 					{ callId: toolCallId },
 				);
 			} catch (error) {
+				if (error instanceof FileMutationPreflightError) {
+					harnessLog.warn("tools", "a write was refused before it changed the file", { reason: error.reason });
+				}
 				if (error instanceof FileMutationPreflightError && error.reason === "write_collision") {
 					throw await writeCollisionWithRetainedPayload(error, input, intentController, signal);
 				}

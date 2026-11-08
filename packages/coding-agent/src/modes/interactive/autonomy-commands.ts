@@ -19,6 +19,8 @@ import type {
 	AutonomySettings,
 	SettingsScope,
 } from "../../core/settings/settings-schema.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { AUTONOMY_MODES, type AutoLearnState } from "./auto-learn-controller.ts";
 import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
 
@@ -84,13 +86,13 @@ export function formatAutonomyStatus(
 		`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
 		`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
 		reflectionLine,
-		`Running tenant learners: ${running.length}/${settings.maxConcurrentLearners}`,
-		`Other tenant learners: ${otherTenantRunning}`,
+		`Running learners: ${running.length}/${settings.maxConcurrentLearners}`,
+		`Learners of other projects: ${otherTenantRunning}`,
 		"History retention: 7 days for internal Auto Learn prompts/logs/sessions",
 		`Learning authority: ${safety}`,
 		"Execution authority: /edge list (independent of learning preset)",
 		`Audit/log dir: ${host.getAutoLearnDataDir()}`,
-		`Tenant artifact dir: ${host.getAutoLearnTenantDataDir()}`,
+		`Artifact folder: ${host.getAutoLearnTenantDataDir()}`,
 		"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",
 	].join("\n");
 }
@@ -126,8 +128,10 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 		void host.session
 			.rollbackLearningWrite(auditId)
 			.then((result) => {
+				if (!result.ok)
+					harnessLog.debug("ui", "a learning rollback was skipped", { auditId, reason: result.reason });
 				host.showStatus(
-					result.ok ? `Rolled back learning change ${auditId}.` : `Rollback skipped: ${result.reason}`,
+					result.ok ? `Rolled back learning change ${auditId}.` : `Rollback skipped: ${plainLabel(result.reason)}`,
 				);
 			})
 			.catch((error: unknown) => {
@@ -162,11 +166,12 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 			.runResearchLaneOnce()
 			.then((outcome) => {
 				if (!outcome.started) {
-					host.showStatus(`Research lane skipped: ${outcome.skipReason ?? "unknown"}`);
+					harnessLog.debug("ui", "research lane skipped", { skipReason: outcome.skipReason });
+					host.showStatus(`Research lane skipped: ${plainLabel(outcome.skipReason ?? "unknown")}`);
 					return;
 				}
 				const status = outcome.record?.status ?? "unknown";
-				const reason = outcome.record?.reasonCode ? ` (${outcome.record.reasonCode})` : "";
+				const reason = outcome.record?.reasonCode ? ` (${plainLabel(outcome.record.reasonCode)})` : "";
 				host.showStatus(`Research lane ${status}${reason}`);
 			})
 			.catch((error: unknown) => {

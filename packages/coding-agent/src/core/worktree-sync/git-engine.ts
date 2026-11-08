@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
@@ -1227,7 +1228,7 @@ const DEFAULT_GATE_TIMEOUT_MS = 900_000;
  * broadcasts in the same critical section.
  */
 export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs): Promise<LandResult> {
-	return withActiveLaneLifecycleLock<LandResult>(deps, args.laneKey, async (ctx, lane) => {
+	const result = await withActiveLaneLifecycleLock<LandResult>(deps, args.laneKey, async (ctx, lane) => {
 		if (ownerConflicts(deps, lane)) {
 			return {
 				code: "lane_owner_conflict",
@@ -1435,6 +1436,9 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 			await releaseIntegrationLock(ctx.paths, acquisition.token, { now: deps.now });
 		}
 	});
+	if (result.code !== "ok")
+		harnessLog.warn("worktree", "a lane landing was refused", { laneKey: args.laneKey, code: result.code });
+	return result;
 }
 
 export interface SyncStatusArgs {

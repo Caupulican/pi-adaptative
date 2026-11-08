@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readdirSync, unlinkSync, watch } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { stateFile } from "../agent-paths.ts";
 import {
@@ -383,8 +384,13 @@ export class WorkerWriteReservationStore {
 						})),
 				};
 			}
-			if (store.reservations.length >= MAX_RESERVATIONS)
+			if (store.reservations.length >= MAX_RESERVATIONS) {
+				harnessLog.warn("workers", "a worker write reservation was refused: reservation capacity reached", {
+					taskId,
+					count: store.reservations.length,
+				});
 				return { kind: "blocked", reasonCode: "reservation_capacity_reached" };
+			}
 			const record: PersistedReservation = {
 				reservationId: randomUUID(),
 				parentSessionId,
@@ -401,6 +407,11 @@ export class WorkerWriteReservationStore {
 			};
 			store.reservations.push(record);
 			writeStore(filePath, store);
+			harnessLog.info("workers", "a worker write reservation was acquired", {
+				taskId,
+				attemptId,
+				scopes: writeScopes.length,
+			});
 			return { kind: "granted", lease: leaseFromRecord(filePath, record) };
 		});
 	}
@@ -418,11 +429,22 @@ export class WorkerWriteReservationStore {
 		const expectedFilePath = reservationFile(this.agentDir, repositoryRoot);
 		if (lease.filePath !== expectedFilePath)
 			throw new TypeError("Worker write reservation lease does not belong to this agent state.");
-		return withFileLockSync(
+		const result = withFileLockSync(
 			expectedFilePath,
 			() => this.releaseLocked(expectedFilePath, repositoryRoot, ownerId, lease),
 			lockOptions,
 		);
+		if (result.kind === "released")
+			harnessLog.info("workers", "a worker write reservation was released", {
+				taskId: lease.taskId,
+				attemptId: lease.attemptId,
+			});
+		else if (result.kind === "stale_fence")
+			harnessLog.warn("workers", "a worker write reservation release was stale; the lease no longer owns it", {
+				taskId: lease.taskId,
+				attemptId: lease.attemptId,
+			});
+		return result;
 	}
 
 	private releaseLocked(

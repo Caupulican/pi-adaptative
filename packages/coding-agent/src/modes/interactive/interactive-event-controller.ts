@@ -10,6 +10,7 @@ import type { ProviderAdmissionWaitEvent } from "../../core/provider-admission/g
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { WaitEndReport } from "../../core/util/wait.ts";
 import { getToolCallRepairInfo } from "../../kernel/agent-loop.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
@@ -61,9 +62,22 @@ function admissionWaitEnd(event: ProviderAdmissionWaitEvent): AdmissionWaitEndLi
 		case "unavailable":
 			return { label: `${event.provider} not admitted ${after}: ${end.cause}`, status: "failure" };
 		case "steered":
+			return { label: `${event.provider} wait interrupted by a new message ${after}`, status: "neutral" };
 		case "disposed":
-			return { label: `${event.provider} wait ended ${end.kind} ${after}`, status: "neutral" };
+			return { label: `${event.provider} wait closed ${after}`, status: "neutral" };
 	}
+}
+
+const COMPACTION_FALLBACK_CAUSE_TEXT: Partial<Record<string, string>> = {
+	unresolved: "the summary model is not configured",
+	unauthed: "the summary model has no credentials",
+	exhausted: "the summary model's quota is used up",
+};
+
+/** The compaction fallback cause as the owner reads it; the raw cause stays in the harness log. */
+function compactionFallbackCauseText(cause: string): string {
+	harnessLog.debug("ui", "a compaction used its fallback checkpoint", { cause });
+	return COMPACTION_FALLBACK_CAUSE_TEXT[cause.replace(/^fallback:/, "")] ?? "the summary model was unavailable";
 }
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -374,8 +388,8 @@ export class InteractiveEventController {
 						id: backgroundToolActivityId(task.taskId),
 						toolCallId: task.toolCallId,
 						kind: "tool" as const,
-						label: task.description.trim() || `${task.toolName} · ${task.taskId}`,
-						tag: task.toolName,
+						label: task.description.trim() || this.port.toolActivityLabel(task.toolName),
+						tag: this.port.toolActivityLabel(task.toolName),
 						...(task.startedAt ? { originAt: task.startedAt } : {}),
 						...(typeof task.elapsedBeforeHandoffMs === "number"
 							? { elapsedBeforeMs: task.elapsedBeforeHandoffMs }
@@ -648,14 +662,15 @@ export class InteractiveEventController {
 					if (event.reason === "manual") this.port.showError("Compaction cancelled");
 				} else if (event.result) {
 					const fallback = event.result.deterministic;
+					const fallbackText = fallback ? compactionFallbackCauseText(fallback.cause) : undefined;
 					this.port.activityLane?.finish("runtime:compaction", fallback ? "neutral" : "success", {
 						id: "runtime:compaction",
 						kind: "runtime",
-						label: fallback ? `Context compacted (fallback: ${fallback.cause})` : "Context compacted",
+						label: fallbackText ? `Context compacted (fallback: ${fallbackText})` : "Context compacted",
 					});
-					if (fallback) {
+					if (fallbackText) {
 						this.port.showError(
-							`Compaction fell back to a deterministic checkpoint (${fallback.cause}): the narrative summary was lost; only files and task facts were kept.`,
+							`Compaction fell back to a simpler checkpoint (${fallbackText}): the narrative summary was lost; only files and task facts were kept.`,
 						);
 					}
 					await this.port.rebuildChatFromMessages({ checkpointWhenDeferred: true });
@@ -719,9 +734,12 @@ export class InteractiveEventController {
 			case "provider_admission_wait": {
 				const id = `runtime:admission:${event.lane}:${event.provider}${event.account ? `#${event.account}` : ""}`;
 				if (event.phase === "start") {
-					const where = event.account
-						? `${event.provider} (account ${event.account.slice(0, 8)})`
-						: event.provider;
+					if (event.account)
+						harnessLog.debug("ui", "a provider admission wait is on a keyed account", {
+							provider: event.provider,
+							account: event.account,
+						});
+					const where = event.provider;
 					const resetsIn =
 						event.expectedMs !== undefined ? `, resets in ${Math.ceil(event.expectedMs / 1000)}s` : "";
 					const why =

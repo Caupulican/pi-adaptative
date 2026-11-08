@@ -1,4 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ModelCapabilityClass } from "../capability-tier.ts";
 import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelToolProbeVerdict } from "../models/adaptation-store.ts";
@@ -72,6 +73,37 @@ export interface AutoSelectionResult {
 
 const CAPABILITY_RANK: Record<ModelCapabilityClass, number> = { full: 3, lean: 2, minimal: 1, chat: 0 };
 
+/** The choice last logged per tier (`""` when no candidate was admitted): a switch or an exhaustion is logged once, not per evaluation. */
+const loggedTierChoice = new Map<AutoSelectionTier, string>();
+
+function logSelection(result: AutoSelectionResult, poolSize: number): void {
+	const ref = result.chosen?.ref ?? "";
+	const previous = loggedTierChoice.get(result.tier);
+	loggedTierChoice.set(result.tier, ref);
+	harnessLog.debug("router", "the router evaluated a tier", () => ({
+		tier: result.tier,
+		chosen: ref || undefined,
+		eligible: result.eligible,
+		pool: poolSize,
+		subscriptionPreferred: result.subscriptionPreferred,
+		reason: result.reason,
+	}));
+	if (previous === ref) return;
+	if (ref === "") {
+		harnessLog.warn("router", "no model is admitted for a tier", () => ({
+			tier: result.tier,
+			pool: poolSize,
+			reason: result.reason,
+		}));
+		return;
+	}
+	harnessLog.info(
+		"router",
+		previous === undefined ? "the router selected a model for a tier" : "the router switched a tier's model",
+		() => ({ tier: result.tier, model: ref, previous: previous || undefined, reason: result.reason }),
+	);
+}
+
 export function routerSurfaceForTier(tier: AutoSelectionTier): FitnessGatedSurface {
 	return tier === "cheap" ? "router_cheap" : tier === "medium" ? "router_medium" : "router_expensive";
 }
@@ -139,18 +171,23 @@ export function selectAutoTierModel(
 		.filter((candidate) => candidate.admitted)
 		.sort((a, b) => compareCandidates(tier, deps.preference, a, b));
 	const rejected = evaluated.filter((candidate) => !candidate.admitted);
-	const chosen = admitted[0];
 	const subscriptionEligible = admitted.filter((candidate) => candidate.subscription).length;
+	// A rule, not a ranking: while any subscription model is admitted for the tier, a metered (API key) model is never chosen.
+	// Metered models stay in the list and are chosen only when no subscription model is admitted, or under `balanced`.
+	const chosen =
+		deps.preference === "subscription-first" && subscriptionEligible > 0
+			? admitted.find((candidate) => candidate.subscription)
+			: admitted[0];
 	const subscriptionPreferred =
 		deps.preference === "subscription-first" &&
 		chosen?.subscription === true &&
-		admitted.some((candidate) => !candidate.subscription && candidate.evidenceClass === chosen.evidenceClass);
+		admitted.some((candidate) => !candidate.subscription);
 	const reason = !chosen
 		? pool.length === 0
 			? "candidate pool is empty"
 			: `no admitted candidate (${Array.from(new Set(rejected.flatMap((c) => c.rejectReasons))).join(", ")})`
 		: `${chosen.evidenceClass}${subscriptionPreferred ? " + subscription-preferred" : ""} · fitness ${formatFitness(chosen.fitness)}`;
-	return {
+	const result: AutoSelectionResult = {
 		tier,
 		candidates: [...admitted, ...rejected],
 		chosen,
@@ -159,6 +196,8 @@ export function selectAutoTierModel(
 		subscriptionPreferred,
 		reason,
 	};
+	logSelection(result, pool.length);
+	return result;
 }
 
 export function formatAutoSelectionCandidate(candidate: AutoSelectionCandidate): string {

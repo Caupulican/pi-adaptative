@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, opendirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { Value } from "typebox/value";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { isRecordedOnHost, readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { judgeOwner, ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { readOwnProcessStartTime } from "../../kernel/reliability/process-tree.ts";
@@ -1517,6 +1518,8 @@ export class CollaborationJobStore {
 		});
 		// A closed member can no longer authenticate, so its credential goes once the close is durable.
 		if (closed) removePeerCredentialFile(this.directory, id, agentId);
+		if (finished)
+			harnessLog.info("collab", "a collaboration agent stop finished", { jobId: id, agentId, status, closed });
 		return finished;
 	}
 	/**

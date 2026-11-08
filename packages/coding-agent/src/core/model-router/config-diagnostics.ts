@@ -22,8 +22,11 @@ function collectModelRouterModelDiagnostics(
 	settingKey: "modelRouter.cheapModel" | "modelRouter.mediumModel" | "modelRouter.expensiveModel",
 	modelPattern: string | undefined,
 	modelRegistry: ConfigDiagnosticsModelSource,
+	selectionMode: ModelRouterStatusSettings["selectionMode"],
 ): string[] {
 	if (!modelPattern) {
+		// Outside manual mode an unset tier is chosen automatically from the candidate pool: nothing to configure.
+		if (selectionMode !== "manual") return [];
 		return [`Model router ${label} is unset; configure ${settingKey} or disable modelRouter.enabled.`];
 	}
 	const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry });
@@ -70,18 +73,21 @@ export function collectModelRouterConfigDiagnostics(
 			"modelRouter.cheapModel",
 			settings.cheapModel,
 			modelRegistry,
+			settings.selectionMode,
 		),
 		...collectModelRouterModelDiagnostics(
 			"medium model",
 			"modelRouter.mediumModel",
 			settings.mediumModel,
 			modelRegistry,
+			settings.selectionMode,
 		),
 		...collectModelRouterModelDiagnostics(
 			"expensive model",
 			"modelRouter.expensiveModel",
 			settings.expensiveModel,
 			modelRegistry,
+			settings.selectionMode,
 		),
 		...(settings.fitnessGate
 			? [

@@ -15,6 +15,7 @@
  */
 
 import { tmpdir } from "node:os";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import type { EdgeOperation } from "../autonomy/edge-policy.ts";
 import {
@@ -103,6 +104,11 @@ interface Decided {
 	readonly verdict: OperationVerdict;
 }
 
+/** The kind of a failure for a log line. Its message is not logged: it can carry the request or the command. */
+function errorName(error: unknown): string {
+	return error instanceof Error ? error.name : "unknown";
+}
+
 export interface PrewarmCall {
 	readonly toolName: string;
 	readonly args: unknown;
@@ -167,6 +173,12 @@ export class OperationGate {
 			return undefined;
 		}
 		if (this.deps.isGranted(thirdParty)) {
+			harnessLog.debug("edge", "an operation ran under the owner's grant", () => ({
+				tool: toolName,
+				actor,
+				edgeClass: "operation.irreversible",
+				action: verdict.action,
+			}));
 			this.deps.notify(
 				`System One: ${subject}: ${verdict.finding}; it runs under your operation.irreversible grant.`,
 			);
@@ -174,19 +186,39 @@ export class OperationGate {
 		}
 		const refusal = `System One ${verdict.action === "refuse" ? "refused" : "held"} ${subject}: ${verdict.finding}.`;
 		if (verdict.action === "refuse" || actor === "worker" || !this.deps.askOperator) {
+			harnessLog.debug("edge", "an operation was stopped without asking the operator", () => ({
+				tool: toolName,
+				actor,
+				edgeClass: "operation.irreversible",
+				action: verdict.action,
+			}));
 			this.deps.notify(refusal);
 			return {
 				block: true,
 				reason: `${refusal} ${actor === "worker" ? "Report the unresolved boundary to the parent or do the work another way." : "Ask the owner before running it, or do the work another way."}`,
 			};
 		}
+		harnessLog.warn("edge", "an operation is held for the operator", () => ({
+			tool: toolName,
+			actor,
+			edgeClass: "operation.irreversible",
+		}));
 		const answer = await this.deps.askOperator(
 			{ class: "operation.irreversible", operation: triage.operation, reason: verdict.finding },
 			signal,
 		);
-		return answer.authorized
-			? undefined
-			: { block: true, reason: answer.reason ?? refusal, correction: answer.correction };
+		if (answer.authorized) {
+			harnessLog.info("edge", "the operator allowed a held operation", () => ({
+				tool: toolName,
+				edgeClass: "operation.irreversible",
+			}));
+			return undefined;
+		}
+		harnessLog.debug("edge", "the operator declined a held operation", () => ({
+			tool: toolName,
+			edgeClass: "operation.irreversible",
+		}));
+		return { block: true, reason: answer.reason ?? refusal, correction: answer.correction };
 	}
 
 	/**
@@ -224,7 +256,12 @@ export class OperationGate {
 			todo.push({ key, toolName: call.toolName, triage });
 		}
 		if (todo.length === 0) return;
-		const never = () => undefined;
+		const never = (error: unknown): undefined => {
+			harnessLog.debug("edge", "a pre-warm judgment did not finish; the call is judged when it runs", () => ({
+				error: errorName(error),
+			}));
+			return undefined;
+		};
 		const request = this.requestFor(caller.thirdParty);
 		// The batch asks every call against the owner's request; with none to read, each call is judged on its effects.
 		if (todo.length === 1 || request === undefined) {
@@ -326,6 +363,14 @@ export class OperationGate {
 		started: number,
 	): void {
 		try {
+			const durationMs = this.now() - started;
+			harnessLog.debug("edge", "system one decided an operation", () => ({
+				tool: toolName,
+				source: source === "jev" ? "system_one" : source,
+				action: verdict.action,
+				notable: verdict.notable,
+				durationMs,
+			}));
 			this.deps.recordDecision?.({
 				tool: toolName,
 				identityHash: operationIdentityHash(triage.identity, triage.operation),
@@ -333,7 +378,7 @@ export class OperationGate {
 				action: verdict.action,
 				notable: verdict.notable,
 				finding: verdict.finding,
-				durationMs: this.now() - started,
+				durationMs,
 			});
 		} catch (error) {
 			// A measurement that cannot be written never changes a verdict; it is reported once.
@@ -344,6 +389,9 @@ export class OperationGate {
 	private reportStoreFailure(error: unknown): void {
 		if (this.storeFailureReported) return;
 		this.storeFailureReported = true;
+		harnessLog.warn("edge", "the operation store failed; readings stay in memory", () => ({
+			error: errorName(error),
+		}));
 		this.deps.notify(
 			`System One: the shell-gate store failed (${error instanceof Error ? error.message : String(error)}); effect readings stay in memory and decisions are not recorded.`,
 		);
@@ -399,8 +447,17 @@ export class OperationGate {
 				if (request !== undefined) {
 					try {
 						asked = readOperationRequest(await ask([OPERATION_REQUEST_ID]));
-					} catch {
+					} catch (error) {
 						signal?.throwIfAborted();
+						harnessLog.warn(
+							"edge",
+							"system one could not read the owner's request; the call is judged on its effects",
+							() => ({
+								tool: toolName,
+								actor,
+								error: errorName(error),
+							}),
+						);
 					}
 				}
 				const verdict = verdictFromReadings(remembered, asked, actor);
@@ -423,6 +480,13 @@ export class OperationGate {
 			return { verdict };
 		} catch (error) {
 			signal?.throwIfAborted();
+			harnessLog.warn("edge", "system one could not judge an operation", () => ({
+				tool: toolName,
+				actor,
+				error: errorName(error),
+				timedOut: errorName(error) === "TimeoutError",
+				durationMs: this.now() - started,
+			}));
 			const verdict = unavailableOperationVerdict(error, actor);
 			this.record(toolName, triage, "outage", verdict, started);
 			return { verdict };

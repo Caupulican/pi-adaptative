@@ -183,12 +183,12 @@ const openPane = (anchor) => {
 	herdr("pane", "zoom", id, "--on");
 	return id;
 };
-const launch = (pane, cwd, extra = "") =>
+const launch = (pane, cwd, extra = "", agentDir = AGENT) =>
 	herdr(
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${AGENT} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
+		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${agentDir} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
 	);
 const type = async (pane, text) => {
 	herdr("pane", "send-text", pane, text);
@@ -533,6 +533,108 @@ const SCENARIOS = [
 		await waitFor("the orchestrator's bot", () => botRecord("helper")?.createdBy === "root", 180_000, 3000);
 		return "chief (leader) created scribe, clerk (not a leader) created nothing and named who to ask, the orchestrator created helper";
 	}),
+	scenario("s14", "a machine joins a hub as a bot with a remote mark and answers", async () => {
+		// A second pi with its own agent directory is the other machine; the link runs over localhost, whichever machine this is.
+		const remoteAgent = join(RUN, "remote-agent");
+		mkdirSync(remoteAgent, { recursive: true });
+		copyFileSync(join(AGENT, "auth.json"), join(remoteAgent, "auth.json"));
+		chmodSync(join(remoteAgent, "auth.json"), 0o600);
+		copyFileSync(join(AGENT, "settings.json"), join(remoteAgent, "settings.json"));
+		await type(state.main, "/chat root");
+		await sleep(1500);
+		await type(state.main, "/remote listen 0");
+		// The hub's own records hold what the owner would carry over (the pane wraps a long token across lines).
+		const readJsonIn = (agentDir, file) => (existsSync(join(agentDir, "remote", file)) ? JSON.parse(readFileSync(join(agentDir, "remote", file), "utf8")) : undefined);
+		const readJson = (file) => readJsonIn(AGENT, file);
+		const port = await waitFor("the hub's port", () => readJson("hub.json")?.port || undefined, 30_000, 1000);
+		await type(state.main, "/remote add lab");
+		const token = await waitFor(
+			"the join token",
+			() => {
+				const machine = readJson("machines.json")?.find((m) => m.name === "lab");
+				const hub = readJson("identity.json");
+				return machine && hub ? `${hub.name}.lab.${machine.secret}` : undefined;
+			},
+			30_000,
+			1000,
+		);
+		const second = openPane();
+		launch(second, SANDBOX, "", remoteAgent);
+		await waitFor("the prompt on the second machine", () => /Ask anything/.test(screen(second, 60)), 90_000, 2000, () => screen(second, 20));
+		await type(second, `/remote join 127.0.0.1:${port} ${token}`);
+		await waitFor(
+			"lab connected",
+			async () => {
+				await type(state.main, "/remote status");
+				return /lab connected/.test(screen(state.main, 60));
+			},
+			90_000,
+			4000,
+		);
+		// The record says the bot is remote; the roster shows it with the computer mark (a long bot list wraps, so the mark is looked for anywhere on screen).
+		const labRecord = (Array.isArray(botStore().bots) ? botStore().bots : Object.values(botStore().bots ?? {})).find((b) => b.agentId === "lab");
+		if (labRecord?.remote !== true) throw new Error("the joined machine's bot is not recorded as remote");
+		if (!screen(state.main, 200).includes("💻")) throw new Error("the joined machine does not show with the computer mark");
+		await type(state.main, "/bot msg lab Reply with only the result of 6 times 7.");
+		const chatFile = join(AGENT, "remote", "chats", "lab.jsonl");
+		const reply = await waitFor(
+			"lab's answer",
+			() => existsSync(chatFile) && readFileSync(chatFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((entry) => entry.from === "machine" && /42/.test(entry.text)),
+			240_000,
+			3000,
+		);
+		// A loop of hubs is refused: the machine that joined this hub becomes a hub too, and this hub tries to join it.
+		await type(second, "/remote listen 0");
+		const secondPort = await waitFor("the second hub's port", () => readJsonIn(remoteAgent, "hub.json")?.port || undefined, 30_000, 1000);
+		await type(second, "/remote add up");
+		const secondToken = await waitFor(
+			"the second hub's token",
+			() => {
+				const machine = readJsonIn(remoteAgent, "machines.json")?.find((m) => m.name === "up");
+				const hub = readJsonIn(remoteAgent, "identity.json");
+				return machine && hub ? `${hub.name}.up.${machine.secret}` : undefined;
+			},
+			30_000,
+			1000,
+		);
+		await type(state.main, `/remote join 127.0.0.1:${secondPort} ${secondToken}`);
+		await waitFor("the loop refused", () => /loop of hubs/.test(JSON.stringify(readJson("links.json") ?? {})), 90_000, 3000);
+		return `lab joined over the link, shows as a remote bot and answered: ${String(reply.text).slice(0, 60)}; a loop of hubs was refused`;
+	}),
+	scenario("s15", "a default setup does a plain edit in few steps and starts a worker without a fight", async () => {
+		// A fresh agent directory with the owner's logins and no settings at all: what a first-time setup is.
+		const freshAgent = join(RUN, "default-agent");
+		const project = join(SANDBOX, "default-setup-project", "packages", "app");
+		mkdirSync(freshAgent, { recursive: true });
+		mkdirSync(project, { recursive: true });
+		copyFileSync(join(AGENT, "auth.json"), join(freshAgent, "auth.json"));
+		chmodSync(join(freshAgent, "auth.json"), 0o600);
+		writeFileSync(join(project, "util.ts"), 'export function slugify(text: string): string {\n  return text.toLowerCase().replace(/\\s+/g, "-")\n}\n');
+		const pane = openPane();
+		launch(pane, project, "", freshAgent);
+		await waitFor("the prompt on the default setup", () => /Ask anything/.test(screen(pane, 60)), 90_000, 2000, () => screen(pane, 20));
+		const sessionCalls = () => {
+			const root = join(freshAgent, "sessions");
+			if (!existsSync(root)) return { calls: [], bounced: 0 };
+			const files = readdirSync(root, { recursive: true }).filter((name) => String(name).endsWith(".jsonl")).map((name) => join(root, String(name)));
+			const rows = files.flatMap((file) => jsonl(file));
+			const calls = rows.flatMap((row) => (row.message?.role === "assistant" ? row.message.content.filter((c) => c.type === "toolCall").map((c) => c.name) : []));
+			const bounced = rows.filter((row) => row.message?.role === "toolResult" && row.message?.isError && /\[harness\]/.test(JSON.stringify(row.message.content))).length;
+			return { calls, bounced };
+		};
+		await type(pane, "In util.ts, make slugify also strip punctuation, and add a one-line JSDoc comment above it. Then tell me what you changed.");
+		await waitFor("the edit", () => /\/\*\*/.test(readFileSync(join(project, "util.ts"), "utf8")), 180_000, 3000);
+		await sleep(8000);
+		const first = sessionCalls();
+		if (first.bounced > 0) throw new Error(`the harness bounced ${first.bounced} call(s) on a plain edit: ${first.calls.join(", ")}`);
+		if (first.calls.length > 6) throw new Error(`a plain edit took ${first.calls.length} tool calls (${first.calls.join(", ")}); the harness should leave read, edit, answer`);
+		await type(pane, "Create one file in this folder, one-a.txt, containing alpha. Use a worker for it, then tell me when it exists.");
+		await waitFor("the worker's file", () => existsSync(join(project, "one-a.txt")), 240_000, 3000);
+		const second = sessionCalls();
+		if (second.bounced > 0) throw new Error(`the harness bounced ${second.bounced} call(s) while starting a worker: ${second.calls.join(", ")}`);
+		if (second.calls.length - first.calls.length > 8) throw new Error(`starting one worker took ${second.calls.length - first.calls.length} tool calls`);
+		return `a plain edit took ${first.calls.length} tool calls and a worker start ${second.calls.length - first.calls.length}, with no bounced call`;
+	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];
@@ -587,7 +689,7 @@ const unsure = results.filter((r) => r.status === "INCONCLUSIVE");
 const skipped = results.filter((r) => r.status === "skipped");
 writeFileSync(join(REPORT_DIR, "report.json"), JSON.stringify({ at: stamp, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1));
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
-for (const authFile of [join(AGENT, "auth.json"), join(RUN, "quota-95", "agent", "auth.json"), join(RUN, "quota-0.01", "agent", "auth.json")])
+for (const authFile of [join(AGENT, "auth.json"), join(RUN, "remote-agent", "auth.json"), join(RUN, "default-agent", "auth.json"), join(RUN, "quota-95", "agent", "auth.json"), join(RUN, "quota-0.01", "agent", "auth.json")])
 	if (existsSync(authFile)) handBackLogins(authFile);
 if (!KEEP && failed.length === 0 && unsure.length === 0) rmSync(RUN, { recursive: true, force: true });
 console.log(`\nreport: ${join(REPORT_DIR, "report.json")}`);

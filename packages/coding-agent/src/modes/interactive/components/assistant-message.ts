@@ -9,7 +9,9 @@ import {
 	VisibilityContainer,
 } from "@caupulican/pi-tui";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
+import { harnessLog } from "../../../kernel/harness-log.ts";
 import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../../kernel/index.ts";
+import { isModelFacingText } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
 import type { ReplyByline } from "./reply-byline.ts";
@@ -24,6 +26,18 @@ export interface AssistantMessageComponentOptions {
 	transformMarkdown?: MarkdownTransformFn;
 	/** Who wrote this reply, shown as one row above it (see reply-byline.ts). */
 	byline?: ReplyByline;
+}
+
+/**
+ * An error the owner can read. A message led by a machine code (`NATIVE_TOOL_PROTOCOL_RESIDUE: …`) or written as a
+ * JSON record shows a plain sentence instead; the raw text stays in the harness log.
+ */
+function ownerErrorText(raw: string): string {
+	if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?::|\s|$)/.test(raw) || /^\s*[[{]/.test(raw) || isModelFacingText(raw)) {
+		harnessLog.debug("ui", "an assistant turn error is kept in the log, not on screen", () => ({ error: raw }));
+		return "The model turn failed with an internal error. Details are in the log.";
+	}
+	return raw;
 }
 
 /**
@@ -236,7 +250,7 @@ export class AssistantMessageComponent extends Container {
 			if (message.stopReason === "aborted") {
 				const abortMessage =
 					message.errorMessage && message.errorMessage !== "Request was aborted"
-						? message.errorMessage
+						? ownerErrorText(message.errorMessage)
 						: "Operation aborted";
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
@@ -257,7 +271,7 @@ export class AssistantMessageComponent extends Container {
 					),
 				);
 			} else if (message.stopReason === "error") {
-				const errorMsg = message.errorMessage || "Unknown error";
+				const errorMsg = ownerErrorText(message.errorMessage || "Unknown error");
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
 			} else if (!this.isStreaming && !hasReadableContent) {

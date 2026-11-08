@@ -29,6 +29,7 @@
  * strictly worse than leaving the raw content in place.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import {
@@ -484,6 +485,14 @@ export function enforcePromptPolicy(
 		});
 	}
 
+	harnessLog.debug("context", "prompt policy checked the tool results", () => ({
+		items: items.length,
+		enforced: items.filter((item) => item.enforced).length,
+		inPlace: items.filter((item) => item.enforced && item.projectionPlacement === "in_place").length,
+		tailOverlays: items.filter((item) => item.projectionPlacement === "tail_overlay").length,
+		frozenPreserved: items.filter((item) => item.skipReason === "frozen_prefix_preserved").length,
+		originalChars: items.reduce((sum, item) => sum + (item.enforced ? (item.originalChars ?? 0) : 0), 0),
+	}));
 	return {
 		messages: changed ? nextMessages : messages,
 		transientMessages,

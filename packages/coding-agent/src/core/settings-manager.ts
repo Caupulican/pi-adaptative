@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { DEFAULT_COMPACTION_SETTINGS } from "../kernel/compaction/compaction.ts";
+import { isLogLevel, type LogLevel } from "../kernel/harness-log.ts";
 import { withHostFileWrite } from "../utils/host-write-transition.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
@@ -92,6 +93,7 @@ import {
 	DEFAULT_WORKER_DELEGATION_ENABLED,
 	DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
 	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
+	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
@@ -2474,8 +2476,26 @@ export class SettingsManager {
 		};
 	}
 
+	getLoggingSettings(): { level?: LogLevel; categories?: string[]; maxFileMb?: number; retainDays?: number } {
+		const logging = this.settings.logging;
+		if (!logging || typeof logging !== "object") return {};
+		const categories = Array.isArray(logging.categories)
+			? logging.categories.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+			: undefined;
+		return {
+			...(isLogLevel(logging.level) ? { level: logging.level } : {}),
+			...(categories && categories.length > 0 ? { categories } : {}),
+			...(typeof logging.maxFileMb === "number" && logging.maxFileMb > 0 && logging.maxFileMb <= 1024
+				? { maxFileMb: logging.maxFileMb }
+				: {}),
+			...(typeof logging.retainDays === "number" && logging.retainDays > 0 && logging.retainDays <= 365
+				? { retainDays: logging.retainDays }
+				: {}),
+		};
+	}
+
 	getOrchestratorSettings(): { delegationGate: boolean } {
-		return { delegationGate: this.settings.orchestrator?.delegationGate ?? true };
+		return { delegationGate: this.settings.orchestrator?.delegationGate ?? false };
 	}
 
 	getScoutSettings(): { enabled: boolean; model: string } {
@@ -4000,6 +4020,12 @@ export class SettingsManager {
 			maxConcurrent: sanitizeIntegerSetting(
 				configured.maxConcurrent,
 				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
+				1,
+				MAX_WORKER_DELEGATION_MAX_CONCURRENT,
+			),
+			maxConcurrentBurst: sanitizeIntegerSetting(
+				configured.maxConcurrentBurst,
+				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT_BURST,
 				1,
 				MAX_WORKER_DELEGATION_MAX_CONCURRENT,
 			),

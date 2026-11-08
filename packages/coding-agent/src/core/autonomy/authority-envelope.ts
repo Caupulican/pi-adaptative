@@ -1,4 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 
 export type InteractionPolicy = "edge_only" | "interactive" | "fully_silent_until_terminal";
 
@@ -72,6 +73,19 @@ function isPathInside(childPath: string, parentRoot: string): boolean {
 }
 
 export function validateProposedAction(action: ProposedAction, envelope: AuthorityEnvelope): AuthorityValidationResult {
+	const result = checkProposedAction(action, envelope);
+	if (!result.allowed) {
+		// The authority is logged by its kind: its target path is not.
+		const authority = result.requiredAuthority ?? "";
+		harnessLog.debug("edge", "the envelope does not allow a proposed action", () => ({
+			edgeType: result.edgeType,
+			authority: authority.startsWith("external:") ? authority : authority.split(":")[0],
+		}));
+	}
+	return result;
+}
+
+function checkProposedAction(action: ProposedAction, envelope: AuthorityEnvelope): AuthorityValidationResult {
 	// 1. Filesystem write verification
 	if (action.targetPath) {
 		const target = resolve(action.targetPath);

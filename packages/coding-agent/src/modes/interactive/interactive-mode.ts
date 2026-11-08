@@ -84,6 +84,7 @@ import { collectSelfModificationSourceCandidates } from "../../core/system-promp
 import { describeCause, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
+import { turnOriginStampOf } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "../../presentation/keybinding-hints.ts";
@@ -112,6 +113,7 @@ import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BotTeamSelectorComponent } from "./components/bot-team-selector.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { ChannelMessageComponent } from "./components/channel-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
@@ -146,6 +148,7 @@ import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalig
 import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
 import * as proactivityCommands from "./proactivity-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
+import { promptHarnessReadiness } from "./readiness-prompt.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
 import { RuntimeStatusController } from "./runtime-status-controller.ts";
@@ -982,7 +985,27 @@ export class InteractiveMode {
 		}
 	}
 
+	/** The harness-ready check, off the start-up path: it prompts only when the owner has something to fix. */
+	private checkHarnessReadiness(): void {
+		setTimeout(() => {
+			void promptHarnessReadiness({
+				probe: () => this.session.backgroundLanes.probeWorkerReadiness(),
+				availableModels: () => this.modelRegistry.getAvailable(),
+				currentModel: () => this.session.model ?? undefined,
+				subscriptionProviders: () =>
+					this.modelRegistry.authStorage
+						.list()
+						.filter((provider) => this.modelRegistry.authStorage.get(provider)?.type === "oauth"),
+				currentWorkerDelegation: () => this.settingsManager.getGlobalSettings().workerDelegation ?? {},
+				saveWorkerDelegation: (settings) => this.settingsManager.setWorkerDelegationSettings(settings),
+				select: (title, options) => this.extensionUiHost.showExtensionSelector(title, options),
+				showStatus: (text) => this.showStatus(text),
+			});
+		}, 2000).unref();
+	}
+
 	private startAudienceChecks(): void {
+		this.checkHarnessReadiness();
 		// Start version check asynchronously
 		checkForNewPiVersion(this.version).then((newRelease) => {
 			if (newRelease) {
@@ -1690,6 +1713,12 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				await this.botTeamChat.handleChatCommand(text);
+				return;
+			}
+			if (text === "/remote" || text.startsWith("/remote ")) {
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.botTeamChat.handleRemoteCommand(text);
 				return;
 			}
 			if (text === "/bot" || text.startsWith("/bot ") || text === "/bots" || text.startsWith("/bots ")) {
@@ -2472,8 +2501,14 @@ export class InteractiveMode {
 					if (this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
 					}
-					const skillBlock = parseSkillBlock(textContent);
-					if (skillBlock) {
+					const origin = turnOriginStampOf(rawMessage);
+					const skillBlock = origin?.shown === undefined ? parseSkillBlock(textContent) : undefined;
+					if (origin?.shown !== undefined && origin.channel !== undefined) {
+						// A third party's words read as who wrote them and what they said, not as the frame the model gets.
+						this.chatContainer.addChild(
+							new ChannelMessageComponent(origin.channel, origin.shown, this.getMarkdownThemeWithSettings()),
+						);
+					} else if (skillBlock) {
 						// Render skill block (collapsible)
 						const component = new SkillInvocationMessageComponent(
 							skillBlock,

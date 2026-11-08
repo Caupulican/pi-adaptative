@@ -10,6 +10,7 @@ import {
 	estimateContextTokens,
 	prepareCompaction,
 } from "../../kernel/compaction/compaction.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ProviderRequestPrefixState, ProviderRequestSnapshotContext } from "../../kernel/index.ts";
 import {
 	type CustomMessage,
@@ -1800,6 +1801,9 @@ export class WorkerConversation {
 		if (this.metadataFile && this.core.metadataRevision) {
 			const metadataRevision = readWorkerConversationFileRevision(this.metadataFile);
 			if (!sameWorkerConversationFileRevision(this.core.metadataRevision, metadataRevision)) {
+				harnessLog.warn("workers", "a worker conversation's metadata changed under another owner", {
+					sessionId: this.resumeContext.sessionId,
+				});
 				throw new WorkerConversationOwnershipError("Worker conversation metadata changed under a different owner.");
 			}
 		}
@@ -2616,7 +2620,12 @@ export class WorkerConversationStore {
 		withSessionFileMutation(options.agentDir, sessionFile, resumeContext.sessionId, "create", () =>
 			writeFileAtomicSync(sessionFile, `${JSON.stringify(header)}\n`),
 		);
-		return this.recoverBirthContextLocked(options, resumeContext);
+		const conversation = this.recoverBirthContextLocked(options, resumeContext);
+		harnessLog.info("workers", "a worker conversation was created", {
+			logicalAgentId: options.logicalAgentId,
+			sessionId: resumeContext.sessionId,
+		});
+		return conversation;
 	}
 
 	private recoverBirthContextLocked(
@@ -2831,6 +2840,9 @@ export class WorkerConversationStore {
 					sessionRevisionChanged && birthContext.recoverBirthContextPrefix,
 				);
 				if (recoveredBirthSuffix) {
+					harnessLog.info("workers", "a worker conversation's birth context suffix was recovered", {
+						sessionId: context.sessionId,
+					});
 					const recoveredHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
 					if (verificationManager.getEntryCount() !== recoveredHead.entryCount) {
 						throw new WorkerConversationOwnershipError(
@@ -3009,6 +3021,7 @@ export class WorkerConversationStore {
 			metadataFile,
 			agentDir: options.agentDir,
 		});
+		harnessLog.debug("workers", "a worker conversation was loaded into the cache", { sessionId: context.sessionId });
 		return conversation;
 	}
 

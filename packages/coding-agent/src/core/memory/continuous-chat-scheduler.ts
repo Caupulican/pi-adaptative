@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	constructSqliteDatabase,
 	type SqliteDatabase,
@@ -58,6 +59,9 @@ interface WorkRow {
 /** Schema 2 orders deferred work by context endpoint (see `continuousChatNodeContextEnd`); schema 1 ordered it by arrival. */
 const SCHEDULER_SCHEMA_VERSION = 3;
 
+/** Successful claims between coarse progress lines. */
+const CLAIM_LOG_INTERVAL = 64;
+
 const RECOVERY_SCHEMA_SQL = `
 	CREATE TABLE IF NOT EXISTS recovery_only (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
 	CREATE TABLE IF NOT EXISTS recovery_configuration (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL) STRICT;
@@ -76,6 +80,13 @@ const CLAIM_INDEX_SQL = `
 	CREATE INDEX IF NOT EXISTS active_claim ON work(status,sequence);
 	CREATE INDEX IF NOT EXISTS ready_retry_by_context ON work(kind,${CONTEXT_END_SQL},level DESC) WHERE status='ready' AND attempts>0;
 `;
+
+/** Rows changed by the statement that `run` executed (the SQLite changes count). */
+function changesOf(result: unknown): number {
+	return typeof result === "object" && result !== null && "changes" in result && typeof result.changes === "number"
+		? result.changes
+		: 0;
+}
 
 /** Whether `a` is built before `b`: earlier context endpoint first, and at a tie the merge (higher level) first. */
 function precedes(a: ContinuousChatWorkItem, b: ContinuousChatWorkItem): boolean {
@@ -122,6 +133,7 @@ export class ContinuousChatScheduler {
 	private readonly db: SqliteDatabase;
 	private readonly path: string;
 	private readonly statements = new Map<string, SqliteStatement>();
+	private claimCount = 0;
 
 	private constructor(db: SqliteDatabase, path: string) {
 		this.db = db;
@@ -131,16 +143,22 @@ export class ContinuousChatScheduler {
 	static open(path: string, create: boolean): ContinuousChatScheduler {
 		if (!create && !existsSync(path))
 			throw new ContinuousChatCorruptError(path, "Committed scheduler database is missing");
-		return constructSqliteDatabase({ databasePath: path }, (db) => {
-			db.exec(
-				"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
-			);
-			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			// Schema 2 opens as is, schema 1 through its atomic migration, and an empty file only when creating.
-			if (version !== SCHEDULER_SCHEMA_VERSION && version !== 2 && version !== 1 && !(version === 0 && create))
-				throw new ContinuousChatCorruptError(path, "Unsupported ICM scheduler schema");
-			if (version === 0)
-				db.exec(`
+		try {
+			return constructSqliteDatabase({ databasePath: path }, (db) => {
+				db.exec(
+					"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
+				);
+				const version = db.prepare("PRAGMA user_version").get()?.user_version;
+				// Schema 2 opens as is, schema 1 through its atomic migration, and an empty file only when creating.
+				if (version !== SCHEDULER_SCHEMA_VERSION && version !== 2 && version !== 1 && !(version === 0 && create))
+					throw new ContinuousChatCorruptError(path, "Unsupported ICM scheduler schema");
+				if (version === 0)
+					withSqliteTransaction(
+						db,
+						() => {
+							// Another process may have created the scheduler between the unlocked version read and this lock.
+							if (db.prepare("PRAGMA user_version").get()?.user_version !== 0) return;
+							db.exec(`
 				CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL) STRICT;
 				CREATE TABLE IF NOT EXISTS work (
 				 level INTEGER NOT NULL, ordinal INTEGER NOT NULL, kind INTEGER NOT NULL CHECK(kind IN(0,1)),
@@ -155,15 +173,34 @@ export class ContinuousChatScheduler {
 				CREATE TABLE IF NOT EXISTS legacy_half (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
 				PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION};
 			`);
-			const scheduler = new ContinuousChatScheduler(db, path);
-			if (version === 1) scheduler.migrateFromSchema1();
-			if (version === 1 || version === 2)
-				scheduler.transaction(() => {
-					db.exec(RECOVERY_SCHEMA_SQL);
-					db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
-				});
-			return scheduler;
-		});
+						},
+						"ICM scheduler initialization",
+					);
+				const scheduler = new ContinuousChatScheduler(db, path);
+				if (version === 1 || version === 2)
+					scheduler.transaction(() => {
+						// Another process may have migrated the file between the unlocked version read and this lock.
+						const locked = db.prepare("PRAGMA user_version").get()?.user_version;
+						if (locked === SCHEDULER_SCHEMA_VERSION) return;
+						if (locked === 1) scheduler.migrateFromSchema1();
+						db.exec(RECOVERY_SCHEMA_SQL);
+						db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
+					});
+				if (version !== SCHEDULER_SCHEMA_VERSION)
+					harnessLog.info("memory", version === 0 ? "chat scheduler created" : "chat scheduler migrated", {
+						from: version,
+						to: SCHEDULER_SCHEMA_VERSION,
+					});
+				return scheduler;
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			harnessLog.warn("memory", "chat scheduler could not open", () => ({
+				busy: /locked|busy/i.test(reason),
+				reason,
+			}));
+			throw error;
+		}
 	}
 
 	close(): void {
@@ -174,23 +211,20 @@ export class ContinuousChatScheduler {
 			throw new Error("Cannot checkpoint provisional scheduler");
 	}
 	/**
-	 * Schema 1 claimed leaves before parents by arrival order and kept a leaf-preference counter in its metadata. In one
-	 * transaction this replaces its claim indexes with the context-ordered ones and drops the counter. Rows, claims, retry
+	 * Schema 1 claimed leaves before parents by arrival order and kept a leaf-preference counter in its metadata. Inside the
+	 * caller's write transaction this replaces its claim indexes with the context-ordered ones and drops the counter. Rows, claims, retry
 	 * state and the authority marker are untouched.
 	 */
 	private migrateFromSchema1(): void {
-		this.transaction(() => {
-			this.db.exec("DROP INDEX IF EXISTS fresh_candidate; DROP INDEX IF EXISTS ready_retry;");
-			this.db.exec(CLAIM_INDEX_SQL);
-			const body = this.sql("SELECT body FROM meta WHERE id=1").get()?.body;
-			if (typeof body === "string") {
-				const value: unknown = JSON.parse(body);
-				if (!isPlainRecord(value)) throw new ContinuousChatCorruptError(this.path, "Invalid scheduler metadata");
-				const { leafStreak: _leafStreak, ...meta } = value;
-				this.sql("UPDATE meta SET body=? WHERE id=1").run(JSON.stringify(meta));
-			}
-			this.db.exec("PRAGMA user_version=2");
-		});
+		this.db.exec("DROP INDEX IF EXISTS fresh_candidate; DROP INDEX IF EXISTS ready_retry;");
+		this.db.exec(CLAIM_INDEX_SQL);
+		const body = this.sql("SELECT body FROM meta WHERE id=1").get()?.body;
+		if (typeof body === "string") {
+			const value: unknown = JSON.parse(body);
+			if (!isPlainRecord(value)) throw new ContinuousChatCorruptError(this.path, "Invalid scheduler metadata");
+			const { leafStreak: _leafStreak, ...meta } = value;
+			this.sql("UPDATE meta SET body=? WHERE id=1").run(JSON.stringify(meta));
+		}
 	}
 	private sql(sql: string): SqliteStatement {
 		let statement = this.statements.get(sql);
@@ -381,13 +415,16 @@ export class ContinuousChatScheduler {
 		return { ...meta, running, builtLeafPrefix: Math.min(meta.nextLeaf, minimum ?? meta.nextLeaf) };
 	}
 	arrival(totalMessages?: number, recoveryKey?: string, forceRecovery = false): void {
+		let unparked = 0;
 		this.transaction(() => {
 			const meta = this.meta();
 			const previous = this.sql("SELECT identity FROM recovery_configuration WHERE id=1").get()?.identity;
 			if (forceRecovery || (recoveryKey !== undefined && recoveryKey !== previous)) {
-				this.sql(
-					"UPDATE work SET retry_after=? WHERE (level,ordinal) IN (SELECT level,ordinal FROM recovery_only)",
-				).run(meta.generation);
+				unparked = changesOf(
+					this.sql(
+						"UPDATE work SET retry_after=? WHERE (level,ordinal) IN (SELECT level,ordinal FROM recovery_only)",
+					).run(meta.generation),
+				);
 				this.sql("DELETE FROM recovery_only").run();
 				if (recoveryKey !== undefined)
 					this.sql(
@@ -403,6 +440,11 @@ export class ContinuousChatScheduler {
 			meta.revision++;
 			this.save(meta);
 		});
+		if (unparked > 0)
+			harnessLog.info("memory", "parked chat work released for retry", {
+				count: unparked,
+				reason: forceRecovery ? "retry" : "configuration changed",
+			});
 	}
 	/**
 	 * The head of one class of one kind, from an index. Never-attempted work and released work come in context order
@@ -437,7 +479,7 @@ export class ContinuousChatScheduler {
 	 * endpoint. Retry-class selection is not a global chronological order over every eligible row.
 	 */
 	claim(): ContinuousChatClaim | undefined {
-		return this.transaction(() => {
+		const claim = this.transaction(() => {
 			const snapshot = this.snapshot();
 			const { running: _running, builtLeafPrefix: _built, ...meta } = snapshot;
 			if (snapshot.running.length >= CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) return undefined;
@@ -479,8 +521,24 @@ export class ContinuousChatScheduler {
 				"UPDATE work SET status='running',claim_id=?,attempts=?,last_action=NULL WHERE level=? AND ordinal=?",
 			).run(claimId, (row?.attempts ?? 0) + 1, selected.level, selected.ordinal);
 			this.save(meta);
+			if (++this.claimCount % CLAIM_LOG_INTERVAL === 0)
+				harnessLog.debug("memory", "chat work claim progress", () => ({
+					claims: this.claimCount,
+					generation: meta.generation,
+					totalMessages: meta.totalMessages,
+					nextLeaf: meta.nextLeaf,
+					builtLeafPrefix: snapshot.builtLeafPrefix,
+					running: snapshot.running.length,
+				}));
 			return { level: selected.level, ordinal: selected.ordinal, claimId };
 		});
+		if (claim)
+			harnessLog.debug("memory", "chat work claimed", () => ({
+				level: claim.level,
+				ordinal: claim.ordinal,
+				claimId: claim.claimId,
+			}));
+		return claim;
 	}
 	abandon(claim: ContinuousChatClaim, action: ContinuousChatWorkAbandonment): void {
 		const reason =
@@ -488,7 +546,8 @@ export class ContinuousChatScheduler {
 				? Array.from(action.reason).slice(0, CONTINUOUS_CHAT_MAX_FAILURE_REASON_CHARACTERS).join("")
 				: null;
 		if (reason === "") throw new RangeError("Failure needs a reason");
-		this.transaction(() => {
+		const settled = this.transaction(() => {
+			let disposed: { attempts: number; waitsForRecovery: boolean } | undefined;
 			const meta = this.meta(),
 				row = this.row(claim);
 			if (!row || row.claimId !== claim.claimId) throw new Error("ICM work claim was superseded");
@@ -511,10 +570,26 @@ export class ContinuousChatScheduler {
 					claim.level,
 					claim.ordinal,
 				);
+				disposed = { attempts: row.attempts, waitsForRecovery: waitForRecovery };
 			}
 			meta.revision++;
 			this.save(meta);
+			return disposed;
 		});
+		if (settled !== undefined && action.kind === "fail")
+			harnessLog.warn("memory", "chat work parked", () => ({
+				level: claim.level,
+				ordinal: claim.ordinal,
+				attempts: settled.attempts,
+				waitsForRecovery: settled.waitsForRecovery,
+				reason,
+			}));
+		else if (settled !== undefined)
+			harnessLog.debug("memory", "chat work released", () => ({
+				level: claim.level,
+				ordinal: claim.ordinal,
+				attempts: settled.attempts,
+			}));
 	}
 	complete(item: ContinuousChatWorkItem, parent?: ContinuousChatWorkItem): void {
 		this.transaction(() => {
@@ -529,24 +604,30 @@ export class ContinuousChatScheduler {
 	/** Invalidate all work whose source or causal context may include the changed suffix. Claim counters never rewind. */
 	invalidateSuffix(cutoff: number): void {
 		if (!isNonNegativeSafeInteger(cutoff)) throw new RangeError("Invalid projection cutoff.");
+		let removed = 0;
 		this.transaction(() => {
 			const meta = this.meta();
 			this.sql("DELETE FROM recovery_only WHERE (ordinal+1)*(1<<level)>?").run(cutoff);
-			this.sql("DELETE FROM work WHERE (ordinal+1)*(1<<level)>?").run(cutoff);
+			removed = changesOf(this.sql("DELETE FROM work WHERE (ordinal+1)*(1<<level)>?").run(cutoff));
 			meta.nextLeaf = Math.min(meta.nextLeaf, cutoff);
 			meta.generation++;
 			meta.revision++;
 			this.save(meta);
 		});
+		harnessLog.info("memory", "chat work after a source change was invalidated", { cutoff, removed });
 	}
 	recover(): void {
+		let requeued = 0;
 		this.transaction(() => {
 			const meta = this.meta();
-			this.sql(
-				"UPDATE work SET status='ready',retry_after=-1,last_action='release',reason=NULL WHERE status='running'",
-			).run();
+			requeued = changesOf(
+				this.sql(
+					"UPDATE work SET status='ready',retry_after=-1,last_action='release',reason=NULL WHERE status='running'",
+				).run(),
+			);
 			meta.revision++;
 			this.save(meta);
 		});
+		if (requeued > 0) harnessLog.info("memory", "claimed chat work requeued after a restart", { count: requeued });
 	}
 }

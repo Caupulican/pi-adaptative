@@ -5,6 +5,7 @@ import {
 	type ToolFailurePhase,
 } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
+import { harnessLog } from "./harness-log.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	TOOL_FAILURE_LEDGER_RECORD_VERSION,
@@ -1869,6 +1870,14 @@ export function createToolFailureResult(
 	terminate?: boolean,
 ): AgentToolResult<ToolFailureResultDetails> {
 	const discardAttempt = record.attemptMemory === "discard";
+	harnessLog.warn("tools", "a tool call was bounced", () => ({
+		tool: record.tool,
+		state: record.state,
+		phase: record.phase,
+		code: record.failureCode,
+		diagnostic: record.diagnostic,
+		occurrence: record.occurrence,
+	}));
 	return {
 		content: [
 			{

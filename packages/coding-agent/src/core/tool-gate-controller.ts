@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { Agent, AgentToolCall, BeforeToolCallResult } from "../kernel/index.ts";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
@@ -49,6 +50,21 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
+
+/** Logs a call that a named gate refused, then passes the refusal on unchanged. */
+function blockedCall(
+	toolName: string,
+	gate: string,
+	result: BeforeToolCallResult,
+	reasonCode?: string,
+): BeforeToolCallResult {
+	harnessLog.warn("tools", "a gate blocked a tool call", () => ({
+		tool: toolName,
+		gate,
+		...(reasonCode === undefined ? {} : { reasonCode }),
+	}));
+	return result;
+}
 
 function existingObservationCwd(targetDirectory: string): string {
 	let candidate = safeRealpathSync(targetDirectory);
@@ -333,21 +349,21 @@ export class ToolGateController {
 		signal?.throwIfAborted();
 		const yolo = this.deps.getExecutionMode?.() === "yolo" && this.deps.runsGuardedRemoteOwner?.() !== true;
 		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
-		if (selfCompactionBlock) return selfCompactionBlock;
+		if (selfCompactionBlock) return blockedCall(toolCall.name, "self_compaction", selfCompactionBlock);
 		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);
-		if (applicabilityBlock) return applicabilityBlock;
+		if (applicabilityBlock) return blockedCall(toolCall.name, "applicability", applicabilityBlock);
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
-			return escalation;
+			return blockedCall(toolCall.name, "router", escalation);
 		}
 		const refusedPush = refuseLocalPush(
 			this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
 			toolCall.name,
 			args,
 		);
-		if (refusedPush) return refusedPush;
+		if (refusedPush) return blockedCall(toolCall.name, "local_push", refusedPush);
 
 		// The capability envelope is evaluated twice per call - once on the raw arguments before any
 		// extension hook can see them, once on the arguments the hooks actually hand to the tool (a
@@ -372,10 +388,15 @@ export class ToolGateController {
 		};
 		const blockedBy = (gateResult: GateOutcome): BeforeToolCallResult | undefined =>
 			gateResult.outcome === "block"
-				? {
-						block: true,
-						reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
-					}
+				? blockedCall(
+						toolCall.name,
+						gateResult.gate,
+						{
+							block: true,
+							reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
+						},
+						gateResult.reasonCode,
+					)
 				: undefined;
 
 		// 1. Pre-hook capability envelope & path bounds check on raw args
@@ -392,7 +413,7 @@ export class ToolGateController {
 			// bytes the gate judged are the bytes that would have run.
 			if (!yolo && this.deps.checkExternalAcquisition) {
 				const acquisitionBlock = await this.deps.checkExternalAcquisition(toolCall.name, args, signal);
-				if (acquisitionBlock) return acquisitionBlock;
+				if (acquisitionBlock) return blockedCall(toolCall.name, "acquisition", acquisitionBlock);
 			}
 
 			// 2. Extension tool_call hooks
@@ -415,7 +436,7 @@ export class ToolGateController {
 					}
 					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 				}
-				if (!yolo && extensionResult?.block) return extensionResult;
+				if (!yolo && extensionResult?.block) return blockedCall(toolCall.name, "extension", extensionResult);
 			}
 
 			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
@@ -425,7 +446,7 @@ export class ToolGateController {
 			if (!yolo && this.deps.checkDirectScriptExecution) {
 				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, args, effectiveCwd);
 				if (directCheck) {
-					return directCheck;
+					return blockedCall(toolCall.name, "direct_script", directCheck);
 				}
 			}
 			terminalOutcome = await evaluateEnvelope(args);
@@ -434,18 +455,18 @@ export class ToolGateController {
 
 			// 4. Single edge authorization on the actual final operation
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
-			if (edge) return edge;
+			if (edge) return blockedCall(toolCall.name, "edge", edge);
 			const delegation = await this.deps.checkDelegation?.(toolCall.name, args, executionContext?.cwd, signal);
-			if (delegation) return delegation;
+			if (delegation) return blockedCall(toolCall.name, "delegation", delegation);
 			// YOLO skips the operation gate on the owner's own terminal runs only: it is not a grant to a third party's words,
 			// and it stands for the owner at the terminal, not on a phone.
 			const operation =
 				yolo && !this.deps.runsOutsideOwnerTerminal?.()
 					? undefined
 					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
-			if (operation) return operation;
+			if (operation) return blockedCall(toolCall.name, "operation", operation);
 			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal, registerCleanup);
-			if (soulWrite) return soulWrite;
+			if (soulWrite) return blockedCall(toolCall.name, "soul", soulWrite);
 
 			// 5. System One semantic tool gate
 			const isControlPlaneTool = CONTROL_PLANE_TOOL_NAMES.has(toolCall.name);
@@ -482,12 +503,17 @@ export class ToolGateController {
 						metadata: { args },
 					});
 					if (beforeToolResult?.decision === "deny") {
-						return {
-							block: true,
-							reason:
-								beforeToolResult.reasonCodes.join(", ") ||
-								"Tool execution blocked by integrity before_tool hook",
-						};
+						return blockedCall(
+							toolCall.name,
+							"system_one_before_tool",
+							{
+								block: true,
+								reason:
+									beforeToolResult.reasonCodes.join(", ") ||
+									"Tool execution blocked by integrity before_tool hook",
+							},
+							beforeToolResult.reasonCodes.join(","),
+						);
 					}
 					if (impact === "repo_mutation") {
 						const beforeMutationResult = await systemOne.hookCoordinator.runHook("before_mutation", {
@@ -500,12 +526,17 @@ export class ToolGateController {
 							metadata: { args },
 						});
 						if (beforeMutationResult?.decision === "deny") {
-							return {
-								block: true,
-								reason:
-									beforeMutationResult.reasonCodes.join(", ") ||
-									"Tool execution blocked by integrity before_mutation hook",
-							};
+							return blockedCall(
+								toolCall.name,
+								"system_one_before_mutation",
+								{
+									block: true,
+									reason:
+										beforeMutationResult.reasonCodes.join(", ") ||
+										"Tool execution blocked by integrity before_mutation hook",
+								},
+								beforeMutationResult.reasonCodes.join(","),
+							);
 						}
 					}
 				}
@@ -551,6 +582,11 @@ export class ToolGateController {
 				observationHandedOff = true;
 				invocation.repositoryObservation = observation;
 			}
+			harnessLog.trace("tools", "a tool call was admitted", () => ({
+				tool: toolCall.name,
+				edge: edgeOperations.map((operation) => operation.class),
+				yolo,
+			}));
 			admitted = true;
 			return yolo ? undefined : extensionResult;
 		} finally {
@@ -678,6 +714,10 @@ export class ToolGateController {
 					});
 					if (verdict?.blocked) {
 						const repair = verdict.repairId ? ` RepairWork ${verdict.repairId} is queued.` : "";
+						harnessLog.warn("tools", "project rules rejected a mutation", () => ({
+							tool: toolCall.name,
+							repairQueued: repair !== "",
+						}));
 						return {
 							content: [
 								{

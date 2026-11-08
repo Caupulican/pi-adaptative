@@ -18,6 +18,7 @@ import {
 	OPENAI_CODEX_CLIENT_VERSION,
 	type OpenAICodexAccountModel,
 } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { RequestAuth } from "../request-auth.ts";
 
 export type AccountModelAvailability = "available" | "unavailable" | "unknown";
@@ -168,6 +169,10 @@ export class AccountModelCatalog {
 			if (!auth?.apiKey) return { kind: "unchecked", reason: "no credential resolved" };
 			return await ACCOUNT_CHECKS[model.provider]!(model, auth.apiKey, fetchImpl, auth.credentialHeaders);
 		} catch (error) {
+			harnessLog.warn("router", "an account check failed; its models stay unchecked", () => ({
+				provider: model.provider,
+				error: error instanceof Error ? error.name : typeof error,
+			}));
 			return { kind: "unchecked", reason: errorText(error) };
 		}
 	}
@@ -240,6 +245,13 @@ export class AccountModelCatalog {
 	/** A provider refused this model for the account: never route to it again this session. */
 	markRefused(model: Model<Api>, providerMessage: string): void {
 		this.refused.set(`${model.provider}/${model.id}`, bounded(providerMessage));
+		harnessLog.warn(
+			"router",
+			"a provider refused a model for this account; the router skips it this session",
+			() => ({
+				model: `${model.provider}/${model.id}`,
+			}),
+		);
 	}
 
 	/** Whether this account's model listing for the provider was fetched, so an absent alternative is a fact about the listing. */

@@ -56,6 +56,9 @@ const PLAIN_LABELS: Readonly<Record<string, string>> = {
 	auto_learn_handoff: "Learning",
 };
 
+/** Words that stay upper case when a stored name is spelled out. */
+const ACRONYMS = new Set(["icm", "usd", "ci", "id", "api", "url", "mcp", "ui", "tui", "cpu", "gpu", "pid"]);
+
 /** A readable name for a record type: a known one by its phrase, any other with the separators turned into spaces. */
 export function plainLabel(id: string): string {
 	const known = PLAIN_LABELS[id];
@@ -63,7 +66,10 @@ export function plainLabel(id: string): string {
 	const spaced = id
 		.replace(/^pi[_-]/, "")
 		.replace(/[_-]+/g, " ")
-		.trim();
+		.trim()
+		.split(" ")
+		.map((word) => (ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : word))
+		.join(" ");
 	return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 

@@ -3,7 +3,9 @@
  * the interactive host, and a child session never asks. The coordinator (agent-session.ts) only
  * supplies these dependencies; the classification itself is `autonomy/edge-policy.ts`.
  */
+
 import { createHash } from "node:crypto";
+import { harnessLog } from "../kernel/harness-log.ts";
 import { type BeforeToolCallResult, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../kernel/index.ts";
 import type { SessionEntry } from "../kernel/node.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
@@ -208,6 +210,12 @@ export function recordEdgeGrant(
 		grantedAt: new Date().toISOString(),
 	};
 	deps.appendCustomEntry(EDGE_GRANT_CUSTOM_TYPE, record);
+	harnessLog.info("edge", "a grant was recorded", {
+		edgeClass,
+		source,
+		standing: details.standing === true,
+		scoped: scopeKey !== undefined,
+	});
 }
 
 /** The run's origin when the run in progress carries a third party's words. */
@@ -942,6 +950,7 @@ export function recordEdgeRevoke(deps: SessionEdgeDeps, edgeClass: EdgeClass, sc
 		revokedAt: new Date().toISOString(),
 	};
 	deps.appendCustomEntry(EDGE_REVOKE_CUSTOM_TYPE, record);
+	harnessLog.info("edge", "a grant was revoked", { edgeClass, scoped: validatedScope !== undefined });
 	return true;
 }
 

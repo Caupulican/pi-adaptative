@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { AgentBusyError } from "../../kernel/agent.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
 import { messageRevision } from "../../kernel/message-revision.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
@@ -241,6 +242,16 @@ export class SelfCompactionController {
 		const usage = this.deps.getContextUsage();
 		const at =
 			usage?.tokens === null || usage?.tokens === undefined ? "unknown" : usage.tokens.toLocaleString("en-US");
+		harnessLog.log(
+			level === "forced" ? "warn" : "info",
+			"compaction",
+			"context passed a self-compaction line",
+			() => ({
+				level,
+				tokens: usage?.tokens ?? null,
+				releaseBlocked: blocked !== undefined,
+			}),
+		);
 		this.deps.warn(
 			blocked !== undefined
 				? `self-compaction: context ${level === "forced" ? "reached the forced line" : "passed the warning line"} at ${at} tokens; no note is asked for and no tool is refused because ${blocked}.`
@@ -397,6 +408,9 @@ export class SelfCompactionController {
 			content: SELF_COMPACTION_OWNER_REQUEST_TEXT,
 			display: true,
 		});
+		harnessLog.info("compaction", "the owner asked for a self-compaction", () => ({
+			tokens: this.deps.getContextUsage()?.tokens ?? null,
+		}));
 		return { kind: "asked" };
 	}
 
@@ -440,7 +454,10 @@ export class SelfCompactionController {
 
 	request(note: unknown): SelfCompactionRequestOutcome {
 		const admission = this.refusal(note);
-		if ("reason" in admission) return { accepted: false, reason: admission.reason };
+		if ("reason" in admission) {
+			harnessLog.warn("compaction", "a self-compaction note was refused", { reason: admission.reason });
+			return { accepted: false, reason: admission.reason };
+		}
 		const record: SelfCompactionRequestRecord = {
 			id: randomUUID(),
 			note: admission.note,
@@ -449,7 +466,14 @@ export class SelfCompactionController {
 			tokens: this.deps.getContextUsage()?.tokens ?? null,
 		};
 		this.deps.getSessionManager().appendCustomEntry(SELF_COMPACTION_REQUEST_CUSTOM_TYPE, record);
-		return { accepted: true, record, replaced: admission.state.status === "pending" };
+		const replaced = admission.state.status === "pending";
+		harnessLog.info("compaction", "a self-compaction note was saved", () => ({
+			level: record.level,
+			tokens: record.tokens,
+			noteChars: record.note.length,
+			replaced,
+		}));
+		return { accepted: true, record, replaced };
 	}
 
 	private batchHandsOff(assistantMessage: AssistantMessage): boolean {
@@ -568,6 +592,11 @@ export class SelfCompactionController {
 						await this.deps.compact(this.summaryInstructions());
 					} catch (error) {
 						const after = this.state();
+						harnessLog.warn("compaction", "a self-compaction attempt did not finish", () => ({
+							attempt: after.attempts,
+							maxAttempts: SELF_COMPACTION_MAX_ATTEMPTS,
+							reason: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+						}));
 						this.deps.warn(
 							`self-compaction: compaction attempt ${after.attempts} of ${SELF_COMPACTION_MAX_ATTEMPTS} did not finish (${error instanceof Error ? error.message : String(error)}). The saved note is kept; the next idle checkpoint retries, and /compact finishes it now.`,
 						);
@@ -590,6 +619,9 @@ export class SelfCompactionController {
 							}),
 						)
 					) {
+						harnessLog.info("compaction", "a saved self-compaction note is delivered", () => ({
+							noteChars: request.note.length,
+						}));
 						settled = true;
 						continued = true;
 					}
@@ -625,6 +657,10 @@ export class SelfCompactionController {
 			handoffId: request.id,
 			reason: why,
 		});
+		harnessLog.warn("compaction", "a self-compaction note was released without compacting", () => ({
+			noteChars: request.note.length,
+			reason: why.slice(0, 200),
+		}));
 		this.deps.warn(
 			`self-compaction: the saved note (${request.note.length.toLocaleString("en-US")} chars) was released because ${why}. Tools are no longer refused; the host's own compaction still protects the context.`,
 		);

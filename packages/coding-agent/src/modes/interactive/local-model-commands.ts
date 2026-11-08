@@ -72,7 +72,9 @@ import type {
 	SettingsScope,
 } from "../../core/settings/settings-schema.ts";
 import type { ToolProbeResult } from "../../core/tool-protocol-controller.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { getSelectListTheme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
@@ -321,9 +323,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 		if (action === "needle") {
 			if (rest.length === 0) {
 				host.showStatus("Usage: /models needle <query> [tools-json]");
-				host.showStatus(
-					`  tools-json defaults to the smoke-test tool set: ${JSON.stringify(NEEDLE_DEFAULT_TOOLS)}`,
-				);
+				host.showStatus("  tools-json defaults to the built-in smoke-test tool set (one city weather lookup)");
 				return;
 			}
 			await runNeedleQuery(host, rest);
@@ -487,7 +487,8 @@ export async function ensureLocalServer(host: LocalModelHost): Promise<boolean> 
 	);
 	const started = await host.localRuntime.start();
 	if (!started.started) {
-		host.showStatus(`Could not start the local server: ${started.reason}`);
+		harnessLog.debug("ui", "the local server did not start", { reason: started.reason });
+		host.showStatus(`Could not start the local server: ${plainLabel(started.reason)}`);
 		return false;
 	}
 	return true;
@@ -565,7 +566,8 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 		},
 	});
 	if (!result.ok) {
-		host.showStatus(`Installation failed at ${result.stage}: ${result.reason}`);
+		harnessLog.debug("ui", "a local model install failed", { stage: result.stage, reason: result.reason });
+		host.showStatus(`Installation failed at the ${plainLabel(result.stage)} step: ${result.reason}`);
 		return;
 	}
 	host.modelRegistry.refresh();
@@ -602,7 +604,8 @@ export async function addTransformersModel(
 
 	const started = await runtime.start();
 	if (!started.started && started.reason !== "already_running") {
-		host.showStatus(`Could not start Transformers sidecar: ${started.reason}`);
+		harnessLog.debug("ui", "the Transformers sidecar did not start", { reason: started.reason });
+		host.showStatus(`Could not start Transformers sidecar: ${plainLabel(started.reason)}`);
 		return;
 	}
 
@@ -1267,9 +1270,17 @@ export async function runFitnessAndAssign(
 					if (role === "scout") {
 						const verdict = evaluateSurfaceFitness("scout_auto", outcome.report);
 						if (!verdict.fit) {
-							const reason = verdict.reason === "lane_failed" ? `failed ${verdict.lane}` : "was not probed";
+							harnessLog.debug("ui", "a model was not assigned as scout", {
+								model: outcome.model,
+								reason: verdict.reason,
+								lane: verdict.reason === "lane_failed" ? verdict.lane : undefined,
+							});
+							const reason =
+								verdict.reason === "lane_failed"
+									? `failed ${verdict.lane === "toolCall" ? "tool call" : verdict.lane} check`
+									: "was not probed";
 							host.showStatus(
-								`${outcome.model} not assigned as scout: ${reason} on the scout_auto fitness exam. Use the docs/scout.md Modelfile recipe, then rerun /fitness.`,
+								`${outcome.model} not assigned as scout: ${reason} in the scout fitness exam. Use the docs/scout.md Modelfile recipe, then rerun /fitness.`,
 							);
 							return;
 						}
@@ -1326,7 +1337,7 @@ export function assignFitnessRole(host: AssignRoleHost, modelRef: string, role: 
 	}
 	if (role === "scout") {
 		host.settingsManager.setScoutSettings({ enabled: true, model: modelRef });
-		host.showStatus(`${modelRef} set as the repository scout (context_scout enabled).`);
+		host.showStatus(`${modelRef} set as the repository scout and turned on.`);
 		return;
 	}
 	const router = host.settingsManager.getModelRouterSettings();

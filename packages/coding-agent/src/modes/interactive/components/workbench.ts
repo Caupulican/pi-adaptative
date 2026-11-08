@@ -17,7 +17,7 @@ import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
-import { botStateMark } from "./bot-state-mark.ts";
+import { botStateMark, REMOTE_MARK } from "./bot-state-mark.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
@@ -111,7 +111,8 @@ const THINKING_METER_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
 const THINKING_METER_CELLS = THINKING_METER_LEVELS.length;
 
 export const PLAN_SECTION = "Work plan";
-export const TEAM_SECTION = "Team";
+/** The panel of what runs the work: the brain, the decider and the workers. Chats live in the roster, not here. */
+export const TEAM_SECTION = "Orchestration";
 export const CHECKS_SECTION = "Checks";
 export const EDGE_SECTION = "Edge";
 const MIN_INSPECTOR_WIDTH = 24;
@@ -1221,17 +1222,11 @@ export class WorkbenchComponent extends Container {
 			targets.push(target);
 		};
 		const isRoot = active.kind === "root";
-		add(theme.fg("muted", " BRAIN"));
+		// The roster is the directory of chats: the Brain is the first of them, by name only. Its model and state are the
+		// Orchestration panel's business, so they are not repeated here.
 		add(
-			`${isRoot ? theme.fg("accent", "▸ ") : "  "}${roster.rootRunning ? theme.fg("accent", "●") : theme.fg("success", "●")} ${isRoot ? theme.bold(theme.fg("accent", "Brain (root)")) : theme.fg("text", "Brain (root)")}`,
+			`${isRoot ? theme.fg("accent", "▸ ") : "  "}${roster.rootRunning ? theme.fg("accent", "●") : theme.fg("success", "●")} ${isRoot ? theme.bold(theme.fg("accent", "Brain")) : theme.fg("text", "Brain")}`,
 			{ kind: "root" },
-		);
-		// The glyph above says ready; only the working state is worth a word.
-		add(
-			`    ${theme.fg("muted", roster.rootRunning ? `${roster.rootModelLabel} · working` : roster.rootModelLabel)}`,
-			{
-				kind: "root",
-			},
 		);
 		// An empty group is its header with the way to fill it, not a header and a row saying it is empty.
 		add(theme.fg("muted", roster.teams.length === 0 ? " TEAMS · /team create" : ` TEAMS (${roster.teams.length})`));
@@ -1254,13 +1249,16 @@ export class WorkbenchComponent extends Container {
 			const glyph = botStateGlyph(bot.state);
 			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
-			const leaderBadge = bot.leader ? ` ${theme.fg("warning", "leader")}` : "";
+			const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", "leader")}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} remote`)}` : ""}`;
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${bot.modelRef === roster.rootModelLabel ? "" : `${theme.fg("muted", bot.modelId || bot.modelRef)}`}${leaderBadge}${unreadBadge}${scheduleBadge}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}`,
 				target,
 			);
-			// The default model and the idle state are the glyph's and the row's business; only a difference earns a word.
+			// The row is the bot's name. Its model is a hint on the line below, shown only for the selected bot; the idle state is
+			// the glyph's business, so only a difference earns a word.
 			const detail = [
+				isSelected ? `@${bot.agentId}` : undefined,
+				isSelected && !bot.remote ? bot.modelId || bot.modelRef : undefined,
 				bot.state === "idle" ? undefined : bot.state,
 				bot.teamIds.length > 0 ? `[${bot.teamIds.join(",")}]` : undefined,
 				bot.currentSummary,
@@ -1270,7 +1268,14 @@ export class WorkbenchComponent extends Container {
 			if (detail) add(`    ${theme.fg("muted", detail)}`, target);
 		}
 		if (roster.lanes.length > 0) {
-			add(theme.fg("muted", ` LANES (${roster.lanes.length})`));
+			const running = roster.lanes.filter((lane) => lane.state === "running").length;
+			const waiting = roster.lanes.filter((lane) => lane.state === "queued").length;
+			add(
+				theme.fg(
+					"muted",
+					` WORKERS · ${running} running${waiting > 0 ? ` · ${waiting} waiting` : ""}${roster.lanes.length > running + waiting ? ` · ${roster.lanes.length} in all` : ""}`,
+				),
+			);
 			for (const lane of roster.lanes) {
 				add(
 					`  ${botStateGlyph(lane.state)} ${theme.fg("text", lane.label)}${lane.modelRef ? ` ${theme.fg("muted", lane.modelRef)}` : ""}`,

@@ -18,6 +18,8 @@
  * per turn. The same total work happens; it just stops invalidating the cache on every request.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
+
 /**
  * Floor `rawBoundary` onto a `stride`-sized grid anchored at the conversation start.
  *
@@ -76,5 +78,11 @@ export function frozenPrefixLength(
 	const bound = Math.min(Math.max(0, safeSentPrefixCount), source.length, target.length);
 	let index = 0;
 	while (index < bound && source[index] === target[index]) index++;
+	if (index < bound) {
+		harnessLog.debug("context", "already-sent history changed; the frozen prefix is shortened", () => ({
+			sentPrefix: bound,
+			frozen: index,
+		}));
+	}
 	return index;
 }

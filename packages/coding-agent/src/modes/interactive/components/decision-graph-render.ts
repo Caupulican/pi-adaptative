@@ -69,7 +69,7 @@ const PLAN_GLYPH: Readonly<Record<DecisionPlanStepStatus, readonly [string, Them
 export function participantText(participant: DecisionParticipant): string {
 	// The session's own model is on the status line; the session itself is just the agent.
 	if (participant.kind === "root") return participant.model ? `brain · ${participant.model}` : "brain";
-	const head = `${participant.kind} ${participant.label}`;
+	const head = participant.label ? `${participant.kind} ${participant.label}` : participant.kind;
 	return participant.model ? `${head} · ${participant.model}` : head;
 }
 
@@ -80,7 +80,7 @@ function queuedText(participant: DecisionParticipant): string {
 export function formatLastEvaluation(model: DecisionGraphModel): string | undefined {
 	const last = model.decider.last;
 	if (!last) return undefined;
-	const result = evaluationResultText(last) ?? last.verdict ?? last.outcome;
+	const result = (evaluationResultText(last) ?? last.verdict ?? last.outcome).replace(/_/g, " ");
 	return `${last.label} → ${result}`;
 }
 

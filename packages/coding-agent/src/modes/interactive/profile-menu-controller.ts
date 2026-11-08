@@ -21,6 +21,7 @@ import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile
 import type { ResourceProfileKind, SettingsReloadSnapshot } from "../../core/settings/settings-schema.ts";
 import { validateSkillName } from "../../core/skills.ts";
 import { allToolNames } from "../../core/tools/index.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { getAvailableThemesWithPaths } from "../../presentation/theme/theme.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import {
@@ -82,7 +83,7 @@ function profileSelectionItems(profiles: NormalizedProfile[]): SelectItem[] {
 	return profiles.map((profile) => ({
 		value: profile.name,
 		label: profile.name,
-		description: profile.description || profile.source,
+		description: profile.description || plainLabel(profile.source),
 	}));
 }
 
@@ -272,7 +273,7 @@ export class ProfileMenuController {
 		const items = profiles.map((profile) => ({
 			value: profile.name,
 			label: profile.name,
-			description: `${profile.model ? `Pinned: ${profile.model}` : "Inherits session/default model"} · ${profile.description || profile.source}`,
+			description: `${profile.model ? `Pinned: ${profile.model}` : "Inherits session/default model"} · ${profile.description || plainLabel(profile.source)}`,
 		}));
 
 		this.ui.showSelector((done) => {
@@ -302,7 +303,7 @@ export class ProfileMenuController {
 		}
 		const scope = deletionScopeForProfile(profile);
 		if (!scope) {
-			this.ui.showError(`Profile "${profileName}" is read-only (${profile.source}).`);
+			this.ui.showError(`Profile "${profileName}" is read-only (${plainLabel(profile.source)}).`);
 			return;
 		}
 		const selectedModel = await this.selectProfileModel(profile.model);
@@ -1220,7 +1221,7 @@ export class ProfileMenuController {
 		if (!scope) {
 			const location = profile.sourcePath ? ` at ${profile.sourcePath}` : "";
 			this.ui.showError(
-				`Profile "${profileName}" comes from read-only source ${profile.source}${location}; edit or remove that source definition directly.`,
+				`Profile "${profileName}" comes from read-only source ${plainLabel(profile.source)}${location}; edit or remove that source definition directly.`,
 			);
 			return;
 		}

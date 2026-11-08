@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { addUsage } from "../../kernel/usage.ts";
 import { MaintenanceUsageRetentionError, type UsageComponent } from "../../kernel/usage-components.ts";
@@ -618,6 +619,12 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			throw new SystemOneUsageRefusal("System One usage cannot be recorded: the session identity changed");
 		}
 		if (this.obligations + this.reserved + maxResponses > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS) {
+			harnessLog.warn("cost", "a paid evaluation was refused: the usage journal is full", () => ({
+				obligations: this.obligations,
+				reserved: this.reserved,
+				requested: maxResponses,
+				bound: SEMANTIC_USAGE_JOURNAL_MAX_RECORDS,
+			}));
 			throw new SystemOneUsageRefusal(
 				"System One usage journal is full: unconfirmed usage fills its bound, so no paid evaluation starts",
 			);
@@ -625,8 +632,15 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (
 			route === "history_summary" &&
 			this.historyObligations + this.historyReserved + maxResponses > HISTORY_SUMMARY_SHARE_RECORDS
-		)
+		) {
+			harnessLog.warn("cost", "a history summary was refused: its share of the usage journal is full", () => ({
+				obligations: this.historyObligations,
+				reserved: this.historyReserved,
+				requested: maxResponses,
+				share: HISTORY_SUMMARY_SHARE_RECORDS,
+			}));
 			throw new SystemOneUsageRefusal("History summary usage has filled its reserved journal share");
+		}
 		this.reserved += maxResponses;
 		if (route === "history_summary") this.historyReserved += maxResponses;
 		return new SemanticUsageLease(this, identity, maxResponses, origin, route);
@@ -1528,8 +1542,23 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private failJournal(operation: WriteOperation, error: unknown): JournalFailure {
 		const failure = classifyJournalFailure(error);
 		if (failure.reason === "capacity") {
-			if (operation === "retain") this.retainFull = true;
+			if (operation === "retain") {
+				if (!this.retainFull) {
+					harnessLog.warn("cost", "the usage journal is full: further records wait until one is removed", () => ({
+						held: this.held.size,
+					}));
+				}
+				this.retainFull = true;
+			}
 			return failure;
+		}
+		const wasReady = operation === "retain" ? this.retainReady : this.removeReady;
+		if (wasReady) {
+			harnessLog.warn("cost", "a usage journal write failed; it is retried", () => ({
+				operation,
+				reason: failure.reason,
+				held: this.held.size,
+			}));
 		}
 		if (operation === "retain") this.retainReady = false;
 		else this.removeReady = false;

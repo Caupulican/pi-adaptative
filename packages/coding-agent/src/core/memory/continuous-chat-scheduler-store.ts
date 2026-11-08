@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, createReadStream, existsSync } from "node:fs";
 import { copyFile, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -183,6 +184,7 @@ export async function openContinuousChatScheduler(
 		await fsyncDirectory(root);
 		await writeDurableAtomic(queuePath, `${JSON.stringify({ schemaVersion: 3, storage: "sqlite" })}\n`);
 		signal?.throwIfAborted();
+		harnessLog.info("memory", "chat scheduler database published", { from: mode, messages: published });
 		return ContinuousChatScheduler.open(databasePath, false);
 	} catch (error) {
 		try {

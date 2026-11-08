@@ -15,7 +15,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, "..");
 const repoRoot = resolve(packageRoot, "..", "..");
+
+// `--write` turns the check into the daily refresh: when the only drift is additions and metadata (no removed model id is
+// still referenced elsewhere in the repo), the committed catalogs are replaced with the live ones; a critical removal is
+// never written, the run fails and a person decides.
+const WRITE = process.argv.includes("--write");
 
 const CATALOGS = [
 	{
@@ -144,7 +149,7 @@ async function checkCatalog(catalog) {
 
 		if (freshContent === committedContent) {
 			console.log(`${catalog.label}: up to date, no drift.`);
-			return { drifted: false, criticalRemovals: [] };
+			return { drifted: false, criticalRemovals: [], addedIds: [], removedIds: [] };
 		}
 
 		const oldIds = extractModelIds(committedContent);
@@ -178,7 +183,7 @@ async function checkCatalog(catalog) {
 			);
 		}
 
-		return { drifted: true, criticalRemovals };
+		return { drifted: true, criticalRemovals, freshContent, catalog, addedIds, removedIds };
 	} finally {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
@@ -193,6 +198,17 @@ if (failures.length > 0) {
 const results = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 const anyDrift = results.some((result) => result.drifted);
 const anyCritical = results.some((result) => result.criticalRemovals.length > 0);
+
+if (WRITE && anyDrift && !anyCritical) {
+	for (const result of results) {
+		if (!result.drifted) continue;
+		writeFileSync(result.catalog.committedPath, result.freshContent);
+		console.log(
+			`${result.catalog.label}: refreshed (+${result.addedIds.length} models, -${result.removedIds.length} models).`,
+		);
+	}
+	process.exit(0);
+}
 
 if (anyDrift) {
 	console.error("");

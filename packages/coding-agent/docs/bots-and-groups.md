@@ -9,6 +9,16 @@ and System One. With that gate off, no task-fitness judgment is required at star
 or execution. Authentication, model availability, permissions, capacity, and lifecycle checks remain
 in force. See [Model Router settings](settings.md#model-router).
 
+## Bot names
+
+A bot has an id and a display name. The id is the stable handle (`trello-scout`: what you type after `@` and in `/bot msg`);
+the display name is what the roster shows (`Trello Scout`). A bot made on the fly with no id (the orchestrator's `bot`
+tool, a leader's `bot_message create`) is named from its purpose, its description or soul (`release-notes-writer`), and a
+taken name gets a number (`release-notes-writer-2`); the answer says which id it chose. `/bot rename <id> <name...>` changes
+the display name only. The roster row shows the name and its badges; the selected bot's model appears as a hint on the line
+below. A bot created without a model runs on what a worker would (the worker profile, else the subscription-routed efficient
+model), not on the session's own model.
+
 ## Who creates bots
 
 Bots are created on the fly, for whatever purpose you have:
@@ -23,6 +33,28 @@ Every other bot cannot create bots. It asks a leader (leaders are marked in its 
 report. Bounds that always hold: a leader cannot make a leader, grants `canWrite` only when it can write itself, and keeps at
 most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
 (`owner`, `root` or the leader's id).
+
+## Machines as bots
+
+Any machine can host a hub, join a hub, or do both; nothing is tied to one machine. A machine that joins a hub shows up there
+as a bot with a computer mark (💻 remote) and the machine's name. You message it like any bot (`/bot msg <name> ...`, its
+chat, a group), and its answers come back into its chat.
+
+On the hub: `/remote listen [port] [host]` turns the hub on (loopback by default), `/remote add <name>` lets a machine join
+as a bot named `<name>` and prints a join token once, `/remote revoke <name>` cuts it off and retires its bot, and
+`/remote status` lists the machines and their links. On the joining machine: `/remote join <host:port> <token>` (and
+`/remote leave <host:port>`). `/remote name <name>` renames this machine.
+
+How it holds together:
+
+- Each side proves a shared secret by HMAC (the secret is never sent), and the joiner checks the hub proves it back. The
+  link does not encrypt: use a private network (Tailscale, WireGuard) or an SSH tunnel for another machine.
+- A joined machine's root session receives the hub's words as a peer's words under the `link` channel's usual bounds
+  (wakes and spend per day), never as its owner's. Settings may replace the implied policy with `channels.link`.
+- The hub refuses a machine that would make a loop of hubs (a machine already above it, or a chain more than three deep),
+  and a machine id that changed under a known name. The reasons show in `/remote status` in plain words.
+- State lives under `<agent dir>/remote/`: this machine's id and name, the machines allowed to join, the hubs joined, each
+  machine's chat log and where each link stands (`links.json`). Secrets are stored for the owner only.
 
 ## Create and use a group
 

@@ -403,9 +403,9 @@ function showResetRetry(
 	host.showSelector((done) => {
 		const selector = new UsageActionSelectorComponent({
 			title: "Reset failed",
-			subtitle: "Retry the same idempotent redemption request?",
+			subtitle: "Retry the same reset?",
 			items: [
-				{ value: "retry", label: "Try again", description: "Reuse the same request safely" },
+				{ value: "retry", label: "Try again", description: "Send the same reset request again" },
 				{ value: "cancel", label: "Cancel", description: "Leave usage unchanged" },
 			],
 			initialSelectedIndex: 1,

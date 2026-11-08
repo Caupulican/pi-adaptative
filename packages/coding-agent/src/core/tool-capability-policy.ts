@@ -17,6 +17,7 @@ import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestr
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
+import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 
 export interface ToolCapabilityPolicy {
 	/** AND across clauses; OR across the capability alternatives inside one clause. */
@@ -107,6 +108,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[PROACTIVITY_TOOL_NAME, policy([["settings.read", "settings.write"]], "control-plane")],
 	[ROUTINE_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	[BOT_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
+	[ASSIGN_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[CHANNEL_REPLY_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],

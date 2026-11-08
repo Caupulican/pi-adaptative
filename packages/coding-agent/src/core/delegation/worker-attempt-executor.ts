@@ -2,6 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact, estimateContextTokens } from "../../kernel/compaction/compaction.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentContextPlan, AgentContextPlanRequest, AgentContextWire } from "../../kernel/index.ts";
 import type { FollowUpState, RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
@@ -169,6 +170,12 @@ export async function runProviderCompletionWithBackoff(args: {
 			args.warn(
 				`Worker ${args.laneId} provider request failed (${classified.reason}); retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt + 1}/${WORKER_PROVIDER_RETRY_POLICY.maxAttempts}).`,
 			);
+			harnessLog.warn("workers", "a worker provider request is retried", {
+				laneId: args.laneId,
+				reason: classified.reason,
+				attempt,
+				delayMs,
+			});
 			await sleepAbortable(delayMs, args.signal, args.timers);
 		}
 	}
@@ -592,6 +599,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			const hostVerdict = judgeReport(submitted);
 			if (worthAFollowUpTurn(hostVerdict) && needsMoreRounds < MAX_NEEDS_MORE_ROUNDS && budgetLeft) {
 				needsMoreRounds++;
+				harnessLog.warn("workers", "a worker report was sent back for review", {
+					attemptId: options.durableHandle.attemptId,
+					round: needsMoreRounds,
+					missing: hostVerdict.missing.length,
+					reasonCodes: hostVerdict.reasonCodes,
+				});
 				reportCapture.submitted = undefined;
 				return message(buildNeedsMoreRequest(hostVerdict, commandReceipts));
 			}
@@ -763,6 +776,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		const finalChangedFiles = sealChangedFiles();
 		const submittedReport = reportCapture.submitted ?? lastSubmittedReport;
 		const hostVerdict = submittedReport ? judgeReport(submittedReport) : undefined;
+		if (hostVerdict) {
+			const accepted = hostVerdict.verdict === "accepted";
+			harnessLog.log(
+				accepted ? "info" : "warn",
+				"workers",
+				accepted ? "a worker report was accepted" : "a worker report was not accepted",
+				{
+					attemptId: options.durableHandle.attemptId,
+					verdict: hostVerdict.verdict,
+					reasonCodes: hostVerdict.reasonCodes,
+				},
+			);
+		}
 		const reportBlockers =
 			hostVerdict && hostVerdict.verdict !== "accepted"
 				? [`worker report ${hostVerdict.verdict}: ${hostVerdict.reasonCodes[0] ?? "report_not_accepted"}`]
@@ -1006,6 +1032,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			attemptTranscriptStart = options.conversation.getRawTranscript().length;
 			if (ran) throw new Error("A worker attempt executor may run only once.");
 			ran = true;
+			const runStartedAt = Date.now();
+			harnessLog.info("workers", "a worker attempt started", () => ({
+				agentId: options.agentId,
+				taskId: options.durableHandle.taskId,
+				attemptId: options.durableHandle.attemptId,
+				role: options.grant.role,
+				model: options.model.id,
+			}));
 			try {
 				const gateway = options.toolSurface.gateway;
 				if (!gateway) throw new Error("Worker execution requires a capability gateway with durable accounting.");
@@ -1716,6 +1750,20 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				});
 				stopUsageClock();
 				const usage = checkpointUsage("Persisted final cumulative worker usage before terminal result.");
+				const failedOutcome =
+					rawOutcome.laneStatus === "failed" ||
+					rawOutcome.laneStatus === "timeout" ||
+					rawOutcome.laneStatus === "budget_exhausted";
+				harnessLog.log(failedOutcome ? "warn" : "info", "workers", "a worker attempt finished", () => ({
+					agentId: options.agentId,
+					attemptId: options.durableHandle.attemptId,
+					laneStatus: rawOutcome.laneStatus,
+					reasonCode: rawOutcome.reasonCode,
+					accepted: rawOutcome.accepted,
+					costUsd: rawOutcome.costUsd,
+					changedFiles: changedFiles.size,
+					durationMs: Date.now() - runStartedAt,
+				}));
 				const outputArtifact = terminalOutput
 					? captureWorkerTerminalOutputArtifact({
 							agentDir: options.agentDir,
@@ -1732,6 +1780,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					changedFiles: [...changedFiles],
 					...(outputArtifact ? { outputArtifact } : {}),
 				};
+			} catch (error) {
+				harnessLog.warn("workers", "a worker attempt ended with an error", () => ({
+					agentId: options.agentId,
+					attemptId: options.durableHandle.attemptId,
+					aborted: options.signal?.aborted === true,
+					durationMs: Date.now() - runStartedAt,
+				}));
+				throw error;
 			} finally {
 				stopUsageClock();
 				for (const signal of usageSignals) signal.removeEventListener("abort", stopUsageClock);

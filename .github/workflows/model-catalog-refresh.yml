@@ -1,0 +1,84 @@
+name: Model catalog daily refresh
+
+# Builds are hermetic by default (packages/ai/scripts/model-catalog-generation-policy.ts): they never fetch live data, so the
+# committed model catalogs would fall behind upstream. This workflow is the governance loop for that data. Once a day it
+# regenerates both catalogs from live sources, refuses to write when a removed model id is still referenced in the repo (a
+# person decides then), checks that the result is bounded and passes the static check, and commits it to main. It never
+# releases: a patch release picks the refreshed catalog up whenever one is cut.
+
+on:
+  schedule:
+    - cron: '30 5 * * *' # daily, 05:30 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: model-catalog-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-model-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Fails (and writes nothing) when the live data is unreachable or a removed model id is still referenced.
+      - name: Refresh the catalogs from live data
+        run: node packages/ai/scripts/check-model-catalog.mjs --write
+
+      - name: Bound the change
+        id: change
+        run: |
+          changed="$(git status --porcelain | awk '{print $2}' | sort)"
+          if [ -z "$changed" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The catalogs are up to date."
+            exit 0
+          fi
+          expected="$(printf '%s\n' packages/ai/src/image-models.generated.ts packages/ai/src/models.generated.ts | sort)"
+          unexpected="$(comm -23 <(echo "$changed") <(echo "$expected"))"
+          if [ -n "$unexpected" ]; then
+            echo "::error::The refresh changed files outside the two generated catalogs: $unexpected"
+            exit 1
+          fi
+          lines="$(git diff --numstat | awk '{added+=$1; removed+=$2} END {print added+removed}')"
+          if [ "${lines:-0}" -gt 40000 ]; then
+            echo "::error::The refresh changes $lines lines, past the bound of 40000; a person should look."
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+
+      - name: Static check with the refreshed catalogs
+        if: steps.change.outputs.changed == 'true'
+        run: npm run check
+
+      - name: Commit and push
+        if: steps.change.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/ai/src/models.generated.ts packages/ai/src/image-models.generated.ts
+          git commit -m "Refresh model catalog (daily): ${{ steps.change.outputs.lines }} changed lines"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

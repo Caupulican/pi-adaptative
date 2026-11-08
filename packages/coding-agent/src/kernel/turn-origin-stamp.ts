@@ -40,10 +40,16 @@ export interface TurnOriginRecord {
 	readonly thirdParty?: true;
 	/** The sender's own id for this delivery (a channel's batch id), so it finds the turn that carried it. */
 	readonly ref?: string;
+	/**
+	 * The third party's words as the owner reads them, without the frame written for the model. The screen shows this, never
+	 * the framed text.
+	 */
+	readonly shown?: string;
 }
 
 export const MAX_TURN_ORIGIN_CHANNEL_CHARS = 128;
 export const MAX_TURN_ORIGIN_REF_CHARS = 128;
+export const MAX_TURN_ORIGIN_SHOWN_CHARS = 4000;
 const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"owner-typed",
 	"extension-message",
@@ -84,6 +90,13 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 	)
 		return undefined;
 	if (
+		record.shown !== undefined &&
+		(typeof record.shown !== "string" ||
+			record.shown.length === 0 ||
+			record.shown.length > MAX_TURN_ORIGIN_SHOWN_CHARS)
+	)
+		return undefined;
+	if (
 		record.k === "owner-channel" &&
 		(record.verified !== true ||
 			record.thirdParty !== undefined ||
@@ -99,6 +112,7 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 		...(record.verified === true ? { verified: true as const } : {}),
 		...(record.thirdParty === true ? { thirdParty: true as const } : {}),
 		...(record.ref !== undefined ? { ref: record.ref as string } : {}),
+		...(record.shown !== undefined ? { shown: record.shown as string } : {}),
 	};
 }
 

@@ -124,7 +124,7 @@ export function formatSelfCompactionInfo(session: Pick<AgentSession, "getSelfCom
 			`${label("Gauge:")} ${gauge ? [gauge.bar, gauge.percent, gauge.tag].filter(Boolean).join(" ") : "unknown"}`,
 		);
 		lines.push(
-			`${label("Phase:")} ${view.phase} (level ${view.level}); tools ${view.toolsLocked ? "locked to self_compact" : "open"}`,
+			`${label("Phase:")} ${view.phase} (level ${view.level}); tools ${view.toolsLocked ? "locked to self-compaction" : "open"}`,
 		);
 		lines.push(
 			`${label("Usage:")} ${count(view.usedTokens)} of ${t.contextWindow.toLocaleString("en-US")} tokens${view.usedPercent === null ? "" : ` (${view.usedPercent}%)`}, cached ${count(view.cachedTokens)}`,
@@ -203,7 +203,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		if (taskMetrics.models.length > 0) {
 			info += `${theme.bold("Model Cost Breakdown")}\n`;
 			for (const row of taskMetrics.models.slice(0, 8)) {
-				info += `${theme.fg("dim", `${row.model} (${row.role}):`)} $${row.costUsd.toFixed(4)} (${row.calls} ${row.role === "subagent" ? "reports" : "calls"}, ${row.tokens.toLocaleString()} tokens)\n`;
+				info += `${theme.fg("dim", `${row.model} (${plainLabel(row.role)}):`)} $${row.costUsd.toFixed(4)} (${row.calls} ${row.role === "subagent" ? "reports" : "calls"}, ${row.tokens.toLocaleString()} tokens)\n`;
 			}
 			info += "\n";
 		}
@@ -252,7 +252,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 						: ` ${checkStats.comparator === "maximum" ? ">" : "<"} ${checkStats.threshold.toFixed(2)}`;
 				score = ` (${range}${threshold})`;
 			}
-			return `${check} x${checkStats.failures}${score}`;
+			return `${plainLabel(check)} x${checkStats.failures}${score}`;
 		});
 		if (failingChecks.length > visibleChecks.length) {
 			visibleChecks.push(`+${failingChecks.length - visibleChecks.length} more`);

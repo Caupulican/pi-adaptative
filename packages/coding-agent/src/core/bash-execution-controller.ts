@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { Agent, BashExecutionMessage } from "../kernel/index.ts";
 import type { SessionManager } from "../kernel/node.ts";
 import { getShellEnv } from "../utils/shell.ts";
@@ -121,6 +122,7 @@ export class BashExecutionController {
 				denyCommands: edgeSettings.deny,
 			});
 			if (boundary) {
+				harnessLog.warn("edge", "a shell command was stopped at the yolo boundary", { kind: boundary.kind });
 				this._bashAbortControllers.delete(abortController);
 				throw new Error(
 					boundary.kind === "confirm"

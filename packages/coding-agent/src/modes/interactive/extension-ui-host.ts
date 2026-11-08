@@ -48,6 +48,7 @@ import type { HumanInputPresentationRequest, HumanInputPresentationResult } from
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SessionImageStore } from "../../core/session-image-store.ts";
 import { AskQuestionDialog } from "../../core/tools/ask-question.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { handleClipboardImagePaste } from "../../presentation/clipboard-input.ts";
 import {
@@ -925,17 +926,8 @@ export class ExtensionUiHost {
 		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
 		this.ui.chatContainer.addChild(errorText);
-		if (stack) {
-			// Show stack trace in dim color, indented
-			const stackLines = stack
-				.split("\n")
-				.slice(1) // Skip first line (duplicates error message)
-				.map((line) => theme.fg("dim", `  ${line.trim()}`))
-				.join("\n");
-			if (stackLines) {
-				this.ui.chatContainer.addChild(new Text(stackLines, 1, 0));
-			}
-		}
+		// The stack is diagnostic detail: it goes to the harness log, not the screen.
+		if (stack) harnessLog.debug("ui", "an extension reported an error with a stack", { extensionPath, stack });
 		this.ui.tui.requestRender();
 	}
 }

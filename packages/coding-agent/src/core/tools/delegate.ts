@@ -620,6 +620,23 @@ function correctExactActionInput(input: DelegateToolInput, action: DelegateActio
 	return undefined;
 }
 
+/** The brief as plain instructions: the goal, the instructions and the detail fields (note, refs, evid, out), in that order. */
+function foldedBriefInput(input: DelegateToolInput): DelegateToolInput {
+	const { goal, note, refs, evid, out, instructions, ...rest } = input as DelegateToolInput & {
+		evid?: unknown;
+		out?: unknown;
+	};
+	const parts = [
+		goal?.trim(),
+		instructions?.trim(),
+		note?.trim() ? `Note: ${note.trim()}` : undefined,
+		refs && refs.length > 0 ? `References:\n${refs.map((ref) => `- ${ref}`).join("\n")}` : undefined,
+		evid ? `Evidence: ${JSON.stringify(evid)}` : undefined,
+		out ? `Report: ${JSON.stringify(out)}` : undefined,
+	].filter((part): part is string => part !== undefined && part.length > 0);
+	return { ...rest, instructions: parts.join("\n\n") } as DelegateToolInput;
+}
+
 /**
  * A `start` that states its task in fields: exactly one of `goal` or `instructions`, the other fields only with
  * `goal`, each inside its budget. The worker's task text is rendered from the record and replaces `instructions`
@@ -631,26 +648,11 @@ function resolveTaskBrief(
 ): { input: DelegateToolInput; brief?: TaskBrief; violation?: ActionViolation } {
 	if (action !== "start") return { input };
 	const companion = (["note", "refs", "evid", "out"] as const).find((field) => input[field] !== undefined);
-	if (input.goal === undefined) {
-		if (companion === undefined) return { input };
-		return {
-			input,
-			violation: {
-				message: `delegate start field ${companion} belongs with goal; send goal, or drop ${companion} and put the text in instructions.`,
-				skipReason: "brief_requires_goal",
-				overrides: { f: companion },
-			},
-		};
-	}
-	if (input.instructions !== undefined) {
-		return {
-			input,
-			violation: {
-				message: "delegate start takes exactly one of goal or instructions, not both.",
-				skipReason: "goal_instructions_conflict",
-			},
-		};
-	}
+	// Detail fields without a goal, and a goal that is not one clean line or that comes with instructions, are one brief in
+	// plain words: nothing is rejected for how the model split its own text (the record form stays for a one-line goal).
+	if (input.goal === undefined) return companion === undefined ? { input } : { input: foldedBriefInput(input) };
+	if (input.instructions !== undefined || /[\r\n\u0000-\u001f]/.test(input.goal.trim()))
+		return { input: foldedBriefInput(input) };
 	const note = input.note?.trim();
 	const refs = input.refs?.map((ref) => ref.trim()).filter(Boolean);
 	const brief: TaskBrief = {
@@ -751,8 +753,8 @@ function sanitizeExactActionInput(
 			// `task` is a profile_create field on the shared schema. A start that only
 			// populated it still has the worker brief — use it. Both fields together is a
 			// conflict; do not drop either.
-			if (taskText && !instructionsText) {
-				exactInput.instructions = exactInput.task;
+			if (taskText) {
+				exactInput.instructions = instructionsText ? `${taskText}\n\n${instructionsText}` : taskText;
 				delete exactInput.task;
 				continue;
 			}

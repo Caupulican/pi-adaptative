@@ -11,8 +11,10 @@ import {
 	readFile as fsReadFile,
 	stat as fsStat,
 } from "fs/promises";
+import type { TSchema } from "typebox";
 import { getAgentDir, getReadmePath } from "../../config.ts";
-import type { AgentTool } from "../../kernel/types.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
+import type { AgentTool, AgentToolResult } from "../../kernel/types.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
 import { keyHint, keyText } from "../../presentation/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../presentation/theme-model.ts";
@@ -473,7 +475,51 @@ function formatReadResult(
 	return text;
 }
 
+/**
+ * Wraps a basic tool's definition so each call writes one `trace` line: outcome, duration and output size. With trace
+ * off the call reaches the tool unchanged, after one comparison.
+ */
+export function traceToolCalls<TParameters extends TSchema, TDetails, TState>(
+	definition: ToolDefinition<TParameters, TDetails, TState>,
+): ToolDefinition<TParameters, TDetails, TState> {
+	const execute = definition.execute;
+	definition.execute = async (toolCallId, params, signal, onUpdate, ctx) => {
+		if (!harnessLog.enabled("trace", "tools"))
+			return execute.call(definition, toolCallId, params, signal, onUpdate, ctx);
+		const startedAt = Date.now();
+		let result: AgentToolResult<TDetails> | undefined;
+		let outcome = "ok";
+		try {
+			result = await execute.call(definition, toolCallId, params, signal, onUpdate, ctx);
+			return result;
+		} catch (error) {
+			outcome = signal?.aborted ? "aborted" : "error";
+			throw error;
+		} finally {
+			harnessLog.trace("tools", "a tool call finished", () => ({
+				tool: definition.name,
+				toolCallId,
+				outcome,
+				ms: Date.now() - startedAt,
+				bytes:
+					result?.content.reduce(
+						(sum, part) => sum + (part.type === "text" ? Buffer.byteLength(part.text, "utf8") : part.data.length),
+						0,
+					) ?? 0,
+			}));
+		}
+	};
+	return definition;
+}
+
 export function createReadToolDefinition(
+	cwd: string,
+	options?: ReadToolOptions,
+): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
+	return traceToolCalls(buildReadToolDefinition(cwd, options));
+}
+
+function buildReadToolDefinition(
 	cwd: string,
 	options?: ReadToolOptions,
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
@@ -1018,6 +1064,13 @@ export function createReadToolDefinition(
 								outputText = window.text;
 								details = { lineWindow: window.lineWindow };
 							} else if (truncation.truncated) {
+								harnessLog.warn("tools", "read output was truncated", {
+									totalBytes: truncation.totalBytes,
+									outputBytes: truncation.outputBytes,
+									totalLines: truncation.totalLines,
+									outputLines: truncation.outputLines,
+									limitedBy: truncation.truncatedBy,
+								});
 								// Truncation occurred. Build an actionable continuation notice.
 								const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
 								const nextOffset = endLineDisplay + 1;

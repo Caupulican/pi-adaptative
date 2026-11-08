@@ -1,4 +1,5 @@
 import type { Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../harness-log.ts";
 import type { ResolvedProviderRequestAuth } from "../loop-config.ts";
 import { classifyFailure } from "../reliability/classifier.ts";
 import type { SessionEntry } from "../session/session-entries.ts";
@@ -93,7 +94,59 @@ function markDeterministic(result: CompactionResult, cause: string): CompactionR
 	return { ...result, deterministic: { cause } };
 }
 
+/** A cycle that runs again: its cause is logged, then the host's transition callback receives the same info. */
+function transition(
+	deps: CompactionLoopDeps,
+	info: { cycle: number; from: string; cause: string; detail?: string },
+): void {
+	harnessLog.warn("compaction", "a compaction checkpoint is retried", {
+		cycle: info.cycle,
+		from: info.from,
+		cause: info.cause,
+	});
+	deps.onTransition(info);
+}
+
+/** One line per run's end: the checkpoint's sizes and duration, or why the run was skipped or failed. */
+function logCompactionOutcome(outcome: CompactionLoopOutcome, durationMs: number): void {
+	if (outcome.kind === "success") {
+		const { result } = outcome;
+		harnessLog.log(
+			result.deterministic ? "warn" : "info",
+			"compaction",
+			result.deterministic ? "a compaction finished with a facts-only checkpoint" : "a compaction finished",
+			() => ({
+				cycles: outcome.cycles,
+				durationMs,
+				tokensBefore: result.tokensBefore,
+				summaryInputTokens: result.usage?.input ?? null,
+				summaryOutputTokens: result.usage?.output ?? null,
+				deterministicCause: result.deterministic?.cause ?? null,
+			}),
+		);
+		return;
+	}
+	if (outcome.kind === "failed") {
+		harnessLog.log(outcome.reason === "aborted" ? "info" : "warn", "compaction", "a compaction failed", {
+			reason: outcome.reason.slice(0, 200),
+			cycles: outcome.cycles,
+			durationMs,
+		});
+		return;
+	}
+	harnessLog.log(outcome.reason === "within threshold" ? "trace" : "debug", "compaction", "a compaction was skipped", {
+		reason: outcome.reason,
+	});
+}
+
 export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<CompactionLoopOutcome> {
+	const startedAt = Date.now();
+	const outcome = await runCompactionCycles(deps);
+	logCompactionOutcome(outcome, Date.now() - startedAt);
+	return outcome;
+}
+
+async function runCompactionCycles(deps: CompactionLoopDeps): Promise<CompactionLoopOutcome> {
 	let lastCause = "start";
 	let lastParams: CompactionCycleParams | undefined;
 	let lastObservedTokens: number | undefined;
@@ -134,6 +187,13 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				reason: trailingCheckpoint ? "already compacted" : "within threshold",
 			};
 		}
+		if (cycle === 1) {
+			harnessLog.info("compaction", "a compaction started", () => ({
+				tokens: observedTokens,
+				keepRecentTokens: baseKeepRecent,
+				deterministicOnly: deps.forceDeterministic === true,
+			}));
+		}
 
 		const selectedParams = deps.forceDeterministic
 			? {
@@ -169,12 +229,12 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			modelInfo = await deps.resolveModelAndAuth(params.modelTier);
 		} catch {
 			lastCause = "auth-failed";
-			deps.onTransition({ cycle: cycle + 1, from: "step0", cause: lastCause });
+			transition(deps, { cycle: cycle + 1, from: "step0", cause: lastCause });
 			continue;
 		}
 		if (modelInfo.failure) {
 			lastCause = "auth-failed";
-			deps.onTransition({ cycle: cycle + 1, from: "step0", cause: lastCause });
+			transition(deps, { cycle: cycle + 1, from: "step0", cause: lastCause });
 			continue;
 		}
 		const currentModelKey = modelKey(modelInfo.model);
@@ -236,7 +296,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 					return { kind: "failed", reason: mapFailureCause(deterministicError).cause, cycles: cycle };
 				}
 			}
-			deps.onTransition({ cycle: cycle + 1, from: "step3", cause: lastCause, detail: failure.detail });
+			transition(deps, { cycle: cycle + 1, from: "step3", cause: lastCause, detail: failure.detail });
 			continue;
 		}
 
@@ -264,7 +324,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 
 		ownTrailingCompactionNeedsRetry = true;
 		lastCause = "effect-not-restored";
-		deps.onTransition({ cycle: cycle + 1, from: "step5", cause: lastCause });
+		transition(deps, { cycle: cycle + 1, from: "step5", cause: lastCause });
 	}
 
 	return { kind: "failed", reason: "exhausted-compaction-cycles", cycles: MAX_CYCLES };

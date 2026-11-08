@@ -6,6 +6,7 @@
  */
 
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import {
@@ -128,6 +129,14 @@ export class CacheLaneGuard {
 			...(snapshot.reasoning !== undefined ? { reasoning: snapshot.reasoning } : {}),
 		});
 		if (verdict.classification === "append" || verdict.classification === "first") return;
+		if (verdict.classification === "unsanctioned") {
+			const { kind, index } = verdict;
+			harnessLog.warn("context", "an unsanctioned cache break: the request prefix changed", () => ({
+				lane,
+				kind,
+				index: index ?? null,
+			}));
+		}
 		this.recordDecision({
 			kind: "cache_break",
 			decidedAt: Date.now(),

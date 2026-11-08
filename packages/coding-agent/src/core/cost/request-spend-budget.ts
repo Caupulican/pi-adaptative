@@ -1,3 +1,5 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
+
 /** Controlled spending hold; callers must not retry it as a provider outage. */
 export class RequestSpendRefusal extends Error {
 	constructor(message: string) {
@@ -52,8 +54,13 @@ export class RequestSpendBudget {
 	}
 
 	assertAffordable(projectedUsd: number): void {
-		if (!Number.isFinite(projectedUsd) || projectedUsd < 0 || projectedUsd > this.remainingUsd())
+		if (!Number.isFinite(projectedUsd) || projectedUsd < 0 || projectedUsd > this.remainingUsd()) {
+			harnessLog.warn("cost", "a request was refused: the remaining budget cannot cover it", () => ({
+				projectedUsd,
+				remainingUsd: Math.max(0, this.maxUsd - this.spentUsd),
+			}));
 			throw new RequestSpendRefusal("The remaining budget cannot cover the next projected request.");
+		}
 	}
 
 	/**
@@ -94,6 +101,12 @@ export class RequestSpendBudget {
 		}
 		this.charges.set(receiptId, costUsd);
 		this.spentUsd += costUsd;
+		harnessLog.trace("cost", "a model response's measured cost was recorded", () => ({
+			costUsd,
+			tokens: measuredTokens,
+			spentUsd: this.spentUsd,
+			maxUsd: this.maxUsd,
+		}));
 		if (!Number.isSafeInteger(measuredTokens) || measuredTokens < 1)
 			this.fail("A model response has no measured token usage; further spending is suspended.");
 		if (!Number.isFinite(this.spentUsd) || this.spentUsd > this.maxUsd)
@@ -101,7 +114,13 @@ export class RequestSpendBudget {
 	}
 
 	fail(reason: string): void {
-		this.failure ??= new RequestSpendRefusal(reason);
+		if (this.failure) return;
+		this.failure = new RequestSpendRefusal(reason);
+		harnessLog.warn("cost", "the request budget stopped further spending", () => ({
+			reason,
+			spentUsd: this.spentUsd,
+			maxUsd: this.maxUsd,
+		}));
 	}
 
 	assertHealthy(): void {

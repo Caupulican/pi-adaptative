@@ -1,5 +1,6 @@
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
 import { type FileHandle, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "../../kernel/types.ts";
 import { renderDiff } from "../../presentation/diff.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
@@ -44,6 +45,7 @@ import {
 	type OpenEditFileInspection,
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
+import { traceToolCalls } from "./read.ts";
 import { renderToolPath, str } from "./render-utils.ts";
 import {
 	type EditOperations,
@@ -452,6 +454,13 @@ export function createEditToolDefinition(
 	cwd: string,
 	options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
+	return traceToolCalls(buildEditToolDefinition(cwd, options));
+}
+
+function buildEditToolDefinition(
+	cwd: string,
+	options?: EditToolOptions,
+): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
 	const ops = options?.operations ?? localEditOperations;
 	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
 		options?.operations !== undefined,
@@ -545,6 +554,7 @@ export function createEditToolDefinition(
 					error instanceof FileMutationPreflightError &&
 					(error.reason === "edit_missing" || error.reason === "edit_not_file")
 				) {
+					harnessLog.warn("tools", "an edit was refused before it changed the file", { reason: error.reason });
 					throw await editPathFailureWithRetainedPayload(error, validated, intentController, signal);
 				}
 				throw error;

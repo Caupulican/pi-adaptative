@@ -58,6 +58,7 @@ import {
 	INITIAL_TASK_CONTRACT_STREAK,
 	type TaskContractStreak,
 } from "../../core/tasks/task-contract-monitor.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { isAutoLearnSessionId } from "../../kernel/session/session-manager.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -68,6 +69,24 @@ export const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
 const AUTO_LEARN_HANDOFF_DIR = "handoffs";
 export const AUTO_LEARN_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** How a learner run's outcome reads on screen; the raw status stays in the handoff record. */
+const AUTO_LEARN_OUTCOME_TEXT: Readonly<Record<AutoLearnHandoffRecord["status"], string>> = {
+	reported: "finished",
+	child_failed: "the learner failed",
+	unparseable: "its result could not be read",
+	learner_not_pass: "the learner did not pass",
+	parent_session_changed: "its session changed before it finished",
+	apply_failed: "its proposals could not be applied",
+};
+
+/** How an unreadable proposal block reads on screen; the raw reason goes to the harness log. */
+const AUTO_LEARN_PARSE_FAILURE_TEXT: Partial<Record<string, string>> = {
+	no_block: "the result has no proposal block",
+	block_too_large: "the proposal block is too large",
+	invalid_json: "the proposal block is malformed",
+	invalid_envelope: "the proposal block has the wrong shape",
+};
 
 export interface AutoLearnHistoryPruneResult {
 	promptFiles: number;
@@ -475,8 +494,8 @@ export class AutoLearnController {
 					);
 				}
 			} catch (error) {
-				if (this.deps.isActive())
-					this.deps.ui.showStatus(`Auto Learn accounting recovery unavailable: ${String(error)}`);
+				harnessLog.debug("ui", "auto-learn accounting recovery failed", { error: String(error) });
+				if (this.deps.isActive()) this.deps.ui.showStatus("Auto Learn: could not recover its usage records.");
 			} finally {
 				this.accountingRecoveryScheduled = false;
 			}
@@ -672,7 +691,7 @@ export class AutoLearnController {
 		if (runningCount >= settings.maxConcurrentLearners) {
 			return {
 				shouldRun: false,
-				reason: `max tenant learners running (${runningCount}/${settings.maxConcurrentLearners})`,
+				reason: `maximum learners already running (${runningCount}/${settings.maxConcurrentLearners})`,
 				messageCount,
 				contextPercent,
 				cooldownRemainingMs,
@@ -997,6 +1016,8 @@ export class AutoLearnController {
 			forwarded: [],
 			completedAt: new Date().toISOString(),
 		};
+		// The owner's wording of the detail, where the stored detail is not fit for the screen; the stored record is unchanged.
+		let shownDetail: string | undefined;
 		const output = exit.code === 0 ? this.readAutoLearnOutputTail(run.logPath) : "";
 		if (exit.code !== 0) {
 			record.detail = "learner did not exit cleanly; its output was not applied";
@@ -1010,6 +1031,8 @@ export class AutoLearnController {
 			if (!parsed.ok) {
 				record.status = "unparseable";
 				record.detail = `${parsed.reason}: ${parsed.detail}`;
+				harnessLog.debug("ui", "an auto-learn result did not parse", { runId: run.runId, reason: parsed.reason });
+				shownDetail = AUTO_LEARN_PARSE_FAILURE_TEXT[parsed.reason] ?? "the result could not be read";
 				retainRaw();
 			} else {
 				const { set } = parsed;
@@ -1026,6 +1049,11 @@ export class AutoLearnController {
 				) {
 					record.status = "parent_session_changed";
 					record.detail = `launching session ${run.owner.sessionId} is no longer the active session; proposals were not applied and are retained for the next main session's startup`;
+					harnessLog.debug("ui", "an auto-learn run's launching session is no longer active", {
+						runId: run.runId,
+						sessionId: run.owner.sessionId,
+					});
+					shownDetail = "proposals were not applied and are kept for the next main session's startup";
 					// The whole validated block: a later session re-offers it (auto-learn-reoffer.ts).
 					retainRaw(true);
 				} else {
@@ -1074,8 +1102,10 @@ export class AutoLearnController {
 				});
 		const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
 		const open = record.entries.length - applied;
+		harnessLog.debug("ui", "an auto-learn run settled", { runId: run.runId, status: record.status });
+		const detailText = shownDetail ?? record.detail;
 		this.deps.ui.showStatus(
-			`Auto Learn ${run.runId}: ${record.status}${record.detail ? ` (${record.detail})` : ""}; ${applied} applied, ${open} recorded as findings${persisted ? "" : " (handoff not persisted)"}`,
+			`Auto Learn: ${AUTO_LEARN_OUTCOME_TEXT[record.status]}${detailText ? ` (${detailText})` : ""}; ${applied} applied, ${open} recorded as findings${persisted ? "" : " (result not saved)"}`,
 		);
 		this.updateAutoLearnFooter();
 	}
@@ -1108,16 +1138,19 @@ export class AutoLearnController {
 		// Receipts stay on disk for their owner; never enqueue old-project work into a replacement session.
 		if (!isCurrent()) return;
 		if (result.unresolved.length > 0) {
-			this.deps.ui.showStatus(
-				`Auto Learn: ${result.unresolved.length} retained handoff issue(s): ${result.unresolved.join("; ")}`,
-			);
+			harnessLog.debug("ui", "auto-learn saved results need attention", { issues: result.unresolved });
+			this.deps.ui.showStatus(`Auto Learn: ${result.unresolved.length} saved learning result(s) need attention.`);
 		}
 		for (const { directory, record } of result.finalized) {
 			if (!isCurrent()) break;
 			try {
 				this.getAccounting().handoffPersisted(record.runId);
 			} catch (error) {
-				this.deps.ui.showStatus(`Auto Learn accounting handoff acknowledgement failed: ${String(error)}`);
+				harnessLog.debug("ui", "auto-learn usage record acknowledgement failed", {
+					runId: record.runId,
+					error: String(error),
+				});
+				this.deps.ui.showStatus("Auto Learn: could not confirm a re-offered result.");
 			}
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
 			await session
@@ -1132,16 +1165,25 @@ export class AutoLearnController {
 				)
 				.then(() => {
 					this.getAccounting().handoffPersisted(record.runId);
-					if (!this.handoffs.acknowledge(directory, record))
+					if (!this.handoffs.acknowledge(directory, record)) {
+						harnessLog.debug("ui", "auto-learn notice delivered; receipt cleanup pending", {
+							runId: record.runId,
+						});
 						this.deps.ui.showStatus(
-							`Auto Learn ${record.runId}: notice delivered; receipt cleanup remains pending.`,
+							"Auto Learn: a notice was delivered; some saved copies are still pending cleanup.",
 						);
+					}
 				})
 				.catch(() => {
 					// The persisted record and status line still carry the outcome.
 				});
+			harnessLog.debug("ui", "an auto-learn run was re-offered", {
+				runId: record.runId,
+				status: record.status,
+				detail: record.detail,
+			});
 			this.deps.ui.showStatus(
-				`Auto Learn ${record.runId}: re-offered proposals ${record.status}${record.detail ? ` (${record.detail})` : ""}; ${applied} applied, ${record.entries.length - applied} recorded as findings`,
+				`Auto Learn: re-offered proposals, ${AUTO_LEARN_OUTCOME_TEXT[record.status]}; ${applied} applied, ${record.entries.length - applied} recorded as findings`,
 			);
 		}
 		if (result.deferred > 0) {
@@ -1429,14 +1471,16 @@ export class AutoLearnController {
 		const runLines = runs.length
 			? runs
 					.map(([id, run]) => {
-						const session = [
-							run.sessionId ? `session=${run.sessionId}` : "",
-							run.sessionDir ? `sessionDir=${run.sessionDir}` : "",
-						]
-							.filter(Boolean)
-							.join(", ");
-						const sessionText = session ? `, ${session}` : "";
-						return `- ${id}: ${run.model}, kind=${run.kind ?? "auto"}, status=${run.status ?? "running"}, authority=${run.authority ?? "unknown"}, pid=${run.pid ?? "?"}${sessionText}, log=${run.logPath}`;
+						harnessLog.debug("ui", "auto-learn status lists a run", {
+							runId: id,
+							sessionId: run.sessionId,
+							sessionDir: run.sessionDir,
+							pid: run.pid,
+							authority: run.authority,
+						});
+						const kindText = run.kind === "reflection" ? "reflection" : "automatic";
+						const statusText = run.status === "reserved" ? "starting" : "running";
+						return `- ${kindText} learner on ${run.model}, ${statusText}; log: ${run.logPath}`;
 					})
 					.join("\n")
 			: "- none";
@@ -1445,16 +1489,20 @@ export class AutoLearnController {
 			ownSessionId: this.deps.getSessionManager().getSessionId(),
 			ownSessionFile: this.deps.getSessionManager().getSessionFile(),
 		});
-		const reloadBlockerLines = reloadBlockers.pending
-			? reloadBlockers.descriptions.map((description) => `- ${description}`).join("\n")
-			: "- none";
+		if (reloadBlockers.pending)
+			harnessLog.debug("ui", "auto-learn status lists reload blockers", {
+				descriptions: reloadBlockers.descriptions,
+				reason: reloadBlockers.reason,
+			});
+		const reloadBlockerText = reloadBlockers.pending ? `${reloadBlockers.blockers.length} other session(s)` : "none";
 		// In-process quiesce registry (background lanes, scout runs, isolated completions) — the
 		// reload gate's OTHER source of blockers, distinct from the cross-process ones above.
 		const inFlightWork = getInFlightWorkUnits(getAgentDir());
-		const inFlightWorkLines = inFlightWork.length
-			? inFlightWork.map((unit) => `- ${describeInFlightWorkUnit(unit)}`).join("\n")
-			: "- none";
+		if (inFlightWork.length)
+			harnessLog.debug("ui", "auto-learn status lists in-flight work", {
+				units: inFlightWork.map(describeInFlightWorkUnit),
+			});
 		const reflectionStatus = this.isNativeReflectionEnabled() ? "enabled" : "disabled";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nCurrent-session reflection: ${reflectionStatus} (complex trigger ${settings.complexTaskToolCalls} tool calls; automatic provider requests 0)\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\n${inFlightWorkLines}\nRuns:\n${runLines}`;
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nCurrent-session reflection: ${reflectionStatus} (complex trigger ${settings.complexTaskToolCalls} tool calls; automatic provider requests 0)\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning learners: ${runs.length}/${settings.maxConcurrentLearners}\nLearners of other projects: ${otherTenantRuns}\nArtifact folder: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockerText}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\nRuns:\n${runLines}`;
 	}
 }

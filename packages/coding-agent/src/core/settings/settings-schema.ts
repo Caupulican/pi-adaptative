@@ -34,10 +34,20 @@ export interface ScoutSettings {
 	model?: string; // default: "auto" — resolve an installed FastContext model, else return unavailable from the tool
 }
 
+export interface LoggingSettings {
+	/** The harness log's level: off, error, warn (default), info, debug or trace. `PI_LOG_LEVEL` overrides it. */
+	level?: "off" | "error" | "warn" | "info" | "debug" | "trace";
+	/** Only these subsystems are logged (delegation, link, bots, tools, readiness, ...); absent logs every one. */
+	categories?: string[];
+	maxFileMb?: number; // default: 8; a log file past it is rotated
+	retainDays?: number; // default: 14; older log files are deleted at start
+}
+
 export interface OrchestratorSettings {
 	/**
-	 * The root orchestrates and workers carry out the work: a root call that is task work is refused with the way to
-	 * delegate it (core/system-one/delegation-gate). Default true; applies only while the `delegate` tool is active.
+	 * Opt-in strict split: a root call that is task work is refused with the way to delegate it
+	 * (core/system-one/delegation-gate). Default false: the root edits and runs commands itself, and delegates by choice;
+	 * applies only while the `delegate` tool is active.
 	 */
 	delegationGate?: boolean;
 }
@@ -250,16 +260,17 @@ export interface FailoverSettings {
 export type ModelRouterSelectionMode = "manual" | "auto" | "hybrid";
 
 /**
- * Ranking preference applied inside the candidate pool AFTER hard admission. `subscription-first`
- * (the default) ranks adequate subscription-backed models ahead of metered ones; `balanced` keeps
- * the evidence ranking alone. Preference is never authority: it cannot override auth, quota,
- * tool incompatibility, a fitness gate, a manual pin or the pool boundary.
+ * Preference applied inside the candidate pool AFTER hard admission. `subscription-first` (the default) is a rule:
+ * while any subscription-backed model is admitted for a tier, a metered (API key) model is not chosen for it, whatever its
+ * evidence; metered models are chosen only when no subscription model is admitted. `balanced` keeps the evidence ranking
+ * alone. Preference is never authority: it cannot override auth, quota, tool incompatibility, a fitness gate, a manual
+ * pin or the pool boundary, and an owner's explicit pin or instruction to use an API model is honoured.
  */
 export type ModelRouterPoolPreference = "subscription-first" | "balanced";
 
 export interface ModelRouterSettings {
 	enabled?: boolean; // default: on when the session has System One, off otherwise (setModelRouterDefaultEnabled)
-	selectionMode?: ModelRouterSelectionMode; // default: manual — existing installs keep exact-pin behavior
+	selectionMode?: ModelRouterSelectionMode; // default: hybrid — pinned tiers keep their exact model, unset tiers are chosen automatically
 	poolPreference?: ModelRouterPoolPreference; // default: subscription-first — applies only to auto-selected tiers
 	cheapModel?: string; // model pattern for read-only/research turns
 	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
@@ -426,6 +437,7 @@ export interface WorkerDelegationSettings {
 	reportHandshake?: boolean; // default: true; a worker about to stop with something checkable (requirement ids, commands, changed files) is asked once for a report the host checks against its receipts; explicit false keeps the plain text path
 	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
 	maxConcurrent?: number; // default: 5 (above the Codex CLI per-session default of 3); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
+	maxConcurrentBurst?: number; // default: 12; running concurrency while the subscription of the worker's account reports room (never below maxConcurrent); the fleet ceilings still hold
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
@@ -809,6 +821,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
+	logging?: LoggingSettings; // The harness log under <agent dir>/logs/harness: level, subsystems, size and retention
 	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words, and routines run away (both on by default)
 	channels?: Record<string, ChannelPolicySettings>; // Admission per registered channel provider (core/channels); global or directory profile only
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models

@@ -14,6 +14,7 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import nodePath from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
 import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
@@ -521,6 +522,12 @@ export function verdictFromReadings(
 		const value = effects[id];
 		return value === undefined || (value > EFFECT_UNSETTLED_ABOVE && value < EFFECT_ESTABLISHED);
 	});
+	harnessLog.debug("edge", "system one read an operation's effects", () => ({
+		actor,
+		established,
+		unsettled,
+		request: asked,
+	}));
 	if (established.length === 0 && unsettled.length === 0) {
 		return { action: "proceed", finding: "System One found no effect beyond the task", notable: false };
 	}

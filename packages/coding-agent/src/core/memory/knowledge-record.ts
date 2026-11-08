@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type { KnowledgeWorkCache } from "./knowledge-work-journal.ts";
 
-export const KNOWLEDGE_KINDS = ["profile", "behavior", "workstream", "world", "journal"] as const;
+export const KNOWLEDGE_KINDS = ["profile", "behavior", "procedure", "workstream", "world", "journal"] as const;
 export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
 export type KnowledgeBasis = "explicit" | "inferred";
 

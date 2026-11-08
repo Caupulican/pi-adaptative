@@ -8,6 +8,7 @@ import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
 import { GMAIL_CHANNEL, GmailChannelProvider } from "./gmail-channel-provider.ts";
+import { LINK_CHANNEL, LinkChannelProvider } from "./link-channel-provider.ts";
 import { SLACK_CHANNEL, SlackChannelProvider } from "./slack-channel-provider.ts";
 import { TELEGRAM_CHANNEL, TelegramChannelProvider } from "./telegram-channel-provider.ts";
 
@@ -23,7 +24,7 @@ export interface BuiltInChannelProviderDeps {
 
 /** Whether `name` has a shipped transport. */
 export function isBuiltInChannel(name: string): boolean {
-	return name === TELEGRAM_CHANNEL || name === SLACK_CHANNEL || name === GMAIL_CHANNEL;
+	return name === TELEGRAM_CHANNEL || name === SLACK_CHANNEL || name === GMAIL_CHANNEL || name === LINK_CHANNEL;
 }
 
 /** The providers this module built: only these are Pi's own transports, however they were registered. */
@@ -48,6 +49,7 @@ function buildShipped(channel: string, deps: BuiltInChannelProviderDeps): Channe
 			...fetch,
 			...(deps.webSocket ? { webSocket: deps.webSocket } : {}),
 		});
+	if (channel === LINK_CHANNEL) return new LinkChannelProvider({ agentDir: deps.agentDir });
 	if (channel === GMAIL_CHANNEL)
 		return new GmailChannelProvider({
 			agentDir: deps.agentDir,

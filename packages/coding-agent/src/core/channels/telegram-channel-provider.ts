@@ -10,6 +10,7 @@
  */
 
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type {
 	ChannelCapabilities,
 	ChannelInboundHandler,
@@ -258,9 +259,14 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 					offset = update.id + 1;
 				}
 				// A batch that moved nothing forward (a rejected handler, or only unreadable updates) is not polled again at once.
-				if (handlerFailed || (updates.length > 0 && offset === before))
+				if (handlerFailed || (updates.length > 0 && offset === before)) {
+					harnessLog.warn("channels", "an update batch did not advance; polling repeats it", {
+						channel: TELEGRAM_CHANNEL,
+						handlerFailed,
+						failures: handlerFailures + 1,
+					});
 					await pause(this.timers, backoffDelay(TRANSIENT_BACKOFF, ++handlerFailures), signal);
-				else handlerFailures = 0;
+				} else handlerFailures = 0;
 				continue;
 			}
 			if (outcome.kind === "refused" && outcome.status === 409) {

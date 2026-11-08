@@ -1,3 +1,4 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 
@@ -344,6 +345,10 @@ export class WorkerNotificationCoordinator {
 	private startHandoffWatchdog(laneIds: readonly string[]): NotificationAlarm {
 		const alarm: NotificationAlarm = { purpose: "handoff watchdog" };
 		this.armAlarm(alarm, HANDOFF_WATCHDOG_MS, () => {
+			harnessLog.warn("workers", "a worker handoff has not settled", {
+				lanes: laneIds,
+				afterMs: HANDOFF_WATCHDOG_MS,
+			});
 			this.warnBestEffort(
 				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
 			);
@@ -406,6 +411,7 @@ export class WorkerNotificationCoordinator {
 		for (const notification of batch) notification.reportedInStatus = true;
 		// A separately owned handoff must never occupy this serialized delivery tail.
 		// Its native outbox stays pending until that owner confirms physical parent acceptance.
+		const offered = batch.length;
 		if (this.options.deliveryOwner) {
 			batch = batch.filter((notification) => {
 				try {
@@ -418,11 +424,18 @@ export class WorkerNotificationCoordinator {
 					this.warnBestEffort(
 						`Worker notification ownership is unresolved: ${error instanceof Error ? error.message : String(error)}`,
 					);
+					harnessLog.warn("workers", "a worker notification's owner could not be resolved", {
+						lane: notification.record.laneId,
+					});
 					this.scheduleRetry();
 					return false;
 				}
 			});
 		}
+		if (offered > batch.length)
+			harnessLog.debug("workers", "worker notifications were left for another owner", {
+				count: offered - batch.length,
+			});
 		if (batch.length === 0) return;
 		const batchRecords = batch.map((notification) => notification.record);
 		// Moved into `inFlight`, not merely captured by the closure below: if notify() never
@@ -448,6 +461,11 @@ export class WorkerNotificationCoordinator {
 			if (this.disposed) return;
 			for (const notification of batch) this.inFlight.delete(notification.key);
 			this.retryCount = 0;
+			harnessLog.info("workers", "worker results were handed to the parent", () => ({
+				count: batch.length,
+				lanes: batch.map((notification) => notification.record.laneId),
+				statuses: batch.map((notification) => notification.record.status),
+			}));
 			const durableIds = batch.flatMap((notification) =>
 				notification.durableNotificationId ? [notification.durableNotificationId] : [],
 			);
@@ -476,6 +494,9 @@ export class WorkerNotificationCoordinator {
 				`Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			this.scheduleRetry();
+			harnessLog.warn("workers", "a worker handoff failed; a retry is scheduled", {
+				lanes: batch.map((notification) => notification.record.laneId),
+			});
 		});
 	}
 }

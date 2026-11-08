@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -276,6 +277,11 @@ export class ProviderAdmissionLedger {
 				!Number.isFinite(heartbeatMs) ||
 				nowMs - heartbeatMs > this.staleMs;
 			if (abandoned) {
+				harnessLog.debug("provider", "a stale provider hold was pruned", () => ({
+					provider: entry.provider,
+					pid: entry.pid,
+					ageMs: Number.isFinite(heartbeatMs) ? nowMs - heartbeatMs : undefined,
+				}));
 				rmSync(path, { force: true });
 				continue;
 			}

@@ -294,6 +294,9 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.maxWallClockMs` | number | `0` | Active wall-clock ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
 | `workerDelegation.haltReportDeadlineMs` | number | `120000` | How long an interrupted worker gets to reach a request boundary and report before it is cancelled; up to 2147483647 |
 | `workerDelegation.maxConcurrent` | number | `5` | Global running-agent concurrency inside the fixed fleet and queue bounds; the Codex CLI's own per-session limit is 3 subagents (4 threads including the root) |
+| `workerDelegation.maxConcurrentBurst` | number | `12` | Running-agent concurrency while the session's subscription reports room (the account's usage windows are below the quota percent); never below `maxConcurrent`, and the fixed fleet bounds still hold. A model that is not a subscription login, or a usage reading that is missing or stale, keeps `maxConcurrent` |
+| `workerDelegation.routeProviders` | string[] | `[]` | Providers workers are routed to, in order, under `account: other`. Left empty, the harness routes only to subscription logins (OAuth), never to a provider reached only by an API key; naming an API provider here is the explicit choice that allows it |
+| `workerDelegation.modelPins.default` | binding | unset | The worker profile: `{provider, modelId, thinkingLevel}` every worker uses. A hard task (`assign` with `deep`, or `delegate` with a higher `thinkingLevel`) raises only the thinking level, never the model |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.reportHandshake` | boolean | `true` | A worker about to stop with something the host can check (task requirement ids, commands it ran, files it changed) is asked once for a report through `submit_report`, citing the host's receipts; the host checks it and gives the root a verdict. A plain text answer is still accepted. Explicit `false` keeps the plain text path |
 | `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |
@@ -308,7 +311,7 @@ The root orchestrates and its workers carry out the work. While the `delegate` t
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `orchestrator.delegationGate` | `true` | Refuse root calls that are task work. `false` returns the root to direct execution. |
+| `orchestrator.delegationGate` | `false` | Opt-in strict split: refuse root calls that are task work and send them to a worker. Off by default: the root edits and runs commands itself and delegates by choice. |
 
 ### Tool Repair
 
@@ -1002,3 +1005,14 @@ Project settings (`.pi/settings.json`) override global settings. Nested objects 
   "compaction": { "enabled": true, "reserveTokens": 8192 }
 }
 ```
+
+### Logging
+
+The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `logging.level` | `off` \| `error` \| `warn` \| `info` \| `debug` \| `trace` | `warn` | What is written. Below the level a log call costs one comparison. `PI_LOG_LEVEL` overrides it |
+| `logging.categories` | string[] | all | Only these categories are written. `PI_LOG_CATEGORIES` (comma list) overrides it |
+| `logging.maxFileMb` | number | `8` | A log file past this size is rotated once (`.1`) |
+| `logging.retainDays` | number | `14` | Log files older than this are deleted at start |

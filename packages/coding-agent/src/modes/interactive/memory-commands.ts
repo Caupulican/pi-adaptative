@@ -15,6 +15,7 @@ import type { KnowledgeCollectionStatus } from "../../core/memory/knowledge-coll
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
 import type { MemorySystem } from "../../core/settings/settings-schema.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 
 export interface MemoryCommandHost {
 	getTranscriptHistoryStatus(): TranscriptHistoryStatus;
@@ -75,7 +76,7 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 	if (hierarchy?.disabledReason) lines.push(`  hierarchy not running: ${hierarchy.disabledReason}`);
 	if (hierarchy?.readAccessReason) lines.push(`  summary read access detail: ${hierarchy.readAccessReason}`);
 	for (const failure of hierarchy?.failures.slice(-5) ?? []) {
-		lines.push(`  hierarchy failure (level ${failure.level}, ${failure.reason}): ${failure.message}`);
+		lines.push(`  hierarchy failure (level ${failure.level}, ${plainLabel(failure.reason)}): ${failure.message}`);
 	}
 	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
 	// One slot the next cause overwrites, not cleared when its condition ends: its time says how old it is.
@@ -97,7 +98,7 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 	if (admission?.blocked) lines.push(`  model summaries held: ${admission.blocked.reason}`);
 	if (admission?.heldReason) {
 		lines.push(
-			`  first held job cause${admission.heldKind !== undefined ? ` (hold: ${admission.heldKind})` : ""}: ${admission.heldReason}`,
+			`  first held job cause${admission.heldKind !== undefined ? ` (hold: ${plainLabel(admission.heldKind)})` : ""}: ${admission.heldReason}`,
 		);
 	}
 	return lines.join("\n");

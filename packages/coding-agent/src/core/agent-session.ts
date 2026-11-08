@@ -203,10 +203,10 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveLaunchedChildModel } from "./model-resolver.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
-	isModelInRouterPool,
 	type RouterCandidatePool,
 	type RouterPoolState,
 	resolveRouterCandidatePool,
+	workerModelAllocator,
 } from "./model-router/candidate-pool.ts";
 import type { ModelPoolPolicy } from "./model-router/owner-model-policy.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
@@ -1161,9 +1161,11 @@ export class AgentSession {
 			getToolManifests: () => this._foregroundRecovery.toolManifests,
 			...createWorkerEdgePolicy({
 				...this._edgeIntent.workerEdgeSource(),
-				isAllocatable: (model) =>
-					!this.settingsManager.getModelRouterSettings().enabled ||
-					isModelInRouterPool(this.getRouterCandidatePool(), model),
+				isAllocatable: workerModelAllocator({
+					getSessionModel: () => this.model,
+					isRouterEnabled: () => this.settingsManager.getModelRouterSettings().enabled,
+					getPool: () => this.getRouterCandidatePool(),
+				}),
 			}),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
@@ -2679,10 +2681,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * The objective loop's wait: every captured running attempt, in-process or managed, until one of
-	 * them leaves "running", the goal's worker-wait bound elapses, the loop is cancelled or the session
-	 * is disposed. Only a captured terminal is observed; the loop re-reads readiness after a terminal or
-	 * the bound, and stops on disposal.
+	 * The objective loop's wait: every captured running attempt, in-process or managed, until one of them leaves
+	 * "running", the goal's worker-wait bound elapses, the loop is cancelled or the session is disposed. Only a
+	 * captured terminal is observed; the loop re-reads readiness after a terminal or the bound, and stops on disposal.
 	 */
 	private async _waitForObjectiveWorkers(context: unknown, signal?: AbortSignal): Promise<void> {
 		const attempts =
@@ -3433,10 +3434,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool
-	 * schemas, extension contributions, message classes incl. GC/policy stubs and recall pages)
-	 * plus background spend, so users can see exactly what their integrations cost per request.
-	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
+	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool schemas, extension
+	 * contributions, message classes incl. GC/policy stubs and recall pages) plus background spend, so users can see
+	 * what their integrations cost per request. Read-only: uses the GC report path (writePayloads=false).
 	 */
 	getContextCompositionReport(): ContextCompositionReport {
 		return buildSessionContextCompositionReport({

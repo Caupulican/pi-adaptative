@@ -5,6 +5,7 @@
  * through zoom while the background work queue catches up.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -171,6 +172,7 @@ export class ContinuousChatRuntime {
 			runtime.reportLeaseRelease(await options.store.releaseRuntimeLease(), "after a failed recovery");
 			throw error;
 		}
+		harnessLog.info("memory", "project chat runtime opened");
 		return runtime;
 	}
 
@@ -315,6 +317,7 @@ export class ContinuousChatRuntime {
 		this.workReleases.close();
 		const unrecorded = await this.workReleases.retry({ report: false, lastChance: true });
 		if (unrecorded.length > 0) {
+			harnessLog.warn("memory", "chat work could not be recorded at stop", { count: unrecorded.length });
 			this.warn(
 				`Continuous-chat stopped with ${this.workReleases.size} claimed work item(s) it could not record (${this.workReleases
 					.entriesSnapshot()
@@ -346,6 +349,7 @@ export class ContinuousChatRuntime {
 		this.refuseWork();
 		this.abort.abort();
 		this.warn("Continuous-chat runtime lease was lost; this session no longer runs the ICM chat.");
+		harnessLog.warn("memory", "project chat lost its lease; dispatch stopped");
 	}
 
 	/** Stops accepting work. `stopped` resolves at the first call; later calls change nothing. */
@@ -431,6 +435,9 @@ export class ContinuousChatRuntime {
 			if (!this.leaseLost) {
 				fatal = error;
 				this.warn(`Continuous-chat dispatch failed: ${safeErrorMessage(error, "unknown error")}`);
+				harnessLog.error("memory", "chat dispatch failed", () => ({
+					reason: safeErrorMessage(error, "unknown error"),
+				}));
 				this.refuseWork();
 				this.abort.abort(error);
 			}
@@ -492,6 +499,11 @@ export class ContinuousChatRuntime {
 		try {
 			await this.recordAbandonment(item, abandonment);
 		} catch (error) {
+			harnessLog.warn("memory", "chat work could not be recorded", {
+				level: item.level,
+				ordinal: item.ordinal,
+				retained: !this.workReleases.closed,
+			});
 			const key = continuousChatWorkItemKey(item);
 			if (this.workReleases.closed) {
 				this.warn(
@@ -568,6 +580,12 @@ export class ContinuousChatRuntime {
 		if (this.leaseLost) return;
 		switch (outcome.status) {
 			case "published":
+				harnessLog.log(outcome.replies > 0 ? "info" : "debug", "memory", "a chat node was published", {
+					level: item.level,
+					ordinal: item.ordinal,
+					replies: outcome.replies,
+					existing: outcome.existing,
+				});
 				if (outcome.existing) {
 					// The node was already in the tree, so the sink never completed this item.
 					await this.store.completeWork(item);
@@ -576,6 +594,12 @@ export class ContinuousChatRuntime {
 				}
 				return;
 			case "failed":
+				harnessLog.debug("memory", "a chat node compaction failed", {
+					level: item.level,
+					ordinal: item.ordinal,
+					failure: outcome.reason,
+					replies: outcome.replies,
+				});
 				await this.recordOrRetain(item, {
 					kind: "fail",
 					reason: outcome.message,

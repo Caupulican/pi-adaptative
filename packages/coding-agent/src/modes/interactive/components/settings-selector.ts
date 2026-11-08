@@ -199,10 +199,10 @@ function contextCurationSummary(settings: ContextCurationSettings): string {
 }
 
 function learningPolicySummary(settings: LearningPolicySettings): string {
-	if (!(settings.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED)) return "disabled (legacy direct-apply)";
+	if (!(settings.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED)) return "disabled (legacy direct apply)";
 	const autoApply = settings.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED;
 	const confidence = settings.confidenceThreshold ?? DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD;
-	return `on · auto-apply ${autoApply ? "on" : "off"} · conf>=${confidence}`;
+	return `on · auto-apply ${autoApply ? "on" : "off"} · confidence at least ${confidence}`;
 }
 
 function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
@@ -271,7 +271,7 @@ function modelRouterTierLabel(model: string | undefined, mode: ModelRouterSelect
 function modelRouterSummary(settings: ModelRouterSettings, pool?: ModelRouterPoolView): string {
 	const state = settings.enabled ? "enabled" : "disabled";
 	const mode = (settings.selectionMode ?? "manual").toUpperCase();
-	const preference = settings.poolPreference ?? "subscription-first";
+	const preference = (settings.poolPreference ?? "subscription-first").replace(/-/g, " ");
 	const gate = settings.fitnessGate ? "gate on" : "gate off";
 	const tier = (model: string | undefined) => modelRouterTierLabel(model, settings.selectionMode);
 	return `${state} · ${mode} · pool ${modelRouterPoolSummary(pool)} · ${preference} · ${gate} · cheap: ${tier(settings.cheapModel)} · medium: ${tier(settings.mediumModel)} · expensive: ${tier(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
@@ -1073,7 +1073,7 @@ class ResearchLaneSettingsSubmenu extends SettingsListSubmenu {
 			{
 				id: "research-lane-max-usd",
 				label: "Budget per pass",
-				description: "USD budget per research pass; breaches mark the lane budget_exhausted in diagnostics",
+				description: "USD budget per research pass; breaches mark the lane as budget exhausted in diagnostics",
 				currentValue: String(this.state.maxUsd),
 				values: RESEARCH_LANE_MAX_USD_VALUES,
 			},
@@ -1172,7 +1172,7 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 				id: "learning-policy-auto-apply-supersessions",
 				label: "Auto-apply supersessions",
 				description:
-					"Allow a memory_replace/memory_remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
+					"Allow a memory replace or remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
 				currentValue: String(this.state.autoApplySupersessions ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS),
 				values: ["true", "false"],
 			},
@@ -1812,7 +1812,7 @@ class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 				id: "context-policy-enabled",
 				label: "Prompt policy enforcement",
 				description:
-					"Opt-in: stub stale artifact-backed grep/find output in the model-visible prompt only. Never touches transcript/session history. Requires the artifact_retrieve tool to be active this turn (not configurable here -- it's a runtime fact, not a setting).",
+					"Opt-in: stub stale artifact-backed grep/find output in the model-visible prompt only. Never touches transcript/session history. Requires the artifact retrieval tool to be active this turn (not configurable here -- it's a runtime fact, not a setting).",
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled),
 				values: ["false", "true"],
 			},
@@ -2969,7 +2969,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "context-policy-enforcement",
 				label: "Context / Prompt Policy",
 				description:
-					"Opt-in artifact-stub prompt-policy enforcement: stubs stale artifact-backed tool output in the model-visible prompt only, never the transcript. Requires the artifact_retrieve tool to be active.",
+					"Opt-in artifact-stub prompt-policy enforcement: stubs stale artifact-backed tool output in the model-visible prompt only, never the transcript. Requires the artifact retrieval tool to be active.",
 				currentValue: contextPolicyEnforcementSummary(currentContextPolicyEnforcement),
 				submenu: (_currentValue, done) =>
 					new ContextPolicyEnforcementSettingsSubmenu(

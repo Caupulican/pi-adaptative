@@ -2,10 +2,39 @@
 
 ### Added
 
+- `assign`, one call that hands work to a worker: `assign {task, files?, deep?}`. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files named) and queue slot, and the result arrives as an event. `deep` raises only the thinking of a pinned worker model. `delegate` stays for follow-ups, waits and its structured start fields.
+- The harness log: leveled (`off` to `trace`, default `warn`), per category, JSONL under `<agent dir>/logs/harness/` with rotation and retention, secrets redacted, nearly free when disabled. `logging.level`, `logging.categories`, `PI_LOG_LEVEL` and `PI_LOG_CATEGORIES` control it, and decisions across delegation, tools, bots, the link, channels, memory, providers, the router, cost, routines and workers write to it.
+- A session-start readiness check (off the start-up path): when the harness cannot start a worker it says why in plain words and offers one-step fixes: set the worker profile, or set it up automatically (subscriptions first, API keys unused).
+- `/bot spawner` creates the one bot whose only work is making bots for the orchestrator, and the root's `bot` tool can `ask` a bot (its answer arrives as an event).
+- Fan-out is wider: `delegate slices` up to 24 and `race` up to 8, and running concurrency widens from `maxConcurrent` to `maxConcurrentBurst` (default 12) while the subscription reports room.
+
+### Fixed
+- Two processes creating or migrating the continuous-chat projection or scheduler database at the same time no longer fail or downgrade the schema: the schema version is re-checked under the write lock.
+
+- Delegation failed in any setup without favorite models: with the model router on and an empty candidate pool nothing counted as allocatable, so every worker start died with `no_allowed_model` and the root went digging through the harness source. An empty pool now restricts nothing, and the session's own model is always usable.
+- `delegate start` no longer rejects a brief for how the model split it: `goal` with `instructions`, a multi-line `goal`, `task` with `instructions`, and `note`/`refs`/`evid`/`out` without a goal all fold into one brief.
+- The root's own file edits are no longer refused (`orchestrator.delegationGate` is off by default; the strict split stays as an opt-in), and the system prompt names the working directory's top-level entries so a plain request needs no searching.
+
+### Changed
+- Model router `selectionMode` now defaults to `hybrid`: unset tiers are chosen from the candidate pool (subscription first) instead of warning at startup that they are unset; pinned tiers are unchanged.
+
+- Bots have readable names: the id stays the handle, a display name (`Trello Scout`) is what the roster shows, a bot made on the fly without an id is named from its purpose (numbered when taken), `/bot rename <id> <name...>` renames, and the roster row shows the name while the selected bot's `@id` and model are hints on the line below.
+- A bot created without a model no longer inherits the session's own (usually the dearest) model: it gets what a worker would run on, the owner's worker profile or else the subscription-routed efficient model, with its thinking stepped down from the session's. Naming a model still decides.
+- Subscriptions are preferred as a rule: worker routing considers only subscription logins unless an API provider is named in `workerDelegation.routeProviders`, and `modelRouter.poolPreference: subscription-first` no longer ranks but decides: a metered (API key) model is not chosen for a tier while any subscription model is admitted.
+
+### Changed
+
+- The model catalogs are refreshed from live data (43 text models added and 58 removed, 4 image models added and 1 removed), and a daily bounded CI task now keeps them current: it refuses to write when a removed model id is still referenced, checks the change stays inside the two generated files, runs the static check and commits to main, so a patch release can carry the update at any time.
+
+### Added
+
+- Machines as bots: any machine can host a hub (`/remote listen`, `/remote add <name>`) or join one (`/remote join <host:port> <token>`), and a joined machine appears as a bot with a computer mark (💻 remote) that you message like any bot; its answers come back into its chat. The link proves a shared secret by HMAC both ways, treats the hub's words as a peer's, refuses loops of hubs and keeps its records under `<agent dir>/remote/`.
+
 - Bots are created on the fly by the orchestrator and by leaders: the root session has a `bot` tool (create, list), a bot you make a leader with `/bot lead <id>` (`/bot unlead <id>` takes it back) creates bots with `bot_message` `action create`, and every other bot is told to ask a leader or its parent. A leader cannot make a leader, grants write access only when it can write itself, keeps at most 12 bots, and the store records each bot's creator.
 
 ### Changed
 
+- A message that reaches a session from another machine, a chat or a mail reads as who it came from and what it said (the harness's framing for the model, `<untrusted_content ...>` included, is no longer shown), and the confirmation after messaging a bot is plain words instead of mode and link names.
 - A tool call the harness bounced now reads as one plain sentence in the Execution pane (it showed the `[harness] {"MUST":...}` record written for the model), and record types (`background_tool_task`, `parent_input_wake`, and the rest) show as plain labels in custom messages, the session tree and the report; a message body that is a payload for the model reads "Details for the assistant; they are kept in the transcript." File references in replies are underlined. The live gate now scans the owner's screens for machine text and snake_case identifiers.
 
 ## [0.104.45] - 2026-11-08

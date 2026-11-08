@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir, getBundledResourcesDir } from "../../config.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
@@ -373,7 +374,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		const watcher = options.watch
 			? options.watch(watchDirectory, changed)
 			: watch(watchDirectory, { persistent: false }, (_event, file) => changed(file));
-		watcher.on("error", (error) => ctx.ui.notify(`Collaboration signal failed: ${error.message}`, "error"));
+		watcher.on("error", (error) => {
+			harnessLog.warn("collab", "the collaboration signal watcher failed", {
+				code: "code" in error ? String(error.code) : "unknown",
+			});
+			ctx.ui.notify(`Collaboration signal failed: ${error.message}`, "error");
+		});
 		let reattaching: Promise<void> | undefined;
 		/** `fresh`: wait out a reconciliation already in flight (it listed jobs before the caller's change), then run. */
 		const recover = async (fresh = false): Promise<void> => {

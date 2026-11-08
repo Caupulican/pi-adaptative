@@ -6,6 +6,7 @@
  * guarded call of the turn (through the `live` closure) and at every work pass.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-contract.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
@@ -123,7 +124,11 @@ export function ownerLiveCheck(sources: OwnerLiveSources): () => boolean {
 			if (!listedOwnerDigests(sources.channel, policy, provider).has(sources.senderDigest)) return false;
 			const engaged = sources.isEmergencyStopEngaged;
 			return engaged !== undefined && engaged() === false;
-		} catch {
+		} catch (error) {
+			harnessLog.warn("channels", "an owner authority check threw; the owner turn is not authorized", {
+				channel: sources.channel,
+				error: error instanceof Error ? error.name : typeof error,
+			});
 			return false;
 		}
 	};

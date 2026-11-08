@@ -19,6 +19,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsPromises, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	type JudgeOwnerOptions,
 	judgeOwner,
@@ -242,6 +243,15 @@ export async function appendAuditEvent(
 	at: string,
 ): Promise<void> {
 	await appendBoundedJsonLine(paths.eventsFile, { at, ...event }, WORKTREE_AUDIT_EVENT_LIMITS);
+	// A discarded release threw away unlanded work (an abandoned lane); a conflict or orphan needs attention.
+	const attention = event.event === "sync_conflicts" || event.event === "lane_orphaned" || event.discarded === true;
+	harnessLog.log(attention ? "warn" : "info", "worktree", "a worktree lane event was recorded", () => ({
+		event: event.event,
+		laneKey: event.laneKey,
+		discarded: event.discarded,
+		files: event.files,
+		changedFiles: event.changedFiles,
+	}));
 }
 
 /**

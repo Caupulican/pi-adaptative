@@ -127,7 +127,7 @@ function formatKpiRows(overview: UsageOverview, width: number): [string, string]
 	const machine = overview.machine;
 	let loadSummary: string;
 	if (machine.emergencyStop.engaged) {
-		loadSummary = theme.fg("error", "ESTOP ENGAGED");
+		loadSummary = theme.fg("error", "EMERGENCY STOP ON");
 	} else if (machine.inflight > 0) {
 		const other = machine.otherAccountsInflight > 0 ? ` · ${machine.otherAccountsInflight} other` : "";
 		loadSummary = `${machine.inflight} in flight${other}`;

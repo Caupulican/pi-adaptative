@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { sessionSemanticUsageOf } from "./semantic-usage-delivery.ts";
 import { journalSlotOf, readJournal, sessionJournalPaths } from "./semantic-usage-journal.ts";
@@ -87,6 +88,10 @@ export function recoverMissingSessionUsage(args: {
 			);
 		}
 	}
+	harnessLog.info("cost", "missing session usage was recovered", () => ({
+		committed: committed.length,
+		unconfirmed: unconfirmed.length,
+	}));
 	return {
 		committed,
 		unconfirmed,

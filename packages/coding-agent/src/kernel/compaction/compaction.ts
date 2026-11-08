@@ -15,6 +15,7 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai/types";
 import { uuidv7 } from "@caupulican/pi-ai/uuid";
+import { harnessLog } from "../harness-log.ts";
 import type { StreamFn } from "../loop-config.ts";
 import {
 	convertToLlm,
@@ -1073,6 +1074,10 @@ export async function generateSummaryWithUsage(
 		if (!chunked) {
 			throw new Error("input-overflow: summarization request exceeds summarizer window");
 		}
+		harnessLog.debug("compaction", "the summary input is chunked to fit the summarizer window", () => ({
+			inputTokens: estimateStringTokens(initialPromptText),
+			inputBound,
+		}));
 		conversationText = await summarizeChunks(
 			conversationText,
 			model,
@@ -1711,6 +1716,11 @@ async function generateVerifiedSummary(options: {
 		const verification = verifySummary(summary, options.facts);
 		if (!isCompactionSummaryStructurallyUsable(summary)) {
 			verificationGateFailures.push(verification);
+			harnessLog.warn("compaction", "a checkpoint failed its structure check", () => ({
+				attempt: attempt + 1,
+				willRetry: attempt < 1,
+				summaryChars: summary.length,
+			}));
 			if (attempt >= 1) throw new CompactionVerificationError(verificationGateFailures);
 			retryInstructions = buildRetryPrompt(verification, summary);
 			continue;

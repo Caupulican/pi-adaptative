@@ -4,6 +4,8 @@
  * history, and the cold write a model switch pays. Safety and recovery compaction is not priced here.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
+
 /**
  * The comparison behind an early compaction: keep the prefix and resume, or compact now and continue on
  * the shorter one. Every quantity is learned or catalog-priced; nothing here is a tuned constant.
@@ -87,6 +89,12 @@ export function compactionVerdictDecision(
 	savingUsd?: number;
 	detail: Readonly<Record<string, number | string>>;
 } {
+	harnessLog.debug("compaction", "an early compaction was priced", () => ({
+		kind,
+		admit: verdict.proceed,
+		reason: verdict.reason,
+		savingUsd: verdict.savingUsd ?? null,
+	}));
 	return {
 		kind,
 		decidedAt,
@@ -439,6 +447,25 @@ export interface SentPrefixRewriteVerdict {
  * anything, since a shorter prompt is then free.
  */
 export function priceSentPrefixRewrite(input: SentPrefixRewriteEconomicsInput): SentPrefixRewriteVerdict {
+	const verdict = priceRewriteVerdict(input);
+	harnessLog.log(
+		verdict.admit ? "info" : "debug",
+		"compaction",
+		verdict.admit
+			? "a rewrite of already-sent history was admitted"
+			: "a rewrite of already-sent history was not admitted",
+		() => ({
+			savedTokens: input.savedTokens,
+			rewrittenTokens: input.rewrittenTokens,
+			remainingRequests: input.remainingRequests,
+			savingUsd: verdict.savingUsd ?? null,
+			costUsd: verdict.costUsd ?? null,
+		}),
+	);
+	return verdict;
+}
+
+function priceRewriteVerdict(input: SentPrefixRewriteEconomicsInput): SentPrefixRewriteVerdict {
 	const read = input.cacheReadUsdPerMillion;
 	const cold = input.coldUsdPerMillion;
 	if (read === undefined || cold === undefined) {

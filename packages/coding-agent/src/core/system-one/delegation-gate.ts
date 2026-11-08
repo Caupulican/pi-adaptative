@@ -14,6 +14,7 @@
  */
 
 import nodePath from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
@@ -94,7 +95,7 @@ export class DelegationGate {
 			if (typeof path !== "string" || !path.trim()) return undefined;
 			const resolved = nodePath.resolve(cwd, path);
 			if (directories.some((root) => isInside(root, resolved))) return undefined;
-			return this.refusal(`${toolName} ${resolved}`, directories);
+			return this.refusal(`${toolName} ${resolved}`);
 		}
 		const engine = this.deps.getEngine();
 		const command = toolName === "run_process" ? processCommand(args) : commandFromToolArgs(args);
@@ -106,7 +107,7 @@ export class DelegationGate {
 			taskWork = await this.judge(engine, toolName, command, directories, signal);
 			this.verdicts.set(key, taskWork);
 		}
-		return taskWork ? this.refusal(command, directories) : undefined;
+		return taskWork ? this.refusal(command) : undefined;
 	}
 
 	private async judge(
@@ -143,13 +144,14 @@ export class DelegationGate {
 		}
 	}
 
-	private refusal(operation: string, directories: readonly string[]): DelegationRefusal {
+	private refusal(operation: string): DelegationRefusal {
 		const shown = operation.replace(/\s+/g, " ").trim();
 		const subject = shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`;
+		harnessLog.info("delegation", "the delegation gate refused a root call", { subject });
 		this.deps.notify(`The root delegates task work: ${subject}`);
 		return {
 			block: true,
-			reason: `The root orchestrates and does not carry out task work itself: ${subject} is task work. Delegate it: write the instructions to a file under ${directories[0] ?? "the agent directory"} when they are long, start a worker with the delegate tool and tell it to read and follow them, then continue with other work. The worker's handoff arrives as an event.`,
+			reason: `The root orchestrates and does not carry out task work itself: ${subject} is task work. Start a worker for it: delegate {"action":"start","task":"<what to do, with the file paths>"}, then continue with other work. The worker's handoff arrives as an event.`,
 		};
 	}
 
