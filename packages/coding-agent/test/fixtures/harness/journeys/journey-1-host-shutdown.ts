@@ -1506,7 +1506,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	const runtimeDiscard = await runDiscardThroughRuntime(world);
 	expect(runtimeDiscard).toMatchObject({
 		rejection:
-			"Session replacement activation failed; the previous session was restored: the candidate's activation is refused",
+			"Switching sessions failed while starting the new session; the previous session was restored: the candidate's activation is refused",
 		candidateKept: true,
 		restoredWarnings: [
 			`Usage handoff: the paid usage rows of ${runtimeDiscard.candidateFile} could not be counted (Scripted IO fault runtime-discard-scan-read: read '${runtimeDiscard.candidateFile}'), so this rejected replacement's session file is kept as recovery evidence.`,
