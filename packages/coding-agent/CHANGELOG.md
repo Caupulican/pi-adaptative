@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- A worker whose check matched no recorded command (a `python` tool run it had written as a `python -c` line) was told only to run what was missing, and ended its finished work `blocked`. The review now lists the commands the host recorded, with their receipt names, so the worker can cite the exact input or drop the check.
+
 ## [0.104.42] - 2026-11-08
 
 ### Changed
