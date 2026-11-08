@@ -1,1 +1,3 @@
-Always build code cleanly, modularly, and with proper architecture and separation of concerns. Never simply bolt on a feature because I asked for it. If you can’t find an easy way to build it naturally, and you'd recommend a refactor to make the whole thing cleanly, stop your work ahead of time and say so.
+Build every change cleanly: modular, with sound architecture and clear separation of concerns. Never bolt a feature on just because it was requested.
+
+Before writing code, check that the feature fits the existing structure naturally. If it does not, and a refactor would make the whole thing cleaner, stop before building: name the refactor, say why it is needed, and wait for a decision.
