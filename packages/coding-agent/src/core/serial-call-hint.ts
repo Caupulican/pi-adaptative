@@ -12,6 +12,9 @@ const INDEPENDENT_LOOKUPS: ReadonlySet<string> = new Set([
 	"date",
 ]);
 
+/** What every batching note starts with, so a reader of a stored result can tell the note from the tool's own output. */
+export const SERIAL_CALL_HINT_PREFIX = "Note: the last ";
+
 /** A hint after this many consecutive single-lookup rounds, then once more every `HINT_EVERY` rounds while the streak lasts. */
 const STREAK_TO_HINT = 2;
 const HINT_EVERY = 4;
@@ -37,6 +40,6 @@ export class SerialCallHint {
 		}
 		if (!this.single || this.streak < STREAK_TO_HINT || (this.streak - STREAK_TO_HINT) % HINT_EVERY !== 0)
 			return undefined;
-		return `Note: the last ${this.streak} rounds were single independent lookups. Put independent reads and searches in one message; each extra round re-sends the whole context.`;
+		return `${SERIAL_CALL_HINT_PREFIX}${this.streak} rounds were single independent lookups. Put independent reads and searches in one message; each extra round re-sends the whole context.`;
 	}
 }

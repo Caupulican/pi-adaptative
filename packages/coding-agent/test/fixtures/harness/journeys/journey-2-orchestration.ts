@@ -24,6 +24,7 @@ import {
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import type { ProviderAdmissionWaitEvent } from "../../../../src/core/provider-admission/gate.ts";
 import { providerAdmissionDir } from "../../../../src/core/provider-admission/ledger.ts";
+import { SERIAL_CALL_HINT_PREFIX } from "../../../../src/core/serial-call-hint.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { WaitEndReport } from "../../../../src/core/util/wait.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
@@ -2656,7 +2657,12 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			if (entry?.type !== "message" || entry.message.role !== "toolResult") {
 				throw new Error(`no durable read result for ${toolCallId}`);
 			}
-			return entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+			// The tool's own output only: a harness note appended to the stored result (the batching note) is not part of it.
+			return entry.message.content
+				.map((block) =>
+					block.type === "text" && !block.text.startsWith(SERIAL_CALL_HINT_PREFIX) ? block.text : "",
+				)
+				.join("");
 		};
 		const withoutReadEnvelope = (text: string): string =>
 			text
