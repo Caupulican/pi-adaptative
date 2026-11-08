@@ -13,7 +13,7 @@ import { reduceToolOutput } from "./output-reduction.ts";
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import type { ReadOperationFactory } from "./read-operation-context.ts";
-import { formatCollapsibleToolResult, renderTextComponent, str, toolTextResult } from "./render-utils.ts";
+import { renderCollapsedTextResult, renderTextComponent, str, toolTextResult } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 /**
@@ -37,7 +37,7 @@ const MAX_TOKEN_CHARS = 256;
 const MAX_PATHSPEC_CHARS = 1_024;
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
-const repoReadSchema = Type.Object({
+export const repoReadSchema = Type.Object({
 	action: Type.Union([
 		Type.Literal("status"),
 		Type.Literal("log"),
@@ -604,16 +604,12 @@ export function createRepoReadToolDefinition(
 			return renderTextComponent(context.lastComponent, formatRepoReadCall(args, theme));
 		},
 		renderResult(result, renderOptions: ToolRenderResultOptions, theme, context) {
-			return renderTextComponent(
-				context.lastComponent,
-				formatCollapsibleToolResult({
-					result: result as { content: Array<{ type: string; text?: string }>; details?: RepoReadToolDetails },
-					options: renderOptions,
-					theme,
-					showImages: context.showImages,
-					collapsedLineLimit: 3,
-					warnings: repoReadWarnings,
-				}),
+			return renderCollapsedTextResult(
+				result as { content: Array<{ type: string; text?: string }>; details?: RepoReadToolDetails },
+				renderOptions,
+				theme,
+				context,
+				repoReadWarnings,
 			);
 		},
 	};

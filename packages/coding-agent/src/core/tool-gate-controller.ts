@@ -14,7 +14,7 @@ import { existsSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { harnessLog } from "../kernel/harness-log.ts";
-import type { Agent, AgentToolCall, BeforeToolCallResult } from "../kernel/index.ts";
+import type { Agent, AgentContext, AgentRequestId, AgentToolCall, BeforeToolCallResult } from "../kernel/index.ts";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
@@ -34,6 +34,8 @@ import type { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
+import type { NestedCall, NestedCallAdmitter } from "./tools/lookup.ts";
+import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 
 export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"task_steps",
@@ -48,6 +50,16 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"tool_task",
 	"ask_question",
 ]);
+
+/** Tools that run sub-calls of other tools; the gate keeps the admitted call's context for them (see `admitNested`). */
+const NESTED_ADMISSION_TOOL_NAMES: ReadonlySet<string> = new Set([LOOKUP_TOOL_NAME]);
+
+/** What an admitted parent call's sub-calls are admitted under: the real context of that parent. */
+interface NestedParentContext {
+	readonly assistantMessage: AssistantMessage;
+	readonly requestId: AgentRequestId | undefined;
+	readonly context: AgentContext;
+}
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
@@ -256,11 +268,24 @@ interface AdmittedToolInvocation {
 	repositoryObservation?: AdmittedRepositoryObservation;
 }
 
+/** What a nested sub-call shares with the call that carries it: its own arguments, and that call's message, request and context. */
+function nestedCallScope(parent: NestedParentContext, child: NestedCall) {
+	return {
+		args: child.args,
+		assistantMessage: parent.assistantMessage,
+		context: parent.context,
+		...(parent.requestId !== undefined ? { requestId: parent.requestId } : {}),
+		...(child.executionContext ? { executionContext: child.executionContext } : {}),
+	};
+}
+
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
 	// Agent core retains this exact call object from admission through detached finalization.
 	// Provider IDs can repeat on later requests while an earlier background call remains live.
 	private readonly admittedInvocations = new WeakMap<AgentToolCall, AdmittedToolInvocation>();
+	/** Admitted parent calls that run sub-calls, by call id, until the parent call is finalized or dropped. */
+	private readonly nestedParents = new Map<string, NestedParentContext>();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
@@ -342,7 +367,17 @@ export class ToolGateController {
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
-		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage, registerCleanup, registerStart },
+		{
+			toolCall,
+			args,
+			executionContext,
+			pathAuthority,
+			requestId,
+			assistantMessage,
+			context,
+			registerCleanup,
+			registerStart,
+		},
 		signal,
 	) => {
 		signal?.throwIfAborted();
@@ -588,6 +623,15 @@ export class ToolGateController {
 				edge: edgeOperations.map((operation) => operation.class),
 				yolo,
 			}));
+			// A parent that runs sub-calls keeps the context it was admitted under until it is finalized or dropped;
+			// without a cleanup owner nothing would release it, so it keeps none and its sub-calls are refused.
+			if (NESTED_ADMISSION_TOOL_NAMES.has(toolCall.name) && registerCleanup) {
+				const parent: NestedParentContext = { assistantMessage, requestId, context };
+				this.nestedParents.set(toolCall.id, parent);
+				registerCleanup(() => {
+					if (this.nestedParents.get(toolCall.id) === parent) this.nestedParents.delete(toolCall.id);
+				});
+			}
 			admitted = true;
 			return yolo ? undefined : extensionResult;
 		} finally {
@@ -610,6 +654,101 @@ export class ToolGateController {
 				if (envelope) this.deps.recordGateOutcome(terminalOutcome);
 			}
 		}
+	};
+
+	/**
+	 * Admission of one sub-call of an admitted parent call (the lookup tool's requests). The sub-call is a call like any
+	 * other: it goes through `beforeToolCall` with its own tool name, arguments and binding, under the parent's real
+	 * request, so the envelope, path authority, router, extension hooks, edge, operation, delegation, soul and
+	 * System One checks all apply to it as they would to a standalone call; an admitted one is closed through
+	 * `afterToolCall` (result hooks, selection and terminal records). A parent this gate did not admit has no context
+	 * to lend, so every sub-call of it is refused.
+	 */
+	readonly admitNested: NestedCallAdmitter = async (parentToolCallId, child, signal) => {
+		const parent = this.nestedParents.get(parentToolCallId);
+		if (!parent) return { kind: "refused", reason: "the call that asked for this was not admitted for sub-requests" };
+		if (NESTED_ADMISSION_TOOL_NAMES.has(child.toolName)) {
+			return { kind: "refused", reason: `${child.toolName} cannot be run from inside another batch` };
+		}
+		const toolCall: AgentToolCall = {
+			type: "toolCall",
+			id: child.id,
+			name: child.toolName,
+			arguments: child.args,
+		};
+		const cleanups: (() => void)[] = [];
+		const starts: (() => void)[] = [];
+		let released = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			const errors: unknown[] = [];
+			for (const cleanup of cleanups.splice(0)) {
+				try {
+					cleanup();
+				} catch (error) {
+					errors.push(error);
+				}
+			}
+			if (errors.length > 0) throw new AggregateError(errors, "Sub-call cleanup failed");
+		};
+		let decision: BeforeToolCallResult | undefined;
+		try {
+			decision = await this.beforeToolCall(
+				{
+					toolCall,
+					...nestedCallScope(parent, child),
+					...(child.pathAuthority ? { pathAuthority: child.pathAuthority } : {}),
+					registerCleanup(cleanup) {
+						if (released) cleanup();
+						else cleanups.push(cleanup);
+					},
+					registerStart(onStart) {
+						starts.push(onStart);
+					},
+				},
+				signal,
+			);
+		} catch (error) {
+			try {
+				release();
+			} catch {
+				// The refusal or abort that stopped admission is the reported cause.
+			}
+			throw error;
+		}
+		if (decision?.block) {
+			release();
+			return {
+				kind: "refused",
+				reason: [decision.reason ?? "blocked by the session's tool policy", decision.correction]
+					.filter((part): part is string => part !== undefined && part.length > 0)
+					.join(" "),
+			};
+		}
+		return {
+			kind: "admitted",
+			start: () => {
+				for (const onStart of starts.splice(0)) onStart();
+			},
+			finish: async (result, isError, finishSignal) => {
+				try {
+					const finalized = await this.afterToolCall(
+						{
+							toolCall,
+							result,
+							isError,
+							...nestedCallScope(parent, child),
+						},
+						finishSignal,
+					);
+					return { content: finalized?.content ?? result.content, isError: finalized?.isError ?? isError };
+				} finally {
+					release();
+				}
+			},
+			abandon: release,
+		};
 	};
 
 	readonly afterToolCall: AfterToolCall = async ({
@@ -767,7 +906,9 @@ export class ToolGateController {
 			}
 			// A reverted soul.md change is told to the model in the result of the call that made it.
 			if (soulNotice) content = [...content, { type: "text", text: soulNotice }];
-			const serialNote = resolvedIsError ? undefined : serialCallHint(context.messages, assistantMessage);
+			const serialNote = resolvedIsError
+				? undefined
+				: serialCallHint(context.messages, assistantMessage, context.tools);
 			if (serialNote) content = [...content, { type: "text", text: serialNote }];
 			finishSucceeded = !resolvedIsError;
 

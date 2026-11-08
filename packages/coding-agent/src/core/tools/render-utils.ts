@@ -189,3 +189,24 @@ export function renderToolPath(
 	if (!value) return theme.fg("toolOutput", "...");
 	return linkPath(theme.fg("accent", shortenPath(value, cwd)), value, cwd);
 }
+
+/** The usual result rendering of a tool whose output is text with optional warnings: collapsed to a few lines until expanded. */
+export function renderCollapsedTextResult<TDetails>(
+	result: { content: Array<{ type: string; text?: string }>; details?: TDetails },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	context: { lastComponent: unknown; showImages: boolean },
+	warnings: (details: TDetails | undefined) => string[],
+): Text {
+	return renderTextComponent(
+		context.lastComponent,
+		formatCollapsibleToolResult({
+			result,
+			options,
+			theme,
+			showImages: context.showImages,
+			collapsedLineLimit: 3,
+			warnings,
+		}),
+	);
+}

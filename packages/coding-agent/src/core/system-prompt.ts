@@ -13,6 +13,7 @@ import {
 	ROOT_DIRECTOR_ROLE_PROMPT,
 	renderExplanationStyleRule,
 } from "./provider-prompt-contracts.ts";
+import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 import { workspaceSnapshotLine } from "./workspace-snapshot.ts";
 
 export { OWNER_AUTHORIZATION_RULE };
@@ -75,6 +76,8 @@ CHAT RULES
 
 REFERENCE POINTS
 D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
+
+const LOOKUP_BATCH_RULE = `Use \`${LOOKUP_TOOL_NAME}\` for 2 or more independent reads, searches or listings: one call, one round.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;
@@ -254,7 +257,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 				: ""
 			: `${OUTPUT_POLICY}${explanationStyle ? `\n- ${explanationStyle}` : ""}`;
 	const scopeContract = capabilityClass === "chat" || fullPrompt ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
-	const operatingContract = `${coreSection}${scopeContract}${styleContract}`;
+	// Told only where the tool is active: the host rejects a call to a tool that is not.
+	const lookupRule =
+		capabilityClass !== "chat" && activeTools.includes(LOOKUP_TOOL_NAME) ? `\n- ${LOOKUP_BATCH_RULE}` : "";
+	const operatingContract = `${coreSection}${lookupRule}${scopeContract}${styleContract}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;

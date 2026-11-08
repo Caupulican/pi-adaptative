@@ -28,6 +28,7 @@ import {
 import type { ManagedToolResolver } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { createBashRouteServer } from "./bash-route-serve.ts";
 import { classifyCommandFamily } from "./command-family.ts";
 import {
 	type FileFailureRecoveryAuthority,
@@ -709,6 +710,7 @@ function createShellToolDefinition(
 	// filtered run must happen where the shell is, not where the tool was created. The pool owns it
 	// so every lane and every tool instance on this session key sees the same directory.
 	const sessionLanes = acquireShellSessionLanes(sessionKey);
+	const routeServer = createBashRouteServer(cwd);
 	const routesWindowsContract = contractPlatform === "win32";
 	const pathFlavor = options?.pathFlavor ?? (routesWindowsContract ? "win32" : "posix");
 	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false && options?.operations === undefined;
@@ -1200,6 +1202,29 @@ function createShellToolDefinition(
 				const filterContext = familyFiltersAllowed
 					? resolveSpawnContext(command, cwd, spawnHook, options?.getShellSessionContext)
 					: undefined;
+				// Route stage: the guards that wrap this tool already admitted the command text, so an exact
+				// plain read or listing is answered by the read tool here and any other command reaches the
+				// shell below. Only where the shell is a local POSIX one the command would have run in
+				// verbatim; a background run is a shell by definition.
+				if (
+					filterContext &&
+					filterContext.command === command &&
+					background !== true &&
+					!routesWindowsContract &&
+					pathFlavor === "posix"
+				) {
+					const routedText = await routeServer({
+						command,
+						shellCwd: options?.forceCwd ? filterContext.cwd : (sessionLanes.currentCwd ?? filterContext.cwd),
+						toolCallId,
+						signal,
+						mutationScope,
+						mutationAnnouncer,
+					});
+					if (routedText !== undefined) {
+						return { content: [{ type: "text", text: routedText }], details: { exitCode: 0 } };
+					}
+				}
 				if (filterContext && filterContext.command === command) {
 					const classification = classifyGitCommand(command, filterContext.env);
 					if (classification.eligible && classification.subcommand) {

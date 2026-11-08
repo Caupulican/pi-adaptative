@@ -4,6 +4,7 @@ import { BOT_MESSAGE_TOOL_NAME } from "../delegation/bot-message-contract.ts";
 import { WORKER_MEMORY_BROKER_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
+import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
 export const CLASSIFIED_LANE_TOOL_NAMES = [
@@ -14,6 +15,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"find",
 	"ls",
 	"repo_read",
+	LOOKUP_TOOL_NAME,
 	"write",
 	"edit",
 	...WORKER_MEMORY_BROKER_TOOL_NAMES,

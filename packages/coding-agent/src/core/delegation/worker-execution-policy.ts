@@ -28,6 +28,7 @@ import {
 	requiredEnvelopeCapabilities,
 	toolSurvivesReadOnly,
 } from "../tool-capability-policy.ts";
+import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
@@ -221,6 +222,7 @@ export function buildWorkerExecutionPlan(args: {
 		for (const name of [
 			...READ_TOOL_NAMES,
 			REPO_READ_TOOL_NAME,
+			LOOKUP_TOOL_NAME,
 			TOOL_SCHEMA_SEARCH_NAME,
 			...(readOnly ? [] : [...WRITE_TOOL_NAMES, "python"]),
 			STABLE_SHELL_TOOL_NAME,
@@ -253,9 +255,12 @@ export function buildWorkerExecutionPlan(args: {
 		(name) => (args.yolo || profileToolNames.has(name)) && (!readOnly || toolSurvivesReadOnly(name)),
 	);
 	const enabledZeroAuthorityToolNames = profileToolNames.has(TOOL_SCHEMA_SEARCH_NAME) ? [TOOL_SCHEMA_SEARCH_NAME] : [];
+	// The batch lookup holds no authority of its own; it is enabled beside the read tools it runs requests through, and
+	// each request still needs the grant of its own tool.
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(grantsRepoRead ? [REPO_READ_TOOL_NAME] : []),
+		...((grantsRead || grantsRepoRead) && profileToolNames.has(LOOKUP_TOOL_NAME) ? [LOOKUP_TOOL_NAME] : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...(memoryEligible ? WORKER_MEMORY_BROKER_TOOL_NAMES.filter((name) => profileToolNames.has(name)) : []),
 		...enabledZeroAuthorityToolNames,

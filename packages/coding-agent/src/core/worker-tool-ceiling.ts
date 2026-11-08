@@ -16,6 +16,7 @@ import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
+import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 
 /**
  * Tools forbidden on EVERY worker surface (in-process leaf lanes and worker processes): agent
@@ -97,6 +98,7 @@ export const WORKER_PROCESS_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
 	"find",
 	"ls",
 	"repo_read",
+	LOOKUP_TOOL_NAME,
 	"bash",
 	"python",
 	"run_process",

@@ -228,6 +228,8 @@ import { createFindTool } from "./tools/find.ts";
 import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createImageGenerateToolDefinition } from "./tools/image-generate.ts";
+import { createLookupToolDefinition, type NestedCallAdmitter } from "./tools/lookup.ts";
+import { LOOKUP_SUB_TOOL_NAMES, LOOKUP_TOOL_NAME, type LookupSubToolName } from "./tools/lookup-tool-name.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
@@ -461,6 +463,11 @@ export interface RuntimeBuilderDeps {
 	getDecisionLedger?(): DecisionLedgerStore | undefined;
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
 	getToolTaskDependencies?(): ToolTaskDependencies;
+	/**
+	 * Admission of a sub-call of an admitted `lookup` call, through the session's own tool gate. Absent, the
+	 * lookup tool is not registered: a tool that would refuse everything is not offered.
+	 */
+	admitNestedToolCall?: NestedCallAdmitter;
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
@@ -2060,6 +2067,21 @@ export class RuntimeBuilder {
 					},
 				});
 				this._baseToolDefinitions.set(pipelineToolDefinition.name, pipelineToolDefinition);
+			}
+			// Batch lookup: each request runs through the registry's own executor for its kind and the session gate's
+			// admission, so it is offered only where at least one of those tools is allowed; a kind whose tool is
+			// withheld refuses at the request.
+			const admitNestedToolCall = this.deps.admitNestedToolCall;
+			if (
+				admitNestedToolCall &&
+				toolAccess.allows(LOOKUP_TOOL_NAME) &&
+				LOOKUP_SUB_TOOL_NAMES.filter((name) => toolAccess.allows(name)).length > 0
+			) {
+				const lookupToolDefinition: ToolDef = createLookupToolDefinition({
+					resolveTool: (name: LookupSubToolName) => this._toolRegistry.get(name),
+					admit: admitNestedToolCall,
+				});
+				this._baseToolDefinitions.set(LOOKUP_TOOL_NAME, lookupToolDefinition);
 			}
 			if (toolAccess.allows("ask_question")) {
 				// Objective correlation is live only while a goal is actually executing: an ask outside

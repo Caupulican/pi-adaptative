@@ -20,6 +20,7 @@ import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
+import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 
@@ -35,6 +36,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"skill_audit",
 		STABLE_SHELL_TOOL_NAME,
 		"repo_read",
+		LOOKUP_TOOL_NAME,
 		"python",
 		"edit",
 		"write",
@@ -98,8 +100,10 @@ export function mapToolNamesForPlatform(
 
 /**
  * The tools a surface can lend to a worker: every mapped name, plus the catalog read tools whenever
- * bash is present. Order is the surface's own, catalog reads appended, so an omitted request
- * inherits a deterministic list.
+ * bash is present, plus the batch `lookup` whenever the surface reads (a `read` of its own, or the bash-backed
+ * reads above). `lookup` holds no authority: each of its requests runs as the equivalent read call under the
+ * worker's own gates, and a kind whose tool the worker lacks refuses. Order is the surface's own, catalog reads
+ * appended, so an omitted request inherits a deterministic list.
  */
 export function lendableToolSurface(
 	surface: readonly string[],
@@ -108,6 +112,12 @@ export function lendableToolSurface(
 	const lendable = mapToolNamesForPlatform(surface, platform);
 	if (lendable.includes(STABLE_SHELL_TOOL_NAME)) {
 		for (const name of BASH_BACKED_CATALOG_TOOL_NAMES) if (!lendable.includes(name)) lendable.push(name);
+	}
+	if (
+		(lendable.includes("read") || lendable.includes(STABLE_SHELL_TOOL_NAME)) &&
+		!lendable.includes(LOOKUP_TOOL_NAME)
+	) {
+		lendable.push(LOOKUP_TOOL_NAME);
 	}
 	return lendable;
 }

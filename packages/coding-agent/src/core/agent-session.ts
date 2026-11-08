@@ -801,9 +801,8 @@ export class AgentSession {
 			const resolvedReasoning = previousResolveRequestReasoning
 				? previousResolveRequestReasoning(reasoning, request)
 				: reasoning;
-			// The lane keeps the reasoning it last sent unless the owner changed it or the change is free; the
-			// owner's cost ceiling applies after the gate and always passes. An isolated lane (a worker) reuses
-			// this resolver on its own conversation, so its pin is its own, never the foreground's.
+			// The lane keeps the reasoning it last sent unless the owner changed it or the change is free; the owner's
+			// cost ceiling applies after the gate. An isolated lane (a worker) reuses this resolver on its own conversation.
 			const conversation =
 				request.sessionId !== undefined && request.sessionId !== this.sessionId ? request.sessionId : undefined;
 			const lane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
@@ -1998,6 +1997,8 @@ export class AgentSession {
 			getToolArtifactStore: () => this._getToolArtifactStore(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getDecisionLedger: () => this.getDecisionLedger(),
+			admitNestedToolCall: (parentToolCallId, call, signal) =>
+				this._toolGate.admitNested(parentToolCallId, call, signal),
 			getToolTaskDependencies: () => ({
 				list: () => this._backgroundToolTasks.list(),
 				readImage: (taskId, imageIndex) => this._backgroundToolTasks.readImage(taskId, imageIndex),

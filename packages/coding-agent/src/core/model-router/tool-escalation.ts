@@ -4,6 +4,7 @@ import type { ModelTier } from "../autonomy/contracts.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
+import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { ShellCommandDialect } from "../tools/shell-command-parser.ts";
 import { isEffectfulReadOnlyProgram, readOnlyShellPrograms } from "./read-only-shell-policy.ts";
 
@@ -31,6 +32,7 @@ export function isLocalOrManagedRouterModel(model: Model<Api>): boolean {
 
 const READ_ONLY_TOOL_NAMES = new Set([
 	"read",
+	LOOKUP_TOOL_NAME,
 	"grep",
 	"find",
 	"ls",

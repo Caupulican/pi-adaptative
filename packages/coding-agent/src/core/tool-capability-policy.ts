@@ -18,6 +18,7 @@ import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
+import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 
 export interface ToolCapabilityPolicy {
 	/** AND across clauses; OR across the capability alternatives inside one clause. */
@@ -62,6 +63,9 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
 	// Bounded read-only git remains available even when a caller uses no shell.
 	["repo_read", policy([["repo.read"]], "path-scope")],
+	// The batch lookup holds no authority of its own: each request is admitted as its equivalent `read`, `repo_read`
+	// or `grep` call, under that tool's capability and path scope.
+	[LOOKUP_TOOL_NAME, policy([], "control-plane")],
 	...["write", "edit", "edit-diff"].map((toolName) => [toolName, WRITE_POLICY] as const),
 	...["bash", "python", "powershell", "shell", "run_toolkit_script", "run_process"].map(
 		(toolName) => [toolName, PROCESS_POLICY] as const,

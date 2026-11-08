@@ -53,6 +53,8 @@ import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
 import { createFindTool, type FindToolOptions } from "../tools/find.ts";
 import { createGrepTool, type GrepToolOptions } from "../tools/grep.ts";
+import { createLookupToolDefinition, type LookupHost } from "../tools/lookup.ts";
+import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { createLsTool, type LsToolOptions } from "../tools/ls.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
@@ -116,7 +118,7 @@ export interface SharedLaneToolOptions {
 	readonly artifactStore?: ArtifactStore;
 }
 
-const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls", "repo_read"] as const;
+const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls", "repo_read", LOOKUP_TOOL_NAME] as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PYTHON_LANE_TOOL_NAME = "python" as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
@@ -294,6 +296,7 @@ function createLaneTools(
 	workerToolAdapters?: WorkerToolAdapterRegistry,
 	bindTool?: (tool: AgentTool) => AgentTool,
 	shared: SharedLaneToolOptions = {},
+	lookupHost?: LookupHost,
 ): AgentTool[] {
 	const packing =
 		shared.artifactStore && names.includes("artifact_retrieve") ? { artifactStore: shared.artifactStore } : {};
@@ -322,6 +325,9 @@ function createLaneTools(
 		["find", () => createFindTool(cwd, { ...shared.find, ...packing })],
 		["ls", () => createLsTool(cwd, shared.ls)],
 		["repo_read", () => createRepoReadTool(cwd, shared.repoRead)],
+		...(lookupHost
+			? [[LOOKUP_TOOL_NAME, () => wrapToolDefinition(createLookupToolDefinition(lookupHost))] as const]
+			: []),
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
 		[TOOL_SCHEMA_SEARCH_NAME, () => wrapToolDefinition(createToolSchemaSearchDefinition())],
@@ -718,6 +724,22 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				find: { ...processToolOptions?.find, ...installedToolsOnly },
 			}
 		: processToolOptions;
+	// A lookup request runs through the lane's final tools (path aliases, credential guard, task binding and the
+	// execution admission above all inside their `execute`), resolved late because the lookup tool is one of them.
+	let laneToolsByName: ReadonlyMap<string, AgentTool> = new Map();
+	const lookupHost: LookupHost = {
+		resolveTool: (name) => laneToolsByName.get(name),
+		admit: async (_parentToolCallId, call) => {
+			const refused = admission.check(call.toolName, call.args);
+			if (refused?.block) return { kind: "refused", reason: refused.reason ?? "refused by this lane's tool policy" };
+			return {
+				kind: "admitted",
+				start() {},
+				finish: async (result, isError) => ({ content: result.content, isError }),
+				abandon() {},
+			};
+		},
+	};
 	const rawTools = createLaneTools(
 		options.cwd,
 		allowedTools,
@@ -733,6 +755,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.workerToolAdapters,
 		options.bindTool,
 		sharedToolOptions,
+		lookupHost,
 	);
 	const getPathAliasTable = options.getPathAliasTable;
 	const wrappedTools = new WeakSet<AgentTool>();
@@ -771,6 +794,8 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd),
 			)
 		: admittedTools;
+
+	laneToolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 
 	return {
 		tools,

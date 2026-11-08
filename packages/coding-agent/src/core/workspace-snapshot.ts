@@ -7,7 +7,20 @@ import { readdirSync } from "node:fs";
 
 const MAX_LISTED = 40;
 const MAX_ENTRIES_READ = 400;
-const SKIPPED = new Set(["node_modules", "dist", "build", "target", "coverage", "__pycache__", "vendor"]);
+// Hidden entries stay listed (the agent reads and writes dotfiles; secrets are redacted, not hidden), except version-control metadata and OS noise.
+const SKIPPED = new Set([
+	"node_modules",
+	"dist",
+	"build",
+	"target",
+	"coverage",
+	"__pycache__",
+	"vendor",
+	".git",
+	".hg",
+	".svn",
+	".DS_Store",
+]);
 
 const snapshots = new Map<string, string>();
 
@@ -18,7 +31,7 @@ export function workspaceSnapshotLine(cwd: string): string {
 	let line = "";
 	try {
 		const entries = readdirSync(cwd, { withFileTypes: true })
-			.filter((entry) => !entry.name.startsWith(".") && !SKIPPED.has(entry.name))
+			.filter((entry) => !SKIPPED.has(entry.name))
 			.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
 			.sort((a, b) => a.localeCompare(b));
 		if (entries.length > 0 && entries.length <= MAX_ENTRIES_READ) {

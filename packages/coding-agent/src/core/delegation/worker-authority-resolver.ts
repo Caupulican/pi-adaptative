@@ -41,6 +41,7 @@ import {
 	getToolCapabilityPolicy,
 	toolSurvivesReadOnly,
 } from "../tool-capability-policy.ts";
+import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { BOT_MESSAGE_TOOL_NAME } from "./bot-message-contract.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
@@ -606,6 +607,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 						"find",
 						"ls",
 						"repo_read",
+						LOOKUP_TOOL_NAME,
 						"write",
 						"edit",
 						"python",
