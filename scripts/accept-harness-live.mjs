@@ -18,15 +18,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
+	copyFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statfsSync,
 	statSync,
-	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -119,7 +121,32 @@ for (const [name, text] of Object.entries(MAILBOX)) writeFileSync(join(SANDBOX, 
 for (const [name, value] of Object.entries(TRELLO))
 	writeFileSync(join(SANDBOX, "trello-export", name), `${JSON.stringify(value, null, 1)}\n`);
 mkdirSync(AGENT, { recursive: true });
-symlinkSync(join(homedir(), ".pi", "agent", "auth.json"), join(AGENT, "auth.json"));
+// The sandbox works on a copy: a refresh writes a new file (it replaces a link), so a link would leave the owner's file with a
+// refresh token the provider has already rotated. `handBackLogins` returns what a run refreshed.
+const OWNER_AUTH = join(homedir(), ".pi", "agent", "auth.json");
+copyFileSync(OWNER_AUTH, join(AGENT, "auth.json"));
+chmodSync(join(AGENT, "auth.json"), 0o600);
+/** Copies every OAuth login a run refreshed (a later expiry) from its auth file back into the owner's, atomically and mode 600. */
+const handBackLogins = (authFile) => {
+	try {
+		const owner = JSON.parse(readFileSync(OWNER_AUTH, "utf8"));
+		const used = JSON.parse(readFileSync(authFile, "utf8"));
+		let changed = false;
+		for (const [provider, login] of Object.entries(used)) {
+			const current = owner[provider];
+			if (login?.type === "oauth" && current?.type === "oauth" && (login.expires ?? 0) > (current.expires ?? 0)) {
+				owner[provider] = login;
+				changed = true;
+			}
+		}
+		if (!changed) return;
+		const temporary = `${OWNER_AUTH}.${process.pid}.tmp`;
+		writeFileSync(temporary, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 });
+		renameSync(temporary, OWNER_AUTH);
+	} catch {
+		// An unreadable auth file hands back nothing; the owner's file is never rewritten from a partial read.
+	}
+};
 writeFileSync(
 	join(AGENT, "settings.json"),
 	JSON.stringify({
@@ -418,6 +445,26 @@ const SCENARIOS = [
 		if (unsure) throw inconclusive(`at ${unsure.percent}%: ${unsure.result.stdout.trim().split("\n").at(-1)}`);
 		return "bounds lifted with room at 95%, stopped with the subscription's reason at 0.01%";
 	}),
+	scenario("s11", "the Trello bot answers from the owner's real boards (read-only export; skipped without a credential file)", async () => {
+		const out = join(SANDBOX, "trello-real");
+		const exported = spawnSync("node", [join(REPO, "scripts", "trello-export.mjs"), "--out", out, "--boards", "Grimdex"], {
+			encoding: "utf8",
+			timeout: 120_000,
+		});
+		if (exported.status === 2) return { skipped: "no Trello credential file (see scripts/trello-export.mjs): the bot has only the synthetic exports" };
+		if (exported.status !== 0) throw inconclusive(`the Trello export did not finish: ${(exported.stderr || exported.stdout).trim().slice(0, 160)}`);
+		chmodSync(out, 0o700);
+		const board = JSON.parse(readFileSync(join(out, "grimdex.json"), "utf8"));
+		const list = board.lists.find((entry) => /bugs/i.test(entry.name));
+		if (!list) return { skipped: "the exported board has no list whose name contains Bugs" };
+		const prompt = 'In trello-real/grimdex.json, how many cards does the list whose name contains "Bugs" have? Answer with the number only.';
+		await type(state.main, `/bot msg trello-scout ${prompt}`);
+		const claim = await claimFor(prompt, (c) => c.status === "completed");
+		const expected = String(list.cards.length);
+		if (!new RegExp(`(^|\\D)${expected}(\\D|$)`).test(claimText(claim)))
+			throw new Error(`the answer does not give the real count ${expected}: ${claimText(claim).slice(0, 200)}`);
+		return `the real "${list.name}" list has ${expected} cards and the bot reported it`;
+	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];
@@ -468,6 +515,8 @@ const unsure = results.filter((r) => r.status === "INCONCLUSIVE");
 const skipped = results.filter((r) => r.status === "skipped");
 writeFileSync(join(REPORT_DIR, "report.json"), JSON.stringify({ at: stamp, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1));
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
+for (const authFile of [join(AGENT, "auth.json"), join(RUN, "quota-95", "agent", "auth.json"), join(RUN, "quota-0.01", "agent", "auth.json")])
+	if (existsSync(authFile)) handBackLogins(authFile);
 if (!KEEP && failed.length === 0 && unsure.length === 0) rmSync(RUN, { recursive: true, force: true });
 console.log(`\nreport: ${join(REPORT_DIR, "report.json")}`);
 if (!KEEP && (failed.length > 0 || unsure.length > 0)) console.log(`evidence kept: ${RUN} (removed by the next run)`);

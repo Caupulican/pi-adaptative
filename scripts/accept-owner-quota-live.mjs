@@ -14,7 +14,7 @@
  * the network failed): it is neither a pass nor a harness failure. Spends subscription quota; CI never runs it.
  *   node scripts/accept-owner-quota-live.mjs [--quota-percent 95] [--model xai/grok-4.7-build-fast] [--dir <empty dir>]
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,7 +37,9 @@ mkdirSync(join(AGENT, "channels"), { recursive: true });
 mkdirSync(PROJECT, { recursive: true });
 writeFileSync(join(PROJECT, "README.md"), "owner live test\n");
 writeFileSync(join(PROJECT, "todo.txt"), "one\ntwo\nthree\n");
-symlinkSync(join(homedir(), ".pi", "agent", "auth.json"), join(AGENT, "auth.json"));
+// A copy, not a link: a refresh replaces the file it writes, and the parent gate hands refreshed logins back to the owner's file.
+copyFileSync(join(homedir(), ".pi", "agent", "auth.json"), join(AGENT, "auth.json"));
+chmodSync(join(AGENT, "auth.json"), 0o600);
 // A token of the right shape; the Bot API is faked below.
 writeFileSync(join(AGENT, "channels", "telegram.token"), `123456789:${"abcdefghijklmnopqrstuvwxyz0123456789".slice(0, 35)}\n`);
 chmodSync(join(AGENT, "channels", "telegram.token"), 0o600);
