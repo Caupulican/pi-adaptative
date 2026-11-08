@@ -36,6 +36,11 @@ import {
 	getUnprovenGoalRequirementIds,
 	reopenUnsupportedGoalCompletion,
 } from "./goal-acceptance.ts";
+import {
+	type GoalAutoContinueHold,
+	type GoalAutoContinueState,
+	goalAutoContinueModelNote,
+} from "./goal-auto-continue-state.ts";
 import { recordObjectiveClarification } from "./goal-clarification-log.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
@@ -105,6 +110,10 @@ export interface GoalSessionControllerDeps {
 	}): Promise<GoalCompletionOwnerDecision>;
 	getExecutionLoopMode?(): ExecutionLoopMode | undefined;
 	getObjectiveExecutionController?(): ObjectiveExecutionController | undefined;
+	/** Why automatic continuation is running, waiting or stopped, from the scheduler's facts; attached to every snapshot. */
+	describeAutoContinue?(snapshot: GoalRuntimeSnapshot): GoalAutoContinueState;
+	/** The reason automatic continuation is stopped that stays true across requests, for the model's goal context. */
+	getAutoContinueHold?(): GoalAutoContinueHold | undefined;
 }
 
 /** `objective_primary` without the named binding must not fall through to the legacy loop. */
@@ -1006,7 +1015,7 @@ export class GoalSessionController {
 
 	getRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
 		const clock = this.deps.clock;
-		return buildGoalRuntimeSnapshot({
+		const snapshot = buildGoalRuntimeSnapshot({
 			sessionManager: this.deps.getSessionManager(),
 			settings,
 			...(clock ? { now: () => new Date(clock.now()).toISOString() } : {}),
@@ -1014,6 +1023,13 @@ export class GoalSessionController {
 			taskRuntime: this.deps.getTaskRuntimeSnapshot(),
 			backgroundToolTasks: this.deps.getBackgroundToolTasks(),
 		});
+		const autoContinue = this.deps.describeAutoContinue?.(snapshot);
+		return autoContinue === undefined ? snapshot : { ...snapshot, autoContinue };
+	}
+
+	/** The one sentence the model is told when automatic continuation is stopped for a lasting reason; undefined otherwise. */
+	autoContinueNote(): string | undefined {
+		return goalAutoContinueModelNote(this.deps.getAutoContinueHold?.());
 	}
 
 	private async evaluateShadowRoute(legacyAction: string): Promise<void> {

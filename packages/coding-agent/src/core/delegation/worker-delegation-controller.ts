@@ -126,7 +126,11 @@ import {
 } from "../orchestration/worker-receipt-origin.ts";
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
-import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
+import {
+	emergencyStopPath,
+	isEmergencyStopEngaged,
+	subscribeEmergencyStop,
+} from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
@@ -644,6 +648,7 @@ export class WorkerDelegationController {
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed() || this.workerAbort.signal.aborted,
+			timers: this.deps.getTimers().port("orchestration"),
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
 			preflight: async (request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
@@ -861,6 +866,21 @@ export class WorkerDelegationController {
 		this.retainedReleases.subscribe(() => {
 			this.agentControl.signalStateChanged();
 			if (!this.deps.isDisposed() && !this.workerAbort.signal.aborted) this.scheduler.drain(true);
+		});
+		// Admission holds every queued worker while the machine-wide emergency stop exists; lifting it in this process is
+		// the wake, since nothing else drains an idle queue.
+		this.unsubscribeEmergencyStop = subscribeEmergencyStop(this.deps.getAgentDir(), () => {
+			if (isEmergencyStopEngaged(this.deps.getAgentDir())) return;
+			if (this.deps.isDisposed() || this.workerAbort.signal.aborted) return;
+			harnessLog.info("delegation", "queued workers were woken by the emergency stop lift");
+			// The lift runs this synchronously inside the caller's `liftEmergencyStop`: a failed drain never fails the lift.
+			try {
+				this.scheduler.drain(true);
+			} catch (error) {
+				this.safeWarn(
+					`Worker queue wake after the emergency stop lift failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		});
 	}
 
@@ -1112,6 +1132,8 @@ export class WorkerDelegationController {
 		this.scheduler.closeAdmission();
 		this.unsubscribeRuntimeRecovery?.();
 		this.unsubscribeRuntimeRecovery = undefined;
+		this.unsubscribeEmergencyStop?.();
+		this.unsubscribeEmergencyStop = undefined;
 		// Retained releases get one last pass after every execution joined; no alarm fires for them from here on.
 		this.retainedReleases.close();
 		this.laneReleases.close();
@@ -1408,6 +1430,7 @@ export class WorkerDelegationController {
 	}
 
 	private unsubscribeRuntimeRecovery: (() => void) | undefined;
+	private unsubscribeEmergencyStop: (() => void) | undefined;
 
 	private async joinWorkerCompletions(finalizePhysicalCleanup = false): Promise<void> {
 		// Settlements may finish an already-admitted start's cleanup. Await that work's actual promise;

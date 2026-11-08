@@ -186,6 +186,55 @@ export function evaluateRules(facts) {
 	return { release, wouldRelease, checks: all, reasons };
 }
 
+/**
+ * Names where a version stands in the prepare / promote / repair flow of scripts/release.mjs, from facts the caller read
+ * (a fact it could not read is `undefined`, never a guess): `packageVersion`; `candidateOnMain` (a `Release vX` or
+ * `Repair release vX` commit for it is on origin/main); `newerCommits` (commits on origin/main after that candidate);
+ * `tagLocal` and `tagOnOrigin` (the `vX` tag exists there); `published` (its GitHub release is published, not a draft).
+ * Pure and read-only: it names a phase and never decides an action.
+ */
+export function releasePhase(facts) {
+	const { packageVersion, candidateOnMain, newerCommits, tagLocal, tagOnOrigin, published } = facts;
+	const tag = `v${packageVersion}`;
+	const phase = (id, plain) => ({ phase: id, plain });
+	if (
+		packageVersion === undefined ||
+		candidateOnMain === undefined ||
+		tagLocal === undefined ||
+		tagOnOrigin === undefined
+	) {
+		return phase("unknown", "The package version, the release commit or the tag could not be read, so the phase is unknown.");
+	}
+	if ((tagOnOrigin || tagLocal) && !candidateOnMain) {
+		return phase(
+			"inconsistent",
+			`${tag} exists but origin/main (as last fetched) has no release commit for it; fetch origin, then look at the tag before releasing again.`,
+		);
+	}
+	if (tagOnOrigin) {
+		if (published === true) return phase("assets_published", `${tag} is tagged and its GitHub release is published; the next release starts with prepare.`);
+		if (published === false) {
+			return phase(
+				"tagged_awaiting_assets",
+				`${tag} is tagged and its GitHub release is not published yet; the tag's build-binaries.yml run owns it (rerun that run if it failed, never prepare ${tag} again).`,
+			);
+		}
+		return phase("unknown", `${tag} is tagged but its GitHub release state could not be read.`);
+	}
+	if (tagLocal) {
+		return phase("tag_not_pushed", `${tag} exists locally but not on origin; release:promote pushes it.`);
+	}
+	if (candidateOnMain) {
+		return newerCommits > 0
+			? phase(
+					"repair_candidate",
+					`The release commit for ${tag} is on origin/main without its tag and ${newerCommits} later commit${newerCommits === 1 ? "" : "s"} landed; release:promote tags the candidate unchanged, release:repair folds the later notes in first.`,
+				)
+			: phase("prepared_untagged", `The release commit for ${tag} is on origin/main without its tag; release:promote tags it.`);
+	}
+	return phase("no_release_prepared", `No release commit or tag exists for ${tag}; a release starts with release:patch, release:minor or release:major.`);
+}
+
 /** `minor` when Breaking Changes has entries, else `patch` (docs: patch = fixes + additions, minor = breaking, never major). */
 export function baseTarget(breakingEntries) {
 	return breakingEntries > 0 ? "minor" : "patch";

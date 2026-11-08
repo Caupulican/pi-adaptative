@@ -48,8 +48,15 @@ export class ContinuousChatSpendMeter {
 		if (!(limit > 0)) return undefined;
 		const spent = this.read().usd;
 		return spent >= limit
-			? `Memory summaries are paused for today: they have used $${spent.toFixed(2)} of the $${limit.toFixed(2)} daily limit. They resume tomorrow, and the full history stays readable.`
+			? `Memory summaries are paused for today: they have used $${spent.toFixed(2)} of the $${limit.toFixed(2)} daily limit. They resume tomorrow or as soon as the limit is raised, and the full history stays readable.`
 			: undefined;
+	}
+
+	/** Milliseconds until the next UTC day starts, when today's total stops counting. */
+	resetsInMs(): number {
+		const now = this.now();
+		const date = new Date(now);
+		return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1) - now;
 	}
 
 	/** Adds one reply's measured cost to today's total. */

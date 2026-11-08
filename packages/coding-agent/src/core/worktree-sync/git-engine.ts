@@ -714,48 +714,65 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	const reRegisteredLaneKeys: string[] = [];
 	const ownerClearedLaneKeys: string[] = [];
 
-	for (const lane of lanes) {
-		if (lane.status === "released") continue;
-		let next = lane;
+	// Each lane is settled under the repo lifecycle lock, from the lane read again under it: the listing above is older
+	// than any `releaseLane` another session committed meanwhile, and a write built from the listing would bring the
+	// released lane back.
+	for (const listed of lanes) {
+		if (listed.status === "released") continue;
+		const branchSha = await revParseBranch(deps, ctx.topLevel, listed.branch);
+		const present = branchSha !== undefined && fileExists(deps, listed.worktreePath);
+		await withFileLock(ctx.paths.lifecycleLockFile, async () => {
+			const lane = await readLane(ctx.paths, listed.laneKey);
+			if (!lane || lane.status === "released") {
+				harnessLog.info("worktree", "reconcile left a lane released by another session", {
+					laneKey: listed.laneKey,
+				});
+				return;
+			}
+			let next = lane;
+			if (lane.status === "active" && !present) {
+				next = { ...next, status: "orphaned", updatedAt: at };
+				orphanedLaneKeys.push(lane.laneKey);
+				await appendAuditEvent(ctx.paths, { event: "lane_orphaned", laneKey: lane.laneKey }, at);
+			} else if (lane.status === "orphaned" && present) {
+				// Self-heal: the checkout and branch are back (or never really left) -- active again.
+				next = { ...next, status: "active", updatedAt: at };
+				reRegisteredLaneKeys.push(lane.laneKey);
+				await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey: lane.laneKey }, at);
+			}
 
-		const branchSha = await revParseBranch(deps, ctx.topLevel, lane.branch);
-		const present = branchSha !== undefined && fileExists(deps, lane.worktreePath);
-		if (lane.status === "active" && !present) {
-			next = { ...next, status: "orphaned", updatedAt: at };
-			orphanedLaneKeys.push(lane.laneKey);
-			await appendAuditEvent(ctx.paths, { event: "lane_orphaned", laneKey: lane.laneKey }, at);
-		} else if (lane.status === "orphaned" && present) {
-			// Self-heal: the checkout and branch are back (or never really left) -- active again.
-			next = { ...next, status: "active", updatedAt: at };
-			reRegisteredLaneKeys.push(lane.laneKey);
-			await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey: lane.laneKey }, at);
-		}
+			// Only an owner `judgeOwner` finds `dead` is cleared; a record whose owner names no valid pid owns nothing.
+			const owner = laneOwner(next);
+			if (next.owner !== undefined && (owner === undefined || judgeOwner(owner, deps) === "dead")) {
+				const { owner: _owner, ownerSessionId: _session, ...rest } = next;
+				next = { ...rest, updatedAt: at };
+				ownerClearedLaneKeys.push(lane.laneKey);
+			}
 
-		// Only an owner `judgeOwner` finds `dead` is cleared; a record whose owner names no valid pid owns nothing.
-		const owner = laneOwner(next);
-		if (next.owner !== undefined && (owner === undefined || judgeOwner(owner, deps) === "dead")) {
-			const { owner: _owner, ownerSessionId: _session, ...rest } = next;
-			next = { ...rest, updatedAt: at };
-			ownerClearedLaneKeys.push(lane.laneKey);
-		}
-
-		if (next !== lane) await writeLane(ctx.paths, next, ctx.write);
+			if (next !== lane) await writeLane(ctx.paths, next, ctx.write);
+		});
 	}
 
-	// Lane worktrees git knows but the registry does not: rebuild identity from git facts.
+	// Lane worktrees git knows but the registry does not: rebuild identity from git facts, unless a session registered
+	// (or released) that key since the listing.
 	for (const { laneKey, path } of unregisteredWorktrees) {
-		await writeLane(
-			ctx.paths,
-			{
-				laneKey,
-				branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
-				worktreePath: path,
-				status: "active",
-				createdAt: at,
-				updatedAt: at,
-			},
-			ctx.write,
-		);
+		const registeredNow = await withFileLock(ctx.paths.lifecycleLockFile, async () => {
+			if (await readLane(ctx.paths, laneKey)) return true;
+			await writeLane(
+				ctx.paths,
+				{
+					laneKey,
+					branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
+					worktreePath: path,
+					status: "active",
+					createdAt: at,
+					updatedAt: at,
+				},
+				ctx.write,
+			);
+			return false;
+		});
+		if (registeredNow) continue;
 		reRegisteredLaneKeys.push(laneKey);
 		await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey }, at);
 	}

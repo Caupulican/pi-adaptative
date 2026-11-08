@@ -1,8 +1,11 @@
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import { RetainedReleases } from "../util/resource-release.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
@@ -68,6 +71,8 @@ export interface WorkerDispatchSchedulerOptions {
 	/** Test seam for proving queue insertion rollback when reload-gate registration fails. */
 	registerInFlightWork?: typeof registerInFlightWork;
 	isDisposed(): boolean;
+	/** Alarm clock of the retained-cancellation retry; absent means the system timers. */
+	timers?: TimerPort;
 	admit(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission;
 	/** Read-only asynchronous validation; queue ownership stays live until it settles. */
 	preflight?(
@@ -125,6 +130,12 @@ export class WorkerDispatchScheduler {
 	private stopped = false;
 	private readonly validated = new Set<string>();
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
+	/**
+	 * The retry owner of retained durable cancellations, keyed by lane. Its backoff alarm retries a cancellation that
+	 * failed to commit even when no other scheduler signal ever arrives (an idle session), so the lane and its reload-gate
+	 * blocker are not held until an unrelated drain.
+	 */
+	private readonly cancellationRetries: RetainedReleases<string>;
 	private readonly reservationBlocked = new Set<string>();
 	private readonly waitStates = new Map<string, WorkerDispatchWaitState>();
 	private readonly queueCapacityListeners = new IndependentObserverSet<() => void>();
@@ -142,6 +153,17 @@ export class WorkerDispatchScheduler {
 
 	constructor(options: WorkerDispatchSchedulerOptions) {
 		this.options = options;
+		this.cancellationRetries = new RetainedReleases<string>({
+			retryOwner: "worker dispatch scheduler",
+			...(options.timers ? { timers: options.timers } : {}),
+			release: (laneId) => this.retryRetainedCancellation(laneId),
+			reportFailure: (entry) =>
+				this.warnBestEffort(`Worker ${entry.key} retained cancellation failed again: ${entry.cause}`),
+			reportListenerFailure: (error) =>
+				this.warnBestEffort(
+					`Worker cancellation retry wake failed: ${error instanceof Error ? error.message : String(error)}`,
+				),
+		});
 	}
 
 	get queuedCount(): number {
@@ -353,7 +375,7 @@ export class WorkerDispatchScheduler {
 						const reasonCode = outcome.skipReason ?? "worker_not_started";
 						const cancellation = this.cancelWithOutcome(laneId, reasonCode, dispatchToken);
 						if (cancellation.state === "failed")
-							this.retainPendingCancellation(laneId, reasonCode, dispatchToken);
+							this.retainPendingCancellation(laneId, reasonCode, dispatchToken, undefined, cancellation.error);
 						else if (cancellation.state === "unowned") observed = { state: "unowned" };
 					}
 				} finally {
@@ -370,7 +392,13 @@ export class WorkerDispatchScheduler {
 					if (!this.stopped && !this.options.isDisposed()) {
 						const cancellation = this.cancelWithOutcome(laneId, "worker_background_error", dispatchToken);
 						if (cancellation.state === "failed")
-							this.retainPendingCancellation(laneId, "worker_background_error", dispatchToken);
+							this.retainPendingCancellation(
+								laneId,
+								"worker_background_error",
+								dispatchToken,
+								undefined,
+								cancellation.error,
+							);
 						else if (cancellation.state === "unowned") observed = { state: "unowned" };
 					}
 					this.warnBestEffort(
@@ -389,11 +417,14 @@ export class WorkerDispatchScheduler {
 		reasonCode: string,
 		dispatchToken?: string,
 		detail?: string,
+		cause: unknown = "durable cancellation did not commit",
 	): void {
 		if (this.pendingCancellations.has(laneId)) return;
 		const pending: PendingCancellation = { reasonCode, dispatchToken, ...(detail ? { detail } : {}) };
 		this.pendingCancellations.set(laneId, pending);
 		this.registerPendingCancellation(laneId, pending);
+		this.cancellationRetries.retain(laneId, laneId, cause);
+		harnessLog.info("delegation", "a worker cancellation was retained for its own retry", () => ({ reasonCode }));
 	}
 
 	private registerPendingCancellation(laneId: string, pending: PendingCancellation): void {
@@ -412,34 +443,60 @@ export class WorkerDispatchScheduler {
 	}
 
 	private retryPendingCancellations(): void {
-		for (const [laneId, pending] of [...this.pendingCancellations]) {
-			this.registerPendingCancellation(laneId, pending);
-			const cancellation = this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken, pending.detail);
-			if (cancellation.state === "failed") continue;
-			// A durable cancellation terminals the lane rather than freeing its deferred resume for
-			// promotion. Delete that ownership before removeQueued releases capacity to other lanes.
-			const hadDeferred = this.deferred.delete(laneId);
-			this.removePendingCancellation(laneId);
-			this.removeQueued(laneId);
-			const outcome: WorkerLaneOutcome =
-				cancellation.state === "cancelled"
-					? {
-							state: "cancelled",
-							reasonCode: pending.reasonCode,
-							...(pending.detail ? { detail: pending.detail } : {}),
-						}
-					: { state: "unowned" };
-			this.settleLaneObservers(laneId, outcome);
-			if (hadDeferred) {
-				this.settleLaneObservers(laneId, outcome, true);
-			}
+		for (const [laneId, pending] of [...this.pendingCancellations]) this.retryPendingCancellation(laneId, pending);
+	}
+
+	/** One attempt of one retained cancellation; a committed one settles the lane's observers. */
+	private retryPendingCancellation(laneId: string, pending: PendingCancellation): CancellationOutcome {
+		this.registerPendingCancellation(laneId, pending);
+		const cancellation = this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken, pending.detail);
+		if (cancellation.state === "failed") return cancellation;
+		// A durable cancellation terminals the lane rather than freeing its deferred resume for
+		// promotion. Delete that ownership before removeQueued releases capacity to other lanes.
+		const hadDeferred = this.deferred.delete(laneId);
+		this.removePendingCancellation(laneId);
+		this.removeQueued(laneId);
+		const outcome: WorkerLaneOutcome =
+			cancellation.state === "cancelled"
+				? {
+						state: "cancelled",
+						reasonCode: pending.reasonCode,
+						...(pending.detail ? { detail: pending.detail } : {}),
+					}
+				: { state: "unowned" };
+		this.settleLaneObservers(laneId, outcome);
+		if (hadDeferred) {
+			this.settleLaneObservers(laneId, outcome, true);
 		}
+		return cancellation;
+	}
+
+	/**
+	 * The retry owner's attempt. A generation that ended hands its recovery to the next one and frees its reload-gate
+	 * blocker; a failed commit throws so the owner keeps the lane on its backoff; a committed one wakes the queue, whose
+	 * lanes the cancelled one may have been blocking.
+	 */
+	private retryRetainedCancellation(laneId: string): undefined {
+		const pending = this.pendingCancellations.get(laneId);
+		if (!pending) return undefined;
+		if (this.stopped || this.options.isDisposed()) {
+			this.removePendingCancellation(laneId);
+			return undefined;
+		}
+		const outcome = this.retryPendingCancellation(laneId, pending);
+		if (outcome.state === "failed") throw outcome.error;
+		harnessLog.info("delegation", "a retained worker cancellation committed on its own retry", () => ({
+			reasonCode: pending.reasonCode,
+		}));
+		this.redrainBestEffort(laneId);
+		return undefined;
 	}
 
 	private removePendingCancellation(laneId: string): void {
 		const pending = this.pendingCancellations.get(laneId);
 		if (!pending) return;
 		this.pendingCancellations.delete(laneId);
+		this.cancellationRetries.delete(laneId);
 		try {
 			pending.deregister?.();
 		} catch (error) {
@@ -725,7 +782,13 @@ export class WorkerDispatchScheduler {
 							admission.detail,
 						);
 						if (cancellation.state === "failed") {
-							this.retainPendingCancellation(laneId, admission.reasonCode, dispatchToken, admission.detail);
+							this.retainPendingCancellation(
+								laneId,
+								admission.reasonCode,
+								dispatchToken,
+								admission.detail,
+								cancellation.error,
+							);
 							continue;
 						}
 						if (cancellation.state === "unowned") {
@@ -795,6 +858,7 @@ export class WorkerDispatchScheduler {
 	/** The controller owns permanent shutdown; ordinary queue cancellation remains reusable. */
 	closeAdmission(): void {
 		this.stopped = true;
+		this.cancellationRetries.close();
 		this.unsubscribeRuntimeAvailability?.();
 		this.unsubscribeRuntimeAvailability = undefined;
 	}

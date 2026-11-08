@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { judgeOwner, ownProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { stateFile } from "../agent-paths.ts";
@@ -78,6 +79,8 @@ export class LearningWriteJournal {
 	private readonly publisher: { host: string; pid: number; startTime?: string; machineId?: string; ownerId: string };
 	private recovering = false;
 	private recoveryOffset = 0;
+	/** The open-time sweep of intents a dead process left ran. */
+	private orphanSweepDone = false;
 	private directory: string | undefined;
 
 	constructor(deps: JournalDeps) {
@@ -191,11 +194,19 @@ export class LearningWriteJournal {
 					sessionFile: context.sessionFile ?? null,
 					anchor: { ...context.anchor },
 					phase: "intent",
+					// The admitting process: what lets a later sweep retire this intent if the process dies unsettled.
+					publisher: { ...this.publisher, active: false },
 					planned,
 				}),
 			};
 			const admitted = pending;
 			this.locked(() => {
+				// An intent a crashed process left holds a slot until retired: sweep when the journal is opened and again
+				// whenever the cap would refuse this write.
+				if (!this.orphanSweepDone || this.names().length >= MAX_PENDING) {
+					this.orphanSweepDone = true;
+					this.retireOrphanedIntents();
+				}
 				if (this.names().length >= MAX_PENDING || this.pending.size >= MAX_PENDING)
 					throw new Error("Learning write journal capacity reached");
 				if (existsSync(this.file(planned.id))) throw new Error("Learning audit identity already exists");
@@ -228,6 +239,37 @@ export class LearningWriteJournal {
 			if (pending && this.pending.has(planned.id)) this.cancel(pending);
 			return undefined;
 		}
+	}
+
+	/**
+	 * Retires the intents whose admitting process is proven gone (never a live peer's, never one on another host or
+	 * unprovable): the effect outcome of such an intent is unknown and no replay is permitted, so it only held a slot of
+	 * the cap. Intents written before the admitting process was recorded are left. Runs under the journal lock.
+	 */
+	private retireOrphanedIntents(): void {
+		let retired = 0;
+		for (const name of this.names()) {
+			const id = name.slice(0, -5);
+			if (this.pending.has(id)) continue;
+			try {
+				const record = this.read(id);
+				const owner = record.publisher;
+				if (record.phase !== "intent" || !owner || owner.ownerId === this.publisher.ownerId) continue;
+				const standing = judgeOwner({
+					pid: owner.pid,
+					hostname: owner.host,
+					startTime: owner.startTime,
+					machineId: owner.machineId,
+				});
+				if (standing !== "dead") continue;
+				this.write({ ...record, phase: "cancelled" });
+				unlinkSync(this.file(id));
+				retired++;
+			} catch (error) {
+				if (!isMissingFileError(error)) this.warn(id, error);
+			}
+		}
+		if (retired > 0) harnessLog.warn("learning", "intents left by a dead process were retired", { count: retired });
 	}
 
 	private cancel(pending: PendingWrite): void {
@@ -271,7 +313,8 @@ export class LearningWriteJournal {
 	reference(ticket: LearningWriteTicket): unknown {
 		const record = this.pending.get(ticket.id)?.record;
 		if (record?.phase !== "intent" || !record.anchor.leafId) throw new Error("Learning intent is not admitted");
-		return canonicalRecord(record);
+		// The admitting process is journal custody, not part of the frozen admission identity.
+		return canonicalRecord({ ...record, publisher: undefined });
 	}
 
 	/** Accept durable custody independently of branch publication. The caller freezes the report first. */

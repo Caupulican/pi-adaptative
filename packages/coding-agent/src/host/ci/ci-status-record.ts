@@ -16,8 +16,17 @@ export interface CiGitPaths {
 	readonly statusDir: string;
 }
 
+/**
+ * What a branch's CI record can say. `pending`: a watcher follows the run; `completed`: the run ended (the conclusion says how);
+ * `watch_failed`: the watcher itself broke, so there is no outcome; `no_run`: no workflow run appeared for the revision;
+ * `unreadable`: the file could not be parsed. `unknown` is never written: a record whose state is none of these (a newer
+ * or damaged writer) is read as it, so a reader never branches on text it does not understand.
+ */
+export const CI_STATUS_STATES = ["pending", "completed", "watch_failed", "no_run", "unreadable", "unknown"] as const;
+export type CiStatusState = (typeof CI_STATUS_STATES)[number];
+
 export interface CiStatusRecord {
-	readonly state: string;
+	readonly state: CiStatusState;
 	readonly sha?: string;
 	readonly branch?: string;
 	readonly workflow?: string;
@@ -167,7 +176,9 @@ export function readCiStatusFile(path: string): CiStatusRecord | undefined {
 				fields.failedJobs.some((job) => typeof job !== "string" || job.length > 512))
 		)
 			throw new Error("Invalid CI job summary.");
-		return record as CiStatusRecord;
+		return (CI_STATUS_STATES as readonly string[]).includes(fields.state as string)
+			? (record as CiStatusRecord)
+			: ({ ...record, state: "unknown" } as CiStatusRecord);
 	} catch {
 		return { state: "unreadable" };
 	}
@@ -288,6 +299,8 @@ export async function completedCiStatus(
 
 export function describeStatus(status: CiStatusRecord | undefined): string {
 	if (!status) return "no recorded CI verdict";
+	if (status.state === "unknown")
+		return `${status.branch} ${status.sha?.slice(0, 9)}: the recorded CI state is not one this version understands, so there is no verdict`;
 	if (status.state === "pending") return `${status.branch} ${status.sha?.slice(0, 9)}: ${CI_WORKFLOW} still running`;
 	if (status.state !== "completed")
 		return `${status.branch} ${status.sha?.slice(0, 9)}: ${status.state}${status.error ? ` (${status.error})` : ""}`;

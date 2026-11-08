@@ -14,7 +14,11 @@ export interface LearningWriteRecord {
 	phase: "intent" | "settled" | "publishing" | "cancelled";
 	planned: LearningAuditRecord;
 	receipt?: LearningAuditRecord;
-	/** `host` is the hostname (the persisted name); `startTime`/`machineId` complete the owner shape on newer records. */
+	/**
+	 * The process that wrote the record last: an intent names its admitting process, so a sweep can tell an orphan from a
+	 * live peer's intent; a publishing record names the process attempting the publication. `host` is the hostname (the
+	 * persisted name); `startTime`/`machineId` complete the owner shape on newer records.
+	 */
 	publisher?: { host: string; pid: number; startTime?: string; machineId?: string; ownerId: string; active: boolean };
 }
 
@@ -51,7 +55,7 @@ export function parseLearningWriteRecord(value: unknown, id: string): LearningWr
 		value.planned.id !== id ||
 		((value.phase === "settled" || value.phase === "publishing") &&
 			(!isLearningAuditRecord(value.receipt) || value.receipt.id !== id)) ||
-		(value.phase === "publishing" &&
+		((value.phase === "publishing" || value.publisher !== undefined) &&
 			(!isPlainRecord(value.publisher) ||
 				typeof value.publisher.host !== "string" ||
 				!isPositiveSafePid(value.publisher.pid) ||

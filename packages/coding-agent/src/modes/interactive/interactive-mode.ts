@@ -146,6 +146,7 @@ import * as localModelCommands from "./local-model-commands.ts";
 import { handleMemoryCommand } from "./memory-commands.ts";
 import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalignment-continuation.ts";
 import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
+import { bindPersistenceFenceIndicator } from "./persistence-fence-indicator.ts";
 import * as proactivityCommands from "./proactivity-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import { promptHarnessReadiness } from "./readiness-prompt.ts";
@@ -309,6 +310,7 @@ export class InteractiveMode {
 	private unsubscribe?: () => void;
 	private unsubscribeForegroundActivity?: () => void;
 	private unsubscribeHumanInputActivity?: () => void;
+	private unsubscribePersistenceFence?: () => void;
 	private subscriptionGeneration = 0;
 	private unsubscribeExtensionsChanged?: () => void;
 	/** Owns shutdown state and the process listeners it registered; see signal-lifecycle.ts. */
@@ -1333,6 +1335,8 @@ export class InteractiveMode {
 		this.subscriptionGeneration++;
 		this.unsubscribeHumanInputActivity?.();
 		this.unsubscribeHumanInputActivity = undefined;
+		this.unsubscribePersistenceFence?.();
+		this.unsubscribePersistenceFence = undefined;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.unsubscribeForegroundActivity?.();
@@ -2157,6 +2161,16 @@ export class InteractiveMode {
 			this.syncForegroundActivity();
 		});
 		this.syncForegroundActivity();
+		this.unsubscribePersistenceFence?.();
+		this.unsubscribePersistenceFence = bindPersistenceFenceIndicator({
+			sessionManager: this.sessionManager,
+			footerData: this.footerDataProvider,
+			showWarning: (message) => this.showWarning(message),
+			refresh: () => {
+				this.footer.invalidate();
+				this.ui.requestRender();
+			},
+		});
 		this.unsubscribeHumanInputActivity?.();
 		this.unsubscribeHumanInputActivity = subscribeHumanInputActivity(this.sessionManager, (activity) => {
 			if (generation !== this.subscriptionGeneration || session !== this.session) return;
@@ -4545,6 +4559,8 @@ export class InteractiveMode {
 		this.subscriptionGeneration++;
 		attempt(() => this.unsubscribeHumanInputActivity?.());
 		this.unsubscribeHumanInputActivity = undefined;
+		attempt(() => this.unsubscribePersistenceFence?.());
+		this.unsubscribePersistenceFence = undefined;
 		attempt(() => this.layout.dispose());
 		attempt(() => this.botTeamChat.dispose());
 		attempt(() => {

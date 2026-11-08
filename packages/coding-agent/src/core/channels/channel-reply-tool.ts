@@ -4,7 +4,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { operationTextResult as result } from "../tools/operation-result.ts";
 import { digest } from "./channel-journal.ts";
 import { CHANNEL_REPLY_TOOL_NAME } from "./channel-tool-names.ts";
-import type { SessionChannels } from "./session-channels.ts";
+import type { ChannelDraftView, SessionChannels } from "./session-channels.ts";
 
 const parameters = Type.Object(
 	{
@@ -16,6 +16,14 @@ const parameters = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+
+/** What the owner is told of a draft whose send was claimed: plain words, nothing of the message. */
+const DRAFT_STATUS_NOTES: Record<ChannelDraftView["status"], string> = {
+	waiting: "",
+	sending: " - being sent right now; its outcome is recorded when that send ends",
+	unknown:
+		" - UNKNOWN OUTCOME: a send of this draft was started and its session ended before recording the result, so it may already have reached the conversation. Check the conversation first, then dismiss it, or send it again knowing it may arrive twice",
+};
 
 /**
  * The owner's release of channel replies. A turn a channel message started answers into a draft unless the owner set
@@ -41,7 +49,7 @@ export function createChannelReplyToolDefinition(channels: SessionChannels): Too
 						: drafts
 								.map(
 									(draft) =>
-										`${draft.id} on ${draft.channel} (${draft.reason}, ${draft.createdAt}):\n${wrapUntrustedText(draft.text, `channel-draft:${draft.channel}`, { nonce: digest(draft.text).slice(0, 32) })}`,
+										`${draft.id} on ${draft.channel} (${draft.reason}, ${draft.createdAt})${DRAFT_STATUS_NOTES[draft.status]}:\n${wrapUntrustedText(draft.text, `channel-draft:${draft.channel}`, { nonce: digest(draft.text).slice(0, 32) })}`,
 								)
 								.join("\n\n"),
 					...senders.map(

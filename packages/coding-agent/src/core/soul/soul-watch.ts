@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import type { SoulHold } from "./soul-hold.ts";
 
 /** `ctime` moves on any content write, whatever a writer does to `mtime`; `ino` moves when the file is replaced. */
 interface SoulStamp {
@@ -37,13 +38,20 @@ function sameStamp(left: SoulStamp | undefined, right: SoulStamp | undefined): b
 	);
 }
 
+/** A stamp no file has: a baseline carrying it is never taken for unchanged, so the next `reconcile` reads the file. */
+const UNMATCHED_STAMP: SoulStamp = { mtimeMs: -1, ctimeMs: -1, size: -1, ino: -1 };
+
+function sha256Of(text: string): string {
+	return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
 function revisionOf(path: string): SoulRevision {
 	let stamp = stampOf(path);
 	let revision: SoulRevision = { text: undefined, digest: undefined, stamp };
 	for (let attempt = 0; attempt < MAX_READ_ATTEMPTS && stamp; attempt++) {
 		const text = readFileSync(path, "utf8");
 		const after = stampOf(path);
-		revision = { text, digest: createHash("sha256").update(text, "utf8").digest("hex"), stamp: after };
+		revision = { text, digest: sha256Of(text), stamp: after };
 		if (sameStamp(stamp, after)) break;
 		stamp = after;
 	}
@@ -58,10 +66,33 @@ function revisionOf(path: string): SoulRevision {
 export class SoulWatch {
 	private readonly path: string;
 	private accounted: SoulRevision;
+	private readonly resumed: { readonly observed: SoulRevision; readonly hold: SoulHold } | undefined;
 
-	constructor(path: string) {
+	/**
+	 * Baselines on what is on disk, except while a persisted hold names exactly that revision: an agent change an earlier
+	 * session left unreviewed. Then the accounted text is the one the hold recorded as standing before the change, so the
+	 * change is found as a difference (`reconcile`, `resumedHold`) and is never taken in as the owner's by the restart. A
+	 * hold for a revision the file no longer has is stale: whoever wrote it since is the owner's.
+	 */
+	constructor(path: string, hold?: SoulHold) {
 		this.path = path;
-		this.accounted = revisionOf(path);
+		const disk = revisionOf(path);
+		if (hold && hold.observedDigest === disk.digest) {
+			this.accounted = {
+				text: hold.standing,
+				digest: hold.standing === undefined ? undefined : sha256Of(hold.standing),
+				stamp: UNMATCHED_STAMP,
+			};
+			this.resumed = { observed: disk, hold };
+		} else {
+			this.accounted = disk;
+			this.resumed = undefined;
+		}
+	}
+
+	/** The unreviewed change a persisted hold kept, found on disk at construction; undefined when none applied. */
+	get resumedHold(): { readonly observed: SoulRevision; readonly hold: SoulHold } | undefined {
+		return this.resumed;
 	}
 
 	/** The accounted-for text, which a revert restores; undefined when the file did not exist. */

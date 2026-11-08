@@ -24,10 +24,12 @@ import type {
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { hasCostSummarySignal } from "../../core/cost/cost-summary.ts";
 import type { ExtensionCommandContext, ExtensionRunner } from "../../core/extensions/index.ts";
+import { describeGoalAutoContinue } from "../../core/goals/goal-auto-continue-state.ts";
 import {
 	cancelPersistedGoal,
 	clearPersistedGoal,
 	editPersistedGoal,
+	GOAL_STATUS_WORDS,
 	type GoalStateRevision,
 	getGoalStateRevision,
 	isSystemBlockedGoal,
@@ -792,14 +794,21 @@ export function resumeCurrentGoal(host: GoalResumeHost, now = new Date().toISOSt
 	return { ok: true, resumed: true, state: resumed.state };
 }
 
+/** A stop reason the host recorded as `machine_code: detail`, with the code in the owner's words. */
+function plainStopReason(reason: string): string {
+	return reason.replace(/^([a-z][a-z0-9]*(?:_[a-z0-9]+)+):/, (_match, code: string) => `${plainLabel(code)}:`);
+}
+
 function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnapshot"]>): string {
 	const state = snapshot.goalState;
-	if (!state) return `Goal: none (${snapshot.continuation.action}/${snapshot.continuation.reasonCode})`;
+	if (!state) return "Goal: none";
 	const requirements = state.requirements.map((requirement) => {
 		const blockedReason = requirement.blockedReason ? ` — ${requirement.blockedReason}` : "";
 		return `- ${requirement.id}: ${requirement.status}${blockedReason}`;
 	});
-	const blockedReason = state.blockedReason ? `\nBlocked reason: ${state.blockedReason}` : "";
+	const blockedReason = state.blockedReason ? `\nBlocked reason: ${plainStopReason(state.blockedReason)}` : "";
+	const autoContinue =
+		snapshot.autoContinue === undefined ? "" : `\n${describeGoalAutoContinue(snapshot.autoContinue)}`;
 	const requirementDetails = requirements.length > 0 ? `\n${requirements.join("\n")}` : "";
 	const tokenUsage =
 		state.tokenBudget !== undefined
@@ -807,7 +816,7 @@ function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnaps
 			: (state.tokensUsed ?? 0) > 0
 				? `\nTokens: ${state.tokensUsed ?? 0}`
 				: "";
-	return `Goal: ${state.userGoal}\nStatus: ${state.status}${blockedReason}${tokenUsage}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}${requirementDetails}\nContinuation: ${snapshot.continuation.action}/${snapshot.continuation.reasonCode}\nControls: /goal edit | /goal pause | /goal resume | /goal reopen <requirement-id> | /goal complete | /goal clear | /goal override <text>`;
+	return `Goal: ${state.userGoal}\nStatus: ${GOAL_STATUS_WORDS[state.status]}${blockedReason}${tokenUsage}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}${requirementDetails}${autoContinue}\nControls: /goal edit | /goal pause | /goal resume | /goal reopen <requirement-id> | /goal complete | /goal clear | /goal override <text>`;
 }
 
 /**

@@ -1390,13 +1390,12 @@ export class CollaborationJobStore {
 			return true;
 		});
 	}
-	beginSteering(
-		id: string,
-		agentId: string,
-		priorTurnId: string,
-		prompt: string,
-		answering = false,
-	): CollaborationSteeringRequest {
+	/**
+	 * Fence the interrupt of an active turn (reserved or running) for a successor task. An answer never steers: a pending
+	 * question exists only on a blocked agent, which has no active turn to interrupt, so an answer is reserved directly
+	 * (`reserveTurn`); the request therefore always records `answering: false`.
+	 */
+	beginSteering(id: string, agentId: string, priorTurnId: string, prompt: string): CollaborationSteeringRequest {
 		let request!: CollaborationSteeringRequest;
 		this.update(id, (current) => {
 			const agent = assertOperableAgent(current, agentId);
@@ -1409,12 +1408,6 @@ export class CollaborationJobStore {
 			if (agent.turn >= 128) {
 				throw new Error("Collaboration turn limit reached.");
 			}
-			if (answering && agent.status !== "blocked") {
-				throw new Error("Agent has no pending question.");
-			}
-			if (!answering && agent.status === "blocked") {
-				throw new Error("Answer the pending question before starting another task.");
-			}
 			assertCollaborationReportCapability(agent.provider, agent.profile);
 			prepareCollaborationPrompt(current, agentId, prompt, this.directory);
 
@@ -1422,7 +1415,7 @@ export class CollaborationJobStore {
 				requestId: randomUUID(),
 				priorTurnId,
 				prompt,
-				answering,
+				answering: false,
 				admittedAt: Date.now(),
 			};
 			agent.steering = request;
@@ -1528,7 +1521,7 @@ export class CollaborationJobStore {
 	 * so no cleanup proof is claimed and reconciliation retries the verified close.
 	 */
 	settleUncertainStop(id: string, agentId: string, turnId: string, evidence: string): boolean {
-		return this.updateAgent(id, agentId, (agent) => {
+		const settled = this.updateAgent(id, agentId, (agent) => {
 			if (!agent || agent.turnId !== turnId || !agent.stopping || agent.closed) return false;
 			releaseTurnProcess(agent);
 			if (["idle", "reserved", "running"].includes(agent.status)) {
@@ -1537,6 +1530,8 @@ export class CollaborationJobStore {
 			}
 			return true;
 		});
+		harnessLog.info("collab", "a collaboration agent uncertain stop was settled", { jobId: id, agentId, settled });
+		return settled;
 	}
 	/**
 	 * Explicit operator release of an acquisition that its exited issuer abandoned before any pane was

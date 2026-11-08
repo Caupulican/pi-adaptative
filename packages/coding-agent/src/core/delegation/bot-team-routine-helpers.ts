@@ -87,7 +87,8 @@ export interface BotDaemonEnd {
 	readonly detail?: string;
 }
 
-const DAEMON_STALE_MS = 60_000;
+/** How long after its last renewal a daemon lease stops being held; a session re-ensures the daemon at that instant. */
+export const DAEMON_STALE_MS = 60_000;
 /** Reports kept in the lease record; older ones are dropped first. */
 const MAX_DAEMON_REPORTS = 20;
 const MAX_DAEMON_REPORT_CHARS = 500;

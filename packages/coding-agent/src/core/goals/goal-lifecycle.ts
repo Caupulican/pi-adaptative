@@ -123,7 +123,7 @@ export interface PersistedGoalStateHost {
 }
 
 /** The owner's words for each goal status. */
-const GOAL_STATUS_WORDS: Readonly<Record<GoalStatus, string>> = {
+export const GOAL_STATUS_WORDS: Readonly<Record<GoalStatus, string>> = {
 	active: "active",
 	paused: "paused",
 	blocked: "blocked",

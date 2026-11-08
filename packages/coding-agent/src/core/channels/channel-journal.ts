@@ -117,8 +117,14 @@ export interface ChannelDraftRecord {
 	readonly text: string;
 	readonly reason: string;
 	readonly createdAt: number;
-	state: "pending" | "sent" | "dismissed";
+	/**
+	 * `sending`: a settle claimed the draft and its send is in flight, or was cut short (`sendingBy` names the claimer);
+	 * a draft whose claimer is gone has an unknown outcome and is surfaced to the owner as such, never sent again on its own.
+	 */
+	state: "pending" | "sending" | "sent" | "dismissed";
 	settledAt?: number;
+	/** The session and process that claimed the send; present only while `state` is `sending`. */
+	sendingBy?: { sessionId: string; pid: number; at: number };
 	/** Written by the daemon while no session was open; the next session that serves the channel is told. */
 	readonly away?: true;
 	/** An open session holding the channel told the owner of this away draft; no session tells it again. */
@@ -279,8 +285,16 @@ function isDraft(value: unknown): value is ChannelDraftRecord {
 		isString(value.text) &&
 		isString(value.reason) &&
 		isTime(value.createdAt) &&
-		(value.state === "pending" || value.state === "sent" || value.state === "dismissed") &&
+		(value.state === "pending" ||
+			value.state === "sending" ||
+			value.state === "sent" ||
+			value.state === "dismissed") &&
 		(value.settledAt === undefined || isTime(value.settledAt)) &&
+		(value.sendingBy === undefined ||
+			(isPlainRecord(value.sendingBy) &&
+				isString(value.sendingBy.sessionId) &&
+				isCount(value.sendingBy.pid) &&
+				isTime(value.sendingBy.at))) &&
 		(value.away === undefined || value.away === true) &&
 		(value.told === undefined || value.told === true)
 	);
@@ -397,7 +411,12 @@ function parseState(text: string): ChannelJournalState {
 	};
 }
 
-/** Drop what retention allows; a waiting message, an unanswered batch and a pending draft are kept. */
+/** A draft the owner still has to settle: waiting, or claimed by a send whose outcome is not recorded. */
+export function isDraftOpen(draft: Pick<ChannelDraftRecord, "state">): boolean {
+	return draft.state === "pending" || draft.state === "sending";
+}
+
+/** Drop what retention allows; a waiting message, an unanswered batch and an open draft are kept. */
 function prune(state: ChannelJournalState, now: number): void {
 	state.seen = state.seen.filter((entry) => now - entry.at < SEEN_RETENTION_MS).slice(-MAX_SEEN);
 	state.held = state.held.slice(-MAX_HELD);
@@ -406,7 +425,7 @@ function prune(state: ChannelJournalState, now: number): void {
 	);
 	const dropBatches = new Set(settledBatches.slice(0, Math.max(0, state.batches.length - MAX_BATCHES)));
 	state.batches = state.batches.filter((batch) => !dropBatches.has(batch));
-	const settledDrafts = state.drafts.filter((draft) => draft.state !== "pending");
+	const settledDrafts = state.drafts.filter((draft) => !isDraftOpen(draft));
 	const dropDrafts = new Set(settledDrafts.slice(0, Math.max(0, state.drafts.length - MAX_DRAFTS)));
 	state.drafts = state.drafts.filter((draft) => !dropDrafts.has(draft));
 	// Told gaps go first, so a long absence keeps what no session told yet.

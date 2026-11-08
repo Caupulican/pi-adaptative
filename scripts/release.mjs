@@ -50,6 +50,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { parseGithubOriginSlug } from "./github-origin.mjs";
 import { executeReleaseMutation, ReleaseRaceError } from "./release-recovery.mjs";
+import { releasePhase } from "./release-steward-rules.mjs";
 import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
@@ -368,8 +369,8 @@ function prepareRelease() {
 	});
 }
 
-function findReleaseCandidateSha(version, includeRepairs = true) {
-	run("git fetch origin --tags", { silent: true });
+function findReleaseCandidateSha(version, includeRepairs = true, { fetch = true } = {}) {
+	if (fetch) run("git fetch origin --tags", { silent: true });
 	const log = run("git log origin/main --format=%H%x1f%s", { silent: true }) || "";
 	for (const line of log.split("\n")) {
 		if (!line) continue;
@@ -519,15 +520,45 @@ function promoteRelease(versionArg) {
 	console.log(`\n=== Promoted ${tag}; standalone artifact publication remains gated ===\n`);
 }
 
+/** A tag's GitHub release is published (not a draft): `undefined` when the answer could not be read, `false` on a plain 404. */
+function isReleasePublished(tag) {
+	try {
+		return JSON.parse(run(`gh api repos/${getRepoSlug()}/releases/tags/${shellQuote(tag)}`, { silent: true })).draft === false;
+	} catch (error) {
+		return /HTTP 404/.test(error instanceof Error ? error.message : "") ? false : undefined;
+	}
+}
+
+/** Read-only: names the release phase in plain words first, then prints the raw facts. Fetches and changes nothing. */
+function printReleaseStatus() {
+	const version = getVersion();
+	const repo = getRepoSlug();
+	const tag = `v${version}`;
+	const sha = run("git rev-parse HEAD", { silent: true }).trim();
+	const remoteTag = run(`git ls-remote --tags origin ${shellQuote(tag)}`, { silent: true }).trim();
+	const tagLocal = run(`git tag -l ${shellQuote(tag)}`, { silent: true }).trim() !== "";
+	const candidate = findReleaseCandidateSha(version, true, { fetch: false });
+	const counted = candidate
+		? run(`git rev-list --count ${shellQuote(candidate)}..origin/main`, { silent: true, ignoreError: true })
+		: null;
+	const { phase, plain } = releasePhase({
+		packageVersion: version,
+		candidateOnMain: candidate !== undefined,
+		newerCommits: counted === null ? undefined : Number(counted),
+		tagLocal,
+		tagOnOrigin: remoteTag !== "",
+		published: remoteTag === "" ? undefined : isReleasePublished(tag),
+	});
+	console.log(`\nRelease phase: ${phase}\n${plain}\n`);
+	console.log(JSON.stringify({ version, repo, sha, phase, workingTree: run("git status --porcelain", { silent: true }).trim(), remoteTag }, null, 2));
+}
+
 // Main flow
 console.log("\n=== Release Script ===\n");
 
 try {
 	if (RELEASE_TARGET === "status") {
-		const version = getVersion();
-		const repo = getRepoSlug();
-		const sha = run("git rev-parse HEAD", { silent: true }).trim();
-		console.log(JSON.stringify({ version, repo, sha, workingTree: run("git status --porcelain", { silent: true }).trim(), remoteTag: run(`git ls-remote --tags origin ${shellQuote(`v${version}`)}`, { silent: true }).trim() }, null, 2));
+		printReleaseStatus();
 	} else if (RELEASE_TARGET === "adopt") {
 		promoteRelease(adoptRelease());
 	} else if (RELEASE_TARGET === "promote") {

@@ -1775,6 +1775,9 @@ export class SessionManager {
 	private latestCustomEntryCache: LatestCustomEntryCache | undefined;
 	private branchCustomEntriesCache: BranchCustomEntriesCache | undefined;
 	private persistenceStateUncertain = false;
+	/** The fence value the listeners last saw, so a value that is set and cleared inside one operation announces nothing. */
+	private persistenceFenceAnnounced = false;
+	private readonly persistenceFenceListeners = new Set<() => void>();
 	private navigationRevision = 0;
 	private inheritedSessionIds = new Set<string>();
 	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
@@ -1845,8 +1848,10 @@ export class SessionManager {
 				this.navigationRevision = previousNavigationRevision;
 				this.persistenceStateUncertain = recoveringUncertainWrite;
 			} else this.persistenceStateUncertain = true;
+			this._announcePersistenceFence();
 			throw error;
 		}
+		this._announcePersistenceFence();
 		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
@@ -2028,6 +2033,7 @@ export class SessionManager {
 		this.branchCustomEntriesCache = undefined;
 		this.flushed = false;
 		this.persistenceStateUncertain = false;
+		this._announcePersistenceFence();
 		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 
@@ -2193,6 +2199,30 @@ export class SessionManager {
 	/** Whether a failed write left the file's state unknown: appends are refused until the file is reopened. */
 	isPersistenceStateUncertain(): boolean {
 		return this.persistenceStateUncertain;
+	}
+
+	/**
+	 * Calls the listener when the fence above is set or lifted, after the operation settled (a value set and cleared inside
+	 * one operation announces nothing). Called synchronously inside the write or reopen: it reads
+	 * `isPersistenceStateUncertain()` and must not write to the session. Returns the unsubscribe.
+	 */
+	onPersistenceFenceChange(listener: () => void): () => void {
+		this.persistenceFenceListeners.add(listener);
+		return () => {
+			this.persistenceFenceListeners.delete(listener);
+		};
+	}
+
+	private _announcePersistenceFence(): void {
+		if (this.persistenceStateUncertain === this.persistenceFenceAnnounced) return;
+		this.persistenceFenceAnnounced = this.persistenceStateUncertain;
+		for (const listener of [...this.persistenceFenceListeners]) {
+			try {
+				listener();
+			} catch {
+				// An indicator never fails the write or reopen it observes.
+			}
+		}
 	}
 
 	/** Fence work across navigation while allowing ordinary appends on its original branch. */
@@ -2525,6 +2555,7 @@ export class SessionManager {
 				this.fileEntries === fileEntries
 			)
 				this.persistenceStateUncertain = true;
+			this._announcePersistenceFence();
 			if (writeStarted)
 				throw new SessionAppendUncertainError(
 					captureSessionAppendWriteIdentity(identity, encodedEntries),
@@ -4585,6 +4616,7 @@ export class SessionManager {
 		this.latestCustomEntryCache = undefined;
 		this.branchCustomEntriesCache = undefined;
 		this.persistenceStateUncertain = branched.persistenceStateUncertain;
+		this._announcePersistenceFence();
 		this.inheritedSessionIds = new Set(branched.inheritedSessionIds);
 		this.coldPayloadEntryIds.clear();
 		for (const id of branched.coldPayloadEntryIds) this.coldPayloadEntryIds.add(id);

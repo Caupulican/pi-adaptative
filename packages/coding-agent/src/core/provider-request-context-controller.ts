@@ -89,6 +89,8 @@ export interface ProviderRequestContextControllerDeps {
 	previewSelfCompactionGuidance?(): { readonly content: string | undefined; readonly cleared: string };
 	getGoalState?(): GoalState | undefined;
 	getRoutedGoalContext?(): RoutedGoalContext | undefined;
+	/** Why automatic continuation is stopped for a lasting reason, in one sentence for the model; undefined while it is not. */
+	getGoalAutoContinueNote?(): string | undefined;
 	skillVault?: Pick<
 		SkillVaultController,
 		"previewSystemPromptSection" | "getContextRevision" | "previewExclusionReminder" | "commitSystemPromptSection"
@@ -259,7 +261,12 @@ export class ProviderRequestContextController {
 			? await this.deps.transformExtensions(transformed)
 			: { messages: transformed, transientMessages: [] as AgentMessage[] };
 		const routedGoalContext = this.deps.getRoutedGoalContext?.();
-		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages, routedGoalContext);
+		const goalAutoContinueNote = this.deps.getGoalAutoContinueNote?.();
+		const goalContextProjection = captureGoalContextProjection(
+			extensionPlan.messages,
+			routedGoalContext,
+			goalAutoContinueNote,
+		);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
 		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
 		const directoryContent =
@@ -422,6 +429,7 @@ export class ProviderRequestContextController {
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState?.() === goalState &&
 			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
+			this.deps.getGoalAutoContinueNote?.() === goalAutoContinueNote &&
 			isDeepStrictEqual(
 				resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages),
 				authorityContext,

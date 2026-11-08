@@ -60,7 +60,7 @@ import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delega
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
-import { isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
+import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
 	createForegroundTranscriptWrites,
 	type ForegroundTranscriptWriteDeps,
@@ -142,6 +142,7 @@ import { HostEventSessionController } from "./events/host-event-session-controll
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import type { SendUserMessageOptions, ToolDefinition } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
+import type { GoalAutoContinueHold, GoalAutoContinueState } from "./goals/goal-auto-continue-state.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
@@ -217,10 +218,17 @@ import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./s
 import type { SettingsManager } from "./settings-manager.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
+import { alarmAt, type WallAlarm } from "./util/timer-port.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
+
+/** Slack after a lease's last renewal is due, so a daemon renewing right at the limit is not mistaken for a dead one. */
+const DAEMON_RECHECK_MARGIN_MS = 2_000;
+/** Backoff of the re-ensure after a daemon that could not be brought up. */
+const DAEMON_RECHECK_BASE_BACKOFF_MS = 15_000;
+const DAEMON_RECHECK_MAX_BACKOFF_MS = 600_000;
 
 export type { SessionChannelsView } from "./channels/session-channels.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
@@ -354,6 +362,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _daemonStartFailure: string | undefined;
 	/** The lease token of the daemon this runtime last launched: one it never replaces for its build. */
 	private _launchedDaemonToken: string | undefined;
+	/** The one alarm that re-ensures the daemon when the lease this session last saw would no longer be held. */
+	private _daemonRecheck: WallAlarm | undefined;
+	/** Consecutive ensures that could not bring the daemon up: the backoff of the next re-ensure. */
+	private _daemonEnsureFailures = 0;
 	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
 	private _awayChannelsKey: string | undefined;
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
@@ -1039,6 +1051,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const unsubscribeAwayChannelSettings = this._unsubscribeAwayChannelSettings;
 		this._unsubscribeAwayChannelSettings = undefined;
 		this._runTeardownStep("unsubscribe away channel settings", () => unsubscribeAwayChannelSettings?.());
+		this._runTeardownStep("stop the daemon lease re-ensure", () => this._armDaemonRecheck(undefined));
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -1070,6 +1083,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	scheduleGoalAutoContinueFromIdle(options?: PromptOptions): void {
 		this._goalAutoContinue.scheduleFromIdle(options);
+	}
+
+	describeGoalAutoContinue(snapshot: GoalRuntimeSnapshot): GoalAutoContinueState {
+		return this._goalAutoContinue.describeState(snapshot);
+	}
+
+	goalAutoContinueHold(): GoalAutoContinueHold | undefined {
+		return this._goalAutoContinue.hold();
 	}
 
 	reconcileGoalContinuationToolAvailability(resumeGoalToolAvailable?: () => boolean): void {
@@ -1915,16 +1936,25 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * claim is idempotent across sessions and processes, so only one start launches. A worker process never starts one.
 	 * A reason the daemon cannot start is reported once. The same points apply `routines.away.autostart` (see
 	 * `away-service.ts`), for the same work.
+	 *
+	 * Every ensure that finds away work arms one alarm at the instant the lease it saw (or its fresh claim) stops being
+	 * held; the alarm runs this again (without the always-on reconcile), so a daemon that died mid-session is relaunched
+	 * by that expiry instead of waiting for a save or settings change. A failed ensure backs off on the same alarm.
 	 */
-	private _ensureBotDaemon(): void {
+	private _ensureBotDaemon(fromAlarm = false): void {
 		const store = this._botTeamStore;
 		if (!store || this.deps.isDisposed() || getSessionRole() === "worker" || this._channelsHostedByDaemon) return;
 		this._daemonRevision = store.getRoutineRevision();
+		const clock = this.deps.getTimers().port("routines");
 		let failure: string | undefined;
 		// Enabled routines and channels served away: either keeps the daemon, and the always-on service, wanted.
 		let awayWork = 0;
+		// When the lease this ensure leaves behind stops being held; absent when nothing is read.
+		let leaseHeldUntil: number | undefined;
 		try {
-			const status = store.getDaemonStatus(this.deps.getTimers().port("routines").now());
+			const status = store.getDaemonStatus(clock.now());
+			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
+			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
 			this._awayChannelsKey = awayChannelsKey(this.deps.getSettingsManager());
 			awayWork = status.activeRoutines + awayChannels(this.deps.getSettingsManager()).length;
 			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
@@ -1942,12 +1972,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			if (awayWork > 0 && (!status.running || (replace && !this.getAwayService().replaceDaemon(fallback)))) {
 				const started = this.startPersistentBotDaemon();
 				if (!started.started && !started.held) failure = started.detail;
+				// A claimed lease is held from its claim until its daemon's first renewal is due.
+				else leaseHeldUntil = clock.now() + DAEMON_STALE_MS;
 			}
 		} catch (error) {
 			failure = `Detached bot daemon could not be started: ${error instanceof Error ? error.message : String(error)}`;
 		}
 		if (failure !== undefined && failure !== this._daemonStartFailure) this._safeWarn(failure);
 		this._daemonStartFailure = failure;
+		this._armDaemonRecheck(
+			awayWork > 0 ? this._nextDaemonCheckAt(clock.now(), failure !== undefined, leaseHeldUntil) : undefined,
+		);
+		if (fromAlarm) return;
 		try {
 			if (!this.deps.isChildSession()) this.getAwayService().reconcile(awayWork);
 		} catch (error) {
@@ -1955,6 +1991,33 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				`Always-on routines could not be checked: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */
+	private _nextDaemonCheckAt(nowMs: number, failed: boolean, leaseHeldUntil: number | undefined): number {
+		this._daemonEnsureFailures = failed ? this._daemonEnsureFailures + 1 : 0;
+		if (failed || leaseHeldUntil === undefined)
+			return (
+				nowMs +
+				Math.min(
+					DAEMON_RECHECK_MAX_BACKOFF_MS,
+					DAEMON_RECHECK_BASE_BACKOFF_MS * 2 ** Math.min(this._daemonEnsureFailures, 16),
+				)
+			);
+		return leaseHeldUntil + DAEMON_RECHECK_MARGIN_MS;
+	}
+
+	private _armDaemonRecheck(atMs: number | undefined): void {
+		this._daemonRecheck?.stop();
+		this._daemonRecheck = undefined;
+		if (atMs === undefined || this.deps.isDisposed()) return;
+		this._daemonRecheck = alarmAt(this.deps.getTimers().port("routines"), atMs, () => {
+			this._daemonRecheck = undefined;
+			harnessLog.info("bots", "the bot daemon lease expiry re-ensured the daemon", {
+				failures: this._daemonEnsureFailures,
+			});
+			this._ensureBotDaemon(true);
+		});
 	}
 
 	/** The channels the daemon serves while no session is open: who serves each now and its drafts (filesystem reads). */
@@ -2035,6 +2098,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			routineIntake: this._routines?.intake.status(),
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
 			hostEventConnections: () => this.readHostEventConnections(),
+			goalContinuation: () =>
+				this._goalAutoContinue.describeState(
+					this.deps.getGoalRuntimeSnapshot({
+						maxStallTurns: this.deps.getSettingsManager().getAutonomySettings().maxStallTurns,
+					}),
+				),
 			proactivity: {
 				daily: this.getProactivityDailyState(),
 				lastSkipReason: this.getLastProactivitySkipReason(),

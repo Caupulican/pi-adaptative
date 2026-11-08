@@ -735,6 +735,8 @@ export class MemoryController {
 
 	private _settingsChanged(): void {
 		void this._hierarchy?.settingsChanged();
+		// A raised daily limit lifts the summaries' hold now, not at the next arrival.
+		this._continuousChat?.runtime.holdMayHaveLifted();
 		this._reconcileContinuousChat();
 	}
 

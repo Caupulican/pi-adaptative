@@ -40,7 +40,7 @@ import {
 	MAX_RETAINED_DIAGNOSTIC_CHARS,
 } from "../security/secret-text.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -56,6 +56,7 @@ import {
 	DAY_MS,
 	digest,
 	heldCount,
+	isDraftOpen,
 	isUntoldEmpty,
 	MAX_OWNER_CONVERSATIONS,
 	MAX_PENDING_MESSAGES,
@@ -183,6 +184,12 @@ function offerHolds(entry: ChannelPendingMessage, now: number): boolean {
 	);
 }
 
+/** Whether a draft's claimed send is still in flight: the session that claimed it still runs in its process. */
+function sendInFlight(draft: ChannelDraftRecord): boolean {
+	const by = draft.sendingBy;
+	return draft.state === "sending" && by !== undefined && sessionLive(by.sessionId, by.pid);
+}
+
 function clearOffer(entry: ChannelPendingMessage): void {
 	entry.offeredTo = undefined;
 	entry.offeredPid = undefined;
@@ -267,6 +274,11 @@ export interface ChannelDraftView {
 	readonly reason: string;
 	readonly createdAt: string;
 	readonly text: string;
+	/**
+	 * `waiting`: nothing claimed it. `sending`: a settle is sending it now. `unknown`: a send was claimed and its session
+	 * ended before it recorded the outcome, so the message may or may not have reached its conversation.
+	 */
+	readonly status: "waiting" | "sending" | "unknown";
 }
 
 /** A verified, not allowlisted sender whose id the sender chose, as the owner's release tool lists it (fenced). */
@@ -378,6 +390,8 @@ export class SessionChannels {
 	private draftSubscription: { readonly control: OwnerChannelControl; readonly unsubscribe: () => void } | undefined;
 	/** The owner-authority notice each channel shows now (`ownerNotice`), so an unchanged state observes nothing. */
 	private readonly ownerNotices = new Map<string, string>();
+	/** The one alarm for the earliest time a held item expires or a bound lifts (`armWake`); none while nothing is due. */
+	private wake: { readonly at: number; readonly handle: unknown } | undefined;
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
@@ -608,6 +622,7 @@ export class SessionChannels {
 		for (const [ref, run] of this.ownerRuns) this.stopOwnerRun(ref, run, undefined);
 		this.transcriptWait?.();
 		this.transcriptWait = undefined;
+		this.clearWake();
 		this.followed.clear();
 		this.syncDirWatch();
 		await this.registry.stop();
@@ -1226,7 +1241,67 @@ export class SessionChannels {
 		} finally {
 			this.routing = false;
 			if (this.rerun) this.scheduleWork();
+			this.armWake();
 		}
+	}
+
+	private clearWake(): void {
+		if (!this.wake) return;
+		(this.deps.timers ?? SYSTEM_TIMER_PORT).clearTimeout(this.wake.handle);
+		this.wake = undefined;
+	}
+
+	/**
+	 * The earliest future moment a held item of a channel this session serves needs another pass without any event
+	 * arriving: a waiting message passing its day (it becomes a gap), and, while the channel holds new messages at its
+	 * bound, the moment the oldest charge leaves the 24-hour window. A moment already past is left to the pass that
+	 * follows the event which kept it (a pass cannot expire what its channel is not in a state to deliver).
+	 */
+	private nextWakeAt(now: number): number | undefined {
+		let earliest: number | undefined;
+		const consider = (at: number | undefined) => {
+			if (at !== undefined && at > now && (earliest === undefined || at < earliest)) earliest = at;
+		};
+		for (const [name, runtime] of this.runtimes) {
+			if (!runtime.holding || (runtime.state !== "armed" && runtime.state !== "capped")) continue;
+			try {
+				const state = this.journal(name).read().result;
+				for (const entry of state.pending) consider(entry.admittedAt + PENDING_EXPIRY_MS);
+				if (runtime.state !== "capped") continue;
+				for (const batch of state.batches) if (batch.owner !== true) consider(batch.acceptedAt + DAY_MS);
+				const policy = this.policy(name);
+				if (policy && this.ownerPolicy(name))
+					consider(ownerRoom(name, state, policy, now, this.ownerQuota(policy).kind === "room").oldestUntil);
+			} catch (error) {
+				harnessLog.warn("channels", "a channel journal could not be read for its expiry wake", {
+					channel: name,
+					reason: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return earliest;
+	}
+
+	/**
+	 * Keep one alarm on the schedule port for what `nextWakeAt` finds, re-armed after every pass (a pass is what changes
+	 * the journal): it fires one more pass, which expires the message or finds the bound lifted, so a channel at rest
+	 * needs no inbound event, activity or settings change to notice time passing, and nothing polls.
+	 */
+	private armWake(): void {
+		if (!this.started) return;
+		const now = this.now();
+		const at = this.nextWakeAt(now);
+		if (this.wake?.at === at) return;
+		this.clearWake();
+		if (at === undefined) return;
+		const handle = (this.deps.timers ?? SYSTEM_TIMER_PORT).setTimeout(() => {
+			if (this.wake?.handle !== handle) return;
+			this.wake = undefined;
+			harnessLog.debug("channels", "the expiry wake fired");
+			this.onActivity();
+		}, at - now);
+		this.wake = { at, handle };
+		harnessLog.debug("channels", "an expiry wake was armed", { inMs: at - now });
 	}
 
 	/** Tell the owner what the journal recorded that they have not been told: a reset and its gaps. */
@@ -1379,7 +1454,7 @@ export class SessionChannels {
 			return `its bound of ${policy.maxWakesPerDay} turn(s) in 24 hours is reached (channels.${name}.maxWakesPerDay)`;
 		if (usd >= policy.maxUsdPerDay)
 			return `$${usd.toFixed(2)} spent in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
-		if (state.drafts.filter((draft) => draft.state === "pending").length >= MAX_PENDING_DRAFTS)
+		if (state.drafts.filter(isDraftOpen).length >= MAX_PENDING_DRAFTS)
 			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
 		return undefined;
 	}
@@ -2416,13 +2491,14 @@ export class SessionChannels {
 		const views: ChannelDraftView[] = [];
 		for (const [name] of this.explicitChannels()) {
 			for (const draft of this.journal(name).read().result.drafts)
-				if (draft.state === "pending")
+				if (isDraftOpen(draft))
 					views.push({
 						id: draft.id,
 						channel: name,
 						reason: draft.reason,
 						createdAt: new Date(draft.createdAt).toISOString(),
 						text: draft.text,
+						status: draft.state === "pending" ? "waiting" : sendInFlight(draft) ? "sending" : "unknown",
 					});
 		}
 		return views;
@@ -2462,11 +2538,11 @@ export class SessionChannels {
 				wakes: { used: usage.wakes, max: policy.maxWakesPerDay },
 				spendUsd: { used: usage.usd, max: policy.maxUsdPerDay },
 				pendingMessages: state.pending.length,
-				pendingDrafts: state.drafts.filter((draft) => draft.state === "pending").length,
+				pendingDrafts: state.drafts.filter(isDraftOpen).length,
 				heldTotal: state.heldTotal,
 				gaps: state.gaps.length,
 				servedBy: channelServedBy(state.holder, sessionId),
-				awayDrafts: state.drafts.filter((draft) => draft.away === true && draft.state === "pending").length,
+				awayDrafts: state.drafts.filter((draft) => draft.away === true && isDraftOpen(draft)).length,
 				...(policy.ownerSenders.length > 0
 					? {
 							ownerSpendUsd: {
@@ -2483,38 +2559,127 @@ export class SessionChannels {
 		});
 	}
 
-	/** Send a pending draft to the address its conversation came from, or dismiss it. Throws a plain reason. */
+	/**
+	 * Send a pending draft to the address its conversation came from, or dismiss it. Throws a plain reason.
+	 *
+	 * At most once: the draft is claimed in the journal (`sending`, under the journal's lock, only while it is still open
+	 * and no live send holds it) before anything is sent, and the outcome is recorded after. A second settle finds the
+	 * claim and is refused; a crash between the claim and the record leaves the claim, which reads as an unknown outcome
+	 * (the message may have reached its conversation) and is never sent again unless the owner sends it again after
+	 * seeing that. A send that fails with a transport error gives the claim back, as a failed reply stays a draft.
+	 */
 	async settleDraft(id: string, action: "send" | "dismiss"): Promise<string> {
 		const found = this.listDrafts().find((draft) => draft.id === id);
 		if (!found) throw new Error(`No pending reply draft ${id}.`);
 		const name = found.channel;
-		const journal = this.journal(name);
-		const { result: draft } = journal.update(this.now(), (state) => {
-			const entry = state.drafts.find((candidate) => candidate.id === id && candidate.state === "pending");
-			return entry ? { ...entry } : undefined;
-		});
-		if (!draft) throw new Error(`No pending reply draft ${id}.`);
+		let send: { readonly provider: ChannelProvider; readonly parts: readonly string[] } | undefined;
 		if (action === "send") {
 			const provider = this.registry.getChannel(name);
 			if (!provider || this.runtime(name).state === "stopped" || !this.runtime(name).holding)
 				throw new Error(`Channel ${name} is not running in this session; the draft is kept.`);
-			const formatted = formatChannelReply(draft.text, provider.capabilities);
+			const formatted = formatChannelReply(found.text, provider.capabilities);
 			if (!formatted.ok)
 				throw new Error(`The draft cannot be sent: it is ${formatted.reason.replaceAll("_", " ")}.`);
+			send = { provider, parts: formatted.parts };
+		}
+		const claim = this.claimDraft(name, id, action);
+		if (!send) {
+			harnessLog.info("channels", "a draft was dismissed", {
+				channel: name,
+				draft: id,
+				interrupted: claim.interrupted,
+			});
+			this.scheduleWork();
+			return `Dismissed draft ${id}.`;
+		}
+		harnessLog.info("channels", "a draft send was claimed", {
+			channel: name,
+			draft: id,
+			repeatsInterrupted: claim.interrupted,
+		});
+		try {
 			await this.sendParts(
-				provider,
-				{ conversationKey: draft.conversationKey, address: draft.address, id: draft.batchId },
-				formatted.parts,
+				send.provider,
+				{ conversationKey: claim.draft.conversationKey, address: claim.draft.address, id: claim.draft.batchId },
+				send.parts,
+			);
+		} catch (error) {
+			this.releaseDraftClaim(name, id, claim);
+			harnessLog.warn("channels", "a draft send failed; the draft is kept", { channel: name, draft: id });
+			throw error;
+		}
+		try {
+			this.journal(name).update(this.now(), (state) => {
+				const entry = state.drafts.find((candidate) => candidate.id === id);
+				if (entry?.state !== "sending") return;
+				entry.state = "sent";
+				entry.settledAt = this.now();
+				delete entry.sendingBy;
+			});
+		} catch (error) {
+			// Sent, but the journal kept the claim: it will read as an unknown outcome until the owner settles it.
+			harnessLog.warn("channels", "a draft was sent but its outcome was not recorded", { channel: name, draft: id });
+			return `Sent draft ${id} to its conversation on ${name}, but the journal could not record it (${error instanceof Error ? error.message : String(error)}); the draft will show as an unknown outcome. Dismiss it after checking the conversation.`;
+		}
+		harnessLog.info("channels", "a draft was sent", { channel: name, draft: id, parts: send.parts.length });
+		this.scheduleWork();
+		return `Sent draft ${id} to its conversation on ${name}.`;
+	}
+
+	/**
+	 * Claim an open draft for `action` in one journal update: a dismiss settles it, a send marks it `sending` by this
+	 * session and process. Refused when the draft is gone or another live send holds it. `interrupted` is whether an
+	 * earlier send's claim was found whose session ended (its outcome unknown); `previous` is that claim.
+	 */
+	private claimDraft(
+		name: string,
+		id: string,
+		action: "send" | "dismiss",
+	): { draft: ChannelDraftRecord; interrupted: boolean; previous: ChannelDraftRecord["sendingBy"] } {
+		const now = this.now();
+		const claimed = this.journal(name).update(now, (state) => {
+			const entry = state.drafts.find((candidate) => candidate.id === id && isDraftOpen(candidate));
+			if (!entry) return "gone" as const;
+			if (sendInFlight(entry)) return "busy" as const;
+			const previous = entry.sendingBy;
+			const interrupted = entry.state === "sending";
+			if (action === "dismiss") {
+				entry.state = "dismissed";
+				entry.settledAt = now;
+				delete entry.sendingBy;
+			} else {
+				entry.state = "sending";
+				entry.sendingBy = { sessionId: this.sessionId(), pid: process.pid, at: now };
+			}
+			return { draft: { ...entry }, interrupted, previous };
+		}).result;
+		if (claimed === "gone") throw new Error(`No pending reply draft ${id}.`);
+		if (claimed === "busy")
+			throw new Error(`Draft ${id} is being sent right now; its outcome is recorded when that send ends.`);
+		return claimed;
+	}
+
+	/** Give a claim back after a failed send: the draft waits again, or shows the earlier interrupted claim it replaced. */
+	private releaseDraftClaim(
+		name: string,
+		id: string,
+		claim: { draft: ChannelDraftRecord; previous: ChannelDraftRecord["sendingBy"] },
+	): void {
+		try {
+			this.journal(name).update(this.now(), (state) => {
+				const entry = state.drafts.find((candidate) => candidate.id === id);
+				// Only this settle's own claim is given back.
+				if (entry?.state !== "sending" || entry.sendingBy?.at !== claim.draft.sendingBy?.at) return;
+				if (claim.previous) entry.sendingBy = claim.previous;
+				else {
+					entry.state = "pending";
+					delete entry.sendingBy;
+				}
+			});
+		} catch (error) {
+			this.deps.warn(
+				`Channel ${name}: draft ${id} could not be released after a failed send (${error instanceof Error ? error.message : String(error)}); it shows as an unknown outcome.`,
 			);
 		}
-		journal.update(this.now(), (state) => {
-			const entry = state.drafts.find((candidate) => candidate.id === id);
-			if (entry) {
-				entry.state = action === "send" ? "sent" : "dismissed";
-				entry.settledAt = this.now();
-			}
-		});
-		this.scheduleWork();
-		return action === "send" ? `Sent draft ${id} to its conversation on ${name}.` : `Dismissed draft ${id}.`;
 	}
 }

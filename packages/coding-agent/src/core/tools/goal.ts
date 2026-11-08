@@ -283,6 +283,8 @@ export interface GoalToolDependencies {
 	retainCompletionEvidence?: (toolCallId: string, decision: FinalCompletionVerdict) => GoalCompletionEvidence;
 	/** Read the latest persisted goal state for the active session. */
 	getGoalState: () => GoalState | undefined;
+	/** Why automatic continuation is stopped for a lasting reason, as the one sentence the goal context carries too. */
+	getAutoContinueNote?: () => string | undefined;
 	/** Persist a new goal state snapshot to the active session. */
 	saveGoalState: (state: GoalState, expected?: GoalStateRevision) => void;
 	/** Clock injection for deterministic tests. */
@@ -901,8 +903,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						details: { action: "get", applied: false },
 					};
 				}
+				const autoContinueNote = isGoalExecutionActive(state.status) ? deps.getAutoContinueNote?.() : undefined;
 				return {
-					content: [{ type: "text", text: summarizeGoalState(state) }],
+					content: [
+						{
+							type: "text",
+							text: [summarizeGoalState(state), autoContinueNote]
+								.filter((line) => line !== undefined)
+								.join("\n"),
+						},
+					],
 					details: { action: "get", applied: false, state },
 				};
 			}

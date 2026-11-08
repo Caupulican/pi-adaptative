@@ -28,6 +28,7 @@ import type {
 	ContinuousChatCompactionConversation,
 	ContinuousChatCompactionPort,
 	ContinuousChatCompactionPrefix,
+	ContinuousChatDispatchHold,
 } from "./continuous-chat-compaction.ts";
 import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
@@ -132,12 +133,19 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		this.summaryModel();
 	}
 
-	spendHold(): string | undefined {
-		const spend = this.deps.spend?.hold();
-		if (spend !== undefined) return spend;
-		return Date.now() < this.providerHoldUntil
-			? "Memory summaries wait for the model provider's limit to reset."
-			: undefined;
+	dispatchHold(): ContinuousChatDispatchHold | undefined {
+		const meter = this.deps.spend;
+		const spend = meter?.hold();
+		const providerWaitMs = this.providerHoldUntil - Date.now();
+		if (spend === undefined && providerWaitMs <= 0) return undefined;
+		// The hold lifts when its earliest reason may have: the next UTC day for the limit, the reset for the provider.
+		const wakes: number[] = [];
+		if (meter !== undefined && spend !== undefined) wakes.push(meter.resetsInMs());
+		if (providerWaitMs > 0) wakes.push(providerWaitMs);
+		return {
+			message: spend ?? "Memory summaries wait for the model provider's limit to reset.",
+			retryInMs: Math.min(...wakes),
+		};
 	}
 
 	/** A refused request parks new claims until the provider can admit them again; it never counts as a failed attempt. */

@@ -14,12 +14,13 @@ const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["fail
 const ATTENTION_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["partial", "blocked", "canceled"]);
 
 /**
- * Reuses the former handoff-timeout boundary, now purely as an observation threshold: a re-dispatch
- * on this timer used to create a duplicate consumer of the same handoff, so it was removed. Without
- * any signal in its place, a notify() call that never settles would block deliveryTail (and every
- * subsequent worker terminal) forever with zero visibility. This watchdog only ever warns.
+ * The most one handoff may hold the serialized delivery tail. A re-dispatch on this timer used to create a duplicate
+ * consumer of the same handoff, so expiry never re-dispatches: the batch stays in `inFlight` (still the one consumer
+ * of its key, still outstanding and durably pending), the tail moves on to the next handoff, and the late settlement of
+ * the original notify() still completes or retries that batch.
  */
-const HANDOFF_WATCHDOG_MS = 1_800_000;
+const HANDOFF_DEADLINE_MS = 1_800_000;
+const HANDOFF_RETAINED = Symbol("handoff retained");
 const MAX_OBSERVED_TERMINALS = 512;
 
 export interface WorkerTerminalHandoffRecord {
@@ -85,7 +86,7 @@ interface PendingWorkerNotification {
 }
 
 interface NotificationAlarm {
-	readonly purpose: "retry" | "handoff watchdog";
+	readonly purpose: "retry" | "handoff deadline";
 	timer?: unknown;
 }
 
@@ -338,22 +339,74 @@ export class WorkerNotificationCoordinator {
 	}
 
 	/**
-	 * Observe-only: warns once if the in-flight notify() call has not settled after
-	 * HANDOFF_WATCHDOG_MS. Never re-dispatches and never creates a second notify() consumer —
-	 * callers disarm it once the awaited notify() settles, success or failure.
+	 * Waits for `work` at most HANDOFF_DEADLINE_MS. On expiry it logs and reports the batch as retained: `work` keeps
+	 * running and is never re-dispatched, but it no longer holds the delivery tail.
 	 */
-	private startHandoffWatchdog(laneIds: readonly string[]): NotificationAlarm {
-		const alarm: NotificationAlarm = { purpose: "handoff watchdog" };
-		this.armAlarm(alarm, HANDOFF_WATCHDOG_MS, () => {
-			harnessLog.warn("workers", "a worker handoff has not settled", {
+	private async waitForHandoff<T>(work: Promise<T>, laneIds: readonly string[]): Promise<T | typeof HANDOFF_RETAINED> {
+		const expired = Promise.withResolvers<typeof HANDOFF_RETAINED>();
+		const alarm: NotificationAlarm = { purpose: "handoff deadline" };
+		this.armAlarm(alarm, HANDOFF_DEADLINE_MS, () => {
+			harnessLog.warn("workers", "a worker handoff did not settle in time; it is retained and the queue continues", {
 				lanes: laneIds,
-				afterMs: HANDOFF_WATCHDOG_MS,
+				afterMs: HANDOFF_DEADLINE_MS,
 			});
 			this.warnBestEffort(
-				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
+				`Background worker handoff has not settled after ${HANDOFF_DEADLINE_MS}ms for lane(s): ${laneIds.join(", ")}. It stays outstanding without a second delivery; later handoffs continue.`,
 			);
+			expired.resolve(HANDOFF_RETAINED);
 		});
-		return alarm;
+		try {
+			return await Promise.race([work, expired.promise]);
+		} finally {
+			this.disarmAlarm(alarm);
+		}
+	}
+
+	/** A confirmed delivery: the batch leaves the outbox and its durable receipts are acknowledged. */
+	private completeDelivery(batch: readonly PendingWorkerNotification[]): void {
+		// Disposal clears the process-local outbox but deliberately leaves its durable receipt
+		// pending for the next session owner. A late notifier must not write through the retired
+		// lifecycle after a replacement session may already have opened the same ledger.
+		if (this.disposed) return;
+		for (const notification of batch) this.inFlight.delete(notification.key);
+		this.retryCount = 0;
+		harnessLog.info("workers", "worker results were handed to the parent", () => ({
+			count: batch.length,
+			lanes: batch.map((notification) => notification.record.laneId),
+			statuses: batch.map((notification) => notification.record.status),
+		}));
+		const durableIds = batch.flatMap((notification) =>
+			notification.durableNotificationId ? [notification.durableNotificationId] : [],
+		);
+		if (durableIds.length === 0) return;
+		try {
+			this.options.markDurableDelivered(durableIds);
+		} catch (error) {
+			// Delivery is already confirmed. Retrying notify() would wake the parent twice just
+			// to repair a separate durable acknowledgment; keep the ledger pending for a future
+			// replay and make the acknowledgment failure observable instead.
+			this.warnBestEffort(
+				`Background worker durable handoff acknowledgment failed after delivery: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	/** A rejected delivery returns the batch to `pending` and arms the retry backoff. */
+	private failDelivery(batch: readonly PendingWorkerNotification[], error: unknown): void {
+		if (this.disposed) return;
+		for (const notification of batch) {
+			this.inFlight.delete(notification.key);
+			this.pending.set(notification.key, notification);
+		}
+		this.warnBestEffort(
+			`Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		this.scheduleRetry();
+		harnessLog.warn("workers", "a worker handoff failed; a retry is scheduled", {
+			lanes: batch.map((notification) => notification.record.laneId),
+		});
 	}
 
 	private flush(): void {
@@ -448,55 +501,20 @@ export class WorkerNotificationCoordinator {
 			// A foreground lease wait is an in-flight side effect, not a failed attempt. Re-dispatching it
 			// on a wall-clock timer creates concurrent consumers that later persist the same handoff.
 			// Explicit rejection remains retryable; process restart replays the durable pending record.
-			const watchdog = this.startHandoffWatchdog(batchRecords.map((record) => record.laneId));
-			try {
-				if (this.disposed) return;
-				await this.options.notify(batchRecords);
-			} finally {
-				this.disarmAlarm(watchdog);
-			}
-			// Disposal clears the process-local outbox but deliberately leaves its durable receipt
-			// pending for the next session owner. A late notifier must not write through the retired
-			// lifecycle after a replacement session may already have opened the same ledger.
-			if (this.disposed) return;
-			for (const notification of batch) this.inFlight.delete(notification.key);
-			this.retryCount = 0;
-			harnessLog.info("workers", "worker results were handed to the parent", () => ({
-				count: batch.length,
-				lanes: batch.map((notification) => notification.record.laneId),
-				statuses: batch.map((notification) => notification.record.status),
-			}));
-			const durableIds = batch.flatMap((notification) =>
-				notification.durableNotificationId ? [notification.durableNotificationId] : [],
+			const notifying = this.options.notify(batchRecords);
+			const outcome = await this.waitForHandoff(
+				notifying,
+				batchRecords.map((record) => record.laneId),
 			);
-			if (durableIds.length > 0) {
-				try {
-					this.options.markDurableDelivered(durableIds);
-				} catch (error) {
-					// Delivery is already confirmed. Retrying notify() would wake the parent twice just
-					// to repair a separate durable acknowledgment; keep the ledger pending for a future
-					// replay and make the acknowledgment failure observable instead.
-					this.warnBestEffort(
-						`Background worker durable handoff acknowledgment failed after delivery: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
+			if (outcome === HANDOFF_RETAINED) {
+				void notifying.then(
+					() => this.completeDelivery(batch),
+					(error: unknown) => this.failDelivery(batch, error),
+				);
+				return;
 			}
+			this.completeDelivery(batch);
 		});
-		this.deliveryTail = delivery.catch((error: unknown) => {
-			if (this.disposed) return;
-			for (const notification of batch) {
-				this.inFlight.delete(notification.key);
-				this.pending.set(notification.key, notification);
-			}
-			this.warnBestEffort(
-				`Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			this.scheduleRetry();
-			harnessLog.warn("workers", "a worker handoff failed; a retry is scheduled", {
-				lanes: batch.map((notification) => notification.record.laneId),
-			});
-		});
+		this.deliveryTail = delivery.catch((error: unknown) => this.failDelivery(batch, error));
 	}
 }

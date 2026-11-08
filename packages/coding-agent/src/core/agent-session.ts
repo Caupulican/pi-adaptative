@@ -1066,6 +1066,8 @@ export class AgentSession {
 				this._backgroundLanes.synchronizeGoalState(state);
 			},
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
+			describeAutoContinue: (snapshot) => this._backgroundLanes.describeGoalAutoContinue(snapshot),
+			getAutoContinueHold: () => this._backgroundLanes.goalAutoContinueHold(),
 			prompt: (text, options) => this.prompt(text, options),
 			getForegroundSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
@@ -1575,6 +1577,7 @@ export class AgentSession {
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 			getRoutedGoalContext: () => this._goals.getRoutedGoalContext(),
+			getGoalAutoContinueNote: () => this._goals.autoContinueNote(),
 			getEdgeGrants: () => this._edgeIntent.getRunEdgeGrants(),
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
 		});
@@ -2021,6 +2024,7 @@ export class AgentSession {
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
+			getGoalAutoContinueNote: () => this._goals.autoContinueNote(),
 			goalClock: config.timers.port("goal-continuation"),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			getCompletionRuleRefusal: (toolCallId) => this._ruleHooks.refusalFor("noticed-items", toolCallId),
@@ -5663,13 +5667,7 @@ export class AgentSession {
 		return getLearningDecisionSnapshots(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
-	/**
-	 * The single injection point that makes the goal-continuation snapshot lane-aware:
-	 * `laneRecords` feeds BOTH `evaluateGoalContinuation`'s "waiting" branch (a worker dispatched
-	 * against an open requirement) and the per-goal worker-spend overlay — read fresh here so BOTH the
-	 * goal loop (`GoalLoopController`) and the idle scheduler (`BackgroundLaneController`) see the
-	 * same live lane state, since both reach this same method.
-	 */
+	/** The single lane-aware goal-continuation snapshot: the goal loop and the idle scheduler both read live lane state here. */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
 		return this._goals.getRuntimeSnapshot(settings);
 	}

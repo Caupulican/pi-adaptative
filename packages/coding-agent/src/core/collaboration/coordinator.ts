@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/managed-lane-records.ts";
@@ -494,13 +495,13 @@ export class CollaborationCoordinator {
 			store.finishAcquisition(jobId, agent.id);
 			store.finishStop(jobId, agent.id, agent.turnId, "failed", detail);
 		} else {
-			store.update(jobId, (current) => {
-				const member = current.agents.find((candidate) => candidate.id === agent.id);
-				if (member) {
-					member.status = "failed";
-					member.evidence = `Launch cleanup uncertain: ${detail}; live work may remain active.`;
-				}
-			});
+			// The store's own fenced settlement: it checks the turn and the stop intent and releases the helper identity.
+			store.settleUncertainStop(
+				jobId,
+				agent.id,
+				agent.turnId,
+				`Launch cleanup uncertain: ${detail}; live work may remain active.`,
+			);
 		}
 	}
 	/**
@@ -822,8 +823,20 @@ export class CollaborationCoordinator {
 					throw new Error("Backend does not support event-driven steering notification; refusing to steer.");
 				}
 
+				// An answer belongs to a blocked agent's pending question; an active turn has none and is never steered by one.
+				if (answer) {
+					harnessLog.info(
+						"collab",
+						"an answer was refused: the agent's turn is active, not blocked on a question",
+						{
+							jobId: job.id,
+							agentId: target.id,
+						},
+					);
+					throw new Error("Agent has no pending question.");
+				}
 				let committed = false;
-				const steering = store.beginSteering(job.id, target.id, target.turnId, text, !!answer);
+				const steering = store.beginSteering(job.id, target.id, target.turnId, text);
 				try {
 					this.assertActive();
 					await backend.sendKeys(target.backendName, ["esc"]);

@@ -56,6 +56,12 @@ export interface ContinuousChatCompactionConversation {
 	send(request: ContinuousChatCompactionRequest, signal?: AbortSignal): Promise<string>;
 }
 
+/** A reason new compactions wait: the owner's words, and how long until the reason may have lifted (the runtime wakes then). */
+export interface ContinuousChatDispatchHold {
+	readonly message: string;
+	readonly retryInMs: number;
+}
+
 /**
  * Provider-neutral model port. The tools in the prefix exist only for cache identity: an adapter MUST throw
  * rather than execute a tool call, because a reply is plain text.
@@ -63,8 +69,8 @@ export interface ContinuousChatCompactionConversation {
 export interface ContinuousChatCompactionPort {
 	/** Stable summary configuration identity; changes permit retrying exhausted output failures. */
 	recoveryKey?(): string | undefined;
-	/** The owner's words for why no compaction may start now (a spend limit), or undefined. New claims wait while it holds. */
-	spendHold?(): string | undefined;
+	/** Why no compaction may start now (a spend limit, a provider limit) and when that may lift, or undefined. New claims wait while it holds. */
+	dispatchHold?(): ContinuousChatDispatchHold | undefined;
 	/** The node the conversation builds names its paid spend, so every reply's usage is attributable to it. */
 	open(
 		prefix: ContinuousChatCompactionPrefix,

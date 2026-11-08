@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentToolCall, BeforeToolCallResult } from "../../kernel/index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { checkSoulText, DEFAULT_AGENT_NAME, SOUL_FILE_NAME } from "../agent-identity.ts";
@@ -23,6 +24,7 @@ import {
 	type SoulReviewer,
 	soulSha256,
 } from "./soul-history.ts";
+import { clearSoulHold, readSoulHold, type SoulHold, type SoulHoldRead, writeSoulHold } from "./soul-hold.ts";
 import { reviewSoulText, type SoulReviewOutcome } from "./soul-review.ts";
 import { type SoulRevision, SoulWatch } from "./soul-watch.ts";
 
@@ -68,6 +70,9 @@ interface DeferredSettlement {
 	readonly action: () => string | undefined;
 	/** The verdict reverts the file (rather than accepting it). */
 	readonly rejects: boolean;
+	/** The accounted text when the verdict was made and the text a revert writes back: what a persisted hold keeps. */
+	readonly standing: string | undefined;
+	readonly restoreTo: string | undefined;
 	readonly since: number;
 	attempts: number;
 }
@@ -232,7 +237,7 @@ export class SoulController {
 	/** True while this process holds the soul lock: history operations inside it must not acquire it again. */
 	private holding = false;
 	/** A verdict on an exact revision that could not be committed because the soul lock stayed held elsewhere. */
-	private deferred: DeferredSettlement | undefined;
+	private heldVerdict: DeferredSettlement | undefined;
 	/** History entries that could not be written for the same reason; flushed under the lock at the next chance. */
 	private readonly deferredAudit: DeferredAudit[] = [];
 	/** A notice produced while no call was settling (a deferred revert completing at admission), told at the next settle. */
@@ -240,7 +245,11 @@ export class SoulController {
 	/** The agent write held while System One could not review it; one at a time, the newest replaces it. */
 	private heldWrite: HeldWrite | undefined;
 	/** The change on disk whose review failed; while it exists the revision is never adopted and no judgment starts. */
-	private awaitingReview: AwaitingReview | undefined;
+	private heldChange: AwaitingReview | undefined;
+	/** What `<agentDir>/state/soul/held.json` holds now (serialized), so an unchanged hold writes nothing. */
+	private persistedHold: string | undefined;
+	/** The owner's words about a hold an earlier session left, told at the first tool admission. */
+	private restartNotice: { readonly reason: string; readonly text: string } | undefined;
 	/** The held review in flight; one at a time. */
 	private retrying: Promise<void> | undefined;
 	private lastRetryAt = 0;
@@ -270,7 +279,121 @@ export class SoulController {
 	constructor(deps: SoulControllerDeps) {
 		this.deps = deps;
 		this.historyStore = new SoulHistory(deps.agentDir);
-		this.watch = new SoulWatch(this.path);
+		const previous = readSoulHold(deps.agentDir);
+		this.watch = new SoulWatch(this.path, previous.kind === "hold" ? previous.hold : undefined);
+		this.resumeHold(previous);
+	}
+
+	/** A verdict the soul lock refused. Every change of it is kept in `held.json` (see {@link persistHold}). */
+	private get deferred(): DeferredSettlement | undefined {
+		return this.heldVerdict;
+	}
+
+	private set deferred(value: DeferredSettlement | undefined) {
+		this.heldVerdict = value;
+		this.persistHold();
+	}
+
+	/** A change found on disk whose review failed. Every change of it is kept in `held.json` (see {@link persistHold}). */
+	private get awaitingReview(): AwaitingReview | undefined {
+		return this.heldChange;
+	}
+
+	private set awaitingReview(value: AwaitingReview | undefined) {
+		this.heldChange = value;
+		this.persistHold();
+	}
+
+	/**
+	 * Keeps what is unreviewed on disk across a session that ends without `close()`: the change a failed review holds, or
+	 * the revert a refused lock deferred. A hold is written when it begins and removed when it settles; without it the
+	 * next session would take the file as it finds it, and an unreviewed agent write would become the accounted text. A
+	 * held write is not on disk and is only lost with the session. Two sessions of one agent directory holding at once
+	 * keep the later hold. A hold that cannot be kept is said in plain words.
+	 */
+	private persistHold(): void {
+		const awaiting = this.heldChange;
+		const verdict = this.heldVerdict;
+		const hold: SoulHold | undefined = awaiting
+			? { observedDigest: awaiting.observed.digest, standing: awaiting.standing, restoreTo: awaiting.restoreTo }
+			: verdict?.rejects
+				? { observedDigest: verdict.observed.digest, standing: verdict.standing, restoreTo: verdict.restoreTo }
+				: undefined;
+		const key = hold ? JSON.stringify(hold) : undefined;
+		if (key === this.persistedHold) return;
+		try {
+			if (hold) writeSoulHold(this.deps.agentDir, hold);
+			else clearSoulHold(this.deps.agentDir);
+			this.persistedHold = key;
+			harnessLog.info(
+				"soul",
+				hold ? "an unreviewed soul change is kept across a restart" : "a soul hold was settled",
+			);
+		} catch (error) {
+			harnessLog.warn("soul", "a soul hold could not be kept", {
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			this.deps.emitWarning(
+				`The unreviewed soul.md change could not be recorded for a restart (${error instanceof Error ? error.message : String(error)}); if this session ends abnormally, the next one accepts the file as it is.`,
+			);
+		}
+	}
+
+	/**
+	 * Takes up the hold an earlier session left (`SoulWatch` already baselined on the text before it): an unreviewed text
+	 * is held for review again, a deleted file is put back by its deferred revert, and a hold for a revision the file no
+	 * longer has is dropped (what changed it since is the owner's).
+	 */
+	private resumeHold(read: SoulHoldRead): void {
+		if (read.kind === "none") return;
+		if (read.kind === "unreadable") {
+			harnessLog.warn("soul", "a soul hold could not be read; it was dropped", { reason: read.reason });
+			clearSoulHold(this.deps.agentDir);
+			this.restartNotice = {
+				reason: "hold-unreadable",
+				text: "An earlier session left a soul.md review hold that could not be read; soul.md was accepted as it is.",
+			};
+			return;
+		}
+		const resumed = this.watch.resumedHold;
+		if (!resumed) {
+			harnessLog.info("soul", "a stale soul hold was dropped: soul.md is no longer the held revision");
+			clearSoulHold(this.deps.agentDir);
+			return;
+		}
+		const { observed, hold } = resumed;
+		this.persistedHold = JSON.stringify(hold);
+		if (observed.text === undefined) {
+			this.deferred = {
+				observed,
+				ownerMark: this.ownerChanges,
+				action: this.deletionAction(hold.restoreTo),
+				rejects: true,
+				standing: hold.standing,
+				restoreTo: hold.restoreTo,
+				since: Date.now(),
+				attempts: 0,
+			};
+		} else {
+			this.awaitingReview = {
+				observed,
+				text: observed.text,
+				ownerMark: this.ownerChanges,
+				standing: hold.standing,
+				restoreTo: hold.restoreTo,
+				failures: 0,
+			};
+		}
+		harnessLog.warn("soul", "an earlier session left an unreviewed soul change; it is held for review", {
+			deleted: observed.text === undefined,
+		});
+		this.restartNotice = {
+			reason: "hold-resumed",
+			text:
+				observed.text === undefined
+					? "An earlier session ended while a deletion of soul.md was waiting to be undone. It is put back."
+					: "An earlier session ended before System One reviewed a change to soul.md. The change stays on disk but is not accepted until System One reviews it; it is reverted if the review rejects it.",
+		};
 	}
 
 	get path(): string {
@@ -336,6 +459,9 @@ export class SoulController {
 	 */
 	private admit(call: AgentToolCall): void {
 		const now = Date.now();
+		const restart = this.restartNotice;
+		this.restartNotice = undefined;
+		if (restart) this.tell("change", restart.reason, restart.text);
 		for (const [other, admittedAt] of this.running) {
 			if (now - admittedAt > MAX_CALL_RUN_MS) this.running.delete(other);
 		}
@@ -629,7 +755,7 @@ export class SoulController {
 		const outcome = this.commit(observed, action);
 		if (outcome.kind === "done") return outcome.notice;
 		if (outcome.kind === "deferred") {
-			this.deferCommit(observed, this.ownerChanges, action, rejects);
+			this.deferCommit(observed, this.ownerChanges, action, rejects, known, restoreTo);
 			return undefined;
 		}
 		// The file moved while this verdict was being made: it says nothing about the new revision.
@@ -677,8 +803,10 @@ export class SoulController {
 		ownerMark: number,
 		action: () => string | undefined,
 		rejects: boolean,
+		standing: string | undefined,
+		restoreTo: string | undefined,
 	): void {
-		this.deferred = { observed, ownerMark, action, rejects, since: Date.now(), attempts: 0 };
+		this.deferred = { observed, ownerMark, action, rejects, standing, restoreTo, since: Date.now(), attempts: 0 };
 		this.deps.emitWarning(
 			this.closed && rejects
 				? `${CLOSE_LOCK_WARNING} ${this.path}`
@@ -829,12 +957,20 @@ export class SoulController {
 			this.dropAwaiting();
 			return;
 		}
+		// A refused lock hands the change to the deferred verdict before the hold is released, so it is never unrecorded.
+		if (outcome.kind === "deferred") {
+			this.deferCommit(
+				awaiting.observed,
+				awaiting.ownerMark,
+				action,
+				verdict.kind !== "accept",
+				awaiting.standing,
+				awaiting.restoreTo,
+			);
+		}
 		this.awaitingReview = undefined;
 		this.syncSubscription();
-		if (outcome.kind === "deferred") {
-			this.deferCommit(awaiting.observed, awaiting.ownerMark, action, verdict.kind !== "accept");
-			return;
-		}
+		if (outcome.kind === "deferred") return;
 		this.carriedNotice = joinNotices(this.carriedNotice, outcome.notice);
 		if (verdict.kind === "accept") {
 			this.tell(
@@ -1005,6 +1141,15 @@ export class SoulController {
 	 */
 	close(): void {
 		if (this.closed) return;
+		try {
+			this.closeSession();
+		} finally {
+			// The hold is settled by the revert below, or kept as the deferred verdict when the lock refused it.
+			this.persistHold();
+		}
+	}
+
+	private closeSession(): void {
 		this.closed = true;
 		this.closing.abort();
 		this.syncSubscription();
@@ -1016,8 +1161,8 @@ export class SoulController {
 				"The held soul.md write was not written before the session closed; its text is kept in /soul history.",
 			);
 		}
-		const awaiting = this.awaitingReview;
-		this.awaitingReview = undefined;
+		const awaiting = this.heldChange;
+		this.heldChange = undefined;
 		this.resolveDeferred();
 		if (this.deferred) {
 			if (this.deferred.rejects) this.deps.emitWarning(`${CLOSE_LOCK_WARNING} ${this.path}`);

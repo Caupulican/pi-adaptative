@@ -203,6 +203,11 @@ export function soulLockFile(agentDir: string): string {
 	return stateFile(agentDir, "soul", "write");
 }
 
+/** `<agentDir>/state/soul/held.json` -- the unreviewed agent change of `soul.md` a session holds, so a restart keeps it held. */
+export function soulHeldFile(agentDir: string): string {
+	return stateFile(agentDir, "soul", "held.json");
+}
+
 /** `<agentDir>/state/soul/history.jsonl` -- append-only record of every write to `soul.md` (bounded to the last entries). */
 export function soulHistoryFile(agentDir: string): string {
 	return stateFile(agentDir, "soul", "history.jsonl");

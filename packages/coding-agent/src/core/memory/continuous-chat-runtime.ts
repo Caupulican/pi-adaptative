@@ -8,7 +8,7 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
-import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import type { ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import {
 	ContinuousChatCompactionCoordinator,
@@ -57,6 +57,9 @@ export interface ContinuousChatTurnBoundary {
  * it keeps them waiting, so the burst of a conversation's turns is one pause.
  */
 export const CONTINUOUS_CHAT_FOREGROUND_QUIET_MS = 2_000;
+
+/** The earliest a hold's wake fires, so a hold that still reports itself at its own wake cannot spin dispatch. */
+const CONTINUOUS_CHAT_HOLD_MIN_WAKE_MS = 1_000;
 
 /**
  * The foreground turn phase as the runtime sees it, the pair the knowledge collector takes too. A turn pins its view
@@ -118,8 +121,10 @@ export class ContinuousChatRuntime {
 	private quietTimer: unknown;
 	/** The pause is logged once per hold, not once per pump. */
 	private foregroundPauseLogged = false;
-	/** The daily-limit notice is given once per hold, not once per pump. */
-	private spendHoldNoticed = false;
+	/** The port's hold (daily limit, provider limit) is told once per hold, not once per pump. */
+	private holdNoticed = false;
+	/** Wakes dispatch when the port's hold may have lifted; armed while a pass ends on that hold. */
+	private holdAlarm: WallAlarm | undefined;
 	/** Resolves once, when this runtime stops accepting work: at `stop()`, or when its lease is lost. Never rejects. */
 	readonly stopped: Promise<void>;
 	private resolveStopped: () => void = () => undefined;
@@ -332,6 +337,31 @@ export class ContinuousChatRuntime {
 		}, CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
 	}
 
+	/**
+	 * The port's hold may have lifted without an arrival or a turn: the daily limit was raised, so dispatch is tried at once.
+	 * Nothing happens unless a pass ended on a hold, so a setting change that does not concern the hold starts no work.
+	 */
+	holdMayHaveLifted(): void {
+		if (this.holdAlarm !== undefined) this.requestPump();
+	}
+
+	private armHoldAlarm(retryInMs: number): void {
+		this.holdAlarm?.stop();
+		this.holdAlarm = alarmAt(
+			this.timers,
+			this.timers.now() + Math.max(retryInMs, CONTINUOUS_CHAT_HOLD_MIN_WAKE_MS),
+			() => {
+				this.holdAlarm = undefined;
+				this.requestPump();
+			},
+		);
+	}
+
+	private clearHoldAlarm(): void {
+		this.holdAlarm?.stop();
+		this.holdAlarm = undefined;
+	}
+
 	/** A turn is in progress, or one ended less than the quiet window ago. */
 	private foregroundHeld(): boolean {
 		return this.foreground?.isForegroundBusy() === true || this.quietTimer !== undefined;
@@ -431,6 +461,7 @@ export class ContinuousChatRuntime {
 		this.unfollowForeground = undefined;
 		if (this.quietTimer !== undefined) this.timers.clearTimeout(this.quietTimer);
 		this.quietTimer = undefined;
+		this.clearHoldAlarm();
 		this.resolveStopped();
 	}
 
@@ -538,17 +569,21 @@ export class ContinuousChatRuntime {
 				}
 				return;
 			}
-			const hold = this.port.spendHold?.();
+			const hold = this.port.dispatchHold?.();
 			if (hold !== undefined) {
-				// Nothing is claimed, so nothing churns: pending work keeps its place and the next claim after the limit lifts takes it.
-				if (!this.spendHoldNoticed) {
-					this.spendHoldNoticed = true;
-					harnessLog.warn("memory", "chat summaries are paused by the daily spend limit");
-					this.warn(hold);
+				// Nothing is claimed, so nothing churns: pending work keeps its place; the alarm, a raised limit or an arrival wakes dispatch.
+				this.armHoldAlarm(hold.retryInMs);
+				if (!this.holdNoticed) {
+					this.holdNoticed = true;
+					harnessLog.warn("memory", "chat summaries are held by a spend or provider limit", {
+						retryInMs: hold.retryInMs,
+					});
+					this.warn(hold.message);
 				}
 				return;
 			}
-			this.spendHoldNoticed = false;
+			this.clearHoldAlarm();
+			this.holdNoticed = false;
 			const item = await this.store.claimWork();
 			if (item === undefined) {
 				if (this.jobs.size === 0) this.emit({ type: "idle" });

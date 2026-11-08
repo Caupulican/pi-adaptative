@@ -20,6 +20,7 @@ import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-s
 import type { HostEventConnectionView } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
+import type { GoalAutoContinueState } from "../goals/goal-auto-continue-state.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessNoticeKind } from "../harness-notice.ts";
 import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import type { MemoryController } from "../memory-controller.ts";
@@ -239,10 +240,22 @@ export interface SystemOneStatus {
 	readonly state: "on" | "no-engine" | "off";
 }
 
+/** Why the active goal's automatic continuation is running, waiting or stopped (`core/goals/goal-auto-continue-state.ts`). */
+export interface GoalContinuationStatus {
+	readonly state: GoalAutoContinueState;
+}
+
+/** Whether the session file accepts new writes: it does not after a write failed in a way that left the file's state unknown. */
+export interface SessionSaveStatus {
+	readonly fenced: boolean;
+}
+
 export interface SessionAutonomyStatus {
 	readonly v: 1;
 	readonly at: string;
 	readonly sessionId: string;
+	readonly goalContinuation: StatusSection<GoalContinuationStatus>;
+	readonly sessionSave: StatusSection<SessionSaveStatus>;
 	readonly routines: StatusSection<RoutinesStatus>;
 	readonly awayDaemon: StatusSection<AwayDaemonStatusView>;
 	readonly hostEvents: StatusSection<HostEventsStatus>;
@@ -273,7 +286,10 @@ export interface AutonomyStatusSources {
 	readonly nowMs: number;
 	readonly sessionId: string;
 	readonly childSession: boolean;
-	readonly sessionManager: Pick<SessionManager, "getBranch" | "getEntry" | "getPendingParentInputs">;
+	readonly sessionManager: Pick<
+		SessionManager,
+		"getBranch" | "getEntry" | "getPendingParentInputs" | "isPersistenceStateUncertain"
+	>;
 	readonly settings: Pick<
 		SettingsManager,
 		| "getRoutinesSettings"
@@ -293,6 +309,8 @@ export interface AutonomyStatusSources {
 	readonly hostEventLedger: HostEventProjection | undefined;
 	/** The running host event sources' connections (`HostEventSessionController.connections`). */
 	hostEventConnections(): readonly HostEventConnectionView[];
+	/** Why the goal's automatic continuation is running, waiting or stopped, from the scheduler's own facts. */
+	goalContinuation(): GoalAutoContinueState;
 	readonly proactivity: {
 		readonly daily: ProactivityDailyState;
 		readonly lastSkipReason?: string;
@@ -627,6 +645,12 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		}),
 		section<readonly RunToolManifest[]>(() => available(run.toolManifests.list())),
 	]);
+	const goalContinuation = await section<GoalContinuationStatus>(() =>
+		available({ state: sources.goalContinuation() }),
+	);
+	const sessionSave = await section<SessionSaveStatus>(() =>
+		available({ fenced: sessionManager.isPersistenceStateUncertain() }),
+	);
 	const systemOne = await section<SystemOneStatus>(() =>
 		available({
 			state: sources.systemOne.recordingSemanticEngine() ? "on" : sources.systemOne.configured ? "no-engine" : "off",
@@ -637,6 +661,8 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		v: 1,
 		at: new Date(nowMs).toISOString(),
 		sessionId: sources.sessionId,
+		goalContinuation,
+		sessionSave,
 		routines,
 		awayDaemon,
 		hostEvents,

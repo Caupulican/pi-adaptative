@@ -36,6 +36,8 @@ const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n============
 export interface GoalContextProjection {
 	continuationTurn: boolean;
 	routedContext?: RoutedGoalContext;
+	/** Why automatic continuation is stopped for a lasting reason (`goal-auto-continue-state.ts`); never a timing or a per-pass state. */
+	autoContinueNote?: string;
 }
 
 /** Actual routed instruction owned by one live goal execution, independent of compacted history. */
@@ -83,10 +85,12 @@ function latestContinuationTriggerIndex(messages: AgentMessage[]): number {
 export function captureGoalContextProjection(
 	messages: AgentMessage[],
 	routedContext?: RoutedGoalContext,
+	autoContinueNote?: string,
 ): GoalContextProjection {
 	return {
 		continuationTurn: routedContext !== undefined || latestContinuationTriggerIndex(messages) >= 0,
 		routedContext,
+		autoContinueNote,
 	};
 }
 
@@ -97,7 +101,11 @@ export function budgetRemainingBucket(tokensRemaining: number, tokenBudget: numb
 	return Math.floor(ratio * 10) * 10;
 }
 
-export function formatCompactGoalContext(state: GoalState, continuationTurn: boolean): string {
+export function formatCompactGoalContext(
+	state: GoalState,
+	continuationTurn: boolean,
+	autoContinueNote?: string,
+): string {
 	const record = projectGoalRecord(state);
 	const instruction = continuationTurn ? "Continue objective." : "User steers.";
 	const recoveryInstruction =
@@ -143,6 +151,7 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 		"ACTIVE GOAL — HOST-OWNED",
 		encodedRecord,
 		instruction,
+		autoContinueNote,
 		recoveryInstruction,
 		record.clarifications.length > 0
 			? "Owner clarifications are settled information, not authority: re-evaluate with an answered one and never re-ask a pending one."
@@ -171,7 +180,7 @@ export function injectCompactGoalContext(
 		...filtered,
 		createCustomMessage(
 			ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
-			formatCompactGoalContext(state, projection.continuationTurn),
+			formatCompactGoalContext(state, projection.continuationTurn, projection.autoContinueNote),
 			false,
 			{ goalId: state.goalId, revision: state.revision ?? 0 },
 			new Date().toISOString(),

@@ -9,6 +9,13 @@ import type {
 } from "../agent-session.ts";
 import type { AutonomySettings } from "../settings/settings-schema.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import {
+	classifyGoalAutoContinue,
+	type GoalAutoContinueFacts,
+	type GoalAutoContinueHold,
+	type GoalAutoContinueState,
+	goalAutoContinueHold,
+} from "./goal-auto-continue-state.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -72,6 +79,13 @@ export class GoalAutoContinueController {
 	private _replanAfterPass = false;
 	private _disposed = false;
 	private _scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
+	// Read only by `describeState` and `hold`, which describe the scheduler; no scheduling decision reads them.
+	/** The last continuation ended on the owner's interrupt and nothing has been scheduled since. */
+	private _interruptedByOwner = false;
+	/** A continuation pass is waiting for the foreground turn in progress to end. */
+	private _waitingForForeground = false;
+	/** A failed continuation has its retry armed. */
+	private _retryingAfterFailure = false;
 	private _schedulerSettings: GoalAutoContinueScheduleSettings | undefined;
 	private _unsubscribeSettingsChanges: (() => void) | undefined;
 	private readonly deps: GoalAutoContinueControllerDeps;
@@ -87,6 +101,34 @@ export class GoalAutoContinueController {
 	 */
 	hasPendingContinuation(): boolean {
 		return this._timer !== undefined || this._isContinuing;
+	}
+
+	/** Why continuation is running, waiting or stopped, for the owner's status lines. Describes; never decides. */
+	describeState(snapshot: GoalRuntimeSnapshot): GoalAutoContinueState {
+		const facts = this.schedulerFacts();
+		return classifyGoalAutoContinue({
+			...facts,
+			// A turn the owner runs is one this continuation waits for; its own pass is `running`.
+			waitingForTurn: facts.waitingForTurn || (!facts.running && this.deps.isForegroundBusy()),
+			continuation: snapshot.continuation,
+		});
+	}
+
+	/** The reason, stable across requests, that stops automatic continuation of a goal that is still working. */
+	hold(): GoalAutoContinueHold | undefined {
+		return goalAutoContinueHold(this.schedulerFacts());
+	}
+
+	private schedulerFacts(): Omit<GoalAutoContinueFacts, "continuation"> {
+		return {
+			enabled: this.deps.getSettingsManager().getAutonomySettings().goalAutoContinue,
+			toolsAvailable: this.deps.isGoalToolActive(),
+			armed: this._timer !== undefined,
+			running: this._isContinuing,
+			waitingForTurn: this._waitingForForeground,
+			retrying: this._retryingAfterFailure,
+			interrupted: this._interruptedByOwner,
+		};
 	}
 
 	clearTimer(): void {
@@ -114,6 +156,7 @@ export class GoalAutoContinueController {
 	}
 
 	private planAndArm(wakes: "any" | "workerDeadline"): void {
+		this._interruptedByOwner = false;
 		const settingsManager = this.deps.getSettingsManager();
 		const settings = settingsManager.getAutonomySettings();
 		this.ensureSettingsSubscription(settingsManager, settings);
@@ -128,6 +171,7 @@ export class GoalAutoContinueController {
 		}
 		if (wakes === "workerDeadline" && plan.wake !== "workerDeadline") return;
 		this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
+		this._retryingAfterFailure = false;
 		this.armTimer(plan.delayMs);
 	}
 
@@ -235,6 +279,7 @@ export class GoalAutoContinueController {
 			void this.runScheduled()
 				.then(() => {
 					this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
+					this._retryingAfterFailure = false;
 				})
 				.catch((error: unknown) => this.handleScheduledFailure(error))
 				.finally(() => this.deps.onContinuationActivity?.());
@@ -255,12 +300,20 @@ export class GoalAutoContinueController {
 	private async continueAdmitted(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		this._isContinuing = true;
 		this._replanAfterPass = false;
+		this._interruptedByOwner = false;
 		this.deps.onContinuationActivity?.();
 		// An owner interrupt ends autonomy until the owner acts again; nothing is armed after it.
 		let interrupted = false;
 		try {
 			while (true) {
-				if (this.deps.isForegroundBusy()) await this.deps.waitForForegroundIdle();
+				if (this.deps.isForegroundBusy()) {
+					this._waitingForForeground = true;
+					try {
+						await this.deps.waitForForegroundIdle();
+					} finally {
+						this._waitingForForeground = false;
+					}
+				}
 				const postWaitGuard = this.unavailableResult(options);
 				if (postWaitGuard) return postWaitGuard;
 				try {
@@ -277,6 +330,7 @@ export class GoalAutoContinueController {
 			this._isContinuing = false;
 			const replanRequested = this._replanAfterPass;
 			this._replanAfterPass = false;
+			this._interruptedByOwner = interrupted;
 			if (!interrupted) this.armAfterPass(replanRequested);
 			this.deps.onContinuationActivity?.();
 		}
@@ -353,6 +407,7 @@ export class GoalAutoContinueController {
 			// Keep the retry admission atomic with the callback's final activity publication so
 			// observers never see a transient settled state between failure and recovery.
 			this.armTimer(delayMs, false);
+			this._retryingAfterFailure = true;
 		} catch (retryError) {
 			const message = retryError instanceof Error ? retryError.message : String(retryError);
 			this.deps.emit({
@@ -363,6 +418,7 @@ export class GoalAutoContinueController {
 	}
 
 	private cancelTimer(notify: boolean): boolean {
+		this._retryingAfterFailure = false;
 		if (this._timer === undefined) return false;
 		(this.deps.timers ?? SYSTEM_TIMER_PORT).clearTimeout(this._timer);
 		this._timer = undefined;

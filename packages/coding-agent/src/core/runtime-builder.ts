@@ -500,6 +500,8 @@ export interface RuntimeBuilderDeps {
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
+	/** Why automatic continuation is stopped for a lasting reason, for the goal tool's `get`. */
+	getGoalAutoContinueNote?(): string | undefined;
 	/**
 	 * The `goal-continuation` port: the goal tool stamps its events on its clock, so a dispatched worker's `boundAt` and
 	 * the deadline the runtime snapshot decides from it share one time domain. Absent, the system clock.
@@ -1882,6 +1884,7 @@ export class RuntimeBuilder {
 				const goalClock = this.deps.goalClock;
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					getAutoContinueNote: () => this.deps.getGoalAutoContinueNote?.(),
 					...(goalClock ? { now: () => new Date(goalClock.now()).toISOString() } : {}),
 					...(systemOneEvidenceStore
 						? {

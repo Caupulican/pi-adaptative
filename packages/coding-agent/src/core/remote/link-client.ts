@@ -44,6 +44,7 @@ export class LinkClient {
 	private stopped = false;
 	private attempt = 0;
 	private retry: ReturnType<typeof setTimeout> | undefined;
+	/** The hub of the current connection once it proved the shared secret; set only at the proven welcome, never at the challenge. */
 	private hub: { id: string; name: string } | undefined;
 
 	constructor(options: {
@@ -78,10 +79,19 @@ export class LinkClient {
 		this.socket = undefined;
 	}
 
-	/** Answers a hub message; false when the connection is gone (the answer is lost, never queued). */
+	/**
+	 * Answers a hub message; false when the connection is gone or its hub has not proven the secret (the answer is lost,
+	 * never queued: an answer must not reach whoever answers at the address before that proof).
+	 */
 	reply(id: string, text: string): boolean {
 		const socket = this.socket;
-		if (!socket || !this.hub || socket.destroyed) return false;
+		if (!socket || socket.destroyed) return false;
+		if (!this.hub) {
+			harnessLog.info("link", "a reply was not sent: the hub has not proven the secret on this connection", {
+				address: this.join.address,
+			});
+			return false;
+		}
 		socket.write(encodeFrame({ t: "reply", id, text }));
 		return true;
 	}
@@ -110,10 +120,14 @@ export class LinkClient {
 		}
 		const socket = createConnection({ host: address.host, port: address.port });
 		this.socket = socket;
+		// A hub proven on an earlier connection says nothing about this one.
+		this.hub = undefined;
 		socket.setEncoding("utf8");
 		socket.setNoDelay(true);
 		const lines = new LineBuffer();
 		let ownNonce = "";
+		// Who answered this connection's challenge: unproven until its welcome carries the proof.
+		let challenger: { id: string; name: string } | undefined;
 		let welcomed = false;
 		let lastSeen = Date.now();
 		const handshake = setTimeout(() => {
@@ -128,8 +142,10 @@ export class LinkClient {
 		socket.on("close", () => {
 			clearTimeout(handshake);
 			clearInterval(watchdog);
-			if (this.socket === socket) this.socket = undefined;
-			if (this.stopped) return;
+			// A superseded connection closing must not clear the hub the current one proved or schedule a second retry.
+			const current = this.socket === socket;
+			if (current) this.socket = undefined;
+			if (this.stopped || !current) return;
 			// A refusal that retrying cannot change waits for the owner; a lost connection is retried.
 			if (
 				refusal === "unknown_machine" ||
@@ -162,13 +178,19 @@ export class LinkClient {
 				}
 				switch (frame.t) {
 					case "challenge": {
+						// One challenge opens a connection; a second one would rebind the hub the join has proven or is proving.
+						if (challenger) {
+							refusal = "protocol";
+							socket.destroy();
+							return;
+						}
 						if (frame.hubId === this.identity.machineId) {
 							refusal = "would_loop";
 							socket.destroy();
 							return;
 						}
 						ownNonce = newNonce();
-						this.hub = { id: frame.hubId, name: frame.hubName };
+						challenger = { id: frame.hubId, name: frame.hubName };
 						const depth = this.depth();
 						if (depth + 1 > MAX_LINK_DEPTH) {
 							refusal = "too_deep";
@@ -195,11 +217,16 @@ export class LinkClient {
 						break;
 					}
 					case "welcome": {
-						if (!this.hub || !proofsMatch(hubProof(this.join.secret, ownNonce, this.hub.id), frame.proof)) {
+						if (
+							welcomed ||
+							!challenger ||
+							!proofsMatch(hubProof(this.join.secret, ownNonce, challenger.id), frame.proof)
+						) {
 							refusal = "bad_proof";
 							socket.destroy();
 							return;
 						}
+						this.hub = challenger;
 						welcomed = true;
 						this.attempt = 0;
 						clearTimeout(handshake);
@@ -215,7 +242,8 @@ export class LinkClient {
 						if (welcomed && this.hub) this.events.message(this.hub.id, this.hub.name, frame.id, frame.text);
 						break;
 					case "ping":
-						socket.write(encodeFrame({ t: "pong" }));
+						// Nothing is sent to a hub that has not proven the secret.
+						if (welcomed) socket.write(encodeFrame({ t: "pong" }));
 						break;
 					default:
 						break;

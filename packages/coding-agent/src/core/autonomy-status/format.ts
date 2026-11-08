@@ -1,10 +1,15 @@
 /** The `/status` text of a {@link SessionAutonomyStatus}: one block per section, an unavailable one with its reason. */
 
 import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
+import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
 import type { ToolDecision } from "./tool-manifest.ts";
+
+/** What the owner is told while the session file refuses new writes: why, what is safe, and the way out. */
+export const SESSION_SAVE_PAUSED_WORDS =
+	"Saving is paused: the last write to this session's file did not finish cleanly, so nothing more is saved until the file is reopened. What is on screen stays. Use /resume and choose this session to reopen it, or /new to start a new one.";
 
 function decisionLine(decision: ToolDecision): string {
 	return `${decision.tool}: ${decision.code} (${decision.owner}${decision.detail ? `: ${decision.detail}` : ""})`;
@@ -31,6 +36,12 @@ function at(ms: number | undefined): string {
 export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): string {
 	return [
 		`Autonomy status at ${status.at}`,
+		...block("Goal", status.goalContinuation, (value) =>
+			value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)],
+		),
+		...block("Session file", status.sessionSave, (value) => [
+			value.fenced ? SESSION_SAVE_PAUSED_WORDS : "Saving normally.",
+		]),
 		...block("Routines", status.routines, (value) => [
 			`result wakes (24 h): ${count(value.resultWakes)}`,
 			...(value.intake

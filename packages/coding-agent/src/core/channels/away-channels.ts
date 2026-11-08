@@ -15,6 +15,7 @@ import {
 	type ChannelJournalState,
 	type ChannelPendingMessage,
 	DAY_MS,
+	isDraftOpen,
 	pendingOfferTimes,
 } from "./channel-journal.ts";
 import { isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
@@ -133,7 +134,7 @@ export function readAwayChannelStatus(
 			name,
 			cwd,
 			servedBy: channelServedBy(state.holder, sessionId),
-			awayDrafts: state.drafts.filter((draft) => draft.away === true && draft.state === "pending").length,
+			awayDrafts: state.drafts.filter((draft) => draft.away === true && isDraftOpen(draft)).length,
 		};
 	});
 }

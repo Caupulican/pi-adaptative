@@ -12,6 +12,7 @@ import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bu
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
 import type { OpenTaskStepProjection } from "../tasks/task-projection.ts";
+import type { GoalAutoContinueState } from "./goal-auto-continue-state.ts";
 import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goal-continuation-defaults.ts";
 import type { GoalState } from "./goal-state.ts";
@@ -86,6 +87,11 @@ export interface GoalRuntimeSnapshot {
 	 * nothing bound" are genuinely different states worth distinguishing.
 	 */
 	requirementWorktreeStates?: readonly GoalRuntimeRequirementWorktreeState[];
+	/**
+	 * Why automatic continuation is running, waiting or stopped, attached by the session controller from the scheduler's
+	 * own facts. Absent from a snapshot built without a scheduler. A description only: no decision reads it.
+	 */
+	autoContinue?: GoalAutoContinueState;
 }
 
 /**
